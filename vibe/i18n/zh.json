@@ -202,10 +202,10 @@
       "bindingUnresolvedPaused": "已暂停:绑定的 Agent 会话 {session} 无法接收请求，该定义继续运行只会反复失败。请用以下命令重新绑定:vibe task update {id} --session-id <id>;然后恢复:vibe task resume {id}。",
       "cli": {
         "help": {
-          "cancel": "\u8bf7\u6c42\u5c3d\u529b\u53d6\u6d88\u4e00\u4e2a run\uff1b\u82e5\u8be5 run \u5df2\u8fdb\u5165\u6b63\u5728\u8fd0\u884c\u7684 Session turn\uff0c\u4f1a\u50cf Session Stop \u4e00\u6837\u505c\u6b62\u6574\u4e2a turn",
+          "cancel": "请求尽力取消一个 run；若该 run 已进入正在运行的 Session turn，会像 Session Stop 一样停止整个 turn",
           "showBrief": "只显示状态、时间、错误和回调字段，与 vibe runs list 相同"
         },
-        "canceledBeforeLiveTurn": "\u8be5 run \u5728\u5176\u8f93\u5165\u8fdb\u5165\u6b63\u5728\u8fd0\u884c\u7684 Session turn \u4e4b\u524d\u5df2\u88ab\u53d6\u6d88\u3002"
+        "canceledBeforeLiveTurn": "该 run 在其输入进入正在运行的 Session turn 之前已被取消。"
       }
     },
     "notice": {
@@ -1170,8 +1170,18 @@
     },
     "hostedTools": {
       "noExecutor": {
-        "web_search": {"one": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "several": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。"},
-        "x_search": {"one": "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "several": "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。"}
+        "web_search": {
+          "one": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。",
+          "several": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。"
+        },
+        "x_search": {
+          "one": "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。",
+          "several": "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。"
+        },
+        "web_fetch": {
+          "one": "当前没有能运行网页抓取的供应商。请添加 DeepSeek API Key 供应商，并在 Vault 中放入 DEEPSEEK_API_KEY。",
+          "several": "当前没有能运行网页抓取的供应商。请添加 DeepSeek API Key 供应商，并在 Vault 中放入 DEEPSEEK_API_KEY。"
+        }
       },
       "listSeparator": "、",
       "providerRefused": "执行方的供应商拒绝了此次调用（{detail}）。",
@@ -1842,7 +1852,8 @@
     "tool": {
       "web_search": "网页搜索",
       "x_search": "X 搜索",
-      "image_generate": "图片生成"
+      "image_generate": "图片生成",
+      "web_fetch": "网页抓取"
     },
     "quoted": "“{subject}”",
     "mode": {

@@ -912,6 +912,15 @@ class _HostedUpstreamCall:
     billable: bool
 
 
+def _hosted_text(value: object, limit: int) -> str | None:
+    """A provider field as hostable text: valid UTF-8, no control characters, bounded."""
+    if not isinstance(value, str):
+        return None
+    text = value.encode("utf-8", "replace").decode("utf-8")
+    text = "".join(char for char in text if char in "\n\t" or ord(char) >= 32).strip()
+    return text[:limit] if text else None
+
+
 def _vault_error(stderr: bytes) -> str:
     """The reason a Vault subprocess failed: its JSON error, or its last non-empty line."""
     text = (stderr or b"").decode("utf-8", "replace").strip()
@@ -6913,7 +6922,8 @@ class ModelHubService:
                 raise
             if failure_reason is None and process.returncode != 0:
                 detail = _vault_error(stderr) or f"exited {process.returncode}"
-                failure_reason = Failure(detail, None)
+                logger.warning("DeepSeek direct search Vault call failed: %s", detail)
+                failure_reason = Failure(say("modelHub.hostedTools.unreachable"), "provider_unreachable")
             if failure_reason is None:
                 try:
                     body = json.loads(stdout.decode("utf-8"))
@@ -6922,16 +6932,16 @@ class ModelHubService:
         if failure_reason is not None:
             record = failed_record(failure_reason)
         elif call.tool == "web_fetch":
-            content = body.get("content") if isinstance(body, dict) else None
-            if not isinstance(content, str) or not content.strip():
+            content = _hosted_text(body.get("content") if isinstance(body, dict) else None, 20_000)
+            if content is None:
                 record = failed_record(Failure(say("modelHub.hostedTools.didNotRun", tool=call.tool), "search_not_run"))
             else:
                 record = {
                     "status": "completed",
                     "sources": [{
-                        "url": call.arguments["url"],
-                        "title": body.get("title") or "",
-                        "snippet": content[:20_000],
+                        "url": _hosted_text(call.arguments["url"], 8192),
+                        "title": _hosted_text(body.get("title"), 500) or "",
+                        "snippet": content,
                     }],
                 }
         else:
@@ -6941,14 +6951,19 @@ class ModelHubService:
             else:
                 sources = []
                 for item in results[:10]:
-                    if not isinstance(item, dict) or not isinstance(item.get("url"), str):
+                    if not isinstance(item, dict):
                         continue
-                    source_row = {"url": item["url"]}
+                    url = _hosted_text(item.get("url"), 8192)
+                    if url is None:
+                        continue
+                    source_row = {"url": url}
                     for key in ("title", "snippet"):
-                        if isinstance(item.get(key), str) and item[key]:
-                            source_row[key] = item[key]
-                    if isinstance(item.get("date"), str) and item["date"]:
-                        source_row["page_age"] = item["date"]
+                        value = _hosted_text(item.get(key), 500)
+                        if value is not None:
+                            source_row[key] = value
+                    date = _hosted_text(item.get("date"), 100)
+                    if date is not None:
+                        source_row["page_age"] = date
                     sources.append(source_row)
                 record = {"status": "completed", "sources": sources}
         completed = record["status"] == "completed"

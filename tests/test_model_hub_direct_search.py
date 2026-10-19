@@ -11,7 +11,7 @@ from config.v2_config import ModelHubModelConfig, ModelHubSourceConfig, ModelHub
 from core.handlers.model_hub import service as service_module
 from core.handlers.model_hub.hosted_executor import ExecutorCall
 from core.agent_core.tools.hosted import hosted_tool_spec
-from core.handlers.model_hub.hosted_tools import direct_search_candidate
+from core.handlers.model_hub.hosted_tools import direct_search_candidate, executor_vendors
 from core.handlers.model_hub.service import ModelHubService
 
 SOURCE = ModelHubSourceConfig(
@@ -27,6 +27,10 @@ SOURCE = ModelHubSourceConfig(
     credential_ref="cred_deepseek",
     base_url="https://api.deepseek.com",
 )
+
+
+def test_web_fetch_names_deepseek_as_a_vendor() -> None:
+    assert "deepseek" in executor_vendors("web_fetch")
 
 
 def test_web_fetch_has_one_canonical_schema() -> None:
@@ -133,12 +137,25 @@ async def test_a_vault_failure_is_the_record_error(monkeypatch, service) -> None
         monkeypatch, service, "web_search", {"query": "q"}, b"{}", returncode=1, stderr=stderr,
     )
     assert attempt.record["status"] == "failed"
-    assert "secret not found" in attempt.record["error"]
-    assert attempt.record["error"] != "}"
+    assert attempt.record["error_code"] == "provider_unreachable"
+    assert "secret not found" not in attempt.record["error"]
     assert recorded == []
     assert attempt.cost is None
     assert attempt.billable is False
     assert attempt.moves_on is True
+
+
+async def test_malformed_source_fields_are_dropped(monkeypatch, service) -> None:
+    attempt, _, _ = await _attempt(
+        monkeypatch, service, "web_search", {"query": "q"},
+        json.dumps({"results": [
+            {"url": "", "title": "bad"},
+            {"url": "https://e", "title": {"bad": 1}, "snippet": "ok", "date": "2026-10-19"},
+        ]}).encode(),
+    )
+    assert attempt.record["sources"] == [
+        {"url": "https://e", "snippet": "ok", "page_age": "2026-10-19"},
+    ]
 
 
 async def test_a_base_url_ending_in_v1_does_not_double_the_prefix(monkeypatch, service) -> None:

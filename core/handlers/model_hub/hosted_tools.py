@@ -342,7 +342,9 @@ def executor_vendors(tool: str) -> tuple[str, ...]:
         families = (provider_overlay_entry(vendor, model_id) for model_id in entry.executor_models)
         if any(family is not None and any(tool in specs for specs in family.hosted_tools.values()) for family in families):
             vendors.append(vendor)
-    return tuple(sorted(vendors))
+    if tool in DEEPSEEK_DIRECT_SEARCH:
+        vendors.append("deepseek")
+    return tuple(sorted(dict.fromkeys(vendors)))
 
 
 @dataclass(frozen=True)

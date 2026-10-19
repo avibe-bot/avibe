@@ -1170,8 +1170,18 @@
     },
     "hostedTools": {
       "noExecutor": {
-        "web_search": {"one": "No Source can run web search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "several": "No Source can run web search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this."},
-        "x_search": {"one": "No Source can run X search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "several": "No Source can run X search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this."}
+        "web_search": {
+          "one": "No Source can run web search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.",
+          "several": "No Source can run web search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this."
+        },
+        "x_search": {
+          "one": "No Source can run X search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.",
+          "several": "No Source can run X search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this."
+        },
+        "web_fetch": {
+          "one": "No Source can fetch web pages right now. Add a DeepSeek API-key Source and put DEEPSEEK_API_KEY in Vault.",
+          "several": "No Source can fetch web pages right now. Add a DeepSeek API-key Source and put DEEPSEEK_API_KEY in Vault."
+        }
       },
       "listSeparator": ", ",
       "providerRefused": "The executor's provider refused the call ({detail}).",
@@ -1842,7 +1852,8 @@
     "tool": {
       "web_search": "Web search",
       "x_search": "X search",
-      "image_generate": "Image generation"
+      "image_generate": "Image generation",
+      "web_fetch": "Web fetch"
     },
     "quoted": "“{subject}”",
     "mode": {

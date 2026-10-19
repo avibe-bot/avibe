@@ -1287,9 +1287,10 @@
       "enum": [
         "web_search",
         "x_search",
+        "web_fetch",
         "image_generate"
       ],
-      "description": "A tool whose result carries `hosted`: a proxied search, or an `image_generate` call (`vibey-hosted-tools.md` §4.2, §7)."
+      "description": "A tool whose result carries `hosted`: a proxied search or fetch, or an `image_generate` call (`vibey-hosted-tools.md` §4.2, §7)."
     }
   },
   "examples": [
