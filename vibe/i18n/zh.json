@@ -1801,6 +1801,7 @@
       "unclassified": "请求模型时出现了 {backend} 无法归类的错误。可以重试，或换一个模型。",
       "outputLimit": "模型在生成可用的答案或工具调用前达到了输出上限。请让它分成更小的步骤，或换用输出上限更大的模型。",
       "internal": "{backend} 因内部错误而停止。可以重试；如果再次出现，服务日志里记录了原因。",
+      "modelHubRoute": "Model Hub 没能为 {backend} 的这一步选定模型路由。可以重试；如果再次出现，服务日志里记录了原因。",
       "historyUnreadable": "这个会话的历史记录无法加载，{backend} 无法继续它。请发送 /new 开始一个新会话。",
       "generic": "{backend} 运行失败。"
     }

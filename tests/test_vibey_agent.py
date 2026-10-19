@@ -1212,6 +1212,8 @@ def test_an_unclassified_provider_failure_and_an_unexpected_exception_each_say_w
     assert error_key("unknown") == "vibeyAgent.error.unclassified"
     # Any kind outside the named set is the class of an exception the loop did not expect.
     assert error_key("HookStateError") == "vibeyAgent.error.internal"
+    # A Model Hub routing refusal with no copy of its own says it is one, not an internal error.
+    assert error_key("ModelHubError") == "vibeyAgent.error.modelHubRoute"
     assert error_key(None, reason="error") == "vibeyAgent.error.generic"
 
 

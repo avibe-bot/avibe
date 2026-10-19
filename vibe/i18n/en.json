@@ -1801,6 +1801,7 @@
       "unclassified": "The request to the model failed with an error {backend} could not classify. Try again, or choose another model.",
       "outputLimit": "The model reached its output limit before producing a usable answer or tool call. Ask for smaller steps, or choose a model with a larger output limit.",
       "internal": "{backend} stopped because of an internal error. Try again; if it happens again, the service log names the cause.",
+      "modelHubRoute": "Model Hub could not route this step of {backend} to a model. Try again; if it happens again, the service log names the cause.",
       "historyUnreadable": "This session's history can't be loaded, so {backend} can't continue it. Start a new session with /new.",
       "generic": "{backend}'s run failed."
     }

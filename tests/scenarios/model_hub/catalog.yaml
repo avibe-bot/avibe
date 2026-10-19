@@ -648,6 +648,12 @@ scenarios:
     test: tests/test_model_hub_vibey_consumer.py::test_sequential_vibey_retry_replaces_route_and_retains_served_provenance
     related_tests:
       - tests/test_model_hub_vibey_consumer.py::test_vibey_route_replacement_refuses_overlap_without_poisoning_current_request
+  - id: MH-VIBEY-010
+    name: A Vibey call that failed over to another Source does not refuse the Turn's next call while it settles
+    status: covered
+    kind: recovery
+    layer: contract
+    test: tests/test_model_hub_vibey_consumer.py::test_the_next_vibey_call_takes_the_failed_over_source_while_the_last_call_settles
   - id: MH-VIBEY-008
     name: Every Vibey resolution names its Turn, so each Turn on its Session's service-lifetime scope keeps exact provenance
     status: covered
