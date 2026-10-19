@@ -223,7 +223,9 @@ Hosted tools §6 holds, with these changes:
   or limit state gets "重新启用" in its detail. When the row's free check can tell that state apart (DeepSeek's balance,
   Tavily's usage limits), it runs the check: `pass` clears the state; `invalid` moves the Source to the existing
   invalid-key state, whose repair is replacing the key; `balance`, `limit` and `unknown` keep or replace the state
-  as they say. A state the row's check cannot tell apart (Exa has no free check) is not cleared at once. The persisted `needs_action` state stays, and the press arms an in-memory one-shot trial:
+  as they say. The check captures the Source's settlement generation when it starts; if a key replacement or
+  removal advanced it before the answer, the answer changes nothing. A state the row's check cannot tell apart (Exa
+  has no free check) is not cleared at once. The persisted `needs_action` state stays, and the press arms an in-memory one-shot trial:
   the Source admits exactly one search request, reserved by the first search that reaches it, while every other
   search skips it as `blocked`. A trial that completes clears the persisted state. A trial that fails is settled by the outcome table: a
   classified failure (401, 402, a limit code) replaces the blocker with its own state, so a revoked key asks for a
@@ -278,7 +280,9 @@ Hosted tools §6 holds, with these changes:
   Otherwise it is the catalog's list price for the request plus any per-returned-page part for content (Exa:
   $1 / 1k pages of `contents.text`), with `basis: "list"`. When content was requested but the page count cannot be
   read (an unreadable 200 with no valid reported cost), the cost is the search part marked as a lower bound
-  ("至少 $0.007"), and the ledger row carries `lower_bound: true` into the Usage aggregate. A vendor that bills only non-empty results (DeepSeek)
+  ("至少 $0.007"), and the ledger row carries `lower_bound: true` into the Usage aggregate. When the vendor bills only
+  non-empty results (DeepSeek) and a 200 is unreadable, whether it was billed is unknown: the attempt records no
+  cost (unpriced), and the ledger row adds nothing to `list_usd` but sets `lower_bound: true`. A vendor that bills only non-empty results (DeepSeek)
   costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
   billable only when it answered 200. Every service attempt the catalog does not bill (any non-200, a timeout, or
   DeepSeek's empty answer) records an explicit `cost: {usd: 0, basis: "list"}`, so the card shows $0 rather than an
@@ -349,7 +353,7 @@ includes, so the recorded list price stays exact.
 | Vendor | Request | Auth | Results | Content | List price (2026-10) | Free check |
 | --- | --- | --- | --- | --- | --- | --- |
 | DeepSeek | `POST https://api.deepseek.com/v1/tools/search` `{query, count, need_content}` | Bearer | 1–50 | `need_content` | $0.75 / 1k successful requests; empty results and failures not billed | `GET /user/balance`: 200 with `is_available: true` is `pass`, with `false` is `balance`; 401 is `invalid` |
-| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: 200 with every reported usage below its limit (`usage`/`limit`, `plan_usage`/`plan_limit`, `paygo_usage`/`paygo_limit`, where present) is `pass`; 200 with any at or above its limit is `limit`; 401 is `invalid` |
+| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: a 200 needs at least one valid numeric usage/limit pair (`usage`/`limit`, `plan_usage`/`plan_limit`, `paygo_usage`/`paygo_limit`); with every valid pair below its limit it is `pass`, with any at or above it `limit`, and with no valid pair `unknown`; 401 is `invalid` |
 | Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | `contents.text`, +$1 / 1k pages | $7 / 1k; the response's `costDollars` is used when present | none known |
 
 - DeepSeek facts that shape the UI (DeepSeek's Search & Fetch guide, 2026-10-19): the query is 1–128 characters and
