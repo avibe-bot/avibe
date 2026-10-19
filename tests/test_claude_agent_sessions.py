@@ -1058,6 +1058,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                 "subtype": "success",
                 "result": "primary final answer",
                 "duration_ms": 1,
+                "uuid": "res_primary",
             },
         )()
         text_block = TextBlock("steered final answer")
@@ -1120,6 +1121,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         # A reply records its Run output like every other reply (Codex: record Claude
         # phase replies on attached Run ledgers).
         self.assertTrue(phase_output.records_run_output)
+        # MESSAGE-DELIVERY-335: identified by its Result, so a same-text phase stays its own.
+        self.assertEqual(phase_output.idempotency_key, "res_primary")
         self.assertNotIn(composite_key, agent._pending_requests)
 
     async def test_presteer_result_stays_visible_without_agent_initiated_turn(self):

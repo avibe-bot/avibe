@@ -2235,46 +2235,36 @@ class ConsolidatedMessageDispatcher:
             return []
 
     @staticmethod
-    def _turn_reply_turn_id(
+    def _turn_reply(
         context: MessageContext,
         canonical_type: str,
         output_semantics: MessageOutput,
+        run_copy: str,
         *,
         is_error: bool,
         level: str,
-    ) -> Optional[str]:
-        """The live Turn a delivered output is a reply of, None when it is not one.
+    ) -> dict[str, tuple[str, str]]:
+        """``persist_agent_message``'s ``turn_reply`` for a reply that does not end its Turn.
 
-        A reply that does not end its Turn is what a later content-free end settles
-        with (docs/plans/reply-and-turn-end.md, rule 5); a final carries its own
-        text, and narration, notices, failures, detached and Activity outputs belong
-        to no Turn's answer.
+        Such a reply is what a later content-free end settles with
+        (docs/plans/reply-and-turn-end.md, rule 5): its receipt write records its Run
+        copy for the Turn in the same transaction. A final carries its own text, and
+        narration, notices, failures, detached and Activity outputs belong to no
+        Turn's answer. Empty when there is nothing to record, so a stand-in for the
+        persistence call keeps the signature it always had.
         """
 
-        if canonical_type != "result" or is_error or level == "silent":
-            return None
+        if canonical_type != "result" or is_error or level == "silent" or not (run_copy or "").strip():
+            return {}
         if (
             output_semantics.completes_turn
             or output_semantics.detached
             or not output_semantics.records_run_output
             or output_semantics.requires_delivery_for_run_settlement
         ):
-            return None
-        return str((context.platform_specific or {}).get("turn_token") or "").strip() or None
-
-    async def _record_turn_reply(self, turn_id: Optional[str], text: str) -> None:
-        """Record a delivered reply's Run copy for its live Turn, off the loop."""
-
-        if not turn_id or not (text or "").strip():
-            return
-        manager = getattr(self.controller, "session_turns", None)
-        record = getattr(manager, "record_turn_reply", None)
-        if not callable(record):
-            return
-        try:
-            await self._run_off_loop(lambda: record(turn_id, text))
-        except Exception:
-            logger.warning("Failed to record the last reply of Turn %s", turn_id, exc_info=True)
+            return {}
+        turn_id = str((context.platform_specific or {}).get("turn_token") or "").strip()
+        return {"turn_reply": (turn_id, run_copy)} if turn_id else {}
 
     async def _turn_last_reply(self, context: MessageContext) -> Optional[str]:
         """The Run copy of the Turn's last delivered reply, read off the loop."""
@@ -3324,6 +3314,14 @@ class ConsolidatedMessageDispatcher:
                 mutates_turn_lifecycle=mutates_turn_lifecycle,
             ) as commit:
                 recorded_text = self._fold_footer(persist_text, result_footer)
+                # A run record carries text alone, so its copy is written here.
+                # The persisted row below keeps its tokens: it is finalized with
+                # a sidecar bound to the body the reader is actually shown.
+                written_recorded_text = materialize_citations(recorded_text, citations)
+                # A background Turn's local row is its reply's receipt.
+                background_reply = self._turn_reply(
+                    context, canonical_type, output_semantics, written_recorded_text, is_error=is_error, level=level
+                )
                 persisted_output = None
                 if visible_output_type:
                     if target_context.platform == "avibe":
@@ -3351,6 +3349,7 @@ class ConsolidatedMessageDispatcher:
                             native_message_id=native_output_id,
                             citations=citations,
                             existing_row_id=existing_row_id,
+                            **background_reply,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -3362,6 +3361,7 @@ class ConsolidatedMessageDispatcher:
                             native_message_id=native_output_id,
                             citations=citations,
                             existing_row_id=existing_row_id,
+                            **background_reply,
                         )
                 else:
                     persisted_output = persist_agent_message(
@@ -3384,18 +3384,6 @@ class ConsolidatedMessageDispatcher:
                 # message recorder, except an intermediate message on a Harness run,
                 # which belongs to no output ledger entry and is recorded by neither.
                 suppressed_trigger_kind = (context.platform_specific or {}).get("task_trigger_kind")
-                # A run record carries text alone, so its copy is written here.
-                # The persisted row above keeps its tokens: it is finalized with
-                # a sidecar bound to the body the reader is actually shown.
-                written_recorded_text = materialize_citations(recorded_text, citations)
-                if persisted_output is not None:
-                    # A background Turn's row is its delivery.
-                    await self._record_turn_reply(
-                        self._turn_reply_turn_id(
-                            context, canonical_type, output_semantics, is_error=is_error, level=level
-                        ),
-                        written_recorded_text,
-                    )
                 if canonical_type == "result" and suppressed_trigger_kind in HARNESS_TRIGGER_KINDS:
                     await self._record_suppressed_agent_run_terminal_result(
                         context,
@@ -3745,6 +3733,12 @@ class ConsolidatedMessageDispatcher:
                 # failed every send/upload (primary_message_id is None) is NOT
                 # recorded, matching the old outbound mirror's success-only rule.
                 persisted_output = None
+                # The row written below is the reply's receipt (on avibe its delivery,
+                # on IM written once the send returned): the Turn's record of its last
+                # reply commits with it (rule 5).
+                delivered_reply = self._turn_reply(
+                    context, canonical_type, output_semantics, written_result_text, is_error=is_error, level=level
+                )
                 if persists_without_delivery or primary_message_id is not None:
                     # A failed terminal result persists as type='error' so it shows in
                     # the transcript/inbox like any terminal message but is NOT counted
@@ -3779,6 +3773,7 @@ class ConsolidatedMessageDispatcher:
                             native_message_id=native_output_id,
                             citations=citations,
                             existing_row_id=existing_row_id,
+                            **delivered_reply,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -3790,21 +3785,8 @@ class ConsolidatedMessageDispatcher:
                             native_message_id=native_output_id,
                             citations=citations,
                             existing_row_id=existing_row_id,
+                            **delivered_reply,
                         )
-
-                # A reply that reached the user (on avibe, its row is the delivery) is
-                # the Turn's last reply so far, as the Run copy recorded above.
-                if (
-                    persisted_output is not None
-                    if target_context.platform == "avibe"
-                    else primary_message_id is not None
-                ):
-                    await self._record_turn_reply(
-                        self._turn_reply_turn_id(
-                            context, canonical_type, output_semantics, is_error=is_error, level=level
-                        ),
-                        written_result_text,
-                    )
 
                 if settlement_waits_for_persistence:
                     accepted_message = persisted_output or (

@@ -28,6 +28,7 @@ from sqlalchemy import select
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.citations import CitationSource, register_citations
+from core import message_dispatcher as dispatcher_module
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput, stop_output_for, terminal_turn_output
 from core.session_turns import SessionTurnManager
@@ -346,6 +347,66 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(snapshot["terminal_evidence"]["result_text"], expected)
                 run = self.harness_run()
                 self.assertEqual((run["status"], run["result_text"] or ""), ("succeeded", expected))
+
+    async def test_a_turns_last_reply_is_recorded_with_its_receipt(self):
+        """Scenario: MESSAGE-DELIVERY-335.
+
+        A reply's record as the Turn's last reply commits in the transaction that writes
+        its receipt: a process that dies right after that commit still leaves it for the
+        Turn's end; a record that cannot be written fails the receipt and leaves nothing
+        behind; a replay of an earlier reply finds its receipt and records nothing, so it
+        never displaces a newer one. Each reply is its own delivery by its identity, the
+        same text twice included.
+        """
+
+        def reply(key: str) -> MessageOutput:
+            return MessageOutput(completes_turn=False, completes_run=False, idempotency_key=key)
+
+        for case in ("the process dies after the receipt", "the record fails", "an older reply replays"):
+            with self.subTest(case), self.state():
+                context = self.context()
+                controller = _Controller("avibe")
+                await controller.emit_agent_message(context, "result", FIRST, output=reply("out_1"))
+                if case == "the process dies after the receipt":
+                    real_persist = dispatcher_module.persist_agent_message
+
+                    def persist_then_die(*args, **kwargs):
+                        real_persist(*args, **kwargs)
+                        raise RuntimeError("the process died after the receipt committed")
+
+                    with mock.patch.object(dispatcher_module, "persist_agent_message", persist_then_die):
+                        with self.assertRaises(RuntimeError):
+                            await controller.emit_agent_message(context, "result", SECOND, output=reply("out_2"))
+                    expected, rows = SECOND, [FIRST, SECOND]
+                elif case == "the record fails":
+                    with mock.patch(
+                        "storage.message_deliveries.record_turn_reply",
+                        side_effect=RuntimeError("database is locked"),
+                    ):
+                        await controller.emit_agent_message(context, "result", SECOND, output=reply("out_2"))
+                    expected, rows = FIRST, [FIRST]
+                else:
+                    await controller.emit_agent_message(context, "result", SECOND, output=reply("out_2"))
+                    await controller.emit_agent_message(context, "result", SECOND, output=reply("out_3"))
+                    await controller.emit_agent_message(context, "result", FIRST, output=reply("out_1"))
+                    expected, rows = SECOND, [FIRST, SECOND, SECOND]
+
+                # The Turn ends in a new process.
+                restarted = _Controller("avibe")
+                await restarted.emit_agent_message(context, "result", "", output=terminal_turn_output())
+
+                self.assertEqual([text for _, text in self.agent_rows()], rows)
+                [snapshot] = restarted.snapshots
+                self.assertEqual(snapshot["terminal_evidence"]["result_text"], expected)
+                run = self.harness_run()
+                self.assertEqual((run["status"], run["result_text"]), ("succeeded", expected))
+                if case == "an older reply replays":
+                    # Each delivered reply is on the Run's log by its identity: the same
+                    # text twice is two entries, and the replay adds none.
+                    self.assertEqual(
+                        [entry["id"] for entry in run["result_payload"]["outputs"]],
+                        ["out_1", "out_2", "out_3", "terminal"],
+                    )
 
     async def test_a_reply_or_a_failure_keeps_its_type_attached_or_detached(self):
         """Scenario: MESSAGE-DELIVERY-334.

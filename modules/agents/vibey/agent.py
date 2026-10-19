@@ -1545,7 +1545,14 @@ class VibeyAgent(BaseAgent):
                 run.request.context,
                 message_type,
                 body,
-                output=MessageOutput(completes_turn=False, completes_run=False, persisted_row_id=row_id),
+                output=MessageOutput(
+                    completes_turn=False,
+                    completes_run=False,
+                    persisted_row_id=row_id,
+                    # A reply is identified by its committed row: two replies with the
+                    # same text stay two, and a replay of one stays one.
+                    idempotency_key=row_id if message_type == "result" else None,
+                ),
                 citations=citations,
             )
         except Exception:

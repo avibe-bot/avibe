@@ -1836,6 +1836,26 @@ def test_opencode_poll_settles_error_when_trailing_user_is_last():
     ]
 
 
+def _ends_the_turn(message_type, output):
+    """A ``result`` is a reply; only one with Turn-end authority settles the Turn (a result
+    without an explicit output keeps the terminal default) (MESSAGE-DELIVERY-335)."""
+
+    return message_type == "result" and (output is None or output.completes_turn)
+
+
+def _assert_no_turn_end_while_the_steer_is_live(emitted):
+    """Nothing ends the Turn while an accepted steer is live (the poll returns the end to its
+    caller), and the reply before the steer is a reply that does not end the Turn, delivered
+    only once the steer's answer settled the poll (MESSAGE-DELIVERY-335)."""
+
+    for args, kwargs, polls_at_emit in emitted:
+        output = kwargs.get("output")
+        assert output is None or not output.completes_turn, (args, kwargs)
+        if args[1] == "result":
+            assert output is not None and not output.settles_run, (args, kwargs)
+            assert polls_at_emit == 3, (args, polls_at_emit)
+
+
 def test_opencode_poll_keeps_accepted_steer_pending_while_native_busy(monkeypatch):
     """A trailing user while OpenCode is busy is a live steer, not a hang."""
 
@@ -1858,7 +1878,7 @@ def test_opencode_poll_keeps_accepted_steer_pending_while_native_busy(monkeypatc
             return f"translated:{key}"
 
         async def emit_agent_message(self, *args, **kwargs):
-            emitted.append((args, kwargs))
+            emitted.append((args, kwargs, polls["n"]))
 
     class _Agent:
         opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
@@ -1932,7 +1952,7 @@ def test_opencode_poll_keeps_accepted_steer_pending_while_native_busy(monkeypatc
 
     assert (final_text, should_emit) == ("steered", True)
     assert polls["n"] == 3
-    assert not any(item[0][1] == "result" for item in emitted)
+    _assert_no_turn_end_while_the_steer_is_live(emitted)
 
 
 def test_opencode_poll_uses_snapshot_live_flag_instead_of_rereading_status(monkeypatch):
@@ -1958,7 +1978,7 @@ def test_opencode_poll_uses_snapshot_live_flag_instead_of_rereading_status(monke
             return f"translated:{key}"
 
         async def emit_agent_message(self, *args, **kwargs):
-            emitted.append((args, kwargs))
+            emitted.append((args, kwargs, polls["n"]))
 
     class _Agent:
         opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
@@ -2036,7 +2056,7 @@ def test_opencode_poll_uses_snapshot_live_flag_instead_of_rereading_status(monke
     assert (final_text, should_emit) == ("steered", True)
     assert polls["n"] == 3
     assert status_reads["n"] == 0
-    assert not any(item[0][1] == "result" for item in emitted)
+    _assert_no_turn_end_while_the_steer_is_live(emitted)
 
 
 def test_opencode_poll_keeps_retry_pending_on_empty_inflight_assistant(monkeypatch):
@@ -2074,7 +2094,7 @@ def test_opencode_poll_keeps_retry_pending_on_empty_inflight_assistant(monkeypat
             output=None,
             terminal_error=None,
         ):
-            emitted.append((message_type, text, is_error, level, terminal_error))
+            emitted.append((message_type, text, is_error, level, terminal_error, output))
 
     class _Agent:
         opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 0})()
@@ -2141,7 +2161,7 @@ def test_opencode_poll_keeps_retry_pending_on_empty_inflight_assistant(monkeypat
 
     assert (final_text, should_emit) == ("recovered", True)
     assert polls["n"] == 3
-    assert not any(item[0] == "result" for item in emitted)
+    assert not any(_ends_the_turn(item[0], item[5]) for item in emitted)
 
 
 def test_opencode_poll_keeps_continue_pending_through_idle_visibility_gap(monkeypatch):
@@ -2182,7 +2202,7 @@ def test_opencode_poll_keeps_continue_pending_through_idle_visibility_gap(monkey
             output=None,
             terminal_error=None,
         ):
-            emitted.append((message_type, text, is_error, level, terminal_error))
+            emitted.append((message_type, text, is_error, level, terminal_error, output))
 
     class _Agent:
         opencode_config = type("OpenCodeConfig", (), {"error_retry_limit": 1})()
@@ -2280,7 +2300,7 @@ def test_opencode_poll_keeps_continue_pending_through_idle_visibility_gap(monkey
 
     assert (final_text, should_emit) == ("recovered", True)
     assert polls["n"] >= 3
-    assert not any(item[0] == "result" for item in emitted)
+    assert not any(_ends_the_turn(item[0], item[5]) for item in emitted)
 
 
 def test_opencode_poll_keeps_retry_pending_before_continue_user_appears(monkeypatch):
@@ -2395,7 +2415,7 @@ def test_opencode_poll_keeps_retry_pending_before_continue_user_appears(monkeypa
 
     assert (final_text, should_emit) == ("recovered", True)
     assert polls["n"] >= 3
-    assert not any(item[0][1] == "result" for item in emitted)
+    assert not any(_ends_the_turn(item[0][1], item[1].get("output")) for item in emitted)
 
 
 def test_opencode_poll_does_not_settle_error_while_followup_has_parts():
@@ -2470,7 +2490,7 @@ def test_opencode_poll_does_not_settle_error_while_followup_has_parts():
 
     assert (final_text, should_emit) == ("recovered", True)
     assert polls["n"] == 2
-    assert not any(item[0][1] == "result" for item in emitted)
+    assert not any(_ends_the_turn(item[0][1], item[1].get("output")) for item in emitted)
 
 
 def test_opencode_poll_keeps_explicit_empty_completion_on_success_path():

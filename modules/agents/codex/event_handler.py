@@ -337,6 +337,7 @@ class CodexEventHandler:
                 if turn_state and (text_is_visible or not prev_is_visible):
                     turn_state.pending_assistant = (text, "markdown")
                     turn_state.pending_assistant_phase = phase
+                    turn_state.pending_assistant_id = str(item.get("id") or "") or None
 
         elif item_type == "commandExecution":
             command = item.get("command", "")
@@ -592,9 +593,11 @@ class CodexEventHandler:
             or not strip_silent_blocks(held[0]).strip()
         ):
             return
+        output_key = turn_state.pending_assistant_id
         turn_state.pending_assistant = None
         turn_state.pending_assistant_phase = None
-        await self._hold(turn_state, thread_id, _REPLY_ROLE, held[0], held[1])
+        turn_state.pending_assistant_id = None
+        await self._hold(turn_state, thread_id, _REPLY_ROLE, held[0], held[1], output_key=output_key)
 
     async def _hold(
         self,
@@ -604,10 +607,17 @@ class CodexEventHandler:
         text: str,
         parse_mode: str | None = "markdown",
         level: str = "normal",
+        *,
+        output_key: str | None = None,
     ) -> None:
         turn_state.pending_narration.append(
             CodexHeldMessage(
-                role=role, text=text, parse_mode=parse_mode, thread_id=thread_id, level=level
+                role=role,
+                text=text,
+                parse_mode=parse_mode,
+                thread_id=thread_id,
+                level=level,
+                output_key=output_key,
             )
         )
         await self._drain_narration(turn_state)
@@ -620,15 +630,21 @@ class CodexEventHandler:
         parse_mode: str | None,
         citations: CitationBundle | None,
         level: str = "normal",
+        output_key: str | None = None,
     ) -> None:
         await self._agent.controller.emit_agent_message(
             request.context,
             role,
             text,
             parse_mode=parse_mode or "markdown",
-            # A reply that does not end the Turn; narration keeps the call it always had.
+            # A reply that does not end the Turn, identified by its item id so two
+            # replies with the same text stay two; narration keeps the call it had.
             **(
-                {"output": MessageOutput(completes_turn=False, completes_run=False)}
+                {
+                    "output": MessageOutput(
+                        completes_turn=False, completes_run=False, idempotency_key=output_key
+                    )
+                }
                 if role == _REPLY_ROLE
                 else {}
             ),
@@ -661,7 +677,7 @@ class CodexEventHandler:
                 return
             held.pop(0)
             await self._emit_narration(
-                request, entry.role, resolved, entry.parse_mode, citations, entry.level
+                request, entry.role, resolved, entry.parse_mode, citations, entry.level, entry.output_key
             )
 
     def _persist_turn_generated_images(self, params: dict[str, Any]) -> None:

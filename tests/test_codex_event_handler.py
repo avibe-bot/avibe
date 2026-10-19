@@ -25,6 +25,7 @@ class _TurnState:
         self.request = request
         self.pending_assistant = None
         self.pending_assistant_phase = None
+        self.pending_assistant_id = None
         self.pending_narration = []
         self.terminal_error = None
         self.terminal_error_notified = False
@@ -607,13 +608,13 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         for item in (
-            {"type": "agentMessage", "text": "Looking at the cache.", "phase": "commentary"},
-            {"type": "agentMessage", "text": "The cache is safe.", "phase": "final_answer"},
+            {"type": "agentMessage", "id": "msg_1", "text": "Looking at the cache.", "phase": "commentary"},
+            {"type": "agentMessage", "id": "msg_2", "text": "The cache is safe.", "phase": "final_answer"},
             # The steered input: "and the lock?"
-            {"type": "agentMessage", "text": "Checking the lock.", "phase": "commentary"},
+            {"type": "agentMessage", "id": "msg_3", "text": "Checking the lock.", "phase": "commentary"},
             {"type": "commandExecution", "command": "rg lock", "status": "completed", "exitCode": 0},
-            {"type": "agentMessage", "text": "One writer holds it.", "phase": "partial_answer"},
-            {"type": "agentMessage", "text": "The lock is fine too.", "phase": "final_answer"},
+            {"type": "agentMessage", "id": "msg_4", "text": "The cache is safe.", "phase": "partial_answer"},
+            {"type": "agentMessage", "id": "msg_5", "text": "The lock is fine too.", "phase": "final_answer"},
         ):
             await handler._on_item_completed({"turnId": "turn-1", "item": item}, request)
         await handler._on_turn_completed({"turn": {"id": "turn-1", "status": "completed"}}, request)
@@ -627,13 +628,15 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
             ("result", "The cache is safe."),
             ("assistant", "Checking the lock."),
             ("toolcall", "tool rg lock"),
-            ("result", "One writer holds it."),
+            ("result", "The cache is safe."),
         ]
         for role, _, output in emitted:
             if role == "result":
                 assert output is not None and not output.completes_turn and not output.settles_run
             else:
                 assert output is None
+        # Each reply is identified by its item, so the same text twice stays two replies.
+        assert [output.idempotency_key for role, _, output in emitted if role == "result"] == ["msg_2", "msg_4"]
         agent.emit_result_message.assert_awaited_once()
         assert agent.emit_result_message.await_args.args[1] == "The lock is fine too."
 

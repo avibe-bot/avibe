@@ -558,7 +558,11 @@ class OpenCodePollLoop:
                 "result",
                 text,
                 parse_mode="markdown",
-                output=MessageOutput(completes_turn=False, completes_run=False),
+                # OpenCode's message id: two replies with the same text stay two
+                # deliveries, and a restored poll's replay of one stays one.
+                output=MessageOutput(
+                    completes_turn=False, completes_run=False, idempotency_key=str(message_id)
+                ),
             )
             emitted_message_ids.add(message_id)
             self._persist_emitted_assistant_messages(session_id, emitted_message_ids)

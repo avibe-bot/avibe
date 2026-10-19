@@ -93,16 +93,27 @@ part is delivered and typed exactly as a non-terminal reply would be.
   `session_turn_replies`, read by primary key off the loop, or with "" when the
   Turn delivered no reply (rule 5). Failed, stopped and teardown ends never
   read it.
-- The write: after a reply that does not end its Turn was delivered (on the
-  Web its row is the delivery; on IM the platform accepted the send; in a
-  background Session its local row), the dispatcher writes the same Run copy it
-  records on the Runs (`process_reply` applied, citations written out) for the
-  live Turn: one upsert keyed by the Turn's id, off the loop, guarded by the
-  Turn being `starting` or `active`. It is a table of its own
+- The write: a reply that does not end its Turn records its Run copy (the same
+  copy the Runs get: `process_reply` applied, citations written out) for the
+  live Turn in the same SQLite transaction that writes its receipt, the row
+  `persist_agent_message` writes (on the Web its delivery, on IM once the send
+  returned, in a background Session its local row, for Vibey the display write
+  into its committed row). The receipt exists exactly when the record does: a
+  record that cannot be written fails the receipt the way a failed row write
+  does, and a crash between an IM send and its row write leaves neither, so a
+  replay sends again, as before. It is one upsert keyed by the Turn's id,
+  guarded by the Turn being `starting` or `active`, in a table of its own
   (`turn_id` → `session_turns.id`, deferred, `ON DELETE CASCADE`), so it never
   takes part in the Turn's compare-and-set and no transition writes or clears
-  it. A receipt replay, narration, notices, failures, detached and Activity
-  outputs never write it. The last write wins, so replies A, B, A settle with A.
+  it. A replay that finds its receipt records nothing, so an earlier reply never
+  displaces a newer one; narration, notices, failures, detached and Activity
+  outputs never write it. The last delivered reply wins, so A, B, A settle with A.
+- Every reply carries the identity its backend gives it as `idempotency_key`
+  (OpenCode's message id, Codex's item id, Vibey's committed row id, Claude's
+  `ResultMessage.uuid`), so two replies with the same text stay two entries in
+  a Run's `result_payload.outputs` and a replay stays one. A Claude phase
+  rebuilt from assistant frames at a steer receipt has no Result and so no
+  identity; it falls back to its text.
 - A footer is never a reply: with nothing visible to say, `base.emit_result_message`
   emits an empty end and passes the duration footer only as `result_footer`,
   so a footer-only end is content-free.

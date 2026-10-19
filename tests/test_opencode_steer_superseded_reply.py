@@ -137,7 +137,8 @@ def _assistant_emits(agent):
 
 
 def _reply_emits(agent):
-    """Replies delivered before the settlement: ``result`` rows that do not end the Turn."""
+    """Replies delivered before the settlement: ``result`` rows that do not end the Turn,
+    each identified by its OpenCode message id (MESSAGE-DELIVERY-335)."""
 
     replies = []
     for call in agent.controller.emit_agent_message.await_args_list:
@@ -145,6 +146,7 @@ def _reply_emits(agent):
             continue
         output = call.kwargs.get("output")
         assert output is not None and not output.completes_turn and not output.settles_run
+        assert output.idempotency_key == "reply-a"
         replies.append(call.args[2])
     return replies
 
@@ -157,12 +159,14 @@ def _reply_emits(agent):
         (_turn(REPORT, SILENT), REPORT, []),
         # A visible answer to the steer rides the Turn end; A is a reply delivered before it.
         (_turn(REPORT, "Callbacks noted."), "Callbacks noted.", [REPORT]),
+        # The same text twice is two replies.
+        (_turn(REPORT, REPORT), REPORT, [REPORT]),
         # A silent reply superseded by a visible one is not re-sent.
         (_turn(SILENT, "Callbacks noted."), "Callbacks noted.", []),
         # When every reply is silent, the Turn stays silent.
         (_turn(SILENT, SILENT), SILENT, []),
     ],
-    ids=["silent-steer-reply", "visible-steer-reply", "silent-superseded", "all-silent"],
+    ids=["silent-steer-reply", "visible-steer-reply", "same-text-reply", "silent-superseded", "all-silent"],
 )
 async def test_steer_keeps_superseded_completed_reply(
     monkeypatch, path, messages, expected_result, expected_emits

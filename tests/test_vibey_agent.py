@@ -2174,6 +2174,9 @@ async def test_a_reply_a_steer_superseded_is_a_result_and_the_turn_ends_once_aft
     replies = [rows[1].row_id] if final.startswith("<silent>") else [rows[1].row_id, rows[3].row_id]
     results = {row["id"]: row["content_text"] for row in harness.rows("result")}
     assert sorted(results) == sorted(replies) and results[rows[1].row_id] == "4."
+    # The reply is identified by its committed row (MESSAGE-DELIVERY-335).
+    [reply_row] = [row for row in harness.rows("result") if row["id"] == rows[1].row_id]
+    assert str(reply_row["native_message_id"]).endswith(f":{rows[1].row_id}")
     assert [push["message_id"] for push in pushes] == replies
     assert sequence == [*replies, "turn.end"]
     # The Turn settles with its last reply: a silent end with the one it delivered before
