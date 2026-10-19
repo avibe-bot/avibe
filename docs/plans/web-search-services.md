@@ -562,7 +562,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   that Source's health (§4.2), while a model executor attempt still never does; a service attempt the catalog does
   not bill records an explicit zero cost, a possibly billed one is listed in `failed_attempts[]` with no `cost`, and
   `HostedCost.lower_bound` marks a partial total (§4.3); a service response is `completed` when it answered 200
-  with a readable `results` array; and the terminal reasons `search_query_too_long` and `search_sources_blocked`
+  with a `results` array that is empty or keeps at least one row after the §4.3 bounds, and a non-empty array whose
+  every row the bounds reject is `service_unreadable` and fails over; and the terminal reasons `search_query_too_long` and `search_sources_blocked`
   (§4.2). The C-6 text is replaced in the same version event, so there is one gateway specification.
 - V2 config: `model_hub.hosted_tools.web_search` as §3.2.
 
