@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 
@@ -10,9 +11,11 @@ import pytest
 from config.v2_config import ModelHubModelConfig, ModelHubSourceConfig, ModelHubSourceStateConfig
 from core.handlers.model_hub import service as service_module
 from core.handlers.model_hub.hosted_executor import ExecutorCall
+from core.agent_core.messages import message_from_dict
 from core.agent_core.tools.hosted import hosted_tool_spec
 from core.handlers.model_hub.hosted_tools import direct_search_candidate, executor_vendors
 from core.handlers.model_hub.service import ModelHubService
+from tests.fake_pid_helpers import fake_pid
 
 SOURCE = ModelHubSourceConfig(
     id="src_ds000001",
@@ -39,10 +42,11 @@ def test_web_fetch_has_one_canonical_schema() -> None:
 
 
 class _Process:
-    def __init__(self, stdout: bytes = b"{}", *, returncode: int = 0, stderr: bytes = b""):
+    def __init__(self, stdout: bytes = b"{}", *, returncode: int = 0, stderr: bytes = b"", pid: int | None = None):
         self.stdout, self.stderr = stdout, stderr
         self.returncode = returncode
         self.killed = False
+        self.pid = fake_pid() if pid is None else pid
 
     async def communicate(self):
         return self.stdout, self.stderr
@@ -112,6 +116,30 @@ async def test_an_empty_search_is_completed_but_free(monkeypatch, service) -> No
     assert attempt.moves_on is False
 
 
+def _message(attempt, tool: str):
+    return message_from_dict({
+        "role": "tool_result",
+        "tool_call_id": "toolu_1",
+        "tool_name": tool,
+        "content": [],
+        "is_error": attempt.record["status"] != "completed",
+        "hosted": {"record": attempt.record, "execution": attempt.execution()},
+    })
+
+
+async def test_direct_records_pass_the_real_reader(monkeypatch, service) -> None:
+    search, _, _ = await _attempt(
+        monkeypatch, service, "web_search", {"query": "q"},
+        json.dumps({"results": [{"title": "T", "url": "https://e", "snippet": "S", "date": "2026-10-19"}]}).encode(),
+    )
+    assert _message(search, "web_search").hosted is not None
+    fetch, _, _ = await _attempt(
+        monkeypatch, service, "web_fetch", {"url": "https://example.com/a"},
+        json.dumps({"title": "T", "content": "body"}).encode(),
+    )
+    assert _message(fetch, "web_fetch").hosted is not None
+
+
 async def test_fetch_returns_the_page_as_the_source(monkeypatch, service) -> None:
     attempt, calls, _ = await _attempt(
         monkeypatch, service, "web_fetch", {"url": "https://example.com/a"},
@@ -156,6 +184,56 @@ async def test_malformed_source_fields_are_dropped(monkeypatch, service) -> None
     assert attempt.record["sources"] == [
         {"url": "https://e", "snippet": "ok", "page_age": "2026-10-19"},
     ]
+
+
+class _FailingProcess(_Process):
+    def __init__(self, error):
+        super().__init__()
+        self.error = error
+
+    async def communicate(self):
+        raise self.error
+
+
+async def test_a_timeout_kills_the_process_tree(monkeypatch, service) -> None:
+    process = _FailingProcess(asyncio.TimeoutError())
+
+    async def spawn(*command, **kwargs):
+        return process
+
+    monkeypatch.setattr(service_module.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(
+        service_module, "signal_process_tree",
+        lambda process, sig, logger, label: process.kill(),
+    )
+    candidate = direct_search_candidate(SOURCE, "web_search")
+    attempt = await service._direct_search_attempt(
+        ExecutorCall("web_search", {"query": "q"}), candidate,
+        deadline=time.monotonic() + 10, say=lambda key, **params: key,
+    )
+    assert process.killed is True
+    assert attempt.record["status"] == "failed"
+    assert attempt.record["error_code"] == "provider_timed_out"
+
+
+async def test_cancellation_kills_the_process_tree(monkeypatch, service) -> None:
+    process = _FailingProcess(asyncio.CancelledError())
+
+    async def spawn(*command, **kwargs):
+        return process
+
+    monkeypatch.setattr(service_module.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(
+        service_module, "signal_process_tree",
+        lambda process, sig, logger, label: process.kill(),
+    )
+    candidate = direct_search_candidate(SOURCE, "web_search")
+    with pytest.raises(asyncio.CancelledError):
+        await service._direct_search_attempt(
+            ExecutorCall("web_search", {"query": "q"}), candidate,
+            deadline=time.monotonic() + 10, say=lambda key, **params: key,
+        )
+    assert process.killed is True
 
 
 async def test_a_base_url_ending_in_v1_does_not_double_the_prefix(monkeypatch, service) -> None:
