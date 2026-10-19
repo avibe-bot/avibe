@@ -34,8 +34,9 @@ SOURCE = ModelHubSourceConfig(
 
 
 def test_web_fetch_rejects_a_non_http_url() -> None:
-    with pytest.raises(ExecutorCallRefused):
-        parse_call("web_fetch", {"arguments": {"url": "file:///etc/passwd"}})
+    for url in ("file:///etc/passwd", "https://[", "https://e\nnext", "https://e "):
+        with pytest.raises(ExecutorCallRefused):
+            parse_call("web_fetch", {"arguments": {"url": url}})
 
 
 def test_web_fetch_names_deepseek_as_a_vendor() -> None:

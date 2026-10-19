@@ -91,7 +91,14 @@ def parse_call(tool: str, payload: object) -> ExecutorCall:
         raise ExecutorCallRefused("invalid_request_error", 400)
     if tool == "web_fetch":
         url = arguments.get("url")
-        if set(arguments) != {"url"} or not isinstance(url, str) or not url.strip() or len(url) > 8192:
+        if (
+            set(arguments) != {"url"}
+            or not isinstance(url, str)
+            or not url.strip()
+            or url != url.strip()
+            or len(url) > 8192
+            or any(ord(char) < 32 for char in url)
+        ):
             raise ExecutorCallRefused("invalid_request_error", 400)
         from urllib.parse import urlsplit
 
