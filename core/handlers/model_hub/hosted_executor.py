@@ -95,7 +95,10 @@ def parse_call(tool: str, payload: object) -> ExecutorCall:
             raise ExecutorCallRefused("invalid_request_error", 400)
         from urllib.parse import urlsplit
 
-        parsed = urlsplit(url)
+        try:
+            parsed = urlsplit(url)
+        except ValueError:
+            raise ExecutorCallRefused("invalid_request_error", 400) from None
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
             raise ExecutorCallRefused("invalid_request_error", 400)
         return ExecutorCall(tool, dict(arguments))

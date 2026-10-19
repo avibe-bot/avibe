@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -921,6 +922,43 @@ def _hosted_text(value: object, limit: int) -> str | None:
     return text[:limit] if text else None
 
 
+class _DirectTooLarge(Exception):
+    """A direct API response exceeded the local read bound."""
+
+
+async def _read_limited(stream: Any, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await stream.read(64 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise _DirectTooLarge()
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _hosted_url(value: object) -> str | None:
+    """A source URL exactly as reported: valid UTF-8, no control characters, HTTP(S), bounded."""
+    if not isinstance(value, str):
+        return None
+    try:
+        url = value.encode("utf-8", "strict").decode("utf-8")
+    except UnicodeError:
+        return None
+    if not url or len(url) > 8192 or any(ord(char) < 32 for char in url):
+        return None
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+        return None
+    return url
+
+
 def _vault_error(stderr: bytes) -> str:
     """The reason a Vault subprocess failed: its JSON error, or its last non-empty line."""
     text = (stderr or b"").decode("utf-8", "replace").strip()
@@ -943,7 +981,7 @@ def _vault_error(stderr: bytes) -> str:
         message = payload.get("message")
         if isinstance(message, str) and message.strip():
             return message.strip()
-    return json.dumps(payload, ensure_ascii=True)[:500]
+    return ""
 
 
 @dataclass(frozen=True)
@@ -6888,6 +6926,7 @@ class ModelHubService:
             ]
 
         failure_reason: Failure | None = None
+        failure_moves_on = True
         body: Any = None
         process = None
         try:
@@ -6930,7 +6969,19 @@ class ModelHubService:
 
             try:
                 timeout = max(1.0, deadline - asyncio.get_running_loop().time())
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+
+                async def read_both() -> tuple[bytes, bytes]:
+                    return await asyncio.gather(
+                        _read_limited(process.stdout, 4 * 1024 * 1024),
+                        _read_limited(process.stderr, 64 * 1024),
+                    )
+
+                stdout, stderr = await asyncio.wait_for(read_both(), timeout=timeout)
+                await process.wait()
+            except _DirectTooLarge:
+                await stop()
+                stdout, stderr = b"", b""
+                failure_reason = Failure(say("modelHub.hostedTools.tooLarge"), "provider_too_large")
             except asyncio.TimeoutError:
                 await stop()
                 stdout, stderr = b"", b""
@@ -6939,12 +6990,18 @@ class ModelHubService:
                 await stop()
                 raise
             if failure_reason is None and process.returncode != 0:
-                detail = _vault_error(stderr) or f"exited {process.returncode}"
+                detail = _vault_error(stdout) or _vault_error(stderr) or f"exited {process.returncode}"
                 logger.warning("DeepSeek direct search Vault call failed: %s", detail)
-                failure_reason = Failure(say("modelHub.hostedTools.unreachable"), "provider_unreachable")
-            if failure_reason is None and len(stdout) > 4 * 1024 * 1024:
-                failure_reason = Failure(say("modelHub.hostedTools.tooLarge"), "provider_too_large")
-                stdout = b""
+                lowered = detail.lower()
+                if any(token in lowered for token in (
+                    "invalid_request_error", "invalid_parameter", " 400", "400 ", "401", "402", "403", "404", "413",
+                )):
+                    failure_reason = Failure(say("modelHub.hostedTools.providerRefused", detail=detail), "provider_refused")
+                    failure_moves_on = False
+                elif "429" in detail or "rate limit" in lowered:
+                    failure_reason = Failure(say("modelHub.hostedTools.providerUnavailable", detail=detail), "provider_unavailable")
+                else:
+                    failure_reason = Failure(say("modelHub.hostedTools.unreachable"), "provider_unreachable")
             if failure_reason is None:
                 try:
                     body = json.loads(stdout.decode("utf-8"))
@@ -6957,14 +7014,18 @@ class ModelHubService:
             if content is None:
                 record = failed_record(Failure(say("modelHub.hostedTools.didNotRun", tool=call.tool), "search_not_run"))
             else:
-                record = {
-                    "status": "completed",
-                    "sources": [{
-                        "url": _hosted_text(call.arguments["url"], 8192),
-                        "title": _hosted_text(body.get("title"), 500) or "",
-                        "snippet": content,
-                    }],
-                }
+                fetch_url = _hosted_url(call.arguments["url"])
+                if fetch_url is None:
+                    record = failed_record(Failure(say("modelHub.hostedTools.didNotRun", tool=call.tool), "search_not_run"))
+                else:
+                    record = {
+                        "status": "completed",
+                        "sources": [{
+                            "url": fetch_url,
+                            "title": _hosted_text(body.get("title"), 500) or "",
+                            "snippet": content,
+                        }],
+                    }
         else:
             results = body.get("results") if isinstance(body, dict) else None
             if not isinstance(results, list):
@@ -6974,7 +7035,7 @@ class ModelHubService:
                 for item in results[:10]:
                     if not isinstance(item, dict):
                         continue
-                    url = _hosted_text(item.get("url"), 8192)
+                    url = _hosted_url(item.get("url"))
                     if url is None:
                         continue
                     source_row = {"url": url}
@@ -6988,26 +7049,29 @@ class ModelHubService:
                     sources.append(source_row)
                 record = {"status": "completed", "sources": sources}
         completed = record["status"] == "completed"
-        if completed:
-            await self.record_hosted_success(source, "deepseek", call.tool, "direct")
         # DeepSeek bills Search only when it returns a non-empty list; an empty result is free.
         billable = completed and (call.tool == "web_fetch" or bool(record.get("sources")))
-        if billable:
-            await self._meter_call(
-                source_id=source.id,
-                model_id="deepseek",
-                outcome=RawCallOutcome(
-                    kind=RawOutcomeKind.SUCCESS,
-                    http_status=200,
-                    error_code=None,
-                    redacted_message=None,
-                    stream_started=False,
-                    model_id="deepseek",
-                    source_id=source.id,
-                ),
-                observed=None,
-                at=self.now(),
-            )
+        if completed:
+            async def settle_direct() -> None:
+                # Meter first: a cancellation after the response must not lose a completed call.
+                if billable:
+                    await self._meter_call(
+                        source_id=source.id,
+                        model_id="deepseek",
+                        outcome=RawCallOutcome(
+                            kind=RawOutcomeKind.SUCCESS,
+                            http_status=200,
+                            error_code=None,
+                            redacted_message=None,
+                            stream_started=False,
+                            model_id="deepseek",
+                            source_id=source.id,
+                        ),
+                        observed=None,
+                        at=self.now(),
+                    )
+                await self.record_hosted_success(source, "deepseek", call.tool, "direct")
+            await asyncio.shield(settle_direct())
         cost = None
         if billable and candidate.price is not None:
             cost = HostedCost(basis="list", usd=round(candidate.price.usd_per_1k / 1000, 6))
@@ -7017,7 +7081,7 @@ class ModelHubService:
             record=record,
             cost=cost,
             billable=billable,
-            moves_on=not completed,
+            moves_on=not completed if completed else failure_moves_on,
             direct=True,
             label=candidate.label,
         )

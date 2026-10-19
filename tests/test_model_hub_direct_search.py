@@ -47,15 +47,24 @@ def test_web_fetch_has_one_canonical_schema() -> None:
     assert spec.input_schema["required"] == ["url"]
 
 
+class _Stream:
+    def __init__(self, data: bytes = b"", error: BaseException | None = None):
+        self.data = data
+        self.error = error
+
+    async def read(self, size: int) -> bytes:
+        if self.error is not None:
+            raise self.error
+        chunk, self.data = self.data[:size], self.data[size:]
+        return chunk
+
+
 class _Process:
     def __init__(self, stdout: bytes = b"{}", *, returncode: int = 0, stderr: bytes = b"", pid: int | None = None):
-        self.stdout, self.stderr = stdout, stderr
+        self.stdout, self.stderr = _Stream(stdout), _Stream(stderr)
         self.returncode = returncode
         self.killed = False
         self.pid = fake_pid() if pid is None else pid
-
-    async def communicate(self):
-        return self.stdout, self.stderr
 
     def kill(self):
         self.killed = True
@@ -199,6 +208,7 @@ async def test_malformed_source_fields_are_dropped(monkeypatch, service) -> None
         monkeypatch, service, "web_search", {"query": "q"},
         json.dumps({"results": [
             {"url": "", "title": "bad"},
+            {"url": "https://e\nnext", "title": "bad"},
             {"url": "https://e", "title": {"bad": 1}, "snippet": "ok", "date": "2026-10-19"},
         ]}).encode(),
     )
@@ -210,10 +220,8 @@ async def test_malformed_source_fields_are_dropped(monkeypatch, service) -> None
 class _FailingProcess(_Process):
     def __init__(self, error):
         super().__init__()
-        self.error = error
-
-    async def communicate(self):
-        raise self.error
+        self.stdout = _Stream(error=error)
+        self.stderr = _Stream(error=error)
 
 
 async def test_a_timeout_kills_the_process_tree(monkeypatch, service) -> None:
@@ -255,6 +263,15 @@ async def test_cancellation_kills_the_process_tree(monkeypatch, service) -> None
             deadline=time.monotonic() + 10, say=lambda key, **params: key,
         )
     assert process.killed is True
+
+
+async def test_a_provider_parameter_error_does_not_fall_through(monkeypatch, service) -> None:
+    body = json.dumps({"error": {"message": "'count' must be between 1 and 50", "code": "invalid_request_error"}}).encode()
+    attempt, _, _, _ = await _attempt(
+        monkeypatch, service, "web_search", {"query": "q"}, body, returncode=1,
+    )
+    assert attempt.record["error_code"] == "provider_refused"
+    assert attempt.moves_on is False
 
 
 async def test_an_oversized_direct_response_is_a_failure(monkeypatch, service) -> None:
