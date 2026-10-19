@@ -23,7 +23,7 @@ import { PetAvatar, type PetPose } from './PetAvatar';
 import { PetOpenButton } from './PetOpenButton';
 import { REPLY_LINGER_RESUME_MS, useReplyLinger } from './useReplyLinger';
 import { onPetHover, petBridge, sessionLink, vaultRequestLink } from './petBridge';
-import { usePetPanel } from './petPanel';
+import { petPanel, usePetPanel } from './petPanel';
 import { petComposer, usePetComposer } from './petComposer';
 import { petShell, useOnSummon, usePetBinding, usePetDismissed } from './petShell';
 import { derivePetPose, derivePetState, latestExchange, latestFailureNotice, openQuickReplies } from './petState';
@@ -656,7 +656,10 @@ const PetSurface: React.FC = () => {
   // replies only light Vibey's badge. Every input is the current epoch's own
   // state, so nothing carries a bubble over from a previous session.
   const needsYou = Boolean((!data.running && failure) || uncertain || queued || vaultRequests.length > 0);
-  const held = Boolean(data.running || optimisticTitle || needsYou || historyOpen);
+  // A history the user asked for but the shell has not confirmed yet holds the
+  // bubble too: it neither folds nor spends the linger while it waits.
+  const historyPending = detailOpen && !expanded;
+  const held = Boolean(data.running || optimisticTitle || needsYou || historyOpen || historyPending);
   // A turn that ends while this epoch watches is what lingers: the moment the
   // server's turn state goes from running to done, derived during render from
   // the last value seen, so the render that ends the turn is the render that
@@ -671,9 +674,10 @@ const PetSurface: React.FC = () => {
   // going from running to done (the local send grace is not a turn ending).
   // That turn's reply is the newest non-empty agent result after that input
   // that is not a background run's detached completion (an exchange can hold
-  // an earlier answer from before this turn ran), or the promoted result
-  // that answers an earlier input (#2815). A stopped turn ends with an empty
-  // result and has none; a reply that lands after its turn end lingers then.
+  // an earlier answer from before this turn ran). Nothing before the input
+  // counts, a promoted answer to an earlier input (#2815) included: it keeps
+  // the badge but does not linger. A stopped turn ends with an empty result
+  // and has none; a reply that lands after its turn end lingers then.
   // `seen` holds the replies shown while the history was open (expansion
   // confirmed by the shell); those do not linger again.
   const inputId = exchange.user?.id ?? '';
@@ -686,10 +690,8 @@ const PetSurface: React.FC = () => {
   const isTurnReply = (row: WorkbenchMessage) => row.author === 'agent' && row.type === 'result'
     && !isDetachedCompletionMessage(row) && Boolean(row.text?.trim());
   const inputAt = exchange.user ? data.messages.findIndex((row) => row.id === exchange.user!.id) : -1;
-  const latestResult = exchange.results.at(-1);
   const turnReply = watched.endedFor === inputId
     ? data.messages.slice(inputAt + 1).reverse().find(isTurnReply)
-      ?? (exchange.answersEarlierInput && latestResult && isTurnReply(latestResult) ? latestResult : null)
     : null;
   if (historyOpen && turnReply && !watched.seen.has(turnReply.id)) {
     watched = { ...watched, seen: new Set([...watched.seen, turnReply.id]) };
@@ -722,7 +724,7 @@ const PetSurface: React.FC = () => {
   const { lingeringId, keepAtLeast } = useReplyLinger({
     scope: epoch,
     candidateId: lingerReply?.id ?? null,
-    counting: documentVisible && replyOnScreen && !pointerOverBubble,
+    counting: documentVisible && replyOnScreen && !pointerOverBubble && !historyPending,
     keyboardHeld: () => {
       const node = bubbleRef.current;
       const active = document.activeElement;
@@ -738,7 +740,9 @@ const PetSurface: React.FC = () => {
   // closes, the reply does not linger again.
   function openHistory() {
     setDetailOpen(true);
-    void setPanel(true);
+    // A refused expansion leaves no history to wait for: drop the request so
+    // the pending hold ends and the linger resumes.
+    void setPanel(true).then(() => { if (epoch.isCurrent() && !petPanel.current()) setDetailOpen(false); });
   }
   const toggleHistory = () => {
     if (detailOpen) { setDetailOpen(false); void setPanel(false); } else openHistory();

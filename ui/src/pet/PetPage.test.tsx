@@ -2719,6 +2719,50 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     }
   });
 
+  it('holds a lingering reply while the shell is slower to confirm the history than its time left', async () => {
+    const expand = deferred<unknown>();
+    const invoke = vi.fn((command: string, args?: { expanded?: boolean }) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
+      if (command === 'pet_set_expanded' && args?.expanded) return expand.promise;
+      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    try {
+      await runToResult();
+      act(() => { vi.advanceTimersByTime(9_000); });
+      fireEvent.click(screen.getByLabelText('pet.recentTurns'));
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
+      // Far longer than the second left: the request holds the bubble.
+      act(() => { vi.advanceTimersByTime(5_000); });
+      expect(bubbleOpen()).toBe(true);
+      await act(async () => expand.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
+      await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).not.toBeNull());
+      expect(bubbleOpen()).toBe(true);
+    } finally {
+      Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+      Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+    }
+  });
+
+  it('does not take an earlier input\'s promoted answer for a later turn that ends without a reply', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
+    tails.S = [
+      message('u1', 'S', { author: 'user', type: 'user', text: 'first' }),
+      message('p1', 'S', { text: 'Promoted answer', metadata: { promoted_from: 'output' } }),
+      message('u2', 'S', { author: 'user', type: 'user', text: 'second' }),
+    ];
+    let running = true;
+    api.getTurnState.mockImplementation(async () => (running ? { ...idleTurn, in_flight: true, foreground: 'running' as const } : idleTurn));
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+    // The later turn is stopped: it reaches idle before its empty row lands.
+    running = false;
+    await emit((h) => h.onTurnEnd?.({ session_id: 'S' }));
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+  });
+
   it('does not linger when a send grace runs out with no turn registered', async () => {
     tails.S = [message('u0', 'S', { author: 'user', type: 'user', text: 'earlier' }), message('r0', 'S', { text: 'Earlier reply' })];
     // The send is accepted and echoed back, so nothing local still holds the bubble.
