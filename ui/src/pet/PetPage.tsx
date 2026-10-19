@@ -612,9 +612,15 @@ const PetSurface: React.FC = () => {
   useHitRegions(rootRef, epoch);
   const collapsedRef = useRef<HTMLDivElement>(null);
   const [collapsedHeight, setCollapsedHeight] = useState(0);
+  // One card is always drawn in its full form (spec §3.3): there is no stack to
+  // open, so Vibey's panel toggle never changes it, and it is measured like the
+  // collapsed stack so the history beside it is sized for its real height.
+  const singleCard = visibleCards.length === 1;
+  const cardsFull = cardsExpanded || singleCard;
+  const cardsListed = cardsExpanded && !singleCard;
   useLayoutEffect(() => {
     const node = collapsedRef.current;
-    if (!node || cardsExpanded) return;
+    if (!node || cardsListed) return;
     // The entrance scales this wrapper; layout height must include its spacing
     // without capturing that transient transform.
     const measure = () => setCollapsedHeight(node.offsetHeight);
@@ -622,7 +628,7 @@ const PetSurface: React.FC = () => {
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
     observer?.observe(node);
     return () => observer?.disconnect();
-  }, [cardsExpanded, visibleCards.length]);
+  }, [cardsListed, visibleCards.length]);
 
   const queued = (data.turn?.pending_input_count ?? 0) > 0;
   const resolvingMain = data.canChat === null;
@@ -639,7 +645,8 @@ const PetSurface: React.FC = () => {
         type="button"
         className="pet-mini-avatar-button"
         aria-label={t('pet.toggle')}
-        aria-expanded={expanded}
+        // A lone card is always drawn in full, so Vibey expands nothing there.
+        aria-expanded={singleCard ? undefined : expanded}
         data-pet-hit
         onClick={(event) => { if (event.detail === 0) togglePanel(); }}
         onPointerDown={(event) => {
@@ -711,11 +718,12 @@ const PetSurface: React.FC = () => {
   return (
     <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state}>
       <div className={clsx('pet-mini-column', voice.listening && 'is-voice-active')} style={{ '--pet-collapsed-height': `${collapsedHeight}px` } as CSSProperties}>
-        <div className={clsx('pet-mini-cards', voice.listening && 'is-hidden')} inert={voice.listening || undefined} aria-label={cardsExpanded ? t('pet.panel') : undefined} style={{ height: cardsExpanded ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}>
-          <div ref={collapsedRef} key={cardsExpanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>
+        <div className={clsx('pet-mini-cards', voice.listening && 'is-hidden')} inert={voice.listening || undefined} aria-label={cardsExpanded ? t('pet.panel') : undefined} style={{ height: cardsListed ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}>
+          <div ref={collapsedRef} key={singleCard ? 'single' : cardsExpanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>
           {visibleCards.length > 0 && (
-            cardsExpanded ? (
+            cardsFull ? (
               <ExpandedCards
+                natural={singleCard}
                 cards={visibleCards}
                 leaving={leaving}
                 onReference={referenceCard}
@@ -1057,11 +1065,13 @@ function useScrollEdgeFade(contentKey: unknown, profile: FadeProfile) {
   return { ref, measure, style: { maskImage: mask, WebkitMaskImage: mask } satisfies CSSProperties };
 }
 
-const ExpandedCards: React.FC<{ cards: PetCard[]; leaving: string[]; onReference: (card: PetCard) => void; onDismiss: (card: PetCard) => void; stops: Record<string, StopPhase>; onStop: (card: PetCard) => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ cards, leaving, onReference, onDismiss, stops, onStop, t }) => {
+/** The full card list. `natural` sizes it to its content instead of the 292px
+ *  scroll box, for the lone card that is always drawn in full. */
+const ExpandedCards: React.FC<{ natural?: boolean; cards: PetCard[]; leaving: string[]; onReference: (card: PetCard) => void; onDismiss: (card: PetCard) => void; stops: Record<string, StopPhase>; onStop: (card: PetCard) => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ natural = false, cards, leaving, onReference, onDismiss, stops, onStop, t }) => {
   const { ref: fadeRef, measure: measureFade, style: fadeStyle } = useScrollEdgeFade(cards.length, CARD_FADE);
   return (
-    <div className="pet-mini-panel">
-      <div ref={fadeRef} onScroll={measureFade} className="pet-mini-scroll" style={fadeStyle}>
+    <div className={clsx('pet-mini-panel', natural && 'is-natural')}>
+      <div ref={fadeRef} onScroll={measureFade} className="pet-mini-scroll" style={natural ? undefined : fadeStyle}>
         <ul className="pet-mini-list">
           {cards.map((card) => {
             const phase = stops[card.id];

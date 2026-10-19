@@ -146,6 +146,10 @@ to {
 .pet-mini-scroll::-webkit-scrollbar {
   display:none}
 
+/* A lone card is drawn in full at its own height: nothing to scroll, no fade. */
+.pet-mini-panel.is-natural .pet-mini-scroll {
+  height:auto;
+  overflow:visible}
 .pet-mini-list {
   display:flex;
   flex-direction:column;
