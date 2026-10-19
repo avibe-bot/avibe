@@ -24,6 +24,7 @@ import urllib.parse
 from typing import Any, Mapping, Optional, Sequence
 
 import httpx
+import psutil
 
 from core.agent_core.tools.args import ToolInputError, error_result, str_arg, text_result
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
@@ -186,6 +187,15 @@ async def _stop(process: asyncio.subprocess.Process) -> None:
                 check=False,
             )
         else:
+            try:
+                children = psutil.Process(process.pid).children(recursive=True)
+            except psutil.Error:
+                children = []
+            for child in children:
+                try:
+                    child.kill()
+                except psutil.Error:
+                    pass
             signal_process_tree(process, KILL_SIGNAL, logger, "DeepSeek search")
         await process.wait()
 
