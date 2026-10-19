@@ -1032,6 +1032,63 @@ describe('ChatPage transcript hydration', () => {
     });
   });
 
+  describe.each([false, true])('Computer Use script prompt with Activity enabled=%s', (activityEnabled) => {
+    it('MESSAGE-DELIVERY-035 draws the confirm prompt as a visible Agent message while the Turn runs', async () => {
+      // The prompt lands mid-Turn over message.new; the owner must notice it and
+      // reply, so it is the Agent's bubble rather than a compact status pill.
+      const prompt = {
+        ...projectedMessage('confirm-prompt', '计算器里已输入 6 × 7，下一步要按「=」。请回复“是”或“否”。'),
+        author: 'agent', source: 'agent', type: 'notify',
+        created_at: '2026-08-15T00:00:30Z',
+        metadata: { event: 'computer_script_confirm', turn_id: 'current-turn', detached: false },
+      };
+      mocks.api.getSession.mockResolvedValue({ id: 'session-new' });
+      mocks.api.getSessionBootstrap.mockResolvedValue({
+        ...bootstrapPayload('session-new'),
+        config: { ui: { show_agent_activity: activityEnabled } },
+        turn_state: { ...idleTurnState, foreground: 'running', in_flight: true },
+        messages: [projectedMessage('owner-start', '开始')],
+      });
+      render(
+        <MemoryRouter initialEntries={['/chat/session-new']}>
+          <Routes>
+            <Route path="/chat/:sessionId" element={<ChatPage />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+      await screen.findByText('chat.thinking');
+      act(() => mocks.events?.onTurnStart({ session_id: 'session-new' }));
+      if (activityEnabled) {
+        act(() => mocks.events?.onMessageNew({
+          ...projectedMessage('script-step', 'vibe computer run'),
+          author: 'agent', source: 'agent', type: 'assistant',
+          created_at: '2026-08-15T00:00:10Z',
+        }));
+        expect(screen.getByText('vibe computer run')).toBeTruthy();
+      }
+      act(() => mocks.events?.onMessageNew(prompt));
+
+      const row = document.querySelector('[data-message-id="confirm-prompt"]');
+      expect(row).not.toBeNull();
+      expect(row!.textContent).toContain(prompt.text);
+      // The Agent's bubble, not the gold notify pill.
+      expect(row!.querySelector('.border-mint\\/25')).not.toBeNull();
+      expect(row!.textContent).not.toContain('chat.notifyLabel');
+      // It does not end the Turn: the running indicator stays and Stop stays live.
+      if (activityEnabled) expect(screen.getByText('vibe computer run')).toBeTruthy();
+      else expect(screen.getByText('chat.thinking')).toBeTruthy();
+      expect(mocks.composer?.busy).toBe(true);
+
+      // Any other notification keeps its compact status pill.
+      act(() => mocks.events?.onMessageNew({
+        ...prompt, id: 'runtime-notice', text: 'runtime status', created_at: '2026-08-15T00:00:40Z', metadata: {},
+      }));
+      const notice = document.querySelector('[data-message-id="runtime-notice"]');
+      expect(notice!.textContent).toContain('chat.notifyLabel');
+      expect(notice!.querySelector('.border-mint\\/25')).toBeNull();
+    });
+  });
+
   it('does not render an open activity group as interrupted before the switched chat turn state is known', async () => {
     const openGroup = {
       id: 'open-turn',

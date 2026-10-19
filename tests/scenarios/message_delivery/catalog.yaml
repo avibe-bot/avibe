@@ -38,6 +38,14 @@ scenarios:
     kind: regression
     layer: contract
     test: tests/test_codex_prompt_delivery_contract.py::test_excluded_resume_preserves_native_history_and_model_settings
+  - id: MESSAGE-DELIVERY-035
+    name: A Computer Use script's notify and confirm prompt draw as a visible Agent message during a running Web Turn
+    status: covered
+    kind: regression
+    layer: contract
+    test:
+      - tests/test_computer_script_interactions.py::test_script_words_carry_the_event_the_web_draws_as_an_agent_message
+      - "ui/src/components/workbench/ChatPage.hydration.test.tsx::Computer Use script prompt with Activity enabled=true MESSAGE-DELIVERY-035 draws the confirm prompt as a visible Agent message while the Turn runs"
   - id: MESSAGE-DELIVERY-001
     name: Scheduled result finalizes its delivery anchor
     status: covered

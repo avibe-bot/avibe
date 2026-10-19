@@ -4747,7 +4747,9 @@ export const MessageRow = memo(function MessageRow({
   // mounting the page. Everything below reads the answer; nothing re-derives it.
   const row = chatRowKind(message);
   const isNotify = row.kind === 'notify';
-  const isAgent = row.kind === 'agent';
+  // A notice addressed to the owner draws the Agent's bubble; authorship below
+  // still withholds the Agent-only Markdown affordances from it.
+  const isAgent = row.kind === 'agent' || row.kind === 'agentNotice';
   const isBoundary = row.kind === 'boundary';
   // ...and, separately, who wrote it. Only the agent's own words may carry the
   // agent-authored Markdown affordances, and its reverse annotation is still its

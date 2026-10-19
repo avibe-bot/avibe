@@ -21,6 +21,9 @@ _LIST_PROPERTIES = {
     "inputAuthors",
     "terminalWhenEvents",
     "webPushWhenEvents",
+    # Events whose row the Web draws as the Agent's own message rather than as
+    # this type's ``render``: words addressed to the owner, not runtime status.
+    "agentRenderWhenEvents",
 }
 _ENUM_PROPERTIES = {
     "activityRole": {"none", "turn_start", "activity", "boundary", "terminal"},

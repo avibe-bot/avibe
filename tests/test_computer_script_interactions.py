@@ -8,14 +8,17 @@ import pytest
 
 from core import internal_server, session_turns
 from core.computer_script_interactions import (
+    CONFIRM_EVENT,
     MAX_INTERACTION_REQUEST_BYTES,
     MAX_MESSAGE_BYTES,
+    NOTIFY_EVENT,
     ComputerScriptInteractionError,
     ComputerScriptInteractionManager,
 )
 from core.computer_script_sessions import ComputerScriptSessionManager
 from core.services.dispatch import SOURCE_SCHEDULED
 from modules.im import MessageContext
+from vibe.message_types import spec_for
 
 
 def _context(
@@ -48,6 +51,8 @@ class _FakeController:
     def __init__(self, language: str = "en") -> None:
         self.config = SimpleNamespace(language=language)
         self.messages: list[tuple[MessageContext, str, str]] = []
+        # The ``output`` each delivered message carried, aligned with ``messages``.
+        self.outputs: list = []
         # ``"none"`` mimics the dispatcher's failed IM send; ``"raise"`` an error.
         self.delivery = "ok"
         self.release: asyncio.Event | None = None
@@ -57,6 +62,8 @@ class _FakeController:
         context: MessageContext,
         message_type: str,
         text: str,
+        *,
+        output=None,
     ) -> str | None:
         if self.release is not None:
             await self.release.wait()
@@ -65,6 +72,7 @@ class _FakeController:
         if self.delivery == "none":
             return None
         self.messages.append((context, message_type, text))
+        self.outputs.append(output)
         return f"message-{len(self.messages)}"
 
 
@@ -112,6 +120,53 @@ def test_notify_reuses_the_launching_surface(platform: str) -> None:
     assert context.platform == platform
     assert message_type == "notify"
     assert text == "A progress update"
+
+
+def test_script_words_carry_the_event_the_web_draws_as_an_agent_message() -> None:
+    """MESSAGE-DELIVERY-035: the owner must notice a script's notify and confirm prompt mid-Turn.
+
+    Both stay ``notify`` rows, so every IM surface delivers them unchanged; the
+    event is what moves them out of the Web's compact status pill and into an
+    Agent bubble, so it must be one the shared catalog declares for that. The
+    answer notice is Avibe's own status line and keeps the pill.
+    """
+
+    async def exercise() -> _FakeController:
+        manager, controller, _turn = _manager(platform="avibe")
+        await manager.notify("script-token", "Calculator shows 42")
+        pending = asyncio.create_task(manager.confirm("script-token", "Press = ?"))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        matched = manager.match_answer(
+            session_id="session", approver_id="owner", message="是"
+        )
+        assert matched is not None
+        manager.resolve_answer(*matched)
+        await pending
+        return controller
+
+    controller = asyncio.run(exercise())
+    agent_render_events = spec_for("notify")["agentRenderWhenEvents"]
+    observed = [
+        (message_type, (output.metadata.get("event") if output is not None else None))
+        for (_context, message_type, _text), output in zip(
+            controller.messages, controller.outputs, strict=True
+        )
+    ]
+    assert observed == [
+        ("notify", NOTIFY_EVENT),
+        ("notify", CONFIRM_EVENT),
+        ("notify", None),
+    ]
+    assert controller.messages[0][2] == "Calculator shows 42"
+    assert "Press = ?" in controller.messages[1][2]
+    for _message_type, event in observed[:2]:
+        assert event in agent_render_events
+    for output in controller.outputs[:2]:
+        # Metadata only: the row must not gain lifecycle authority over the Turn.
+        assert not output.completes_turn
+        assert not output.detached
+        assert output.idempotency_key is None
 
 
 @pytest.mark.parametrize(

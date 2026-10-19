@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from './chatRowKind';
+import { messageTypeNames, specFor } from './messageTypes';
 
 const row = (over: Partial<Parameters<typeof chatRowKind>[0]>) =>
   chatRowKind({ type: 'user', author: 'user', source: 'user', ...over });
@@ -33,6 +34,31 @@ describe('chatRowKind', () => {
     expect(row({ author: 'harness', source: 'harness', type: 'vault' })).toEqual({ kind: 'harness' });
     expect(row({ author: 'agent', type: 'notify' })).toEqual({ kind: 'notify' });
     expect(row({ author: 'agent', type: 'error' })).toEqual({ kind: 'notify' });
+  });
+
+  it('draws a notice addressed to the owner as the Agent, and only by its declared event', () => {
+    const declared = messageTypeNames().flatMap((type) =>
+      specFor(type).agentRenderWhenEvents.map((event) => ({ type, event })));
+    // The Computer Use script's notify and confirm prompt are the producers today.
+    expect(declared).toEqual(expect.arrayContaining([
+      { type: 'notify', event: 'computer_script_notify' },
+      { type: 'notify', event: 'computer_script_confirm' },
+    ]));
+    for (const { type, event } of declared) {
+      const notice = { author: 'agent', type, metadata: { event } };
+      expect(row(notice), `${type}/${event}`).toEqual({ kind: 'agentNotice' });
+      // Presentation only: it is still not the Agent's own authored reply.
+      expect(isAgentAuthored(notice), `${type}/${event}`).toBe(false);
+      // The event belongs to that type; elsewhere it changes nothing.
+      for (const other of messageTypeNames()) {
+        if (specFor(other).agentRenderWhenEvents.includes(event)) continue;
+        expect(row({ author: 'agent', type: other, metadata: { event } }), other)
+          .toEqual(row({ author: 'agent', type: other }));
+      }
+    }
+    // Every other status row keeps its pill.
+    expect(row({ author: 'agent', type: 'notify', metadata: { event: 'backend_failure' } })).toEqual({ kind: 'notify' });
+    expect(row({ author: 'agent', type: 'notify', metadata: {} })).toEqual({ kind: 'notify' });
   });
 
   it('keeps legacy detached results in the boundary family', () => {
