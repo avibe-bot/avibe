@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Collection, Iterable, Literal, Mapping, NamedTuple, Optional, Protocol, cast
 
+import psutil
 from sqlalchemy import func, literal_column, select
 
 from config import paths
@@ -48,6 +49,7 @@ from config.v2_config import (
     validate_model_hub_source_client_nonce,
 )
 from core.agent_auth_service import BackendLoginInProgressError
+from core.process_isolation import KILL_SIGNAL, isolated_subprocess_kwargs, signal_process_tree
 from core.agent_core.ai.registry import sent_effort
 from core.agent_core.messages import HostedCost
 from core.os_errors import format_os_errno, local_error_detail
@@ -6853,6 +6855,7 @@ class ModelHubService:
                 *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                **isolated_subprocess_kwargs(console=False),
             )
         except OSError as error:
             failure_reason = Failure(str(error), None)
@@ -6862,7 +6865,16 @@ class ModelHubService:
                 timeout = max(1.0, deadline - asyncio.get_running_loop().time())
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
             except asyncio.TimeoutError:
-                process.kill()
+                try:
+                    children = psutil.Process(process.pid).children(recursive=True)
+                except psutil.Error:
+                    children = []
+                for child in children:
+                    try:
+                        child.kill()
+                    except psutil.Error:
+                        pass
+                signal_process_tree(process, KILL_SIGNAL, logger, "DeepSeek direct search")
                 await process.wait()
                 stdout, stderr = b"", b""
                 failure_reason = Failure(say("modelHub.hostedTools.timedOut"), "provider_timed_out")
