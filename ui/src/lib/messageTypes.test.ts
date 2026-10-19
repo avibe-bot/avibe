@@ -78,11 +78,11 @@ const wasHarnessInputType = (type: string): boolean =>
 
 type TerminalCandidate = { author: string; type: string; metadata?: Record<string, unknown> | null };
 
+// A ``result`` is a reply, not a Turn end (docs/plans/reply-and-turn-end.md).
 const wasTerminalAgentMessage = (message: TerminalCandidate): boolean =>
   message.author === 'agent' &&
   message.metadata?.detached !== true &&
-  (message.type === 'result' ||
-    message.type === 'error' ||
+  (message.type === 'error' ||
     (message.type === 'notify' && message.metadata?.event === 'backend_failure'));
 
 describe('catalog-derived predicates match the communication-record boundary', () => {
@@ -127,7 +127,7 @@ describe('catalog-derived predicates match the communication-record boundary', (
     }
   });
 
-  it('visible terminal replies (isTerminalAgentMessage), across authors and events', () => {
+  it('visible terminal rows (isTerminalAgentMessage), across authors and events', () => {
     const metadataCases: Array<Record<string, unknown> | null | undefined> = [
       undefined,
       null,

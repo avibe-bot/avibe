@@ -35,14 +35,11 @@ from core.message_mirror import (
     delivered_committed_row,
     persist_agent_message,
     persist_silent_terminal,
-    promote_turn_text_to_result,
-    resumed_turn_text,
 )
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
     HARNESS_TRIGGER_KINDS,
     MessageOutput,
-    communication_type_for_output,
     neutralize_mentions,
     output_for_message,
 )
@@ -76,7 +73,6 @@ from storage.background import (
     TERMINAL_RUN_STATUSES,
     normalize_run_status,
 )
-from storage.messages_service import canonical_message_timestamp
 from vibe.i18n import t as i18n_t
 from vibe.message_types import TRANSCRIPT_COPY_KEY
 
@@ -204,7 +200,7 @@ async def _stream_chunk(
     text: str,
     message_id: Optional[str],
     kind: str,
-    completes_turn: bool | None = None,
+    completes_turn: bool = False,
 ) -> None:
     """Forward one durable agent message to the live streaming turn sink.
 
@@ -214,9 +210,9 @@ async def _stream_chunk(
     even though the agent's receiver runs on a background task carrying a
     stale per-turn context. We resolve the sink by its *thread-scoped sink key*
     (stable across a session's turns) rather than off the context, so reused
-    agent sessions stream correctly too. A terminal ``result`` emit also marks the
-    turn complete so ``dispatch_turn`` can close the stream right after it;
-    multi-output callers explicitly pass ``completes_turn=False``. No
+    agent sessions stream correctly too. ``completes_turn`` marks the turn
+    complete so ``dispatch_turn`` can close the stream right after the chunk; a
+    chunk's kind never does, since a Turn may stream several replies. No
     sink (IM / CLI turns) => no-op, byte-identical to master.
     """
 
@@ -241,8 +237,6 @@ async def _stream_chunk(
         # A misbehaving SSE consumer must not block the underlying agent
         # reply. Log + swallow, same posture as ``mirror_outbound``.
         logger.exception("turn on_chunk raised; dropping chunk kind=%s", kind)
-    if completes_turn is None:
-        completes_turn = kind == "result"
     if completes_turn:
         _complete_turn_sink(sink, context)
 
@@ -423,13 +417,6 @@ class ConsolidatedMessageDispatcher:
         # first use per turn (see ``_concise_progress_style``), dropped in
         # ``_drop_status_keys``.
         self._turn_progress_style: dict[str, str] = {}
-        # Per turn-sink key (thread-scoped, so concurrent Turns in one channel stay
-        # apart), the current Turn's latest transcript-visible text that did not
-        # end it (an ``output`` boundary or an ``interim`` bubble), with that Turn's
-        # token. A Turn that ends on a silent reply makes this row its result
-        # (``promote_turn_text_to_result``). Every lifecycle-terminal emit takes
-        # the entry, so it never outlives its Turn.
-        self._turn_visible_text: dict[str, tuple[str, str, Optional[tuple[str, str]]]] = {}
         # Harness deliveries whose prompt has already been echoed to IM, kept as a
         # bounded FIFO (see ``emit_harness_prompt``). Per-process only: a restart
         # replay writes a new Delivery anyway, and a duplicated echo is cosmetic
@@ -2786,39 +2773,6 @@ class ConsolidatedMessageDispatcher:
             return True
         return sum(1 for line in body.splitlines() if line.strip()) >= _INTERIM_MIN_LINES
 
-    def _remember_turn_text(self, context: MessageContext, row: Optional[dict]) -> None:
-        """Record a persisted row as its Turn's latest visible text.
-
-        The record is the Turn's last *persisted* visible text: promotion edits
-        history, and a text whose row was never written is not in it. A row that
-        sits earlier in the transcript than the one held (a retried earlier
-        output) never displaces it; the order is the transcript's own
-        (``messages_service.transcript_order_value``: when the row entered the
-        transcript, then its id). Only a row whose Turn is identified: without a
-        token, a later Turn's silent final could not tell this row apart from its
-        own.
-        """
-
-        row_id = (row or {}).get("id")
-        turn_token = (context.platform_specific or {}).get("turn_token")
-        if not (row_id and turn_token):
-            return
-        key = resolve_turn_sink_key(self.controller, context)
-        entered = canonical_message_timestamp(row.get("delivered_at") or row.get("created_at"))
-        order = (entered, str(row_id)) if entered else None
-        held = self._turn_visible_text.get(key)
-        if held is not None and held[0] == turn_token and order and held[2] and held[2] > order:
-            return
-        self._turn_visible_text[key] = (turn_token, row_id, order)
-
-    def _take_turn_text(self, context: MessageContext) -> Optional[str]:
-        """Remove and return the row recorded for this context's Turn, if any."""
-
-        entry = self._turn_visible_text.pop(resolve_turn_sink_key(self.controller, context), None)
-        if entry is None or entry[0] != (context.platform_specific or {}).get("turn_token"):
-            return None
-        return entry[1]
-
     async def emit_agent_message(
         self,
         context: MessageContext,
@@ -2841,7 +2795,9 @@ class ConsolidatedMessageDispatcher:
         Message Types:
         - Log Messages (system/assistant/toolcall): consolidated into a single
           editable message per conversation round. Can be hidden by user settings.
-        - Result Message: final output, always sent immediately, not hideable.
+        - Result Message: a reply, always sent immediately, not hideable. A Turn
+          may reply more than once; the reply's type never says whether it ends
+          the Turn (docs/plans/reply-and-turn-end.md).
         - Notify Message: notifications, always sent immediately.
 
         ``is_error`` marks a terminal ``result`` as a FAILED turn. It is the only
@@ -2877,6 +2833,8 @@ class ConsolidatedMessageDispatcher:
         compatibility default remains one terminal result. Explicit nonterminal
         outputs remain in the current Turn, while detached outputs are delivered
         to the Session/IM surface without touching a newer Turn or its stream.
+        The terminal emit is the Turn's end; an empty one is its content-free
+        form (docs/plans/reply-and-turn-end.md).
 
         ``hosted`` is a ``toolcall``'s hosted-tool card (``core.hosted_activity``,
         ``HostedActivity.to_payload``). It rides on the persisted row for the Web
@@ -2913,7 +2871,6 @@ class ConsolidatedMessageDispatcher:
             and not output_semantics.detached
             and current_runtime_turn
         )
-        turn_text_row_id = self._take_turn_text(context) if mutates_turn_lifecycle else None
 
         # Terminal status-bubble reason word for the done/orphan footer:
         # a clean turn is "done" (✅); a failure is "stopped" (⏹) when it was an
@@ -2937,17 +2894,11 @@ class ConsolidatedMessageDispatcher:
             terminal_reason = "failed"
 
         visible_output_type = canonical_type in {"result", "output"}
-        communication_type = communication_type_for_output(
-            canonical_type,
-            output_semantics,
-            is_error=is_error,
-        )
-        # Visible text that stays in the current Turn without ending it.
-        remembers_turn_text = (
-            visible_output_type
-            and communication_type == "output"
-            and not output_semantics.detached
-        )
+        # What a reply is depends on the reply alone: a ``result`` (``error`` when it
+        # reports a failure) whether or not this emit also ends its Turn
+        # (docs/plans/reply-and-turn-end.md). ``output`` is a type released versions
+        # wrote for a reply that did not end its Turn; a caller may still name it.
+        communication_type = "error" if canonical_type == "result" and is_error else canonical_type
         if visible_output_type:
             if not current_runtime_turn and not output_semantics.detached:
                 logger.info(
@@ -3039,48 +2990,6 @@ class ConsolidatedMessageDispatcher:
                         "Activity output batch recovery is incomplete",
                         delivered=False,
                     )
-                # A reply that is empty once ``<silent>`` blocks are stripped never
-                # displaces the Turn's earlier visible text: that text becomes the
-                # result, rendered and notified as one. ``level="silent"`` is not a
-                # reply but a settlement (a stop, a failure already shown, a
-                # teardown), and a failed or stopped Turn has no result to promote.
-                # The promotion waits for SQLite's write lock, so it runs off the
-                # controller loop. It adds no cancellation point: a cancellation
-                # that arrives meanwhile waits for it and is delivered at the next
-                # await, as the Run terminal record below does.
-                if (
-                    turn_text_row_id is None
-                    and mutates_turn_lifecycle
-                    and level != "silent"
-                    and terminal_reason == "done"
-                ):
-                    # A rerun after a restart: what its Turn showed before was delivered
-                    # by the process that died, so it is read from the Turn's rows.
-                    turn_text_row_id = resumed_turn_text(context)
-                if (
-                    turn_text_row_id is not None
-                    and level != "silent"
-                    and terminal_reason == "done"
-                ):
-                    suppress_promoted_delivery = bool(
-                        (context.platform_specific or {}).get("suppress_delivery")
-                    )
-                    step, cancelled = await land_step(
-                        self._run_off_loop(
-                            lambda: promote_turn_text_to_result(
-                                turn_text_row_id,
-                                suppress_delivery=suppress_promoted_delivery,
-                            )
-                        )
-                    )
-                    if step_failed(step):
-                        logger.warning(
-                            "Failed to promote Turn text %s to its result",
-                            turn_text_row_id,
-                            exc_info=None if step.cancelled() else step.exception(),
-                        )
-                    if cancelled:
-                        rearm_caught_cancellation()
                 # This row is the IM turn's ONLY terminal boundary — an IM turn has
                 # no durable execution owner, and ``list_turn_groups`` /
                 # ``_latest_source_message_anchor`` both close a turn on it. So a
@@ -3224,8 +3133,6 @@ class ConsolidatedMessageDispatcher:
             logger.info("Skipping duplicate agent output %s", native_output_id or existing_row_id)
             # A dispatcher that never saw the first emit (a recovery replay) learns
             # the row here; an older output's retry keeps the newer row recorded.
-            if remembers_turn_text:
-                self._remember_turn_text(context, accepted_message)
             accepted_output_semantics = self._output_with_accepted_provenance(
                 output_semantics,
                 accepted_message,
@@ -3395,8 +3302,6 @@ class ConsolidatedMessageDispatcher:
                         citations=citations,
                         existing_row_id=existing_row_id,
                     )
-                if remembers_turn_text:
-                    self._remember_turn_text(context, persisted_output)
                 local_message_id = (persisted_output or {}).get("id") or (
                     f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
                 )
@@ -3807,8 +3712,6 @@ class ConsolidatedMessageDispatcher:
                             citations=citations,
                             existing_row_id=existing_row_id,
                         )
-                if remembers_turn_text:
-                    self._remember_turn_text(context, persisted_output)
 
                 if settlement_waits_for_persistence:
                     accepted_message = persisted_output or (
@@ -4034,7 +3937,6 @@ class ConsolidatedMessageDispatcher:
                     or None,
                     citations=citations,
                 )
-                self._remember_turn_text(context, interim_row)
         # Persist the intermediate log row BEFORE the mute filter so muted
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).

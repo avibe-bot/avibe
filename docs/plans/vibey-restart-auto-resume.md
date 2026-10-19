@@ -194,16 +194,16 @@ exists; "handled" names where the in-place design still owns it.
   recovers a waiting Turn again. `release_for_service_shutdown` skips a Vibey
   Turn nobody asked to stop.
 - `core/message_dispatcher.py` with `core/message_mirror.py`: item 8's delivery
-  evidence (`delivered_committed_row`) and a rerun's silent-final result
-  (`resumed_turn_text`), both bounded reads on the controller loop.
+  evidence (`delivered_committed_row`), a bounded read on the controller loop.
 - `core/restart_resume.py`: `restart_resume_plan` (item 1, the steer wait, and
   item 6's streak).
 - `storage/message_deliveries.py`: `rotate_restart_generation` (the writer
   transaction of item 2) and `turn_has_unresolved_steer`; `bind_native_start`
   keeps the restart streak when the rerun binds its generation.
 - `storage/agent_transcript.py`: `last_response` and `committed_final`, bounded
-  reads of the context tail, and `last_turn_text`, the silent final's result,
-  bounded by the Turn's start. A final follows the loop's own rule: no tool
+  reads of the context tail, and `last_turn_reply`, the reply a rerun's silent
+  final settles with (`docs/plans/reply-and-turn-end.md`), keyed by the Turn and
+  read off the loop. A final follows the loop's own rule: no tool
   calls, not the `error`/`aborted` partial a failed stream commits, and no
   input after it.
 - `modules/agents/vibey/agent.py`: a rerun takes a committed final

@@ -37,7 +37,7 @@ from core.services import sessions as workbench_sessions_service
 from modules.im.base import MessageContext
 from storage import agent_events_service, messages_service, settings_service
 from storage.db import get_cached_sqlite_engine
-from vibe.message_types import PROMOTED_FROM_KEY, PROMOTED_FROM_TYPES, activity_role_for, spec_for
+from vibe.message_types import activity_role_for, spec_for
 
 logger = logging.getLogger(__name__)
 
@@ -757,101 +757,6 @@ def _write_committed_row(
     return messages_service.get_message(conn, row_id, include_local_error_detail=True)
 
 
-
-
-def promote_turn_text_to_result(row_id: str, *, suppress_delivery: bool = False) -> Optional[dict]:
-    """Make a Turn's last visible text its result once its final reply is silent.
-
-    The row was delivered as text that did not end the Turn, and the Turn then
-    ended on a reply that is empty once ``<silent>`` blocks are stripped. That
-    text is what the Turn answered, so it takes the result type: it renders as a
-    reply, settles the Inbox card, counts as unread, and pushes the notification
-    a result pushes. Its body, its place in the transcript, and its read state
-    stay as delivered, so text the reader has already seen is not unread again.
-
-    The update is guarded on the row still being Turn text, so a repeated call
-    changes, publishes, and notifies nothing.
-    """
-
-    import json
-
-    from sqlalchemy import select, update
-
-    from storage.agent_session_rows import reserve_write_lock
-    from storage.models import messages
-
-    try:
-        engine = get_cached_sqlite_engine()
-        inbox_row = None
-        with engine.begin() as conn:
-            # The content read below decides the write, so the write lock is held
-            # from before it.
-            reserve_write_lock(conn)
-            turn_text = (
-                messages.c.id == row_id,
-                messages.c.author == "agent",
-                messages.c.type.in_(PROMOTED_FROM_TYPES),
-            )
-            stored = conn.execute(
-                select(messages.c.type, messages.c.content_json, messages.c.metadata_json).where(*turn_text)
-            ).first()
-            if stored is None:
-                return None
-
-            def stored_object(raw: Optional[str]) -> dict:
-                try:
-                    value = json.loads(raw or "{}")
-                except (TypeError, ValueError):
-                    return {}
-                return value if isinstance(value, dict) else {}
-
-            # ``content.kind`` names the type the row was persisted as; it moves
-            # with the type, as every persist path keeps the two together. The
-            # metadata keeps the type it had, so the Activity timeline still sees
-            # the row mid-Turn (``PROMOTED_FROM_KEY``).
-            promoted = conn.execute(
-                update(messages)
-                .where(*turn_text)
-                .values(
-                    type="result",
-                    content_json=json.dumps({**stored_object(stored.content_json), "kind": "result"}),
-                    metadata_json=json.dumps(
-                        {**stored_object(stored.metadata_json), PROMOTED_FROM_KEY: stored.type}
-                    ),
-                    updated_at=messages_service.canonical_message_timestamp(_now()),
-                )
-            ).rowcount
-            if promoted != 1:
-                return None
-            row = messages_service.get_message(conn, row_id, include_local_error_detail=True)
-            # The same audience ``persist_agent_message`` publishes a new row to.
-            session_id = (row or {}).get("session_id")
-            visible = bool(
-                row is not None
-                and row.get("platform") == "avibe"
-                and session_id
-                and not suppress_delivery
-            )
-            if visible:
-                inbox_row = messages_service.get_inbox_session(conn, session_id)
-        if visible:
-            from core.inbox_events import bus
-
-            bus.publish("message.updated", row)
-            if inbox_row is not None:
-                bus.publish("inbox.session.updated", inbox_row)
-                try:
-                    from core.web_push_notifications import maybe_notify_inbox_message
-
-                    maybe_notify_inbox_message(row, inbox_row)
-                except Exception:
-                    logger.debug("web push notification scheduling failed", exc_info=True)
-        return row
-    except Exception:
-        logger.exception("promote_turn_text_to_result: failure for row %s", row_id)
-        return None
-
-
 def persist_silent_terminal(
     context: MessageContext,
     *,
@@ -979,33 +884,6 @@ def delivered_committed_row(
     if outward and isinstance(metadata, dict) and metadata.get("delivery_suppressed") is True:
         return None
     return row
-
-
-def resumed_turn_text(context: MessageContext) -> Optional[str]:
-    """The last visible text of a Turn a restart reran, from the Turn's own rows.
-
-    The dispatcher remembers each Turn's visible text as it delivers it; what a rerun
-    Turn showed before the restart was delivered by the process that died, so a
-    silent final of the rerun reads it from the transcript (``last_turn_text``).
-    """
-
-    spec = context.platform_specific or {}
-    session_id, turn_id = str(spec.get("agent_session_id") or ""), str(spec.get("turn_token") or "")
-    if spec.get("vibey_resume") is not True or not session_id or not turn_id:
-        return None
-    from storage import message_deliveries
-    from storage.agent_transcript import last_turn_text
-
-    try:
-        with get_cached_sqlite_engine().connect() as conn:
-            turn = message_deliveries.get_turn(conn, turn_id)
-            if turn is None or turn["session_id"] != session_id:
-                return None
-            found = last_turn_text(conn, session_id, since=str(turn.get("started_at") or turn["created_at"]))
-    except Exception:
-        logger.debug("resumed_turn_text: lookup failed", exc_info=True)
-        return None
-    return found[0] if found else None
 
 
 def mirror_harness_inbound(

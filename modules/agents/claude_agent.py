@@ -4869,18 +4869,17 @@ class ClaudeAgent(BaseAgent):
                 completes_turn=False,
             )
             if activity is not None
-            else MessageOutput(
-                completes_turn=False,
-                completes_run=False,
-                records_run_output=False,
-            )
+            # A reply: recorded on the Turn's Runs when it is delivered, like any other.
+            else MessageOutput(completes_turn=False, completes_run=False)
         )
         emitted_text = text or (
             str(activity.metadata.get("summary") or "") if activity else ""
         )
+        # A completed phase is a reply like any other: a ``result`` that does not end
+        # the Turn (docs/plans/reply-and-turn-end.md).
         message_id = await self.controller.emit_agent_message(
             context,
-            "output",
+            "result",
             emitted_text,
             parse_mode="markdown",
             output=output,

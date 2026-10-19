@@ -47,6 +47,8 @@ HARNESS_PROMPT_ECHO_TIMEOUT_SECONDS = 5.0
 class MessageOutput:
     """Lifecycle and hidden provenance for one user-visible agent output."""
 
+    # This emit is its Turn's end event (``docs/plans/reply-and-turn-end.md``). It
+    # never decides the output's type: a reply is a ``result`` either way.
     completes_turn: bool = False
     completes_run: bool | None = None
     detached: bool = False
@@ -198,33 +200,6 @@ def output_for_message(message_type: str, output: MessageOutput | None) -> Messa
     if message_type == "result":
         return terminal_turn_output()
     return MessageOutput(completes_turn=False, completes_run=False)
-
-
-def communication_type_for_output(
-    message_type: str,
-    output: MessageOutput,
-    *,
-    is_error: bool = False,
-) -> str:
-    """Classify a visible output by the lifecycle authority it actually owns.
-
-    Attached nonterminal output is persisted as ``output``. Detached completions
-    retain their ``result`` / ``error`` notification family while metadata records
-    their detached provenance without granting current-Turn timeline authority.
-    """
-
-    if message_type == "output":
-        return "output"
-    if message_type == "result":
-        # Detached completion keeps its notification semantics. Lifecycle consumers
-        # use its provenance without changing the visible type or current Turn.
-        if output.detached:
-            return "error" if is_error else "result"
-        if not output.completes_turn:
-            return "output"
-        if is_error:
-            return "error"
-    return message_type
 
 
 def terminal_turn_output() -> MessageOutput:

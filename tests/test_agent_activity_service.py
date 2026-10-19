@@ -875,9 +875,12 @@ def test_activity_after_nonterminal_output_anchors_to_that_output(isolated_state
     assert groups[0]["open"] is False
 
 
+@pytest.mark.parametrize("reply_type", ["output", "result"])
 def test_nonterminal_output_completes_prior_activity_and_anchors_later_work(
-    isolated_state,
+    isolated_state, reply_type
 ):
+    """MESSAGE-DELIVERY-334: a reply (``result``, or a legacy ``output``) closes the activity before
+    it without ending the Turn, so the work after it is the same Turn's, timed from the reply."""
     engine = create_sqlite_engine()
     sid = "ses_output_completion_boundary"
     with engine.begin() as conn:
@@ -906,7 +909,7 @@ def test_nonterminal_output_completes_prior_activity_and_anchors_later_work(
             scope,
             sid,
             mid="m_output",
-            mtype="output",
+            mtype=reply_type,
             author="agent",
             created_at="2026-06-01T10:00:02Z",
             text="primary answer",
@@ -945,6 +948,7 @@ def test_nonterminal_output_completes_prior_activity_and_anchors_later_work(
     assert groups[1]["anchor_message_id"] == "m_output"
     assert groups[1]["anchor_position"] == "after"
     assert groups[1]["open"] is False
+    assert groups[1]["started_at"] == "2026-06-01T10:00:02Z"
 
 
 @pytest.mark.parametrize(
@@ -2007,24 +2011,22 @@ def test_stop_without_terminal_stays_interrupted(isolated_state):
 
 
 @pytest.mark.parametrize("shown_type", ["interim", "output"])
-def test_a_promoted_silent_final_result_keeps_the_turns_activity(isolated_state, monkeypatch, shown_type):
+def test_a_promoted_silent_final_result_keeps_the_turns_activity(isolated_state, shown_type):
     """Scenario: MESSAGE-DELIVERY-325.
 
-    A Turn's text promoted to its result when the Turn ended on a silent reply
-    renders as the result, but stays where it was mid-Turn: the Activity groups
-    around it are exactly the ones its text had before promotion.
+    Released versions promoted a Turn's text to its result when the Turn ended on a
+    silent reply (``metadata.promoted_from``). Such a row renders as the result but
+    stays where it was mid-Turn: the Activity groups around it are exactly the ones
+    its text had before promotion.
     """
-    from types import SimpleNamespace
+    import json
 
-    from core import web_push_notifications
-    from core.message_mirror import promote_turn_text_to_result
-    from vibe.message_types import activity_role_for
+    from sqlalchemy import update
 
-    monkeypatch.setattr(
-        web_push_notifications,
-        "threading",
-        SimpleNamespace(Thread=lambda **_kwargs: SimpleNamespace(start=lambda: None)),
-    )
+    from storage import messages_service
+    from storage.models import messages
+    from vibe.message_types import PROMOTED_FROM_KEY, activity_role_for
+
     engine = create_sqlite_engine()
     sid, turn_id = "ses_promoted", "trn_promoted"
     with engine.begin() as conn:
@@ -2083,14 +2085,25 @@ def test_a_promoted_silent_final_result_keeps_the_turns_activity(isolated_state,
     with engine.connect() as conn:
         before = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
 
-    promoted = promote_turn_text_to_result("m_text")
+    # What a released version's promotion wrote.
+    with engine.begin() as conn:
+        conn.execute(
+            update(messages)
+            .where(messages.c.id == "m_text")
+            .values(
+                type="result",
+                content_json=json.dumps({"text": "The report.", "kind": "result"}),
+                metadata_json=json.dumps({"turn_id": turn_id, PROMOTED_FROM_KEY: shown_type}),
+            )
+        )
+        promoted = messages_service.get_message(conn, "m_text")
 
     assert promoted is not None and promoted["type"] == "result"
     with engine.connect() as conn:
         after = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
     assert after == before
-    # Everywhere else, fork recovery among them, the row is the Turn's terminal output.
-    assert activity_role_for(promoted["type"], promoted["metadata"]) == "terminal"
+    # Everywhere else, fork recovery among them, the row is a reply.
+    assert activity_role_for(promoted["type"], promoted["metadata"]) == "reply"
 
 
 def test_a_promotion_marker_counts_only_on_a_promoted_result(isolated_state):
@@ -2118,3 +2131,42 @@ def test_a_promotion_marker_counts_only_on_a_promoted_result(isolated_state):
         ("interrupted", "m_q1", 1),
         ("done", "m_r2", 1),
     ]
+
+
+def test_the_turn_terminal_read_stays_within_the_window(isolated_state):
+    """Every Activity refresh reads the Session's terminal Turns; a reply and a Turn end
+    each refresh it (MESSAGE-DELIVERY-334). The read walks ``ix_session_turns_session_created``
+    newest first and stops at its window: a SEARCH with no temporary sort, so a long-lived
+    Session's whole Turn history is never sorted (AGENTS.md "Controller Event Loop")."""
+    import sqlite3
+
+    from sqlalchemy import event
+
+    from config import paths
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        _seed_session(conn, session_id="ses_window")
+    statements: list[tuple[str, object]] = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _executemany):
+        statements.append((statement, parameters))
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with engine.connect() as conn:
+            agent_activity_service.list_turn_groups(conn, session_id="ses_window")
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    [(sql, params)] = [
+        (sql, params)
+        for sql, params in statements
+        if "FROM session_turns" in sql and "terminal_at IS NOT NULL" in sql and "JOIN" not in sql
+    ]
+    raw = sqlite3.connect(str(paths.get_sqlite_state_path()))
+    try:
+        plan = [row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + sql, params)]
+    finally:
+        raw.close()
+    assert plan == ["SEARCH session_turns USING INDEX ix_session_turns_session_created (session_id=?)"], plan

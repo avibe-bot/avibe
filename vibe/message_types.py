@@ -26,7 +26,10 @@ _LIST_PROPERTIES = {
     "agentRenderWhenEvents",
 }
 _ENUM_PROPERTIES = {
-    "activityRole": {"none", "turn_start", "activity", "boundary", "terminal"},
+    # ``reply``: the agent's answer, which closes the current Activity phase like a
+    # ``boundary`` but never ends the Turn; a Turn ends at its durable Turn row, the IM
+    # ``silent_terminal`` trace, or a ``terminal`` row (docs/plans/reply-and-turn-end.md).
+    "activityRole": {"none", "turn_start", "activity", "boundary", "reply", "terminal"},
     "render": {
         "none",
         "user",
@@ -153,12 +156,13 @@ def is_detached_completion(message_type: str, metadata: Any = None) -> bool:
 TRANSCRIPT_COPY_KEY = "transcript_copy"
 
 
-# Metadata on a ``result`` promoted from Turn text when its Turn ended on a silent
-# reply (``core.message_mirror.promote_turn_text_to_result``): the type it was
-# persisted as, one of ``PROMOTED_FROM_TYPES``. The row is that Turn's terminal
-# output everywhere; only Activity grouping keeps it where its text was mid-Turn.
+# Metadata on a ``result`` that released versions promoted from Turn text when its
+# Turn ended on a silent reply: the type it was persisted as, one of
+# ``PROMOTED_FROM_TYPES``. Nothing promotes any more (docs/plans/reply-and-turn-end.md);
+# the marker stays readable on those rows. The row is a reply everywhere; only
+# Activity grouping keeps it where its text was mid-Turn.
 PROMOTED_FROM_KEY = "promoted_from"
-# Transcript-visible agent text that does not end its Turn, and so can be promoted.
+# The types a released version's promotion retyped.
 PROMOTED_FROM_TYPES = ("output", "interim")
 
 

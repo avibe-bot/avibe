@@ -445,7 +445,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         agent.emit_result_message.assert_not_awaited()
         agent.controller.emit_agent_message.assert_awaited_once_with(
             context,
-            "output",
+            "result",
             "buffered primary result",
             parse_mode="markdown",
             output=ANY,
@@ -654,7 +654,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
 
         agent.controller.emit_agent_message.assert_awaited_once_with(
             context,
-            "output",
+            "result",
             "primary result",
             parse_mode="markdown",
             output=ANY,

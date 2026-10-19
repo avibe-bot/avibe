@@ -4,7 +4,7 @@ import type {
   WorkbenchMessage,
   WorkbenchSession,
 } from '@/context/ApiContext';
-import { isBackendFailureNotice, isTerminalAgentMessage, isTranscriptMessage } from '@/lib/chatMessageTypes';
+import { isBackendFailureNotice, isDetachedCompletionMessage, isTerminalAgentMessage, isTranscriptMessage } from '@/lib/chatMessageTypes';
 import { specFor } from '@/lib/messageTypes';
 
 import type { PetPose } from './PetAvatar';
@@ -54,6 +54,8 @@ export const latestFailureNotice = (messages: WorkbenchMessage[]): WorkbenchMess
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
     if (isUserInput(message)) return null;
+    // A reply after the notice answered the exchange (a retry that went on to reply).
+    if (isAgentResult(message) && !isDetachedCompletionMessage(message)) return null;
     // The foreground exchange ends at its terminal row, by the transcript's own rule:
     // detached completions and replayed failures report work outside it and are skipped.
     if (isTerminalAgentMessage(message)) return isBackendFailureNotice(message) ? message : null;

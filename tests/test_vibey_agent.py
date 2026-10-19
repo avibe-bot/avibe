@@ -2072,13 +2072,8 @@ async def test_a_silent_final_shows_nothing_and_completes(engine, session, tmp_p
     assert harness.controller.terminals[-1]["is_error"] is False
 
 
-async def test_a_silent_final_leaves_the_visible_reply_before_it_as_the_result(
-    engine, session, tmp_path, published, monkeypatch
-) -> None:
-    """Scenario: MESSAGE-DELIVERY-325.
-
-    A silent final is an empty reply, as the other backends emit one, so it never displaces visible text.
-    """
+def _recorded_pushes(monkeypatch) -> list[dict]:
+    """The Web Push payloads the dispatcher schedules, one per notifying row."""
     from core import web_push_notifications
 
     pushes: list[dict] = []
@@ -2091,6 +2086,16 @@ async def test_a_silent_final_leaves_the_visible_reply_before_it_as_the_result(
             pushes.append(self.payload)
 
     monkeypatch.setattr(web_push_notifications, "threading", SimpleNamespace(Thread=_Thread))
+    return pushes
+
+
+async def test_a_silent_final_after_narration_shows_no_reply(engine, session, tmp_path, published, monkeypatch) -> None:
+    """Scenario: MESSAGE-DELIVERY-334.
+
+    Narration beside tool calls is narration however long it is: its Web bubble stays muted, and a
+    Turn whose final is silent ends with no reply, nothing promoted, and nothing notified.
+    """
+    pushes = _recorded_pushes(monkeypatch)
     report = "Found it.\nThe cache is shared.\nTwo writers race.\nThe lock went in #12.\nFixed and verified."
     call = ToolCallBlock(id="call_1", name="echo", arguments={"path": "src"})
     harness = _Harness(
@@ -2099,40 +2104,27 @@ async def test_a_silent_final_leaves_the_visible_reply_before_it_as_the_result(
 
     await harness.agent.handle_message(harness.request("fix the race"))
 
-    [result] = harness.rows("result")
-    assert result["content_text"] == report and harness.rows("interim") == []
-    assert [payload["type"] for name, payload in published if name == "message.updated"] == ["result"]
-    assert [push["message_id"] for push in pushes] == [result["id"]]
-    assert harness.controller.terminals[-1]["is_error"] is False
+    assert harness.rows("result") == [] and [row["content_text"] for row in harness.rows("interim")] == [report]
+    assert [name for name, _ in published if name == "message.updated"] == [] and pushes == []
+    assert harness.controller.terminals[-1]["is_error"] is False and harness.controller.terminal_texts == [""]
 
 
 @pytest.mark.parametrize(
     ("stop_reason", "final"),
-    [("stop", "<silent>already answered</silent>"), ("stop", "You're welcome."), ("length", "<silent>noted</silent>")],
-    ids=["silent", "visible", "truncated"],
+    [("stop", "You're welcome."), ("stop", "<silent>already answered</silent>"), ("length", "<silent>noted</silent>")],
+    ids=["visible", "silent", "truncated"],
 )
-async def test_a_short_reply_a_steer_superseded_stays_a_visible_reply(
+async def test_a_reply_a_steer_superseded_is_a_result_and_the_turn_ends_once_after_both(
     engine, session, tmp_path, published, monkeypatch, stop_reason, final
 ) -> None:
-    """Scenario: MESSAGE-DELIVERY-326.
+    """Scenario: MESSAGE-DELIVERY-334.
 
-    A reply that a steer took the final word from is a completed reply, not narration: an
-    ``output`` boundary whatever its length, kept in the context, and the Turn's result when
-    the steered phase answers ``<silent>``. One cut off at its output limit was never completed,
-    so it stays narration.
+    A reply a steer took the final word from is a reply: a ``result`` whatever its length,
+    green and notified once, and the steered input's answer is the Turn's second. The Turn
+    ends once, after both; a silent answer to the steer ends it with nothing promoted. One
+    cut off at its output limit was never completed, so it stays narration.
     """
-    from core import web_push_notifications
-
-    pushes: list[dict] = []
-
-    class _Thread:
-        def __init__(self, *, target, args, daemon):
-            self.payload = args[0]
-
-        def start(self) -> None:
-            pushes.append(self.payload)
-
-    monkeypatch.setattr(web_push_notifications, "threading", SimpleNamespace(Thread=_Thread))
+    pushes = _recorded_pushes(monkeypatch)
     generating, steered = asyncio.Event(), asyncio.Event()
 
     async def answer(_request, _cancel):
@@ -2141,6 +2133,8 @@ async def test_a_short_reply_a_steer_superseded_stays_a_visible_reply(
         yield Done(assistant("4.", stop_reason=stop_reason))
 
     harness = _Harness(engine, tmp_path, "avibe", [answer, [Done(assistant(final))]])
+    # The Turn's end, in order with the replies the dispatcher announces.
+    harness.controller.session_turns.on_terminal_delivery_complete = lambda _context: published.append(("turn.end", {}))
     request = harness.request("2+2?")
     turn_id = _turn(request.context)
     running = asyncio.create_task(harness.agent.handle_message(request))
@@ -2158,20 +2152,27 @@ async def test_a_short_reply_a_steer_superseded_stays_a_visible_reply(
 
     rows = await harness.context_rows()
     assert [entry.kind for entry in rows] == ["input", "response", "input", "response"]
-    assert harness.rows("interim") == [] and harness.controller.terminals[-1]["is_error"] is False
+    assert harness.rows("interim") == [] and harness.rows("output") == []
+    assert [name for name, _ in published if name == "message.updated"] == []
+    assert len(harness.controller.terminals) == 1 and harness.controller.terminals[0]["is_error"] is False
+    sequence = [
+        payload.get("id") if name == "message.new" else name
+        for name, payload in published
+        if name == "turn.end" or (name == "message.new" and payload.get("type") == "result")
+    ]
     if stop_reason == "length":
-        assert harness.rows("output") == [] and harness.rows("result") == [] and pushes == []
+        assert harness.rows("result") == [] and pushes == [] and sequence == ["turn.end"]
         assert [row["id"] for row in harness.rows("assistant")][0] == rows[1].row_id
+        assert harness.controller.terminal_texts == [""]
         return
-    [result] = harness.rows("result")
-    if final.startswith("<silent>"):
-        assert result["id"] == rows[1].row_id and result["content_text"] == "4."
-        assert harness.rows("output") == []
-    else:
-        [reply] = harness.rows("output")
-        assert reply["id"] == rows[1].row_id and reply["content_text"] == "4."
-        assert result["id"] == rows[3].row_id and result["content_text"] == final
-    assert [push["message_id"] for push in pushes] == [result["id"]]
+    replies = [rows[1].row_id] if final.startswith("<silent>") else [rows[1].row_id, rows[3].row_id]
+    results = {row["id"]: row["content_text"] for row in harness.rows("result")}
+    assert sorted(results) == sorted(replies) and results[rows[1].row_id] == "4."
+    assert [push["message_id"] for push in pushes] == replies
+    assert sequence == [*replies, "turn.end"]
+    # The end's own text settles the Turn, as on master: a silent end carries none (settling
+    # it with the Turn's last reply is PR 2's typed Turn-end event).
+    assert harness.controller.terminal_texts == ["" if final.startswith("<silent>") else final]
 
 
 async def test_a_silent_final_whose_run_failed_after_its_commit_is_typed_by_its_row(
@@ -2587,14 +2588,15 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
     """MESSAGE-DELIVERY-333: the run a restart cut had committed the Turn's final, so the rerun
     ends with that row through the live end, with no model call. A final that process never sent
     to IM is delivered once, with the image that run generated; one whose delivery the dispatcher
-    recorded is not sent again; a silent final leaves the narration that process showed as the
-    Turn's result."""
+    recorded is not sent again; a silent final leaves the reply that process showed as it was
+    and promotes nothing, not even a phase a released version stored as ``output``
+    (MESSAGE-DELIVERY-334)."""
     from dataclasses import replace
 
     from core.message_output import MessageOutput, terminal_output_for
 
     answer = "The cache is safe: one writer holds the lock."
-    narration = "Found it.\nThe cache is shared.\nTwo writers race.\nThe lock went in #12.\nFixed and verified."
+    reply = "Found it: two writers raced; the lock went in #12."
     harness = _Harness(engine, tmp_path, platform, [])
     # The previous process: the Turn's final committed, then the restart cut the run.
     request = harness.request("is the cache safe?")
@@ -2605,12 +2607,18 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
         SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("is the cache safe?"),))
     )
     if case == "silent":
-        shown = await harness.agent.store.append_response(SESSION, assistant(narration), final=False)
+        # An earlier phase a released version stored as ``output``, then a reply a steer
+        # superseded, which that process showed before the Turn's silent final.
         await harness.controller.emit_agent_message(
-            request.context, "assistant", narration,
+            request.context, "output", "An earlier phase.",
+            output=MessageOutput(completes_turn=False, completes_run=False),
+        )
+        shown = await harness.agent.store.append_response(SESSION, assistant(reply), final=False, superseded=True)
+        await harness.controller.emit_agent_message(
+            request.context, "result", reply,
             output=MessageOutput(completes_turn=False, completes_run=False, persisted_row_id=shown.row_id),
         )
-        [shown] = harness.rows("interim")
+        [shown] = harness.rows("result")
     image = tmp_path / "lighthouse.jpg"
     image.write_bytes(_JPEG)
     final = await harness.agent.store.append_response(
@@ -2646,8 +2654,9 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
     assert harness.controller.terminals[-1] == {"turn": cut_turn, "is_error": False, "settled_by": "terminal_result"}
     [result] = harness.rows("result")
     if case == "silent":
-        assert (result["id"], result["content_text"]) == (shown["id"], narration)
-        assert harness.rows("interim") == []
+        assert (result["id"], result["content_text"]) == (shown["id"], reply)
+        assert [row["content_text"] for row in harness.rows("output")] == ["An earlier phase."]
+        assert [name for name, _ in published if name == "message.updated"] == []
         return
     assert result["id"] == final.row_id and result["content_text"].startswith(answer)
     sent, uploads = harness.controller.im_client.sent, harness.controller.im_client.uploads

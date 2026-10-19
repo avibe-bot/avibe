@@ -390,30 +390,23 @@ scenarios:
       - tests/test_backend_failure_retry.py::test_restart_notice_names_the_watch_running_the_command_and_offers_no_retry
       - tests/test_backend_failure_retry.py::test_a_restart_notice_waits_until_its_running_command_is_handed_over
   - id: MESSAGE-DELIVERY-325
-    name: A silent final reply makes the Turn's last visible text its result, rendered and notified once
+    name: A result released versions promoted from a silent final (metadata.promoted_from) keeps its Turn's Activity and its place in the pet; nothing promotes any more (MESSAGE-DELIVERY-334)
     status: covered
     kind: regression
     layer: contract
     test:
-      - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_a_silent_final_makes_the_last_visible_text_the_result
-      - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_concurrent_turns_in_one_channel_each_promote_their_own_text
-      - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_a_cancellation_during_the_promotion_still_commits_the_turn
-      - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_a_replayed_output_is_recorded_without_displacing_newer_text
-      - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_nothing_else_promotes_earlier_text
-      - tests/test_vibey_agent.py::test_a_silent_final_leaves_the_visible_reply_before_it_as_the_result
       - tests/test_agent_activity_service.py::test_a_promoted_silent_final_result_keeps_the_turns_activity
       - tests/test_agent_activity_service.py::test_a_promotion_marker_counts_only_on_a_promoted_result
     supporting_tests:
       - ui/src/pet/petState.test.ts
       - ui/src/pet/PetPage.test.tsx
   - id: MESSAGE-DELIVERY-326
-    name: A Vibey reply a steer superseded stays a visible reply whatever its length, and a silent final makes it the Turn's result
+    name: A Vibey reply a steer superseded commits as a result from its commit, whatever its length, and a restart's rerun does not read it as the Turn's final
     status: covered
     kind: regression
     layer: contract
     test:
-      - tests/test_vibey_agent.py::test_a_short_reply_a_steer_superseded_stays_a_visible_reply
-      - tests/test_agent_transcript.py::test_a_reply_pending_input_superseded_commits_as_a_visible_reply
+      - tests/test_agent_transcript.py::test_a_reply_pending_input_superseded_commits_as_a_reply
   - id: MESSAGE-DELIVERY-327
     name: Startup reruns a Vibey Turn a restart cut in place from its transcript, once its surface can deliver, without a notice
     status: covered
@@ -467,7 +460,7 @@ scenarios:
     layer: contract
     test: tests/test_vibey_agent.py::test_a_run_the_service_stop_cut_leaves_its_turn_open_for_its_restart_rerun
   - id: MESSAGE-DELIVERY-333
-    name: The rerun of a Turn whose final was committed ends with it through the live end, with no model call; a final not yet delivered is sent once, one already delivered is not sent again, a silent final promotes the Turn's earlier visible text, and the Turn stays open across another restart until then
+    name: The rerun of a Turn whose final was committed ends with it through the live end, with no model call; a final not yet delivered is sent once, one already delivered is not sent again, a silent final promotes nothing and leaves the reply the Turn showed before the restart as it was, and the Turn stays open across another restart until then
     status: covered
     kind: recovery
     layer: contract
@@ -476,5 +469,28 @@ scenarios:
       - tests/test_backend_failure_retry.py::test_restart_reruns_a_cut_vibey_turn_in_place_without_a_notice
       - tests/test_backend_failure_retry.py::test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice
       - tests/test_agent_transcript.py::test_the_restart_reads_of_a_turns_context_tail_stay_bounded
+  - id: MESSAGE-DELIVERY-334
+    name: A reply is a result whether or not it ends its Turn; a Turn may reply more than once (a steered input's answer is a second result, each notified once), and only the Turn end settles the Run, writes the Turn snapshot, hides the thinking indicator, and finalizes IM, once; a silent final after a reply promotes nothing; the Activity read of a Session's terminal Turns stays an index-ordered SEARCH within its window
+    status: covered
+    kind: regression
+    layer: contract
+    test:
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_turn_replies_twice_and_ends_once_after_both
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_silent_final_after_a_reply_promotes_nothing
+      - tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::test_steered_assistant_and_result_settle_the_pending_turn
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_reply_or_a_failure_keeps_its_type_attached_or_detached
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_only_a_reply_is_a_completed_turns_answer
+      - tests/test_message_dispatcher_turn_end.py::TurnEndFinalizesImOnceTests::test_im_surfaces_finalize_once_at_the_turn_end
+      - tests/test_vibey_agent.py::test_a_reply_a_steer_superseded_is_a_result_and_the_turn_ends_once_after_both
+      - tests/test_vibey_agent.py::test_a_silent_final_after_narration_shows_no_reply
+      - tests/test_vibey_agent.py::test_a_restart_rerun_ends_with_the_final_its_cut_run_committed
+      - tests/test_dispatcher_stream_chunk.py::test_only_the_turn_end_sets_done_event
+      - tests/test_session_fork.py::test_a_reply_while_the_source_turn_runs_is_not_its_completion
+      - tests/test_agent_activity_service.py::test_nonterminal_output_completes_prior_activity_and_anchors_later_work
+      - tests/test_agent_activity_service.py::test_the_turn_terminal_read_stays_within_the_window
+    supporting_tests:
+      - ui/src/components/workbench/ChatPage.hydration.test.tsx
+      - ui/src/lib/chatMessageTypes.test.ts
+      - ui/src/pet/petState.test.ts
 next_priority:
-  - MESSAGE-DELIVERY-334
+  - MESSAGE-DELIVERY-335
