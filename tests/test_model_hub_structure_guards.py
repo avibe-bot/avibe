@@ -715,7 +715,10 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     # than forwarding a Turn to the gateway. They reuse the same metering owner,
     # exactly once.
     consumers = (
-        invoke, _functions(service_tree)["_user_test_call"], _functions(service_tree)["_hosted_upstream_call"],
+        invoke,
+        _functions(service_tree)["_user_test_call"],
+        _functions(service_tree)["_hosted_upstream_call"],
+        _functions(service_tree)["_direct_search_attempt"],
     )
     assert len(meter_calls) == len(consumers)
     assert all(

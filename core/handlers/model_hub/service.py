@@ -6972,13 +6972,20 @@ class ModelHubService:
         # DeepSeek bills Search only when it returns a non-empty list; an empty result is free.
         billable = completed and (call.tool == "web_fetch" or bool(record.get("sources")))
         if billable:
-            await self.usage_writer.wait_recorded(
-                self.usage_writer.record(
-                    source_id=source.id,
+            await self._meter_call(
+                source_id=source.id,
+                model_id="deepseek",
+                outcome=RawCallOutcome(
+                    kind=RawOutcomeKind.SUCCESS,
+                    http_status=200,
+                    error_code=None,
+                    redacted_message=None,
+                    stream_started=False,
                     model_id="deepseek",
-                    usage=None,
-                    at=self.now(),
-                )
+                    source_id=source.id,
+                ),
+                observed=None,
+                at=self.now(),
             )
         cost = None
         if billable and candidate.price is not None:
