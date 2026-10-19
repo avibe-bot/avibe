@@ -141,8 +141,10 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
   material crosses it). A second new operation runs a catalog free check for a `credential_ref` and returns only
   its outcome (`pass`, `balance`, `limit`, `invalid`, `unknown`), under the same transport rules and a 10 s total deadline
   (5 s to connect); expiry is `unknown`; create, replace, the
-  DeepSeek add path and "重新启用" call it. A new adapter operation sends one search request for a `credential_ref` and returns status,
-  a bounded header subset and the body. Like the invocation contract's `on_admitted`, it takes an `on_sent`
+  DeepSeek add path and "重新启用" call it. A new adapter operation sends one search request for a `credential_ref` and returns a structured
+  outcome: status, a bounded header subset, `response_received_at` (the instant the headers arrived, which the retry
+  coordinator anchors `Retry-After` to, as `model-hub-retry-experience.md` requires) and the body, the status and
+  receipt time surviving a later body-read failure. Like the invocation contract's `on_admitted`, it takes an `on_sent`
   callback that it calls exactly once just before writing the request, after connect and TLS succeed; a failure or
   cancellation before that call is pre-send ($0), and one after it is billing-unknown (§4.3). It reads the key from the state store (`read_api_key`, as credential
   retargeting does today) only for the duration of the request.
