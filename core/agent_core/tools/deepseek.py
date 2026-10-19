@@ -20,10 +20,10 @@ import os
 import re
 import subprocess
 import sys
-import urllib.error
 import urllib.parse
-import urllib.request
 from typing import Any, Mapping, Optional, Sequence
+
+import httpx
 
 from core.agent_core.tools.args import ToolInputError, error_result, str_arg, text_result
 from core.agent_core.tools.base import ToolContext, ToolResult, ToolSpec
@@ -79,17 +79,6 @@ FETCH_SCHEMA: Mapping[str, Any] = {
     "required": ["url"],
     "additionalProperties": False,
 }
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """Never follow a redirect: the request carries a bearer credential, and a cross-origin redirect would hand it
-    to another host."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-_OPENER = urllib.request.build_opener(_NoRedirect)
 
 
 def deepseek_tools_enabled(env: Mapping[str, str] | None = None) -> bool:
@@ -162,34 +151,27 @@ class _ToolError(ValueError):
     """A failure with a message safe to show to the model."""
 
 
-def _post_direct(url: str, payload: Mapping[str, Any], key: str) -> Any:
-    data = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-    request = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "User-Agent": "avibe-deepseek-search/1.0",
-        },
-        method="POST",
-    )
+async def _post_direct(url: str, payload: Mapping[str, Any], key: str) -> Any:
+    headers = {
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "avibe-deepseek-search/1.0",
+    }
     try:
-        with _OPENER.open(request, timeout=TIMEOUT_SECONDS) as response:
-            body = response.read(MAX_RESPONSE_BYTES + 1)
-    except urllib.error.HTTPError as error:
-        body = error.read(MAX_RESPONSE_BYTES + 1)
-        raise _ToolError(_http_error_message(error.code, body, key)) from None
-    except urllib.error.URLError as error:
-        raise _ToolError(f"DeepSeek API is unreachable: {error.reason}") from None
-    except TimeoutError:
+        async with httpx.AsyncClient(follow_redirects=False, trust_env=False, timeout=TIMEOUT_SECONDS) as client:
+            response = await client.post(url, json=payload, headers=headers)
+    except httpx.TimeoutException:
         raise _ToolError(f"DeepSeek API timed out after {TIMEOUT_SECONDS:g}s") from None
-    if len(body) > MAX_RESPONSE_BYTES:
+    except httpx.HTTPError as error:
+        raise _ToolError(f"DeepSeek API is unreachable: {type(error).__name__}") from None
+    if response.status_code != 200:
+        raise _ToolError(_http_error_message(response.status_code, response.content, key)) from None
+    if len(response.content) > MAX_RESPONSE_BYTES:
         raise _ToolError("DeepSeek API response exceeded the size limit")
     try:
-        return json.loads(body.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+        return response.json()
+    except ValueError:
         raise _ToolError("DeepSeek API returned a response that is not JSON") from None
 
 
@@ -264,7 +246,7 @@ async def _post(path: str, payload: Mapping[str, Any], env: Mapping[str, str]) -
     url = f"{_api_base(env)}{path}"
     key = env.get("DEEPSEEK_API_KEY") or os.environ.get("DEEPSEEK_API_KEY")
     if key:
-        return await asyncio.to_thread(_post_direct, url, payload, key)
+        return await _post_direct(url, payload, key)
     return await _post_via_vault(url, payload, env)
 
 

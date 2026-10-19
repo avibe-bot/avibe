@@ -130,8 +130,7 @@ async def test_direct_mode_refuses_redirects_instead_of_forwarding_the_key() -> 
     thread.start()
     try:
         with pytest.raises(deepseek._ToolError) as caught:
-            await asyncio.to_thread(
-                deepseek._post_direct,
+            await deepseek._post_direct(
                 f"http://127.0.0.1:{server.server_port}/v1/tools/search",
                 {"query": "q"},
                 "test-key",
