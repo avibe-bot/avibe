@@ -228,7 +228,7 @@ Hosted tools §6 holds, with these changes:
   as they say. The check captures the Source's settlement generation when it starts; if a key replacement or
   removal advanced it before the answer, the answer changes nothing. A state the row's check cannot tell apart (Exa
   has no free check) is not cleared at once. The persisted `needs_action` state stays, and the press arms an in-memory one-shot trial:
-  the Source admits exactly one search request, reserved by the first search that reaches it, while every other
+  the Source admits exactly one search request, reserved by the first search that is about to send it, after every skip and final-admission check (a search that skips the Source never reserves it), while every other
   search skips it as `blocked`. A trial that completes clears the persisted state. A trial that fails is settled by the outcome table: a
   classified failure (401, 402, a limit code) replaces the blocker with its own state, so a revoked key asks for a
   new key. Any other failure, whether transient, unreadable or a query-specific `service_refused`, keeps the
