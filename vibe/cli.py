@@ -39,7 +39,6 @@ from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_
 from core.scheduled_tasks import (
     AGENT_RUN_CLOSE_AFTER_METADATA_KEY,
     AGENT_RUN_DELIVERY_QUEUE,
-    AGENT_RUN_DELIVERY_SEND_NOW,
     AGENT_RUN_DELIVERY_STEER,
     BINDING_FOLLOWS_SESSION_METADATA_KEY,
     ScheduledTaskStore,
@@ -2045,9 +2044,8 @@ def _agent_run_examples_text() -> str:
         Session target:
           Use --session-id to continue an existing Agent Session.
           The default is P1: steer an active native Turn, start when idle, or fall back to the durable P3 queue.
-          A Turn that a person's message is part of is not steered: the Run queues behind it and runs as its own Turn.
           Add --queue to persist this Run as P3 behind the active Turn.
-          --send-now steers the active Turn even when a person's message is part of it.
+          --send-now explicitly selects the same P1 content delivery for an existing Session.
           To promote the exact existing P3 queue head without a new message, use: vibe session send-now <session-id>
           Inspect queued work with: vibe session queue list <session-id>
           Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
@@ -7015,8 +7013,6 @@ def cmd_agent_run(args):
         delivery_intent = (
             AGENT_RUN_DELIVERY_QUEUE
             if bool(getattr(args, "queue", False))
-            else AGENT_RUN_DELIVERY_SEND_NOW
-            if bool(getattr(args, "send_now", False))
             else AGENT_RUN_DELIVERY_STEER
         )
         if bool(getattr(args, "send_now", False)) and session_policy != "existing":
@@ -7281,7 +7277,7 @@ def cmd_agent_run(args):
                 "close_after": close_after,
             },
         }
-        if delivery_intent != AGENT_RUN_DELIVERY_STEER:
+        if bool(getattr(args, "send_now", False)) or delivery_intent != AGENT_RUN_DELIVERY_STEER:
             payload["delivery_intent"] = delivery_intent
             payload["run"]["delivery_intent"] = delivery_intent
         if fork_result:
@@ -17981,7 +17977,7 @@ def build_parser():
     agent_run_delivery_group.add_argument(
         "--send-now",
         action="store_true",
-        help="Steer this Run into the active Turn of an existing Session, even one serving a person's message",
+        help="Explicitly deliver this Run as P1 to an existing Session (the default behavior)",
     )
     agent_run_delivery_group.add_argument(
         "--queue",

@@ -501,28 +501,6 @@ def _segment_dispatch_text(segment: list[dict[str, Any]]) -> str:
     return ("\n\n---\n\n" if scheduled else "\n").join(texts)
 
 
-def _yields_to_human_turn(
-    conn: Connection,
-    request: "DeliveryRequest",
-    delivery: dict[str, Any],
-    turn_id: str,
-) -> bool:
-    """Whether this P1 input queues behind the active Turn instead of steering it.
-
-    A Watch, Hook, Webhook, or Agent Run delivers a scheduled Harness input: an
-    automatic signal, not a person speaking. Steered into a Turn that serves a
-    person, it would continue that Turn past the person's answer, which would
-    then no longer be the Turn's result. So it waits for that Turn to end and
-    runs as its own Turn. A person's input (IM, a Show annotation) and an
-    explicit send-now keep steering.
-    """
-    if request.send_now:
-        return False
-    if delivery_store.scheduled_delivery_provenance(delivery_store.delivery_payload(delivery)) is None:
-        return False
-    return delivery_store.turn_has_human_input(conn, turn_id)
-
-
 def emit_matches_active_turn(sink: dict, context: "MessageContext") -> bool:
     """The ONE active-turn token rule (FSM Phase 2 — collapses the three previously
     duplicated guards: ``_stream_chunk`` completion, ``_is_active_turn``, and
@@ -646,10 +624,6 @@ class DeliveryRequest:
     # P3 admission without the usual idle-session auto-start. This keeps the
     # admission and promotion decision on one post-admission queue snapshot.
     admission_only: bool = False
-    # A producer's explicit send-now (``vibe agent run --send-now``). Without it,
-    # a scheduled Harness P1 input never steers a Turn a person's input is part
-    # of; it queues behind that Turn (``_yields_to_human_turn``).
-    send_now: bool = False
 
 
 @dataclass(frozen=True)
@@ -3251,23 +3225,7 @@ class SessionTurnManager:
                 and identity is not None
                 and identity[0] == observed_id
             )
-            if current is not None and _yields_to_human_turn(conn, request, delivery, str(current["id"])):
-                queued = delivery_store.cas_delivery(
-                    conn,
-                    str(delivery["id"]),
-                    expected_version=int(delivery["version"]),
-                    expected_states=("reserved",),
-                    values={"priority": "p3", "state": "queued"},
-                    history_event={
-                        "kind": "queue",
-                        "reason": "behind_human_turn",
-                        "turn_id": str(current["id"]),
-                    },
-                )
-                if queued is None:
-                    raise RuntimeError("P1 queue claim behind a human Turn lost after writer reservation")
-                delivery = queued
-            elif same_active:
+            if same_active:
                 attempt_id = delivery_store.new_attempt_id()
                 native_id = str(identity[1])
                 turn_id = observed_id

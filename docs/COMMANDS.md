@@ -969,11 +969,9 @@ record. It cannot target an existing `--session-id`.
 
 With an existing `--session-id`, the default is P1: steer the new Run into an
 active native Turn, start it when idle, or move the same Delivery to P3 after a
-definitive refusal/not-active receipt. When a person's message is part of the
-active Turn, the Run queues behind it as P3 and runs as its own Turn instead.
-`--queue` selects P3 without attempting a steer. For an existing Session,
-`--send-now` steers the new message into the active Turn, including one a
-person's message is part of; it targets the new message and never promotes older
+definitive refusal/not-active receipt. `--queue` selects P3 without attempting a
+steer. For an existing Session, `--send-now` explicitly selects the same
+content-bearing P1 behavior; it targets the new message and never promotes older
 queued work. `vibe session send-now` is the content-free P1 operation that
 promotes the exact existing FIFO head without adding a message.
 
