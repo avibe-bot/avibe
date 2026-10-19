@@ -8,7 +8,7 @@ publish.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-base64 = "0.22"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 minisign-verify = "0.3"
 reqwest.workspace = true
