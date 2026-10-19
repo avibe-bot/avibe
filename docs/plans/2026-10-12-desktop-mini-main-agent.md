@@ -178,14 +178,18 @@ Then, when Vibey's turn ends, the bubble shows the reply summary for
 transition (instant under reduced motion), taking no space and no clicks.
 
 - **A turn this epoch watched end.** The linger starts when the current epoch
-  (binding and authorization) sees the main session go from running to done.
+  (binding and authorization) sees the main session's server turn state go
+  from running to done. The local send grace (which shows "thinking" before
+  the server registers a turn) is not part of it: a grace that runs out is not
+  a turn that ended.
   It is derived while rendering from the last running value seen, so the
   render that ends the turn starts the linger and the bubble never closes in
   between; the only state is which ended turns have expired, per epoch. A turn
   already over when the epoch first looks is history, so on first load an old,
   finished exchange starts hidden. A reply that appears without a watched turn
-  end (a background or detached result, or a turn that starts and ends while
-  authorization is still resolving) does not linger; Vibey's badge still marks
+  end (a background or detached result, a turn that starts and ends while
+  authorization is still resolving, or a turn so quick the pet never saw the
+  server report it running) does not linger; Vibey's badge still marks
   it, and a Vibey click opens it. A turn that ends in failure keeps the bubble
   shown through its failure notice (needs-you).
 - **On-screen time.** The 10s count only while the reply itself is on

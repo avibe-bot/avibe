@@ -656,15 +656,16 @@ const PetSurface: React.FC = () => {
   const needsYou = Boolean((!data.running && failure) || uncertain || queued || vaultRequests.length > 0);
   const held = Boolean(data.running || optimisticTitle || needsYou || historyOpen);
   // A turn that ends while this epoch watches is what lingers: the moment the
-  // main session goes from running to done, derived during render from the
-  // last running value seen, so the render that ends the turn is the render
-  // that starts the linger and the bubble never closes in between. A turn
-  // already over when the epoch first looks is history.
-  const [turnWatch, setTurnWatch] = useState(() => ({ epoch, running: data.running, ended: 0 }));
+  // server's turn state goes from running to done, derived during render from
+  // the last value seen, so the render that ends the turn is the render that
+  // starts the linger and the bubble never closes in between. The server's
+  // state alone: the local send grace running out is not a turn that ended.
+  // A turn already over when the epoch first looks is history.
+  const [turnWatch, setTurnWatch] = useState(() => ({ epoch, running: data.serverRunning, ended: 0 }));
   let watched = turnWatch;
-  if (watched.epoch !== epoch) watched = { epoch, running: data.running, ended: 0 };
-  else if (watched.running !== data.running) {
-    watched = { ...watched, running: data.running, ended: data.running ? watched.ended : watched.ended + 1 };
+  if (watched.epoch !== epoch) watched = { epoch, running: data.serverRunning, ended: 0 };
+  else if (watched.running !== data.serverRunning) {
+    watched = { ...watched, running: data.serverRunning, ended: data.serverRunning ? watched.ended : watched.ended + 1 };
   }
   if (watched !== turnWatch) setTurnWatch(watched);
   const endedTurn = watched.ended > 0 ? String(watched.ended) : null;

@@ -18,6 +18,7 @@ import type {
 import { ApiError } from '@/context/ApiContext';
 
 import { PET_BOUND_EVENT, PET_HOVER_EVENT, PET_SUMMON_EVENT } from './petBridge';
+import { SEND_GRACE_MS } from './usePetSession';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -2590,6 +2591,26 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
       vi.resetModules();
       ({ PetPage } = await import('./PetPage'));
     }
+  });
+
+  it('does not linger when a send grace runs out with no turn registered', async () => {
+    tails.S = [message('u0', 'S', { author: 'user', type: 'user', text: 'earlier' }), message('r0', 'S', { text: 'Earlier reply' })];
+    // The send is accepted and echoed back, so nothing local still holds the bubble.
+    api.sendSessionMessage.mockImplementationOnce(async () => message('sent', 'S', { author: 'user', type: 'user', text: 'quick' }));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
+    mainSession('S');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder');
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('S'));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    await userEvent.type(input, 'quick{Enter}');
+    await waitFor(() => expect(pose()).toBe('running'));
+    // The server never registers the turn: the local grace simply runs out.
+    act(() => { vi.advanceTimersByTime(SEND_GRACE_MS + 100); });
+    await waitFor(() => expect(pose()).not.toBe('running'));
+    act(() => { vi.advanceTimersByTime(500); });
+    expect(bubbleOpen()).toBe(false);
   });
 
   it('drops a lingering reply when the epoch changes', async () => {
