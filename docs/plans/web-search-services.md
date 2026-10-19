@@ -144,7 +144,9 @@ Hosted tools §6 holds, with these changes:
   `needs_action` is skipped.
 - **Automatic order** (no `executor_order`): `search` Sources in creation order, then model Sources with a search API
   in Vibey's Source order, then model executors as today. A saved `executor_order` is used as saved; candidates it
-  does not name follow in automatic order.
+  does not name follow in automatic order. Adding a search-capable Source while an order is saved inserts it into
+  the saved order after its last search-capable entry, so it runs before the model executors and the user's other
+  entries keep their order.
 - **Per-service limits are checked before the call.** A query longer than the service accepts (DeepSeek: 128
   characters) skips that service for this call with no state and no cost.
 - **One attempt** sends the catalog's request for the canonical query, the turn's frozen `results` and `content`, and
@@ -168,6 +170,9 @@ Hosted tools §6 holds, with these changes:
   state when the check passes; without a free check it clears the state, and the next real search tries the Source
   once, putting it back in `needs_action` if the same failure returns. Nothing retries on its own. A model Source with
   a search API (DeepSeek) recovers through the existing model Source paths.
+- **Health writes are fenced** like every other Source attempt (`model-hub.md`, attempt-start settlement
+  generation). A service attempt reserves the generation when it starts. A response that settles after the key was
+  replaced or the Source was removed writes no health, so a superseded key cannot block a repaired Source.
 - A search service writes no hosted-tool refusal evidence: its failures are Source health, not tool support.
 - A completed attempt writes positive evidence with `mode: "service"`, keyed by (Source, service id, `web_search`),
   through the same in-memory and hourly-file rule (hosted tools §3.2).
@@ -178,7 +183,11 @@ Hosted tools §6 holds, with these changes:
 
 - The result is the canonical `HostedRecord` (hosted tools §6). `sources[]` follows the service's ranking: `url`,
   `title`, `snippet` and `page_age` from the catalog's mapping, `snippet` taken from the vendor's model-oriented
-  field (DeepSeek `summary`) and bounded to 1,000 characters.
+  field (DeepSeek `summary`).
+- **Every persisted field is bounded before the record is written.** `url` is at most 2,048 characters, and a result
+  with a longer or non-HTTP(S) URL is dropped. `title` is cut to 300, `snippet` to 1,000 and `page_age` to 64. A
+  record keeps at most the configured number of results. A response that leaves no valid result is
+  `service_unreadable`.
 - With `content` on, each source gains `content`, bounded to 4,000 characters per source and 20,000 per record.
   Vibey renders it in the model-facing text with the same renderer as today.
 - `execution` is a `ProxyExecution` naming the Source, `executor_billing: "metered"` and the attempt's `cost`. Cost is
@@ -186,10 +195,15 @@ Hosted tools §6 holds, with these changes:
   costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
   billable only when it answered 200.
 - `execution.attempts[]` (new) lists every earlier attempt of the call in order, billable or not, as
-  `{source_id, error_code}`. `error_code` is one of `service_key_invalid`, `service_balance`, `service_limit`,
-  `service_unavailable`, `service_refused` and `service_unreadable`, each with en and zh copy. Model executors' failed
-  attempts use the codes the chain already writes. This is what the switch note reads ("Tavily 密钥无效，已改用
-  DeepSeek"; with two or more, "Tavily、Exa 失败，已改用 DeepSeek"); `failed_attempts[]` keeps its cost role.
+  `{source_id, error_code?}`. A search service always sets `error_code`: one of `service_key_invalid`,
+  `service_balance`, `service_limit`, `service_unavailable`, `service_refused` and `service_unreadable`, each with en
+  and zh copy. A model executor sets it only when its failure already carries a code (`FAILURE_CODES`); a provider's
+  free-text failure leaves it absent, and the note then says "失败" for that Source. The switch note reads this list
+  ("Tavily 密钥无效，已改用 DeepSeek"; with two or more, "Tavily、Exa 失败，已改用 DeepSeek"). `failed_attempts[]`
+  keeps its cost role.
+- `core/hosted_activity` projects `attempts[]` with the Sources' current names into the shared activity payload
+  (`HostedActivity.to_payload`). Its localized line renderer writes the note, so the Web card and the IM line read
+  one projection, as they do for cost.
 - Every attempt is metered on its Source, so the Usage tab shows search requests per service.
 
 ## 5. Catalog: first batch
@@ -205,7 +219,7 @@ includes, so the recorded list price stays exact.
 | Vendor | Request | Auth | Results | Content | List price (2026-10) | Free check |
 | --- | --- | --- | --- | --- | --- | --- |
 | DeepSeek | `POST https://api.deepseek.com/v1/tools/search` `{query, count, need_content}` | Bearer | 1–50 | `need_content` | $0.75 / 1k successful requests; empty results and failures not billed | `GET /user/balance` |
-| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | a usage endpoint, if documented |
+| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: 200 passes, 401 is an invalid key |
 | Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | `contents.text` | $7 / 1k | none known |
 
 - DeepSeek facts that shape the UI (DeepSeek's Search & Fetch guide, 2026-10-19): the query is 1–128 characters and
@@ -252,7 +266,8 @@ states interactively.
   shown as "已添加"; DeepSeek, when a DeepSeek Source qualifies, as "已在搜索顺序中".
 - Choosing a tool-only vendor asks for the key. Choosing DeepSeek without a DeepSeek Source asks for a key and creates
   an ordinary DeepSeek Source (models and search), and says so.
-- The dialog states where queries go, that the service joins before model executors, and the custody line. Saving
+- The dialog states where queries go, that the service joins the search order before the model executors (in a
+  saved order too, §4.1), and the custody line. Saving
   runs the free check where the catalog has one; otherwise it saves without a call.
 
 ### 6.3 Service detail
@@ -299,7 +314,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - `api.md`: the read and PUT changes, and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
 - The turn trace's `hosted_tools`: the frozen `prefer_native` and per-candidate `results` and `content` (§3.2).
-- C-1 (`agent-core-contracts/message.schema.json`): `HostedSource.content` (bounded, §4.3);
+- `core/hosted_activity`'s payload: the projected `attempts` with Source names and codes (§4.3).
+- C-1 (`agent-core-contracts/message.schema.json`): `HostedSource.content` and the field bounds (§4.3);
   `ProxyExecution.attempts[]` and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; an
   `executor_origin` that names a search service (`provider` = vendor, `model` = service id, and an `api` value for
   search APIs, which the contract lane names).
@@ -310,7 +326,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 | PR | Lane | Work | Depends on |
 | --- | --- | --- | --- |
 | **S1** Catalog, Sources, settings | foundation | search vendors in the catalog; `protocol: "search"` Sources and their exclusions; `prefer_native` and `services`; the adapter's search call with custody and transport rules; free checks on add and replace; the Tools read and PUT; the version event | — |
-| **S2** Chain and records | gateway | candidates, automatic order, limits, per-vendor request and result mapping, outcome classes into Source health, positive evidence, record, cost and metering, `prefer_native` in hop facts, the no-candidate reason | S1 |
+| **S2** Chain and records | gateway | candidates, automatic order and insertion into a saved order, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1 |
 | **S3** Model text | Vibey | `content` in the model-facing text and its bounds; the card's executor label | S2's record |
 | **S4** Tools, dialog, Sources | UI | §6 with en and zh copy | S1's read; S2 for live states |
 | **S5** Frames | design | §6 frames in `design.pen` through Pencil | — |
@@ -322,7 +338,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 2. No search service key reaches Vibey, the turn environment, a model, a log or Vault; every request is HTTPS to the
    catalog host with redirects refused.
 3. Nothing calls a service except a model's tool call in a turn the user started, or a free check when a key is
-   added or replaced.
+   added or replaced or when the user presses "重新启用".
 4. Automatic order is search services, then model executors; a saved order is honored; with `prefer_native` off,
    every hop declares the function.
 5. Invalid-key, balance and limit failures put the Source in `needs_action` and skip it until the key is replaced
