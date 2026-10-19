@@ -122,7 +122,8 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
   engine config, the turn environment, Vibey, a log or the model.
 - The call is made inside the Model Hub adapter, which is already the custody boundary (`adapter.py`: no credential
   material crosses it). A second new operation runs a catalog free check for a `credential_ref` and returns only
-  its outcome (`pass`, `balance`, `invalid`, `unknown`), under the same transport rules; create, replace, the
+  its outcome (`pass`, `balance`, `invalid`, `unknown`), under the same transport rules and a 10 s total deadline
+  (5 s to connect); expiry is `unknown`; create, replace, the
   DeepSeek add path and "重新启用" call it. A new adapter operation sends one search request for a `credential_ref` and returns status,
   a bounded header subset and the body; it reads the key from the state store (`read_api_key`, as credential
   retargeting does today) only for the duration of the request.
@@ -198,7 +199,8 @@ Hosted tools §6 holds, with these changes:
 | a plan or spending limit the catalog names (Tavily 432 plan limit, 433 pay-as-you-go limit) | next candidate | `needs_action`, the existing `models.source.needs_action.spend_limit_reached` detail; the catalog row adds a vendor remedy line naming both repairs (Tavily: "在 Tavily 后台升级套餐（432）或提高按量上限（433）"), so no new state is needed |
 | 408, 429, 5xx, timeout, connection failure | next candidate | none; a service cooldown (below) |
 | 3xx (the redirect is refused, §3.3) | next candidate, `service_unavailable` | none |
-| other 4xx (a query the service refuses) | next candidate | none |
+| a 4xx the catalog row names as query-specific (for example a malformed query) | next candidate, `service_refused` | none |
+| any other 4xx (404, 405, 410 and the like: the endpoint or protocol, which a different query cannot fix) | next candidate, `service_unavailable` | none; a service cooldown |
 | a body the mapping cannot read (`service_unreadable`) | next candidate | none; a service cooldown, because a 200 may be billed |
 
 - **A model Source with a search API (DeepSeek)** shares its key and balance with its models, so a search 401 or 402
