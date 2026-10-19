@@ -1,26 +1,30 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import clsx from 'clsx';
 
 import { showPageAvatar, showPageIconUrl } from './showPageAvatar';
+import { forgetShowPageIcon, loadShowPageIcon, peekShowPageIcon } from './showPageIconCache';
 
 // The icon-or-letter CONTENT of a Show Page avatar, WITHOUT any tile wrapper:
 // the page's own HTML icon (§7.1f) rendered as an <img>, falling back to the
-// letter avatar when there is no icon OR the image fails to load (onError).
+// letter avatar when there is no icon OR the icon fails to load.
 // Shared by ShowPageAvatarTile and the Dock / mobile-drawer / window-title-bar
 // tiles — each provides its own accent-box wrapper — so the icon + fallback rule
 // lives in one place.
 //
 // Freshness needs no notifier/remount machinery: `iconUrl` is content-versioned
 // (`?v=<token>` from the icon file's identity), so a changed icon changes the URL,
-// which is a new `src` the browser fetches on its own.
+// which is a new download on its own. The bytes come from showPageIconCache, so a
+// remounted tile (the hover Dock remounts on every reveal) paints its icon on the
+// first frame instead of waiting for another uncacheable remote download.
 //
 // A load failure is retried a bounded number of times before falling back to the
-// letter: `onError` remounts the <img> (a per-URL attempt count is the `key`, so it
-// re-fetches) and only latches to the letter after MAX_ICON_LOAD_ATTEMPTS. In the
-// versioned-URL model a permanently-absent icon arrives as a null `iconUrl` (letter,
-// no <img>, no onError) — so onError only ever signals a TRANSIENT failure (a brief
-// bytes-or-404 race window, a network blip), exactly the case worth retrying. The
-// count is keyed to the URL, so a new versioned URL retries with a fresh budget.
+// letter: a failed download or an undecodable image bumps a per-URL attempt count
+// that re-runs the download, and only latches to the letter after
+// MAX_ICON_LOAD_ATTEMPTS. In the versioned-URL model a permanently-absent icon
+// arrives as a null `iconUrl` (letter, no download) — so a failure only ever
+// signals a TRANSIENT problem (a brief bytes-or-404 race window, a network blip),
+// exactly the case worth retrying. The count is keyed to the URL, so a new
+// versioned URL retries with a fresh budget.
 const MAX_ICON_LOAD_ATTEMPTS = 3;
 // INVARIANT (proven by live CDP real-input on the regression env, §7.1h item 3): in
 // the Dock a tile is a framer-motion Reorder.Item, and its drag pan does NOT start
@@ -29,24 +33,55 @@ const MAX_ICON_LOAD_ATTEMPTS = 3;
 // direct press target: the avatar content MUST render as a FILLING child element —
 // never a bare text node, and never `pointer-events-none` (which pushes the press
 // back through to the button and re-breaks drag). Built-in tiles already render an
-// <svg> child; here both the icon <img> and the letter fill the tile as real children.
+// <svg> child; here the icon <img>, its download placeholder, and the letter all fill
+// the tile as real children.
 export const ShowPageAvatarContent: React.FC<{ iconUrl: string | null; letter: string }> = ({ iconUrl, letter }) => {
   const [failure, setFailure] = useState<{ url: string; attempts: number } | null>(null);
+  const [loaded, setLoaded] = useState<{ url: string; attempts: number; src: string } | null>(null);
   const attempts = failure && failure.url === iconUrl ? failure.attempts : 0;
-  if (iconUrl && attempts < MAX_ICON_LOAD_ATTEMPTS) {
+  const wanted = iconUrl && attempts < MAX_ICON_LOAD_ATTEMPTS ? iconUrl : null;
+  const src = wanted
+    ? (peekShowPageIcon(wanted) ?? (loaded?.url === wanted && loaded.attempts === attempts ? loaded.src : null))
+    : null;
+
+  useEffect(() => {
+    if (!wanted) return;
+    let live = true;
+    loadShowPageIcon(wanted).then(
+      (next) => {
+        if (live) setLoaded({ url: wanted, attempts, src: next });
+      },
+      () => {
+        if (live) setFailure({ url: wanted, attempts: attempts + 1 });
+      },
+    );
+    return () => {
+      live = false;
+    };
+  }, [wanted, attempts]);
+
+  if (wanted && src) {
     return (
       <img
-        key={`${iconUrl}#${attempts}`}
-        src={iconUrl}
+        key={`${wanted}#${attempts}`}
+        src={src}
         alt=""
         // `draggable={false}` disables native image DnD (#906's real concern). NO
         // `pointer-events-none`: the filling <img> must itself BE the press target,
         // or the Dock Reorder pan can't start (see invariant above).
         draggable={false}
         className="size-full select-none object-cover"
-        onError={() => setFailure({ url: iconUrl, attempts: attempts + 1 })}
+        onError={() => {
+          forgetShowPageIcon(wanted);
+          setFailure({ url: wanted, attempts: attempts + 1 });
+        }}
       />
     );
+  }
+  if (wanted) {
+    // First download in flight: the bare accent tint, as an unpainted <img> showed.
+    // Still a FILLING element so a press during the download starts a Dock drag.
+    return <span aria-hidden className="block size-full select-none" />;
   }
   // A FILLING element, never a bare text node: a raw string leaves the <button>
   // itself as the press target and the Dock drag won't start (see invariant above).
