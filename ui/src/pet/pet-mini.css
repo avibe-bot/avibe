@@ -536,11 +536,6 @@ to {
   background:color-mix(in srgb,var(--pet-ink) 10%,transparent)}
 .pet-mini-dock button.is-typing {
   background:color-mix(in srgb,var(--pet-ink) 10%,transparent)}
-.pet-mini-dock button.is-open {
-  background:color-mix(in srgb,var(--pet-ink) 10%,transparent)}
-.pet-mini-dock button:disabled {
-  opacity:.4;
-  cursor:default}
 .pet-mini-dock-divider {
   width:1px;
   height:16px;

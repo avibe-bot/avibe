@@ -119,10 +119,8 @@ the main agent; there is no Follow up on cards.
 A stack needs at least **two** visible cards. **Exactly one** visible card is
 never collapsed: it is always drawn in its full expanded form (stop or
 authorize, Open in Avibe, × on hover, click to reference) at its own height,
-whatever the panel state. Clicking Vibey does not change it, so Vibey's button
-carries no `aria-expanded` then. With a lone card a Vibey click toggles no
-panel state at all, so nothing waits to appear when a second card arrives: it
-closes an open history (and the panel with it) and otherwise does nothing. All of the card's controls are hit regions in
+whatever the panel state. A Vibey click (§5.1) opens or closes the history
+beside it and never changes the card. All of the card's controls are hit regions in
 every panel state. Opening the history keeps the card in full beside it, and
 the history's height bound uses the card's measured height. Going between one
 and two cards follows the data with the ordinary swap transition.
@@ -144,7 +142,10 @@ and two cards follows the data with the ordinary swap transition.
 - When there are at least two cards, the front card's eyebrow row shows a
   muted count chip: `N items` in English or `共 N 项` in Chinese. Counts above
   99 display as `99+`.
-- The whole stack is one button: a click expands it.
+- The whole stack is one button: a click expands it. It is the only way to
+  expand the cards; Vibey collapses an expanded list but never expands one
+  (§5.1). The expanded list and the open history never show together: opening
+  either closes the other.
 
 ## 4. Cards
 
@@ -168,20 +169,17 @@ slot above the avatar: thinking, delegated-to (only when provenance is known),
 then the latest reply. The bubble names Vibey in its existing localized spelling.
 It remains available with either the collapsed or expanded stack.
 
-**When it shows.** The bubble is shown while Vibey's turn is running or a send
-is pending; while Vibey needs the user (a pending Vault handoff, a failure
-notice, an uncertain-send notice, or a queued notice); and while the history is
-open. Composing and dictating take the slot as before (§5.2). When none of
-these holds any more, or a new reply arrives, the bubble shows the reply
-summary and lingers for **30 seconds of on-screen time**: the time counts only
-while the pet document is visible and the pointer is not over the bubble and
-keyboard focus is not in it. Then it folds away with the speech slot's
-transition (instant under reduced motion) and takes no space and no clicks;
-only the cards, Vibey and the dock remain. Unread replies and quick replies do
-not hold it: Vibey's unread badge carries "something new", and the quick
-replies stay in the history. On first load an old, finished exchange starts
-hidden. A new reply, a new running turn or a new needs-you state brings it back
-at once. The dock's history button (§5.1) opens it with the history.
+**When it shows.** Only while Vibey's conversation is active: the turn is
+running or thinking, or a send is pending; Vibey needs the user (a pending
+Vault handoff, a failure notice, an uncertain-send notice, or a queued
+notice); or the history is open. Composing and dictating take the slot as
+before (§5.2). The moment none of these holds, the turn's result arriving
+included, the bubble hides with the speech slot's transition (instant under
+reduced motion), taking no space and no clicks: there is no linger. Unread
+replies only light Vibey's badge, and quick replies stay in the history; to
+read a reply, click Vibey (§5.1). On first load an old, finished exchange
+starts hidden. A new running turn, a new needs-you state or a Vibey click
+that opens the history shows it at once.
 
 Click the bubble to expand recent turns from the loaded tail. Preserve all
 previous main detail behavior:
@@ -279,7 +277,21 @@ Known data limitations for P1:
 
 ### 5.1 Vibey and the dock
 
-- **Click Vibey:** toggle the stack between collapsed and expanded.
+- **Click Vibey** (a pointer click without hold or drag, or keyboard
+  activation): one step about Vibey's own conversation, in order:
+  - an expanded card list collapses, and nothing else happens;
+  - else an open history closes, and the bubble hides with it unless something
+    else keeps it shown (§4.2);
+  - else, if there is any exchange, the bubble shows with the history open,
+    scrolled to the bottom;
+  - with no messages yet, or while typing or dictating, the click does nothing
+    (the input and its draft are left as they are).
+
+  Every branch leaves the shell's panel state matching what is drawn, so
+  nothing stays expanded out of sight. Vibey's button is labelled "Recent
+  turns", with `aria-expanded` reflecting the open history. It has no tooltip:
+  hovering Vibey already shows the dock, and a tooltip on every hover of the
+  pet would be noise.
 - **Press and hold Vibey (≥ 320ms):** start dictation; release to stop.
   - A press shorter than 320ms is a click.
   - Leaving Vibey before the hold fires cancels the hold.
@@ -297,14 +309,8 @@ Known data limitations for P1:
     dictation ends.
 - **Dock:** a pill under Vibey's feet that overlaps the image by 12px.
   - Background `#2a2a2e`, padding 4px, border 1px `white / 8%`, no shadow.
-  - Three 32px buttons with a 4px gap and a 1px × 16px `white / 10%` hairline
-    between each pair:
-    - **history** (clock icon), leftmost, opens Vibey's bubble with its history
-      (scrolled to the bottom) when it is hidden or showing the summary, and
-      closes the history when it is open, after which the summary lingers
-      (§4.2). Its accessible name and pet tooltip are "Recent turns", and
-      `aria-expanded` reflects the open history; while open it uses the same
-      background as the button hover state;
+  - Two 32px buttons with a 4px gap and a 1px × 16px `white / 10%` hairline
+    between them:
     - **mic** starts or stops dictation; while dictating, it uses the same
       background as the button hover state with a stop square icon;
     - **keyboard** opens or closes the input bubble; while the bubble is open,
@@ -320,7 +326,7 @@ Known data limitations for P1:
     cursor poller (§9.2) sends `avibe:pet-hover { hover }` when the cursor
     enters or leaves them, and the page shows the dock while it is set. CSS
     `:hover` still applies where the webview does see hover.
-  - It stays visible while dictating, typing or the history is open, and is always visible on
+  - It stays visible while dictating or typing, and is always visible on
     devices without hover (`@media (hover: none)`).
 
 ### 5.2 Speech slot
@@ -686,7 +692,7 @@ GET /api/sessions/main
       are at most three layers, with 9px steps, a `18+6+3i` inset and the
       same opacity as the front card. Two or more cards show the count chip,
       capped at `99+`.
-- [ ] Clicking Vibey or the stack expands upward (360ms settle, height plus
+- [ ] Clicking the stack expands upward (360ms settle, height plus
       content fade); clicking Vibey again collapses.
 - [ ] Expanded: fixed 3.5-card box; cards bottom-aligned; overflow scrolls;
       scrollbar hidden; 10px top padding.

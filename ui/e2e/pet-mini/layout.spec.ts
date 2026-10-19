@@ -3,7 +3,7 @@ import { expect, test } from '@playwright/test';
 for (const theme of ['light', 'dark']) {
   for (const lang of ['en', 'zh']) {
     test(`collapsed bubble spacing and action copy (${theme}, ${lang})`, async ({ page }) => {
-      await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=${lang}`);
+      await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=${lang}&queued=1`);
       await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
       await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
       await expect(page.locator('.pet-mini-stage')).toHaveCSS('color', theme === 'dark' ? 'rgb(255, 255, 255)' : 'rgb(23, 23, 28)');
@@ -62,7 +62,7 @@ for (const main of [true, false]) {
     test(`collapsed layers follow the front height (main=${main}, layers=${layers})`, async ({ page }) => {
       const errors: string[] = [];
       page.on('pageerror', (error) => errors.push(error.message));
-      await page.goto(`/e2e/pet-mini/fixture.html?main=${main}&layers=${layers}`);
+      await page.goto(`/e2e/pet-mini/fixture.html?main=${main}&layers=${layers}&queued=1`);
       const renderedLayers = Math.min(layers, 3);
       await expect(page.locator('.pet-mini-layer')).toHaveCount(renderedLayers);
       // Wait for the real CSS entrance before measuring its transformed bounds.
@@ -150,7 +150,7 @@ for (const theme of ['light', 'dark']) {
 }
 
 test('no mini surface casts a shadow the transparent window would clip', async ({ page }) => {
-  await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=2&sessions=4');
+  await page.goto('/e2e/pet-mini/fixture.html?main=true&layers=2&sessions=4&queued=1');
   await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
   // Every mini rule, rendered or not (input bubble, marquee, setup card): the
   // window clips a shadow to a visible box while content moves.
@@ -324,7 +324,7 @@ test('attention leads the list and referencing sends only through the main compo
 
 test('reply history and input remain within the fixed window with reduced motion', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'reduce' });
-  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal');
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&queued=1');
   await page.locator('.pet-mini-collapsed').click();
   const avatar = await page.locator('.pet-mini-avatar-button').boundingBox();
   await page.locator('.pet-mini-reply-toggle').click();
@@ -340,7 +340,7 @@ for (const theme of ['light', 'dark']) {
   for (const reduced of [false, true]) {
     test(`history and cards share expansion with reachable actions (${theme}, reduced=${reduced})`, async ({ page }) => {
       await page.emulateMedia({ reducedMotion: reduced ? 'reduce' : 'no-preference' });
-      await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=actions');
+      await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=actions&queued=1');
       await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
       const avatar = page.locator('.pet-mini-avatar-button');
       await expect(avatar).toBeVisible();
@@ -374,8 +374,20 @@ for (const theme of ['light', 'dark']) {
       await expect(page.locator('.pet-mini-detail')).not.toHaveClass(/is-open/);
       await page.locator('.pet-mini-reply-toggle').click();
       await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+      await expect(page.locator('.pet-mini-detail')).toHaveClass(/is-open/);
+      // Vibey closes the open history, then opens it again with the stack
+      // still collapsed; the stack expands the list and closes the history;
+      // Vibey then collapses the list.
       await avatar.click();
+      await expect(page.locator('.pet-mini-detail')).not.toHaveClass(/is-open/);
+      await avatar.click();
+      await expect(page.locator('.pet-mini-detail')).toHaveClass(/is-open/);
+      await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+      await page.locator('.pet-mini-collapsed').click();
       await expect(page.locator('.pet-mini-scroll')).toBeVisible();
+      await expect(page.locator('.pet-mini-detail')).not.toHaveClass(/is-open/);
+      await avatar.click();
+      await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
       await expect(page.locator('.pet-mini-detail')).not.toHaveClass(/is-open/);
       expect(await avatar.boundingBox()).toEqual(anchor);
     });
@@ -384,13 +396,13 @@ for (const theme of ['light', 'dark']) {
 
 
 test('an empty activity stack takes no space while history remains usable without a switcher', async ({ page }) => {
-  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=0');
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=0&queued=1');
   await page.locator('.pet-mini-reply-toggle').waitFor();
   const avatar = await page.locator('.pet-mini-avatar-button').boundingBox();
+  // With no cards, a Vibey click opens the history straight away.
   await page.locator('.pet-mini-avatar-button').click();
   await expect(page.locator('.pet-mini-cards')).toHaveCSS('height', '0px');
   await expect(page.locator('.pet-mini-panel')).toHaveCount(0);
-  await page.locator('.pet-mini-reply-toggle').click();
   await expect(page.getByRole('button', { name: 'Switch session' })).toHaveCount(0);
   await expect(page.locator('.pet-mini-session-option')).toHaveCount(0);
   await expect(page.locator('.pet-mini-detail')).toHaveClass(/is-open/);
@@ -512,7 +524,7 @@ test('the reply bubble tail starts on the bubble border instead of poking above 
 
 for (const theme of ['light', 'dark']) {
   test(`history opens above a toggle that keeps its place (${theme})`, async ({ page }) => {
-    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long');
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&queued=1');
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
     const settle = () => page.evaluate(async () => {
       await Promise.all(document.getAnimations()
@@ -563,7 +575,7 @@ for (const theme of ['light', 'dark']) {
 
 for (const theme of ['light', 'dark']) {
   test(`Open in Avibe is an icon pinned to the open history's corner (${theme})`, async ({ page, browserName }) => {
-    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long');
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&queued=1');
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
     const settle = () => page.evaluate(async () => {
       await Promise.all(document.getAnimations()
@@ -627,7 +639,7 @@ for (const theme of ['light', 'dark']) {
 }
 
 test('the history fades over a taller, darker band than the card list', async ({ page }) => {
-  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=8');
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=8&queued=1');
   const mask = (selector: string) => page.locator(selector).evaluate((node) => (node as HTMLElement).style.maskImage || (node as HTMLElement).style.webkitMaskImage);
   const scrollTo = (selector: string, where: 'top' | 'middle') => page.locator(selector).evaluate((node, where) => {
     node.scrollTop = where === 'top' ? 0 : (node.scrollHeight - node.clientHeight) / 2;
@@ -658,7 +670,7 @@ test('the history fades over a taller, darker band than the card list', async ({
 test('the history opens at the bottom and stays pinned there only while the reader is', async ({ page }) => {
   // Everything is read, so each live reply replaces the shown one and nothing
   // here is about mark-read; the open-once mark-read is covered above.
-  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&unread=0');
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&unread=0&queued=1');
   const history = page.locator('.pet-mini-bubble-history');
   const gap = () => history.evaluate((node) => node.scrollHeight - node.clientHeight - node.scrollTop);
   const height = () => history.evaluate((node) => node.scrollHeight);
@@ -689,7 +701,7 @@ test('the history opens at the bottom and stays pinned there only while the read
 });
 
 test('a latest reply taller than the history opens at its end', async ({ page }) => {
-  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&reply=long');
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&reply=long&queued=1');
   const history = page.locator('.pet-mini-bubble-history');
   await page.locator('.pet-mini-reply-toggle').click();
   await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
@@ -702,7 +714,7 @@ test('a latest reply taller than the history opens at its end', async ({ page })
 
 for (const theme of ['light', 'dark']) {
   test(`the open buttons show a pet tooltip on hover and keyboard focus (${theme})`, async ({ page, browserName }) => {
-    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long');
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&queued=1');
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
     const tooltip = page.getByRole('tooltip');
     // Fully on screen and on top: nothing (clip, mask, scroll box) covers it.
@@ -776,8 +788,8 @@ for (const theme of ['light', 'dark']) {
 }
 
 for (const theme of ['light', 'dark']) {
-  test(`one card is always drawn in full and Vibey does not toggle it (${theme})`, async ({ page }) => {
-    await page.goto('/e2e/pet-mini/fixture.html?activities=1');
+  test(`one card is always drawn in full and a Vibey click does not change it (${theme})`, async ({ page }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?activities=1&queued=1');
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
     const settle = () => page.evaluate(async () => {
       await Promise.all(document.getAnimations()
@@ -793,20 +805,23 @@ for (const theme of ['light', 'dark']) {
     await expect(open).toBeVisible();
     await expect(page.locator('.pet-mini-collapsed')).toHaveCount(0);
     await expect(page.locator('.pet-mini-stack-count')).toHaveCount(0);
-    expect(await avatar.getAttribute('aria-expanded')).toBeNull();
+    await expect(avatar).toHaveAttribute('aria-expanded', 'false');
     // The fixture's reply lands just after load and opens the bubble below.
     await expect(page.locator('.pet-mini-slot.is-open .pet-mini-reply-bubble')).toBeVisible();
     await settle();
-    const box = await card.boundingBox();
+    const size = async () => { const box = (await card.boundingBox())!; return { width: box.width, height: box.height }; };
+    const before = await size();
 
-    for (let click = 0; click < 2; click += 1) {
+    // A Vibey click opens and closes the history; the card moves with the
+    // bubble beneath it but keeps its full form.
+    for (const historyOpen of [true, false]) {
       await avatar.click();
       await settle();
-      expect(await card.boundingBox()).toEqual(box);
+      expect(await size()).toEqual(before);
       await expect(stop).toBeVisible();
       await expect(open).toBeVisible();
       await expect(page.locator('.pet-mini-collapsed')).toHaveCount(0);
-      expect(await avatar.getAttribute('aria-expanded')).toBeNull();
+      await expect(avatar).toHaveAttribute('aria-expanded', String(historyOpen));
     }
 
     // The window passes clicks through except over hit regions, so every
@@ -838,7 +853,7 @@ for (const theme of ['light', 'dark']) {
   });
 
   test(`one card stays in full beside the open history and everything fits (${theme})`, async ({ page }) => {
-    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&activities=1&history=long');
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&activities=1&history=long&queued=1');
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
     const card = page.locator('.pet-mini-card');
     await expect(card.locator('.pet-mini-open')).toBeVisible();
@@ -867,9 +882,11 @@ test('Vibey clicks with a lone card leave no hidden expansion for a second card'
   await page.goto('/e2e/pet-mini/fixture.html?activities=1');
   const avatar = page.locator('.pet-mini-avatar-button');
   await expect(page.locator('.pet-mini-card')).toHaveCount(1);
+  // Open, then close, the history: nothing is left expanded behind it.
   await avatar.click();
+  await expect(avatar).toHaveAttribute('aria-expanded', 'true');
   await avatar.click();
-  await avatar.click();
+  await expect(avatar).toHaveAttribute('aria-expanded', 'false');
   await page.evaluate(() => window.petFixtureAddActivity());
   await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
   await expect(page.locator('.pet-mini-stack-count')).toHaveText('2 items');
@@ -878,7 +895,7 @@ test('Vibey clicks with a lone card leave no hidden expansion for a second card'
 });
 
 test('with a lone card, Vibey closes the open history and leaves the card alone', async ({ page }) => {
-  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=1');
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=1&queued=1');
   const card = page.locator('.pet-mini-card');
   const avatar = page.locator('.pet-mini-avatar-button');
   await expect(card.locator('.pet-mini-open')).toBeVisible();
@@ -906,33 +923,36 @@ test('with a lone card, Vibey closes the open history and leaves the card alone'
   await expect(page.locator('.pet-mini-scroll')).toHaveCount(0);
 });
 
-test('two or more cards keep the collapsed stack that Vibey toggles', async ({ page }) => {
+test('two or more cards expand from the stack, and a Vibey click collapses them', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?activities=2');
   const avatar = page.locator('.pet-mini-avatar-button');
   await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
   await expect(page.locator('.pet-mini-stack-count')).toBeVisible();
-  await expect(avatar).toHaveAttribute('aria-expanded', 'false');
-  await avatar.click();
+  // The stack is the way to expand the cards.
+  await page.locator('.pet-mini-collapsed').click();
   await expect(page.locator('.pet-mini-scroll')).toBeVisible();
   await expect(page.locator('.pet-mini-card')).toHaveCount(2);
-  await expect(avatar).toHaveAttribute('aria-expanded', 'true');
+  await expect(avatar).toHaveAttribute('aria-expanded', 'false');
+  // Vibey collapses the expanded list and does nothing else.
   await avatar.click();
   await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).not.toHaveClass(/is-open/);
+  // The next click is about Vibey: it opens the history, and the stack stays collapsed.
+  await avatar.click();
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+  await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+  await expect(avatar).toHaveAttribute('aria-expanded', 'true');
+  // Expanding the list closes the history: the two never share the space.
+  await page.locator('.pet-mini-collapsed').click();
+  await expect(page.locator('.pet-mini-scroll')).toBeVisible();
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).not.toHaveClass(/is-open/);
   await expect(avatar).toHaveAttribute('aria-expanded', 'false');
 });
 
-// Vibey's bubble: shown while there is something to wait for, then a 30s
-// on-screen linger, then folded away (spec §4.2). The clock is installed so the
-// linger can be walked through; the fixture's reply lands 150ms after load.
+// Vibey's bubble: shown only while the main session is active, hidden the
+// moment it is not (spec §4.2).
 const bubbleShown = (page: import('@playwright/test').Page) => page.locator('.pet-mini-slot.is-open .pet-mini-reply-bubble');
 const bubbleSlot = (page: import('@playwright/test').Page) => page.locator('.pet-mini-slot:has(.pet-mini-reply-bubble)');
-const inHitRegions = (page: import('@playwright/test').Page, selector: string) => page.evaluate((selector) => {
-  const node = document.querySelector(selector);
-  if (!node) return false;
-  const box = node.getBoundingClientRect();
-  const x = box.left + box.width / 2, y = box.top + box.height / 2;
-  return window.petLayoutHitRegions.some((rect) => x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height);
-}, selector);
 // Whether the bubble itself is reported as a region (a card moving into its old
 // place is, rightly, a region of its own).
 const bubbleIsRegion = (page: import('@playwright/test').Page) => page.evaluate(() => {
@@ -946,152 +966,104 @@ const settleMotion = (page: import('@playwright/test').Page) => page.evaluate(as
     .map((animation) => animation.finished.catch(() => {})));
 });
 
-for (const theme of ['light', 'dark']) {
-  test(`a new reply shows the bubble for 30s of on-screen time, then it folds away (${theme})`, async ({ page }) => {
-    await page.clock.install();
-    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh');
-    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
-    await page.clock.runFor(500);
-    await expect(bubbleShown(page)).toBeVisible();
-    await page.clock.runFor(28_000);
-    await expect(bubbleShown(page)).toBeVisible();
-
-    // Hidden time does not count.
-    await page.evaluate(() => {
-      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' });
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
-    await page.clock.runFor(60_000);
-    await page.evaluate(() => {
-      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'visible' });
-      document.dispatchEvent(new Event('visibilitychange'));
-    });
-    await expect(bubbleShown(page)).toBeVisible();
-
-    // Nor does time under the pointer.
-    await page.locator('.pet-mini-reply-toggle').hover();
-    await page.clock.runFor(60_000);
-    await expect(bubbleShown(page)).toBeVisible();
-    await page.mouse.move(2, 2);
-    await page.clock.runFor(1_000);
-    await expect(bubbleShown(page)).toBeVisible();
-    await page.clock.runFor(1_500);
-    await expect(bubbleShown(page)).toHaveCount(0);
-    // Folded away: it takes no space and no clicks.
-    await settleMotion(page);
-    expect(await bubbleSlot(page).evaluate((node) => node.getBoundingClientRect().height)).toBeLessThan(1);
-    await page.clock.runFor(100);
-    expect(await bubbleIsRegion(page)).toBe(false);
-
-    // A new reply brings it back at once.
-    await page.evaluate(() => window.petFixtureMessage({ id: 'live_reply', author: 'agent', type: 'result', text: '新的回复到了。' }));
-    await page.clock.runFor(100);
-    await expect(bubbleShown(page)).toBeVisible();
-    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('新的回复到了。');
-    await settleMotion(page);
-    await page.clock.runFor(100);
-    expect(await bubbleIsRegion(page)).toBe(true);
-  });
-}
-
-test('keyboard focus in the bubble holds it', async ({ page, browserName }) => {
-  await page.clock.install();
+test('an old, finished exchange starts with the bubble hidden, and takes no space or clicks', async ({ page }) => {
   await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh');
-  await page.clock.runFor(500);
-  await expect(bubbleShown(page)).toBeVisible();
-  await page.locator('.pet-mini-avatar-button').focus();
-  // Tab back from Vibey's button reaches the bubble's toggle row.
-  await page.keyboard.press(browserName === 'webkit' ? 'Alt+Shift+Tab' : 'Shift+Tab');
-  await expect(page.locator('.pet-mini-reply-toggle')).toBeFocused();
-  await page.clock.runFor(60_000);
-  await expect(bubbleShown(page)).toBeVisible();
-  await page.locator('.pet-mini-reply-toggle').blur();
-  await page.clock.runFor(31_000);
-  await expect(bubbleShown(page)).toHaveCount(0);
-});
-
-test('an old, finished exchange starts with the bubble hidden', async ({ page }) => {
-  await page.clock.install();
-  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&idle=1');
-  await page.clock.runFor(1_000);
   await expect(page.locator('.pet-mini-avatar-button')).toBeVisible();
+  await expect(page.locator('.pet-mini-reply-bubble')).toHaveCount(1);
   await expect(bubbleShown(page)).toHaveCount(0);
   await settleMotion(page);
-  await page.clock.runFor(100);
   expect(await bubbleSlot(page).evaluate((node) => node.getBoundingClientRect().height)).toBeLessThan(1);
-  expect(await bubbleIsRegion(page)).toBe(false);
+  await expect.poll(() => bubbleIsRegion(page)).toBe(false);
 });
 
-for (const [name, query] of [['running', 'running=1'], ['a pending Vault handoff', 'history=actions']] as const) {
+test('a running turn shows the bubble, and it hides as soon as the result arrives', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1');
+  await expect(bubbleShown(page)).toBeVisible();
+  await expect.poll(() => bubbleIsRegion(page)).toBe(true);
+  // The turn ends with its result, announced the way the event stream does.
+  await page.evaluate(() => window.petFixtureFinishTurn({ id: 'live_reply', author: 'agent', type: 'result', text: '做完了。', read_at: null }));
+  await expect(page.locator('.pet-mini-reply-bubble')).toContainText('做完了。');
+  await expect(bubbleShown(page)).toHaveCount(0);
+  await expect.poll(() => bubbleIsRegion(page)).toBe(false);
+});
+
+for (const [name, query] of [['a running turn', 'running=1'], ['a pending Vault handoff', 'history=actions']] as const) {
   test(`${name} keeps the bubble shown`, async ({ page }) => {
-    await page.clock.install();
-    await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&idle=1&${query}`);
-    await page.clock.runFor(1_000);
+    await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&${query}`);
     await expect(bubbleShown(page)).toBeVisible();
-    await page.clock.runFor(120_000);
+    await page.waitForTimeout(500);
     await expect(bubbleShown(page)).toBeVisible();
   });
 }
 
 for (const theme of ['light', 'dark']) {
-  test(`the dock's history button opens the bubble with its history, and closes it (${theme})`, async ({ page }) => {
-    await page.clock.install();
-    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&idle=1&history=long');
+  test(`a Vibey click opens the history from a hidden bubble, and a second hides it again (${theme})`, async ({ page }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&asr=1');
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
-    await page.clock.runFor(1_000);
+    const avatar = page.locator('.pet-mini-avatar-button');
+    await expect(avatar).toBeVisible();
     await expect(bubbleShown(page)).toHaveCount(0);
-    await page.locator('.pet-mini-avatar-button').hover();
-    const history = page.locator('.pet-mini-dock').getByRole('button', { name: '最近几轮', exact: true });
-    await expect(history).toBeVisible();
-    await expect(history).toHaveAttribute('aria-expanded', 'false');
-    expect(await history.getAttribute('title')).toBe('');
-    // Its tooltip, like the other pet icons.
-    await history.hover();
-    await page.clock.runFor(400);
-    await expect(page.getByRole('tooltip')).toHaveText('最近几轮');
-    await page.clock.runFor(100);
-    expect(await inHitRegions(page, '.pet-mini-dock button[aria-label="最近几轮"]')).toBe(true);
+    await expect(avatar).toHaveAttribute('aria-label', '最近几轮');
+    await expect(avatar).toHaveAttribute('aria-expanded', 'false');
 
-    await history.click();
-    await page.clock.runFor(500);
+    await avatar.click();
     await expect(bubbleShown(page)).toBeVisible();
     await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
-    await expect(history).toHaveAttribute('aria-expanded', 'true');
-    await expect(history).toHaveClass(/is-open/);
+    await expect(avatar).toHaveAttribute('aria-expanded', 'true');
     await expect.poll(() => page.locator('.pet-mini-bubble-history').evaluate((node) => Math.abs(node.scrollHeight - node.clientHeight - node.scrollTop))).toBeLessThanOrEqual(1);
-    // The dock stays while the history is open, hover or not.
-    await page.mouse.move(2, 2);
-    await page.clock.runFor(120_000);
-    await expect(page.locator('.pet-mini-dock')).toHaveCSS('opacity', '1');
-    await expect(bubbleShown(page)).toBeVisible();
 
-    await history.click();
-    await page.clock.runFor(500);
+    // Closing the history leaves nothing active, so the bubble hides at once.
+    await avatar.click();
     await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).not.toHaveClass(/is-open/);
-    await expect(history).toHaveAttribute('aria-expanded', 'false');
-    // Back to the summary, which lingers and then folds away.
-    await page.mouse.move(2, 2);
-    await expect(bubbleShown(page)).toBeVisible();
-    await page.clock.runFor(29_000);
-    await expect(bubbleShown(page)).toBeVisible();
-    await page.clock.runFor(2_000);
     await expect(bubbleShown(page)).toHaveCount(0);
+    await expect(avatar).toHaveAttribute('aria-expanded', 'false');
   });
 }
 
+test('keyboard activation of Vibey toggles the history like a click', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh');
+  const avatar = page.locator('.pet-mini-avatar-button');
+  await avatar.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+  await expect(avatar).toHaveAttribute('aria-expanded', 'true');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).not.toHaveClass(/is-open/);
+  await expect(avatar).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('a Vibey click with no conversation yet does nothing', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?main=false&activities=0');
+  const avatar = page.locator('.pet-mini-avatar-button');
+  await expect(avatar).toBeVisible();
+  await avatar.click();
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail.is-open')).toHaveCount(0);
+  await expect(avatar).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('holding Vibey still starts input, not the history', async ({ page }) => {
+  // Voice is unavailable here, so a hold opens the text input instead of
+  // dictation: the same hold path, without a microphone in the test browser.
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh');
+  const avatar = page.locator('.pet-mini-avatar-button');
+  const box = (await avatar.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.waitForTimeout(500);
+  await page.mouse.up();
+  await expect(page.getByRole('textbox')).toBeVisible();
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail.is-open')).toHaveCount(0);
+  // While typing, a Vibey click leaves the input, and its draft, alone.
+  await page.getByRole('textbox').fill('a draft');
+  await avatar.click();
+  await expect(page.getByRole('textbox')).toHaveValue('a draft');
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail.is-open')).toHaveCount(0);
+});
+
 for (const cards of [1, 3]) {
-  test(`with ${cards} card${cards > 1 ? 's' : ''}, the bubble shown, hidden or open fits without overlap`, async ({ page }) => {
-    await page.clock.install();
-    await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&activities=${cards}&history=long`);
-    const settle = async () => {
-      await page.clock.runFor(600);
-      await page.evaluate(async () => {
-        await Promise.all(document.getAnimations()
-          .filter((animation) => animation.effect?.getTiming().iterations !== Infinity)
-          .map((animation) => animation.finished.catch(() => {})));
-      });
-    };
+  test(`with ${cards} card${cards > 1 ? 's' : ''}, the bubble hidden, shown or open fits without overlap`, async ({ page }) => {
     const fits = async () => {
+      await settleMotion(page);
       const cardsBox = (await page.locator('.pet-mini-cards').boundingBox())!;
       const avatar = (await page.locator('.pet-mini-avatar-button').boundingBox())!;
       expect(cardsBox.y).toBeGreaterThanOrEqual(0);
@@ -1104,29 +1076,29 @@ for (const cards of [1, 3]) {
         expect(cardsBox.y + cardsBox.height).toBeLessThanOrEqual(avatar.y + avatar.height);
       }
     };
-    await settle();
-    await expect(bubbleShown(page)).toBeVisible();
-    await fits();
-    await page.locator('.pet-mini-reply-toggle').click();
-    await settle();
-    await fits();
-    await page.locator('.pet-mini-reply-toggle').click();
-    await page.mouse.move(2, 2);
-    await page.clock.runFor(31_000);
-    await settle();
+    // Hidden, then opened by a Vibey click.
+    await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&activities=${cards}&history=long`);
+    await expect(page.locator('.pet-mini-avatar-button')).toBeVisible();
     await expect(bubbleShown(page)).toHaveCount(0);
+    await fits();
+    await page.locator('.pet-mini-avatar-button').click();
+    await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+    await fits();
+    // Shown with its summary while Vibey works.
+    await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&activities=${cards}&history=long&running=1`);
+    await expect(bubbleShown(page)).toBeVisible();
     await fits();
   });
 }
 
 for (const asr of [true, false]) {
-  test(`the dock reads history, ${asr ? 'mic, ' : ''}keyboard, with a hairline between each (voice ${asr ? 'available' : 'unavailable'})`, async ({ page }) => {
-    await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&idle=1${asr ? '&asr=1' : ''}`);
+  test(`the dock holds ${asr ? 'mic and keyboard' : 'the keyboard alone'} (voice ${asr ? 'available' : 'unavailable'})`, async ({ page }) => {
+    await page.goto(`/e2e/pet-mini/fixture.html?scenario=personal&lang=zh${asr ? '&asr=1' : ''}`);
     await page.locator('.pet-mini-avatar-button').hover();
     const dock = page.locator('.pet-mini-dock');
     await expect(dock).toHaveCSS('opacity', '1');
     if (asr) await expect(dock.getByRole('button', { name: '语音输入', exact: true })).toBeVisible();
     const order = await dock.evaluate((node) => [...node.children].map((child) => child.tagName === 'BUTTON' ? child.getAttribute('aria-label') : child.classList.contains('pet-mini-dock-divider') ? '|' : null).filter(Boolean));
-    expect(order).toEqual(asr ? ['最近几轮', '|', '语音输入', '|', '输入消息'] : ['最近几轮', '|', '输入消息']);
+    expect(order).toEqual(asr ? ['语音输入', '|', '输入消息'] : ['输入消息']);
   });
 }
