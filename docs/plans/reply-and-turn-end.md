@@ -116,6 +116,13 @@ part is delivered and typed exactly as a non-terminal reply would be.
   it. A replay that finds its receipt records nothing, so an earlier reply never
   displaces a newer one; narration, notices, failures, detached and Activity
   outputs never write it. The last delivered reply wins, so A, B, A settle with A.
+- Every write derived from a reply that does not end its Turn happens only at
+  the dispatcher's delivered-reply point, once delivery evidence exists (on the
+  Web and in a background Session its receipt row persisted, on IM the platform
+  accepted the send): its Run output entry, its record as the Turn's last reply
+  (committed with the receipt), and a backend's own mark (OpenCode's emitted
+  id, from the emit's returned message id). Finals and Activity outputs keep
+  their settlement order.
 - Every reply carries the identity its backend gives it as `idempotency_key`
   (OpenCode's message id, Codex's item id, Vibey's committed row id, Claude's
   `ResultMessage.uuid`), so two replies with the same text stay two entries in
@@ -133,10 +140,12 @@ part is delivered and typed exactly as a non-terminal reply would be.
 - Claude: its completed pre-steer phase is now a non-terminal `result` that
   records its Run output.
 - Codex (PR 2a): `agentMessage.phase` decides. `final_answer` and
-  `partial_answer` are reply candidates; once anything visible follows a held
-  candidate (another answer, commentary, a tool call), it is delivered first, in
-  turn order, as a `result` that does not end the Turn. `commentary` is
-  narration. A message with no phase keeps the last-visible rule. The last
+  `partial_answer` are reply candidates; once anything follows a held candidate
+  (another answer, commentary, a tool call), it is delivered first, in turn
+  order, as a `result` that does not end the Turn. `commentary` is narration. A
+  message with no phase keeps the last-visible rule: a visible item after it
+  (a message, commentary, a tool call) makes it narration, delivered first in
+  the provider's order. The last
   candidate rides the `turn/completed` end, and a silent answer never displaces
   a visible one.
 - OpenCode (PR 2a): every completed assistant message whose finish is not

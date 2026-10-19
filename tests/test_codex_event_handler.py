@@ -640,6 +640,42 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         agent.emit_result_message.assert_awaited_once()
         assert agent.emit_result_message.await_args.args[1] == "The lock is fine too."
 
+    async def test_a_message_without_a_phase_goes_out_before_what_follows_it(self):
+        """Scenario: MESSAGE-DELIVERY-335.
+
+        A message with no phase is the reply only while it is the last visible item:
+        commentary or a tool call after it makes it narration, delivered first, in
+        the provider's order; a Turn that then completes has no reply of its own.
+        """
+        agent = _StubAgent()
+        handler = CodexEventHandler(agent)
+        request = SimpleNamespace(base_session_id="session-1", context=object(), started_at=0)
+        agent._turn_registry.register_turn("turn-1", request)
+        agent._get_formatter = lambda _context: SimpleNamespace(
+            format_toolcall=lambda name, payload, **_kwargs: f"tool {payload['command']}"
+        )
+
+        for item in (
+            {"type": "agentMessage", "id": "msg_1", "text": "The cache is safe."},
+            {"type": "agentMessage", "id": "msg_2", "text": "Checking the lock.", "phase": "commentary"},
+            {"type": "agentMessage", "id": "msg_3", "text": "One writer holds it."},
+            {"type": "commandExecution", "command": "rg lock", "status": "completed", "exitCode": 0},
+        ):
+            await handler._on_item_completed({"turnId": "turn-1", "item": item}, request)
+        await handler._on_turn_completed({"turn": {"id": "turn-1", "status": "completed"}}, request)
+
+        assert [
+            (call.args[1], call.args[2], call.kwargs.get("output"))
+            for call in agent.controller.emit_agent_message.await_args_list
+        ] == [
+            ("assistant", "The cache is safe.", None),
+            ("assistant", "Checking the lock.", None),
+            ("assistant", "One writer holds it.", None),
+            ("toolcall", "tool rg lock", None),
+        ]
+        agent.emit_result_message.assert_awaited_once()
+        assert not agent.emit_result_message.await_args.args[1]
+
     async def test_a_silent_answer_keeps_the_declared_answer_as_the_turns_reply(self):
         """Scenario: MESSAGE-DELIVERY-335: a silent answer after a declared one shows nothing
         and does not demote it; that answer rides the Turn end."""

@@ -2240,6 +2240,24 @@ class ConsolidatedMessageDispatcher:
             return []
 
     @staticmethod
+    def _writes_on_delivery(canonical_type: str, output_semantics: MessageOutput) -> bool:
+        """Whether this output's derived writes wait for its delivery evidence.
+
+        A reply that does not end its Turn (a ``result`` that settles no Run) records
+        its Run output entry, the Turn's last reply, and through the emit's return
+        value any backend mark, only at the delivered-reply point: on Web and
+        background delivery once its receipt row is persisted, on IM once the
+        platform accepted the send (docs/plans/reply-and-turn-end.md). Finals and
+        Activity outputs keep their own settlement order.
+        """
+
+        return (
+            canonical_type == "result"
+            and not output_semantics.settles_run
+            and not output_semantics.requires_delivery_for_run_settlement
+        )
+
+    @staticmethod
     def _turn_reply(
         context: MessageContext,
         canonical_type: str,
@@ -3404,7 +3422,11 @@ class ConsolidatedMessageDispatcher:
                 # message recorder, except an intermediate message on a Harness run,
                 # which belongs to no output ledger entry and is recorded by neither.
                 suppressed_trigger_kind = (context.platform_specific or {}).get("task_trigger_kind")
-                if canonical_type == "result" and suppressed_trigger_kind in HARNESS_TRIGGER_KINDS:
+                if persisted_output is None and self._writes_on_delivery(canonical_type, output_semantics):
+                    # A background reply's receipt is its local row: without one there
+                    # is nothing delivered to record.
+                    pass
+                elif canonical_type == "result" and suppressed_trigger_kind in HARNESS_TRIGGER_KINDS:
                     await self._record_suppressed_agent_run_terminal_result(
                         context,
                         written_recorded_text,
@@ -3738,7 +3760,8 @@ class ConsolidatedMessageDispatcher:
                 settlement_output_semantics = output_semantics
                 settlement_result_text = written_result_text
 
-                if not settlement_waits_for_persistence:
+                writes_on_delivery = self._writes_on_delivery(canonical_type, output_semantics)
+                if not settlement_waits_for_persistence and not writes_on_delivery:
                     await self._record_agent_run_terminal_result(
                         context,
                         written_result_text,
@@ -3807,6 +3830,23 @@ class ConsolidatedMessageDispatcher:
                             existing_row_id=existing_row_id,
                             **delivered_reply,
                         )
+
+                # The delivered-reply point: a non-terminal reply's Run output entry is
+                # written only with its delivery evidence (its Turn record committed
+                # with the receipt above; the return value below is a backend's).
+                if writes_on_delivery and (
+                    persisted_output is not None
+                    if target_context.platform == "avibe"
+                    else primary_message_id is not None
+                ):
+                    await self._record_agent_run_terminal_result(
+                        context,
+                        written_result_text,
+                        primary_message_id,
+                        is_error=is_error,
+                        terminal_error=terminal_error,
+                        output_semantics=output_semantics,
+                    )
 
                 if settlement_waits_for_persistence:
                     accepted_message = persisted_output or (

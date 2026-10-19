@@ -322,16 +322,10 @@ class CodexEventHandler:
                     await self._narrate(request, turn_state, thread_id, "assistant", text)
             elif text:
                 if text_is_visible:
-                    # An earlier answer is a reply now that more follows it.
-                    await self._flush_reply_candidate(turn_state, thread_id)
+                    # The held message is no longer the last word: it goes out first.
+                    await self._flush_pending(turn_state, thread_id, visible_follower=True)
                 prev = turn_state.pending_assistant if turn_state else None
                 prev_is_visible = bool(prev and strip_silent_blocks(prev[0]).strip())
-                if text_is_visible and prev_is_visible:
-                    # No phase: the last visible message is the reply, earlier ones narration.
-                    prev_text, prev_pm = prev
-                    await self._narrate(
-                        request, turn_state, thread_id, "assistant", prev_text, prev_pm
-                    )
                 # A silent terminal response may settle the turn, but it must
                 # not displace an earlier visible result candidate.
                 if turn_state and (text_is_visible or not prev_is_visible):
@@ -573,31 +567,36 @@ class CodexEventHandler:
             resolved, citations, _ = await self._prepare_citations(text, thread_id, request)
             await self._emit_narration(request, role, resolved, parse_mode, citations, level)
             return
-        # Whatever follows an answer Codex declared makes that answer a reply.
-        await self._flush_reply_candidate(turn_state, thread_id)
+        # What follows the held message makes it go out first, in turn order.
+        await self._flush_pending(turn_state, thread_id, visible_follower=level != "process")
         await self._hold(turn_state, thread_id, role, text, parse_mode, level)
 
-    async def _flush_reply_candidate(self, turn_state: CodexTurnState | None, thread_id: str) -> None:
-        """Deliver a held answer as a reply that does not end the Turn, in turn order.
+    async def _flush_pending(
+        self, turn_state: CodexTurnState | None, thread_id: str, *, visible_follower: bool
+    ) -> None:
+        """Deliver the held message ahead of what follows it, in turn order.
 
-        Codex marks an answer with ``agentMessage.phase``; once anything visible
-        follows it (a steered input's answer, commentary, a tool call), it is not
-        the Turn's last word but it is still a reply, a ``result``
-        (docs/plans/reply-and-turn-end.md). A held message with no phase keeps
-        the last-visible rule and stays where it is.
+        Once anything follows the held visible message it is not the Turn's last
+        word (docs/plans/reply-and-turn-end.md). An answer Codex declared
+        (``agentMessage.phase``) is still a reply: a ``result`` that does not end the
+        Turn, whatever follows it. A message with no phase keeps the last-visible
+        rule: a visible item after it (another message, commentary, a tool call)
+        makes it narration; process-only narration (a reasoning summary) leaves it
+        where it is.
         """
         held = turn_state.pending_assistant if turn_state else None
-        if (
-            not held
-            or turn_state.pending_assistant_phase not in _REPLY_PHASES
-            or not strip_silent_blocks(held[0]).strip()
-        ):
+        if not held or not strip_silent_blocks(held[0]).strip():
             return
-        output_key = turn_state.pending_assistant_id
+        if turn_state.pending_assistant_phase in _REPLY_PHASES:
+            role, output_key = _REPLY_ROLE, turn_state.pending_assistant_id
+        elif visible_follower:
+            role, output_key = "assistant", None
+        else:
+            return
         turn_state.pending_assistant = None
         turn_state.pending_assistant_phase = None
         turn_state.pending_assistant_id = None
-        await self._hold(turn_state, thread_id, _REPLY_ROLE, held[0], held[1], output_key=output_key)
+        await self._hold(turn_state, thread_id, role, held[0], held[1], output_key=output_key)
 
     async def _hold(
         self,

@@ -413,6 +413,32 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
                         ["out_1", "out_2", "out_3", "terminal"],
                     )
 
+    async def test_a_replys_derived_writes_wait_for_its_delivery(self):
+        """Scenario: MESSAGE-DELIVERY-335: every write derived from a reply that does not end
+        its Turn waits for its delivery evidence. An IM reply whose every send failed leaves
+        no Run output entry, no record as the Turn's last reply, and no delivery evidence
+        for its backend to mark; the same reply delivered writes each exactly once."""
+        with self.state():
+            controller = _Controller("slack")
+            context = self.context("slack")
+            send = controller.im_client.send_message
+
+            async def down(*_args, **_kwargs):
+                raise RuntimeError("Slack is down")
+
+            controller.im_client.send_message = down
+            evidence = await controller.emit_agent_message(context, "result", FIRST, output=REPLY)
+            self.assertIsNone(evidence)
+            self.assertEqual((self.harness_run()["result_payload"] or {}).get("outputs") or [], [])
+            self.assertIsNone(controller.session_turns.turn_last_reply("trn_1"))
+
+            controller.im_client.send_message = send
+            evidence = await controller.emit_agent_message(context, "result", FIRST, output=REPLY)
+            self.assertIsNotNone(evidence)
+            self.assertEqual([entry["text"] for entry in self.harness_run()["result_payload"]["outputs"]], [FIRST])
+            self.assertEqual(controller.session_turns.turn_last_reply("trn_1"), FIRST)
+            self.assertEqual(self.agent_rows(), [("result", FIRST)])
+
     async def test_a_failed_last_reply_read_is_retried_then_read_as_none(self):
         """Scenario: MESSAGE-DELIVERY-335: rule 5 is best effort. A read of the Turn's last
         reply that fails is retried briefly; one that keeps failing is logged and read as
