@@ -160,16 +160,18 @@ Hosted tools §6 holds, with these changes:
 | 200 with no results | ends with a `completed` record with no sources | none |
 | 401, or 403 that the catalog maps to the credential | next candidate | `needs_action`, invalid key (model-hub.md `credential.static_unauthorized`) |
 | 402 (balance exhausted) | next candidate | `needs_action`, balance (model-hub.md `credential.account_classified`) |
-| a plan or spending limit the catalog names (Tavily 432 plan limit, 433 pay-as-you-go limit) | next candidate | `needs_action`, a new detail: limit reached, remedy "raise the limit or upgrade in the vendor's dashboard" |
+| a plan or spending limit the catalog names (Tavily 432 plan limit, 433 pay-as-you-go limit) | next candidate | `needs_action`, the existing `models.source.needs_action.spend_limit_reached` detail and its raise-the-limit remedy |
 | 408, 429, 5xx, timeout, connection failure | next candidate | none |
 | 3xx (the redirect is refused, §3.3) | next candidate, `service_unavailable` | none |
 | other 4xx (a query the service refuses) | next candidate | none |
 | a body the mapping cannot read | next candidate | none |
 
 - **Recovery.** Replacing the key clears an invalid-key state, as for every Source. A `search` Source in the balance
-  or limit state gets "重新启用" in its detail: it runs the catalog's free check where one exists and clears the
-  state when the check passes; without a free check it clears the state, and the next real search tries the Source
-  once, putting it back in `needs_action` if the same failure returns. Nothing retries on its own. A model Source with
+  or limit state gets "重新启用" in its detail. For a balance state it runs the catalog's free check where one
+  exists and clears the state when the check passes. A free check only proves the key, and Tavily's `/usage` answers
+  200 while the account is still over its limit, so a limit state, and a balance state with no free check, are
+  cleared directly: the next real search tries the Source once and puts it back in `needs_action` if the same
+  failure returns. Nothing retries on its own. A model Source with
   a search API (DeepSeek) recovers through the existing model Source paths.
 - **Health writes are fenced** like every other Source attempt (`model-hub.md`, attempt-start settlement
   generation). A service attempt reserves the generation when it starts. A response that settles after the key was
@@ -214,6 +216,9 @@ Hosted tools §6 holds, with these changes:
 - `core/hosted_activity` projects `attempts[]` with the Sources' current names into the shared activity payload
   (`HostedActivity.to_payload`). Its localized line renderer writes the note, so the Web card and the IM line read
   one projection, as they do for cost.
+- The projection also carries the executor kind, `service` or `model`, taken from `executor_origin.api`. For a
+  service it leaves `model` empty, so the Web card (`HostedToolRow`) and the IM line (`_ran`) render "通过 Tavily"
+  without the catalog's service id. Model executors keep "via Anthropic API key · claude-haiku-5-5".
 - Every attempt is metered on its Source, so the Usage tab shows search requests per service. A service attempt
   reaches no model, so the usage ledger gains a service row: the Source, the catalog's `service_id` in place of a
   model, requests and cost. The label comes from the catalog, not from model inventory (§8).
@@ -320,8 +325,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   `service_vendors[]` (§3.5); the PUT body.
 - `capability-evidence.schema.json`, and `status.latest_ok.mode` and `status.verified[].mode` in
   `hosted-tools-status.schema.json` with the UI's types: `mode: "service"`.
-- The Source health detail for a reached plan or spending limit, with its remedy, in `source.schema.json` and the
-  classification registry of `model-hub.md`.
+- No new Source health detail: plan and spending limits reuse `models.source.needs_action.spend_limit_reached`.
 - The vendor catalog (`vibe/data/api_key_vendors.json` and its schema): search vendors and DeepSeek's search API row.
 - Usage (`usage-summary.schema.json`, `api.md`'s Usage section): a service row keyed by Source and `service_id`,
   counting requests rather than model calls, with reported or list cost (§4.3).
@@ -329,7 +333,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - `api.md`: the read and PUT changes, and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
 - The turn trace's `hosted_tools`: the frozen `prefer_native` and per-candidate `results` and `content` (§3.2).
-- `core/hosted_activity`'s payload: the projected `attempts` with Source names and codes (§4.3).
+- `core/hosted_activity`'s payload: the projected `attempts` with Source names and codes, and the executor kind
+  (§4.3).
 - C-1 (`agent-core-contracts/message.schema.json`): `HostedSource.content` and the field bounds (§4.3);
   `ProxyExecution.attempts[]` and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; an
   `executor_origin` that names a search service (`provider` = vendor, `model` = service id, and an `api` value for
