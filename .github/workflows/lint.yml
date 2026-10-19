@@ -36,7 +36,7 @@ jobs:
       - name: Classify the complete change
         id: scope
         run: python3 scripts/ci_docs_only.py
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         if: steps.scope.outputs.docs_only == 'true'
         with:
           python-version: "3.12"
@@ -64,7 +64,7 @@ jobs:
         run: |
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
       - name: Install pinned uv
@@ -98,7 +98,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: '3.12'
           cache: "pip"
@@ -183,7 +183,7 @@ jobs:
           node-version: "22.14.0"
           cache: npm
           cache-dependency-path: .show-runtime-test/package-lock.json
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
       - name: Install pinned uv
@@ -227,7 +227,7 @@ jobs:
           npm ci
           npm run build
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
           cache: "pip"
@@ -298,7 +298,7 @@ jobs:
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
 
@@ -373,7 +373,7 @@ jobs:
         run: |
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         if: steps.manifest.outputs.changed == 'true'
         with:
           python-version: "3.12"
@@ -468,7 +468,7 @@ jobs:
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
 
@@ -515,7 +515,7 @@ jobs:
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
 
@@ -604,7 +604,7 @@ jobs:
           name: vibe-package-contracts-linux
           path: dist
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
 
@@ -925,7 +925,7 @@ jobs:
           name: vibe-wheel-linux
           path: dist
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
           architecture: x64
@@ -979,7 +979,7 @@ jobs:
           name: vibe-wheel-linux
           path: dist
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
           cache: "pip"
@@ -1100,7 +1100,7 @@ jobs:
           New-Item -ItemType Directory -Force ui/dist | Out-Null
           Set-Content -Path ui/dist/index.html -Value '<!doctype html><html><body></body></html>'
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
         with:
           python-version: "3.12"
           architecture: x64
