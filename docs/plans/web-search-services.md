@@ -75,10 +75,12 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
 - **Create and replace branch.** `POST /api/models/sources` and `PUT /api/models/sources/<id>/credential` with
   `protocol: "search"` skip protocol observation and inventory discovery; `save_unverified` and
   `accept_unavailable_inventory` do not apply. The server provisions the key and runs the catalog's free check where
-  one exists. Its result is one of the four free-check outcomes (§5):
+  one exists. Its result is one of the five free-check outcomes (§5):
   - `pass`: the Source is saved verified;
   - `balance`: the key is valid but the account cannot pay for a request. The Source is saved verified and in the
     balance `needs_action` state, so the UI asks for a top-up before any query goes to it;
+  - `limit`: the key is valid but a plan or spending limit is already reached. The Source is saved verified and in
+    the `spend_limit_reached` state;
   - `invalid`: nothing is saved, and the existing invalid-key create error answers (for a replacement, the old key
     stays);
   - `unknown`, or no free check: the Source is saved with `verification_pending`, presented as "已保存" like an
@@ -122,7 +124,7 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
   engine config, the turn environment, Vibey, a log or the model.
 - The call is made inside the Model Hub adapter, which is already the custody boundary (`adapter.py`: no credential
   material crosses it). A second new operation runs a catalog free check for a `credential_ref` and returns only
-  its outcome (`pass`, `balance`, `invalid`, `unknown`), under the same transport rules and a 10 s total deadline
+  its outcome (`pass`, `balance`, `limit`, `invalid`, `unknown`), under the same transport rules and a 10 s total deadline
   (5 s to connect); expiry is `unknown`; create, replace, the
   DeepSeek add path and "重新启用" call it. A new adapter operation sends one search request for a `credential_ref` and returns status,
   a bounded header subset and the body; it reads the key from the state store (`read_api_key`, as credential
@@ -218,11 +220,10 @@ Hosted tools §6 holds, with these changes:
   not today), and its detail offers "立即重试", which clears the
   cooldown (advancing its generation) so the next search may try the service.
 - **Recovery.** Replacing the key clears an invalid-key state, as for every Source. A `search` Source in the balance
-  or limit state gets "重新启用" in its detail. For a balance state it runs the catalog's free check where one
-  exists: `pass` clears the state; `invalid` moves the Source to the existing invalid-key state, whose repair is
-  replacing the key; `balance` and `unknown` keep the current state. A free check only proves the key, and Tavily's `/usage` answers
-  200 while the account is still over its limit, so a limit state, and a balance state with no free check, are
-  not cleared at once. The persisted `needs_action` state stays, and the press arms an in-memory one-shot trial:
+  or limit state gets "重新启用" in its detail. When the row's free check can tell that state apart (DeepSeek's balance,
+  Tavily's usage limits), it runs the check: `pass` clears the state; `invalid` moves the Source to the existing
+  invalid-key state, whose repair is replacing the key; `balance`, `limit` and `unknown` keep or replace the state
+  as they say. A state the row's check cannot tell apart (Exa has no free check) is not cleared at once. The persisted `needs_action` state stays, and the press arms an in-memory one-shot trial:
   the Source admits exactly one search request, reserved by the first search that reaches it, while every other
   search skips it as `blocked`. A trial that completes clears the persisted state. A trial that fails is settled by the outcome table: a
   classified failure (401, 402, a limit code) replaces the blocker with its own state, so a revoked key asks for a
@@ -335,8 +336,9 @@ Hosted tools §6 holds, with these changes:
 The catalog row is the single source for each vendor's wire shape and price. The implementation lane verifies every
 field against the vendor's current documentation and records the date and link beside the price.
 
-A row's free check maps the vendor's answer to one of four outcomes: `pass` (the key works and the account can pay),
-`balance` (the key works but the account cannot pay), `invalid` (401, or a 403 the row maps to the credential) and
+A row's free check maps the vendor's answer to one of five outcomes: `pass` (the key works and the account can pay),
+`balance` (the key works but the account cannot pay), `limit` (the key works but a plan or spending limit is
+reached), `invalid` (401, or a 403 the row maps to the credential) and
 `unknown` (anything else: transport failures, 5xx, unreadable bodies).
 
 A vendor enters the catalog only when its terms allow what every search does: keeping the returned titles, URLs,
@@ -347,7 +349,7 @@ includes, so the recorded list price stays exact.
 | Vendor | Request | Auth | Results | Content | List price (2026-10) | Free check |
 | --- | --- | --- | --- | --- | --- | --- |
 | DeepSeek | `POST https://api.deepseek.com/v1/tools/search` `{query, count, need_content}` | Bearer | 1–50 | `need_content` | $0.75 / 1k successful requests; empty results and failures not billed | `GET /user/balance`: 200 with `is_available: true` is `pass`, with `false` is `balance`; 401 is `invalid` |
-| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: 200 is `pass` for the key (it does not prove the plan limit, §4.2); 401 is `invalid` |
+| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: 200 with every reported usage below its limit (`usage`/`limit`, `plan_usage`/`plan_limit`, `paygo_usage`/`paygo_limit`, where present) is `pass`; 200 with any at or above its limit is `limit`; 401 is `invalid` |
 | Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | `contents.text`, +$1 / 1k pages | $7 / 1k; the response's `costDollars` is used when present | none known |
 
 - DeepSeek facts that shape the UI (DeepSeek's Search & Fetch guide, 2026-10-19): the query is 1–128 characters and
