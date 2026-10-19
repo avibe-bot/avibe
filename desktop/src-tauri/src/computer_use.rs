@@ -18,6 +18,7 @@ use avibe_runtime_host::computer_use::{
     StoredComputerUseState, ToolSnapshot, COMPUTER_USE_DRIVER_VERSION, COMPUTER_USE_LOCK_FILE,
     COMPUTER_USE_SCHEMA_VERSION, COMPUTER_USE_SOCKET_FILE, COMPUTER_USE_STATE_FILE, COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
 };
+use avibe_runtime_host::hashing::{lower_hex, update_from_reader};
 use avibe_runtime_host::{BootstrapLog, LoopbackOrigin, BOOTSTRAP_LOG_NAME};
 use block2::RcBlock;
 use objc2::rc::{Allocated, Retained};
@@ -242,7 +243,7 @@ impl Paths {
 fn short_socket_path(state_dir: &Path, owner_uid: u32) -> PathBuf {
     let mut digest = Sha256::new();
     digest.update(state_dir.as_os_str().as_bytes());
-    let flavor = format!("{:x}", digest.finalize());
+    let flavor = lower_hex(&digest.finalize());
     let flavor = &flavor[..SOCKET_FLAVOR_HEX_BYTES];
     PathBuf::from("/tmp")
         .join(format!("avibe-cua-{owner_uid}-{flavor}"))
@@ -2040,15 +2041,8 @@ fn open_missing_permission_settings(app: &AppHandle, grants: Grants) {
 fn sha256_file(path: &Path) -> Option<String> {
     let mut file = File::open(path).ok()?;
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Some(format!("{:x}", hasher.finalize()))
+    update_from_reader(&mut hasher, &mut file).ok()?;
+    Some(lower_hex(&hasher.finalize()))
 }
 
 fn random_instance_id() -> io::Result<String> {

@@ -1,4 +1,5 @@
 //! Signed desktop release contract, shared by the shell and release verifier.
+use crate::hashing::lower_hex;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use minisign_verify::{PublicKey, Signature};
 use semver::Version;
@@ -216,7 +217,7 @@ impl Manifest {
 }
 impl Artifact {
     pub fn verify(&self, bytes: &[u8], public_key: &str) -> Result<(), String> {
-        if bytes.len() as u64 != self.size || format!("{:x}", Sha256::digest(bytes)) != self.sha256 {
+        if bytes.len() as u64 != self.size || lower_hex(&Sha256::digest(bytes)) != self.sha256 {
             return Err("update artifact integrity mismatch".into());
         }
         verify_signature(bytes, &self.signature, public_key)

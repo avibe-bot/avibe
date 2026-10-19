@@ -689,17 +689,18 @@ mod tests {
 
     #[test]
     fn tool_snapshot_digest_matches_the_runtime_pin() {
+        use crate::hashing::lower_hex;
         use sha2::{Digest, Sha256};
 
         const SNAPSHOT: &[u8] =
             include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../cua-driver/tools-v0.31.0.json"));
-        let actual = format!("{:x}", Sha256::digest(SNAPSHOT));
+        let actual = lower_hex(&Sha256::digest(SNAPSHOT));
         assert_eq!(actual, COMPUTER_USE_TOOL_SNAPSHOT_SHA256);
 
         let mut mutated = SNAPSHOT.to_vec();
         mutated[0] ^= 1;
         assert_ne!(
-            format!("{:x}", Sha256::digest(mutated)),
+            lower_hex(&Sha256::digest(mutated)),
             COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
             "a changed snapshot must fail the runtime pin"
         );

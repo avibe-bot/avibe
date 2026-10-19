@@ -12,6 +12,7 @@ use std::io::{self, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::hashing::{lower_hex, update_from_reader};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
@@ -514,8 +515,8 @@ fn verify_archive(path: &Path, manifest: &RuntimeBundleManifest) -> Result<(), P
 
     let mut file = File::open(path).map_err(PrivateRuntimeError::ArchiveUnavailable)?;
     let mut hasher = Sha256::new();
-    io::copy(&mut file, &mut hasher).map_err(PrivateRuntimeError::ArchiveUnavailable)?;
-    let actual = format!("{:x}", hasher.finalize());
+    update_from_reader(&mut hasher, &mut file).map_err(PrivateRuntimeError::ArchiveUnavailable)?;
+    let actual = lower_hex(&hasher.finalize());
     if actual != manifest.archive_sha256 {
         return Err(PrivateRuntimeError::ArchiveVerification);
     }
@@ -636,9 +637,9 @@ fn verify_installed_tree(root: &Path, manifest: &RuntimeBundleManifest) -> Resul
     for (relative, path, size) in &files {
         update_tree_header(&mut hasher, relative, *size);
         let mut file = File::open(path).map_err(PrivateRuntimeError::Install)?;
-        io::copy(&mut file, &mut hasher).map_err(PrivateRuntimeError::Install)?;
+        update_from_reader(&mut hasher, &mut file).map_err(PrivateRuntimeError::Install)?;
     }
-    let actual = format!("{:x}", hasher.finalize());
+    let actual = lower_hex(&hasher.finalize());
     if actual != manifest.tree_sha256 {
         return Err(PrivateRuntimeError::ArchiveVerification);
     }
@@ -860,11 +861,11 @@ mod tests {
             os: current_os().to_owned(),
             arch: current_arch().to_owned(),
             archive: "runtime.zip".to_owned(),
-            archive_sha256: format!("{:x}", Sha256::digest(&bytes)),
+            archive_sha256: lower_hex(&Sha256::digest(&bytes)),
             archive_size: bytes.len() as u64,
             unpacked_size,
             entry_count,
-            tree_sha256: format!("{:x}", tree_hasher.finalize()),
+            tree_sha256: lower_hex(&tree_hasher.finalize()),
             python_entrypoint: python.to_owned(),
             node_entrypoint: node.to_owned(),
             npm_entrypoint: npm_cli.to_owned(),
@@ -888,6 +889,31 @@ mod tests {
         )
         .expect("manifest");
         manifest
+    }
+
+    #[test]
+    fn tree_verification_keeps_the_frozen_v1_digest_and_rejects_equal_size_tampering() {
+        let root = scratch("frozen-tree-digest");
+        let mut manifest = write_bundle(&root, None);
+        let tree = root.join("tree");
+        fs::create_dir_all(tree.join("dir")).unwrap();
+        // Deliberately create files out of sorted order, including an empty file
+        // and a UTF-8 path. The v1 hash uses byte lengths, not character counts.
+        fs::write(tree.join("z"), b"c4").unwrap();
+        fs::write(tree.join("dir/测试"), b"abc").unwrap();
+        fs::write(tree.join("a"), b"").unwrap();
+        manifest.entry_count = 3;
+        manifest.unpacked_size = 5;
+        // Independent SHA-256 vector for domain + sorted length/path/size/data
+        // records, confirmed against the pre-upgrade sha2 0.10 implementation.
+        manifest.tree_sha256 = "b15f116b100c3be48b84107d8097a4874f97a7bdc0c127035bdaa702767ac411".into();
+        verify_installed_tree(&tree, &manifest).unwrap();
+        fs::write(tree.join("dir/测试"), b"abd").unwrap();
+        assert!(matches!(
+            verify_installed_tree(&tree, &manifest),
+            Err(PrivateRuntimeError::ArchiveVerification)
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1506,7 +1532,7 @@ mod tests {
     // payload hashes, staging cleanup and publication are part of this boundary.
     fn refresh_archive_identity(root: &Path, manifest: &mut RuntimeBundleManifest) {
         let bytes = fs::read(root.join("bundle/runtime.zip")).expect("archive bytes");
-        manifest.archive_sha256 = format!("{:x}", Sha256::digest(&bytes));
+        manifest.archive_sha256 = lower_hex(&Sha256::digest(&bytes));
         manifest.archive_size = bytes.len() as u64;
         fs::write(
             root.join("bundle").join(MANIFEST_NAME),
