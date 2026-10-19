@@ -266,7 +266,7 @@ name = "avibe-runtime-host"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "chrono",
  "minisign-verify",
  "reqwest 0.12.28",
