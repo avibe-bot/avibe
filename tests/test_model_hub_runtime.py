@@ -2492,7 +2492,7 @@ def test_search_free_check_propagates_cancelled_transport(monkeypatch):
     assert service is not None
 
     async def response(**_kwargs):
-        return SearchResponse(503, {"Retry-After": "2"}, None, "cancelled", True)
+        return SearchResponse(401, {"Retry-After": "2"}, None, "cancelled", True)
 
     monkeypatch.setattr(adapter, "_search_http", response)
     with pytest.raises(asyncio.CancelledError):

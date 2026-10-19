@@ -2205,10 +2205,10 @@ class CLIProxyEngineAdapter:
             timeout_total=_SEARCH_CHECK_TIMEOUT_SECONDS,
             connect_timeout=_SEARCH_CHECK_CONNECT_TIMEOUT_SECONDS,
         )
-        if response.http_status in set(check.get("invalid_statuses") or ()):
-            return SearchCredentialCheck("invalid")
         if response.error == "cancelled":
             raise asyncio.CancelledError
+        if response.http_status in set(check.get("invalid_statuses") or ()):
+            return SearchCredentialCheck("invalid")
         if response.error or response.http_status is None:
             return SearchCredentialCheck("unknown")
         if response.http_status != 200 or response.body is None:
