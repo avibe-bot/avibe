@@ -570,12 +570,20 @@ class ModelHubTurnGateway:
             raise ModelHubError("mapping_target_unavailable", status=409)
         if backend == "vibey" and turn_id:
             # The caller may read EOF before the previous handler's owned
-            # teardown exits. Drain already-settled responses, not live model
-            # work; the registry still refuses any remaining overlap.
+            # teardown exits, and Vibey stops reading at the stream's terminal
+            # event, before the gateway has settled the call. Drain responses
+            # whose upstream stream has ended, not live model work: a next call
+            # that resolves to another Source (the last call failed over) may
+            # only replace the turn's route once the previous one is released.
+            # The registry still refuses any remaining overlap.
             finishing = [
                 owned.done for owned in self._turn_requests.get(turn_id, ())
                 if owned.execution is not None
-                and (owned.execution.settlement_recorded or owned.execution.terminal_fact_committed)
+                and (
+                    owned.execution.completed_at is not None
+                    or owned.execution.settlement_recorded
+                    or owned.execution.terminal_fact_committed
+                )
             ]
             if finishing:
                 await asyncio.wait(finishing, timeout=self._transport_timeout)

@@ -649,6 +649,67 @@ async def test_a_finished_turns_request_is_never_credited_to_the_next_turn_on_it
         await gateway.close()
 
 
+class _SettlingLiveHandle(LiveInvokeHandle):
+    """A stream already delivered in full whose settlement (its outcome) is still being read."""
+
+    def __init__(self, outcome, chunks):
+        super().__init__(outcome, chunks)
+        self.settle = asyncio.Event()
+
+    async def outcome(self):
+        await self.settle.wait()
+        return self._outcome
+
+
+@pytest.mark.asyncio
+async def test_the_next_vibey_call_takes_the_failed_over_source_while_the_last_call_settles(tmp_path):
+    """MH-VIBEY-010: a call that failed over to another Source does not refuse the turn's next call.
+
+    Vibey stops reading a stream at its terminal event and resolves its next call at once, while the
+    gateway is still settling the last call. When that call failed over (its first Source now cooling
+    down), the next resolution names the other Source and replaces the turn's route; that waits for the
+    finished call instead of refusing the turn as overlapping live work.
+    """
+    primary = _source("src_primary01", "Primary", vendor="openai", protocol="openai_responses", model_id="gpt-x")
+    fallback = _source("src_fallback01", "Fallback", vendor="openai", protocol="openai_responses", model_id="gpt-x")
+    answer = _body("openai_responses", True)
+    settling = _SettlingLiveHandle(
+        _outcome(RawOutcomeKind.SUCCESS, source_id=fallback.id, stream_started=True), (answer,),
+    )
+    service = _vibey_service(tmp_path, [primary, fallback], handles=[
+        InvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=503, code="server_error", source_id=primary.id)),
+        settling,
+    ])
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    turn_id = "turn-failed-over"
+    try:
+        first = await router.resolve_hop("menu-alias", process_scope="vibey:test", turn_id=turn_id)
+        assert first["source_id"] == primary.id
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f'{first["base_url"]}/responses',
+                headers={"Authorization": f'Bearer {first["token"]}', **first["request_headers"]},
+                json={"model": first["runtime_model"], "stream": True, "input": "hi"},
+            ) as response:
+                assert _served_hop(response)["source"] == fallback.id
+                received = b""
+                while b"response.completed" not in received:
+                    received += await response.content.readany()
+                # The terminal event is in: the next call resolves while this one still settles.
+                following = asyncio.create_task(
+                    router.resolve_hop("menu-alias", process_scope="vibey:test", turn_id=turn_id)
+                )
+                await asyncio.sleep(0.05)
+                settling.settle.set()
+                second = await asyncio.wait_for(following, timeout=5)
+                await response.read()
+        assert second["source_id"] == fallback.id
+    finally:
+        settling.settle.set()
+        await gateway.close()
+
+
 @pytest.mark.asyncio
 async def test_vibey_route_replacement_refuses_overlap_without_poisoning_current_request(tmp_path):
     """MH-VIBEY-006: a new launch cannot take an in-flight request's turn identity."""
