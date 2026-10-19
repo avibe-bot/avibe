@@ -3009,13 +3009,14 @@ class ConsolidatedMessageDispatcher:
                 context,
                 output_semantics,
             )
-        # A Turn end that completes its Turn without a reply of its own settles each
-        # Run with the latest reply recorded on it for this Turn (its output ledger),
-        # appending nothing. A failed or stopped Turn reports its outcome instead.
+        # A Turn end that completes its Turn with no text of its own settles each Run
+        # with the latest reply recorded on it for this Turn (its output ledger),
+        # appending nothing. A failed or stopped Turn reports its outcome instead, and
+        # a ``level="silent"`` end that carries text still records that text.
         settles_with_recorded_reply = bool(
             mutates_turn_lifecycle
             and terminal_reason == "done"
-            and not (level != "silent" and text and text.strip())
+            and not (text and text.strip())
         )
         # Persist the exact terminal body in the Turn snapshot before delivery.
         # A steer accepted after this Turn settles can then complete its Agent Run
