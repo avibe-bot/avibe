@@ -64,8 +64,9 @@ Raw text, no line numbers, head kept. Model-facing suffixes:
 - Error: `Offset {offset} is beyond end of file ({total} lines total)`
 
 Images are attached as `ImageBlock`s (C-1); for a model without image input the result says so and omits the image.
-Avibe changes to Pi's text: `bmp` is not listed because v1 does not convert it, and there is no resizing (no image
-dependency); oversized images are refused with a message.
+Avibe changes to Pi's text: `bmp` is not listed because v1 does not convert it, and `read` does not resize: the
+snapshot keeps the file as it is, and a file over the inline byte limit is refused with a message. Pi's 2000 px
+dimension fit happens at request time instead, for every image of the context (`conversion-tables.md`, Images).
 
 ## 3. `write`
 

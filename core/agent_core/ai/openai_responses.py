@@ -24,6 +24,7 @@ from core.agent_core.ai.hosted import (
     responses_hosted_tool,
     x_cited_sources,
 )
+from core.agent_core.ai.image_limits import LoadedImage
 from core.agent_core.ai._common import (
     ServedHopResolver,
     WireRequest,
@@ -1320,7 +1321,7 @@ def build_responses_payload(
     request: ModelRequest,
     messages: tuple[Any, ...],
     *,
-    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+    loaded_images: Mapping[str, LoadedImage] | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "model": request.endpoint.model_id,
@@ -1368,7 +1369,7 @@ def wire_request(
     messages: tuple[Any, ...],
     *,
     gateway: bool,
-    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+    loaded_images: Mapping[str, LoadedImage] | None = None,
 ) -> WireRequest:
     """The Responses request for already prepared ``messages``, as the adapter sends it."""
 
@@ -1382,7 +1383,7 @@ def wire_request(
 def _message_to_response(
     message: Any,
     supports_images: bool,
-    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+    loaded_images: Mapping[str, LoadedImage] | None = None,
 ) -> list[dict[str, Any]]:
     if isinstance(message, UserMessage):
         return [{"role": "user", "content": _response_content(message.content, supports_images, input_text=True, loaded_images=loaded_images)}]
@@ -1448,7 +1449,7 @@ def _response_content(
     supports_images: bool,
     *,
     input_text: bool,
-    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+    loaded_images: Mapping[str, LoadedImage] | None = None,
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for part in content_parts(content, include_images=supports_images, loaded_images=loaded_images):

@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from core.agent_core.ai.image_limits import LoadedImage
 from core.agent_core.ai._common import (
     ServedHopResolver,
     WireRequest,
@@ -672,7 +673,7 @@ def build_chat_payload(
     request: ModelRequest,
     messages: tuple[Any, ...],
     *,
-    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+    loaded_images: Mapping[str, LoadedImage] | None = None,
 ) -> dict[str, Any]:
     payload_messages: list[dict[str, Any]] = [{"role": "system", "content": request.system}]
     # Pi keeps every correlated text tool result adjacent, then sends images
@@ -728,7 +729,7 @@ def wire_request(
     messages: tuple[Any, ...],
     *,
     gateway: bool,
-    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+    loaded_images: Mapping[str, LoadedImage] | None = None,
 ) -> WireRequest:
     """The Chat Completions request for already prepared ``messages``, as the adapter sends it."""
 
@@ -742,7 +743,7 @@ def wire_request(
 def _message_to_chat(
     message: Any,
     supports_images: bool,
-    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+    loaded_images: Mapping[str, LoadedImage] | None = None,
 ) -> dict[str, Any]:
     if isinstance(message, UserMessage):
         parts = _chat_content(message.content, supports_images, loaded_images)
@@ -787,7 +788,7 @@ def _message_to_chat(
 def _chat_content(
     content: tuple[Any, ...],
     supports_images: bool,
-    loaded_images: Mapping[str, tuple[str, str]] | None = None,
+    loaded_images: Mapping[str, LoadedImage] | None = None,
 ) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for part in content_parts(content, include_images=supports_images, loaded_images=loaded_images):

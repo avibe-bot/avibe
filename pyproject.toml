@@ -78,6 +78,9 @@ dependencies = [
     "packaging>=23.0",
     "uvicorn[standard]>=0.27",
     "imagesize>=1.4.1",
+    # Vibey fits context images to the providers' per-image size limit
+    # (core/agent_core/ai/image_limits.py).
+    "Pillow>=11.0",
     "pywebpush>=2.0.3",
     "cryptography>=42.0",
     # keccak256 + ripemd160 for vault signing-key address derivation

@@ -43,8 +43,8 @@ from core.agent_core.tools.truncate import format_size, truncate_head, utf8_len
 #: Stores an image for the transcript and returns its media token: ``(data, mime_type, name)``.
 ImageSink = Callable[[bytes, str, str], Union[str, Awaitable[str]]]
 
-# Pi keeps images under 4.5MB of base64 payload, below Anthropic's 5MB limit. Avibe v1 does not
-# resize, so the cap applies to the file as it is.
+# Pi keeps images under 4.5MB of base64 payload, below Anthropic's 5MB limit. Avibe's ``read`` does not
+# resize, so the cap applies to the file as it is; requests fit its dimensions (``ai/image_limits.py``).
 MAX_INLINE_IMAGE_BYTES = int(4.5 * 1024 * 1024) * 3 // 4
 _IMAGE_SNIFF_BYTES = 4100
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -180,7 +180,7 @@ def _load_image(handle: BinaryIO, head: bytes, mime_type: str) -> Union[_Image, 
         data = head + handle.read(max(0, MAX_INLINE_IMAGE_BYTES + 1 - len(head)))
         size = max(os.fstat(handle.fileno()).st_size, len(data))
         if size > MAX_INLINE_IMAGE_BYTES:
-            # Avibe: no resizing in v1.
+            # Avibe: ``read`` does not resize to fit the byte cap.
             reason = (
                 f"the file is {format_size(size)}, over the {format_size(MAX_INLINE_IMAGE_BYTES)} inline image limit. "
                 "Images are not resized."
