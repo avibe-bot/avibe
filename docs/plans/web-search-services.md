@@ -111,7 +111,7 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
 - `executor_order` keeps its rule (hosted tools §3.3) and now lists search-capable Sources beside model executors.
 - Releases before this feature ignore both fields with a warning: the existing loader rule for unknown fields.
 - A settings change applies from the next turn. The turn's first resolution freezes `prefer_native`, the effective
-  candidate list (with `services.<id>.enabled` applied) and each candidate's `results` and `content` in the turn
+  candidate list (Sources with `services.<id>.enabled: false` kept, last, as `disabled` entries) and each candidate's `results` and `content` in the turn
   trace's `hosted_tools`, beside the tool set and the executor order (hosted tools §6). Later hop resolutions and every call of the turn read the frozen values.
 
 ### 3.3 Credential custody
@@ -160,8 +160,8 @@ The PUT body gains `prefer_native` and `services` as per-field writes, the exist
 Hosted tools §6 holds, with these changes:
 
 - **Candidates** are the model executors of hosted tools §6 plus every search-capable Source: a `search` Source, or a
-  model Source whose vendor lists a search API and whose endpoint is official, unless `services.<id>.enabled` is
-  `false`.
+  model Source whose vendor lists a search API and whose endpoint is official. A Source with `services.<id>.enabled:
+  false` stays in the list as a `disabled` entry at the end; it is never requested.
 - **Automatic order** (no `executor_order`): `search` Sources in creation order, then model Sources with a search API
   in Vibey's Source order, then model executors as today. A saved `executor_order` is used as saved; candidates it
   does not name follow in automatic order. Adding a search-capable Source while an order is saved inserts it
@@ -169,6 +169,8 @@ Hosted tools §6 holds, with these changes:
   before every model executor, and the user's other entries keep their order. The same insertion applies once, in
   the version event's config migration, to an existing Source that becomes search-capable through the new catalog
   (an official DeepSeek Source in a saved order).
+- **Argument check.** Before any candidate, the gateway rejects a query that is empty or only whitespace with the
+  canonical tool's argument error, which the model can correct; no Source is tried or recorded.
 - **Skips.** A candidate can be skipped without a request, for one of five reasons: `blocked` (its Source is in
   `needs_action` or in a persistent `error`, the states admission already suppresses), `cooling` (a service cooldown, §4.2), `query_too_long` (the query exceeds what the service
   accepts, DeepSeek 128 characters) or `unavailable` (the Source was removed, re-identified or refused by final
@@ -193,8 +195,9 @@ Hosted tools §6 holds, with these changes:
 | a body the mapping cannot read (`service_unreadable`) | next candidate | none; a service cooldown, because a 200 may be billed |
 
 - **A model Source with a search API (DeepSeek)** shares its key and balance with its models, so a search 401 or 402
-  writes the Source's health exactly as a model call would. Its 403 is a security-policy refusal of the query, so the
-  catalog maps it to `service_refused` with no state.
+  writes the Source's health exactly as a model call would. DeepSeek documents no 403 for Search (its security-policy
+  403 is listed for Fetch), so a Search 403 is an undocumented status: `service_unavailable` with a cooldown, and no
+  Source state.
 - **Service cooldown.** A transient failure puts that (Source, service id) on an in-memory cooldown that only the
   search chain reads. A model route through the same Source (DeepSeek) is unaffected. A 429's `Retry-After` is read
   by the Model Hub retry coordinator's advice parser (seconds or HTTP date) and honored in full, never shortened;
@@ -350,7 +353,7 @@ states interactively.
 - A service row opens its detail; a model row is managed under 供应商与路由.
 - Advanced keeps only "各供应商状态" and the clears.
 - The tab subtitle names search services as a destination: "搜索会把查询发给执行它的厂商或搜索服务，失败时可能改由顺序中的
-  下一个重试；……按量付费的供应商和搜索服务每次调用都会计费。"
+  下一个重试；……按量付费的供应商和搜索服务按各自的规则计费。"
 
 ### 6.2 Add a search service
 
