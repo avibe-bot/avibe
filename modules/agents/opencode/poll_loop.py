@@ -16,7 +16,7 @@ from config.v2_config import (
 from core.backend_failure import emit_backend_failure
 from core.handlers.model_hub.retry import RECOVERY_EXHAUSTED_CODE
 from core.message_context import build_context_session_key
-from core.message_output import terminal_output_for, terminal_turn_output
+from core.message_output import MessageOutput, terminal_output_for, terminal_turn_output
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
 from modules.agents.base import AgentRequest
@@ -508,12 +508,13 @@ class OpenCodePollLoop:
         """Final text for the settlement message, keeping superseded replies.
 
         A steer injected while the model is finishing a text reply moves the
-        settlement to the reply that answers the steer. Earlier completed
-        replies in the Turn are not the result, but they must still reach the
-        user: the last visible reply is the result, earlier visible replies
-        are emitted as intermediate assistant messages, and a silent reply
-        never displaces a visible one. Emitted IDs are persisted so a
-        restored poll does not deliver the same reply again.
+        settlement to the reply that answers the steer. Every completed reply
+        that is not a tool-calls step is a reply all the same
+        (docs/plans/reply-and-turn-end.md): the last visible one rides the
+        settlement, earlier visible ones are delivered first as replies that do
+        not end the Turn, and a silent reply never displaces a visible one.
+        Emitted IDs are persisted so a restored poll does not deliver the same
+        reply again.
         """
 
         settlement_id = _message_info(settlement_message).get("id")
@@ -554,9 +555,10 @@ class OpenCodePollLoop:
             )
             await self._agent.controller.emit_agent_message(
                 context,
-                "assistant",
+                "result",
                 text,
                 parse_mode="markdown",
+                output=MessageOutput(completes_turn=False, completes_run=False),
             )
             emitted_message_ids.add(message_id)
             self._persist_emitted_assistant_messages(session_id, emitted_message_ids)

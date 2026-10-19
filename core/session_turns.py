@@ -1195,6 +1195,22 @@ class SessionTurnManager:
         with self._sqlite_engine().connect() as conn:
             return delivery_store.accepted_agent_run_ids_for_turn(conn, turn_id)
 
+    def record_turn_reply(self, turn_id: str, text: str) -> bool:
+        """Record a delivered reply's Run copy on its live Turn (blocking; call off the loop)."""
+
+        if not turn_id or not self._durable_schema_available():
+            return False
+        with self._sqlite_engine().begin() as conn:
+            return delivery_store.record_turn_reply(conn, turn_id, text)
+
+    def turn_last_reply(self, turn_id: str) -> Optional[str]:
+        """The Run copy of the Turn's last delivered reply (blocking; call off the loop)."""
+
+        if not turn_id or not self._durable_schema_available():
+            return None
+        with self._sqlite_engine().connect() as conn:
+            return delivery_store.turn_last_reply(conn, turn_id)
+
     def busy_session_ids(self) -> set[str]:
         """Sessions whose gate is occupied by a live turn RIGHT NOW.
 

@@ -1018,8 +1018,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_steered_assistant_and_result_settle_the_pending_turn(self):
         """A Result before the native input echo remains nonterminal.
 
-        MESSAGE-DELIVERY-334: that completed phase is a reply, a ``result`` that does
-        not end the Turn and records its Run output.
+        MESSAGE-DELIVERY-334 / MESSAGE-DELIVERY-335: that completed phase is a reply, a
+        ``result`` that does not end the Turn and records its Run output.
         """
         controller = _StubController()
         controller._get_session_key = lambda _context: "session-1"

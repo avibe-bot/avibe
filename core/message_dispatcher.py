@@ -2234,6 +2234,62 @@ class ConsolidatedMessageDispatcher:
             )
             return []
 
+    @staticmethod
+    def _turn_reply_turn_id(
+        context: MessageContext,
+        canonical_type: str,
+        output_semantics: MessageOutput,
+        *,
+        is_error: bool,
+        level: str,
+    ) -> Optional[str]:
+        """The live Turn a delivered output is a reply of, None when it is not one.
+
+        A reply that does not end its Turn is what a later content-free end settles
+        with (docs/plans/reply-and-turn-end.md, rule 5); a final carries its own
+        text, and narration, notices, failures, detached and Activity outputs belong
+        to no Turn's answer.
+        """
+
+        if canonical_type != "result" or is_error or level == "silent":
+            return None
+        if (
+            output_semantics.completes_turn
+            or output_semantics.detached
+            or not output_semantics.records_run_output
+            or output_semantics.requires_delivery_for_run_settlement
+        ):
+            return None
+        return str((context.platform_specific or {}).get("turn_token") or "").strip() or None
+
+    async def _record_turn_reply(self, turn_id: Optional[str], text: str) -> None:
+        """Record a delivered reply's Run copy for its live Turn, off the loop."""
+
+        if not turn_id or not (text or "").strip():
+            return
+        manager = getattr(self.controller, "session_turns", None)
+        record = getattr(manager, "record_turn_reply", None)
+        if not callable(record):
+            return
+        try:
+            await self._run_off_loop(lambda: record(turn_id, text))
+        except Exception:
+            logger.warning("Failed to record the last reply of Turn %s", turn_id, exc_info=True)
+
+    async def _turn_last_reply(self, context: MessageContext) -> Optional[str]:
+        """The Run copy of the Turn's last delivered reply, read off the loop."""
+
+        turn_id = str((context.platform_specific or {}).get("turn_token") or "").strip()
+        manager = getattr(self.controller, "session_turns", None)
+        read = getattr(manager, "turn_last_reply", None)
+        if not turn_id or not callable(read):
+            return None
+        try:
+            return await self._run_off_loop(lambda: read(turn_id))
+        except Exception:
+            logger.warning("Failed to read the last reply of Turn %s", turn_id, exc_info=True)
+            return None
+
     async def _record_suppressed_agent_run_terminal_result(
         self,
         context: MessageContext,
@@ -2936,6 +2992,14 @@ class ConsolidatedMessageDispatcher:
                 context,
                 output_semantics,
             )
+        # A Turn that ends done without a reply of its own settles with its last
+        # delivered reply: the Run copy this dispatcher recorded for the Turn when it
+        # delivered that reply (``session_turn_replies``), or "" when it delivered none
+        # (docs/plans/reply-and-turn-end.md, rule 5).
+        ends_without_reply = mutates_turn_lifecycle and not (text and text.strip())
+        turn_reply: Optional[str] = None
+        if ends_without_reply and terminal_reason == "done" and output_semantics.settles_run:
+            turn_reply = await self._turn_last_reply(context)
         # Persist the exact terminal body in the Turn snapshot before delivery.
         # A steer accepted after this Turn settles can then complete its Agent Run
         # without guessing from transcript order or requiring a live sink.
@@ -2954,7 +3018,13 @@ class ConsolidatedMessageDispatcher:
                     is_error=is_error,
                     settled_by=self._turn_release_settlement(output_semantics),
                     terminal_evidence={
-                        "result_text": self._fold_footer(terminal_body, result_footer),
+                        # A footer is never a reply: an end without one records the
+                        # Turn's last reply, or nothing.
+                        "result_text": (
+                            (turn_reply or "")
+                            if ends_without_reply
+                            else self._fold_footer(terminal_body, result_footer)
+                        ),
                         "terminal_error": terminal_error,
                         "settles_run": output_semantics.settles_run,
                         "output_provenance": output_semantics.provenance(context),
@@ -3015,10 +3085,11 @@ class ConsolidatedMessageDispatcher:
                 if canonical_type == "result" and output_semantics.settles_run:
                     # Run completion is independent from visible Message and Turn
                     # completion cardinality. A detached/empty final output may
-                    # settle its origin Run without touching the current Turn.
+                    # settle its origin Run without touching the current Turn; a
+                    # Turn end without a reply of its own settles with the Turn's.
                     await self._record_agent_run_terminal_result(
                         context,
-                        materialize_citations(text, citations),
+                        turn_reply if turn_reply else materialize_citations(text, citations),
                         None,
                         is_error=is_error,
                         terminal_error=terminal_error,
@@ -3317,6 +3388,14 @@ class ConsolidatedMessageDispatcher:
                 # The persisted row above keeps its tokens: it is finalized with
                 # a sidecar bound to the body the reader is actually shown.
                 written_recorded_text = materialize_citations(recorded_text, citations)
+                if persisted_output is not None:
+                    # A background Turn's row is its delivery.
+                    await self._record_turn_reply(
+                        self._turn_reply_turn_id(
+                            context, canonical_type, output_semantics, is_error=is_error, level=level
+                        ),
+                        written_recorded_text,
+                    )
                 if canonical_type == "result" and suppressed_trigger_kind in HARNESS_TRIGGER_KINDS:
                     await self._record_suppressed_agent_run_terminal_result(
                         context,
@@ -3712,6 +3791,20 @@ class ConsolidatedMessageDispatcher:
                             citations=citations,
                             existing_row_id=existing_row_id,
                         )
+
+                # A reply that reached the user (on avibe, its row is the delivery) is
+                # the Turn's last reply so far, as the Run copy recorded above.
+                if (
+                    persisted_output is not None
+                    if target_context.platform == "avibe"
+                    else primary_message_id is not None
+                ):
+                    await self._record_turn_reply(
+                        self._turn_reply_turn_id(
+                            context, canonical_type, output_semantics, is_error=is_error, level=level
+                        ),
+                        written_result_text,
+                    )
 
                 if settlement_waits_for_persistence:
                     accepted_message = persisted_output or (

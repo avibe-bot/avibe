@@ -943,6 +943,28 @@ session_turns = Table(
     ),
 )
 
+
+# The Run copy of each Turn's last delivered reply, which a Turn that ends without a
+# reply of its own settles with (docs/plans/reply-and-turn-end.md, rule 5). One row per
+# Turn, written by the dispatcher by primary key when it delivers a reply and read at the
+# Turn's end; a table of its own, so it is outside the Turn's compare-and-set by
+# construction.
+session_turn_replies = Table(
+    "session_turn_replies",
+    metadata,
+    Column("turn_id", String, primary_key=True),
+    Column("reply_text", Text, nullable=False),
+    Column("updated_at", String, nullable=False),
+    ForeignKeyConstraint(
+        ["turn_id"],
+        ["session_turns.id"],
+        ondelete="CASCADE",
+        deferrable=True,
+        initially="DEFERRED",
+        name="fk_session_turn_replies_turn",
+    ),
+)
+
 # One durable operational owner per submitted content-bearing input. Before
 # positive native acceptance the complete immutable Message candidate lives only
 # here. Acceptance moves one Delivery snapshot, or one ordered merged batch,

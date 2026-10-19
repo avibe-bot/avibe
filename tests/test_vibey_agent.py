@@ -66,6 +66,7 @@ from core.agent_core.messages import (
 from core.agent_core.tools.base import CallInstance, JobStatus, ToolResult, ToolSpec
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
+from core.session_turns import SessionTurnManager
 from modules.agents.vibey import VibeyAgent
 from modules.agents.vibey.errors import _KIND_KEYS, error_key
 from modules.agents.vibey.media import MediaSnapshots
@@ -224,11 +225,16 @@ class _Controller:
             mark_runtime_turn_started=self._native_start,
             release_runtime_turn=lambda context, **_kw: self.released.append(_turn(context)),
         )
+        # The durable Turn row's own reply reads and writes are the real Turn owner's.
+        turns = SessionTurnManager()
+        turns._engine = engine
         self.session_turns = SimpleNamespace(
             on_terminal_result=self._terminal,
             on_terminal_delivery_complete=lambda _context: None,
             model_hub_turn_id_for_task=lambda: None,
             _build_context=lambda session_id: _context(platform, session_id, turn_id="redelivery", delivery_id=""),
+            record_turn_reply=turns.record_turn_reply,
+            turn_last_reply=turns.turn_last_reply,
         )
         self.model_hub_runtime = SimpleNamespace(
             resolve=self._resolve, snapshot=lambda: ModelHubConfig(sources=list(self.hub_sources))
@@ -2117,7 +2123,7 @@ async def test_a_silent_final_after_narration_shows_no_reply(engine, session, tm
 async def test_a_reply_a_steer_superseded_is_a_result_and_the_turn_ends_once_after_both(
     engine, session, tmp_path, published, monkeypatch, stop_reason, final
 ) -> None:
-    """Scenario: MESSAGE-DELIVERY-334.
+    """Scenario: MESSAGE-DELIVERY-334 / MESSAGE-DELIVERY-335.
 
     A reply a steer took the final word from is a reply: a ``result`` whatever its length,
     green and notified once, and the steered input's answer is the Turn's second. The Turn
@@ -2170,9 +2176,9 @@ async def test_a_reply_a_steer_superseded_is_a_result_and_the_turn_ends_once_aft
     assert sorted(results) == sorted(replies) and results[rows[1].row_id] == "4."
     assert [push["message_id"] for push in pushes] == replies
     assert sequence == [*replies, "turn.end"]
-    # The end's own text settles the Turn, as on master: a silent end carries none (settling
-    # it with the Turn's last reply is PR 2's typed Turn-end event).
-    assert harness.controller.terminal_texts == ["" if final.startswith("<silent>") else final]
+    # The Turn settles with its last reply: a silent end with the one it delivered before
+    # (MESSAGE-DELIVERY-335).
+    assert harness.controller.terminal_texts == ["4." if final.startswith("<silent>") else final]
 
 
 async def test_a_silent_final_whose_run_failed_after_its_commit_is_typed_by_its_row(
@@ -2588,9 +2594,10 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
     """MESSAGE-DELIVERY-333: the run a restart cut had committed the Turn's final, so the rerun
     ends with that row through the live end, with no model call. A final that process never sent
     to IM is delivered once, with the image that run generated; one whose delivery the dispatcher
-    recorded is not sent again; a silent final leaves the reply that process showed as it was
-    and promotes nothing, not even a phase a released version stored as ``output``
-    (MESSAGE-DELIVERY-334)."""
+    recorded is not sent again; a silent final leaves the reply that process showed as it was,
+    promotes nothing, not even a phase a released version stored as ``output``
+    (MESSAGE-DELIVERY-334), and settles with that reply, which the dead process's dispatcher
+    recorded on the durable Turn (MESSAGE-DELIVERY-335)."""
     from dataclasses import replace
 
     from core.message_output import MessageOutput, terminal_output_for
@@ -2657,6 +2664,7 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
         assert (result["id"], result["content_text"]) == (shown["id"], reply)
         assert [row["content_text"] for row in harness.rows("output")] == ["An earlier phase."]
         assert [name for name, _ in published if name == "message.updated"] == []
+        assert harness.controller.terminal_texts[-1] == reply
         return
     assert result["id"] == final.row_id and result["content_text"].startswith(answer)
     sent, uploads = harness.controller.im_client.sent, harness.controller.im_client.uploads

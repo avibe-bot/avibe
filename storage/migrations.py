@@ -64,6 +64,7 @@ HEAD_TABLES = INITIAL_TABLES | {
     "messages",
     "message_deliveries",
     "session_turns",
+    "session_turn_replies",
     "agent_events",
     "skill_usage_daily",
     "show_session_events",

@@ -81,20 +81,18 @@ class AgentSilentResultTests(unittest.IsolatedAsyncioTestCase):
         # result path settles the dot + releases the stream.
         self.assertEqual(controller.messages, [("result", "", "markdown")])
 
-    async def test_footer_only_result_is_promoted_to_visible_body(self):
-        # show_duration on + no visible result/suffix: the duration/token footnote
-        # is promoted to the visible body (and NOT sent as a separate footer), so a
-        # timing-only completion is still delivered/persisted instead of going
-        # silent (Codex P2).
+    async def test_a_footer_only_end_is_content_free(self):
+        """MESSAGE-DELIVERY-335: show_duration on and nothing visible to say. A footer is
+        never a reply, so the end is content-free: an empty body, the footer only as
+        ``result_footer`` (the dispatcher settles the Turn with its last reply)."""
         controller = _StubController(token_field="1.2k tok")
         agent = _StubAgent(controller)
         context = MessageContext(user_id="U1", channel_id="C1", platform="slack")
 
         await agent.emit_result_message(context, "", subtype="success", duration_ms=5000)
 
-        self.assertEqual(controller.messages, [("result", "✅ ⏱️ 5s · 🪙 1.2k tok", "markdown")])
-        # Promoted to body, so no separate subtext footer is passed.
-        self.assertEqual(controller.result_footers, [None])
+        self.assertEqual(controller.messages, [("result", "", "markdown")])
+        self.assertEqual(controller.result_footers, ["✅ ⏱️ 5s · 🪙 1.2k tok"])
 
     async def test_an_uncited_result_does_not_require_the_citation_keyword(self):
         """The controller is substitutable, so an empty sidecar stays unsent.

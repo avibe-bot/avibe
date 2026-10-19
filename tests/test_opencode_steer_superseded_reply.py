@@ -136,13 +136,26 @@ def _assistant_emits(agent):
     ]
 
 
+def _reply_emits(agent):
+    """Replies delivered before the settlement: ``result`` rows that do not end the Turn."""
+
+    replies = []
+    for call in agent.controller.emit_agent_message.await_args_list:
+        if call.args[1] != "result":
+            continue
+        output = call.kwargs.get("output")
+        assert output is not None and not output.completes_turn and not output.settles_run
+        replies.append(call.args[2])
+    return replies
+
+
 @pytest.mark.parametrize("path", ["live", "restored"])
 @pytest.mark.parametrize(
     ("messages", "expected_result", "expected_emits"),
     [
         # A silent answer to the steer must not replace the visible reply.
         (_turn(REPORT, SILENT), REPORT, []),
-        # A visible answer to the steer is the result; A still reaches the user.
+        # A visible answer to the steer rides the Turn end; A is a reply delivered before it.
         (_turn(REPORT, "Callbacks noted."), "Callbacks noted.", [REPORT]),
         # A silent reply superseded by a visible one is not re-sent.
         (_turn(SILENT, "Callbacks noted."), "Callbacks noted.", []),
@@ -154,7 +167,8 @@ def _assistant_emits(agent):
 async def test_steer_keeps_superseded_completed_reply(
     monkeypatch, path, messages, expected_result, expected_emits
 ):
-    """MESSAGE-DELIVERY-321."""
+    """MESSAGE-DELIVERY-321 / MESSAGE-DELIVERY-335: a completed reply a steer follows is a
+    reply, a ``result`` that does not end the Turn, never narration."""
 
     monkeypatch.setattr("modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0)
     results: list[str] = []
@@ -166,7 +180,8 @@ async def test_steer_keeps_superseded_completed_reply(
         final_text = await _restored_poll(messages, agent, results)
 
     assert final_text == expected_result
-    assert _assistant_emits(agent) == expected_emits
+    assert _reply_emits(agent) == expected_emits
+    assert _assistant_emits(agent) == []
 
 
 async def test_tool_call_step_text_is_not_emitted_twice(monkeypatch):
@@ -197,4 +212,4 @@ async def test_restored_poll_does_not_resend_a_persisted_superseded_reply(monkey
     )
 
     assert final_text == "Callbacks noted."
-    assert _assistant_emits(restored) == []
+    assert _reply_emits(restored) == [] and _assistant_emits(restored) == []

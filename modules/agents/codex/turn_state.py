@@ -30,6 +30,9 @@ class CodexTurnState:
     turn_id: str
     request: AgentRequest
     pending_assistant: Optional[Tuple[str, Optional[str]]] = None
+    # The ``agentMessage.phase`` Codex gave the held message, None when it named
+    # none (``docs/plans/reply-and-turn-end.md``).
+    pending_assistant_phase: Optional[str] = None
     # Narration this turn has produced but not yet delivered, oldest first,
     # because the source that will attribute part of it has not arrived. Held as
     # one queue per turn so the order the turn narrated in is the order the user

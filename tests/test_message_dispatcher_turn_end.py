@@ -3,9 +3,13 @@
 Scenario: MESSAGE-DELIVERY-334. A reply is a ``result`` whether or not its emit
 also ends the Turn, so a Turn can reply more than once; only the Turn-end emit
 settles the Run, writes the Turn snapshot, commits the Turn, and finalizes the
-IM surfaces. A Turn end with no reply of its own settles the Run and the snapshot
-as master does (empty text); settling it with the Turn's last delivered reply is
-PR 2's typed Turn-end event (docs/plans/reply-and-turn-end.md).
+IM surfaces.
+
+Scenario: MESSAGE-DELIVERY-335. A Turn end with no reply of its own (a silent final,
+an empty end, a footer-only end) is content-free: it adds no row, and every attached
+Run and the Turn snapshot settle with the Run copy of the Turn's last delivered reply,
+which the dispatcher wrote onto the durable Turn when it delivered that reply, or ""
+when the Turn delivered none.
 """
 
 from __future__ import annotations
@@ -23,10 +27,14 @@ from sqlalchemy import select
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.citations import CitationSource, register_citations
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput, stop_output_for, terminal_turn_output
+from core.session_turns import SessionTurnManager
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.im import MessageContext
+from modules.im.formatters.slack_formatter import SlackFormatter
+from storage import message_deliveries
 from storage.db import create_sqlite_engine, dispose_cached_sqlite_engines
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_sessions, messages
@@ -50,17 +58,53 @@ class _Controller(_StubController):
     def __init__(self, platform: str):
         super().__init__(platform)
         self.settings_manager = SimpleNamespace(sessions=None)
+        # The duration footer a base result end composes.
+        self.config.show_duration = True
+        self.im_client.formatter = SlackFormatter()
         self.dispatcher = ConsolidatedMessageDispatcher(self)
         # The Turn's snapshot, and its commit: the commit runs once the Turn end armed it.
         self.snapshots: list[dict] = []
         self.committed_turns: list[MessageContext] = []
+        # Runs a steer attached to the Turn (the Turn owner's durable attribution).
+        self.steered_runs: list[str] = []
+        # The durable Turn row's own reads and writes are the real Turn owner's.
+        turns = SessionTurnManager()
         self.session_turns = SimpleNamespace(
             on_terminal_result=lambda _context, **kwargs: self.snapshots.append(kwargs),
             on_terminal_delivery_complete=self.committed_turns.append,
+            accepted_agent_run_ids_for_turn=lambda _turn_id: list(self.steered_runs),
+            record_turn_reply=turns.record_turn_reply,
+            turn_last_reply=turns.turn_last_reply,
         )
 
     async def emit_agent_message(self, *args, **kwargs):
         return await self.dispatcher.emit_agent_message(*args, **kwargs)
+
+
+def _live_turn(conn, scope_id: str) -> None:
+    """The durable Turn ``trn_1``, accepted and running, as the Turn owner leaves it."""
+    delivery = message_deliveries.insert_delivery(
+        conn,
+        delivery_id="dlv_trn_1",
+        session_id=SESSION,
+        priority="p3",
+        state="reserved",
+        snapshot=message_deliveries.message_snapshot(
+            scope_id=scope_id, session_id=SESSION, platform="avibe", author="user", source="user",
+            message_type="user", text="is the cache safe?",
+        ),
+        dispatch_text="is the cache safe?",
+        now=NOW,
+    )
+    claimed = message_deliveries.claim_start_batch(
+        conn, turn_id="trn_1", session_id=SESSION, backend="claude", deliveries=[delivery],
+        dispatch_text="is the cache safe?",
+    )
+    assert message_deliveries.bind_native_start(
+        conn, "trn_1", expected_version=int(claimed["turn"]["version"]), runtime_key="runtime",
+        runtime_turn_id="trn_1", native_turn_id="trn_1",
+    )
+    assert message_deliveries.materialize_start_acceptance(conn, turn_id="trn_1", evidence={"kind": "test"})
 
 
 class _Agent(BaseAgent):
@@ -119,6 +163,7 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
                             metadata_json="{}", created_at=NOW, updated_at=NOW, last_active_at=NOW,
                         )
                     )
+                    _live_turn(conn, scope_id)
             finally:
                 engine.dispose()
             self.runs = TaskExecutionStore()
@@ -170,7 +215,7 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
         return [push["body"] for push in _ScheduledPush.pushes]
 
     async def test_a_turn_replies_twice_and_ends_once_after_both(self):
-        """Scenario: MESSAGE-DELIVERY-334.
+        """Scenario: MESSAGE-DELIVERY-334 / MESSAGE-DELIVERY-335.
 
         The reply before a steer stays a reply, the steered input's answer is a
         second one, and the Turn ends once, after both: on its own final reply, or
@@ -193,36 +238,114 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.agent_rows(), [("result", FIRST), ("result", SECOND)])
                 self.assertEqual(self.pushed_texts(), [FIRST, SECOND])
                 self.assertNotIn("message.updated", [name for name, _ in self.published])
-                # The end's own text settles the snapshot and the Run, as on master: a
-                # content-free end carries none (PR 2 settles it with the last reply).
-                own_text = SECOND if ends_with == "its final reply" else ""
+                # Either way the Turn settles with its last reply: its own final, or the
+                # one it delivered before a content-free end (MESSAGE-DELIVERY-335).
                 [snapshot] = controller.snapshots
-                self.assertEqual((snapshot["is_error"], snapshot["terminal_evidence"]["result_text"]), (False, own_text))
+                self.assertEqual((snapshot["is_error"], snapshot["terminal_evidence"]["result_text"]), (False, SECOND))
                 self.assertEqual(len(controller.committed_turns), 1)
                 run = self.harness_run()
-                self.assertEqual((run["status"], run["result_text"] or ""), ("succeeded", own_text))
-                # Each delivered reply is on the Run's output log once.
-                self.assertEqual([entry["text"] for entry in run["result_payload"]["outputs"]], [FIRST, SECOND])
+                self.assertEqual((run["status"], run["result_text"]), ("succeeded", SECOND))
+                # Each delivered reply is on the Run's output log; a content-free end
+                # adds its settlement under the terminal identity, as every final does.
+                outputs = [entry["text"] for entry in run["result_payload"]["outputs"]]
+                self.assertEqual(outputs[:2], [FIRST, SECOND])
+                self.assertEqual(outputs[2:], [] if ends_with == "its final reply" else [SECOND])
 
-    async def test_a_silent_final_after_a_reply_promotes_nothing(self):
-        """Scenario: MESSAGE-DELIVERY-334."""
+    async def test_an_end_without_a_reply_settles_with_the_last_delivered_reply(self):
+        """Scenario: MESSAGE-DELIVERY-335 (and MESSAGE-DELIVERY-334: a content-free end
+        after a reply promotes nothing).
+
+        Every content-free end of a done Turn (a silent final, an empty end with the
+        duration footer shown or hidden, a backend's bare end) adds no row and pushes
+        nothing, and the snapshot and every Run attached to the Turn, one a steer
+        attached after the reply included, settle with the last reply it delivered:
+        the copy the dispatcher wrote (quick replies and file links stripped,
+        citations written out), A after A, B, A, read from the durable Turn by the
+        end in a new process.
+        """
+        source = (
+            "Two writers raced.\ue200cite\ue202turn0view0\ue201 See [the report](file:///tmp/report.md)."
+            "\n\n---\n[👍 Thanks] | [🔁 Rerun]"
+        )
+        written = "Two writers raced. [example.com](https://example.com/race) See the report."
+        registered, citations = register_citations(
+            source,
+            {"turn0view0": CitationSource(ref_id="turn0view0", title="Race report", url="https://example.com/race")},
+            unresolved_label="(source unavailable)",
+        )
+
+        async def silent_final(agent, controller, context):
+            await agent.emit_result_message(context, "<silent>noted</silent>")
+
+        async def empty_end(show_duration):
+            async def end(agent, controller, context):
+                controller.config.show_duration = show_duration
+                await agent.emit_result_message(context, "", duration_ms=5000)
+
+            return end
+
+        async def bare_end(agent, controller, context):
+            await controller.emit_agent_message(context, "result", "", output=terminal_turn_output())
+
+        ends = {
+            "a silent final": silent_final,
+            "an empty end, duration shown": await empty_end(True),
+            "an empty end, duration hidden": await empty_end(False),
+            "a bare end": bare_end,
+        }
         for platform in ("avibe", "slack"):
-            with self.subTest(platform=platform), self.state():
-                controller = _Controller(platform)
-                context = self.context(platform)
-                await controller.emit_agent_message(context, "result", FIRST, output=REPLY)
-                # The base result path emits a ``<silent>`` final as the content-free end.
-                await _Agent(controller).emit_result_message(context, "<silent>nothing to add</silent>")
+            for name, end in ends.items():
+                with self.subTest(platform=platform, end=name), self.state():
+                    context = self.context(platform)
+                    process = _Controller(platform)
+                    process.config.reply_enhancements = True
+                    await process.emit_agent_message(context, "result", registered, output=REPLY, citations=citations)
+                    steered = self.running_run("task-steered")
+                    await process.emit_agent_message(context, "result", SECOND, output=REPLY)
+                    await process.emit_agent_message(context, "result", registered, output=REPLY, citations=citations)
 
-                self.assertEqual(self.agent_rows(), [("result", FIRST)])
-                self.assertNotIn("message.updated", [name for name, _ in self.published])
-                self.assertEqual(self.pushed_texts(), [FIRST] if platform == "avibe" else [])
+                    # The Turn ends in a new process: nothing in memory carries the reply.
+                    restarted = _Controller(platform)
+                    restarted.steered_runs = [steered]
+                    await end(_Agent(restarted), restarted, context)
+
+                    self.assertEqual([row[0] for row in self.agent_rows()], ["result"] * 3)
+                    self.assertEqual(len(self.pushed_texts()), 3 if platform == "avibe" else 0)
+                    self.assertNotIn("message.updated", [event for event, _ in self.published])
+                    [snapshot] = restarted.snapshots
+                    self.assertEqual(snapshot["terminal_evidence"]["result_text"], written)
+                    self.assertEqual(len(restarted.committed_turns), 1)
+                    for run_id in (self.run_id, steered):
+                        run = self.harness_run(run_id)
+                        self.assertEqual((run["status"], run["result_text"]), ("succeeded", written))
+
+    async def test_only_a_delivered_reply_is_what_the_turn_settles_with(self):
+        """Scenario: MESSAGE-DELIVERY-335: a reply whose every send failed never reached the user,
+        so a content-free end settles with the one before it; a Turn that delivered no reply
+        settles with nothing (and so sends no callback), and a failure or a stop reports its
+        outcome, never an earlier reply (``test_only_a_reply_is_a_completed_turns_answer``)."""
+        for delivered in ((FIRST,), ()):
+            with self.subTest(delivered=delivered), self.state():
+                controller = _Controller("slack")
+                context = self.context("slack")
+                send = controller.im_client.send_message
+
+                async def lossy_send(target, text, *args, **kwargs):
+                    if SECOND in text:
+                        raise RuntimeError("Slack is down")
+                    return await send(target, text, *args, **kwargs)
+
+                controller.im_client.send_message = lossy_send
+                for reply in delivered:
+                    await controller.emit_agent_message(context, "result", reply, output=REPLY)
+                await controller.emit_agent_message(context, "result", SECOND, output=REPLY)
+                await _Agent(controller).emit_result_message(context, "", duration_ms=5000)
+
+                expected = delivered[-1] if delivered else ""
                 [snapshot] = controller.snapshots
-                self.assertEqual(snapshot["terminal_evidence"]["result_text"], "")
-                self.assertEqual(len(controller.committed_turns), 1)
+                self.assertEqual(snapshot["terminal_evidence"]["result_text"], expected)
                 run = self.harness_run()
-                self.assertEqual(run["status"], "succeeded")
-                self.assertEqual([entry["text"] for entry in run["result_payload"]["outputs"]], [FIRST])
+                self.assertEqual((run["status"], run["result_text"] or ""), ("succeeded", expected))
 
     async def test_a_reply_or_a_failure_keeps_its_type_attached_or_detached(self):
         """Scenario: MESSAGE-DELIVERY-334.
@@ -249,7 +372,7 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIs(bool(row["metadata"].get("detached")), output.detached)
 
     async def test_only_a_reply_is_a_completed_turns_answer(self):
-        """Scenario: MESSAGE-DELIVERY-334.
+        """Scenario: MESSAGE-DELIVERY-334 / MESSAGE-DELIVERY-335.
 
         Narration stays narration, and a Turn that fails or is stopped ends once
         with its outcome, never an earlier reply as its answer.
@@ -332,6 +455,41 @@ class TurnEndFinalizesImOnceTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(client.edits[-1][2].startswith("✅ done"))
                     self.assertEqual(len(client.sent), 2)
                 self.assertEqual(controller.processing_indicator.finished, 1)
+
+    async def test_a_footer_only_end_posts_nothing_and_still_ends_the_turn(self):
+        """Scenario: MESSAGE-DELIVERY-335.
+
+        With the duration shown and nothing to say, the end is content-free: no
+        message carries the footer alone, in concise or verbose mode. The Turn still
+        visibly ends: the concise status bubble collapses to its done line (with the
+        run time), the running indicator finishes, and the request's reaction clears.
+        """
+        for style in ("concise", "verbose"):
+            with self.subTest(style=style), mock.patch("core.message_dispatcher.persist_agent_message"):
+                controller = _BubbleController(platform="slack", progress_style=style)
+                controller.processing_indicator = _Indicator()
+                controller.settings_manager = SimpleNamespace(sessions=None)
+                controller.config.show_duration = True
+                controller.im_client.formatter = SlackFormatter()
+                dispatcher = _bubble_dispatcher(controller)
+                controller.emit_agent_message = dispatcher.emit_agent_message
+                context = _bubble_context()
+                context.platform_specific = {"turn_token": "trn_1"}
+                client = controller.im_client
+                agent = _Agent(controller)
+                agent._remove_ack_reaction = mock.AsyncMock()
+                request = SimpleNamespace(output=None, context=context)
+
+                await dispatcher.emit_agent_message(context, "toolcall", "🔧 `Bash` `{}`")
+                sent_before = list(client.sent)
+                await agent.emit_result_message(context, "", duration_ms=5000, request=request)
+
+                self.assertEqual(client.sent, sent_before)
+                if style == "concise":
+                    self.assertEqual(client.edits[-1][:2], ("msg-1", ""))
+                    self.assertTrue(client.edits[-1][2].startswith("✅ done"))
+                self.assertEqual(controller.processing_indicator.finished, 1)
+                agent._remove_ack_reaction.assert_awaited_once_with(request)
 
 
 if __name__ == "__main__":

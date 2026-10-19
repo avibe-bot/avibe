@@ -24,6 +24,7 @@ class _TurnState:
         self.turn_id = turn_id
         self.request = request
         self.pending_assistant = None
+        self.pending_assistant_phase = None
         self.pending_narration = []
         self.terminal_error = None
         self.terminal_error_notified = False
@@ -587,6 +588,72 @@ class CodexEventHandlerTests(unittest.IsolatedAsyncioTestCase):
         )
         agent.emit_result_message.assert_awaited_once()
         assert agent.emit_result_message.await_args.args[1] == "Final answer"
+
+    async def test_an_answer_a_steer_follows_stays_a_reply_in_turn_order(self):
+        """Scenario: MESSAGE-DELIVERY-335.
+
+        Codex declares each answer with ``agentMessage.phase``. An answer that more
+        output follows (here: the steered input's commentary, a tool call, and its
+        own answer) is still a reply: a ``result`` that does not end the Turn,
+        delivered before what follows it. ``commentary`` is narration, and the last
+        answer rides the Turn end.
+        """
+        agent = _StubAgent()
+        handler = CodexEventHandler(agent)
+        request = SimpleNamespace(base_session_id="session-1", context=object(), started_at=0)
+        agent._turn_registry.register_turn("turn-1", request)
+        agent._get_formatter = lambda _context: SimpleNamespace(
+            format_toolcall=lambda name, payload, **_kwargs: f"tool {payload['command']}"
+        )
+
+        for item in (
+            {"type": "agentMessage", "text": "Looking at the cache.", "phase": "commentary"},
+            {"type": "agentMessage", "text": "The cache is safe.", "phase": "final_answer"},
+            # The steered input: "and the lock?"
+            {"type": "agentMessage", "text": "Checking the lock.", "phase": "commentary"},
+            {"type": "commandExecution", "command": "rg lock", "status": "completed", "exitCode": 0},
+            {"type": "agentMessage", "text": "One writer holds it.", "phase": "partial_answer"},
+            {"type": "agentMessage", "text": "The lock is fine too.", "phase": "final_answer"},
+        ):
+            await handler._on_item_completed({"turnId": "turn-1", "item": item}, request)
+        await handler._on_turn_completed({"turn": {"id": "turn-1", "status": "completed"}}, request)
+
+        emitted = [
+            (call.args[1], call.args[2], call.kwargs.get("output"))
+            for call in agent.controller.emit_agent_message.await_args_list
+        ]
+        assert [(role, text) for role, text, _ in emitted] == [
+            ("assistant", "Looking at the cache."),
+            ("result", "The cache is safe."),
+            ("assistant", "Checking the lock."),
+            ("toolcall", "tool rg lock"),
+            ("result", "One writer holds it."),
+        ]
+        for role, _, output in emitted:
+            if role == "result":
+                assert output is not None and not output.completes_turn and not output.settles_run
+            else:
+                assert output is None
+        agent.emit_result_message.assert_awaited_once()
+        assert agent.emit_result_message.await_args.args[1] == "The lock is fine too."
+
+    async def test_a_silent_answer_keeps_the_declared_answer_as_the_turns_reply(self):
+        """Scenario: MESSAGE-DELIVERY-335: a silent answer after a declared one shows nothing
+        and does not demote it; that answer rides the Turn end."""
+        agent = _StubAgent()
+        handler = CodexEventHandler(agent)
+        request = SimpleNamespace(base_session_id="session-1", context=object(), started_at=0)
+        agent._turn_registry.register_turn("turn-1", request)
+
+        for item in (
+            {"type": "agentMessage", "text": "Regression report", "phase": "final_answer"},
+            {"type": "agentMessage", "text": "<silent>Watch acknowledged</silent>", "phase": "final_answer"},
+        ):
+            await handler._on_item_completed({"turnId": "turn-1", "item": item}, request)
+        await handler._on_turn_completed({"turn": {"id": "turn-1", "status": "completed"}}, request)
+
+        agent.controller.emit_agent_message.assert_not_awaited()
+        assert agent.emit_result_message.await_args.args[1] == "Regression report"
 
     async def test_reasoning_summary_stays_process_only(self):
         agent = _StubAgent()
