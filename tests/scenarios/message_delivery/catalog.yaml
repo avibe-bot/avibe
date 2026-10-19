@@ -475,13 +475,17 @@ scenarios:
       - tests/test_backend_failure_retry.py::test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice
       - tests/test_agent_transcript.py::test_the_restart_reads_of_a_turns_context_tail_stay_bounded
   - id: MESSAGE-DELIVERY-334
-    name: A reply is a result whether or not it ends its Turn; a Turn may reply more than once (a steered input's answer is a second result, each notified once), and only the content-free Turn end settles the Run with the Turn's last visible reply, writes the Turn snapshot, hides the thinking indicator, and finalizes IM, once
+    name: A reply is a result whether or not it ends its Turn; a Turn may reply more than once (a steered input's answer is a second result, each notified once), and only the Turn end settles the Run, writes the Turn snapshot, hides the thinking indicator, and finalizes IM, once; a content-free end settles each Run with the latest reply recorded on its own ledger, under that entry's id, across restarts and retries
     status: covered
     kind: regression
     layer: contract
     test:
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_turn_replies_twice_and_ends_once_after_both
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_silent_final_settles_with_the_last_reply_and_promotes_nothing
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_restart_settles_with_this_turns_reply_not_detached_work
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_replayed_earlier_reply_never_displaces_a_later_one
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_each_reply_has_one_ledger_entry_across_a_restart
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_run_steered_in_after_the_last_reply_settles_empty
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_reply_or_a_failure_keeps_its_type_attached_or_detached
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_only_a_reply_is_a_completed_turns_answer
       - tests/test_message_dispatcher_turn_end.py::TurnEndFinalizesImOnceTests::test_im_surfaces_finalize_once_at_the_turn_end

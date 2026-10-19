@@ -36,7 +36,6 @@ from core.message_mirror import (
     persist_agent_message,
     persist_silent_terminal,
     promote_turn_text_to_result,
-    resumed_turn_reply,
     resumed_turn_text,
 )
 from core.message_output import (
@@ -348,21 +347,6 @@ class _TerminalCommit:
 
 
 @dataclass(frozen=True)
-class _TurnReply:
-    """A Turn's latest visible reply that did not end it.
-
-    ``text`` is the Run copy (citations written out, no footer), ``output_id`` the
-    identity its Run output was recorded under, and ``order`` its transcript
-    position when a row holds it.
-    """
-
-    turn_token: str
-    text: str
-    output_id: str
-    order: Optional[tuple[str, str]] = None
-
-
-@dataclass(frozen=True)
 class _ResultSplit:
     """A proposed split, and whether every link in it survived.
 
@@ -437,14 +421,9 @@ class ConsolidatedMessageDispatcher:
         # ``_drop_status_keys``.
         self._turn_progress_style: dict[str, str] = {}
         # Per turn-sink key (thread-scoped, so concurrent Turns in one channel stay
-        # apart), the current Turn's latest visible reply that did not end it. A
-        # Turn that ends without a reply of its own settles its Run and snapshot
-        # with this one (docs/plans/reply-and-turn-end.md). Every lifecycle-terminal
-        # emit takes the entry, so it never outlives its Turn.
-        self._turn_reply: dict[str, _TurnReply] = {}
-        # Per turn-sink key, the current Turn's latest ``output``, the type a backend
-        # still names for a reply that did not end its Turn (Claude's pre-steer
-        # phase), with the Turn's token. A Turn that ends on a silent reply and
+        # apart), the current Turn's latest ``output``, the type a backend still
+        # names for a reply that did not end its Turn (Claude's pre-steer phase),
+        # with the Turn's token. A Turn that ends on a silent reply and
         # showed no ``result`` makes this row its result (``promote_turn_text_to_result``)
         # until every backend types its replies ``result`` (PR 2 of
         # docs/plans/reply-and-turn-end.md). Narration (``interim``) is never a reply.
@@ -1460,7 +1439,7 @@ class ConsolidatedMessageDispatcher:
         provenance: dict[str, Any],
         blocked_run_ids: frozenset[str],
         session_id: str | None = None,
-        output_id: str | None = None,
+        settles_with_recorded_reply: bool = False,
     ) -> list[str]:
         """Record a Turn's output on its Runs; may run off the loop.
 
@@ -1479,9 +1458,14 @@ class ConsolidatedMessageDispatcher:
                 if (run_id := str(value or "").strip())
             )
         )
-        output_id = output_id or self._run_output_id(
-            output_semantics, text, terminal=bool(terminal_status)
-        )
+        output_id = str(output_semantics.idempotency_key or "").strip()
+        if not output_id and output_semantics.sequence is not None:
+            output_id = f"sequence:{output_semantics.sequence}"
+        if not output_id and terminal_status:
+            output_id = "terminal"
+        if not output_id:
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
+            output_id = f"content:{digest}"
         record_turn_outputs = getattr(store, "record_turn_run_outputs", None)
         if callable(record_turn_outputs):
             deferred_run_ids = (
@@ -1492,6 +1476,12 @@ class ConsolidatedMessageDispatcher:
                 ]
                 if terminal_status
                 else []
+            )
+            # Each Run settles with the reply recorded on it for this Turn, under that
+            # entry's own id (``record_turn_run_outputs``). Passed only when set, so a
+            # stand-in store without the keyword keeps working.
+            recorded_reply = (
+                {"settles_with_recorded_reply": True} if settles_with_recorded_reply else {}
             )
             # Looked up on the class: a stand-in store answers any attribute.
             if callable(getattr(type(store), "record_turn_terminal_outputs", None)):
@@ -1506,6 +1496,7 @@ class ConsolidatedMessageDispatcher:
                     terminal_status=terminal_status,
                     error=terminal_error,
                     deferred_run_ids=deferred_run_ids,
+                    **recorded_reply,
                 )
             record_turn_outputs(
                 normalized_run_ids,
@@ -1517,6 +1508,7 @@ class ConsolidatedMessageDispatcher:
                 terminal_status=terminal_status,
                 error=terminal_error,
                 deferred_run_ids=deferred_run_ids,
+                **recorded_reply,
             )
             return deferred_run_ids
         get_run = getattr(store, "get_run", None)
@@ -1598,20 +1590,6 @@ class ConsolidatedMessageDispatcher:
                     **record_kwargs,
                 )
         return deferred_run_ids
-
-    @staticmethod
-    def _run_output_id(output_semantics: MessageOutput, text: str, *, terminal: bool) -> str:
-        """The identity a Run output ledger records this output under."""
-
-        output_id = str(output_semantics.idempotency_key or "").strip()
-        if not output_id and output_semantics.sequence is not None:
-            output_id = f"sequence:{output_semantics.sequence}"
-        if not output_id and terminal:
-            output_id = "terminal"
-        if not output_id:
-            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:20]
-            output_id = f"content:{digest}"
-        return output_id
 
     def _terminal_agent_run_ids(
         self,
@@ -1869,12 +1847,13 @@ class ConsolidatedMessageDispatcher:
         terminal_error: str | None = None,
         output_semantics: MessageOutput | None = None,
         log_label: str = "agent run terminal result",
-        output_id: str | None = None,
+        settles_with_recorded_reply: bool = False,
     ) -> None:
         """Record a Turn's terminal result on its Runs, off the controller loop.
 
-        ``output_id`` names the ledger entry the text was already recorded under (a
-        Turn's earlier reply its end settles with), so the Run lists it once.
+        ``settles_with_recorded_reply``: the Turn ended with no reply of its own, so
+        each Run settles with the latest reply recorded on it for this Turn, under
+        that entry's own id, and nothing is appended (docs/plans/reply-and-turn-end.md).
 
         The write waits for SQLite's writer, which another process can hold for the
         whole busy timeout, so it runs on the runtime-work door (#2706). It keeps the
@@ -1925,7 +1904,7 @@ class ConsolidatedMessageDispatcher:
                     blocked_run_ids=blocked_run_ids,
                     session_id=str((getattr(context, "platform_specific", None) or {}).get("agent_session_id") or "")
                     or None,
-                    output_id=output_id,
+                    settles_with_recorded_reply=settles_with_recorded_reply,
                 )
             finally:
                 store.close()
@@ -2820,47 +2799,6 @@ class ConsolidatedMessageDispatcher:
             return True
         return sum(1 for line in body.splitlines() if line.strip()) >= _INTERIM_MIN_LINES
 
-    def _remember_turn_reply(
-        self,
-        context: MessageContext,
-        text: str,
-        output_semantics: MessageOutput,
-        row: Optional[Mapping[str, Any]],
-    ) -> None:
-        """Record a delivered reply that did not end its Turn as the Turn's latest.
-
-        ``text`` is the copy a Run records. A reply that sits earlier in the
-        transcript than the one held (a retried earlier output) never displaces
-        it; the order is the transcript's own (``transcript_order_value``: when
-        the row entered the transcript, then its id). Only a reply whose Turn is
-        identified: without a token, a later Turn's end could not tell it apart
-        from its own.
-        """
-
-        turn_token = (context.platform_specific or {}).get("turn_token")
-        if not (turn_token and text and text.strip()):
-            return
-        order = None
-        row_id = (row or {}).get("id")
-        if row_id:
-            entered = canonical_message_timestamp(row.get("delivered_at") or row.get("created_at"))
-            order = (entered, str(row_id)) if entered else None
-        key = resolve_turn_sink_key(self.controller, context)
-        held = self._turn_reply.get(key)
-        if held is not None and held.turn_token == turn_token and order and held.order and held.order > order:
-            return
-        self._turn_reply[key] = _TurnReply(
-            turn_token, text, self._run_output_id(output_semantics, text, terminal=False), order
-        )
-
-    def _take_turn_reply(self, context: MessageContext) -> Optional[_TurnReply]:
-        """Remove and return the reply recorded for this context's Turn, if any."""
-
-        entry = self._turn_reply.pop(resolve_turn_sink_key(self.controller, context), None)
-        if entry is None or entry.turn_token != (context.platform_specific or {}).get("turn_token"):
-            return None
-        return entry
-
     def _remember_turn_text(self, context: MessageContext, row: Optional[dict]) -> None:
         """Record a persisted legacy row as its Turn's latest visible text.
 
@@ -2955,8 +2893,8 @@ class ConsolidatedMessageDispatcher:
         outputs remain in the current Turn, while detached outputs are delivered
         to the Session/IM surface without touching a newer Turn or its stream.
         The terminal emit is the Turn's end; an empty one is its content-free
-        form, which settles the Run and the Turn snapshot with the Turn's last
-        visible reply when the Turn completed.
+        form. When the Turn completed, it settles each Run with the latest reply
+        recorded on that Run for the Turn, and its snapshot carries nothing.
 
         ``hosted`` is a ``toolcall``'s hosted-tool card (``core.hosted_activity``,
         ``HostedActivity.to_payload``). It rides on the persisted row for the Web
@@ -2993,7 +2931,6 @@ class ConsolidatedMessageDispatcher:
             and not output_semantics.detached
             and current_runtime_turn
         )
-        turn_reply = self._take_turn_reply(context) if mutates_turn_lifecycle else None
         turn_text_row_id = self._take_turn_text(context) if mutates_turn_lifecycle else None
 
         # Terminal status-bubble reason word for the done/orphan footer:
@@ -3023,16 +2960,16 @@ class ConsolidatedMessageDispatcher:
         # (docs/plans/reply-and-turn-end.md). ``output`` is a type released versions
         # wrote for a reply that did not end its Turn; a caller may still name it.
         communication_type = "error" if canonical_type == "result" and is_error else canonical_type
-        # A reply that stays in the current Turn without ending it. The Turn's end
-        # settles its Run with the last one when it has no reply of its own.
-        remembers_turn_reply = (
+        # A legacy ``output`` reply: a silent final with no ``result`` promotes it.
+        remembers_turn_text = communication_type == "output" and not output_semantics.detached
+        # A reply that does not end its Turn supersedes the Turn's legacy ``output``:
+        # a Turn with a ``result`` reply promotes nothing.
+        replies_mid_turn = (
             communication_type == "result"
             and level != "silent"
             and not output_semantics.completes_turn
             and not output_semantics.detached
         )
-        # A legacy ``output`` reply: a silent final with no ``result`` promotes it.
-        remembers_turn_text = communication_type == "output" and not output_semantics.detached
         if visible_output_type:
             if not current_runtime_turn and not output_semantics.detached:
                 logger.info(
@@ -3041,6 +2978,8 @@ class ConsolidatedMessageDispatcher:
                     self._get_session_key(context),
                 )
                 return None
+        if replies_mid_turn:
+            self._take_turn_text(context)
         if current_runtime_turn or output_semantics.detached:
             self._schedule_agent_run_activity(context, output_semantics)
         quick_reply_target = routed_delivery_context(context)
@@ -3070,26 +3009,14 @@ class ConsolidatedMessageDispatcher:
                 context,
                 output_semantics,
             )
-        # A Turn end that completes its Turn without a reply of its own settles its
-        # Run and its snapshot with the Turn's last visible reply. A failed or
-        # stopped Turn reports its outcome, never an earlier answer.
-        settles_with_reply: Optional[_TurnReply] = None
-        if (
+        # A Turn end that completes its Turn without a reply of its own settles each
+        # Run with the latest reply recorded on it for this Turn (its output ledger),
+        # appending nothing. A failed or stopped Turn reports its outcome instead.
+        settles_with_recorded_reply = bool(
             mutates_turn_lifecycle
             and terminal_reason == "done"
             and not (level != "silent" and text and text.strip())
-        ):
-            settles_with_reply = turn_reply
-            if settles_with_reply is None:
-                # A rerun after a restart: the reply its Turn showed before was
-                # delivered by the process that died, so it is read from the rows.
-                resumed = resumed_turn_reply(context)
-                if resumed:
-                    settles_with_reply = _TurnReply(
-                        str((context.platform_specific or {}).get("turn_token") or ""),
-                        resumed,
-                        self._run_output_id(MessageOutput(), resumed, terminal=False),
-                    )
+        )
         # Persist the exact terminal body in the Turn snapshot before delivery.
         # A steer accepted after this Turn settles can then complete its Agent Run
         # without guessing from transcript order or requiring a live sink.
@@ -3101,8 +3028,6 @@ class ConsolidatedMessageDispatcher:
             # finalized, and an internal token must never be what a later steer
             # reads back as the turn's result.
             terminal_body = materialize_citations(terminal_body, citations)
-            if settles_with_reply is not None:
-                terminal_body = settles_with_reply.text
             manager = getattr(self.controller, "session_turns", None)
             if manager is not None:
                 manager.on_terminal_result(
@@ -3157,8 +3082,7 @@ class ConsolidatedMessageDispatcher:
                 # that arrives meanwhile waits for it and is delivered at the next
                 # await, as the Run terminal record below does.
                 promotes_turn_text = (
-                    settles_with_reply is None
-                    and mutates_turn_lifecycle
+                    mutates_turn_lifecycle
                     and level != "silent"
                     and terminal_reason == "done"
                 )
@@ -3212,17 +3136,15 @@ class ConsolidatedMessageDispatcher:
                     # Run completion is independent from visible Message and Turn
                     # completion cardinality. A detached/empty final output may
                     # settle its origin Run without touching the current Turn; a
-                    # Turn's end settles it with the Turn's last visible reply.
+                    # Turn's end settles each Run with the reply recorded on it.
                     await self._record_agent_run_terminal_result(
                         context,
-                        settles_with_reply.text
-                        if settles_with_reply is not None
-                        else materialize_citations(text, citations),
+                        "" if settles_with_recorded_reply else materialize_citations(text, citations),
                         None,
                         is_error=is_error,
                         terminal_error=terminal_error,
                         output_semantics=output_semantics,
-                        output_id=settles_with_reply.output_id if settles_with_reply is not None else None,
+                        settles_with_recorded_reply=settles_with_recorded_reply,
                     )
 
                 def settle_invisible_output() -> None:
@@ -3333,15 +3255,6 @@ class ConsolidatedMessageDispatcher:
             logger.info("Skipping duplicate agent output %s", native_output_id or existing_row_id)
             # A dispatcher that never saw the first emit (a recovery replay) learns
             # the row here; an older output's retry keeps the newer row recorded.
-            if remembers_turn_reply:
-                self._remember_turn_reply(
-                    context,
-                    self._accepted_message_result_text(
-                        accepted_message, materialize_citations(persist_text, citations), None
-                    ),
-                    output_semantics,
-                    accepted_message,
-                )
             if remembers_turn_text:
                 self._remember_turn_text(context, accepted_message)
             accepted_output_semantics = self._output_with_accepted_provenance(
@@ -3515,13 +3428,6 @@ class ConsolidatedMessageDispatcher:
                     )
                 if remembers_turn_text:
                     self._remember_turn_text(context, persisted_output)
-                if remembers_turn_reply:
-                    self._remember_turn_reply(
-                        context,
-                        materialize_citations(recorded_text, citations),
-                        output_semantics,
-                        persisted_output,
-                    )
                 local_message_id = (persisted_output or {}).get("id") or (
                     f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
                 )
@@ -3934,8 +3840,6 @@ class ConsolidatedMessageDispatcher:
                         )
                 if remembers_turn_text:
                     self._remember_turn_text(context, persisted_output)
-                if remembers_turn_reply and (persisted_output is not None or primary_message_id is not None):
-                    self._remember_turn_reply(context, written_result_text, output_semantics, persisted_output)
 
                 if settlement_waits_for_persistence:
                     accepted_message = persisted_output or (

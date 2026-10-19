@@ -2121,9 +2121,8 @@ async def test_a_reply_a_steer_superseded_is_a_result_and_the_turn_ends_once_aft
 
     A reply a steer took the final word from is a reply: a ``result`` whatever its length,
     green and notified once, and the steered input's answer is the Turn's second. The Turn
-    ends once, after both; a silent answer to the steer ends it with the first reply as its
-    answer, nothing promoted. One cut off at its output limit was never completed, so it
-    stays narration.
+    ends once, after both; a silent answer to the steer ends it with nothing promoted. One
+    cut off at its output limit was never completed, so it stays narration.
     """
     pushes = _recorded_pushes(monkeypatch)
     generating, steered = asyncio.Event(), asyncio.Event()
@@ -2171,7 +2170,8 @@ async def test_a_reply_a_steer_superseded_is_a_result_and_the_turn_ends_once_aft
     assert sorted(results) == sorted(replies) and results[rows[1].row_id] == "4."
     assert [push["message_id"] for push in pushes] == replies
     assert sequence == [*replies, "turn.end"]
-    assert harness.controller.terminal_texts == ["4." if final.startswith("<silent>") else final]
+    # The snapshot carries what the Turn's end said; a silent end said nothing.
+    assert harness.controller.terminal_texts == ["" if final.startswith("<silent>") else final]
 
 
 async def test_a_silent_final_whose_run_failed_after_its_commit_is_typed_by_its_row(
@@ -2587,8 +2587,8 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
     """MESSAGE-DELIVERY-333: the run a restart cut had committed the Turn's final, so the rerun
     ends with that row through the live end, with no model call. A final that process never sent
     to IM is delivered once, with the image that run generated; one whose delivery the dispatcher
-    recorded is not sent again; a silent final settles with the reply that process showed, read
-    from the Turn's rows, and promotes nothing (MESSAGE-DELIVERY-334)."""
+    recorded is not sent again; a silent final after a reply that process showed promotes
+    nothing and leaves that reply as it was (MESSAGE-DELIVERY-334)."""
     from dataclasses import replace
 
     from core.message_output import MessageOutput, terminal_output_for
@@ -2612,11 +2612,6 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
             output=MessageOutput(completes_turn=False, completes_run=False, persisted_row_id=shown.row_id),
         )
         [shown] = harness.rows("result")
-        # Detached work reported into the same Session meanwhile is not this Turn's reply.
-        await harness.controller.emit_agent_message(
-            request.context, "result", "The nightly job finished.",
-            output=MessageOutput(completes_turn=False, completes_run=False, detached=True),
-        )
     image = tmp_path / "lighthouse.jpg"
     image.write_bytes(_JPEG)
     final = await harness.agent.store.append_response(
@@ -2650,10 +2645,9 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
 
     assert harness.provider.requests == [] and harness.controller.hub_calls == []
     assert harness.controller.terminals[-1] == {"turn": cut_turn, "is_error": False, "settled_by": "terminal_result"}
-    [result] = [row for row in harness.rows("result") if not json.loads(row["metadata_json"] or "{}").get("detached")]
+    [result] = harness.rows("result")
     if case == "silent":
         assert (result["id"], result["content_text"]) == (shown["id"], reply)
-        assert harness.controller.terminal_texts[-1] == reply
         assert [name for name, _ in published if name == "message.updated"] == []
         return
     assert result["id"] == final.row_id and result["content_text"].startswith(answer)

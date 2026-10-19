@@ -981,10 +981,10 @@ def delivered_committed_row(
     return row
 
 
-def _resumed_turn_row(context: MessageContext, types: tuple[str, ...]) -> Optional[tuple[str, str]]:
-    """``(row_id, text)`` of the last row of ``types`` a Turn a restart reran wrote, from its own rows.
+def resumed_turn_text(context: MessageContext) -> Optional[str]:
+    """The legacy ``output`` a rerun Turn's silent final promotes (``promote_turn_text_to_result``).
 
-    The dispatcher remembers what each Turn shows as it delivers it; what a rerun
+    The dispatcher remembers each Turn's ``output`` as it delivers it; what a rerun
     Turn showed before the restart was delivered by the process that died, so the
     rerun's end reads it from the Turn's own rows (``last_turn_text``).
     """
@@ -997,23 +997,10 @@ def _resumed_turn_row(context: MessageContext, types: tuple[str, ...]) -> Option
 
     try:
         with get_cached_sqlite_engine().connect() as conn:
-            return last_turn_text(conn, session_id, turn_id, types=types)
+            found = last_turn_text(conn, session_id, turn_id, types=("output",))
     except Exception:
-        logger.debug("resumed turn lookup failed", exc_info=True)
+        logger.debug("resumed_turn_text: lookup failed", exc_info=True)
         return None
-
-
-def resumed_turn_reply(context: MessageContext) -> Optional[str]:
-    """The last visible reply of a Turn a restart reran, which its end settles with."""
-
-    found = _resumed_turn_row(context, ("result",))
-    return found[1] if found else None
-
-
-def resumed_turn_text(context: MessageContext) -> Optional[str]:
-    """The legacy ``output`` a rerun Turn's silent final promotes (``promote_turn_text_to_result``)."""
-
-    found = _resumed_turn_row(context, ("output",))
     return found[0] if found else None
 
 
