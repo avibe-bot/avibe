@@ -2618,6 +2618,39 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     await waitFor(() => expect(bubbleOpen()).toBe(false));
   });
 
+  it('does not take a background completion for the ended turn\'s reply', async () => {
+    await runThenEnd(async (finish) => {
+      const detached = message('bg', 'S', { text: 'Background run done', read_at: null, metadata: { detached: true } });
+      const silent = message('stop', 'S', { text: '', read_at: null });
+      tails.S = [...tails.S, detached, silent];
+      finish();
+      await emit((h) => {
+        h.onMessageNew?.(detached);
+        h.onMessageNew?.(silent);
+        h.onTurnEnd?.({ session_id: 'S' });
+      });
+    });
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+  });
+
+  it('counts a turn that ends while the history is open as already seen', async () => {
+    await runThenEnd(async (finish) => {
+      // The history is open (expansion confirmed) when the turn ends with its reply.
+      await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+      await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).not.toBeNull());
+      const reply = message('r1', 'S', { text: 'Answered while open', read_at: null });
+      tails.S = [...tails.S, reply];
+      finish();
+      await emit((h) => {
+        h.onMessageNew?.(reply);
+        h.onTurnEnd?.({ session_id: 'S' });
+      });
+      await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Answered while open'));
+    });
+    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+  });
+
   it('lingers once the reply arrives when the turn end came first', async () => {
     await runThenEnd(async (finish) => {
       finish();
@@ -2632,6 +2665,35 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     expect(bubbleOpen()).toBe(true);
     act(() => { vi.advanceTimersByTime(400); });
     expect(bubbleOpen()).toBe(false);
+  });
+
+  it('keeps the lingering reply while a history request waits on the shell, and after it is refused', async () => {
+    const expand = deferred<unknown>();
+    const invoke = vi.fn((command: string, args?: { expanded?: boolean }) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
+      if (command === 'pet_set_expanded' && args?.expanded) return expand.promise;
+      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    try {
+      await runToResult();
+      const toggle = document.querySelector<HTMLButtonElement>('.pet-mini-reply-toggle')!;
+      act(() => { toggle.focus(); });
+      fireEvent.click(screen.getByLabelText('pet.recentTurns'));
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
+      // Not yet confirmed: the reply still holds the bubble, and focus stays put.
+      expect(bubbleOpen()).toBe(true);
+      expect(document.activeElement).toBe(toggle);
+      await act(async () => expand.reject(new Error('no monitor')));
+      // Refused: the history never opened, so the reply plays out its time.
+      expect(bubbleOpen()).toBe(true);
+      act(() => { vi.advanceTimersByTime(10_200); });
+      expect(bubbleOpen()).toBe(false);
+    } finally {
+      Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+      Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+    }
   });
 
   it('does not linger when a send grace runs out with no turn registered', async () => {

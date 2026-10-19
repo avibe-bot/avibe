@@ -182,8 +182,8 @@ transition (instant under reduced motion), taking no space and no clicks.
   from running to done. The local send grace (which shows "thinking" before
   the server registers a turn) is not part of it: a grace that runs out is not
   a turn that ended. Only a turn that produced a reply lingers: a non-empty
-  agent result after the latest input, or the promoted result that answers an
-  earlier input. A stopped turn (which ends with an empty result) or a turn
+  agent result after the latest input (not a background run's detached
+  completion), or the promoted result that answers an earlier input. A stopped turn (which ends with an empty result) or a turn
   with no reply does not; if the turn's end comes before its result, the
   bubble folds away and the reply lingers once it arrives.
   It is derived while rendering from the last running value seen, so the
@@ -212,9 +212,13 @@ transition (instant under reduced motion), taking no space and no clicks.
   again a second later. A pointer click never pins it. If the bubble goes
   while focus is inside, whether it folds away or is replaced (by the input,
   the dictation marquee, or a loading notice), focus moves to Vibey's button.
-- **Looked at means done.** Opening the history from a lingering reply (a
-  Vibey click or its toggle row) ends that reply's linger, so closing the
-  history hides the bubble. A new running turn holds the bubble again, and its
+- **Looked at means done.** A turn shown while the history is open (its
+  expansion confirmed by the shell) counts as seen and does not linger after,
+  whether the history was opened from the lingering reply (a Vibey click or its
+  toggle row) or the turn ended while it was already open; closing the history
+  hides the bubble. While a history request still waits on the shell, the
+  reply keeps holding the bubble, and if the shell refuses, it plays out its
+  time. A new running turn holds the bubble again, and its
   own result lingers anew.
 
 Unread replies only light Vibey's badge and never hold the bubble; quick

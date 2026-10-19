@@ -11,6 +11,7 @@ import { Markdown } from '@/components/ui/markdown';
 import { QuickReplies } from '@/components/workbench/QuickReplies';
 import { isComposingKey } from '@/lib/imeComposition';
 import { useDocumentVisible, usePageActive } from '@/lib/pageActivity';
+import { isDetachedCompletionMessage } from '@/lib/chatMessageTypes';
 import { usePendingVaultRequests } from '@/lib/usePendingVaultRequests';
 import { useVaultRequestRefresh } from '@/lib/useVaultRequestRefresh';
 import { vaultRequestType } from '@/lib/vaultRequestPlacement';
@@ -661,21 +662,30 @@ const PetSurface: React.FC = () => {
   // starts the linger and the bubble never closes in between. The server's
   // state alone: the local send grace running out is not a turn that ended.
   // A turn already over when the epoch first looks is history.
-  const [turnWatch, setTurnWatch] = useState(() => ({ epoch, running: data.serverRunning, ended: 0 }));
+  // `seen` is the last ended turn shown while the history was open (expansion
+  // confirmed): the user has looked at it, so only a later turn lingers. A
+  // history request still waiting on the shell changes nothing yet.
+  const [turnWatch, setTurnWatch] = useState(() => ({ epoch, running: data.serverRunning, ended: 0, seen: 0 }));
   let watched = turnWatch;
-  if (watched.epoch !== epoch) watched = { epoch, running: data.serverRunning, ended: 0 };
+  if (watched.epoch !== epoch) watched = { epoch, running: data.serverRunning, ended: 0, seen: 0 };
   else if (watched.running !== data.serverRunning) {
     watched = { ...watched, running: data.serverRunning, ended: data.serverRunning ? watched.ended : watched.ended + 1 };
   }
+  if (historyOpen && watched.seen !== watched.ended) watched = { ...watched, seen: watched.ended };
   if (watched !== turnWatch) setTurnWatch(watched);
   // Only a turn that produced a reply lingers: a non-empty agent result after
   // the latest input, or the promoted result that answers an earlier input
   // (#2815). A stopped turn ends with an empty result, and a turn whose end
   // comes before its result lingers once that result is here.
   const inputAt = exchange.user ? data.messages.findIndex((row) => row.id === exchange.user!.id) : -1;
-  const turnHasReply = data.messages.slice(inputAt + 1).some((row) => row.author === 'agent' && row.type === 'result' && Boolean(row.text?.trim()))
-    || Boolean(exchange.answersEarlierInput && exchange.results.at(-1)?.text?.trim());
-  const endedTurn = watched.ended > 0 && turnHasReply ? String(watched.ended) : null;
+  // A background run's completion (`metadata.detached`) is not this turn's
+  // reply, as for the foreground's own terminal authority.
+  const isTurnReply = (row: WorkbenchMessage) => row.author === 'agent' && row.type === 'result'
+    && !isDetachedCompletionMessage(row) && Boolean(row.text?.trim());
+  const latestReply = exchange.results.at(-1);
+  const turnHasReply = data.messages.slice(inputAt + 1).some(isTurnReply)
+    || Boolean(exchange.answersEarlierInput && latestReply && isTurnReply(latestReply));
+  const endedTurn = watched.ended > watched.seen && turnHasReply ? String(watched.ended) : null;
   // The bubble is drawn: the speech slot shows it rather than the input or the
   // dictation marquee. Every input to the linger (time, pointer) means
   // something only while this holds.
@@ -699,7 +709,7 @@ const PetSurface: React.FC = () => {
       if (node.contains(document.activeElement)) avatarRef.current?.focus();
     };
   }, []);
-  const { lingeringId, expire: expireReply, keepAtLeast } = useReplyLinger({
+  const { lingeringId, keepAtLeast } = useReplyLinger({
     scope: epoch,
     candidateId: endedTurn,
     counting: documentVisible && replyOnScreen && !pointerOverBubble,
@@ -714,10 +724,9 @@ const PetSurface: React.FC = () => {
   // its leave event may never come (the input replaced it under a still
   // pointer); a stale reading would pause the reply for good.
   if ((!bubbleDrawn || !showReplyBubble) && pointerOverBubble) setPointerOverBubble(false);
-  // Looking at the history is looking at the reply: once it closes, the reply
-  // does not linger again.
+  // Looking at the history is looking at the reply (`seen` above): once it
+  // closes, the reply does not linger again.
   function openHistory() {
-    if (lingeringId !== null) expireReply(lingeringId);
     setDetailOpen(true);
     void setPanel(true);
   }
