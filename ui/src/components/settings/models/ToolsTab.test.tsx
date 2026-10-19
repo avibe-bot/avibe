@@ -56,7 +56,8 @@ const RELAY = source('src_relay001', 'relay-gpt');
 const GROK = source('src_grok0001', 'Grok', { vendor: 'xai' });
 const SUBSCRIPTION = source('src_chatgpt1', 'OpenAI subscription', { kind: 'subscription', billing: 'monthly' });
 const CLAUDE = source('src_claude01', 'relay-claude', { vendor: 'anthropic', protocol: 'anthropic' });
-const SOURCES = [CLAUDE, RELAY, GROK, SUBSCRIPTION];
+const DEEPSEEK = source('src_deepseek1', 'DeepSeek', { vendor: 'deepseek', protocol: 'openai_chat' });
+const SOURCES = [CLAUDE, RELAY, GROK, SUBSCRIPTION, DEEPSEEK];
 
 const run = (over: Partial<HostedToolRunStatus> = {}): HostedToolRunStatus => ({ latest_ok: null, verified: [], refused: [], ...over });
 const refusal = (sourceId: string, modelId: string, at: string, aspect: HostedRefusal['aspect'] = 'call'): HostedRefusal => ({
@@ -115,6 +116,28 @@ const openAdvanced = async (user: ReturnType<typeof userEvent.setup>, name: stri
 afterEach(() => cleanup());
 
 describe('ToolsTab settings', () => {
+  it('shows web_fetch in Search and labels a direct executor without hiding a model name', async () => {
+    const user = userEvent.setup();
+    renderTab({
+      tools: [
+        search('web_search', { executor_candidates: [candidate(RELAY.id, 'gpt-6-luna', { label: '' })] }),
+        search('x_search'),
+        search('web_fetch', {
+          executor_candidates: [candidate(DEEPSEEK.id, 'deepseek', { direct: true, label: 'DeepSeek Search API' })],
+        }),
+        image(),
+      ],
+    });
+
+    expect(
+      within(screen.getByRole('region', { name: 'Search' })).getAllByRole('region').map((region) => region.getAttribute('aria-label')),
+    ).toEqual(['Web search', 'X search', 'Web fetch']);
+    await openAdvanced(user, 'Web search');
+    expect(within(card('Web search')).getByText('gpt-6-luna')).toBeTruthy();
+    await openAdvanced(user, 'Web fetch');
+    expect(within(card('Web fetch')).getByText('DeepSeek Search API')).toBeTruthy();
+  });
+
   it('MH-HOSTED-UI-018: shows every tool on by default under its capability, and never locks a switch', () => {
     renderTab({ tools: [search('web_search'), search('x_search'), image()] });
 

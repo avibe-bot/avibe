@@ -57,6 +57,12 @@ def service():
 
 async def _attempt(monkeypatch, service, tool, arguments, stdout, *, returncode=0, stderr=b""):
     calls = []
+    recorded = []
+
+    async def record(*args):
+        recorded.append(args)
+
+    service.record_hosted_success = record
 
     async def spawn(*command, **kwargs):
         calls.append(command)
@@ -68,11 +74,11 @@ async def _attempt(monkeypatch, service, tool, arguments, stdout, *, returncode=
     attempt = await service._direct_search_attempt(
         ExecutorCall(tool, arguments), candidate, deadline=time.monotonic() + 10, say=lambda key, **params: key,
     )
-    return attempt, calls
+    return attempt, calls, recorded
 
 
 async def test_search_runs_the_standalone_api_with_vault(monkeypatch, service) -> None:
-    attempt, calls = await _attempt(
+    attempt, calls, recorded = await _attempt(
         monkeypatch, service, "web_search", {"query": "q"},
         json.dumps({"results": [{"title": "T", "url": "https://e", "snippet": "S"}]}).encode(),
     )
@@ -88,10 +94,11 @@ async def test_search_runs_the_standalone_api_with_vault(monkeypatch, service) -
     command = calls[0]
     assert "--auth" in command and "DEEPSEEK_API_KEY" in command
     assert "https://api.deepseek.com/v1/tools/search" in command
+    assert recorded == [(SOURCE, "deepseek", "web_search", "direct")]
 
 
 async def test_fetch_returns_the_page_as_the_source(monkeypatch, service) -> None:
-    attempt, calls = await _attempt(
+    attempt, calls, _ = await _attempt(
         monkeypatch, service, "web_fetch", {"url": "https://example.com/a"},
         json.dumps({"title": "T", "content": "body"}).encode(),
     )
@@ -102,7 +109,7 @@ async def test_fetch_returns_the_page_as_the_source(monkeypatch, service) -> Non
 
 
 async def test_an_empty_fetch_is_a_failure(monkeypatch, service) -> None:
-    attempt, _ = await _attempt(
+    attempt, _, _ = await _attempt(
         monkeypatch, service, "web_fetch", {"url": "https://example.com/a"},
         json.dumps({"title": "T", "content": ""}).encode(),
     )
@@ -110,11 +117,14 @@ async def test_an_empty_fetch_is_a_failure(monkeypatch, service) -> None:
 
 
 async def test_a_vault_failure_is_the_record_error(monkeypatch, service) -> None:
-    attempt, _ = await _attempt(
-        monkeypatch, service, "web_search", {"query": "q"}, b"{}", returncode=1, stderr=b"no secret",
+    stderr = b'{\n  "ok": false,\n  "error": "secret not found: DEEPSEEK_API_KEY"\n}\n'
+    attempt, _, recorded = await _attempt(
+        monkeypatch, service, "web_search", {"query": "q"}, b"{}", returncode=1, stderr=stderr,
     )
     assert attempt.record["status"] == "failed"
-    assert "no secret" in attempt.record["error"]
+    assert "secret not found" in attempt.record["error"]
+    assert attempt.record["error"] != "}"
+    assert recorded == []
     assert attempt.cost is None
     assert attempt.billable is False
     assert attempt.moves_on is True
@@ -127,7 +137,7 @@ async def test_a_base_url_ending_in_v1_does_not_double_the_prefix(monkeypatch, s
     original = SOURCE
     SOURCE = replace(SOURCE, base_url="https://api.deepseek.com/v1")
     try:
-        _, calls = await _attempt(
+        _, calls, _ = await _attempt(
             monkeypatch, service, "web_search", {"query": "q"}, json.dumps({"results": []}).encode(),
         )
     finally:

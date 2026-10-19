@@ -912,6 +912,31 @@ class _HostedUpstreamCall:
     billable: bool
 
 
+def _vault_error(stderr: bytes) -> str:
+    """The reason a Vault subprocess failed: its JSON error, or its last non-empty line."""
+    text = (stderr or b"").decode("utf-8", "replace").strip()
+    if not text:
+        return ""
+    try:
+        payload = json.loads(text)
+    except (ValueError, TypeError):
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        return lines[-1] if lines else ""
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message") or "").strip()
+            code = str(error.get("code") or "").strip()
+            if message:
+                return f"{message} (code={code})" if code else message
+        elif isinstance(error, str) and error.strip():
+            return error.strip()
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            return message.strip()
+    return json.dumps(payload, ensure_ascii=True)[:500]
+
+
 @dataclass(frozen=True)
 class _ExecutorAttempt:
     """One executor candidate a search chain called, as it settled (``vibey-hosted-tools.md`` §6)."""
@@ -6887,8 +6912,8 @@ class ModelHubService:
                 await stop()
                 raise
             if failure_reason is None and process.returncode != 0:
-                detail = (stderr or b"").decode("utf-8", "replace").strip().splitlines()
-                failure_reason = Failure(detail[-1] if detail else f"exited {process.returncode}", None)
+                detail = _vault_error(stderr) or f"exited {process.returncode}"
+                failure_reason = Failure(detail, None)
             if failure_reason is None:
                 try:
                     body = json.loads(stdout.decode("utf-8"))
@@ -6927,6 +6952,8 @@ class ModelHubService:
                     sources.append(source_row)
                 record = {"status": "completed", "sources": sources}
         completed = record["status"] == "completed"
+        if completed:
+            await self.record_hosted_success(source, "deepseek", call.tool, "direct")
         cost = None
         if completed and candidate.price is not None:
             cost = HostedCost(basis="list", usd=round(candidate.price.usd_per_1k / 1000, 6))
