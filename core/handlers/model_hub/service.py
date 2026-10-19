@@ -7070,39 +7070,38 @@ class ModelHubService:
                     failure_reason = Failure(say("modelHub.hostedTools.providerUnavailable", detail=detail), "provider_unavailable")
                 else:
                     failure_reason = Failure(say("modelHub.hostedTools.unreachable"), "provider_unreachable")
-            if failure_reason is None:
-                try:
-                    body = json.loads(stdout.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    failure_reason = Failure(say("modelHub.hostedTools.unreadable"), "provider_unreadable")
         if failure_reason is not None:
             record = failed_record(failure_reason)
+            completed = False
+            billable = False
         else:
-            record = await asyncio.to_thread(_direct_record, call, stdout, say)
-        completed = record["status"] == "completed"
-        # DeepSeek bills Search only when it returns a non-empty list; an empty result is free.
-        billable = completed and (call.tool == "web_fetch" or bool(record.get("sources")))
-        if completed:
-            async def settle_direct() -> None:
-                # Meter first: a cancellation after the response must not lose a completed call.
-                if billable:
-                    await self._meter_call(
-                        source_id=source.id,
-                        model_id="deepseek",
-                        outcome=RawCallOutcome(
-                            kind=RawOutcomeKind.SUCCESS,
-                            http_status=200,
-                            error_code=None,
-                            redacted_message=None,
-                            stream_started=False,
-                            model_id="deepseek",
+            async def finish() -> tuple[dict[str, Any], bool]:
+                parsed = await asyncio.to_thread(_direct_record, call, stdout, say)
+                done = parsed["status"] == "completed"
+                billed = done and (call.tool == "web_fetch" or bool(parsed.get("sources")))
+                if done:
+                    if billed:
+                        await self._meter_call(
                             source_id=source.id,
-                        ),
-                        observed=None,
-                        at=self.now(),
-                    )
-                await self.record_hosted_success(source, "deepseek", call.tool, "direct")
-            await asyncio.shield(settle_direct())
+                            model_id="deepseek",
+                            outcome=RawCallOutcome(
+                                kind=RawOutcomeKind.SUCCESS,
+                                http_status=200,
+                                error_code=None,
+                                redacted_message=None,
+                                stream_started=False,
+                                model_id="deepseek",
+                                source_id=source.id,
+                            ),
+                            observed=None,
+                            at=self.now(),
+                        )
+                    await self.record_hosted_success(source, "deepseek", call.tool, "direct")
+                return parsed, billed
+
+            record, billable = await asyncio.shield(finish())
+            completed = record["status"] == "completed"
+        # A completed call is settled by `finish`; a failed one has no charge.
         cost = None
         if billable and candidate.price is not None:
             cost = HostedCost(basis="list", usd=round(candidate.price.usd_per_1k / 1000, 6))
