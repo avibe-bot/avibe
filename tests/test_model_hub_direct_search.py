@@ -11,7 +11,7 @@ import pytest
 
 from config.v2_config import ModelHubModelConfig, ModelHubSourceConfig, ModelHubSourceStateConfig
 from core.handlers.model_hub import service as service_module
-from core.handlers.model_hub.hosted_executor import ExecutorCall
+from core.handlers.model_hub.hosted_executor import ExecutorCall, ExecutorCallRefused, parse_call
 from core.agent_core.messages import message_from_dict
 from core.agent_core.tools.hosted import hosted_tool_spec
 from core.handlers.model_hub.hosted_tools import direct_search_candidate, executor_vendors
@@ -31,6 +31,11 @@ SOURCE = ModelHubSourceConfig(
     credential_ref="cred_deepseek",
     base_url="https://api.deepseek.com",
 )
+
+
+def test_web_fetch_rejects_a_non_http_url() -> None:
+    with pytest.raises(ExecutorCallRefused):
+        parse_call("web_fetch", {"arguments": {"url": "file:///etc/passwd"}})
 
 
 def test_web_fetch_names_deepseek_as_a_vendor() -> None:
@@ -250,6 +255,14 @@ async def test_cancellation_kills_the_process_tree(monkeypatch, service) -> None
             deadline=time.monotonic() + 10, say=lambda key, **params: key,
         )
     assert process.killed is True
+
+
+async def test_an_oversized_direct_response_is_a_failure(monkeypatch, service) -> None:
+    attempt, _, _, _ = await _attempt(
+        monkeypatch, service, "web_search", {"query": "q"}, b"x" * (4 * 1024 * 1024 + 1),
+    )
+    assert attempt.record["status"] == "failed"
+    assert attempt.record["error_code"] == "provider_too_large"
 
 
 async def test_a_base_url_ending_in_v1_does_not_double_the_prefix(monkeypatch, service) -> None:

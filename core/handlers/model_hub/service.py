@@ -6924,6 +6924,9 @@ class ModelHubService:
                 detail = _vault_error(stderr) or f"exited {process.returncode}"
                 logger.warning("DeepSeek direct search Vault call failed: %s", detail)
                 failure_reason = Failure(say("modelHub.hostedTools.unreachable"), "provider_unreachable")
+            if failure_reason is None and len(stdout) > 4 * 1024 * 1024:
+                failure_reason = Failure(say("modelHub.hostedTools.tooLarge"), "provider_too_large")
+                stdout = b""
             if failure_reason is None:
                 try:
                     body = json.loads(stdout.decode("utf-8"))
@@ -7017,8 +7020,11 @@ class ModelHubService:
             return None
         if candidate.direct:
             # A Source removed or re-identified after the first admission must not start a direct call.
-            if await asyncio.to_thread(self._admitted_executor, slot, tool) is None:
+            async with self._mutation_lock:
+                admitted = await asyncio.to_thread(self._admitted_executor, slot, tool)
+            if admitted is None:
                 return None
+            candidate = admitted
             return await self._direct_search_attempt(call, candidate, deadline=deadline, say=say)
         source = candidate.source
         request = executor_request(call, source, model_id, candidate.declaration, candidate.include)

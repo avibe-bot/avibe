@@ -93,6 +93,11 @@ def parse_call(tool: str, payload: object) -> ExecutorCall:
         url = arguments.get("url")
         if set(arguments) != {"url"} or not isinstance(url, str) or not url.strip() or len(url) > 8192:
             raise ExecutorCallRefused("invalid_request_error", 400)
+        from urllib.parse import urlsplit
+
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise ExecutorCallRefused("invalid_request_error", 400)
         return ExecutorCall(tool, dict(arguments))
     optional = {"web_search": set(), "x_search": {"limit", "mode"}}[tool]
     text = arguments.get("query")
