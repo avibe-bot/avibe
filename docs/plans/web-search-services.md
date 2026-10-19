@@ -167,7 +167,9 @@ The PUT body gains `prefer_native` and `services` as per-field writes, the exist
 Hosted tools §6 holds, with these changes:
 
 - **Candidates** are the model executors of hosted tools §6 plus every search-capable Source: a `search` Source, or a
-  model Source whose vendor lists a search API and whose endpoint is official. A Source with `services.<id>.enabled:
+  model Source whose vendor lists a search API and whose endpoint is official. A Source holds one role in a chain:
+  a model Source with a search API is a search-service candidate only, never also a model executor, so it has one
+  row in the order and is called at most once per call. A Source with `services.<id>.enabled:
   false` stays in the list as a `disabled` entry at the end; it is never requested.
 - **Automatic order** (no `executor_order`): `search` Sources in `service_order` (§3.2), then model Sources with a search API
   in Vibey's Source order, then model executors as today. A saved `executor_order` is used as saved; candidates it
@@ -237,7 +239,8 @@ Hosted tools §6 holds, with these changes:
   a search API (DeepSeek) recovers through the existing model Source paths.
 - **Every state an attempt writes is fenced.** Source health uses the Source-global attempt-start settlement
   generation (`model-hub.md`). The service cooldown uses its own generation per (Source, service id), which only
-  search attempts, key replacement, Source removal and "重新启用" advance; a model call on the same Source does not.
+  search attempts, key replacement, Source removal, "重新启用" and "立即重试" (`clear_service_cooldown`) advance; a
+  model call on the same Source does not.
   A response whose generation is no longer current writes nothing. Replacing the key or removing the Source also
   clears its cooldowns.
 - **"重新启用" advances the Source's settlement generation** without interrupting anything, as an attempt start
@@ -283,15 +286,18 @@ Hosted tools §6 holds, with these changes:
   Otherwise it is the catalog's list price for the request plus any per-returned-page part for content (Exa:
   $1 / 1k pages of `contents.text`), with `basis: "list"`. When content was requested but the page count cannot be
   read (an unreadable 200 with no valid reported cost), the cost is the search part marked as a lower bound
-  ("至少 $0.007"), and the ledger row carries `lower_bound: true` into the Usage aggregate. When the vendor bills only
+  ("至少 $0.007") through the new `HostedCost.lower_bound`, and the ledger row carries `lower_bound: true` into the
+  Usage aggregate. When the vendor bills only
   non-empty results (DeepSeek), a 200 whose `results` array is non-empty is billed even if every item fails the
   bounds, so it is recorded at the list price. Only a 200 whose `results` array is missing or unreadable leaves the
   charge unknown: the attempt records no cost (unpriced), and the ledger row adds nothing to `list_usd` but sets
   `lower_bound: true`. A vendor that bills only non-empty results (DeepSeek)
   costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
-  billable only when it answered 200. Every service attempt the catalog does not bill (any non-200, a timeout, or
-  DeepSeek's empty answer) records an explicit `cost: {usd: 0, basis: "list"}`, so the card shows $0 rather than an
-  unknown cost.
+  billable only when it answered 200. Every service attempt the catalog does not bill records an explicit
+  `cost: {usd: 0, basis: "list"}`, so the card shows $0 rather than an unknown cost: a non-200 response, DeepSeek's
+  empty answer, and a failure before the request was sent (connect failure). A read timeout or a connection lost
+  after the request was sent may still have been billed, so it is handled like an unreadable 200 whose billing is
+  unknown: no cost, `uncertain_requests` in the ledger, and the lower-bound flag.
 - A chain with no search-capable candidate (model executors only) writes the released record shape, without
   `attempts[]`, so a model-only search stays readable by older releases.
 - `record.attempts[]` (new, on the `HostedRecord`, so it exists when nothing executed) lists, in chain order,
@@ -407,7 +413,8 @@ states interactively.
 ### 6.2 Add a search service
 
 - A grid of `service_vendors[]`: name, one line, list price, free tier and facts. A vendor the user already has is
-  shown as "已添加"; DeepSeek, when a DeepSeek Source qualifies, as "已在搜索顺序中".
+  shown as "已添加"; DeepSeek, when an official-endpoint DeepSeek Source qualifies, as "已在搜索顺序中". A user whose
+only DeepSeek Source is a relay gets the create flow, which adds an official DeepSeek Source.
 - Choosing a tool-only vendor asks for the key. Choosing DeepSeek without a DeepSeek Source asks for a key and creates
   an ordinary DeepSeek Source (models and search), and says so.
 - The dialog states where queries go, that the service joins the search order before the model executors (in a
@@ -480,7 +487,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   executor kind (§4.3).
 - C-1 (`agent-core-contracts/message.schema.json`): the optional `HostedSource.content` (§4.3; the read shape
   gains no new limits);
-  `HostedRecord.attempts[]` with `outcome`, `label`, `error_code`, `skipped`, `needs_action` and `superseded`, and
+  `HostedRecord.attempts[]` with `source_id`, `outcome`, `label`, `error_code`, `skipped`, `needs_action` and
+  `superseded`; `HostedCost.lower_bound` with its `core/hosted_activity` projection ("至少"); and
   their reader and writer types, and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; an
   `executor_origin` that names a search service (`provider` = vendor, `model` = service id, and an `api` value for
   search APIs, which the contract lane names).
