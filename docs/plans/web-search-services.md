@@ -230,7 +230,9 @@ Hosted tools §6 holds, with these changes:
   search skips it as `blocked`. A trial that completes clears the persisted state. A trial that fails is settled by the outcome table: a
   classified failure (401, 402, a limit code) replaces the blocker with its own state, so a revoked key asks for a
   new key. A transient or unreadable failure keeps the current blocker. A restart
-  drops an unused trial, so the Source stays blocked and the user can press again. This fails closed. Nothing retries on its own. A model Source with
+  drops an unused trial, so the Source stays blocked and the user can press again. This fails closed. While a
+  trial is armed or in flight, "重新启用" is disabled (the read reports `trial_pending`), and a repeated request is
+  answered with the current trial without arming another or advancing the generation. Nothing retries on its own. A model Source with
   a search API (DeepSeek) recovers through the existing model Source paths.
 - **Every state an attempt writes is fenced.** Source health uses the Source-global attempt-start settlement
   generation (`model-hub.md`). The service cooldown uses its own generation per (Source, service id), which only
@@ -281,8 +283,10 @@ Hosted tools §6 holds, with these changes:
   $1 / 1k pages of `contents.text`), with `basis: "list"`. When content was requested but the page count cannot be
   read (an unreadable 200 with no valid reported cost), the cost is the search part marked as a lower bound
   ("至少 $0.007"), and the ledger row carries `lower_bound: true` into the Usage aggregate. When the vendor bills only
-  non-empty results (DeepSeek) and a 200 is unreadable, whether it was billed is unknown: the attempt records no
-  cost (unpriced), and the ledger row adds nothing to `list_usd` but sets `lower_bound: true`. A vendor that bills only non-empty results (DeepSeek)
+  non-empty results (DeepSeek), a 200 whose `results` array is non-empty is billed even if every item fails the
+  bounds, so it is recorded at the list price. Only a 200 whose `results` array is missing or unreadable leaves the
+  charge unknown: the attempt records no cost (unpriced), and the ledger row adds nothing to `list_usd` but sets
+  `lower_bound: true`. A vendor that bills only non-empty results (DeepSeek)
   costs zero for an empty answer. Earlier billable attempts are `failed_attempts[]` as today; a service attempt is
   billable only when it answered 200. Every service attempt the catalog does not bill (any non-200, a timeout, or
   DeepSeek's empty answer) records an explicit `cost: {usd: 0, basis: "list"}`, so the card shows $0 rather than an
