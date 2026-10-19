@@ -122,7 +122,12 @@ part is delivered and typed exactly as a non-terminal reply would be.
   accepted the send): its Run output entry, its record as the Turn's last reply
   (committed with the receipt), and a backend's own mark (OpenCode's emitted
   id, from the emit's returned message id). Finals and Activity outputs keep
-  their settlement order.
+  their settlement order. The emit's return value is that evidence: a
+  background output returns its local row's id, never a synthetic one, and
+  nothing when the row was not written. The Run output entry is best effort
+  under rule 5's policy: it is written in its own step after the receipt, so a
+  crash between the two can leave it out of `result_payload.outputs`, and a
+  replay never backfills it.
 - Every reply carries the identity its backend gives it as `idempotency_key`
   (OpenCode's message id, Codex's item id, Vibey's committed row id, Claude's
   `ResultMessage.uuid`), so two replies with the same text stay two entries in
@@ -226,6 +231,10 @@ as `assistant`; the base result path's footer promotion.
   Turn still visibly ends: the thinking indicator hides on `turn.end`, the IM
   running reaction clears, and the concise status bubble collapses to its done
   line with the run time.
+- A reply's Run output entry is best effort: it is written after the reply's
+  receipt, in its own step, so a crash between the two leaves it out of the
+  Run's `result_payload.outputs`; a replay finds the receipt and does not
+  backfill it.
 - Rule 5 is best effort (rule 5's degradation policy): an IM reply whose row
   write fails after its send has no receipt and no record, so the Turn settles
   with the reply before it; a record read that keeps failing settles with "".
@@ -308,7 +317,10 @@ Approved by the owner, in this order:
      typed event set: reply, narration, tool activity, turn end (outcome), and
      error. This replaces type strings plus `MessageOutput` flags, so the
      dispatcher no longer infers semantics. Vibey's agent-event schema is the
-     starting point, and rule 5 moves onto the typed Turn-end event.
+     starting point, and rule 5 moves onto the typed Turn-end event. Emits
+     return a typed delivery receipt (delivered, with its receipt row or the
+     platform's message id; or not delivered) instead of an id or `None`, so
+     delivery evidence is a type rather than a convention every caller reads.
 2. PR 3, structural only with no behavior change. One presentation decision
    point per output event: transcript or not, muted, push, IM delivery.
    Today's rules move into it unchanged as the default policy: the interim

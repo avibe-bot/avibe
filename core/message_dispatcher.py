@@ -3411,9 +3411,10 @@ class ConsolidatedMessageDispatcher:
                         citations=citations,
                         existing_row_id=existing_row_id,
                     )
-                local_message_id = (persisted_output or {}).get("id") or (
-                    f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
-                )
+                # The return value is the delivery evidence, and a background output's
+                # receipt is its local row: no row, no id (never a synthetic one), so a
+                # caller that waits for evidence never mistakes a failed write for it.
+                local_message_id = (persisted_output or {}).get("id")
                 terminal_status = None
                 # These two branches are one rule and must be edited as a pair:
                 # the ``elif`` is the negation of the ``if``. A terminal result on

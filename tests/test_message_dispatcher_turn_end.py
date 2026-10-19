@@ -209,6 +209,19 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
         finally:
             engine.dispose()
 
+    @staticmethod
+    def agent_row_ids() -> list:
+        engine = create_sqlite_engine()
+        try:
+            with engine.connect() as conn:
+                return list(
+                    conn.execute(
+                        select(messages.c.id).where(messages.c.session_id == SESSION, messages.c.author == "agent")
+                    )
+                )
+        finally:
+            engine.dispose()
+
     def running_run(self, task_id: str) -> str:
         run = self.runs.enqueue_task_run(task_id)
         assert self.runs.claim(run.id) is not None
@@ -438,6 +451,29 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([entry["text"] for entry in self.harness_run()["result_payload"]["outputs"]], [FIRST])
             self.assertEqual(controller.session_turns.turn_last_reply("trn_1"), FIRST)
             self.assertEqual(self.agent_rows(), [("result", FIRST)])
+
+    async def test_a_background_emit_returns_its_receipt_or_nothing(self):
+        """Scenario: MESSAGE-DELIVERY-335: an emit's return value is its delivery evidence. A
+        background (``suppress_delivery``) output's receipt is its local row: its id when the
+        row was written, and nothing, never a synthetic id, when the write failed, so a caller
+        that waits for evidence (OpenCode's emitted mark, an Activity's delivery check) never
+        takes a failed write for a delivery."""
+        for persisted in (True, False):
+            with self.subTest(persisted=persisted), self.state():
+                controller = _Controller("avibe")
+                context = self.context()
+                context.platform_specific["suppress_delivery"] = True
+                if persisted:
+                    evidence = await controller.emit_agent_message(context, "result", FIRST, output=REPLY)
+                    [row_id] = [row.id for row in self.agent_row_ids()]
+                    self.assertEqual(evidence, row_id)
+                    self.assertEqual(controller.session_turns.turn_last_reply("trn_1"), FIRST)
+                else:
+                    with mock.patch.object(dispatcher_module, "persist_agent_message", return_value=None):
+                        evidence = await controller.emit_agent_message(context, "result", FIRST, output=REPLY)
+                    self.assertIsNone(evidence)
+                    self.assertIsNone(controller.session_turns.turn_last_reply("trn_1"))
+                    self.assertEqual((self.harness_run()["result_payload"] or {}).get("outputs") or [], [])
 
     async def test_a_failed_last_reply_read_is_retried_then_read_as_none(self):
         """Scenario: MESSAGE-DELIVERY-335: rule 5 is best effort. A read of the Turn's last

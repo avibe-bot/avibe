@@ -2442,7 +2442,9 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
 
-        self.assertEqual(message_id, "suppressed:run-suppressed-cleanup")
+        # No local row was written here (this stub has no scope to write it under), so
+        # there is no receipt and no id: never a synthetic one (MESSAGE-DELIVERY-335).
+        self.assertIsNone(message_id)
         self.assertEqual(controller.im_client.sent, [])
         self.assertEqual(settled, ["activity-suppressed-cleanup"])
         self.assertFalse(
@@ -2784,7 +2786,9 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()):
             message_id = await dispatcher.emit_agent_message(context, "result", "private output")
 
-        self.assertEqual(message_id, "suppressed:run-1")
+        # No local row was written here (this stub has no scope to write it under), so
+        # there is no receipt and no id: never a synthetic one (MESSAGE-DELIVERY-335).
+        self.assertIsNone(message_id)
         self.assertEqual(
             calls,
             [
@@ -2818,7 +2822,9 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()):
             message_id = await dispatcher.emit_agent_message(context, "result", "private agent output")
 
-        self.assertEqual(message_id, "suppressed:run-agent")
+        # No local row was written here (this stub has no scope to write it under), so
+        # there is no receipt and no id: never a synthetic one (MESSAGE-DELIVERY-335).
+        self.assertIsNone(message_id)
         self.assertEqual(
             calls,
             [
@@ -2861,7 +2867,9 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
                 terminal_error="provider unavailable",
             )
 
-        self.assertEqual(message_id, "suppressed:run-agent")
+        # No local row was written here (this stub has no scope to write it under), so
+        # there is no receipt and no id: never a synthetic one (MESSAGE-DELIVERY-335).
+        self.assertIsNone(message_id)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0], "run-agent")
         self.assertEqual(calls[0][1]["terminal_status"], "failed")
@@ -2893,7 +2901,9 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()):
             message_id = await dispatcher.emit_agent_message(context, "result", "private agent output")
 
-        self.assertEqual(message_id, "suppressed:run-1")
+        # No local row was written here (this stub has no scope to write it under), so
+        # there is no receipt and no id: never a synthetic one (MESSAGE-DELIVERY-335).
+        self.assertIsNone(message_id)
         self.assertEqual(
             calls,
             [
@@ -2935,7 +2945,9 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()):
             message_id = await dispatcher.emit_agent_message(context, "result", "private agent output")
 
-        self.assertEqual(message_id, "suppressed:run-1")
+        # No local row was written here (this stub has no scope to write it under), so
+        # there is no receipt and no id: never a synthetic one (MESSAGE-DELIVERY-335).
+        self.assertIsNone(message_id)
         self.assertEqual(
             calls,
             [
@@ -3125,10 +3137,12 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
             assistant_id = await dispatcher.emit_agent_message(context, "assistant", "working note")
             result_id = await dispatcher.emit_agent_message(context, "result", "final result")
 
-        self.assertEqual(system_id, "suppressed:run-agent")
-        self.assertEqual(tool_id, "suppressed:run-agent")
-        self.assertEqual(assistant_id, "suppressed:run-agent")
-        self.assertEqual(result_id, "suppressed:run-agent")
+        # No local row was written here (this stub has no scope to write it under), so
+        # there is no receipt and no id: never a synthetic one (MESSAGE-DELIVERY-335).
+        self.assertIsNone(system_id)
+        self.assertIsNone(tool_id)
+        self.assertIsNone(assistant_id)
+        self.assertIsNone(result_id)
         self.assertEqual(controller.im_client.sent, [])
         self.assertEqual(
             calls,
@@ -3163,7 +3177,9 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(message_dispatcher_module, "SQLiteBackgroundTaskStore", return_value=_Store()):
             message_id = await dispatcher.emit_agent_message(context, "notify", "auth recovery required")
 
-        self.assertEqual(message_id, "suppressed:run-1")
+        # No local row was written here (this stub has no scope to write it under), so
+        # there is no receipt and no id: never a synthetic one (MESSAGE-DELIVERY-335).
+        self.assertIsNone(message_id)
         self.assertEqual(controller.im_client.sent, [])
         self.assertEqual(calls, [])
 
