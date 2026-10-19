@@ -168,7 +168,8 @@
             "propertyNames": {
               "enum": [
                 "web_search",
-                "x_search"
+                "x_search",
+                "web_fetch"
               ]
             },
             "additionalProperties": {

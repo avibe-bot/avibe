@@ -373,6 +373,85 @@
               }
             }
           }
+        },
+        "web_fetch": {
+          "type": "object",
+          "required": [
+            "native",
+            "replay"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "native": {
+              "enum": [
+                "assumed",
+                "unsupported"
+              ]
+            },
+            "declaration": {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "include": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "replay": {
+              "enum": [
+                "assumed",
+                "unsupported"
+              ]
+            },
+            "refused": {
+              "const": true,
+              "description": "Present exactly when the tool runs on the hop but current negative `call` evidence for the hop's (Source, model) makes `native` `unsupported`: this Source refused it, so a proxied call is a fallback from it."
+            }
+          },
+          "if": {
+            "properties": {
+              "native": {
+                "const": "assumed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "declaration",
+              "include"
+            ],
+            "not": {
+              "required": [
+                "refused"
+              ]
+            }
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "declaration"
+                  ]
+                },
+                {
+                  "required": [
+                    "include"
+                  ]
+                }
+              ]
+            }
+          }
         }
       }
     }
@@ -425,8 +504,14 @@
               "source_id": "src_openai0001",
               "model_id": "gpt-image-2",
               "description": "OpenAI's image model; follows long prompts closely",
-              "params": ["size", "images", "n"],
-              "size_forms": ["pixels"]
+              "params": [
+                "size",
+                "images",
+                "n"
+              ],
+              "size_forms": [
+                "pixels"
+              ]
             }
           ],
           "default": {

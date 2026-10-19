@@ -1099,6 +1099,7 @@ async def test_hop_resolution_states_each_enabled_hosted_tool(tmp_path):
                 "include": ["web_search_call.action.sources"],
                 "replay": "assumed",
             },
+            "web_fetch": {"native": "unsupported", "replay": "unsupported"},
             # The bundled overlay's verified image model on an OpenAI key, its params as sorted lists.
             "image_generate": {
                 "models": [{

@@ -4,38 +4,123 @@
   "title": "HopResolution",
   "description": "C-6 runtime consumer projection of ModelHubLaunch. Unknown planning metadata remains null; credentials are in-memory only.",
   "type": "object",
-  "required": ["backend", "requested_model", "protocol", "base_url", "token", "runtime_model", "source_id", "source_identity", "provider", "request_headers", "capabilities", "hosted_tools"],
+  "required": [
+    "backend",
+    "requested_model",
+    "protocol",
+    "base_url",
+    "token",
+    "runtime_model",
+    "source_id",
+    "source_identity",
+    "provider",
+    "request_headers",
+    "capabilities",
+    "hosted_tools"
+  ],
   "additionalProperties": false,
   "properties": {
-    "backend": { "const": "vibey" },
-    "requested_model": { "type": "string" },
-    "protocol": { "$ref": "source.schema.json#/properties/protocol" },
-    "base_url": { "type": "string", "format": "uri" },
-    "token": { "type": "string" },
-    "runtime_model": { "type": "string" },
-    "source_id": { "type": "string" },
+    "backend": {
+      "const": "vibey"
+    },
+    "requested_model": {
+      "type": "string"
+    },
+    "protocol": {
+      "$ref": "source.schema.json#/properties/protocol"
+    },
+    "base_url": {
+      "type": "string",
+      "format": "uri"
+    },
+    "token": {
+      "type": "string"
+    },
+    "runtime_model": {
+      "type": "string"
+    },
+    "source_id": {
+      "type": "string"
+    },
     "source_identity": {
       "type": "string",
       "minLength": 1,
       "description": "The primary hop Source's credential-free identity (identity_digest), from the snapshot its origin came from. The consumer replays opaque payloads only to a hop of the identity that served them."
     },
-    "provider": { "type": "string" },
-    "request_headers": { "type": "object", "additionalProperties": { "type": "string" } },
+    "provider": {
+      "type": "string"
+    },
+    "request_headers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
     "capabilities": {
       "type": "object",
-      "required": ["context_window", "input_limit", "max_output_tokens", "supports_tools", "supports_images", "supports_reasoning", "reasoning_efforts", "context_price_steps"],
+      "required": [
+        "context_window",
+        "input_limit",
+        "max_output_tokens",
+        "supports_tools",
+        "supports_images",
+        "supports_reasoning",
+        "reasoning_efforts",
+        "context_price_steps"
+      ],
       "additionalProperties": false,
       "properties": {
-        "context_window": { "type": ["integer", "null"], "minimum": 1 },
-        "input_limit": { "type": ["integer", "null"], "minimum": 1 },
-        "max_output_tokens": { "type": ["integer", "null"], "minimum": 1 },
-        "supports_tools": { "type": ["boolean", "null"] },
-        "supports_images": { "type": ["boolean", "null"] },
-        "supports_reasoning": { "type": ["boolean", "null"] },
-        "reasoning_efforts": { "type": "array", "items": { "type": "string" } },
+        "context_window": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "input_limit": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "max_output_tokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "supports_tools": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "supports_images": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "supports_reasoning": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "reasoning_efforts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "context_price_steps": {
           "type": "array",
-          "items": { "type": "integer", "minimum": 1 },
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
           "description": "Where the target model's list price rises with its context, ascending, from the price table the usage writer holds; empty when flat or unknown."
         }
       }
@@ -125,6 +210,85 @@
           }
         },
         "x_search": {
+          "type": "object",
+          "required": [
+            "native",
+            "replay"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "native": {
+              "enum": [
+                "assumed",
+                "unsupported"
+              ]
+            },
+            "declaration": {
+              "type": "object",
+              "required": [
+                "type"
+              ],
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            },
+            "include": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "replay": {
+              "enum": [
+                "assumed",
+                "unsupported"
+              ]
+            },
+            "refused": {
+              "const": true,
+              "description": "Present exactly when the tool runs on the hop but current negative `call` evidence for the hop's (Source, model) makes `native` `unsupported`: this Source refused it, so a proxied call is a fallback from it."
+            }
+          },
+          "if": {
+            "properties": {
+              "native": {
+                "const": "assumed"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "declaration",
+              "include"
+            ],
+            "not": {
+              "required": [
+                "refused"
+              ]
+            }
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": [
+                    "declaration"
+                  ]
+                },
+                {
+                  "required": [
+                    "include"
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        "web_fetch": {
           "type": "object",
           "required": [
             "native",

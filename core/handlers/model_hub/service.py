@@ -6661,7 +6661,7 @@ class ModelHubService:
             # Every candidate was tried and failed: say which, so the user sees whether retrying or those Sources is the issue.
             tried = ", ".join(dict.fromkeys(attempt.source.display_name for attempt in attempts))
             # Its reason keeps its code; the Sources tried follow in its text.
-            last_failure = Failure(record["error"], record["error_code"])
+            last_failure = Failure(record["error"], record.get("error_code"))
             record = failed_record(
                 last_failure.also(say("modelHub.hostedTools.triedSources", sources=tried)), record.get("sources"),
             )
@@ -6863,10 +6863,7 @@ class ModelHubService:
             failure_reason = Failure(str(error), None)
             process = None
         if process is not None:
-            try:
-                timeout = max(1.0, deadline - asyncio.get_running_loop().time())
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
-            except asyncio.TimeoutError:
+            async def stop() -> None:
                 try:
                     children = psutil.Process(process.pid).children(recursive=True)
                 except psutil.Error:
@@ -6878,8 +6875,17 @@ class ModelHubService:
                         pass
                 signal_process_tree(process, KILL_SIGNAL, logger, "DeepSeek direct search")
                 await process.wait()
+
+            try:
+                timeout = max(1.0, deadline - asyncio.get_running_loop().time())
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                await stop()
                 stdout, stderr = b"", b""
                 failure_reason = Failure(say("modelHub.hostedTools.timedOut"), "provider_timed_out")
+            except asyncio.CancelledError:
+                await stop()
+                raise
             if failure_reason is None and process.returncode != 0:
                 detail = (stderr or b"").decode("utf-8", "replace").strip().splitlines()
                 failure_reason = Failure(detail[-1] if detail else f"exited {process.returncode}", None)
