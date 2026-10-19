@@ -96,13 +96,37 @@ async def test_a_many_image_request_sends_every_image_within_2000_px(protocol: s
     assert sum(1 for kind, text in parts if kind == "text" and text.startswith("[Image")) == 1
 
 
+def _gif(size: tuple[int, int], frames: int) -> bytes:
+    out = io.BytesIO()
+    images = [Image.new("P", size, index) for index in range(frames)]
+    images[0].save(out, "GIF", save_all=True, append_images=images[1:])
+    return out.getvalue()
+
+
 @pytest.mark.asyncio
-async def test_an_image_too_large_to_decode_is_left_out_with_a_note() -> None:
-    images = {"huge": _png((9000, 6000), mode="L")}
+@pytest.mark.parametrize(
+    ("image", "sent"),
+    [
+        pytest.param(
+            lambda: _png((9000, 6000), mode="L"),
+            ["[Image omitted: 9000x6000 is too large to downscale to 2000x2000 for this request.]"],
+            id="too-large-to-decode",
+        ),
+        pytest.param(
+            lambda: _gif((2500, 300), frames=3),
+            [
+                "<image 2000x240>",
+                "[Image: original 2500x300, displayed at 2000x240. Multiply coordinates by 1.25 to map to original "
+                "image. Only the first of its 3 frames is shown.]",
+            ],
+            id="animation",
+        ),
+    ],
+)
+async def test_the_note_says_what_an_oversized_image_lost(image: Any, sent: list[str]) -> None:
+    parts = await _sent("anthropic", {"large": image()})
 
-    parts = await _sent("anthropic", images)
-
-    assert parts == [
-        ("text", "Compare these screens"),
-        ("text", "[Image omitted: 9000x6000 is too large to downscale to 2000x2000 for this request.]"),
+    shown = [
+        value if kind == "text" else "<image {}x{}>".format(*Image.open(io.BytesIO(value)).size) for kind, value in parts
     ]
+    assert shown == ["Compare these screens", *sent]

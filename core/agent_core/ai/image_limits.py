@@ -8,9 +8,11 @@ Each image with a side over ``MAX_IMAGE_SIDE`` is sent downscaled to fit, in eve
 bytes do not change from one request to the next and the provider's prompt cache keeps them. Its snapshot keeps the
 original. A note after the image gives the model the original size and the coordinate scale, worded as Pi's ``read``
 words it (``packages/coding-agent/src/utils/image-resize.ts``, MIT, Copyright (c) 2025 Mario Zechner). An image too
-large to decode safely is left out, with a note in its place. Bytes Pillow cannot open are sent as they are.
+large to decode safely is left out, with a note in its place. Bytes Pillow cannot open are sent as they are. An
+animation is fitted as its first frame, which is what the providers read of it, and the note says so.
 
 A downscale is kept in memory, keyed by the original bytes, so a Session does not pay for it on every request.
+Downscales run one at a time, so their memory peak does not multiply across concurrent Sessions.
 """
 
 from __future__ import annotations
@@ -22,16 +24,18 @@ import threading
 from collections import OrderedDict
 from typing import NamedTuple, Optional
 
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import ExifTags, Image, ImageOps, UnidentifiedImageError
 
 #: The longest side an image is sent with: Anthropic's per-image limit for a request with more than 20 images, and
 #: the resize default of Pi's ``read``. Providers scale larger images down before the model reads them in any case.
 MAX_IMAGE_SIDE = 2000
-#: The most pixels a downscale decodes (about 200 MB as RGBA). A larger image is left out rather than risk the
-#: process's memory; providers refuse a side over 8000 px anyway.
-MAX_DECODE_PIXELS = 50_000_000
-#: The memory the kept downscales may hold, as base64 text.
+#: The most pixels a downscale decodes: a peak of about 230 MB for an image with alpha (measured). A JPEG decodes at a
+#: reduced scale first, so this counts its reduced pixels. A larger image is left out rather than risk the process's
+#: memory; providers refuse a side over 8000 px anyway.
+MAX_DECODE_PIXELS = 24_000_000
+#: The memory the kept results may hold: their base64 text and notes, plus ``_ENTRY_OVERHEAD`` each.
 DOWNSCALE_CACHE_BYTES = 64 * 1024 * 1024
+_ENTRY_OVERHEAD = 256
 
 _LOSSY_QUALITY = 90
 
@@ -62,41 +66,55 @@ def fit_image(raw: bytes, mime_type: str) -> LoadedImage:
         fitted = _DOWNSCALES.get(key)
         if fitted is not None:
             return fitted
-        fitted = LoadedImage(None, mime_type, _omitted_note((width, height)))
-        if width * height <= MAX_DECODE_PIXELS:
+        with _DOWNSCALE_LOCK:
+            fitted = _DOWNSCALES.get(key)
+            if fitted is not None:
+                return fitted
             try:
                 fitted = _downscale(image)
             except (OSError, ValueError, Image.DecompressionBombError):
-                pass  # an image that does not decode cannot be sent at its size either: it stays left out
-    _DOWNSCALES.put(key, fitted)
+                fitted = None  # an image that does not decode cannot be sent at its size either: it is left out
+            if fitted is None:
+                fitted = LoadedImage(None, mime_type, _omitted_note((width, height)))
+            _DOWNSCALES.put(key, fitted)
     return fitted
 
 
-def _downscale(image: Image.Image) -> LoadedImage:
-    """``image`` upright and within ``MAX_IMAGE_SIDE``: a JPEG (a camera's MPO is one too) or WebP stays one, anything
-    else becomes a PNG."""
+def _downscale(image: Image.Image) -> Optional[LoadedImage]:
+    """``image`` upright and within ``MAX_IMAGE_SIDE``, or ``None`` when it is over ``MAX_DECODE_PIXELS``. A JPEG (a
+    camera's MPO is one too) or WebP stays one, anything else becomes a PNG.
 
-    source_format = image.format
-    upright = ImageOps.exif_transpose(image)
-    original_width, original_height = upright.size
-    if upright.mode not in ("L", "LA", "RGB", "RGBA"):
-        upright = upright.convert("RGBA" if upright.has_transparency_data else "RGB")
-    upright.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE), Image.Resampling.LANCZOS)
+    The image is reduced before anything else holds a full-size copy: a JPEG decodes at a reduced scale (``draft``),
+    and orientation is applied to the reduced image in place."""
+
+    source_format, frames = image.format, getattr(image, "n_frames", 1)
+    width, height = image.size
+    image.draft(None, (MAX_IMAGE_SIDE, MAX_IMAGE_SIDE))
+    if image.size[0] * image.size[1] > MAX_DECODE_PIXELS:
+        return None
+    if image.getexif().get(ExifTags.Base.Orientation) in (5, 6, 7, 8):
+        width, height = height, width
+    if image.mode not in ("L", "LA", "RGB", "RGBA"):
+        image = image.convert("RGBA" if image.has_transparency_data else "RGB")
+    image.thumbnail((MAX_IMAGE_SIDE, MAX_IMAGE_SIDE), Image.Resampling.LANCZOS)
+    ImageOps.exif_transpose(image, in_place=True)
     out = io.BytesIO()
     if source_format in ("JPEG", "MPO"):
-        upright.save(out, "JPEG", quality=_LOSSY_QUALITY)
+        image.save(out, "JPEG", quality=_LOSSY_QUALITY)
         mime_type = "image/jpeg"
     elif source_format == "WEBP":
-        upright.save(out, "WEBP", quality=_LOSSY_QUALITY)
+        image.save(out, "WEBP", quality=_LOSSY_QUALITY)
         mime_type = "image/webp"
     else:
-        upright.save(out, "PNG")
+        image.save(out, "PNG")
         mime_type = "image/png"
-    width, height = upright.size
+    shown_width, shown_height = image.size
     note = (
-        f"[Image: original {original_width}x{original_height}, displayed at {width}x{height}. "
-        f"Multiply coordinates by {original_width / width:.2f} to map to original image.]"
+        f"[Image: original {width}x{height}, displayed at {shown_width}x{shown_height}. "
+        f"Multiply coordinates by {width / shown_width:.2f} to map to original image.]"
     )
+    if frames > 1:
+        note = f"{note[:-1]} Only the first of its {frames} frames is shown.]"
     return LoadedImage(_base64(out.getvalue()), mime_type, note)
 
 
@@ -110,7 +128,7 @@ def _base64(data: bytes) -> str:
 
 
 class _Downscales:
-    """The kept downscales, least recently used first, within ``budget`` bytes of base64 text."""
+    """The kept results, least recently used first, within ``budget`` bytes (``_entry_size``)."""
 
     def __init__(self, budget: int) -> None:
         self._budget = budget
@@ -126,7 +144,7 @@ class _Downscales:
             return value
 
     def put(self, key: bytes, value: LoadedImage) -> None:
-        size = len(value.data or "")
+        size = _entry_size(value)
         if size > self._budget:
             return
         with self._lock:
@@ -136,7 +154,12 @@ class _Downscales:
             self._size += size
             while self._size > self._budget:
                 _, evicted = self._items.popitem(last=False)
-                self._size -= len(evicted.data or "")
+                self._size -= _entry_size(evicted)
+
+
+def _entry_size(value: LoadedImage) -> int:
+    return len(value.data or "") + len(value.note or "") + _ENTRY_OVERHEAD
 
 
 _DOWNSCALES = _Downscales(DOWNSCALE_CACHE_BYTES)
+_DOWNSCALE_LOCK = threading.Lock()
