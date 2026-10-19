@@ -180,6 +180,9 @@ transition (instant under reduced motion), taking no space and no clicks.
 - **Fresh replies only.** A reply lingers when it is news to the current epoch
   (binding and authorization): it arrived live, at any time, including before
   the epoch's first tail read, or it was missing from that first read. A reply
+  arrives live as a new reply row, or as an update that promotes a row the pet
+  did not already hold as a reply (`metadata.promoted_from`); an edit to a
+  reply it already holds is not an arrival. Only replies are recorded. A reply
   the first read already held is history, so on first load an old, finished
   exchange starts hidden. A new epoch starts with nothing lingering.
 - **No closed frame.** Freshness is derived while rendering, so when the turn

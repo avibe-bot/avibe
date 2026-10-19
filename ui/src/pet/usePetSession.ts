@@ -60,6 +60,19 @@ type Freshness = { identity: unknown; baseline: ReadonlySet<string> | null; live
 // sets grow with the replies in an epoch, not with its tool and progress rows.
 const isReply = (row: WorkbenchMessage) => row.author === 'agent' && row.type === 'result';
 
+/**
+ * The one definition of a reply arriving live, for every event that can bring
+ * one: a new row that is a reply, or an update that turns a row the pet did not
+ * already hold as a reply into one (a silent final promoted to the turn's
+ * result, `metadata.promoted_from`). An edit to a reply it already holds is not
+ * an arrival, so an old reply never lingers again.
+ */
+export function bringsReply(event: 'new' | 'updated', row: WorkbenchMessage, held: WorkbenchMessage | undefined): boolean {
+  if (!isReply(row)) return false;
+  if (event === 'new') return true;
+  return Boolean(row.metadata?.promoted_from) && !(held && isReply(held));
+}
+
 // `loaded`: a tail read has applied. Until then the rows are only what live
 // events merged, so they cannot be read as a complete window.
 type Tail = { messages: WorkbenchMessage[]; hasOlder: boolean; loaded: boolean };
@@ -169,6 +182,14 @@ export function usePetSession(sessionId: string | null): PetSessionData {
   // next chance to read instead.
   const sessionRef = useLatestRef(session);
   const tailLoadedRef = useLatestRef(tail.loaded);
+  const tailRef = useLatestRef(tail);
+  const noteLiveReply = useCallback((id: string) => {
+    const owner = currentIdentity.current;
+    setFreshness((current) => {
+      const scoped = current.identity === owner ? current : { identity: owner, baseline: null, live: new Set<string>() };
+      return scoped.live.has(id) ? scoped : { ...scoped, live: new Set([...scoped.live, id]) };
+    });
+  }, [currentIdentity]);
 
   const refreshAll = useCallback(() => {
     sources.session.refresh();
@@ -201,17 +222,14 @@ export function usePetSession(sessionId: string | null): PetSessionData {
       onConnected: refreshAll,
       onMessageNew: (row) => {
         if (!mine(row.session_id)) return;
-        const owner = currentIdentity.current;
-        if (isReply(row)) setFreshness((current) => {
-          const scoped = current.identity === owner ? current : { identity: owner, baseline: null, live: new Set<string>() };
-          return { ...scoped, live: new Set([...scoped.live, row.id]) };
-        });
+        if (bringsReply('new', row, undefined)) noteLiveReply(row.id);
         sources.tail.noteLiveMerge();
         setTail((current) => mergeRow(current, row));
         if (!tailLoadedRef.current) sources.tail.refresh();
       },
       onMessageUpdated: (row) => {
         if (!mine(row.session_id)) return;
+        if (bringsReply('updated', row, tailRef.current.messages.find((existing) => existing.id === row.id))) noteLiveReply(row.id);
         sources.tail.noteLiveMerge();
         setTail((current) => ({
           ...current,
@@ -271,7 +289,7 @@ export function usePetSession(sessionId: string | null): PetSessionData {
       onRunsUpdated: () => sources.turn.refresh(),
       onDefinitionsUpdated: () => sources.turn.refresh(),
     });
-  }, [api, sessionId, resolved, authorizationGeneration, sources, refreshAll, sessionRef, tailLoadedRef, currentIdentity]);
+  }, [api, sessionId, resolved, authorizationGeneration, sources, refreshAll, sessionRef, tailLoadedRef, tailRef, noteLiveReply]);
 
   // The window coming back is a gap too.
   useEffect(() => {

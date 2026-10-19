@@ -2551,6 +2551,44 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     expect(bubbleOpen()).toBe(true);
   });
 
+  it('counts a reply promoted before the first tail read as fresh', async () => {
+    const promoted = message('p', 'S', { text: 'Promoted early', read_at: null, metadata: { promoted_from: 'output' } });
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), promoted];
+    const read = deferred<{ messages: WorkbenchMessage[]; next_after_id: null; next_before_id: null }>();
+    api.listSessionMessages.mockImplementationOnce(() => read.promise);
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(api.listSessionMessages).toHaveBeenCalled());
+    await emit((h) => h.onMessageUpdated?.(promoted));
+    await act(async () => read.resolve({ messages: tails.S, next_after_id: null, next_before_id: null }));
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Promoted early'));
+    expect(bubbleOpen()).toBe(true);
+  });
+
+  it('counts a reply promoted after the first tail read as fresh', async () => {
+    const output = message('p', 'S', { type: 'output', text: 'Promoted later', read_at: null });
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), output];
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')).not.toBeNull());
+    expect(bubbleOpen()).toBe(false);
+    const promoted = { ...output, type: 'result', metadata: { promoted_from: 'output' } } as WorkbenchMessage;
+    tails.S = [tails.S[0], promoted];
+    await emit((h) => h.onMessageUpdated?.(promoted));
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+  });
+
+  it('does not linger an old reply again when it is edited', async () => {
+    const old = message('r', 'S', { text: 'Old reply', metadata: { promoted_from: 'output' } });
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), old];
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    await emit((h) => h.onMessageUpdated?.({ ...old, text: 'Old reply, edited' }));
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('edited'));
+    expect(bubbleOpen()).toBe(false);
+  });
+
   it('drops a lingering reply when the epoch changes', async () => {
     await runToResult();
     expect(bubbleOpen()).toBe(true);
