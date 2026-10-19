@@ -9864,6 +9864,11 @@ class ScheduledTaskService:
             for execution_id in normalized_execution_ids
             if callable(has_blocker) and has_blocker(execution_id)
         ]
+        # A Turn end that settled with its last reply carries that reply here; the
+        # attached Runs recorded it when it was delivered, so it is not recorded again.
+        recorded_reply = (
+            {"append_output": False} if evidence.get("result_recorded") is True else {}
+        )
         results = store.record_turn_run_outputs(
             normalized_execution_ids,
             output_id=output_id,
@@ -9878,6 +9883,7 @@ class ScheduledTaskService:
             terminal_status=terminal_status,
             error=str(terminal_error) if terminal_error is not None else None,
             deferred_run_ids=deferred_run_ids,
+            **recorded_reply,
         )
         settled_any = any(
             result.get("terminal_transition") or result.get("text_backfilled")

@@ -68,7 +68,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
-from sqlalchemy import and_, bindparam, func, or_, select, text
+from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.engine import Connection, Engine
 
 from core.agent_core.harness.fork import fork_point, latest_cut
@@ -875,34 +875,30 @@ def committed_final(conn: Connection, session_id: str, turn_id: str) -> Optional
     return None if unconsumed is not None else response
 
 
-def last_turn_text(conn: Connection, session_id: str, turn_id: str, *, types: Sequence[str]) -> Optional[tuple[str, str]]:
-    """``(row_id, text)`` of the last visible agent row of ``types`` written for ``turn_id``.
+def last_turn_reply(conn: Connection, session_id: str, turn_id: str) -> Optional[str]:
+    """The text of the last visible reply the agent wrote for ``turn_id``.
 
-    The legacy ``output`` reply a rerun Turn's silent final promotes
-    (``promote_turn_text_to_result``). Only the Turn's own rows count: a detached
-    completion is another Turn's work, even when it lands in the Session while this
-    one runs. The read seeks the Turn's rows by ``ix_messages_turn_id`` (forced, so
-    no SQLite version walks a growing index instead) and sorts only those; the
-    author and the Session are checked on the row it returns.
+    What a Turn rerun after a restart ends on when its final is silent: the reply
+    the process that died delivered (``result``, or ``output`` as released versions
+    typed one). Only the Turn's own rows count: a detached completion is another
+    Turn's work, even when it lands in the Session while this one runs. The read
+    seeks the Turn's rows by ``ix_messages_turn_id`` (forced, so no SQLite version
+    walks a growing index instead) and sorts only those; the author and the
+    Session are checked on the row it returns.
     """
     row = conn.execute(
         text(
-            "select id, session_id, author, content_text from messages INDEXED BY ix_messages_turn_id "
-            f"where {MESSAGE_TURN_ID_SQL} = :turn_id and type in :types "
+            "select session_id, author, content_text from messages INDEXED BY ix_messages_turn_id "
+            f"where {MESSAGE_TURN_ID_SQL} = :turn_id and type in ('result', 'output') "
             "and coalesce(CASE WHEN (json_valid(metadata_json) = 1) "
             "THEN json_extract(metadata_json, '$.detached') END, 0) != 1 "
             "order by created_at desc, id desc limit 1"
-        ).bindparams(bindparam("types", expanding=True)),
-        {"turn_id": turn_id, "types": list(types)},
+        ),
+        {"turn_id": turn_id},
     ).first()
-    if (
-        row is None
-        or row.session_id != session_id
-        or row.author != "agent"
-        or not str(row.content_text or "").strip()
-    ):
+    if row is None or row.session_id != session_id or row.author != "agent":
         return None
-    return str(row.id), str(row.content_text)
+    return str(row.content_text or "").strip() or None
 
 
 def fork_link(conn: Connection, session_id: str) -> Optional[tuple[str, int]]:

@@ -2170,8 +2170,8 @@ async def test_a_reply_a_steer_superseded_is_a_result_and_the_turn_ends_once_aft
     assert sorted(results) == sorted(replies) and results[rows[1].row_id] == "4."
     assert [push["message_id"] for push in pushes] == replies
     assert sequence == [*replies, "turn.end"]
-    # The snapshot carries what the Turn's end said; a silent end said nothing.
-    assert harness.controller.terminal_texts == ["" if final.startswith("<silent>") else final]
+    # The snapshot carries the Turn's last reply, which a silent end settles with.
+    assert harness.controller.terminal_texts == ["4." if final.startswith("<silent>") else final]
 
 
 async def test_a_silent_final_whose_run_failed_after_its_commit_is_typed_by_its_row(
@@ -2587,8 +2587,9 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
     """MESSAGE-DELIVERY-333: the run a restart cut had committed the Turn's final, so the rerun
     ends with that row through the live end, with no model call. A final that process never sent
     to IM is delivered once, with the image that run generated; one whose delivery the dispatcher
-    recorded is not sent again; a silent final after a reply that process showed promotes
-    nothing and leaves that reply as it was (MESSAGE-DELIVERY-334)."""
+    recorded is not sent again; a silent final settles with the reply that process showed, read
+    from the Turn's rows, and promotes nothing, not even a phase a released version stored as
+    ``output`` (MESSAGE-DELIVERY-334)."""
     from dataclasses import replace
 
     from core.message_output import MessageOutput, terminal_output_for
@@ -2605,7 +2606,12 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
         SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("is the cache safe?"),))
     )
     if case == "silent":
-        # A reply a steer superseded, which that process showed before the Turn's silent final.
+        # An earlier phase a released version stored as ``output``, then a reply a steer
+        # superseded, which that process showed before the Turn's silent final.
+        await harness.controller.emit_agent_message(
+            request.context, "output", "An earlier phase.",
+            output=MessageOutput(completes_turn=False, completes_run=False),
+        )
         shown = await harness.agent.store.append_response(SESSION, assistant(reply), final=False, superseded=True)
         await harness.controller.emit_agent_message(
             request.context, "result", reply,
@@ -2648,7 +2654,9 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
     [result] = harness.rows("result")
     if case == "silent":
         assert (result["id"], result["content_text"]) == (shown["id"], reply)
+        assert [row["content_text"] for row in harness.rows("output")] == ["An earlier phase."]
         assert [name for name, _ in published if name == "message.updated"] == []
+        assert harness.controller.terminal_texts[-1] == reply
         return
     assert result["id"] == final.row_id and result["content_text"].startswith(answer)
     sent, uploads = harness.controller.im_client.sent, harness.controller.im_client.uploads

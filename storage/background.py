@@ -2460,28 +2460,6 @@ def normalize_run_status(status: Any) -> str:
     return RUN_STATUS_ALIASES.get(str(status or "").strip(), str(status or "").strip() or "queued")
 
 
-def _recorded_turn_reply(row: Any, turn_id: str) -> Optional[tuple[str, str]]:
-    """``(output_id, text)`` of the latest reply a Run recorded for ``turn_id``.
-
-    A Run's output ledger holds what each output it was attached to recorded, in
-    order of first arrival (a retry keeps its place). A detached completion is not
-    the Turn's reply, and an output of another Turn is not this one's.
-    """
-
-    payload = _json_loads(row["result_payload_json"], {})
-    outputs = payload.get("outputs") if isinstance(payload, dict) else None
-    for entry in reversed(outputs if isinstance(outputs, list) else []):
-        if not isinstance(entry, dict):
-            continue
-        provenance = entry.get("provenance") if isinstance(entry.get("provenance"), dict) else {}
-        if provenance.get("detached") is True or str(provenance.get("turn_id") or "") != turn_id:
-            continue
-        identity, text = str(entry.get("id") or ""), str(entry.get("text") or "")
-        if identity and text.strip():
-            return identity, text
-    return None
-
-
 def _stronger_terminal_status(current: Any, incoming: Any) -> str:
     current_status = normalize_run_status(current)
     incoming_status = normalize_run_status(incoming)
@@ -6119,9 +6097,14 @@ class SQLiteBackgroundTaskStore:
         terminal_status: Optional[str] = None,
         error: Optional[str] = None,
         updated_at: Optional[str] = None,
+        append_output: bool = True,
         _conn: Any = None,
     ) -> dict[str, Any]:
-        """Append one idempotent Run output and optionally settle the Run once."""
+        """Append one idempotent Run output and optionally settle the Run once.
+
+        ``append_output=False`` settles with ``text`` as the terminal result only: it
+        is a reply the ledger already holds from its delivery.
+        """
 
         now = updated_at or _utc_now_iso()
         identity = str(output_id or "").strip()
@@ -6165,7 +6148,11 @@ class SQLiteBackgroundTaskStore:
             raw_outputs = result_payload.get("outputs")
             outputs = [dict(item) for item in raw_outputs if isinstance(item, dict)] if isinstance(raw_outputs, list) else []
             visible_text = str(text or "")
-            if visible_text.strip() and not any(str(item.get("id") or "") == identity for item in outputs):
+            if (
+                append_output
+                and visible_text.strip()
+                and not any(str(item.get("id") or "") == identity for item in outputs)
+            ):
                 output_entry: dict[str, Any] = {
                     "id": identity,
                     "text": visible_text,
@@ -6394,7 +6381,7 @@ class SQLiteBackgroundTaskStore:
         error: Optional[str] = None,
         deferred_run_ids: Sequence[str] = (),
         updated_at: Optional[str] = None,
-        settles_with_recorded_reply: bool = False,
+        append_output: bool = True,
         _durable_activity_blockers: Optional[set[str]] = None,
         _activity_session_ids: Sequence[str] = (),
     ) -> dict[str, dict[str, Any]]:
@@ -6405,12 +6392,10 @@ class SQLiteBackgroundTaskStore:
         cancellation cannot land after owner election but before a later participant
         is written with that owner's id.
 
-        ``settles_with_recorded_reply``: the Turn ended with no reply of its own, so
-        each Run settles with the latest reply recorded on it for this Turn
-        (``provenance['turn_id']``), not detached, under that entry's own id and
-        text; nothing is appended, and a Run with none settles with empty text
-        (docs/plans/reply-and-turn-end.md). Read from the row this transaction
-        already holds, so it is the ledger as committed.
+        ``append_output=False``: ``text`` is a reply already recorded on the Runs
+        when it was delivered (a Turn end's settle text), so it settles them as
+        their ``result_text`` without a second output entry
+        (docs/plans/reply-and-turn-end.md).
         """
 
         from core import failure_notices
@@ -6544,15 +6529,11 @@ class SQLiteBackgroundTaskStore:
                 run = runs.get(run_id)
                 if run is None or normalize_run_status(run.get("status")) == "canceled":
                     continue
-                run_output_id, run_text = output_id, text
-                if settles_with_recorded_reply:
-                    recorded = _recorded_turn_reply(rows[run_id], turn_id)
-                    run_output_id, run_text = recorded if recorded is not None else (output_id, "")
                 run_terminal_status = terminal_status
                 if run_terminal_status and run_id in deferred_ids:
                     defer_kwargs: dict[str, Any] = {
                         "terminal_status": run_terminal_status,
-                        "result_text": run_text,
+                        "result_text": text,
                         "updated_at": now,
                         "_conn": conn,
                     }
@@ -6564,14 +6545,15 @@ class SQLiteBackgroundTaskStore:
                     run_terminal_status = None
                 results[run_id] = self.record_run_output(
                     run_id,
-                    output_id=run_output_id,
-                    text=run_text,
+                    output_id=output_id,
+                    text=text,
                     message_id=message_id,
                     sequence=sequence,
                     provenance=terminal_provenance,
                     terminal_status=run_terminal_status,
                     error=error,
                     updated_at=now,
+                    append_output=append_output,
                     _conn=conn,
                 )
         return results

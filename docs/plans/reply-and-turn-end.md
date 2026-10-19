@@ -1,7 +1,8 @@
 # A reply is not the end of a Turn
 
-Status: approved by the owner (cyhhao), 2026-10-19. PR 1: shared contract and
-Vibey. PR 2: Claude, Codex, OpenCode.
+Status: approved by the owner (cyhhao), 2026-10-19. PR 1: shared contract,
+Vibey, and Claude's pre-steer phase typed as a reply. PR 2 and later: see Next
+steps.
 
 ## Background
 
@@ -59,12 +60,11 @@ completion signal, and only that event does Turn-end work.
    Failed and stopped Turns end with their outcome; error notices stay status
    pills.
 4. Web Push: one push per `result` row.
-5. Run settlement and callback text: the Turn's last visible reply. A Turn with
-   no visible reply settles with empty text and sends no callback. Precisely
-   (orchestrator decision, 2026-10-20): a Run settles with the latest reply
-   recorded while it was attached. A Run steered in after the Turn's last
-   reply, whose Turn then ends silently, settles empty and gets no callback,
-   because that reply answered an earlier input, not this Run.
+5. Run settlement and callback text: the Turn's last visible reply, for every
+   Run attached to the Turn, including one a steer attached after that reply.
+   A Turn with no visible reply settles with empty text and sends no callback.
+   The backend says what that reply was when the Turn ends (`settle_text`);
+   nothing reconstructs it afterwards.
 6. The demotion and promotion patches are deleted. Stored `output`, `interim`
    and promoted rows keep rendering as they do today.
 7. Consumers that read `result` as the Turn's end move to the Turn-end signal
@@ -83,27 +83,31 @@ part is delivered and typed exactly as a non-terminal reply would be.
 
 - A non-terminal, non-detached `result` is persisted and delivered as `result`
   (`communication_type_for_output` no longer returns `output` for it).
-- One owner per consumer, both durable, no in-memory copy:
-  - Run `result_text` and callback: each Run's own output ledger
-    (`agent_runs.result_payload.outputs`), where every reply the Run was
-    attached to is recorded when it is delivered (IM records before its row is
-    written). A Turn end without its own visible text that completes the Turn
-    (not failed, not a resultless settlement) settles each Run with the latest
-    entry recorded on it for this Turn (`provenance.turn_id`), not detached,
-    under that entry's own id and text, and appends nothing
-    (`record_turn_run_outputs(settles_with_recorded_reply=True)`, inside the
-    settlement write that already holds the Run rows). A Run with no such entry
-    settles empty. The ledger keeps first-arrival order and never re-adds an
-    id, so a retried earlier reply cannot displace a later one, and a restart
-    reads the same entries.
-  - Turn snapshot `terminal_evidence.result_text`: what the Turn end itself
-    carried, so "" for a content-free end. Its only reader settles Runs
-    accepted into the Turn too late for its end, which by the rule above have
-    no recorded reply.
-- For a reply, the ledger is the record: a Run settles with the reply recorded
-  on it even when its transcript write failed, as a final reply's Run does.
-  The transcript is the record for what the UI renders. Nothing is promoted or
-  re-notified.
+- The backend says its last visible reply when the Turn ends. A Turn-end emit
+  with no text of its own that completes the Turn carries `settle_text`, the
+  backend's last visible reply in the Turn ("" only when there was none). It is
+  never displayed and adds no row, Web Push or unread. The dispatcher writes it
+  into the Turn snapshot (`terminal_evidence.result_text`) and settles every
+  attached Run with it through the one terminal path. Startup reconciliation,
+  late steers and restarts read that snapshot. The reply was recorded on the
+  Runs' output ledgers when it was delivered, so the settlement sets
+  `result_text` and the terminal status only (`append_output=False`; the
+  snapshot carries `result_recorded` so reconciliation does the same). Nothing
+  is reconstructed: no in-memory memo, no ledger selection, no restart lookup in
+  the dispatcher.
+- A failed or stopped Turn reports its outcome, never an earlier reply, and a
+  `level="silent"` end that carries text still records that text, as before.
+- Where `settle_text` comes from:
+  - Vibey: the last reply a steer superseded that the run delivered. A Turn
+    rerun after a restart reads the Turn's own `result`/`output` rows
+    (`last_turn_reply`, a forced `ix_messages_turn_id` SEARCH, off the loop).
+  - Claude: its completed pre-steer phase is now a non-terminal `result` and
+    becomes the request's `last_reply_text`; `emit_result_message` carries it
+    on a silent or empty final.
+  - Codex and OpenCode: their terminal text already is the last visible reply
+    (Codex keeps the last visible `agentMessage` as the result candidate and a
+    silent message never displaces it; OpenCode substitutes the last visible
+    completed reply for a silent final), so their Turn end never needs one.
 - `_stream_chunk` no longer derives Turn completion from `kind == "result"`.
 
 ### Message catalog (`vibe/message_types.json`)
@@ -129,9 +133,10 @@ trace, `error`, or a backend-failure `notify`. No partial index reads
 | Consumer | Today | After |
 | --- | --- | --- |
 | `communication_type_for_output` | non-terminal `result` → `output` | stays `result` |
-| silent-final promotion (`promote_turn_text_to_result`, `resumed_turn_text`) | retypes earlier `output`/`interim` to `result` | PR 1: never for narration or in a Turn with a reply; PR 2: deleted |
-| Run `result_text` / callback on a silent final | empty | the latest reply recorded on that Run's ledger for this Turn, under its own id; empty for a Run attached after it |
-| Turn snapshot `result_text` on a silent final | empty | unchanged: what the end carried ("") |
+| silent-final promotion (`promote_turn_text_to_result`, `resumed_turn_text`) | retypes earlier `output`/`interim` to `result` | deleted |
+| Claude pre-steer phase (`_emit_primary_phase_output`) | `output` | non-terminal `result` |
+| Run `result_text` / callback on a silent final | empty | the end's `settle_text`, for every attached Run, no second ledger entry |
+| Turn snapshot `result_text` on a silent final | empty | the end's `settle_text` |
 | `_stream_chunk` default | `kind == "result"` completes the Turn | completion only when the caller says so |
 | Activity grouping (`storage/agent_activity_service.py`) | `result` ends the Turn | `reply` closes the Activity group like a boundary; the durable Turn row / IM marker ends the Turn; promoted rows keep their recorded role |
 | Live Activity card (`ChatPage`, `chatMessageTypes.ts`) | `result` settles the generation | `reply` resets it like a boundary; `turn.end` settles |
@@ -144,44 +149,19 @@ trace, `error`, or a backend-failure `notify`. No partial index reads
 
 ## Deletions
 
-PR 1: the dispatcher downgrade, narration (`interim`) promotion, Vibey
-superseded→`output`. The silent-final promotion stays only for a stored
-`output` and only in a Turn that has no `result` reply, because Claude's
-pre-steer phase still emits `output` until PR 2 (Codex and OpenCode already
-choose their last visible reply themselves).
+PR 1: the dispatcher downgrade; the whole silent-final promotion
+(`promote_turn_text_to_result`, `resumed_turn_text`, the dispatcher's legacy
+`output` memo); Vibey superseded→`output`; Claude's pre-steer `output` type.
 
-PR 2: Claude's pre-steer `output` branch, Codex narration of the previous
-visible `agentMessage`, OpenCode's superseded replies as `assistant`, and the
-rest of the promotion (`promote_turn_text_to_result`, `resumed_turn_text`, the
-dispatcher's legacy `output` record).
-
-## Transition from PR 1 to PR 2
-
-PR 1 keeps one transitional patch, approved by the orchestrator on
-2026-10-20 as contract-preserving: a silent final still promotes a stored
-legacy `output` in a Turn that has no `result` reply. It exists only because
-Claude's pre-steer phase emits `output` until PR 2. PR 2 must delete it in the
-same change as Claude's pre-steer `output` branch:
-
-- [ ] `core/message_dispatcher.py`: `_turn_visible_text`, `_remember_turn_text`,
-  `_take_turn_text`, `remembers_turn_text`, and the promotion block of the
-  content-free Turn end;
-- [ ] `core/message_mirror.py`: `promote_turn_text_to_result`,
-  `resumed_turn_text`;
-- [ ] `tests/test_message_dispatcher_silent_final.py` and
-  `MESSAGE-DELIVERY-325` (retired in favour of `MESSAGE-DELIVERY-334`);
-- [ ] `storage/agent_transcript.py::last_turn_text`, whose only caller is
-  `resumed_turn_text` (a forced `ix_messages_turn_id` read of the Turn's rows);
-- [ ] the line that drops a Turn's legacy `output` record when a `result`
-  reply is delivered (`replies_mid_turn` in `emit_agent_message`);
-- [ ] keep reading `PROMOTED_FROM_KEY` / `PROMOTED_FROM_TYPES` for released
-  promoted rows (`storage/agent_activity_service.py`).
+PR 2: Codex narration of the previous visible `agentMessage` and OpenCode's
+superseded replies as `assistant`, with the rest of the backend migration.
 
 ## Compatibility
 
 - Rows written by released versions keep their type: `output` renders muted,
   `interim` renders muted, a promoted `result` (`metadata.promoted_from`) keeps
-  its recorded Activity role. `PROMOTED_FROM_KEY` stays readable.
+  its recorded Activity role. `PROMOTED_FROM_KEY` stays readable; nothing
+  writes it any more.
 - `committed_final` still treats a stored `output` as not final.
 - No schema or index change; `activityRole` is not part of any partial index.
 - IM Turns have no durable Turn row; a visible IM reply closes its Activity
@@ -190,9 +170,9 @@ same change as Claude's pre-steer `output` branch:
 
 ## Known by design
 
-- A Run steered in after the Turn's last reply, whose Turn then ends silently,
-  settles with empty text and sends no callback: that reply answered an
-  earlier input (rule 5).
+- `settle_text` is the backend's word for its last reply, written as the Run
+  copy (citations written out). It is not re-read from the transcript, so a
+  reply that reached IM but whose row write failed still settles the Runs.
 - On the Web the thinking indicator stays until `turn.end`, so it can show
   briefly under a final reply while the runner commits the Turn.
 - In IM a reply that does not end the Turn is its own message without the done
@@ -208,18 +188,45 @@ Scenario `MESSAGE-DELIVERY-334` (`tests/scenarios/message_delivery/catalog.yaml`
 - Dispatcher (owner boundary): a non-terminal reply followed by the steered
   input's reply both persist as `result`, each pushes once, the Turn ends once
   after both, and the Run settles with the last reply; a silent final after a
-  visible reply promotes nothing and the Run settles with that reply; a new
-  process ending the Turn settles with this Turn's reply, not a detached
-  completion on the same ledger; a replayed earlier reply does not displace a
-  later one whose row was never written; each reply has one ledger entry
-  across a restart; a Run steered in after the last reply settles empty;
-  narration stays `assistant` and leaves the Run text empty; a stop and a
-  failure end the Turn once and carry no reply text; IM finalization (running
-  indicator, status bubble) happens once, at the Turn end.
+  visible reply settles with it and pushes nothing new; replies A, B, A with
+  detached work on the same Run, a Turn end in a new process carrying A, and
+  startup reconciliation of a second Run all settle with A with no second
+  ledger entry; every attached Run, one steered in after the reply included,
+  settles with it; narration stays `assistant` and leaves the Run text empty;
+  a stop and a failure end the Turn once and carry no reply text; IM
+  finalization (running indicator, status bubble) happens once, at the Turn end.
 - Vibey (owner boundary): a complete reply followed by a steered input commits
   and delivers as `result` and pushes once, the steered reply is a second
-  `result`, and the Turn ends once after both.
+  `result`, and the Turn ends once after both; a rerun after a restart settles
+  with the reply the dead process delivered and promotes no stored `output`.
+- Claude: a completed pre-steer phase emits a non-terminal `result` and becomes
+  the request's last reply.
 - Activity grouping, fork completion, and the UI message-role helpers keep their
   rendering for single-reply Turns and treat a mid-Turn reply as a phase
   boundary.
 - PR 2: one primary regression per backend at its owning boundary.
+
+## Next steps
+
+Approved by the owner, in this order:
+
+1. PR 2. Claude, Codex and OpenCode move to the reply rule. In the same PR,
+   every backend, Vibey included, reports output through one typed event set:
+   reply, narration, tool activity, turn end (outcome plus `settle_text`), and
+   error. This replaces type strings plus `MessageOutput` flags, so the
+   dispatcher no longer infers semantics. Vibey's agent-event schema is the
+   starting point.
+2. PR 3, structural only with no behavior change. One presentation decision
+   point per output event: transcript or not, muted, push, IM delivery.
+   Today's rules move into it unchanged as the default policy: the interim
+   length threshold, hidden types, IM concise mode, `suppress_delivery`. The
+   decision is recorded on the message.
+3. PR 4, structural only with no behavior change. One admission entry for
+   every input source: Web composer, IM, Harness, Show annotation, failure
+   retry, agent-initiated. Each input is normalized to sender, kind and
+   content, and its priority is decided through one default policy that holds
+   today's per-source defaults. Who decided is recorded in the delivery
+   history.
+
+Out of scope for now: Mailbox, P2 (doorbell, owner-confirmed meaning, not
+specified yet) and P4, decision models, firewall rules.

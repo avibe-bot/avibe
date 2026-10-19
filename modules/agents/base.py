@@ -71,6 +71,10 @@ class AgentRequest:
     vibe_agent_system_prompt: Optional[str] = None
     last_agent_message: Optional[str] = None
     last_agent_message_parse_mode: Optional[str] = None
+    # The backend's last visible reply in this Turn that did not end it. A Turn end
+    # with no reply of its own settles with it (``settle_text``,
+    # docs/plans/reply-and-turn-end.md); it is never displayed again.
+    last_reply_text: str = ""
     started_at: float = field(default_factory=time.monotonic)
     # Reaction ack: emoji added to user's message, to be removed when result is sent
     processing_indicator: Optional[Any] = None
@@ -639,6 +643,8 @@ class BaseAgent(ABC):
         has_silent_directive = "<silent" in raw_result.lower() or "<silent" in raw_suffix.lower()
         message_id: Optional[str] = None
 
+        # A Turn end with no reply of its own settles with the Turn's last visible reply.
+        settle = {"settle_text": request.last_reply_text} if request and request.last_reply_text else {}
         if has_silent_directive and not visible_result.strip() and not (visible_suffix or "").strip():
             message_id = await self.controller.emit_agent_message(
                 context,
@@ -647,6 +653,7 @@ class BaseAgent(ABC):
                 parse_mode=parse_mode,
                 is_error=is_error,
                 output=output,
+                **settle,
             )
             if request and settles_request:
                 await self._remove_ack_reaction(request)
@@ -689,6 +696,7 @@ class BaseAgent(ABC):
                     parse_mode=parse_mode,
                     is_error=is_error,
                     output=output,
+                    **settle,
                 )
         else:
             token_field = ""

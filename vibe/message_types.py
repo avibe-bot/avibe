@@ -156,13 +156,13 @@ def is_detached_completion(message_type: str, metadata: Any = None) -> bool:
 TRANSCRIPT_COPY_KEY = "transcript_copy"
 
 
-# Metadata on a ``result`` promoted from Turn text when its Turn ended on a silent
-# reply (``core.message_mirror.promote_turn_text_to_result``): the type it was
-# persisted as, one of ``PROMOTED_FROM_TYPES``. The row is a reply everywhere; only
-# Activity grouping keeps it where its text was mid-Turn. Rows released versions
-# promoted keep the marker, so it stays readable.
+# Metadata on a ``result`` that released versions promoted from Turn text when its
+# Turn ended on a silent reply: the type it was persisted as, one of
+# ``PROMOTED_FROM_TYPES``. Nothing promotes any more (docs/plans/reply-and-turn-end.md);
+# the marker stays readable on those rows. The row is a reply everywhere; only
+# Activity grouping keeps it where its text was mid-Turn.
 PROMOTED_FROM_KEY = "promoted_from"
-# Transcript-visible agent text that does not end its Turn, and so can be promoted.
+# The types a released version's promotion retyped.
 PROMOTED_FROM_TYPES = ("output", "interim")
 
 

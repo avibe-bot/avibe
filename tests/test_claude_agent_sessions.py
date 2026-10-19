@@ -1016,7 +1016,11 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(agent._pending_steering_input_state(composite_key), "unknown")
 
     async def test_steered_assistant_and_result_settle_the_pending_turn(self):
-        """A Result before the native input echo remains nonterminal."""
+        """A Result before the native input echo remains nonterminal.
+
+        MESSAGE-DELIVERY-334: that completed phase is a reply, a ``result`` that does
+        not end the Turn, and the request's last reply a silent final settles with.
+        """
         controller = _StubController()
         controller._get_session_key = lambda _context: "session-1"
         controller.emit_agent_message = AsyncMock()
@@ -1098,13 +1102,23 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             parse_mode="markdown",
             request=pending_request,
         )
+        # MESSAGE-DELIVERY-334: the completed pre-steer phase is a reply (``result``)
+        # that does not end the Turn, and the Turn's request remembers it as the reply
+        # a silent final would settle with.
         controller.emit_agent_message.assert_any_await(
             context,
-            "output",
+            "result",
             "primary final answer",
             parse_mode="markdown",
             output=ANY,
         )
+        phase_output = next(
+            call.kwargs["output"]
+            for call in controller.emit_agent_message.await_args_list
+            if call.args[1:3] == ("result", "primary final answer")
+        )
+        self.assertFalse(phase_output.completes_turn)
+        self.assertEqual(pending_request.last_reply_text, "primary final answer")
         self.assertNotIn(composite_key, agent._pending_requests)
 
     async def test_presteer_result_stays_visible_without_agent_initiated_turn(self):
@@ -1116,7 +1130,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         output_semantics = []
 
         async def _emit_output(emit_context, message_type, *_args, **kwargs):
-            if message_type == "output":
+            # The completed pre-steer phase: a reply that does not end the Turn.
+            if message_type == "result" and not getattr(kwargs.get("output"), "completes_turn", True):
                 output_tokens.append(
                     emit_context.platform_specific.get("agent_runtime_turn_token")
                 )
@@ -1213,7 +1228,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         controller.emit_agent_message.assert_any_await(
             context,
-            "output",
+            "result",
             "primary work completed",
             parse_mode="markdown",
             output=ANY,
@@ -1311,7 +1326,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         primary_call = controller.emit_agent_message.await_args_list[0]
-        self.assertEqual(primary_call.args[1:3], ("output", "primary result"))
+        self.assertEqual(primary_call.args[1:3], ("result", "primary result"))
         primary_output = primary_call.kwargs["output"]
         self.assertFalse(primary_output.completes_turn)
         self.assertTrue(primary_output.settles_run)
@@ -1409,7 +1424,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
 
         primary_call = controller.emit_agent_message.await_args_list[0]
-        self.assertEqual(primary_call.args[1], "output")
+        self.assertEqual(primary_call.args[1], "result")
         self.assertEqual(
             primary_call.args[2],
             "<silent>Claude turn completed without assistant text.</silent>",
@@ -1562,7 +1577,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         controller.emit_agent_message.assert_awaited_once_with(
             context,
-            "output",
+            "result",
             "primary answer",
             parse_mode="markdown",
             output=ANY,
@@ -1889,7 +1904,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
 
         controller.emit_agent_message.assert_any_await(
             context,
-            "output",
+            "result",
             "primary answer",
             parse_mode="markdown",
             output=ANY,
@@ -1906,7 +1921,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(composite_key, agent._pending_requests)
         self.assertEqual(
             emissions,
-            [("output", "primary answer"), ("result", "steered answer")],
+            [("result", "primary answer"), ("result", "steered answer")],
         )
 
     async def test_buffered_pre_steer_assistant_keeps_primary_result_ownership(self):

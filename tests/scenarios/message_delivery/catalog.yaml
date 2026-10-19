@@ -390,16 +390,11 @@ scenarios:
       - tests/test_backend_failure_retry.py::test_restart_notice_names_the_watch_running_the_command_and_offers_no_retry
       - tests/test_backend_failure_retry.py::test_a_restart_notice_waits_until_its_running_command_is_handed_over
   - id: MESSAGE-DELIVERY-325
-    name: A silent final reply makes a legacy output reply before it the Turn's result, rendered and notified once; narration is never promoted (until every backend types its replies result, MESSAGE-DELIVERY-334)
+    name: A result released versions promoted from a silent final (metadata.promoted_from) keeps its Turn's Activity and its place in the pet; nothing promotes any more (MESSAGE-DELIVERY-334)
     status: covered
     kind: regression
     layer: contract
     test:
-      - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_a_silent_final_makes_the_last_visible_text_the_result
-      - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_concurrent_turns_in_one_channel_each_promote_their_own_text
-      - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_a_cancellation_during_the_promotion_still_commits_the_turn
-      - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_a_replayed_output_is_recorded_without_displacing_newer_text
-      - tests/test_message_dispatcher_silent_final.py::SilentFinalTurnResultTests::test_nothing_else_promotes_earlier_text
       - tests/test_agent_activity_service.py::test_a_promoted_silent_final_result_keeps_the_turns_activity
       - tests/test_agent_activity_service.py::test_a_promotion_marker_counts_only_on_a_promoted_result
     supporting_tests:
@@ -475,17 +470,16 @@ scenarios:
       - tests/test_backend_failure_retry.py::test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice
       - tests/test_agent_transcript.py::test_the_restart_reads_of_a_turns_context_tail_stay_bounded
   - id: MESSAGE-DELIVERY-334
-    name: A reply is a result whether or not it ends its Turn; a Turn may reply more than once (a steered input's answer is a second result, each notified once), and only the Turn end settles the Run, writes the Turn snapshot, hides the thinking indicator, and finalizes IM, once; a content-free end settles each Run with the latest reply recorded on its own ledger, under that entry's id, across restarts and retries
+    name: A reply is a result whether or not it ends its Turn; a Turn may reply more than once (a steered input's answer is a second result, each notified once), and only the Turn end settles the Run, writes the Turn snapshot, hides the thinking indicator, and finalizes IM, once; a content-free end carries the backend's last visible reply (settle_text), with which every attached Run and the snapshot settle, across restarts, reconciliation and repeated replies, never recorded twice
     status: covered
     kind: regression
     layer: contract
     test:
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_turn_replies_twice_and_ends_once_after_both
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_silent_final_settles_with_the_last_reply_and_promotes_nothing
-      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_restart_settles_with_this_turns_reply_not_detached_work
-      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_replayed_earlier_reply_never_displaces_a_later_one
-      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_each_reply_has_one_ledger_entry_across_a_restart
-      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_run_steered_in_after_the_last_reply_settles_empty
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_the_end_settles_with_its_reply_through_restart_reconciliation_and_repeats
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_every_attached_run_settles_with_the_turns_last_reply
+      - tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::test_steered_assistant_and_result_settle_the_pending_turn
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_reply_or_a_failure_keeps_its_type_attached_or_detached
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_only_a_reply_is_a_completed_turns_answer
       - tests/test_message_dispatcher_turn_end.py::TurnEndFinalizesImOnceTests::test_im_surfaces_finalize_once_at_the_turn_end

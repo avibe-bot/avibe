@@ -156,7 +156,7 @@ def _visible_emits(agent):
     return [
         (call.args[1], call.args[2])
         for call in agent.controller.emit_agent_message.await_args_list
-        if len(call.args) > 2 and call.args[1] in {"assistant", "toolcall", "output"}
+        if len(call.args) > 2 and call.args[1] in {"assistant", "toolcall", "output", "result"}
     ]
 
 
@@ -758,19 +758,20 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 )
 
                 # Same order and shape the live path emits: the pre-steer text
-                # closes its phase as a non-terminal output at the boundary.
+                # closes its phase as a reply that does not end the Turn
+                # (MESSAGE-DELIVERY-334: a completed phase is a ``result``).
                 self.assertEqual(
                     _visible_emits(agent),
                     [
                         ("toolcall", "Bash(pwd)"),
-                        ("output", "answer before steer"),
+                        ("result", "answer before steer"),
                         *post_steer_emits,
                     ],
                 )
                 presteer_output = next(
                     call.kwargs["output"]
                     for call in agent.controller.emit_agent_message.await_args_list
-                    if call.args[1] == "output"
+                    if call.args[1] == "result"
                 )
                 self.assertFalse(presteer_output.completes_turn)
                 self.assertEqual(agent.emit_result_message.await_count, 1)

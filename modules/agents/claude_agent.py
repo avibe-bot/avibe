@@ -4878,13 +4878,18 @@ class ClaudeAgent(BaseAgent):
         emitted_text = text or (
             str(activity.metadata.get("summary") or "") if activity else ""
         )
+        # A completed phase is a reply like any other: a ``result`` that does not end
+        # the Turn (docs/plans/reply-and-turn-end.md), and the Turn's last reply so far.
         message_id = await self.controller.emit_agent_message(
             context,
-            "output",
+            "result",
             emitted_text,
             parse_mode="markdown",
             output=output,
         )
+        visible_reply = strip_silent_blocks(emitted_text).strip()
+        if request is not None and visible_reply:
+            request.last_reply_text = visible_reply
         if activity is None:
             return
         if strip_silent_blocks(emitted_text).strip():

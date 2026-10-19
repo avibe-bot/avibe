@@ -1952,6 +1952,7 @@ class Controller:
         delivery: Any = None,
         citations: Optional[CitationBundle] = None,
         hosted: Optional[dict] = None,
+        settle_text: Optional[str] = None,
     ):
         """Backward-compatible entrypoint; delegated to message dispatcher."""
         result = await self.message_dispatcher.emit_agent_message(
@@ -1973,6 +1974,7 @@ class Controller:
             **({"delivery": delivery} if delivery is not None else {}),
             **({"citations": citations} if citations else {}),
             **({"hosted": hosted} if hosted else {}),
+            **({"settle_text": settle_text} if settle_text else {}),
         )
         # The dispatcher's terminal commit already ran this write beside the Turn's
         # signal (#2714), which makes this call a no-op. It still covers a dispatcher

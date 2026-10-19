@@ -2011,24 +2011,22 @@ def test_stop_without_terminal_stays_interrupted(isolated_state):
 
 
 @pytest.mark.parametrize("shown_type", ["interim", "output"])
-def test_a_promoted_silent_final_result_keeps_the_turns_activity(isolated_state, monkeypatch, shown_type):
+def test_a_promoted_silent_final_result_keeps_the_turns_activity(isolated_state, shown_type):
     """Scenario: MESSAGE-DELIVERY-325.
 
-    A Turn's text promoted to its result when the Turn ended on a silent reply
-    renders as the result, but stays where it was mid-Turn: the Activity groups
-    around it are exactly the ones its text had before promotion.
+    Released versions promoted a Turn's text to its result when the Turn ended on a
+    silent reply (``metadata.promoted_from``). Such a row renders as the result but
+    stays where it was mid-Turn: the Activity groups around it are exactly the ones
+    its text had before promotion.
     """
-    from types import SimpleNamespace
+    import json
 
-    from core import web_push_notifications
-    from core.message_mirror import promote_turn_text_to_result
-    from vibe.message_types import activity_role_for
+    from sqlalchemy import update
 
-    monkeypatch.setattr(
-        web_push_notifications,
-        "threading",
-        SimpleNamespace(Thread=lambda **_kwargs: SimpleNamespace(start=lambda: None)),
-    )
+    from storage import messages_service
+    from storage.models import messages
+    from vibe.message_types import PROMOTED_FROM_KEY, activity_role_for
+
     engine = create_sqlite_engine()
     sid, turn_id = "ses_promoted", "trn_promoted"
     with engine.begin() as conn:
@@ -2087,7 +2085,18 @@ def test_a_promoted_silent_final_result_keeps_the_turns_activity(isolated_state,
     with engine.connect() as conn:
         before = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
 
-    promoted = promote_turn_text_to_result("m_text")
+    # What a released version's promotion wrote.
+    with engine.begin() as conn:
+        conn.execute(
+            update(messages)
+            .where(messages.c.id == "m_text")
+            .values(
+                type="result",
+                content_json=json.dumps({"text": "The report.", "kind": "result"}),
+                metadata_json=json.dumps({"turn_id": turn_id, PROMOTED_FROM_KEY: shown_type}),
+            )
+        )
+        promoted = messages_service.get_message(conn, "m_text")
 
     assert promoted is not None and promoted["type"] == "result"
     with engine.connect() as conn:

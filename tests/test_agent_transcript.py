@@ -552,17 +552,17 @@ async def test_a_reply_pending_input_superseded_commits_as_a_reply(engine, super
 async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) -> None:
     """MESSAGE-DELIVERY-327 / MESSAGE-DELIVERY-333: restart recovery decides each cut Turn
     (``restart_resume_plan``, its restart streak included) and releases its runtime generation to
-    rerun it; the rerun finds the final it committed, and its end asks whether that final was
-    delivered and what a silent final promotes, the last two on the controller loop. Every
-    read is an indexed SEARCH keyed by the Turn, a row id, or the Session's context tail: no scan,
-    and a temporary sort only over the Turn's own Deliveries or rows, never over the growing
-    history."""
+    rerun it; the rerun finds the final it committed, its end asks whether that final was
+    delivered (on the controller loop), and a silent final reads the reply the Turn delivered
+    before the restart (MESSAGE-DELIVERY-334, off the loop). Every read is an indexed SEARCH
+    keyed by the Turn, a row id, or the Session's context tail: no scan, and a temporary sort only
+    over the Turn's own Deliveries or rows, never over the growing history."""
     from sqlalchemy import event
 
-    from core.message_mirror import delivered_committed_row, resumed_turn_text
+    from core.message_mirror import delivered_committed_row
     from core.restart_resume import restart_resume_plan, restart_streak
     from modules.im.base import MessageContext
-    from storage.agent_transcript import committed_final, last_turn_text
+    from storage.agent_transcript import committed_final, last_turn_reply
     from storage.db import get_cached_sqlite_engine
 
     with engine.begin() as conn:
@@ -596,11 +596,10 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
             cut_turn = message_deliveries.get_turn(conn, "turn_cut")
             assert restart_resume_plan(conn, cut_turn) == "rerun"
             assert committed_final(conn, "ses_cut", "turn_cut") is None
-            # The legacy ``output`` a silent final promotes, from the Turn's own rows.
-            last_turn_text(conn, "ses_main", "turn_main", types=("output",))
-        # The rerun's end, on the loop: the final's delivery, and what a silent final promotes.
+            # A silent final's settle text: the last reply the Turn delivered, from its own rows.
+            assert last_turn_reply(conn, "ses_main", "turn_main") == "两个文件。"
+        # The rerun's end, on the loop: the final's delivery.
         assert delivered_committed_row(rerun, final.row_id, outward=True) is None
-        assert resumed_turn_text(rerun) is None
         with engine.begin() as conn:
             # The rerun's writer transaction: the streak, and the released generation.
             streak, response_seq = restart_streak(conn, cut_turn)
