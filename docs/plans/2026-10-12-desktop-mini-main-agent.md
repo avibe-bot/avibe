@@ -116,6 +116,17 @@ the main agent; there is no Follow up on cards.
 
 ### 3.3 Collapsed stack
 
+A stack needs at least **two** visible cards. **Exactly one** visible card is
+never collapsed: it is always drawn in its full expanded form (stop or
+authorize, Open in Avibe, × on hover, click to reference) at its own height,
+whatever the panel state. Clicking Vibey does not change it, so Vibey's button
+carries no `aria-expanded` then. With a lone card a Vibey click toggles no
+panel state at all, so nothing waits to appear when a second card arrives: it
+closes an open history (and the panel with it) and otherwise does nothing. All of the card's controls are hit regions in
+every panel state. Opening the history keeps the card in full beside it, and
+the history's height bound uses the card's measured height. Going between one
+and two cards follows the data with the ordinary swap transition.
+
 - **Front card:** the **first** card (the main agent card when it exists),
   showing its title and subtitle only: no ×, no stop button.
 - **Layers:** at most **three** behind the front card, regardless of the
@@ -144,8 +155,8 @@ the main agent; there is no Follow up on cards.
 | Container | Radius 28px; padding 20px × 14px; background `#2a2a2e`; border 1px `white / 8%`; no shadow (§3.2). |
 | Title | 15px, semibold, tight tracking, white, one line, ellipsis. The full text is the tooltip. |
 | Subtitle | 13px, `white / 45%`, 2px below the title, one line, ellipsis, with the full text as the tooltip. While running it has a 6px pulsing dot (`emerald-400`) before the text. |
-| × (dismiss) | Expanded activity cards only. 20px circle at the top-left corner, offset −6px/−6px. Hidden until the card is hovered or receives focus within; always visible when hover is unavailable. Background `#3a3a3e`, glyph 11px `white / 70%`; on hover `#4a4a50` with a white glyph. Sits above the card content. |
-| Stop | Expanded list only, running sub-tasks only (§6). A 32px circle with background `white / 10%` and a filled rounded-square SVG icon at `white / 80%`. Its right gap and top gap to the card edge are both 16px. |
+| × (dismiss) | Expanded activity cards only (a lone card always counts as expanded, §3.3). 20px circle at the top-left corner, offset −6px/−6px. Hidden until the card is hovered or receives focus within; always visible when hover is unavailable. Background `#3a3a3e`, glyph 11px `white / 70%`; on hover `#4a4a50` with a white glyph. Sits above the card content. |
+| Stop | Expanded list or a lone card only (§3.3), running sub-tasks only (§6). A 32px circle with background `white / 10%` and a filled rounded-square SVG icon at `white / 80%`. Its right gap and top gap to the card edge are both 16px. |
 
 - There is **no reply/return button** and **no Follow up** (owner decisions).
 - **Icons are SVG**, never Unicode glyphs. iOS renders `↩` as a blue emoji.

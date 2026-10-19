@@ -121,23 +121,16 @@ for (const cards of [2, 4, 20]) {
   });
 }
 
-for (const cards of [1, 2, 12, 120]) {
+// One card is never a stack; see "one card is always drawn in full".
+for (const cards of [2, 12, 120]) {
   test(`shows the collapsed count for ${cards} cards`, async ({ page }) => {
     await page.goto(`/e2e/pet-mini/fixture.html?activities=${cards}&layers=1`);
     await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
     const displayCount = cards > 99 ? '99+' : String(cards);
-    const countChip = page.locator('.pet-mini-stack-count');
-    if (cards === 1) {
-      await expect(countChip).toHaveCount(0);
-    } else {
-      await expect(countChip).toHaveText(`${displayCount} items`);
-    }
-    const expectedLabel = cards === 1
-      ? `Expand ${displayCount} session card`
-      : `Expand ${displayCount} session cards`;
+    await expect(page.locator('.pet-mini-stack-count')).toHaveText(`${displayCount} items`);
     await expect(page.locator('.pet-mini-collapsed')).toHaveAttribute(
       'aria-label',
-      expectedLabel,
+      `Expand ${displayCount} session cards`,
     );
   });
 }
@@ -198,7 +191,7 @@ test('Vibey and its dock are reported as the hover zone, and a shell hover shows
   })).toBe(true);
   // Cards take the mouse but are not part of the hover zone.
   await expect.poll(() => page.evaluate(() => {
-    const card = document.querySelector('.pet-mini-collapsed .pet-mini-card')!.getBoundingClientRect();
+    const card = document.querySelector('.pet-mini-card')!.getBoundingClientRect();
     const x = card.left + card.width / 2, y = card.top + card.height / 2;
     return window.petLayoutHitRegions.some((rect) => rect.hover && x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height);
   })).toBe(false);
@@ -781,3 +774,147 @@ for (const theme of ['light', 'dark']) {
     await expect(tooltip).toHaveCount(0);
   });
 }
+
+for (const theme of ['light', 'dark']) {
+  test(`one card is always drawn in full and Vibey does not toggle it (${theme})`, async ({ page }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?activities=1');
+    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+    const settle = () => page.evaluate(async () => {
+      await Promise.all(document.getAnimations()
+        .filter((animation) => animation.effect?.getTiming().iterations !== Infinity)
+        .map((animation) => animation.finished.catch(() => {})));
+    });
+    const card = page.locator('.pet-mini-card');
+    const stop = card.locator('.pet-mini-stop');
+    const open = card.locator('.pet-mini-open');
+    const avatar = page.locator('.pet-mini-avatar-button');
+    await expect(card).toHaveCount(1);
+    await expect(stop).toBeVisible();
+    await expect(open).toBeVisible();
+    await expect(page.locator('.pet-mini-collapsed')).toHaveCount(0);
+    await expect(page.locator('.pet-mini-stack-count')).toHaveCount(0);
+    expect(await avatar.getAttribute('aria-expanded')).toBeNull();
+    await settle();
+    const box = await card.boundingBox();
+
+    for (let click = 0; click < 2; click += 1) {
+      await avatar.click();
+      await settle();
+      expect(await card.boundingBox()).toEqual(box);
+      await expect(stop).toBeVisible();
+      await expect(open).toBeVisible();
+      await expect(page.locator('.pet-mini-collapsed')).toHaveCount(0);
+      expect(await avatar.getAttribute('aria-expanded')).toBeNull();
+    }
+
+    // The window passes clicks through except over hit regions, so every
+    // control of the card must be one, without opening anything first.
+    const inRegions = async (locator: typeof card) => {
+      const target = (await locator.boundingBox())!;
+      const x = target.x + target.width / 2, y = target.y + target.height / 2;
+      return page.evaluate(([x, y]) => window.petLayoutHitRegions.some((rect) =>
+        x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height), [x, y]);
+    };
+    await expect.poll(() => inRegions(stop)).toBe(true);
+    await expect.poll(() => inRegions(open)).toBe(true);
+    await card.hover();
+    const dismiss = page.locator('.pet-mini-dismiss');
+    await expect(dismiss).toBeVisible();
+    await expect.poll(() => inRegions(dismiss)).toBe(true);
+
+    // The lone card's open button is the shared one: the pet tooltip, and no
+    // native tooltip inherited from the card's title.
+    expect(await open.getAttribute('title')).toBe('');
+    await open.hover();
+    await expect(page.getByRole('tooltip')).toHaveText('Open in Avibe');
+    await open.click();
+    await expect.poll(() => page.evaluate(() => window.petFixtureOpens)).toEqual(['avibe://session/ses_fixture_0']);
+    await stop.click();
+    await expect(stop).toHaveAttribute('aria-label', 'Stop?');
+    await dismiss.click();
+    await expect(card).toHaveCount(0);
+  });
+
+  test(`one card stays in full beside the open history and everything fits (${theme})`, async ({ page }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&activities=1&history=long');
+    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+    const card = page.locator('.pet-mini-card');
+    await expect(card.locator('.pet-mini-open')).toBeVisible();
+    const anchor = await page.locator('.pet-mini-avatar-button').boundingBox();
+    await page.locator('.pet-mini-reply-toggle').click();
+    await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+    await page.evaluate(async () => {
+      await Promise.all(document.getAnimations()
+        .filter((animation) => animation.effect?.getTiming().iterations !== Infinity)
+        .map((animation) => animation.finished.catch(() => {})));
+    });
+    await expect(card).toBeVisible();
+    await expect(card.locator('.pet-mini-open')).toBeVisible();
+    const cardBox = (await card.boundingBox())!;
+    const bubble = (await page.locator('.pet-mini-reply-bubble').boundingBox())!;
+    const avatar = (await page.locator('.pet-mini-avatar-button').boundingBox())!;
+    expect(cardBox.y).toBeGreaterThanOrEqual(0);
+    expect(cardBox.y + cardBox.height).toBeLessThanOrEqual(bubble.y);
+    expect(avatar).toEqual(anchor);
+    expect(bubble.y + bubble.height).toBeLessThanOrEqual(600);
+    expect(avatar.y + avatar.height).toBeLessThanOrEqual(600);
+  });
+}
+
+test('Vibey clicks with a lone card leave no hidden expansion for a second card', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?activities=1');
+  const avatar = page.locator('.pet-mini-avatar-button');
+  await expect(page.locator('.pet-mini-card')).toHaveCount(1);
+  await avatar.click();
+  await avatar.click();
+  await avatar.click();
+  await page.evaluate(() => window.petFixtureAddActivity());
+  await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+  await expect(page.locator('.pet-mini-stack-count')).toHaveText('2 items');
+  await expect(page.locator('.pet-mini-scroll')).toHaveCount(0);
+  await expect(avatar).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('with a lone card, Vibey closes the open history and leaves the card alone', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&activities=1');
+  const card = page.locator('.pet-mini-card');
+  const avatar = page.locator('.pet-mini-avatar-button');
+  await expect(card.locator('.pet-mini-open')).toBeVisible();
+  await page.locator('.pet-mini-reply-toggle').click();
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
+  const size = async () => {
+    await page.evaluate(async () => {
+      await Promise.all(document.getAnimations()
+        .filter((animation) => animation.effect?.getTiming().iterations !== Infinity)
+        .map((animation) => animation.finished.catch(() => {})));
+    });
+    const box = (await card.boundingBox())!;
+    return { width: box.width, height: box.height };
+  };
+  const before = await size();
+  await avatar.click();
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).not.toHaveClass(/is-open/);
+  // The card moves down with the shrinking bubble, but keeps its full form.
+  await expect(card.locator('.pet-mini-open')).toBeVisible();
+  await expect(card.locator('.pet-mini-authorize')).toBeVisible();
+  expect(await size()).toEqual(before);
+  // Nothing was left expanded behind it either.
+  await page.evaluate(() => window.petFixtureAddActivity());
+  await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+  await expect(page.locator('.pet-mini-scroll')).toHaveCount(0);
+});
+
+test('two or more cards keep the collapsed stack that Vibey toggles', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?activities=2');
+  const avatar = page.locator('.pet-mini-avatar-button');
+  await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+  await expect(page.locator('.pet-mini-stack-count')).toBeVisible();
+  await expect(avatar).toHaveAttribute('aria-expanded', 'false');
+  await avatar.click();
+  await expect(page.locator('.pet-mini-scroll')).toBeVisible();
+  await expect(page.locator('.pet-mini-card')).toHaveCount(2);
+  await expect(avatar).toHaveAttribute('aria-expanded', 'true');
+  await avatar.click();
+  await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+  await expect(avatar).toHaveAttribute('aria-expanded', 'false');
+});
