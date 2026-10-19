@@ -10,7 +10,8 @@ import { Button } from '@/components/ui/button';
 import { Markdown } from '@/components/ui/markdown';
 import { QuickReplies } from '@/components/workbench/QuickReplies';
 import { isComposingKey } from '@/lib/imeComposition';
-import { usePageActive } from '@/lib/pageActivity';
+import { useDocumentVisible, usePageActive } from '@/lib/pageActivity';
+import { isDetachedCompletionMessage } from '@/lib/chatMessageTypes';
 import { usePendingVaultRequests } from '@/lib/usePendingVaultRequests';
 import { useVaultRequestRefresh } from '@/lib/useVaultRequestRefresh';
 import { vaultRequestType } from '@/lib/vaultRequestPlacement';
@@ -20,8 +21,9 @@ import { VoiceTranscriptionError } from '@/lib/voiceTranscription';
 
 import { PetAvatar, type PetPose } from './PetAvatar';
 import { PetOpenButton } from './PetOpenButton';
+import { REPLY_LINGER_RESUME_MS, useReplyLinger } from './useReplyLinger';
 import { onPetHover, petBridge, sessionLink, vaultRequestLink } from './petBridge';
-import { usePetPanel } from './petPanel';
+import { petPanel, usePetPanel } from './petPanel';
 import { petComposer, usePetComposer } from './petComposer';
 import { petShell, useOnSummon, usePetBinding, usePetDismissed } from './petShell';
 import { derivePetPose, derivePetState, latestExchange, latestFailureNotice, openQuickReplies } from './petState';
@@ -45,6 +47,7 @@ const STACK_HEIGHT = 304; // 292px scroll box + 6px panel padding on each side.
 type FadeProfile = { size: number; ramp: readonly (readonly [number, number])[] };
 const CARD_FADE: FadeProfile = { size: 32, ramp: [] };
 // The history is denser text, so its band is taller and darker at the edge.
+const NO_REPLIES: ReadonlySet<string> = new Set();
 const HISTORY_FADE: FadeProfile = { size: 48, ramp: [[0.12, 0.35], [0.55, 0.7]] };
 // How close to the end of the history still counts as reading at the bottom.
 const HISTORY_STICK_PX = 8;
@@ -276,8 +279,7 @@ const PetSurface: React.FC = () => {
     // Typing and dictation keep the speech slot, and the draft, as they are.
     if (composing || voice.listening) return;
     if (!binding || resolvingMain || (data.messages.length === 0 && !optimisticTitle)) return;
-    setDetailOpen(true);
-    void setPanel(true);
+    openHistory();
   };
   const [composing, setComposing] = useState(false);
   const [presentations, setPresentations] = useState<Record<string, CardPresentation>>({});
@@ -648,20 +650,115 @@ const PetSurface: React.FC = () => {
     && (historyOpen || data.running || optimisticTitle || exchange.user || exchange.results.length > 0 || failure || uncertain
       || queued || vaultRequests.length > 0 || quickReplies),
   );
-  // Whether it is drawn (spec §4.2): only while the main session is active —
-  // Vibey is working, a send is pending, Vibey needs the user, or the history
-  // is open — and hidden the moment none holds, the turn's result included.
-  // Unread replies only light Vibey's badge; a Vibey click opens the history.
-  // Every input is the current epoch's own state, so nothing carries a bubble
-  // over from a previous session.
+  // Whether it is drawn (spec §4.2): while the main session is active — Vibey
+  // is working, a send is pending, Vibey needs the user, or the history is
+  // open — and then for a short on-screen linger of a fresh reply. Unread
+  // replies only light Vibey's badge. Every input is the current epoch's own
+  // state, so nothing carries a bubble over from a previous session.
   const needsYou = Boolean((!data.running && failure) || uncertain || queued || vaultRequests.length > 0);
-  const showReplyBubble = hasBubbleContent && Boolean(data.running || optimisticTitle || needsYou || historyOpen);
-  const toggleHistory = () => { setDetailOpen(!detailOpen); void setPanel(!detailOpen); };
+  // A history the user asked for but the shell has not confirmed yet holds the
+  // bubble too: it neither folds nor spends the linger while it waits.
+  const historyPending = detailOpen && !expanded;
+  const held = Boolean(data.running || optimisticTitle || needsYou || historyOpen || historyPending);
+  // A turn that ends while this epoch watches is what lingers: the moment the
+  // server's turn state goes from running to done, derived during render from
+  // the last value seen, so the render that ends the turn is the render that
+  // starts the linger and the bubble never closes in between. The server's
+  // state alone: the local send grace running out is not a turn that ended.
+  // A turn already over when the epoch first looks is history.
+  // One thing lingers: the reply of a turn this epoch watched end, pinned by
+  // its id. Everything about the linger is derived from that reply during
+  // render — whether there is one, what the summary shows, whether it was seen.
+  //
+  // `endedFor` is the latest input when the server's turn state was last seen
+  // going from running to done (the local send grace is not a turn ending).
+  // That turn's reply is the newest non-empty agent result after that input
+  // that is not a background run's detached completion (an exchange can hold
+  // an earlier answer from before this turn ran). Nothing before the input
+  // counts, a promoted answer to an earlier input (#2815) included: it keeps
+  // the badge but does not linger. A stopped turn ends with an empty result
+  // and has none; a reply that lands after its turn end lingers then.
+  // `seen` holds the replies shown while the history was open (expansion
+  // confirmed by the shell); those do not linger again.
+  const inputId = exchange.user?.id ?? '';
+  const [turnWatch, setTurnWatch] = useState(() => ({ epoch, running: data.serverRunning, endedFor: null as string | null, seen: NO_REPLIES }));
+  let watched = turnWatch;
+  if (watched.epoch !== epoch) watched = { epoch, running: data.serverRunning, endedFor: null, seen: NO_REPLIES };
+  else if (watched.running !== data.serverRunning) {
+    watched = { ...watched, running: data.serverRunning, endedFor: data.serverRunning ? watched.endedFor : inputId };
+  }
+  const isTurnReply = (row: WorkbenchMessage) => row.author === 'agent' && row.type === 'result'
+    && !isDetachedCompletionMessage(row) && Boolean(row.text?.trim());
+  const inputAt = exchange.user ? data.messages.findIndex((row) => row.id === exchange.user!.id) : -1;
+  const turnReply = watched.endedFor === inputId
+    ? data.messages.slice(inputAt + 1).reverse().find(isTurnReply)
+    : null;
+  if (historyOpen && turnReply && !watched.seen.has(turnReply.id)) {
+    watched = { ...watched, seen: new Set([...watched.seen, turnReply.id]) };
+  }
+  if (watched !== turnWatch) setTurnWatch(watched);
+  const lingerReply = turnReply && !watched.seen.has(turnReply.id) ? turnReply : null;
+  // The bubble is drawn: the speech slot shows it rather than the input or the
+  // dictation marquee. Every input to the linger (time, pointer) means
+  // something only while this holds.
+  const bubbleDrawn = hasBubbleContent && Boolean(binding) && !voice.listening && !(composing && canChat && !uncertain);
+  // The reply is on screen: the bubble is drawn and its summary row is the
+  // reply (not "thinking" while the turn still runs, nor a failure notice).
+  // Only then does the linger spend its time.
+  const replyOnScreen = bubbleDrawn && !data.running && !failure;
+  const documentVisible = useDocumentVisible();
+  const [pointerOverBubble, setPointerOverBubble] = useState(false);
+  const bubbleRef = useRef<HTMLDivElement | null>(null);
+  const avatarRef = useRef<HTMLButtonElement>(null);
+  // Focus inside a bubble that is replaced (by the input, the dictation
+  // marquee, or a loading notice) moves to Vibey rather than to nowhere. The
+  // node is checked as it detaches, while it still holds the focus.
+  const attachBubble = useCallback((node: HTMLDivElement | null) => {
+    bubbleRef.current = node;
+    if (!node) return undefined;
+    return () => {
+      if (bubbleRef.current === node) bubbleRef.current = null;
+      if (node.contains(document.activeElement)) avatarRef.current?.focus();
+    };
+  }, []);
+  const { lingeringId, keepAtLeast } = useReplyLinger({
+    scope: epoch,
+    candidateId: lingerReply?.id ?? null,
+    counting: documentVisible && replyOnScreen && !pointerOverBubble && !historyPending,
+    keyboardHeld: () => {
+      const node = bubbleRef.current;
+      const active = document.activeElement;
+      return Boolean(node && active && node.contains(active) && active.matches(':focus-visible'));
+    },
+  });
+  const showReplyBubble = hasBubbleContent && (held || lingeringId !== null);
+  // A bubble that is not drawn, or is hidden, cannot be under the pointer, and
+  // its leave event may never come (the input replaced it under a still
+  // pointer); a stale reading would pause the reply for good.
+  if ((!bubbleDrawn || !showReplyBubble) && pointerOverBubble) setPointerOverBubble(false);
+  // Looking at the history is looking at the reply (`seen` above): once it
+  // closes, the reply does not linger again.
+  function openHistory() {
+    setDetailOpen(true);
+    // A refused expansion leaves no history to wait for: drop the request so
+    // the pending hold ends and the linger resumes.
+    void setPanel(true).then(() => { if (epoch.isCurrent() && !petPanel.current()) setDetailOpen(false); });
+  }
+  const toggleHistory = () => {
+    if (detailOpen) { setDetailOpen(false); void setPanel(false); } else openHistory();
+  };
+  useLayoutEffect(() => {
+    // Focus inside a bubble that folds away (still mounted) moves to Vibey too.
+    if (showReplyBubble) return;
+    const node = bubbleRef.current;
+    if (node && document.activeElement && node.contains(document.activeElement)) avatarRef.current?.focus();
+  }, [showReplyBubble]);
 
   const avatar = (
     <div className={clsx('pet-mini-avatar-wrap', voice.listening && 'is-listening', hovered && 'is-hovered')} data-pet-hover>
       {voice.listening && <span className="pet-mini-listen-ring" aria-hidden />}
       <button
+        ref={avatarRef}
         type="button"
         className="pet-mini-avatar-button"
         // A click opens or closes Vibey's recent turns (§5.1).
@@ -791,9 +888,22 @@ const PetSurface: React.FC = () => {
           </>
           ) : hasBubbleContent && binding ? (
             // Still drawn while the slot closes, so it fades out rather than vanishing.
+            <div
+              // Its own identity, so a notice drawn in the same place replaces
+              // it (and runs the focus handoff) instead of reusing this node.
+              key="vibey-bubble"
+              ref={attachBubble}
+              onPointerEnter={() => setPointerOverBubble(true)}
+              onPointerLeave={() => {
+                // Leaving gives the reader a moment before it goes.
+                keepAtLeast(REPLY_LINGER_RESUME_MS);
+                setPointerOverBubble(false);
+              }}
+            >
             <MainReplyBubble
               open={historyOpen}
               onToggle={toggleHistory}
+              pinnedReply={lingeringId !== null ? lingerReply : null}
               epoch={epoch}
               voiceNeedsCloud={voice.cloudRequired}
               canChat={canChat}
@@ -811,6 +921,7 @@ const PetSurface: React.FC = () => {
               uncertain={uncertain}
               onInspect={() => { void petBridge.open(sessionLink(binding)).then(() => { if (epoch.isCurrent()) setUncertain(binding, false); }).catch(() => undefined); }}
             />
+            </div>
           ) : resolvingMain || !binding ? (
             <div className="pet-mini-reply-bubble pet-mini-detail-inner" data-pet-hit role="status">
               <p className="pet-mini-detail-muted">{t(data.canChat === null ? 'common.loading' : 'pet.vibeyUnavailable')}</p>
@@ -1150,9 +1261,11 @@ const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, op
 
 type MainDetailProps = { epoch: PetSurfaceEpoch; voiceNeedsCloud: boolean; canChat: boolean; visible: boolean; binding: string; exchange: ReturnType<typeof latestExchange>; messages: WorkbenchMessage[]; failure: WorkbenchMessage | null; running: boolean; queued: boolean; markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>; onRead: () => void; vaultRequestIds: string[]; quickReplies: ReturnType<typeof openQuickReplies>; onChoose: (message: WorkbenchMessage, choice: string) => Promise<boolean>; uncertain: boolean; onInspect: () => void };
 
-const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boolean; onToggle: () => void }> = ({ open, onToggle, ...props }) => {
+const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boolean; onToggle: () => void; pinnedReply?: WorkbenchMessage | null }> = ({ open, onToggle, pinnedReply, ...props }) => {
   const { t } = useTranslation();
-  const last = props.exchange.results.at(-1);
+  // A lingering reply keeps its summary even if a later result (a background
+  // completion) arrives while it lingers.
+  const last = pinnedReply ?? props.exchange.results.at(-1);
   const summary = props.running ? t('pet.thinking')
     : props.failure ? `${t('pet.failedPrefix')} ${props.failure.text.trim()}`
         : last?.text?.trim() ? t('pet.repliedPrefix', { text: last.text.trim() })

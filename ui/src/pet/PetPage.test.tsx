@@ -18,6 +18,7 @@ import type {
 import { ApiError } from '@/context/ApiContext';
 
 import { PET_BOUND_EVENT, PET_HOVER_EVENT, PET_SUMMON_EVENT } from './petBridge';
+import { SEND_GRACE_MS } from './usePetSession';
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
@@ -2453,7 +2454,8 @@ describe('PetPage IME composition', () => {
 });
 
 describe('Vibey bubble visibility (spec §4.2)', () => {
-  const bubbleOpen = () => document.querySelector('.pet-mini-reply-bubble')?.closest('.pet-mini-slot')?.classList.contains('is-open') ?? false;
+  // Vibey's own bubble (its toggle row), not the loading notice that shares the slot.
+  const bubbleOpen = () => document.querySelector('.pet-mini-reply-toggle')?.closest('.pet-mini-slot')?.classList.contains('is-open') ?? false;
 
   it('starts hidden for an old, finished exchange, quick replies and unread included', async () => {
     tails.S = [
@@ -2466,27 +2468,379 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     expect(bubbleOpen()).toBe(false);
   });
 
-  it('shows while Vibey works, and hides as soon as the result arrives', async () => {
+  // A turn that is running, then ends with `text` as its result; returns the
+  // slot's class at every commit after the result lands.
+  const runToResult = async (text = 'All done') => {
+    // Fake time that still moves on its own, so waitFor keeps polling while the
+    // linger's own timer is under the test's control from the start.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
     tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' })];
     let running = true;
     api.getTurnState.mockImplementation(async () => (running ? { ...idleTurn, in_flight: true, foreground: 'running' as const } : idleTurn));
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+    const slot = document.querySelector('.pet-mini-reply-toggle')!.closest('.pet-mini-slot')!;
+    const classes: string[] = [];
+    const observer = new MutationObserver(() => classes.push(slot.className));
+    observer.observe(slot, { attributes: true, attributeFilter: ['class'] });
+    const result = message('r', 'S', { text, read_at: null });
+    tails.S = [...tails.S, result];
+    running = false;
+    await emit((h) => {
+      h.onMessageNew?.(result);
+      h.onTurnEnd?.({ session_id: 'S' });
+    });
+    await waitFor(() => expect(api.getTurnState).toHaveBeenCalled());
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    observer.disconnect();
+    return classes;
+  };
+  const bubbleWrap = () => document.querySelector('.pet-mini-reply-bubble')!.parentElement!;
+  afterEach(() => {
+    vi.useRealTimers();
+    api.getTurnState.mockImplementation(async () => idleTurn);
+  });
+
+  it('keeps the bubble open from running to its result, then shows the reply for 10s', async () => {
+    const classes = await runToResult();
+    // No closed frame between the running bubble and the reply.
+    expect(classes.every((value) => value.includes('is-open'))).toBe(true);
+    expect(bubbleOpen()).toBe(true);
+    expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('All done');
+    act(() => { vi.advanceTimersByTime(9_900); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(200); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('spends nothing while the turn still reads as running, so a late turn end still gets the full 10s', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
+    tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' })];
+    let running = true;
+    api.getTurnState.mockImplementation(async () => (running ? { ...idleTurn, in_flight: true, foreground: 'running' as const } : idleTurn));
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+    // The result lands, but its turn end is late: the summary still says thinking.
+    const result = message('r', 'S', { text: 'Late end', read_at: null });
+    tails.S = [...tails.S, result];
+    await emit((h) => h.onMessageNew?.(result));
+    act(() => { vi.advanceTimersByTime(30_000); });
+    expect(bubbleOpen()).toBe(true);
+    running = false;
+    await emit((h) => h.onTurnEnd?.({ session_id: 'S' }));
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-toggle .pet-mini-running-dot')).toBeNull());
+    act(() => { vi.advanceTimersByTime(9_800); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(400); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('does not linger an old reply again when it is edited', async () => {
+    const old = message('r', 'S', { text: 'Old reply', metadata: { promoted_from: 'output' } });
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), old];
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    await emit((h) => h.onMessageUpdated?.({ ...old, text: 'Old reply, edited' }));
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('edited'));
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('hands keyboard focus to Vibey when a loading notice replaces the bubble', async () => {
+    await runToResult();
+    const toggle = document.querySelector<HTMLButtonElement>('.pet-mini-reply-toggle')!;
+    act(() => { toggle.focus(); });
+    expect(document.activeElement).toBe(toggle);
+    // A new authorization resolves slowly: the loading notice takes the slot.
+    const pending = deferred<WorkbenchSessionReadResult>();
+    api.getMainSession.mockReturnValueOnce(pending.promise);
+    await emit((h) => h.onAuthorizationChanged?.({}));
+    expect(document.querySelector('.pet-mini-reply-toggle')).toBeNull();
+    expect(document.activeElement).toBe(screen.getByLabelText('pet.recentTurns'));
+    await act(async () => pending.resolve({ status: 200, session: session('S'), capabilities: { can_chat: true } }));
+  });
+
+  it('hands keyboard focus to Vibey when dictation replaces the bubble', async () => {
+    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = () => {}; abort = () => {}; }
+    vi.doMock('@/lib/showPageVoiceDictation', () => ({ ShowPageVoiceDictation: Dictation }));
+    const locks = Object.getOwnPropertyDescriptor(navigator, 'locks');
+    const media = Object.getOwnPropertyDescriptor(navigator, 'mediaDevices');
     try {
-      mainSession('S');
-      render(<PetPage />);
-      await waitFor(() => expect(bubbleOpen()).toBe(true));
-      // The turn ends with its result: the server tail now holds it.
-      const result = message('r', 'S', { text: 'All done', read_at: null });
-      tails.S = [...tails.S, result];
-      running = false;
+      Object.defineProperty(navigator, 'locks', { configurable: true, value: {} });
+      Object.defineProperty(navigator, 'mediaDevices', { configurable: true, value: { getUserMedia: vi.fn() } });
+      vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => ({ available: true }) })));
+      vi.resetModules();
+      ({ PetPage } = await import('./PetPage'));
+      await runToResult();
+      await waitFor(() => expect(screen.getByLabelText('pet.voice.open')).toBeTruthy());
+      const toggle = document.querySelector<HTMLButtonElement>('.pet-mini-reply-toggle')!;
+      act(() => { toggle.focus(); });
+      // Holding the summon hotkey starts dictation: the marquee takes the slot.
+      summon('listen');
+      await waitFor(() => expect(document.querySelector('.pet-mini-reply-toggle')).toBeNull());
+      expect(document.activeElement).toBe(screen.getByLabelText('pet.recentTurns'));
+    } finally {
+      vi.doUnmock('@/lib/showPageVoiceDictation');
+      vi.unstubAllGlobals();
+      if (locks) Object.defineProperty(navigator, 'locks', locks);
+      else Reflect.deleteProperty(navigator, 'locks');
+      if (media) Object.defineProperty(navigator, 'mediaDevices', media);
+      else Reflect.deleteProperty(navigator, 'mediaDevices');
+      vi.resetModules();
+      ({ PetPage } = await import('./PetPage'));
+    }
+  });
+
+  // Running, then the turn ends; the test supplies what the end delivers.
+  const runThenEnd = async (deliver: (finish: () => void) => Promise<void>) => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
+    tails.S = [message('r0', 'S', { text: 'Earlier reply' }), message('u', 'S', { author: 'user', type: 'user', text: 'hello' })];
+    let running = true;
+    api.getTurnState.mockImplementation(async () => (running ? { ...idleTurn, in_flight: true, foreground: 'running' as const } : idleTurn));
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+    await deliver(() => { running = false; });
+  };
+
+  it('does not linger after a stopped turn, whose result is empty', async () => {
+    await runThenEnd(async (finish) => {
+      const silent = message('stop', 'S', { text: '', read_at: null });
+      tails.S = [...tails.S, silent];
+      finish();
       await emit((h) => {
-        h.onMessageNew?.(result);
+        h.onMessageNew?.(silent);
         h.onTurnEnd?.({ session_id: 'S' });
       });
-      await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('All done'));
-      await waitFor(() => expect(bubbleOpen()).toBe(false));
+    });
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+  });
+
+  it('does not take a background completion for the ended turn\'s reply', async () => {
+    await runThenEnd(async (finish) => {
+      const detached = message('bg', 'S', { text: 'Background run done', read_at: null, metadata: { detached: true } });
+      const silent = message('stop', 'S', { text: '', read_at: null });
+      tails.S = [...tails.S, detached, silent];
+      finish();
+      await emit((h) => {
+        h.onMessageNew?.(detached);
+        h.onMessageNew?.(silent);
+        h.onTurnEnd?.({ session_id: 'S' });
+      });
+    });
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+  });
+
+  it('counts a turn that ends while the history is open as already seen', async () => {
+    await runThenEnd(async (finish) => {
+      // The history is open (expansion confirmed) when the turn ends with its reply.
+      await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+      await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).not.toBeNull());
+      const reply = message('r1', 'S', { text: 'Answered while open', read_at: null });
+      tails.S = [...tails.S, reply];
+      finish();
+      await emit((h) => {
+        h.onMessageNew?.(reply);
+        h.onTurnEnd?.({ session_id: 'S' });
+      });
+      await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Answered while open'));
+    });
+    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+  });
+
+  it('lingers a reply that lands after its turn end, once the history it was not in has closed', async () => {
+    await runThenEnd(async (finish) => {
+      // History open, then the turn ends before its result.
+      await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+      await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).not.toBeNull());
+      finish();
+      await emit((h) => h.onTurnEnd?.({ session_id: 'S' }));
+      await waitFor(() => expect(api.getTurnState).toHaveBeenCalled());
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    });
+    // Closed before the reply came: it was never seen there.
+    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+    const late = message('late', 'S', { text: 'Late reply', read_at: null });
+    tails.S = [...tails.S, late];
+    await emit((h) => h.onMessageNew?.(late));
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+    act(() => { vi.advanceTimersByTime(9_800); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(400); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('lingers once the reply arrives when the turn end came first', async () => {
+    await runThenEnd(async (finish) => {
+      finish();
+      await emit((h) => h.onTurnEnd?.({ session_id: 'S' }));
+    });
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+    const late = message('late', 'S', { text: 'Late reply', read_at: null });
+    tails.S = [...tails.S, late];
+    await emit((h) => h.onMessageNew?.(late));
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+    act(() => { vi.advanceTimersByTime(9_800); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(400); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('keeps the lingering reply while a history request waits on the shell, and after it is refused', async () => {
+    const expand = deferred<unknown>();
+    const invoke = vi.fn((command: string, args?: { expanded?: boolean }) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
+      if (command === 'pet_set_expanded' && args?.expanded) return expand.promise;
+      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    try {
+      await runToResult();
+      const toggle = document.querySelector<HTMLButtonElement>('.pet-mini-reply-toggle')!;
+      act(() => { toggle.focus(); });
+      fireEvent.click(screen.getByLabelText('pet.recentTurns'));
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
+      // Not yet confirmed: the reply still holds the bubble, and focus stays put.
+      expect(bubbleOpen()).toBe(true);
+      expect(document.activeElement).toBe(toggle);
+      await act(async () => expand.reject(new Error('no monitor')));
+      // Refused: the history never opened, so the reply plays out its time.
+      expect(bubbleOpen()).toBe(true);
+      act(() => { vi.advanceTimersByTime(10_200); });
+      expect(bubbleOpen()).toBe(false);
     } finally {
-      api.getTurnState.mockImplementation(async () => idleTurn);
+      Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+      Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
     }
+  });
+
+  it('holds a lingering reply while the shell is slower to confirm the history than its time left', async () => {
+    const expand = deferred<unknown>();
+    const invoke = vi.fn((command: string, args?: { expanded?: boolean }) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
+      if (command === 'pet_set_expanded' && args?.expanded) return expand.promise;
+      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    try {
+      await runToResult();
+      act(() => { vi.advanceTimersByTime(9_000); });
+      fireEvent.click(screen.getByLabelText('pet.recentTurns'));
+      await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
+      // Far longer than the second left: the request holds the bubble.
+      act(() => { vi.advanceTimersByTime(5_000); });
+      expect(bubbleOpen()).toBe(true);
+      await act(async () => expand.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
+      await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).not.toBeNull());
+      expect(bubbleOpen()).toBe(true);
+    } finally {
+      Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+      Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+    }
+  });
+
+  it('does not take an earlier input\'s promoted answer for a later turn that ends without a reply', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
+    tails.S = [
+      message('u1', 'S', { author: 'user', type: 'user', text: 'first' }),
+      message('p1', 'S', { text: 'Promoted answer', metadata: { promoted_from: 'output' } }),
+      message('u2', 'S', { author: 'user', type: 'user', text: 'second' }),
+    ];
+    let running = true;
+    api.getTurnState.mockImplementation(async () => (running ? { ...idleTurn, in_flight: true, foreground: 'running' as const } : idleTurn));
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+    // The later turn is stopped: it reaches idle before its empty row lands.
+    running = false;
+    await emit((h) => h.onTurnEnd?.({ session_id: 'S' }));
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+  });
+
+  it('does not linger when a send grace runs out with no turn registered', async () => {
+    tails.S = [message('u0', 'S', { author: 'user', type: 'user', text: 'earlier' }), message('r0', 'S', { text: 'Earlier reply' })];
+    // The send is accepted and echoed back, so nothing local still holds the bubble.
+    api.sendSessionMessage.mockImplementationOnce(async () => message('sent', 'S', { author: 'user', type: 'user', text: 'quick' }));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
+    mainSession('S');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder');
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('S'));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    await userEvent.type(input, 'quick{Enter}');
+    await waitFor(() => expect(pose()).toBe('running'));
+    // The server never registers the turn: the local grace simply runs out.
+    act(() => { vi.advanceTimersByTime(SEND_GRACE_MS + 100); });
+    await waitFor(() => expect(pose()).not.toBe('running'));
+    act(() => { vi.advanceTimersByTime(500); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('drops a lingering reply when the epoch changes', async () => {
+    await runToResult();
+    expect(bubbleOpen()).toBe(true);
+    // A new authorization is a new epoch: its first read is the baseline.
+    await resolveMainAs('S');
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+  });
+
+  it('pauses while typing takes the slot, then plays the rest', async () => {
+    await runToResult();
+    act(() => { vi.advanceTimersByTime(4_000); });
+    summon('listen');
+    await screen.findByLabelText('pet.inputPlaceholder');
+    act(() => { vi.advanceTimersByTime(60_000); });
+    act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(5_900); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(200); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('holds while the pointer is over it, and leaves at least 3s after', async () => {
+    await runToResult();
+    act(() => { vi.advanceTimersByTime(9_000); });
+    fireEvent.pointerEnter(bubbleWrap());
+    act(() => { vi.advanceTimersByTime(60_000); });
+    expect(bubbleOpen()).toBe(true);
+    fireEvent.pointerLeave(bubbleWrap());
+    act(() => { vi.advanceTimersByTime(2_900); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(200); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('drops the pointer hold when the input replaces the bubble under a still pointer', async () => {
+    await runToResult();
+    act(() => { vi.advanceTimersByTime(4_000); });
+    fireEvent.pointerEnter(bubbleWrap());
+    // The summon opens the input in the bubble's place; no pointer leave comes.
+    summon('listen');
+    await screen.findByLabelText('pet.inputPlaceholder');
+    act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(5_900); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(200); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('does not linger again once its history has been opened and closed', async () => {
+    await runToResult();
+    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).not.toBeNull());
+    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
   });
 
   it('stays shown while a failure needs the user', async () => {

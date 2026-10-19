@@ -42,6 +42,9 @@ export type PetSessionData = {
   turn: SessionRuntimeState | null;
   /** Running per the server, or a local send inside the registration grace. */
   running: boolean;
+  /** Running per the server's turn state alone, without the local send grace:
+   *  its end is a turn that really finished, not a grace that ran out. */
+  serverRunning: boolean;
   /** Merge a row the pet itself just sent. */
   noteSent: (message: WorkbenchMessage | null) => void;
   /** Re-read the tail from the server. */
@@ -300,6 +303,7 @@ export function usePetSession(sessionId: string | null): PetSessionData {
     hasOlder: tail.hasOlder || !tail.loaded,
     turn,
     running: working,
+    serverRunning,
     noteSent,
     refreshTail,
   };
