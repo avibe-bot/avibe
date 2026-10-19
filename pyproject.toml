@@ -66,7 +66,9 @@ dependencies = [
     "fastapi>=0.110",
     "lark-oapi>=1.4.0",
     "requests>=2.31.0",
-    "sentry-sdk==2.72.0",
+    # The fail-closed redacting transport is audited against this exact SDK.
+    # Upgrade only with vibe/sentry_integration.py and its real-SDK tests.
+    "sentry-sdk==2.56.0",
     "python-socks[asyncio]>=2.0.0",
     "aiohttp-socks>=0.8.0",
     "httpx[socks]>=0.27",
@@ -82,7 +84,9 @@ dependencies = [
     # (core/agent_core/ai/image_limits.py).
     "Pillow>=11.0",
     "pywebpush>=2.0.3",
-    "cryptography>=42.0",
+    # Keep the validated release for the binary-only Intel Mac Runtime.
+    # Newer releases must pass its wheel gate; 49+ no longer ships Intel wheels.
+    "cryptography==46.0.3",
     # keccak256 + ripemd160 for vault signing-key address derivation
     # (storage/vault_addresses.py); cryptography ships neither.
     "pycryptodome>=3.20",
