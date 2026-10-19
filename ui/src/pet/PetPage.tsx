@@ -660,12 +660,14 @@ const PetSurface: React.FC = () => {
   // the same render its result lands, the bubble never closes in between.
   const latestResultId = exchange.results.at(-1)?.id ?? null;
   const freshResultId = latestResultId !== null && data.isFresh(latestResultId) ? latestResultId : null;
-  // The reply is on screen: the speech slot is drawing this bubble (not the
-  // input or the dictation marquee), and its summary row is the reply (not
-  // "thinking" while the turn still runs, nor a failure notice). Only then
-  // does the linger spend its time.
-  const replyOnScreen = hasBubbleContent && Boolean(binding) && !voice.listening && !(composing && canChat && !uncertain)
-    && !data.running && !failure;
+  // The bubble is drawn: the speech slot shows it rather than the input or the
+  // dictation marquee. Every input to the linger (time, pointer) means
+  // something only while this holds.
+  const bubbleDrawn = hasBubbleContent && Boolean(binding) && !voice.listening && !(composing && canChat && !uncertain);
+  // The reply is on screen: the bubble is drawn and its summary row is the
+  // reply (not "thinking" while the turn still runs, nor a failure notice).
+  // Only then does the linger spend its time.
+  const replyOnScreen = bubbleDrawn && !data.running && !failure;
   const documentVisible = useDocumentVisible();
   const [pointerOverBubble, setPointerOverBubble] = useState(false);
   const bubbleRef = useRef<HTMLDivElement>(null);
@@ -680,9 +682,10 @@ const PetSurface: React.FC = () => {
     },
   });
   const showReplyBubble = hasBubbleContent && (held || lingeringId !== null);
-  // A hidden bubble cannot be under the pointer; a stale reading would pause
-  // the next reply.
-  if (!showReplyBubble && pointerOverBubble) setPointerOverBubble(false);
+  // A bubble that is not drawn, or is hidden, cannot be under the pointer, and
+  // its leave event may never come (the input replaced it under a still
+  // pointer); a stale reading would pause the reply for good.
+  if ((!bubbleDrawn || !showReplyBubble) && pointerOverBubble) setPointerOverBubble(false);
   // Looking at the history is looking at the reply: once it closes, the reply
   // does not linger again.
   function openHistory() {

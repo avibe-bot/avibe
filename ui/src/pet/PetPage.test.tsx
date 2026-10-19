@@ -2625,6 +2625,22 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     expect(bubbleOpen()).toBe(false);
   });
 
+  it('drops the pointer hold when the input replaces the bubble under a still pointer', async () => {
+    await runToResult();
+    act(() => { vi.advanceTimersByTime(4_000); });
+    fireEvent.pointerEnter(bubbleWrap());
+    // The summon opens the input in the bubble's place; no pointer leave comes.
+    summon('listen');
+    await screen.findByLabelText('pet.inputPlaceholder');
+    act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+    expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull();
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(5_900); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(200); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
   it('does not linger again once its history has been opened and closed', async () => {
     await runToResult();
     await userEvent.click(screen.getByLabelText('pet.recentTurns'));

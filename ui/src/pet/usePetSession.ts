@@ -57,7 +57,8 @@ export type PetSessionData = {
 type Freshness = { identity: unknown; baseline: ReadonlySet<string> | null; live: ReadonlySet<string> };
 
 // Only Vibey's replies are ever asked about, so only they are recorded: the
-// sets grow with the replies in an epoch, not with its tool and progress rows.
+// sets grow with the replies in an epoch, not with its tool and progress rows
+// (a cost, not a behaviour: recording those rows would change no answer).
 const isReply = (row: WorkbenchMessage) => row.author === 'agent' && row.type === 'result';
 
 /**
@@ -67,7 +68,7 @@ const isReply = (row: WorkbenchMessage) => row.author === 'agent' && row.type ==
  * result, `metadata.promoted_from`). An edit to a reply it already holds is not
  * an arrival, so an old reply never lingers again.
  */
-export function bringsReply(event: 'new' | 'updated', row: WorkbenchMessage, held: WorkbenchMessage | undefined): boolean {
+function bringsReply(event: 'new' | 'updated', row: WorkbenchMessage, held: WorkbenchMessage | undefined): boolean {
   if (!isReply(row)) return false;
   if (event === 'new') return true;
   return Boolean(row.metadata?.promoted_from) && !(held && isReply(held));

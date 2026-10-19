@@ -193,6 +193,9 @@ transition (instant under reduced motion), taking no space and no clicks.
   input, the dictation marquee, or the loading and unavailable notices), its
   summary row is the reply (not "thinking" while the turn still reads as
   running, nor a failure notice), and the pointer is not over the bubble.
+  The pointer reading counts only while the bubble is drawn; when the input or
+  the marquee replaces it, or it hides, the reading is dropped, since no leave
+  event may come.
   Typing or dictating pauses it, and the rest plays when the bubble is back.
   Leaving the bubble with the pointer leaves at least 3s. One timer, rescheduled
   whenever these change.
