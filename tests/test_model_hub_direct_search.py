@@ -97,6 +97,17 @@ async def test_search_runs_the_standalone_api_with_vault(monkeypatch, service) -
     assert recorded == [(SOURCE, "deepseek", "web_search", "direct")]
 
 
+async def test_an_empty_search_is_completed_but_free(monkeypatch, service) -> None:
+    attempt, _, _ = await _attempt(
+        monkeypatch, service, "web_search", {"query": "q"}, b'{"results":[]}',
+    )
+    assert attempt.record["status"] == "completed"
+    assert attempt.record["sources"] == []
+    assert attempt.cost is None
+    assert attempt.billable is False
+    assert attempt.moves_on is False
+
+
 async def test_fetch_returns_the_page_as_the_source(monkeypatch, service) -> None:
     attempt, calls, _ = await _attempt(
         monkeypatch, service, "web_fetch", {"url": "https://example.com/a"},

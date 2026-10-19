@@ -6954,15 +6954,17 @@ class ModelHubService:
         completed = record["status"] == "completed"
         if completed:
             await self.record_hosted_success(source, "deepseek", call.tool, "direct")
+        # DeepSeek bills Search only when it returns a non-empty list; an empty result is free.
+        billable = completed and (call.tool == "web_fetch" or bool(record.get("sources")))
         cost = None
-        if completed and candidate.price is not None:
+        if billable and candidate.price is not None:
             cost = HostedCost(basis="list", usd=round(candidate.price.usd_per_1k / 1000, 6))
         return _ExecutorAttempt(
             source=source,
             model_id="deepseek",
             record=record,
             cost=cost,
-            billable=completed,
+            billable=billable,
             moves_on=not completed,
             direct=True,
             label=candidate.label,
