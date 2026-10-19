@@ -21,7 +21,7 @@ import { VoiceTranscriptionError } from '@/lib/voiceTranscription';
 import { PetAvatar, type PetPose } from './PetAvatar';
 import { PetOpenButton } from './PetOpenButton';
 import { onPetHover, petBridge, sessionLink, vaultRequestLink } from './petBridge';
-import { petPanel, usePetPanel } from './petPanel';
+import { usePetPanel } from './petPanel';
 import { petComposer, usePetComposer } from './petComposer';
 import { petShell, useOnSummon, usePetBinding, usePetDismissed } from './petShell';
 import { derivePetPose, derivePetState, latestExchange, latestFailureNotice, openQuickReplies } from './petState';
@@ -266,19 +266,18 @@ const PetSurface: React.FC = () => {
     setDetailOpen(false);
     void setPanel(true);
   }, [setPanel]);
-  const togglePanel = () => {
-    // A lone card has no stack to open (§3.3). Vibey still closes an open
-    // history, but otherwise toggles nothing: flipping the panel state here
-    // would be invisible until a second card arrived and opened the list.
-    if (singleCard) {
-      if (detailOpen) {
-        setDetailOpen(false);
-        void setPanel(false);
-      }
-      return;
-    }
-    if (detailOpen) openCards();
-    else void setPanel(!petPanel.want());
+  // A Vibey click (§5.1) is about Vibey's own conversation: it collapses an
+  // expanded card list, else closes an open history, else opens the history.
+  // The collapsed stack is the only way to expand the cards (§3.3). Every
+  // branch leaves the shell's panel state matching what is drawn.
+  const toggleVibey = () => {
+    if (cardsListed) { void setPanel(false); return; }
+    if (historyOpen) { setDetailOpen(false); void setPanel(false); return; }
+    // Typing and dictation keep the speech slot, and the draft, as they are.
+    if (composing || voice.listening) return;
+    if (!binding || resolvingMain || (data.messages.length === 0 && !optimisticTitle)) return;
+    setDetailOpen(true);
+    void setPanel(true);
   };
   const [composing, setComposing] = useState(false);
   const [presentations, setPresentations] = useState<Record<string, CardPresentation>>({});
@@ -642,11 +641,22 @@ const PetSurface: React.FC = () => {
 
   const queued = (data.turn?.pending_input_count ?? 0) > 0;
   const resolvingMain = data.canChat === null;
-  const showReplyBubble = Boolean(
+  const historyOpen = detailOpen && expanded;
+  // What the bubble would draw: any exchange, or a state worth a word.
+  const hasBubbleContent = Boolean(
     binding && !resolvingMain
-    && (data.running || optimisticTitle || exchange.user || exchange.results.length > 0 || failure || uncertain
+    && (historyOpen || data.running || optimisticTitle || exchange.user || exchange.results.length > 0 || failure || uncertain
       || queued || vaultRequests.length > 0 || quickReplies),
   );
+  // Whether it is drawn (spec §4.2): only while the main session is active —
+  // Vibey is working, a send is pending, Vibey needs the user, or the history
+  // is open — and hidden the moment none holds, the turn's result included.
+  // Unread replies only light Vibey's badge; a Vibey click opens the history.
+  // Every input is the current epoch's own state, so nothing carries a bubble
+  // over from a previous session.
+  const needsYou = Boolean((!data.running && failure) || uncertain || queued || vaultRequests.length > 0);
+  const showReplyBubble = hasBubbleContent && Boolean(data.running || optimisticTitle || needsYou || historyOpen);
+  const toggleHistory = () => { setDetailOpen(!detailOpen); void setPanel(!detailOpen); };
 
   const avatar = (
     <div className={clsx('pet-mini-avatar-wrap', voice.listening && 'is-listening', hovered && 'is-hovered')} data-pet-hover>
@@ -654,11 +664,11 @@ const PetSurface: React.FC = () => {
       <button
         type="button"
         className="pet-mini-avatar-button"
-        aria-label={t('pet.toggle')}
-        // A lone card is always drawn in full, so Vibey expands nothing there.
-        aria-expanded={singleCard ? undefined : expanded}
+        // A click opens or closes Vibey's recent turns (§5.1).
+        aria-label={t('pet.recentTurns')}
+        aria-expanded={historyOpen}
         data-pet-hit
-        onClick={(event) => { if (event.detail === 0) togglePanel(); }}
+        onClick={(event) => { if (event.detail === 0) toggleVibey(); }}
         onPointerDown={(event) => {
           if (event.button !== 0) return;
           const target = event.currentTarget;
@@ -695,7 +705,7 @@ const PetSurface: React.FC = () => {
           if (!press) return;
           window.clearTimeout(press.timer);
           if (press.held) voice.stop(true);
-          else if (!press.dragged) togglePanel();
+          else if (!press.dragged) toggleVibey();
         }}
         onPointerLeave={() => {
           const press = pressRef.current;
@@ -779,10 +789,11 @@ const PetSurface: React.FC = () => {
             </div>
           </form>
           </>
-          ) : showReplyBubble && binding ? (
+          ) : hasBubbleContent && binding ? (
+            // Still drawn while the slot closes, so it fades out rather than vanishing.
             <MainReplyBubble
-              open={detailOpen && expanded}
-              onToggle={() => { setDetailOpen(!detailOpen); void setPanel(!detailOpen); }}
+              open={historyOpen}
+              onToggle={toggleHistory}
               epoch={epoch}
               voiceNeedsCloud={voice.cloudRequired}
               canChat={canChat}

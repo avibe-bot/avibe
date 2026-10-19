@@ -40,6 +40,7 @@ declare global {
     petFixtureConnection: (connected: boolean) => void;
     petFixtureMessage: (message: Record<string, unknown>) => void;
     petFixtureAddActivity: () => void;
+    petFixtureFinishTurn: (result: Record<string, unknown>) => void;
   }
 }
 window.petLayoutHitRegions = [];
@@ -102,6 +103,7 @@ const unread = personal ? { ses_fixture_2: 1 } : {};
 // A legacy file must not steer reads or sends away from main.
 localStorage.setItem('avibe.pet.devBinding', JSON.stringify({ binding: 'legacy-session', revision: 1 }));
 let mainAvailable = params.get('offline') !== 'true';
+let mainRunning = params.get('running') === '1';
 window.petFixtureMainReads = 0;
 window.setPetMainAvailable = (available) => { mainAvailable = available; };
 
@@ -137,11 +139,16 @@ window.fetch = async (input, init) => {
     '/api/sessions/ses_main': session,
     '/api/sessions/ses_main/messages': { messages, next_after_id: null, next_before_id: null },
     '/api/sessions/ses_main/turn-state': {
-      foreground: 'idle', in_flight: false, native_turn_started: false, pending_input_count: 0,
+      // `running=1`: Vibey's own turn is in progress until `petFixtureFinishTurn`.
+      foreground: mainRunning ? 'running' : 'idle', in_flight: mainRunning, native_turn_started: false,
+      // `queued=1`: an input waits behind the turn, which keeps Vibey's bubble
+      // shown with the latest reply's summary (the state layout tests draw in).
+      pending_input_count: params.get('queued') === '1' ? 1 : 0,
       background_activities: [], pending_activity_output_count: 0, connection: 'connected',
     },
     '/api/vault/requests': { ok: true, requests: requests.filter((request) => !url.searchParams.get('session') || request.session.id === url.searchParams.get('session')) },
-    '/api/asr/status': { available: false },
+    // `asr=1`: voice input is available, so the dock shows its mic.
+    '/api/asr/status': { available: params.get('asr') === '1' },
     '/api/running-agents': { ok: true, agents, counts: { total: agents.length, active: agents.length, idle: 0, orphan: 0, by_backend: {} } },
     '/api/sessions': { sessions: [session], next_before_id: null },
     '/api/inbox': { ok: true, sessions: [], unread_by_session: unread, total_unread: Object.values(unread).reduce((a, b) => a + b, 0), next_before_id: null },
@@ -181,6 +188,20 @@ window.petFixtureAddActivity = () => {
   agents.push({ ...agents[0], session_id: `ses_fixture_${agents.length}`, base_session_id: `native_${agents.length}`, title: 'Another task' });
   for (const stream of streams) {
     stream.dispatchEvent(new MessageEvent('runs.updated', { data: JSON.stringify({ type: 'runs.updated', data: { run_id: `run_${agents.length}`, status: 'running' } }) }));
+  }
+};
+// End Vibey's running turn with its result, as the event stream reports it.
+window.petFixtureFinishTurn = (result) => {
+  const data = {
+    session_id: session.id, scope_id: session.scope_id, metadata: {}, content: {},
+    created_at: '2026-10-12T00:00:02Z', updated_at: '2026-10-12T00:00:02Z', read_at: '2026-10-12T00:00:03Z',
+    ...result,
+  };
+  mainRunning = false;
+  messages.push(data as unknown as (typeof messages)[number]);
+  for (const stream of streams) {
+    stream.dispatchEvent(new MessageEvent('message.new', { data: JSON.stringify({ type: 'message.new', data }) }));
+    stream.dispatchEvent(new MessageEvent('turn.end', { data: JSON.stringify({ type: 'turn.end', data: { session_id: session.id } }) }));
   }
 };
 

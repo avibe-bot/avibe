@@ -631,7 +631,7 @@ describe('PetPage review fixes', () => {
     Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
     render(<PetPage />);
     // The surface is mounted and subscribed before the shell answers.
-    await screen.findByLabelText('pet.toggle');
+    await screen.findByLabelText('pet.recentTurns');
     await act(async () => ready.resolve({ binding: 'legacy', revision: 1, summon_pending: { intent: 'listen' } }));
     // The summon opens the resolved main's input.
     expect(await screen.findByLabelText('pet.inputPlaceholder')).toBeTruthy();
@@ -818,11 +818,12 @@ describe('PetPage review fixes, round 7', () => {
     Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
     tails.S = [];
     render(<PetPage />);
-    await screen.findByLabelText('pet.toggle');
+    await screen.findByLabelText('pet.recentTurns');
     // The live summon is newer than the pending one pet_ready still carries.
     await shellBound('S', 1);
     await showDetail();
-    expect(screen.getByLabelText('pet.toggle').getAttribute('aria-expanded')).toBe('true');
+    // The summon expanded the panel (Vibey's aria-expanded now speaks for the history).
+    expect(screen.getByLabelText('pet.panel')).toBeTruthy();
     act(() => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     });
@@ -900,7 +901,7 @@ describe('PetPage review fixes, round 9', () => {
     try {
       mainSession('S');
       render(<PetPage />);
-      await screen.findByLabelText('pet.toggle');
+      await screen.findByLabelText('pet.recentTurns');
       await act(async () => {});
       expect(pose()).toBe('idle');
     } finally {
@@ -939,10 +940,10 @@ describe('PetPage review fixes, round 12', () => {
     Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
     Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
     render(<PetPage />);
-    await userEvent.click(await screen.findByLabelText('pet.toggle'));
+    await userEvent.click(await screen.findByLabelText('pet.recentTurns'));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
     await waitFor(() => expect(screen.queryByLabelText('pet.panel')).toBeNull());
-    expect(screen.getByLabelText('pet.toggle').getAttribute('aria-expanded')).toBe('false');
+    expect(screen.getByLabelText('pet.recentTurns').getAttribute('aria-expanded')).toBe('false');
   });
 });
 
@@ -1315,13 +1316,13 @@ describe('PetPage review fixes, round 14', () => {
     summon('show');
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
     expect(order).toEqual([true]);
-    // Collapse while expand is still in flight: Esc is not listening yet
-    // (the panel is hidden until the frame grows), so the avatar toggle is
-    // the overlapping command. The native collapse waits its turn.
-    await userEvent.click(screen.getByLabelText('pet.toggle'));
+    // A second panel command while the expand is still in flight: a Vibey
+    // click, which opens the history (the panel is not confirmed open, so
+    // nothing is open to close). It waits its turn behind the first.
+    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
     expect(order).toEqual([true]);
     await act(async () => first.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
-    await waitFor(() => expect(order).toEqual([true, false]));
+    await waitFor(() => expect(order).toEqual([true, true]));
     await act(async () => second.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
   });
 
@@ -1600,7 +1601,7 @@ describe('desktop mini v2 interaction contract', () => {
     await withVoiceEnv(() => true, Dictation, async () => {
       vi.stubGlobal('fetch', vi.fn(() => status.promise));
       mainSession('S'); render(<PetPage />); await screen.findByText('Session S');
-      const avatar = screen.getByLabelText('pet.toggle');
+      const avatar = screen.getByLabelText('pet.recentTurns');
       vi.useFakeTimers();
       try {
         fireEvent.pointerDown(avatar, { button: 0, pointerId: 1 });
@@ -1816,7 +1817,7 @@ describe('desktop mini v2 interaction contract', () => {
 
   it('shows the dock while the shell reports hover over Vibey, and reports that zone', async () => {
     mainSession('S'); render(<PetPage />);
-    const wrap = (await screen.findByLabelText('pet.toggle')).closest('.pet-mini-avatar-wrap')!;
+    const wrap = (await screen.findByLabelText('pet.recentTurns')).closest('.pet-mini-avatar-wrap')!;
     expect(wrap.hasAttribute('data-pet-hover')).toBe(true);
     expect(wrap.classList.contains('is-hovered')).toBe(false);
     act(() => { window.dispatchEvent(new CustomEvent(PET_HOVER_EVENT, { detail: { hover: true } })); });
@@ -1855,7 +1856,7 @@ describe('desktop mini v2 interaction contract', () => {
     expect(markRead).not.toHaveBeenCalled();
     fireEvent.click(document.querySelector('.pet-mini-reply-toggle')!);
     await waitFor(() => expect(markRead).toHaveBeenCalledWith('S', 'r'));
-    fireEvent.click(screen.getByLabelText('pet.toggle'));
+    fireEvent.click(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull());
   });
 
@@ -1926,7 +1927,7 @@ describe('desktop mini v2 interaction contract', () => {
 
   it('holds for exactly 320ms, cancels a departed press, and falls back to text without voice support', async () => {
     mainSession('S'); render(<PetPage />); await screen.findByText('Session S');
-    const avatar = screen.getByLabelText('pet.toggle');
+    const avatar = screen.getByLabelText('pet.recentTurns');
     vi.useFakeTimers();
     fireEvent.pointerDown(avatar, { button: 0, pointerId: 1 });
     fireEvent.pointerLeave(avatar);
@@ -2448,5 +2449,87 @@ describe('PetPage IME composition', () => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     });
     await waitFor(() => expect(screen.queryByLabelText('pet.inputPlaceholder')).toBeNull());
+  });
+});
+
+describe('Vibey bubble visibility (spec §4.2)', () => {
+  const bubbleOpen = () => document.querySelector('.pet-mini-reply-bubble')?.closest('.pet-mini-slot')?.classList.contains('is-open') ?? false;
+
+  it('starts hidden for an old, finished exchange, quick replies and unread included', async () => {
+    tails.S = [
+      message('u', 'S', { author: 'user', type: 'user', text: 'hello' }),
+      message('r', 'S', { text: 'Done already', read_at: null, content: { quick_replies: ['Yes', 'No'] } }),
+    ];
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Done already'));
+    expect(bubbleOpen()).toBe(false);
+  });
+
+  it('shows while Vibey works, and hides as soon as the result arrives', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' })];
+    let running = true;
+    api.getTurnState.mockImplementation(async () => (running ? { ...idleTurn, in_flight: true, foreground: 'running' as const } : idleTurn));
+    try {
+      mainSession('S');
+      render(<PetPage />);
+      await waitFor(() => expect(bubbleOpen()).toBe(true));
+      // The turn ends with its result: the server tail now holds it.
+      const result = message('r', 'S', { text: 'All done', read_at: null });
+      tails.S = [...tails.S, result];
+      running = false;
+      await emit((h) => {
+        h.onMessageNew?.(result);
+        h.onTurnEnd?.({ session_id: 'S' });
+      });
+      await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('All done'));
+      await waitFor(() => expect(bubbleOpen()).toBe(false));
+    } finally {
+      api.getTurnState.mockImplementation(async () => idleTurn);
+    }
+  });
+
+  it('stays shown while a failure needs the user', async () => {
+    tails.S = [
+      message('u', 'S', { author: 'user', type: 'user', text: 'hello' }),
+      message('n', 'S', {
+        type: 'notify',
+        text: 'No model source yet.',
+        metadata: { event: 'backend_failure', failure_id: 'f', turn_id: 't', failure_next_step: 'models' },
+      }),
+    ];
+    mainSession('S');
+    render(<PetPage />);
+    expect(await screen.findByText('pet.failedPrefix No model source yet.')).toBeTruthy();
+    expect(bubbleOpen()).toBe(true);
+  });
+
+  it('stays shown while a send may have been admitted', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('q', 'S')];
+    api.sendSessionMessage.mockRejectedValueOnce(new ApiError('dispatch pending', 504, null));
+    mainSession('S');
+    render(<PetPage />);
+    summon('listen');
+    const input = await screen.findByLabelText('pet.inputPlaceholder') as HTMLTextAreaElement;
+    await waitFor(() => expect(api.getSessionResult).toHaveBeenCalledWith('S'));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 10)));
+    await userEvent.type(input, 'deploy{Enter}');
+    expect(await screen.findByText('newSession.sendUncertain')).toBeTruthy();
+    expect(bubbleOpen()).toBe(true);
+  });
+
+  it('opens with a Vibey click and hides again when that history closes', async () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' }), message('r', 'S', { text: 'Old reply' })];
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    expect(bubbleOpen()).toBe(false);
+    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+    expect(document.querySelector('.pet-mini-detail.is-open')).not.toBeNull();
+    expect(screen.getByLabelText('pet.recentTurns').getAttribute('aria-expanded')).toBe('true');
+    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(bubbleOpen()).toBe(false));
+    expect(screen.getByLabelText('pet.recentTurns').getAttribute('aria-expanded')).toBe('false');
   });
 });
