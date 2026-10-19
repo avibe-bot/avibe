@@ -49,6 +49,8 @@ ExecutionMode = Literal["native", "executor", "direct"]
 HOSTED_TOOL_ASPECTS: Mapping[str, tuple[str, ...]] = {
     "web_search": ("call", "replay"),
     "x_search": ("call", "replay"),
+    # Fetch is a direct function tool on every vendor; only its call is evidence.
+    "web_fetch": ("call",),
     # An image call is an ordinary tool call and result, so only its call is evidence.
     "image_generate": ("call",),
 }

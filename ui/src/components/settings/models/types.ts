@@ -1030,7 +1030,7 @@ export type QuotaSummary = {
 
 // ── hosted-tools-status.schema.json ─────────────────────────────────────
 /** The catalog's tools, in catalog order (`vibey-hosted-tools.md` §2). */
-export const HOSTED_TOOL_NAMES = ['web_search', 'x_search', 'image_generate'] as const;
+export const HOSTED_TOOL_NAMES = ['web_search', 'x_search', 'web_fetch', 'image_generate'] as const;
 export type HostedToolName = (typeof HOSTED_TOOL_NAMES)[number];
 export type HostedSearchToolName = Exclude<HostedToolName, 'image_generate'>;
 
@@ -1077,6 +1077,10 @@ export type HostedExecutorCandidate = {
   relay: boolean;
   /** Null when no list price is known, never zero. */
   price: HostedToolListPrice | null;
+  /** A direct vendor API (DeepSeek Search/Fetch) rather than a vendor model. */
+  direct?: boolean;
+  /** The API's label when `direct`. */
+  label?: string;
 };
 
 export type HostedModelRef = { source_id: string; model_id: string };

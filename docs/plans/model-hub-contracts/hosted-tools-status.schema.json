@@ -103,7 +103,7 @@
       "required": ["name", "enabled", "status", "executor_order", "effective_order", "executor_candidates"],
       "additionalProperties": false,
       "properties": {
-        "name": { "enum": ["web_search", "x_search"] },
+        "name": { "enum": ["web_search", "x_search", "web_fetch"] },
         "enabled": { "type": "boolean" },
         "status": { "$ref": "#/definitions/Status" },
         "executor_order": {
@@ -116,14 +116,16 @@
           "description": "Every eligible executor Source for the tool, in effective order, with its vendor's executor model; a Claude subscription never is one.",
           "items": {
             "type": "object",
-            "required": ["source_id", "model_id", "billing", "relay", "price"],
+            "required": ["source_id", "model_id", "billing", "relay", "price", "direct", "label"],
             "additionalProperties": false,
             "properties": {
               "source_id": { "$ref": "#/definitions/SourceId" },
               "model_id": { "type": "string", "minLength": 1 },
               "billing": { "enum": ["monthly", "metered"] },
               "relay": { "type": "boolean", "description": "An API-key Source on an endpoint other than its vendor's own: its price is labelled \"at API price\"." },
-              "price": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ListPrice" }] }
+              "price": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ListPrice" }] },
+              "direct": { "type": "boolean", "description": "A vendor API that runs the tool without a model." },
+              "label": { "type": "string", "description": "The API's display label when direct; empty otherwise." }
             }
           }
         }

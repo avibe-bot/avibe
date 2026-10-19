@@ -26,7 +26,7 @@ from .events import bounded_diagnostic_detail
 from .hosted_items import responses_item_tool
 from .request import ModelHubRequest
 
-EXECUTOR_TOOLS: Final = ("web_search", "x_search")
+EXECUTOR_TOOLS: Final = ("web_search", "x_search", "web_fetch")
 # One deadline for a search call's whole executor chain, not one per candidate.
 SEARCH_TIMEOUT_SECONDS: Final = 180.0
 # Responses counts reasoning against this cap, so it leaves room beyond the list itself.
@@ -89,6 +89,11 @@ def parse_call(tool: str, payload: object) -> ExecutorCall:
     arguments = payload["arguments"]
     if not isinstance(arguments, dict):
         raise ExecutorCallRefused("invalid_request_error", 400)
+    if tool == "web_fetch":
+        url = arguments.get("url")
+        if set(arguments) != {"url"} or not isinstance(url, str) or not url.strip() or len(url) > 8192:
+            raise ExecutorCallRefused("invalid_request_error", 400)
+        return ExecutorCall(tool, dict(arguments))
     optional = {"web_search": set(), "x_search": {"limit", "mode"}}[tool]
     text = arguments.get("query")
     if set(arguments) - {"query"} - optional or not isinstance(text, str) or not text.strip():

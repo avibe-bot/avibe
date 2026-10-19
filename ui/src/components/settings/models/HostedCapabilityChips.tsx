@@ -8,7 +8,7 @@
 // toggles it, and the chip's accessible name carries the same facts.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, AtSign, CheckCircle2, Gauge, Globe, Image as ImageIcon } from 'lucide-react';
+import { AlertCircle, AtSign, CheckCircle2, FileText, Gauge, Globe, Image as ImageIcon } from 'lucide-react';
 
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover';
 import { cn } from '@/lib/utils';
@@ -19,6 +19,7 @@ import type { HostedToolName, RefusedEffort } from './types';
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {
   web_search: Globe,
   x_search: AtSign,
+  web_fetch: FileText,
   image_generate: ImageIcon,
 };
 

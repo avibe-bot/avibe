@@ -2356,6 +2356,11 @@
             "inline": "X 搜索",
             "description": "搜索 X 上的帖子，支持 from:、within_time: 等高级语法。"
           },
+          "web_fetch": {
+            "name": "网页抓取",
+            "inline": "网页抓取",
+            "description": "抓取单个网页，返回标题和 Markdown 正文。"
+          },
           "image_generate": {
             "name": "图片生成",
             "inline": "图片生成",

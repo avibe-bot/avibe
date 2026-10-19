@@ -17,7 +17,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import date, datetime
 from functools import lru_cache
 from importlib import resources
 from pathlib import Path
@@ -37,6 +37,7 @@ from config.v2_config import (
 )
 from vibe.backend_model_catalog import (
     IMAGE_PROTOCOLS,
+    HostedToolPrice,
     HostedToolSpec,
     ImageModelSpec,
     bundled_provider_vendors,
@@ -63,6 +64,30 @@ UNKNOWN_ENGINE_RELEASE = "unknown-engine"
 NATIVE_REPLAY_PROTOCOLS: frozenset[str] = frozenset({"anthropic", "openai_responses"})
 
 Assumption = Literal["assumed", "unsupported"]
+
+#: DeepSeek's standalone Search/Fetch APIs: no model call, credential from Avibe Vault.
+DEEPSEEK_DIRECT_SEARCH: dict[str, tuple[str, HostedToolPrice]] = {
+    "web_search": (
+        "/v1/tools/search",
+        HostedToolPrice(
+            unit="search",
+            usd_per_1k=0.75,
+            as_of=date(2026, 10, 19),
+            url="https://api-docs.deepseek.com/guides/search",
+        ),
+    ),
+    "web_fetch": (
+        "/v1/tools/fetch",
+        HostedToolPrice(
+            unit="call",
+            usd_per_1k=0.75,
+            as_of=date(2026, 10, 19),
+            url="https://api-docs.deepseek.com/guides/search",
+        ),
+    ),
+}
+DEEPSEEK_VAULT_SECRET = "DEEPSEEK_API_KEY"
+DEEPSEEK_DIRECT_LABEL = "DeepSeek Search API"
 
 
 def credential_eligible(source: ModelHubSourceConfig) -> bool:
@@ -208,13 +233,42 @@ def _vibey_order(config: ModelHubConfig) -> list[ModelHubSourceConfig]:
 
 @dataclass(frozen=True)
 class ExecutorCandidate:
-    """A Source that can run a proxied search: its vendor's lightweight model and the declaration it runs with."""
+    """A Source that can run a proxied search: a vendor model, or a direct vendor API."""
 
     source: ModelHubSourceConfig
     model_id: str
     declaration: Mapping[str, Any]
     include: tuple[str, ...]
     price: Any = None
+    direct: bool = False
+    label: str = ""
+    path: str = ""
+    vault_secret: str = ""
+
+
+def direct_search_candidate(source: ModelHubSourceConfig, tool: str) -> Optional[ExecutorCandidate]:
+    """DeepSeek's standalone Search/Fetch API on an eligible API-key Source, without a model."""
+
+    if (
+        source.vendor != "deepseek"
+        or source.kind != "api_key"
+        or source.supply_channel != "hub"
+        or not credential_eligible(source)
+        or tool not in DEEPSEEK_DIRECT_SEARCH
+    ):
+        return None
+    path, price = DEEPSEEK_DIRECT_SEARCH[tool]
+    return ExecutorCandidate(
+        source=source,
+        model_id="deepseek",
+        declaration={},
+        include=(),
+        price=price,
+        direct=True,
+        label=DEEPSEEK_DIRECT_LABEL,
+        path=path,
+        vault_secret=DEEPSEEK_VAULT_SECRET,
+    )
 
 
 def executor_candidates(
@@ -231,6 +285,10 @@ def executor_candidates(
         return ()
     candidates: dict[str, ExecutorCandidate] = {}
     for source in _vibey_order(config):
+        direct = direct_search_candidate(source, tool)
+        if direct is not None:
+            candidates[source.id] = direct
+            continue
         model_id = listed_executor_model(source)
         candidate = executor_candidate(source, model_id, tool, evidence=evidence, spec_for=spec_for) if model_id else None
         if candidate is not None:
@@ -391,7 +449,15 @@ def freeze_turn_tools(config: ModelHubConfig, *, evidence: HostedEvidence, spec_
     tools = frozenset(tool for tool in enabled if tool != IMAGE_TOOL or images)
     executors = {
         tool: tuple(
-            ExecutorSlot(candidate.source.id, candidate.model_id, identity_digest(candidate.source))
+            ExecutorSlot(
+                candidate.source.id,
+                candidate.model_id,
+                identity_digest(candidate.source),
+                direct=candidate.direct,
+                label=candidate.label,
+                path=candidate.path,
+                vault_secret=candidate.vault_secret,
+            )
             for candidate in executor_candidates(config, tool, evidence=evidence, spec_for=spec_for)
         )
         for tool in tools
@@ -542,6 +608,8 @@ def hosted_tools_status(
                     "billing": candidate.source.billing,
                     "relay": is_relay(candidate.source),
                     "price": _price_payload(candidate.price),
+                    "direct": candidate.direct,
+                    "label": candidate.label,
                 }
                 for candidate in chain
             ]

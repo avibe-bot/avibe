@@ -4,7 +4,7 @@
 // sources or image it produced. Every mode draws the same card from the same record.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { AtSign, Check, ChevronRight, CircleSlash, Download, FileImage, Globe, Image as ImageIcon, TriangleAlert, Type, Waypoints } from 'lucide-react';
+import { AtSign, Check, ChevronRight, CircleSlash, Download, FileImage, FileText, Globe, Image as ImageIcon, TriangleAlert, Type, Waypoints } from 'lucide-react';
 import clsx from 'clsx';
 
 import { ChatImage } from '../ui/chat-image';
@@ -16,6 +16,7 @@ import { hostedCompleted, type HostedActivity, type HostedActivityImage, type Ho
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {
   web_search: Globe,
   x_search: AtSign,
+  web_fetch: FileText,
   image_generate: ImageIcon,
 };
 

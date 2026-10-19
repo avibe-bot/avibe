@@ -25,6 +25,11 @@ class ExecutorSlot:
     source_id: str
     model_id: str
     identity: str
+    # A direct API executor has no model; ``label`` names the API in the UI.
+    direct: bool = False
+    label: str = ""
+    path: str = ""
+    vault_secret: str = ""
 
 
 @dataclass(frozen=True)

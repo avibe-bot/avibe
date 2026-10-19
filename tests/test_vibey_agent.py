@@ -3957,7 +3957,7 @@ def _without(entry: dict, key: str) -> dict:
     "hosted_tools",
     [
         None,
-        {"web_fetch": _PROXY_SEARCH},
+        {"web_unknown": _PROXY_SEARCH},
         {"web_search": _without(_NATIVE_SEARCH, "declaration")},
         {"web_search": {**_PROXY_SEARCH, "include": []}},
         {"web_search": {**_NATIVE_SEARCH, "note": "extra"}},

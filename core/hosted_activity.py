@@ -256,7 +256,7 @@ def proxy_activity(
 
     arguments = call.arguments if isinstance(call.arguments, dict) else {}
     subject = next(
-        (value for name in ("query", "prompt") if isinstance(value := arguments.get(name), str) and value),
+        (value for name in ("query", "url", "prompt") if isinstance(value := arguments.get(name), str) and value),
         None,
     )
     size = arguments.get("size") if isinstance(arguments.get("size"), str) else None

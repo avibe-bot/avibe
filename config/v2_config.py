@@ -3037,7 +3037,7 @@ class ModelHubAgentSupplyConfig:
 
 # Model Hub's hosted-tool catalog (vibey-hosted-tools.md §2): two search tools a hop may run natively or
 # through the executor, and the direct image tool.
-MODEL_HUB_SEARCH_TOOLS: tuple[str, ...] = ("web_search", "x_search")
+MODEL_HUB_SEARCH_TOOLS: tuple[str, ...] = ("web_search", "x_search", "web_fetch")
 MODEL_HUB_HOSTED_TOOLS: tuple[str, ...] = (*MODEL_HUB_SEARCH_TOOLS, "image_generate")
 
 

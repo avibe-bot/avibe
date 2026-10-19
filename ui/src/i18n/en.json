@@ -2356,6 +2356,11 @@
             "inline": "X search",
             "description": "Searches posts on X, with operators such as from: and within_time:."
           },
+          "web_fetch": {
+            "name": "Web fetch",
+            "inline": "web fetch",
+            "description": "Fetches one web page and returns its title and content as Markdown."
+          },
           "image_generate": {
             "name": "Image generation",
             "inline": "image generation",

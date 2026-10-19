@@ -43,7 +43,7 @@ SOURCE = {
     "created_at": "2026-10-13T00:00:00Z",
     "credential_ref": "cred_src_xai00001",
 }
-ALL_TOOLS = ("web_search", "x_search", "image_generate")
+ALL_TOOLS = ("web_search", "x_search", "web_fetch", "image_generate")
 
 
 def _section(hosted_tools) -> dict:
@@ -67,11 +67,13 @@ def test_hosted_tool_settings_round_trip_in_canonical_order():
         "image_generate": {"enabled": True, "default_model": {"source_id": "src_xai00001", "model_id": "grok-imagine-image"}},
         "x_search": {"enabled": False},
         "web_search": {"enabled": True, "executor_order": ["src_gone0001", "src_xai00001"]},
+        "web_fetch": {"enabled": True},
     }
     config = ModelHubConfig.from_payload(_section(tools))
     assert config.hosted_tools == {
         "web_search": ModelHubHostedToolConfig(True, ("src_gone0001", "src_xai00001")),
         "x_search": ModelHubHostedToolConfig(False),
+        "web_fetch": ModelHubHostedToolConfig(True),
         "image_generate": ModelHubHostedToolConfig(
             True, default_image=ModelHubImageModelChoice("src_xai00001", "grok-imagine-image"),
         ),
@@ -139,7 +141,7 @@ def test_disk_load_with_a_broken_hosted_tools_section_keeps_model_hub(monkeypatc
 
     assert not loaded.load_warnings
     assert [source.id for source in loaded.model_hub.sources] == ["src_xai00001"]
-    assert enabled_tools(loaded.model_hub) == ("image_generate",)
+    assert enabled_tools(loaded.model_hub) == ("web_fetch", "image_generate")
     assert config_path.read_text(encoding="utf-8") == original
     assert not list(tmp_path.glob("config.json.bak-recovery-*"))
 

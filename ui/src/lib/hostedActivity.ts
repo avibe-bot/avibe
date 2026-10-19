@@ -3,7 +3,7 @@
 // ``hostedActivity.fixture.json``). The row's ``text`` is the IM line; the Web
 // renders the card from these fields instead.
 
-export type HostedToolName = 'web_search' | 'x_search' | 'image_generate';
+export type HostedToolName = 'web_search' | 'x_search' | 'web_fetch' | 'image_generate';
 
 export type HostedActivitySource = {
   /** Only a URL a browser should open; a source without one is named by its title. */
@@ -56,7 +56,7 @@ export type HostedActivity = {
   cost?: { basis: 'reported' | 'list' | 'included'; usd?: number; calls: number; at_least?: boolean };
 };
 
-const TOOLS: readonly string[] = ['web_search', 'x_search', 'image_generate'];
+const TOOLS: readonly string[] = ['web_search', 'x_search', 'web_fetch', 'image_generate'];
 const STATUSES: readonly string[] = ['completed', 'failed', 'incomplete', 'pending'];
 
 /** The card a row carries, or undefined for anything that is not one this client reads. */

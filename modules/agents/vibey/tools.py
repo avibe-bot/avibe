@@ -151,8 +151,8 @@ class HostedTool:
             # The hop's own Source would run the tool but refused it, so this call is a fallback from it (C-6
             # ``refused``): the card and the IM line say so.
             hosted = replace(hosted, fallback_from=HostedFallback(endpoint.source_id))
-        query = arguments.get("query")
-        return _result(self.spec.name, hosted, query=query if isinstance(query, str) else None)
+        subject = arguments.get("query") or arguments.get("url")
+        return _result(self.spec.name, hosted, query=subject if isinstance(subject, str) else None)
 
 
 @dataclass(frozen=True)

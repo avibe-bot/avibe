@@ -240,18 +240,38 @@ def test_the_image_enum_is_deterministic_with_the_default_first(tmp_path):
     assert image_choices(_config(sources=[on_messages]), evidence=evidence).models == ()
 
 
+def test_a_deepseek_source_runs_search_and_fetch_directly(tmp_path):
+    deepseek = _source("src_ds000001", "deepseek", "openai_chat", "deepseek-v4-pro", base_url="https://api.deepseek.com")
+    config = _config(sources=[deepseek])
+    evidence = _evidence(tmp_path)
+    for tool, path in (("web_search", "/v1/tools/search"), ("web_fetch", "/v1/tools/fetch")):
+        chain = executor_candidates(config, tool, evidence=evidence, spec_for=_spec_for)
+        assert len(chain) == 1
+        candidate = chain[0]
+        assert candidate.direct is True
+        assert candidate.label == "DeepSeek Search API"
+        assert candidate.path == path
+        assert candidate.vault_secret == "DEEPSEEK_API_KEY"
+        assert candidate.price.usd_per_1k == 0.75
+    turn = freeze_turn_tools(config, evidence=evidence, spec_for=_spec_for)
+    slot = turn.executors["web_fetch"][0]
+    assert slot.direct is True and slot.path == "/v1/tools/fetch"
+    assert slot.label == "DeepSeek Search API"
+
+
 def test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_its_own_facts(tmp_path):
     """MH-HOSTED-001: every tool is on unless turned off; the turn freezes the set, each search tool's executor order
     with the identity it was built under, and the image enum; a hop states facts only, the enum's params sorted."""
     evidence = _evidence(tmp_path)
     turn = freeze_turn_tools(_config(), evidence=evidence, spec_for=_spec_for)
-    assert turn.tools == {"web_search", "x_search", "image_generate"}
+    assert turn.tools == {"web_search", "x_search", "web_fetch", "image_generate"}
     assert turn.executors == {
         "web_search": (
             ExecutorSlot("src_xai00001", "grok-fast", identity_digest(XAI)),
             ExecutorSlot("src_oai00001", "gpt-mini", identity_digest(OPENAI)),
         ),
         "x_search": (ExecutorSlot("src_xai00001", "grok-fast", identity_digest(XAI)),),
+        "web_fetch": (),
     }
     image = {"description": "Grok Imagine", "params": ["images", "size"], "size_forms": ["pixels"]}
     assert hop_hosted_tools(turn, OPENAI, "gpt-6-astra", evidence=evidence, spec_for=_spec_for) == {
@@ -261,6 +281,7 @@ def test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_i
         },
         # OpenAI does not run X search: the hop takes the function.
         "x_search": {"native": "unsupported", "replay": "unsupported"},
+        "web_fetch": {"native": "unsupported", "replay": "unsupported"},
         "image_generate": {
             "models": [
                 {"source_id": "src_xai00001", "model_id": "grok-imagine-image", **image},
@@ -279,8 +300,8 @@ def test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_i
     turn = freeze_turn_tools(
         off, evidence=_evidence(tmp_path / "o", (OPENAI, "gpt-image-2", "image_generate", "call")), spec_for=_spec_for,
     )
-    assert (turn.tools, turn.images) == ({"web_search"}, ())
-    assert set(hop_hosted_tools(turn, OPENAI, "gpt-6-astra", evidence=evidence, spec_for=_spec_for)) == {"web_search"}
+    assert (turn.tools, turn.images) == ({"web_search", "web_fetch"}, ())
+    assert set(hop_hosted_tools(turn, OPENAI, "gpt-6-astra", evidence=evidence, spec_for=_spec_for)) == {"web_search", "web_fetch"}
 
 
 def test_the_tools_read_states_saved_and_effective_values_and_what_real_use_showed(tmp_path):
@@ -297,7 +318,7 @@ def test_the_tools_read_states_saved_and_effective_values_and_what_real_use_show
     config = _config({"web_search": ModelHubHostedToolConfig(executor_order=("src_oai00001",))})
     status = hosted_tools_status(config, evidence=evidence, spec_for=_spec_for, image_price=lambda _source, _spec: None)
     by_name = {tool["name"]: tool for tool in status["tools"]}
-    assert list(by_name) == ["web_search", "x_search", "image_generate"]
+    assert list(by_name) == ["web_search", "x_search", "web_fetch", "image_generate"]
     web = by_name["web_search"]
     assert web["enabled"] is True and by_name["x_search"]["enabled"] is True
     assert web["executor_order"] == ["src_oai00001"]

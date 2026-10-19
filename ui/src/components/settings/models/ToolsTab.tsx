@@ -7,7 +7,7 @@
 // request. Nothing here checks a Source or decides a route.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, ArrowDown, ArrowUp, AtSign, CheckCircle2, ChevronRight, Eraser, Globe, Image as ImageIcon, Info, RotateCcw } from 'lucide-react';
+import { AlertCircle, ArrowDown, ArrowUp, AtSign, CheckCircle2, ChevronRight, Eraser, FileText, Globe, Image as ImageIcon, Info, RotateCcw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
@@ -39,12 +39,13 @@ type Clear = (tool: HostedToolName, body: HostedToolClear) => void;
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {
   web_search: Globe,
   x_search: AtSign,
+  web_fetch: FileText,
   image_generate: ImageIcon,
 };
 
 /** The tab's groups, by capability, in catalog order. */
 const TOOL_GROUPS: { key: 'search' | 'generate'; tools: readonly HostedToolName[] }[] = [
-  { key: 'search', tools: ['web_search', 'x_search'] },
+  { key: 'search', tools: ['web_search', 'x_search', 'web_fetch'] },
   { key: 'generate', tools: ['image_generate'] },
 ];
 
@@ -263,7 +264,7 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                     <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
                       <SourceGlyph source={source} />
                       <span className="truncate font-semibold text-foreground" title={name}>{name}</span>
-                      <span className="truncate font-mono text-muted" title={candidate.model_id}>{candidate.model_id}</span>
+                      <span className="truncate font-mono text-muted" title={candidate.label ?? candidate.model_id}>{candidate.label ?? candidate.model_id}</span>
                       {source && <span className={cn('model-hub-pill border', ACCENT_PILL[source.kind === 'api_key' ? 'cyan' : sourceVisual(source).accent])}>{t(`settings.models.upstream.kind.${source.kind === 'subscription' ? 'subscription' : 'apiKey'}`)}</span>}
                     </span>
                     <ExecutorPrice candidate={candidate} />

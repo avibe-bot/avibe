@@ -28,10 +28,10 @@ _COUNTER_NAME_RE = re.compile(r"^[a-z0-9_]{1,64}$")
 _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 #: The tools a provider runs natively, each a ``HostedToolBlock`` in assistant content (``vibey-hosted-tools.md`` §4.2).
-HostedToolName = Literal["web_search", "x_search"]
-HOSTED_TOOLS: tuple[str, ...] = ("web_search", "x_search")
+HostedToolName = Literal["web_search", "x_search", "web_fetch"]
+HOSTED_TOOLS: tuple[str, ...] = ("web_search", "x_search", "web_fetch")
 #: The tools whose ``ToolResultMessage`` carries ``hosted``: a proxied search, and every ``image_generate`` call.
-HOSTED_RESULT_TOOLS: tuple[str, ...] = (*HOSTED_TOOLS, "image_generate")
+HOSTED_RESULT_TOOLS: tuple[str, ...] = (*HOSTED_TOOLS, "web_fetch", "image_generate")
 EXECUTION_MODES: tuple[str, ...] = ("proxy", "direct")
 HostedStatus = Literal["completed", "failed", "incomplete", "pending"]
 HOSTED_STATUSES: tuple[str, ...] = ("completed", "failed", "incomplete", "pending")

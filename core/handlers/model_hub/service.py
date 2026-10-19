@@ -7,6 +7,8 @@ import copy
 import hashlib
 import json
 import logging
+import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -163,6 +165,7 @@ from .hosted_tools import (
     apply_hosted_tool_put,
     clear_request,
     engine_stamp,
+    direct_search_candidate,
     executor_candidate,
     executor_vendors,
     freeze_turn_tools,
@@ -919,11 +922,17 @@ class _ExecutorAttempt:
     billable: bool
     # Whether its failure passes the search to the next candidate.
     moves_on: bool
+    direct: bool = False
+    label: str = ""
 
     def execution(self) -> dict[str, Any]:
         execution: dict[str, Any] = {
-            "mode": "proxy",
-            "executor_origin": {"provider": self.source.vendor, "api": self.source.protocol, "model": self.model_id},
+            "mode": "direct" if self.direct else "proxy",
+            "executor_origin": {
+                "provider": self.source.vendor,
+                "api": self.source.protocol,
+                "model": self.label if self.direct else self.model_id,
+            },
             "executor_source_id": self.source.id,
             "executor_billing": self.source.billing,
         }
@@ -6589,6 +6598,8 @@ class ModelHubService:
         source = next((item for item in config.sources if item.id == slot.source_id), None)
         if source is None or identity_digest(source) != slot.identity:
             return None
+        if slot.direct:
+            return direct_search_candidate(source, tool)
         # The frozen model while it stays listed and runnable, even if the Source now lists one its vendor prefers.
         return executor_candidate(source, slot.model_id, tool, evidence=self.hosted_evidence(), spec_for=hosted_tool_spec)
 
@@ -6800,6 +6811,115 @@ class ModelHubService:
             return HostedCost(basis="list", usd=round(price.usd_per_1k / 1000 * images, 6))
         return self.hosted_call_cost(source, spec.id, (), usage=usage, counts={})
 
+    async def _direct_search_attempt(
+        self,
+        call: ExecutorCall,
+        candidate: ExecutorCandidate,
+        *,
+        deadline: float,
+        say: Callable[..., str],
+    ) -> _ExecutorAttempt:
+        """Run DeepSeek's standalone Search/Fetch API directly, with its key from Avibe Vault."""
+
+        source = candidate.source
+        base = (source.base_url or "https://api.deepseek.com").rstrip("/")
+        url = base + candidate.path
+        if call.tool == "web_fetch":
+            payload = {"url": call.arguments["url"]}
+        else:
+            payload = {"query": call.arguments["query"], "count": 10}
+        command = [
+            sys.executable,
+            "-m",
+            "vibe",
+            "vault",
+            "fetch",
+            "--auth",
+            candidate.vault_secret,
+            "--method",
+            "POST",
+            "--url",
+            url,
+            "--header",
+            "Content-Type: application/json",
+            "--data",
+            json.dumps(payload, ensure_ascii=True),
+            "--no-approval-wait",
+        ]
+        failure_reason: Failure | None = None
+        body: Any = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as error:
+            failure_reason = Failure(str(error), None)
+            process = None
+        if process is not None:
+            try:
+                timeout = max(1.0, deadline - asyncio.get_running_loop().time())
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+                stdout, stderr = b"", b""
+                failure_reason = Failure(say("modelHub.hostedTools.timedOut"), "provider_timed_out")
+            if failure_reason is None and process.returncode != 0:
+                detail = (stderr or b"").decode("utf-8", "replace").strip().splitlines()
+                failure_reason = Failure(detail[-1] if detail else f"exited {process.returncode}", None)
+            if failure_reason is None:
+                try:
+                    body = json.loads(stdout.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    failure_reason = Failure(say("modelHub.hostedTools.unreadable"), "provider_unreadable")
+        if failure_reason is not None:
+            record = failed_record(failure_reason)
+        elif call.tool == "web_fetch":
+            content = body.get("content") if isinstance(body, dict) else None
+            if not isinstance(content, str) or not content.strip():
+                record = failed_record(Failure(say("modelHub.hostedTools.didNotRun", tool=call.tool), "search_not_run"))
+            else:
+                record = {
+                    "status": "completed",
+                    "sources": [{
+                        "url": call.arguments["url"],
+                        "title": body.get("title") or "",
+                        "snippet": content[:20_000],
+                    }],
+                }
+        else:
+            results = body.get("results") if isinstance(body, dict) else None
+            if not isinstance(results, list):
+                record = failed_record(Failure(say("modelHub.hostedTools.unreadable"), "provider_unreadable"))
+            else:
+                sources = []
+                for item in results[:10]:
+                    if not isinstance(item, dict) or not isinstance(item.get("url"), str):
+                        continue
+                    source_row = {"url": item["url"]}
+                    for key in ("title", "snippet"):
+                        if isinstance(item.get(key), str) and item[key]:
+                            source_row[key] = item[key]
+                    if isinstance(item.get("date"), str) and item["date"]:
+                        source_row["page_age"] = item["date"]
+                    sources.append(source_row)
+                record = {"status": "completed", "sources": sources}
+        cost = None
+        if candidate.price is not None:
+            cost = HostedCost(basis="list", usd=round(candidate.price.usd_per_1k / 1000, 6))
+        return _ExecutorAttempt(
+            source=source,
+            model_id="deepseek",
+            record=record,
+            cost=cost,
+            billable=True,
+            moves_on=False,
+            direct=True,
+            label=candidate.label,
+        )
+
     async def _executor_attempt(
         self,
         call: ExecutorCall,
@@ -6814,6 +6934,8 @@ class ModelHubService:
         candidate = await asyncio.to_thread(self._admitted_executor, slot, tool)
         if candidate is None:
             return None
+        if candidate.direct:
+            return await self._direct_search_attempt(call, candidate, deadline=deadline, say=say)
         source = candidate.source
         request = executor_request(call, source, model_id, candidate.declaration, candidate.include)
         stream = executor_streams(source)

@@ -52,13 +52,22 @@ _SPECS: dict[str, tuple[str, dict[str, Any]]] = {
             "additionalProperties": False,
         },
     ),
+    "web_fetch": (
+        "Fetch one web page and return its title and content as Markdown.",
+        {
+            "type": "object",
+            "properties": {"url": {"type": "string", "description": "HTTP or HTTPS URL to fetch."}},
+            "required": ["url"],
+            "additionalProperties": False,
+        },
+    ),
 }
 
 
 def hosted_tool_spec(tool: str) -> ToolSpec:
     """The canonical spec of the search tool ``tool`` (``web_search`` or ``x_search``)."""
 
-    if tool not in HOSTED_TOOLS:
+    if tool not in (*HOSTED_TOOLS, "web_fetch"):
         raise ValueError(f"unknown hosted tool: {tool!r}")
     description, schema = _SPECS[tool]
     return ToolSpec(tool, description, copy.deepcopy(schema))
