@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import datetime
 import json
 import time
 
@@ -71,6 +72,20 @@ async def _attempt(monkeypatch, service, tool, arguments, stdout, *, returncode=
         recorded.append(args)
 
     service.record_hosted_success = record
+    service.now = lambda: datetime.datetime.now(datetime.timezone.utc)
+
+    class _UsageWriter:
+        def __init__(self):
+            self.calls = []
+
+        def record(self, **kwargs):
+            self.calls.append(kwargs)
+            return object()
+
+        async def wait_recorded(self, _future):
+            return None
+
+    service.usage_writer = _UsageWriter()
 
     async def spawn(*command, **kwargs):
         calls.append(command)
@@ -82,11 +97,11 @@ async def _attempt(monkeypatch, service, tool, arguments, stdout, *, returncode=
     attempt = await service._direct_search_attempt(
         ExecutorCall(tool, arguments), candidate, deadline=time.monotonic() + 10, say=lambda key, **params: key,
     )
-    return attempt, calls, recorded
+    return attempt, calls, recorded, service.usage_writer.calls
 
 
 async def test_search_runs_the_standalone_api_with_vault(monkeypatch, service) -> None:
-    attempt, calls, recorded = await _attempt(
+    attempt, calls, recorded, usage = await _attempt(
         monkeypatch, service, "web_search", {"query": "q"},
         json.dumps({"results": [{"title": "T", "url": "https://e", "snippet": "S"}]}).encode(),
     )
@@ -103,10 +118,11 @@ async def test_search_runs_the_standalone_api_with_vault(monkeypatch, service) -
     assert "--auth" in command and "DEEPSEEK_API_KEY" in command
     assert "https://api.deepseek.com/v1/tools/search" in command
     assert recorded == [(SOURCE, "deepseek", "web_search", "direct")]
+    assert usage and usage[0]["source_id"] == SOURCE.id and usage[0]["model_id"] == "deepseek"
 
 
 async def test_an_empty_search_is_completed_but_free(monkeypatch, service) -> None:
-    attempt, _, _ = await _attempt(
+    attempt, _, _, _ = await _attempt(
         monkeypatch, service, "web_search", {"query": "q"}, b'{"results":[]}',
     )
     assert attempt.record["status"] == "completed"
@@ -128,12 +144,12 @@ def _message(attempt, tool: str):
 
 
 async def test_direct_records_pass_the_real_reader(monkeypatch, service) -> None:
-    search, _, _ = await _attempt(
+    search, _, _, _ = await _attempt(
         monkeypatch, service, "web_search", {"query": "q"},
         json.dumps({"results": [{"title": "T", "url": "https://e", "snippet": "S", "date": "2026-10-19"}]}).encode(),
     )
     assert _message(search, "web_search").hosted is not None
-    fetch, _, _ = await _attempt(
+    fetch, _, _, _ = await _attempt(
         monkeypatch, service, "web_fetch", {"url": "https://example.com/a"},
         json.dumps({"title": "T", "content": "body"}).encode(),
     )
@@ -141,7 +157,7 @@ async def test_direct_records_pass_the_real_reader(monkeypatch, service) -> None
 
 
 async def test_fetch_returns_the_page_as_the_source(monkeypatch, service) -> None:
-    attempt, calls, _ = await _attempt(
+    attempt, calls, _, _ = await _attempt(
         monkeypatch, service, "web_fetch", {"url": "https://example.com/a"},
         json.dumps({"title": "T", "content": "body"}).encode(),
     )
@@ -152,7 +168,7 @@ async def test_fetch_returns_the_page_as_the_source(monkeypatch, service) -> Non
 
 
 async def test_an_empty_fetch_is_a_failure(monkeypatch, service) -> None:
-    attempt, _, _ = await _attempt(
+    attempt, _, _, _ = await _attempt(
         monkeypatch, service, "web_fetch", {"url": "https://example.com/a"},
         json.dumps({"title": "T", "content": ""}).encode(),
     )
@@ -161,7 +177,7 @@ async def test_an_empty_fetch_is_a_failure(monkeypatch, service) -> None:
 
 async def test_a_vault_failure_is_the_record_error(monkeypatch, service) -> None:
     stderr = b'{\n  "ok": false,\n  "error": "secret not found: DEEPSEEK_API_KEY"\n}\n'
-    attempt, _, recorded = await _attempt(
+    attempt, _, recorded, _ = await _attempt(
         monkeypatch, service, "web_search", {"query": "q"}, b"{}", returncode=1, stderr=stderr,
     )
     assert attempt.record["status"] == "failed"
@@ -174,7 +190,7 @@ async def test_a_vault_failure_is_the_record_error(monkeypatch, service) -> None
 
 
 async def test_malformed_source_fields_are_dropped(monkeypatch, service) -> None:
-    attempt, _, _ = await _attempt(
+    attempt, _, _, _ = await _attempt(
         monkeypatch, service, "web_search", {"query": "q"},
         json.dumps({"results": [
             {"url": "", "title": "bad"},
@@ -243,7 +259,7 @@ async def test_a_base_url_ending_in_v1_does_not_double_the_prefix(monkeypatch, s
     original = SOURCE
     SOURCE = replace(SOURCE, base_url="https://api.deepseek.com/v1")
     try:
-        _, calls, _ = await _attempt(
+        _, calls, _, _ = await _attempt(
             monkeypatch, service, "web_search", {"query": "q"}, json.dumps({"results": []}).encode(),
         )
     finally:

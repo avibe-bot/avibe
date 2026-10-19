@@ -6971,6 +6971,15 @@ class ModelHubService:
             await self.record_hosted_success(source, "deepseek", call.tool, "direct")
         # DeepSeek bills Search only when it returns a non-empty list; an empty result is free.
         billable = completed and (call.tool == "web_fetch" or bool(record.get("sources")))
+        if billable:
+            await self.usage_writer.wait_recorded(
+                self.usage_writer.record(
+                    source_id=source.id,
+                    model_id="deepseek",
+                    usage=None,
+                    at=self.now(),
+                )
+            )
         cost = None
         if billable and candidate.price is not None:
             cost = HostedCost(basis="list", usd=round(candidate.price.usd_per_1k / 1000, 6))
