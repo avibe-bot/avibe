@@ -3,8 +3,9 @@
 ``ToolSuite`` is the adapter's whole dependency on ``core.agent_core.tools``:
 the job host, the tools built over the loop's tracking wrapper (``Agent.jobs``,
 so an abort kills foreground commands), the bash renderer recovery uses for open
-calls (``recovery.md`` T2), the lookup from a call instance to its job, and
-job pruning.
+calls (``recovery.md`` T2), the foreground wait a Turn continued after a restart
+gives a surviving job, the lookup from a call instance to its job, and job
+pruning.
 
 The job host lives in Watch's ``agent_jobs_dir()``, where ``vibe stop`` and the
 job-Watch sweep look, and hands a job over through Watch's own
@@ -38,7 +39,7 @@ from core.agent_core.messages import (
     ToolResultMessage,
     message_from_dict,
 )
-from core.agent_core.tools.base import CallInstance, JobHost, Tool, ToolContext, ToolResult, ToolSpec
+from core.agent_core.tools.base import CallInstance, JobHost, JobStatus, Tool, ToolContext, ToolResult, ToolSpec
 from core.agent_core.tools.hosted import MAX_IMAGES, hosted_tool_spec, image_generate_spec, size_form
 from core.agent_core.tools.read import MAX_INLINE_IMAGE_BYTES, ImageUnreadable, read_image
 from core.agent_core.tools.truncate import format_size
@@ -59,6 +60,9 @@ class ToolSuite:
     #: The job a call instance started, if any.
     find_job: Callable[[CallInstance], Optional[str]]
     prune: Optional[Callable[[CallSettled], list[str]]] = None
+    #: ``(call, job_id, stop)``: a surviving job settled as its live call would, from its launch, or until
+    #: ``stop``: its status and Watch (``settle_in_foreground``); ``None`` hands a running job over at once.
+    wait_recovered: Optional[Callable[[Any, str, asyncio.Event], Awaitable[tuple[JobStatus, Optional[str]]]]] = None
     #: The shell commands run in, as the environment block names it (C-7 tools.md section 8).
     shell: str = field(default_factory=lambda: default_shell().describe())
 
@@ -72,9 +76,10 @@ def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOver
 
     Every path that creates a job Watch (``watch=true``, the foreground-window hand-over,
     and T2 recovery) goes through the host's ``on_hand_over``, which takes the Watch's
-    Agent and authorization from ``route``: the job's owning Turn.
+    Agent and authorization from ``route``: the job's owning Turn. ``bash`` and the
+    recovered wait use the same default foreground window.
     """
-    from core.agent_core.tools.bash import recovered_result
+    from core.agent_core.tools.bash import recovered_result, settle_in_foreground
     from core.agent_core.tools.coding import create_coding_tools
     from core.agent_core.tools.jobs import LocalJobHost
     from core.watches import ManagedWatchStore, agent_jobs_dir
@@ -102,6 +107,9 @@ def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOver
     async def render(call: Any, job_id: str, status: Any, watch_id: Optional[str]) -> Any:
         return await recovered_result(host, job_id, status, watch_id)
 
+    async def wait_recovered(call: Any, job_id: str, stop: asyncio.Event) -> tuple[JobStatus, Optional[str]]:
+        return await settle_in_foreground(host, call, job_id, stop=stop)
+
     def prune(call_settled: CallSettled) -> list[str]:
         # J5: a job's files stay until its call has a durable result and no Watch still manages it.
         watches = ManagedWatchStore()
@@ -114,6 +122,7 @@ def local_tool_suite(jobs_dir: Optional[str] = None, *, route: Optional[HandOver
         find_job=host.find_job,
         prune=prune,
         shell=host.shell.describe(),
+        wait_recovered=wait_recovered,
     )
 
 

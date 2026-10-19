@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import sqlite3
 import threading
 
@@ -536,6 +537,92 @@ async def test_a_reply_pending_input_superseded_commits_as_a_visible_reply(engin
     assert committed == row_type
     # Whatever its type, it is context.
     assert [entry.row_id for entry in await store.load("ses_main") if entry.kind == "response"] == [reply.row_id]
+
+
+async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) -> None:
+    """MESSAGE-DELIVERY-327 / MESSAGE-DELIVERY-333: restart recovery decides each cut Turn
+    (``restart_resume_plan``, its restart streak included) and releases its runtime generation to
+    rerun it; the rerun finds the final it committed, and its end asks whether that final was
+    delivered and what a silent final leaves as the result, the last two on the controller loop.
+    Every read is an indexed SEARCH keyed by the Turn, a row id, the Session's context tail, or the
+    Turn's own time window: no scan, and a temporary sort only over the Turn's own Deliveries, never
+    over the growing history."""
+    from sqlalchemy import event
+
+    from core.message_mirror import delivered_committed_row, resumed_turn_text
+    from core.restart_resume import restart_resume_plan, restart_streak
+    from modules.im.base import MessageContext
+    from storage.agent_transcript import committed_final, last_turn_text
+    from storage.db import get_cached_sqlite_engine
+
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        first = _accepted_turn(conn, "ses_main", home, "看一下目录", "turn_main")
+        _session(conn, "ses_cut", home)
+        cut = _accepted_turn(conn, "ses_cut", home, "跑一下测试", "turn_cut")
+    store = SQLiteTranscriptStore(engine)
+    await store.consume_input("ses_main", first, _user("看一下目录"))
+    final = await store.append_response("ses_main", _assistant("两个文件。"), final=True, turn_id="turn_main")
+    await store.consume_input("ses_cut", cut, _user("跑一下测试"))
+    await store.append_response("ses_cut", _assistant("先跑", call_id="call_1"), final=False, turn_id="turn_cut")
+    statements: list[tuple[str, object]] = []
+
+    def capture(_conn, _cursor, statement, parameters, _context, _executemany):
+        statements.append((statement, parameters))
+
+    rerun = MessageContext(
+        user_id="u1", channel_id="C-home", platform="slack",
+        platform_specific={"vibey_resume": True, "agent_session_id": "ses_main", "turn_token": "turn_main"},
+    )
+    cached = get_cached_sqlite_engine()
+    event.listen(engine, "before_cursor_execute", capture)
+    event.listen(cached, "before_cursor_execute", capture)
+    try:
+        with engine.connect() as conn:
+            # Both Turns rerun: one ends with the final it committed, one continues.
+            assert restart_resume_plan(conn, message_deliveries.get_turn(conn, "turn_main")) == "rerun"
+            assert committed_final(conn, "ses_main", "turn_main").row_id == final.row_id
+            cut_turn = message_deliveries.get_turn(conn, "turn_cut")
+            assert restart_resume_plan(conn, cut_turn) == "rerun"
+            assert committed_final(conn, "ses_cut", "turn_cut") is None
+            # A silent final's result: the Turn's last narration or superseded reply.
+            last_turn_text(conn, "ses_main", since="2026-01-01T00:00:00.000000Z")
+        # The rerun's end, on the loop: the final's delivery, and a silent final's result.
+        assert delivered_committed_row(rerun, final.row_id, outward=True) is None
+        assert resumed_turn_text(rerun) is None
+        with engine.begin() as conn:
+            # The rerun's writer transaction: the streak, and the released generation.
+            streak, response_seq = restart_streak(conn, cut_turn)
+            assert message_deliveries.rotate_restart_generation(
+                conn, "turn_cut", expected_version=int(cut_turn["version"]), streak=streak, response_seq=response_seq
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+        event.remove(cached, "before_cursor_execute", capture)
+
+    raw = sqlite3.connect(str(get_sqlite_state_path()))
+    try:
+        plans = [[row[-1] for row in raw.execute("EXPLAIN QUERY PLAN " + sql, params)] for sql, params in statements]
+    finally:
+        raw.close()
+    turn_keys = ("(turn_id=?)", "(current_target_turn_id=?)")
+    bounded = re.compile(
+        r"SEARCH \w+ USING (?:COVERING )?INDEX \w+ \((?:id=\?|delivery_id=\?|turn_id=\?|current_target_turn_id=\?"
+        r"|session_id=\? AND context_seq>\?|session_id=\? AND type=\? AND created_at>\?)\)"
+    )
+    for (sql, _params), plan in zip(statements, plans):
+        searches = [step for step in plan if step.startswith(("SEARCH", "SCAN"))]
+        if not searches and sql.lstrip().upper().startswith("UPDATE"):
+            continue  # a CAS write keyed by the row id, whose plan names no table read
+        assert searches and all(bounded.fullmatch(step) for step in searches), (sql, plan)
+        if any("TEMP B-TREE" in step for step in plan):
+            assert all(step.endswith(turn_keys) for step in searches), (sql, plan)
+    # The steer the Turn may still wait for is found by the Turn it targets.
+    assert any(
+        "current_target_turn_id" in sql and "steering" in str(params) and bounded.fullmatch(plan[0])
+        for (sql, params), plan in zip(statements, plans)
+    )
 
 
 async def test_a_call_instance_is_settled_once_whoever_writes(engine) -> None:

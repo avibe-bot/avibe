@@ -110,6 +110,35 @@ class QueuedReactionLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(handle.ack_reaction_emoji, ACK_REACTION_EMOJI)
         self.assertEqual(im.calls, [("add", "m1", ACK_REACTION_EMOJI)])
 
+    async def test_a_restart_rerun_retires_the_running_reaction_its_dead_process_may_have_left(self):
+        """MESSAGE-DELIVERY-327: the rerun runs its own indicator as any Turn does; its end also
+        retires the 👀 the dead process may have left. There may be none, so a failed removal
+        does not withhold its terminal receipt."""
+        from core.processing_indicator import STOPPED_REACTION_EMOJI
+
+        cases = [
+            # Reaction mode: its own 👀 (adding one already there is a no-op) is the one it retires.
+            (True, True, [("add", "m1", ACK_REACTION_EMOJI), ("remove", "m1", ACK_REACTION_EMOJI)]),
+            # Typing mode: the stale 👀 is removed, then the Stop's receipt lands.
+            (False, True, [("remove", "m1", ACK_REACTION_EMOJI), ("add", "m1", STOPPED_REACTION_EMOJI)]),
+            # Typing mode, no 👀 ever added: the removal fails, and the receipt still lands.
+            (False, False, [("remove", "m1", ACK_REACTION_EMOJI), ("add", "m1", STOPPED_REACTION_EMOJI)]),
+        ]
+        for selected, removable, expected in cases:
+            with self.subTest(reaction_indicator_selected=selected, stale_reaction=removable):
+                im = _FakeIM(remove_ok=removable)
+                svc = _svc(im)
+                context = _ctx()
+                context.platform_specific = {"vibey_resume": True}
+                # As ``start()`` builds it: the receipt goes on the message the Turn answers.
+                handle = ProcessingIndicatorHandle(
+                    context=context, reaction_indicator_selected=selected, terminal_reaction_message_id="m1"
+                )
+
+                await svc.promote_reaction_to_running(handle)
+                await svc.finish(handle, terminal_emoji=None if selected else STOPPED_REACTION_EMOJI)
+                self.assertEqual(im.calls, expected)
+
     async def test_promote_is_idempotent(self):
         im = _FakeIM()
         svc = _svc(im)

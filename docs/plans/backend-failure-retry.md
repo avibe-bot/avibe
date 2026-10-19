@@ -9,6 +9,10 @@ adapter-local policy over the same committed transcript.
 - Only an attached `notify` with `event=backend_failure`, a `failure_id`, and a
   durable `turn_id` can offer the action. Ordinary notifications, detached
   completions, user stops, and authentication-recovery cards are unchanged.
+- A service restart does not end an accepted Vibey Turn: startup recovery
+  reruns that same Turn in place, as the transcript resume this action uses,
+  with no Delivery and no notice (`vibey-restart-auto-resume.md`). Only a Vibey
+  Turn that no longer qualifies takes the notice below.
 - A service restart that terminalizes an accepted, non-restorable conversation
   Turn emits the same failure-notice contract, with the original Turn ID and
   backend retained across transport readiness waits and failed-send retries.
@@ -121,6 +125,8 @@ not added here.
 Scenario contracts: `MESSAGE-DELIVERY-026` through `MESSAGE-DELIVERY-028`.
 Restart notification binding and continuation: `MESSAGE-DELIVERY-030`.
 Harness-owned notification binding and continuation: `MESSAGE-DELIVERY-320`.
+Vibey restart rerun without a notice: `MESSAGE-DELIVERY-327` through
+`MESSAGE-DELIVERY-333`.
 
 ## Review-boundary correction contract
 

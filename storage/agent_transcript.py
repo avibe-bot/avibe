@@ -91,6 +91,7 @@ from storage.agent_session_rows import reserve_write_lock
 from storage.message_deliveries import TURN_OWNER_STATES
 from storage.models import agent_events, agent_sessions, message_deliveries, messages, scopes, session_turns
 from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
+from vibe.message_types import PROMOTED_FROM_TYPES
 
 INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
 # A final response is ``result``, or ``error`` when ``final_outcome`` says it failed:
@@ -755,6 +756,141 @@ def recovered_watch_ids(conn: Connection, session_id: str, turn_id: str) -> list
         .order_by(agent_events.c.context_seq)
     ).scalars()
     return [str(json.loads(raw)["details"]["watch_id"]) for raw in rows]
+
+
+# A response that stopped this way is never final: the loop commits the partial a failed
+# stream carried with ``final=False`` (``Agent._commit_model_message``).
+_UNFINISHED_STOP_REASONS = frozenset({"error", "aborted"})
+
+
+@dataclass(frozen=True)
+class CommittedResponse:
+    """A response row in a Session's own context: the facts restart recovery reads."""
+
+    row_id: str
+    context_seq: int
+    message_type: str
+    turn_id: Optional[str]
+    text: str
+    has_tool_calls: bool
+    stop_reason: str
+    agent_name: Optional[str] = None
+
+
+def last_response(conn: Connection, session_id: str) -> Optional[CommittedResponse]:
+    """The last model response the Session's own rows committed, by one bounded index read."""
+    row = conn.execute(
+        select(
+            messages.c.id,
+            messages.c.context_seq,
+            messages.c.type,
+            messages.c.content_text,
+            messages.c.content_json,
+            messages.c.metadata_json,
+            messages.c.author_name,
+        )
+        .where(
+            messages.c.session_id == session_id,
+            messages.c.context_seq.is_not(None),
+            messages.c.type.in_(RESPONSE_TYPES),
+        )
+        .order_by(messages.c.context_seq.desc())
+        .limit(1)
+    ).mappings().first()
+    if row is None:
+        return None
+    try:
+        model_message = json.loads(row["content_json"] or "{}")["model"]["message"]
+        blocks, stop_reason = model_message["content"], str(model_message.get("stop_reason") or "")
+    except (TypeError, ValueError, KeyError, AttributeError):
+        blocks, stop_reason = [], ""
+    try:
+        metadata = json.loads(row["metadata_json"] or "{}")
+    except (TypeError, ValueError):
+        metadata = {}
+    turn_id = metadata.get("turn_id") if isinstance(metadata, dict) else None
+    return CommittedResponse(
+        row_id=str(row["id"]),
+        context_seq=int(row["context_seq"]),
+        message_type=str(row["type"]),
+        turn_id=str(turn_id) if turn_id else None,
+        text=str(row["content_text"] or ""),
+        has_tool_calls=any(
+            isinstance(block, dict) and block.get("type") == "tool_call" for block in blocks or ()
+        ),
+        stop_reason=stop_reason,
+        agent_name=str(row["author_name"]) if row["author_name"] else None,
+    )
+
+
+def committed_final(conn: Connection, session_id: str, turn_id: str) -> Optional[CommittedResponse]:
+    """The final response ``turn_id`` committed, when the Turn's work ended with it.
+
+    Read after T2 and T3, with the loop's finality rule (``Agent._commit_model_message``):
+    a Turn has work left unless its last committed response has no tool calls, did not
+    stop with ``error`` or ``aborted`` (the partial a failed stream commits), and no
+    input follows it, in the context or still waiting to enter it (an accepted steer no
+    run consumed). Every read is bounded by the Session's context tail or by the Turn's
+    own Deliveries.
+    """
+    response = last_response(conn, session_id)
+    if (
+        response is None
+        or response.turn_id != turn_id
+        or response.has_tool_calls
+        or response.stop_reason in _UNFINISHED_STOP_REASONS
+        # A reply pending input superseded is visible, never final.
+        or response.message_type == "output"
+    ):
+        return None
+    later_input = conn.execute(
+        select(messages.c.id)
+        .where(
+            messages.c.session_id == session_id,
+            messages.c.context_seq > response.context_seq,
+            messages.c.type.in_(INPUT_TYPES),
+        )
+        .limit(1)
+    ).first()
+    if later_input is not None:
+        return None
+    unconsumed = conn.execute(
+        text(
+            "select messages.id from message_deliveries "
+            "cross join messages on messages.id = message_deliveries.message_id "
+            "where message_deliveries.turn_id = :turn_id and message_deliveries.state = 'accepted' "
+            f"and {VIBEY_RECOVERY_INPUT_PREDICATE} limit 1"
+        ),
+        {"turn_id": turn_id},
+    ).first()
+    return None if unconsumed is not None else response
+
+
+def last_turn_text(conn: Connection, session_id: str, *, since: str) -> Optional[tuple[str, str]]:
+    """``(row_id, text)`` of the last visible text the Session's agent wrote since ``since``.
+
+    What a Turn that ends on a silent final leaves as its result
+    (``promote_turn_text_to_result``): its narration (``interim``) or a superseded
+    reply (``output``). A Session runs one Turn at a time, so with ``since`` the
+    Turn's start these are the Turn's own rows; each read is an index-keyed
+    ``SEARCH`` bounded by that window.
+    """
+    latest: Optional[tuple[str, str, str]] = None
+    for message_type in PROMOTED_FROM_TYPES:
+        row = conn.execute(
+            select(messages.c.created_at, messages.c.id, messages.c.content_text)
+            .where(
+                messages.c.session_id == session_id,
+                messages.c.type == message_type,
+                messages.c.created_at >= since,
+                messages.c.author == "agent",
+            )
+            .order_by(messages.c.created_at.desc(), messages.c.id.desc())
+            .limit(1)
+        ).first()
+        if row is not None and str(row.content_text or "").strip() and (latest is None or (row[0], row[1]) > latest[:2]):
+            latest = (str(row.created_at), str(row.id), str(row.content_text))
+    return (latest[1], latest[2]) if latest else None
 
 
 def fork_link(conn: Connection, session_id: str) -> Optional[tuple[str, int]]:

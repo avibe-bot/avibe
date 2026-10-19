@@ -1182,7 +1182,13 @@ def bind_native_start(
     runtime_key: str | None,
     runtime_turn_id: str | None,
     native_turn_id: str | None,
+    execution: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
+    """Accept a Turn's native start; ``execution`` records the request a Vibey Turn runs with.
+
+    A Turn rerun after a restart keeps its restart streak and recorded execution across
+    its rebind (``vibey-restart-auto-resume.md``).
+    """
     turn = get_turn(conn, turn_id)
     if turn is None:
         return None
@@ -1206,8 +1212,84 @@ def bind_native_start(
             "runtime_turn_id": runtime_turn_id or turn.get("runtime_turn_id"),
             "native_turn_id": native_turn_id or turn.get("native_turn_id"),
             "start_receipt_outcome": "accepted",
-            "start_receipt_json": _canonical_json({"kind": "native_start"}),
+            "start_receipt_json": _canonical_json(
+                {
+                    "kind": "native_start",
+                    **_carried_receipt(turn),
+                    **({"vibey_execution": dict(execution)} if execution else {}),
+                }
+            ),
             "started_at": turn.get("started_at") or turn_now_iso(),
+        },
+    )
+
+
+#: Start-receipt keys of a Turn rerun in place after restarts: the restarts in a row
+#: that cut it, and the context sequence of the last model response then committed.
+RESTART_STREAK_KEYS = ("restart_streak", "restart_response_seq", "restart_process")
+
+
+def _start_receipt(turn: dict[str, Any]) -> dict[str, Any]:
+    try:
+        receipt = json.loads(str(turn.get("start_receipt_json") or "{}"))
+    except (TypeError, ValueError):
+        return {}
+    return receipt if isinstance(receipt, dict) else {}
+
+
+def restart_receipt(turn: dict[str, Any]) -> dict[str, Any]:
+    """The restart streak a Turn's start receipt carries, if it was rerun after a restart."""
+    receipt = _start_receipt(turn)
+    return {key: receipt[key] for key in RESTART_STREAK_KEYS if key in receipt}
+
+
+def recorded_execution(turn: dict[str, Any]) -> dict[str, Any]:
+    """The request a Vibey Turn's native start recorded (its Agent, model, effort, and
+    instructions), or ``{}``."""
+    execution = _start_receipt(turn).get("vibey_execution")
+    return dict(execution) if isinstance(execution, dict) else {}
+
+
+def _carried_receipt(turn: dict[str, Any]) -> dict[str, Any]:
+    receipt = _start_receipt(turn)
+    return {key: receipt[key] for key in (*RESTART_STREAK_KEYS, "vibey_execution") if key in receipt}
+
+
+def rotate_restart_generation(
+    conn: Connection,
+    turn_id: str,
+    *,
+    expected_version: int,
+    streak: int,
+    response_seq: int | None,
+    process: str | None = None,
+) -> dict[str, Any] | None:
+    """Release an accepted Turn from the runtime generation a restart killed, to rerun it.
+
+    The Turn keeps its accepted start; the dead process's runtime and native ids are
+    cleared so the rerun's native start binds this process's, and the start receipt
+    records the restart streak (``vibey-restart-auto-resume.md`` item 6).
+    """
+    turn = get_turn(conn, turn_id)
+    if (
+        turn is None
+        or turn["state"] != "active"
+        or turn.get("start_receipt_outcome") != "accepted"
+        or int(turn["version"]) != expected_version
+    ):
+        return None
+    receipt = _start_receipt(turn)
+    receipt.update({"restart_streak": streak, "restart_response_seq": response_seq, "restart_process": process})
+    return cas_turn(
+        conn,
+        turn_id,
+        expected_version=expected_version,
+        expected_states=("active",),
+        values={
+            "runtime_key": None,
+            "runtime_turn_id": None,
+            "native_turn_id": None,
+            "start_receipt_json": _canonical_json(receipt),
         },
     )
 
@@ -2566,6 +2648,19 @@ def pending_control_for_turn(conn: Connection, turn_id: str) -> dict[str, Any] |
                 ("pending", "interrupting", "waiting_terminal", "reconciling")
             )
         ),
+    )
+
+
+def turn_has_unresolved_steer(conn: Connection, turn_id: str) -> bool:
+    """Whether a steer into the Turn still waits for its receipt to be settled."""
+    return (
+        conn.execute(
+            select(message_deliveries.c.id)
+            .where(message_deliveries.c.current_target_turn_id == turn_id)
+            .where(message_deliveries.c.state.in_(("steering", "reconciling_steer")))
+            .limit(1)
+        ).first()
+        is not None
     )
 
 

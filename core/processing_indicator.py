@@ -921,6 +921,18 @@ class ProcessingIndicatorService:
         if getattr(request, "processing_indicator", None) is None:
             request.processing_indicator = handle
 
+    def _stale_running_reaction_target(self, handle: ProcessingIndicatorHandle) -> Optional[str]:
+        """The message a restart rerun's dead process may have left its 👀 on, unless the
+        handle owns that reaction itself (its own end retires it then)."""
+        if (handle.context.platform_specific or {}).get("vibey_resume") is not True:
+            return None
+        if not self._capabilities(handle.context).supports_reaction_indicator:
+            return None
+        target = self._reaction_target_message_id(handle.context)
+        if not target or (target == handle.ack_reaction_message_id and handle.ack_reaction_emoji == ACK_REACTION_EMOJI):
+            return None
+        return target
+
     async def finish(
         self,
         request_or_handle: Any,
@@ -972,6 +984,18 @@ class ProcessingIndicatorService:
             handle.typing_indicator_active = False
             if request is not None:
                 request.typing_indicator_active = False
+
+        stale_target = self._stale_running_reaction_target(handle)
+        if stale_target:
+            # A Turn rerun after a restart answers a message that may still wear the 👀 its
+            # dead process added; this Turn's end retires it too, whatever its own
+            # indicator. There may be none, so a failed removal decides nothing below.
+            try:
+                await self._get_im_client(handle.context).remove_reaction(
+                    handle.context, stale_target, ACK_REACTION_EMOJI
+                )
+            except Exception as err:
+                logger.debug("Failed to remove a rerun's stale running reaction: %s", err)
 
         if terminal_emoji and not handle.ack_reaction_emoji:
             # The receipt is not a *reaction* feature, it is the only trace a

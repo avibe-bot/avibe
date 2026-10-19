@@ -15,9 +15,12 @@ One Turn is one ``Agent.run`` (plan section 4). The adapter
   the route's Model Hub limits;
 * before any run of a Session in this process, under the Session writer lock,
   settles open tool calls (T2) and admits accepted inputs that were never
-  consumed (T3); at startup it settles every Session's open calls eagerly. The
-  Turn a restart interrupted is settled by the Turn owner (T4; ``vibey`` is a
-  process-bound runtime).
+  consumed (T3); at startup it settles every Session's open calls eagerly,
+  except a running command of a Turn not yet settled. The Turn owner then
+  reruns the Turn a restart interrupted in place, as a transcript resume of
+  itself (T4; ``vibey`` is a process-bound runtime), whose T2 waits for that
+  command as its live call would, or settles the Turn after having it handed to
+  a Watch; a run the service stop cut leaves its Turn open for that.
 """
 
 from __future__ import annotations
@@ -112,6 +115,7 @@ from storage.agent_transcript import (
     RESPONSE_TYPES,
     SQLiteTranscriptStore,
     call_instance_result,
+    committed_final,
     final_outcome,
     render_text,
     text_parts,
@@ -201,6 +205,9 @@ class _Run:
     replied: dict[str, bool] = field(default_factory=dict)
     # The images each final delivers with its reply, as committed with its row.
     reply_images: dict[str, tuple[HostedImage, ...]] = field(default_factory=dict)
+    # A rerun's final as its row committed it, undelivered: that display carries the images
+    # the run that died generated, which this run does not have.
+    committed_display: Optional[str] = None
     # Steer attempts ``Agent.steer`` accepted into this run: reconcile's in-process evidence.
     accepted_steers: set[str] = field(default_factory=set)
     # Automatic transcript-only continuations already spent by this Turn. The
@@ -328,13 +335,39 @@ class VibeyAgent(BaseAgent):
         # Rows this Turn writes are the Turn's Agent's, from its request snapshot, even if the
         # Session's selected Agent changes while it runs.
         self.store.bind_agent(session_id, request.vibe_agent_name, turn_id=turn.turn_id)
-        await self._resume(runtime)
+        # A transcript resume (a Turn rerun after a restart) gives a job that survived the restart
+        # the foreground wait its live call would have, so its real output becomes the call's result.
+        resuming = (context.platform_specific or {}).get("vibey_resume") is True
+        try:
+            await self._resume(runtime, stop=turn.stop_event if resuming else None)
+        except asyncio.CancelledError:
+            if resuming and getattr(self.controller, "shutdown_requested", False) is not True:
+                # Cancelled outside a shutdown (the backend disabled or refreshed): the work
+                # stops, so the command the wait was for ends with it instead of running on
+                # unowned. A shutdown leaves it for the next start's rerun.
+                turn.stop_event.set()
+                await self._settle_open_calls(runtime, stop=turn.stop_event)
+            raise
+        if resuming and await self._take_committed_final(turn):
+            # The run that died committed the Turn's final: this one ends where that one
+            # would have, with no model call. A Stop now loses to it, as it does live.
+            self._accept_native_start(request, session_id)
+            indicator = getattr(self.controller, "processing_indicator", None)
+            if indicator is not None:
+                await indicator.delete_ack_message(request)
+            await self._settle(turn)
+            self._maybe_backfill_session_title(request, session_id)
+            return
         if turn.stop_requested:
             return await self._settle_stopped(turn)
         cwd = request.working_path or runtime.cwd
         try:
             turn.router = await self._preflight(turn)
         except Exception as error:
+            if self._service_stopping(turn):
+                # Stopping the service (its Model Hub gateway first) failed the route, not
+                # the Turn: leave it open, as a run cut below is, for the restart.
+                await asyncio.Event().wait()
             turn.settled = True
             await self._fail_preflight(request, error)
             return
@@ -351,10 +384,9 @@ class VibeyAgent(BaseAgent):
         message = await self._render_input(session_id, request.message, request.files, request.input_metadata)
         if turn.stop_requested:
             return await self._settle_stopped(turn)
-        # Native acceptance materializes the input row the loop consumes.
-        self.bind_agent_session_id(request, session_id)
-        mark_backend_dispatch_attempted(context)
-        self.mark_runtime_turn_started(context)
+        # Native acceptance materializes the input row the loop consumes, and binds this
+        # process's generation: steers held for the Turn are dispatched once its Agent exists.
+        self._accept_native_start(request, session_id)
         indicator = getattr(self.controller, "processing_indicator", None)
         if indicator is not None:
             # The ack message goes once the native write is accepted, as for the other backends.
@@ -405,10 +437,63 @@ class VibeyAgent(BaseAgent):
                     transcript_resume = True
                     continue
             agent_input = await self._continuing_input(turn)
+        if self._cut_by_service_stop(turn):
+            # Stopping the service (its Model Hub gateway first) ended this run, not
+            # anything the Turn did. Leave the Turn open: startup recovery runs T2 and
+            # continues it from the committed transcript (vibey-restart-auto-resume.md).
+            await asyncio.Event().wait()
         if turn.reason not in _COMPLETED:
             await self._settle_left_open(runtime)
         await self._settle(turn)
         self._maybe_backfill_session_title(request, session_id)
+
+    async def _take_committed_final(self, run: _Run) -> bool:
+        """Whether the Turn's transcript already holds its final response, which the run then takes.
+
+        Its replied decision is the one its row's type was committed by (``final_outcome``).
+        """
+        found = await asyncio.to_thread(self._committed_final, run.session_id, run.turn_id)
+        if found is None:
+            return False
+        row_id, message_type, message, display = found
+        run.final_row, run.reason = row_id, "completed"
+        run.responses[row_id] = message
+        run.replied[row_id] = message_type != "error"
+        run.committed_display = display
+        return True
+
+    def _committed_final(
+        self, session_id: str, turn_id: str
+    ) -> Optional[tuple[str, str, AssistantMessage, Optional[str]]]:
+        """``(row_id, type, message, committed display or None once delivered)`` of the Turn's final."""
+        with self._engine.connect() as conn:
+            final = committed_final(conn, session_id, turn_id)
+            row = (
+                conn.execute(
+                    select(messages.c.content_json, messages.c.content_text).where(messages.c.id == final.row_id)
+                ).first()
+                if final is not None
+                else None
+            )
+        if final is None or row is None:
+            return None
+        try:
+            content = json.loads(row.content_json or "{}")
+            message = message_from_dict(content["model"]["message"])
+        except (TypeError, ValueError, KeyError):
+            logger.warning("Vibey could not read the committed final %s of Turn %s", final.row_id, turn_id)
+            return None
+        if not isinstance(message, AssistantMessage):
+            return None
+        return final.row_id, final.message_type, message, None if "kind" in content else str(row.content_text or "")
+
+    def _cut_by_service_stop(self, run: _Run) -> bool:
+        """Whether a run that did not complete ended while the service was stopping."""
+        return bool(run.reason not in _COMPLETED and not run.final_row and self._service_stopping(run))
+
+    def _service_stopping(self, run: _Run) -> bool:
+        """Whether the service is stopping under a run nobody asked to stop."""
+        return not run.stop_requested and getattr(self.controller, "shutdown_requested", False) is True
 
     def _resume_turn_inputs(self, session_id: str, source_turn_id: Any) -> tuple[int, ...]:
         """Committed inputs of the failed task, including steers across its retry ancestry."""
@@ -481,6 +566,21 @@ class VibeyAgent(BaseAgent):
             return False
         return time.monotonic() - run.continuation_started_at < policy.max_elapsed_s
 
+    def _accept_native_start(self, request: AgentRequest, session_id: str) -> None:
+        # The native start records the request this Turn runs with, which a restart rerun keeps.
+        if request.context.platform_specific is None:
+            request.context.platform_specific = {}
+        request.context.platform_specific["vibey_execution"] = {
+            "agent_id": request.vibe_agent_id,
+            "agent_name": request.vibe_agent_name,
+            "model": request.vibe_agent_model,
+            "reasoning_effort": request.vibe_agent_reasoning_effort,
+            "system_prompt": request.vibe_agent_system_prompt,
+        }
+        self.bind_agent_session_id(request, session_id)
+        mark_backend_dispatch_attempted(request.context)
+        self.mark_runtime_turn_started(request.context)
+
     async def _settle_stopped(self, turn: _Run) -> None:
         """A Stop before the loop started: the Turn settles as stopped, nothing dispatched."""
         turn.reason = "aborted"
@@ -535,29 +635,34 @@ class VibeyAgent(BaseAgent):
             if rt.run is not None and rt.run.request.session_key == session_key
         }
 
-    async def recover_runtime_state(self) -> list[str]:
+    async def recover_runtime_state(self, session_id: Optional[str] = None) -> list[str]:
         """One settlement pass outside a Turn: T2, T3 admission, then J5; return the unsettled Sessions.
 
         Candidates come from the rows: Sessions whose context can hold an open call, and
         Sessions with accepted inputs no run consumed. Each runs the same resume a Turn
         runs (T2 and T3, no model call). A Session a run holds is skipped: its own resume
-        settles it. J5 pruning follows a pass that settled everything. Never reports
-        success over a failure; ``VibeyRecovery`` owns the retries. The first pass of the
-        process also starts the media sweep.
+        settles it. So is a Session whose open call has a running job and an unsettled
+        Turn: the Turn owner either continues that Turn, whose own resume waits for the
+        job, or settles it after asking for this Session alone (``session_id``), which
+        hands the job over as before (``vibey-restart-auto-resume.md``). J5 pruning follows
+        a pass that settled everything. Never reports success over a failure;
+        ``VibeyRecovery`` owns the retries. The first pass of the process also starts the
+        media sweep.
         """
         if self._media_sweep is None:
             self._media_sweep = asyncio.create_task(self._sweep_media(), name="vibey-agent-media-sweep")
-        candidates = await asyncio.to_thread(self._recovery_candidates)
+        explicit = session_id is not None
+        candidates = [session_id] if session_id else await asyncio.to_thread(self._recovery_candidates)
         unsettled: list[str] = []
-        for session_id in candidates:
-            async with self._held(session_id, wait=False) as runtime:
+        for candidate in candidates:
+            async with self._held(candidate, wait=False) as runtime:
                 if runtime is None:
                     continue
                 try:
-                    await self._resume(runtime)
+                    await self._resume(runtime, defer_continued=not explicit)
                 except Exception:
-                    logger.exception("Vibey could not settle Session %s outside a Turn", session_id)
-                    unsettled.append(session_id)
+                    logger.exception("Vibey could not settle Session %s outside a Turn", candidate)
+                    unsettled.append(candidate)
         if not unsettled:
             await self._prune_settled_jobs()
         return unsettled
@@ -830,6 +935,8 @@ class VibeyAgent(BaseAgent):
             body, citations = self._display_with_citations(
                 final, final=True, replied=bool(replied), images=run.reply_images.get(run.final_row, ())
             )
+            if run.committed_display is not None and citations is None:
+                body = run.committed_display
             if failed and not body.strip():
                 # A silent final whose run failed after the commit: like a final without text
                 # of its own (``_display_source``), its row carries the explanation.
@@ -935,11 +1042,21 @@ class VibeyAgent(BaseAgent):
 
     # --- resume (recovery.md T2, T3) -------------------------------------------
 
-    async def _resume(self, runtime: _SessionRuntime) -> None:
+    async def _resume(
+        self,
+        runtime: _SessionRuntime,
+        *,
+        stop: Optional[asyncio.Event] = None,
+        defer_continued: bool = False,
+    ) -> None:
+        """T2, then T3. ``stop``: the continuing Turn's own resume, which waits for a running job
+        (``_settle_open_calls``). ``defer_continued``: recovery leaves alone a Session the Turn owner
+        has yet to continue or settle."""
         session_id = runtime.session_id
         # T2 before every run: idempotent, and a Turn that waited behind an aborted one
         # finds the call that abort left open on the same, still-held runtime.
-        await self._settle_open_calls(runtime)
+        if not await self._settle_open_calls(runtime, stop=stop, defer_continued=defer_continued):
+            return
         if not runtime.cwd:
             runtime.cwd = await asyncio.to_thread(self._session_workdir, session_id)
         for message_id, text_value, files, delivery in await asyncio.to_thread(self._unconsumed_inputs, session_id):
@@ -977,12 +1094,24 @@ class VibeyAgent(BaseAgent):
             logger.exception("Vibey could not settle the calls a run left open in Session %s", runtime.session_id)
             self._schedule_recovery()
 
-    async def _settle_open_calls(self, runtime: _SessionRuntime) -> None:
-        """T2: one committed result for every open tool call, chosen from its job's state."""
+    async def _settle_open_calls(
+        self,
+        runtime: _SessionRuntime,
+        *,
+        stop: Optional[asyncio.Event] = None,
+        defer_continued: bool = False,
+    ) -> bool:
+        """T2: one committed result for every open tool call, chosen from its job's state.
+
+        With ``stop``, a job still running is first waited for as its live call would wait
+        (its foreground window from the job's launch, or until ``stop``), so only a job still
+        running then is handed to a Watch. With ``defer_continued``, a running job whose Turn
+        is not yet settled is left to that Turn's owner and nothing is written: ``False``.
+        """
         session_id = runtime.session_id
         open_calls = open_tool_calls(await self.store.load(session_id))
         if not open_calls:
-            return
+            return True
         suite = self._tools()
 
         def evidence() -> dict[CallInstance, str]:
@@ -1002,6 +1131,25 @@ class VibeyAgent(BaseAgent):
         # the Turn writing it now (or none, at startup) or the Session's current selection.
         # Only the last response can hold open calls, so they share one owner.
         owner_agent, owner_turn = await asyncio.to_thread(self._response_owner, open_calls[0][0].row_id)
+        work = await asyncio.to_thread(self._work_state, owner_turn)
+        if (
+            defer_continued
+            and work == "open"
+            and any(suite.jobs.status(job_id).state == "running" for job_id in job_ids.values())
+        ):
+            return False
+        if work == "stopped" and stop is None:
+            # A Stop settled the Turn while its command outlived the run: it ends the command,
+            # as it ends a live foreground command, rather than leaving it to a Watch.
+            stop = asyncio.Event()
+            stop.set()
+        wait_running = None
+        if stop is not None and suite.wait_recovered is not None:
+            wait_recovered = suite.wait_recovered
+
+            async def wait_running(call: Any, job_id: str) -> Any:
+                return await wait_recovered(call, job_id, stop)
+
         with self.store.writing_as(session_id, owner_agent, turn_id=owner_turn):
             await settle_open_calls(
                 session_id=session_id,
@@ -1009,7 +1157,28 @@ class VibeyAgent(BaseAgent):
                 jobs=suite.jobs,
                 job_ids=job_ids,
                 render_result=suite.render_recovered,
+                wait_running=wait_running,
             )
+        return True
+
+    def _work_state(self, turn_id: Optional[str]) -> str:
+        """Where the Turn owning an open call stands: ``open``, ``stopped``, or ``settled``.
+
+        A Turn a restart cut stays open and reruns in place, so its call's Turn is the one
+        that continues it. ``stopped``: a Stop or a replacement canceled that Turn, or a stop
+        asked of it is not yet settled (``stop_requested``; it never reruns).
+        """
+        from core.restart_resume import stop_requested
+
+        if not turn_id:
+            return "settled"
+        with self._engine.connect() as conn:
+            turn = delivery_store.get_turn(conn, turn_id)
+            if turn is not None and turn["state"] in delivery_store.TURN_OWNER_STATES:
+                return "stopped" if stop_requested(conn, turn) else "open"
+        if turn is None:
+            return "settled"
+        return "stopped" if turn.get("terminal_outcome") == "canceled" else "settled"
 
     def _response_owner(self, row_id: str) -> tuple[Optional[str], Optional[str]]:
         with self._engine.connect() as conn:

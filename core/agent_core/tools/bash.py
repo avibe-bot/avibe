@@ -15,9 +15,11 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
 from core.agent_core.cancel import CancelToken
+from core.agent_core.messages import ToolCallBlock
 from core.agent_core.tools.args import (
     ToolInputError,
     error_result,
@@ -206,6 +208,68 @@ async def recovered_result(
         return None
     line = _stopped_line(jobs.stop_reason(job_id), jobs.meta(job_id).get("timeout_s"))
     return await stopped_result(output, line) if line else None
+
+
+async def settle_in_foreground(
+    jobs: LocalJobHost,
+    call: ToolCallBlock,
+    job_id: str,
+    *,
+    stop: asyncio.Event,
+    foreground_window_s: float = DEFAULT_FOREGROUND_WINDOW_S,
+) -> tuple[JobStatus, Optional[str]]:
+    """Settle a job that survived a restart as its live call would (``recovery.md`` T2).
+
+    The call's foreground window counts from the job's launch (``meta.created_at``),
+    so downtime spends it: a window that already passed hands over at once. A job
+    still running then goes to a Watch, retried once as ``BashTool`` does; when no
+    Watch can take it, it stays in the foreground until it ends. A Stop ends the
+    wait and the command, as it ends a live foreground command. Returns the job's
+    status and its Watch, if it went to one.
+    """
+    window_s = foreground_window_s
+    if (call.arguments or {}).get("watch") is True:
+        window_s = min(window_s, _WATCH_GRACE_S)
+    try:
+        launched = datetime.fromisoformat(str(jobs.meta(job_id).get("created_at") or "").replace("Z", "+00:00"))
+        # A wall clock that stepped back never stretches the window past its length.
+        remaining: Optional[float] = min(window_s, window_s - (datetime.now(timezone.utc) - launched).total_seconds())
+    except ValueError:
+        remaining = 0.0
+    status = await _wait_or_stop(jobs, job_id, max(0.0, remaining or 0.0), stop)
+    if status.state != "running":
+        return status, None
+    error: Optional[Exception] = None
+    for _ in range(2):
+        if stop.is_set():
+            # As the live call checks its Stop before each handover: the Stop ends the command.
+            return await _wait_or_stop(jobs, job_id, 0, stop), None
+        try:
+            return status, await jobs.hand_over(job_id)
+        except JobHandOverUnavailable as exc:
+            error = exc
+            break
+        except Exception as exc:
+            error = exc
+    logger.info("Job %s stays in the foreground: %s", job_id, error)
+    return await _wait_or_stop(jobs, job_id, None, stop), None
+
+
+async def _wait_or_stop(jobs: LocalJobHost, job_id: str, seconds: Optional[float], stop: asyncio.Event) -> JobStatus:
+    """The job's status after it ends, ``seconds`` pass (``None``: no limit), or ``stop``, which kills it."""
+    if not stop.is_set() and (seconds is None or seconds > 0):
+        waiting = asyncio.ensure_future(jobs.wait(job_id, deadline_s=seconds))
+        stopped = asyncio.ensure_future(stop.wait())
+        try:
+            await asyncio.wait({waiting, stopped}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in (waiting, stopped):
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(waiting, stopped, return_exceptions=True)
+    if stop.is_set() and jobs.status(job_id).state == "running":
+        await jobs.kill(job_id, reason=STOP_ABORTED)
+    return jobs.status(job_id)
 
 
 async def settle_bash_call(jobs: LocalJobHost, call: CallInstance) -> Optional[ToolResult]:

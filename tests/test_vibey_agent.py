@@ -208,6 +208,7 @@ class _Controller:
         self.terminal_texts: list[Optional[str]] = []
         self.released: list[str] = []
         self.started: list[Optional[str]] = []
+        self.native_agents: list[Optional[str]] = []
         self.hub_calls: list[str] = []
         self.hub_protocol = "anthropic"
         # The Model Hub model definition's limits (C-9 takes W, L_in, and O from them).
@@ -285,6 +286,7 @@ class _Controller:
         # Outside a run (a crash simulation), the identity a previous process's adapter bound.
         native = self.agent.steering_native_turn_id(target) or f"vibey:previous-process:{turn_id}"
         self.started.append(native)
+        self.native_agents.append((context.platform_specific or {}).get("vibey_execution"))
         with self.engine.begin() as conn:
             turn = message_deliveries.get_turn(conn, turn_id)
             assert message_deliveries.bind_native_start(
@@ -300,6 +302,16 @@ class _Controller:
 
 def _turn(context) -> str:
     return str((context.platform_specific or {}).get("turn_token") or "")
+
+
+def _owner_settled(engine, *requests) -> None:
+    """The Turn owner settled these Turns without continuing them, as after a restart notice."""
+    with engine.begin() as conn:
+        conn.execute(
+            update(session_turns)
+            .where(session_turns.c.id.in_([_turn(request.context) for request in requests]))
+            .values(state="terminal", terminal_outcome="failed", terminal_at=NOW)
+        )
 
 
 def _context(platform: str, session_id: str, *, turn_id: str, delivery_id: str) -> MessageContext:
@@ -2603,6 +2615,8 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
     call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": "pytest -q"})
     await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
     jobs.states["job_1"] = JobStatus("running")
+    # The Turn owner settled the Turn without continuing it, so the job is startup's to hand over.
+    _owner_settled(engine, request)
 
     # A pass that failed before it settled anything runs again in full.
     harness.new_agent()
@@ -2625,6 +2639,307 @@ async def test_startup_hands_an_orphaned_foreground_job_to_its_watch(engine, ses
     assert await harness.context_rows() == rows
     assert rendered == [("call_bash", "job_1", "watch_job_1")] and jobs.watches == {"job_1": "watch_job_1"}
     assert harness.provider.requests == []
+
+
+@pytest.mark.parametrize("cut_in", ["model_call", "preflight"])
+async def test_a_run_the_service_stop_cut_leaves_its_turn_open_for_its_restart_rerun(
+    engine, session, tmp_path, published, cut_in
+) -> None:
+    """MESSAGE-DELIVERY-332: stopping the service (its gateway first) fails the run, in a model
+    call or in a rerun's preflight; the Turn is the restart's to continue, so it neither fails
+    nor shows a notice."""
+    from core.agent_core.ai.provider import ProviderError
+
+    harness = _Harness(engine, tmp_path, "telegram", [[ProviderError("server", "gateway closed", False)]])
+    harness.controller.shutdown_requested = True
+    request = harness.request("keep working")
+    if cut_in == "preflight":
+        # A rerun of a Turn the previous process accepted; the Model Hub stops with the service.
+        harness.controller._native_start(request.context)
+        request.context.platform_specific.update(
+            {"vibey_resume": True, "vibey_source_turn_id": _turn(request.context)}
+        )
+
+        async def stopped(*_args, **_kwargs):
+            raise RuntimeError("the Model Hub gateway is stopped")
+
+        harness.controller.model_hub_runtime.resolve = stopped
+
+    running = asyncio.create_task(harness.agent.handle_message(request))
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if harness.provider.requests and not running.done():
+            break
+    await asyncio.sleep(0.05)
+
+    assert not running.done()
+    assert harness.controller.terminals == [] and harness.rows("notify") == []
+    assert harness.controller.im_client.sent == []
+    with engine.connect() as conn:
+        assert message_deliveries.get_turn(conn, _turn(request.context))["state"] == "active"
+    running.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+@pytest.mark.parametrize(
+    ("platform", "case"), [("telegram", "undelivered"), ("telegram", "delivered"), ("avibe", "silent")]
+)
+async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
+    engine, session, tmp_path, published, platform, case
+) -> None:
+    """MESSAGE-DELIVERY-333: the run a restart cut had committed the Turn's final, so the rerun
+    ends with that row through the live end, with no model call. A final that process never sent
+    to IM is delivered once, with the image that run generated; one whose delivery the dispatcher
+    recorded is not sent again; a silent final leaves the narration that process showed as the
+    Turn's result."""
+    from dataclasses import replace
+
+    from core.message_output import MessageOutput, terminal_output_for
+
+    answer = "The cache is safe: one writer holds the lock."
+    narration = "Found it.\nThe cache is shared.\nTwo writers race.\nThe lock went in #12.\nFixed and verified."
+    harness = _Harness(engine, tmp_path, platform, [])
+    # The previous process: the Turn's final committed, then the restart cut the run.
+    request = harness.request("is the cache safe?")
+    cut_turn = _turn(request.context)
+    harness.controller._native_start(request.context)
+    harness.agent.store.bind_agent(SESSION, None, turn_id=cut_turn)
+    await harness.agent.store.consume_input(
+        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("is the cache safe?"),))
+    )
+    if case == "silent":
+        shown = await harness.agent.store.append_response(SESSION, assistant(narration), final=False)
+        await harness.controller.emit_agent_message(
+            request.context, "assistant", narration,
+            output=MessageOutput(completes_turn=False, completes_run=False, persisted_row_id=shown.row_id),
+        )
+        [shown] = harness.rows("interim")
+    image = tmp_path / "lighthouse.jpg"
+    image.write_bytes(_JPEG)
+    final = await harness.agent.store.append_response(
+        SESSION, assistant("<silent>done</silent>" if case == "silent" else answer), final=True,
+        images=(HostedImage(path=str(image), mime="image/jpeg"),) if case == "undelivered" else (),
+    )
+    if case == "delivered":
+        # It was delivered before the process died, but the Turn was not yet settled.
+        await harness.agent.emit_result_message(
+            request.context, answer, request=request,
+            output=replace(terminal_output_for(request), persisted_row_id=final.row_id),
+        )
+        assert harness.controller.im_client.sent == [answer]
+        harness.controller.im_client.sent.clear()
+    with engine.begin() as conn:
+        # The Turn owner releases the dead runtime generation to rerun the Turn in place.
+        turn = message_deliveries.get_turn(conn, cut_turn)
+        assert message_deliveries.rotate_restart_generation(
+            conn, cut_turn, expected_version=int(turn["version"]), streak=1, response_seq=final.context_seq
+        )
+    # A new process: a new adapter, and a dispatcher that has seen none of the Turn.
+    harness.controller.message_dispatcher = ConsolidatedMessageDispatcher(harness.controller)
+    harness.new_agent()
+    context = _context(
+        platform, SESSION, turn_id=cut_turn, delivery_id=request.context.platform_specific["delivery_id"]
+    )
+    context.platform_specific.update({"vibey_resume": True, "vibey_source_turn_id": cut_turn})
+    resume = AgentRequest(**{**request.__dict__, "context": context, "message": "", "user_message": ""})
+
+    await harness.agent.handle_message(resume)
+
+    assert harness.provider.requests == [] and harness.controller.hub_calls == []
+    assert harness.controller.terminals[-1] == {"turn": cut_turn, "is_error": False, "settled_by": "terminal_result"}
+    [result] = harness.rows("result")
+    if case == "silent":
+        assert (result["id"], result["content_text"]) == (shown["id"], narration)
+        assert harness.rows("interim") == []
+        return
+    assert result["id"] == final.row_id and result["content_text"].startswith(answer)
+    sent, uploads = harness.controller.im_client.sent, harness.controller.im_client.uploads
+    if case == "delivered":
+        assert sent == [] and uploads == []
+        return
+    # Sent once, with the image its run generated.
+    assert len(sent) == 1 and sent[0].startswith(answer)
+    assert uploads == [str(image.resolve())]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "exits", "window_passed", "watch_unavailable", "stop", "cancelled", "cancelled_at_shutdown", "stopped_left_open",
+        "stop_pending", "cancel_pending",
+    ],
+)
+async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_would(
+    engine, session, tmp_path, published, monkeypatch, case
+) -> None:
+    """MESSAGE-DELIVERY-330: startup leaves a running command to the Turn it reruns, and so does a
+    second startup before that rerun ran; the rerun waits for it within the call's foreground
+    window, counted from its launch, before it binds its native start, so its real output is the
+    result the reply (and a Run, MESSAGE-DELIVERY-328) settles from. A window the downtime spent
+    hands it over; with no Watch to take it, it stays in the foreground until it ends; a Stop ends
+    the wait and the command, as does one that settles the Turn while it is left open, or one the
+    dead process recorded and never settled (a Stop, or a cancel of the Turn's Run), and so does a cancellation outside a shutdown (the
+    backend disabled or refreshed); a shutdown leaves the command for the next start. It never
+    starts again."""
+    import core.watches as watches_module
+    from core.scheduled_tasks import TaskExecutionStore
+    from core.watches import ManagedWatchStore
+
+    suite = local_tool_suite(str(tmp_path / "jobs"))
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("步骤三完成"))]], suite=suite)
+    # The previous process: an accepted Turn of an Agent Run, cut while its command ran.
+    request = harness.request("run the three steps")
+    cut_turn = _turn(request.context)
+    harness.controller._native_start(request.context)
+    await harness.agent.store.consume_input(
+        SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("run the three steps"),))
+    )
+    command = "sleep 1; printf step-two-done" if case in {"exits", "watch_unavailable"} else "sleep 30"
+    call = ToolCallBlock(id="call_bash", name="bash", arguments={"command": command})
+    response = await harness.agent.store.append_response(SESSION, assistant("", calls=(call,)), final=False)
+    job_id = await _real_job(suite, command, call=_instance(response, "call_bash"), cwd=tmp_path)
+    requests = TaskExecutionStore()
+    run = requests.enqueue_agent_run(message="run the three steps", session_id=SESSION, agent_name="vibey")
+    assert requests.claim(run.id) is not None
+    try:
+        if case == "watch_unavailable":
+
+            async def no_watch(meta, **_kwargs):
+                raise RuntimeError("the Watch store is locked")
+
+            monkeypatch.setattr(watches_module, "hand_over_job", no_watch)
+        if case in {"window_passed", "watch_unavailable"}:
+            # The job launched three minutes ago: the downtime spent its 120 s window.
+            from datetime import datetime, timedelta
+
+            meta_path = Path(suite.jobs.job_dir(job_id)) / "meta.json"
+            meta = json.loads(meta_path.read_text())
+            launched = datetime.fromisoformat(meta["created_at"].replace("Z", "+00:00")) - timedelta(minutes=3)
+            meta["created_at"] = launched.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            meta_path.write_text(json.dumps(meta))
+        if case == "stop_pending":
+            # The user pressed Stop as the service went down; the Stop never settled the Turn,
+            # which will not rerun. Startup's T2 ends the command, as that Stop would have.
+            with engine.begin() as conn:
+                turn = message_deliveries.get_turn(conn, cut_turn)
+                assert message_deliveries.cas_turn(
+                    conn, cut_turn, expected_version=int(turn["version"]), expected_states=("active",),
+                    values={"control_mode": "stop_only"},
+                )
+        if case == "cancel_pending":
+            # The caller canceled the Turn's Run as the service went down, before its Stop reached
+            # the Turn: the same.
+            from storage.background import attach_agent_run_delivery_in_connection
+
+            with engine.begin() as conn:
+                assert attach_agent_run_delivery_in_connection(
+                    conn, run.id, session_id=SESSION, delivery_id=request.context.platform_specific["delivery_id"]
+                )
+            assert requests.cancel_run(run.id)
+        harness.new_agent()
+        assert await harness.agent.recover_runtime_state() == []
+        assert ManagedWatchStore().find_job_watch(job_id) is None
+        if case in {"stopped_left_open", "stop_pending", "cancel_pending"}:
+            if case == "stopped_left_open":
+                # The Turn stays open (its fallback waits for a Watch) and a Stop settles it with no
+                # runtime holding it: the next T2 ends the command, as the Stop would have.
+                with engine.begin() as conn:
+                    message_deliveries.terminalize_turn(
+                        conn, cut_turn, outcome="canceled", settled_by="adapter_not_active",
+                        evidence_kind="stop_not_active",
+                    )
+                assert await harness.agent.recover_runtime_state() == []
+            [result] = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
+            assert "Stopped by the user" in result.message.content[0].text
+            assert suite.jobs.status(job_id).state != "running" and ManagedWatchStore().find_job_watch(job_id) is None
+            return
+        with engine.begin() as conn:
+            # The Turn owner releases the dead runtime generation to rerun the Turn in place.
+            turn = message_deliveries.get_turn(conn, cut_turn)
+            assert message_deliveries.rotate_restart_generation(
+                conn, cut_turn, expected_version=int(turn["version"]), streak=1, response_seq=response.context_seq
+            )
+        native_starts = list(harness.controller.started)
+        # Another restart before the rerun ran: the command is still the Turn's.
+        harness.new_agent()
+        assert await harness.agent.recover_runtime_state() == []
+        assert ManagedWatchStore().find_job_watch(job_id) is None
+        context = _context(
+            "avibe", SESSION, turn_id=cut_turn, delivery_id=request.context.platform_specific["delivery_id"]
+        )
+        accepted = {
+            "agent_id": "agt_worker", "agent_name": "worker", "model": "model-accepted",
+            "reasoning_effort": None, "system_prompt": "Run the steps in order.",
+        }
+        context.platform_specific.update(
+            {
+                "vibey_resume": True, "vibey_source_turn_id": cut_turn, "accepted_agent_run_ids": [run.id],
+                # Recorded by the Turn's native start; the Agent's model was edited since.
+                "vibey_execution": accepted,
+            }
+        )
+        # The rerun's request, as the message handler builds it from that record.
+        resume = AgentRequest(
+            **{
+                **request.__dict__, "context": context, "message": "", "user_message": "",
+                "vibe_agent_name": "worker", "vibe_agent_id": "agt_worker", "vibe_agent_model": "model-accepted",
+                "vibe_agent_reasoning_effort": None, "vibe_agent_system_prompt": "Run the steps in order.",
+            }
+        )
+
+        resumed = asyncio.create_task(harness.agent.handle_message(resume))
+        if case in {"cancelled", "cancelled_at_shutdown"}:
+            await _until(lambda: harness.agent._run_for(SESSION, cut_turn) is not None, "the rerun never ran")
+            await asyncio.sleep(0.3)
+            harness.controller.shutdown_requested = case == "cancelled_at_shutdown"
+            # The Turn task is cancelled directly, without ``handle_stop``.
+            resumed.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(resumed, timeout=20)
+            results = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
+            if case == "cancelled":
+                assert "Stopped by the user" in results[0].message.content[0].text
+                assert suite.jobs.status(job_id).state != "running"
+            else:
+                assert results == [] and suite.jobs.status(job_id).state == "running"
+            assert ManagedWatchStore().find_job_watch(job_id) is None and harness.provider.requests == []
+            return
+        if case == "stop":
+            await _until(lambda: harness.agent._run_for(SESSION, cut_turn) is not None, "the rerun never ran")
+            await asyncio.sleep(0.3)
+            assert not resumed.done()
+            # Its native start, which releases the steers held for the Turn, waits for the Agent
+            # that takes them; the durably active Turn still routes this Stop to ``handle_stop``.
+            assert harness.controller.started == native_starts
+            assert await harness.agent.handle_stop(resume)
+        await asyncio.wait_for(resumed, timeout=20)
+
+        [result] = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
+        body = result.message.content[0].text
+        watch_id = ManagedWatchStore().find_job_watch(job_id)
+        if case in {"exits", "watch_unavailable"}:
+            # It runs with the request its Turn was accepted with, and its native start records
+            # that request again for a later restart's rerun.
+            assert harness.controller.hub_calls[-1] == "model-accepted"
+            assert harness.controller.native_agents[-1] == accepted
+            assert "step-two-done" in body and watch_id is None
+            assert "step-two-done" in json.dumps(message_to_dict(harness.provider.requests[0].messages[-1]))
+            assert harness.controller.im_client.sent[-1] == "步骤三完成"
+            stored = requests.get_run(run.id)
+            assert (stored["status"], stored["result_text"]) == ("succeeded", "步骤三完成")
+        elif case == "window_passed":
+            assert watch_id and f"now Watch {watch_id}" in body
+            assert suite.jobs.status(job_id).state == "running"
+        else:
+            # Stopped before the rerun's model call: none was made.
+            assert "Stopped by the user" in body and watch_id is None
+            assert suite.jobs.status(job_id).state != "running" and harness.provider.requests == []
+        # The rerun consumed nothing: the Turn's one input, and no hidden row.
+        assert len(harness.rows("user")) == 1 and harness.rows("agent_initiated") == []
+    finally:
+        if suite.jobs.status(job_id).state == "running":
+            await suite.jobs.kill(job_id)
 
 
 async def test_startup_recovers_a_session_routed_to_another_agent_since(engine, session, tmp_path, published) -> None:
@@ -2655,7 +2970,8 @@ async def test_startup_recovers_a_session_routed_to_another_agent_since(engine, 
         )
 
     harness.new_agent()
-    await harness.agent.recover_runtime_state()
+    # Startup leaves the job to the Turn owner, whose notice for a Session off Vibey asks for it first.
+    await harness.agent.recover_runtime_state(SESSION)
 
     assert jobs.watches == {"job_1": "watch_job_1"}
     assert (await harness.context_rows())[-1].kind == "tool_result"
@@ -4053,7 +4369,7 @@ async def test_resume_settles_a_real_bash_job_through_the_real_renderer(
             await _until(lambda: suite.jobs.status(job_id).state == "exited", "the command never exited")
 
         harness.new_agent()
-        await harness.agent.recover_runtime_state()
+        await harness.agent.recover_runtime_state(SESSION)
 
         result = (await harness.context_rows())[-1]
         assert result.kind == "tool_result"
@@ -4118,7 +4434,7 @@ async def test_resume_settles_a_reused_call_id_from_its_own_instance_whatever_th
     try:
         agent = harness.new_agent()
         agent._tool_suite = None
-        await agent.recover_runtime_state()
+        await agent.recover_runtime_state(SESSION)
 
         result = (await harness.context_rows())[-1]
         watch = _job_watch(current)
@@ -4199,6 +4515,13 @@ async def test_recovery_retries_a_session_it_could_not_settle(
 
     _hand_over_failing_once(monkeypatch)
     harness, running, _exited = await _two_sessions_with_open_calls(engine, tmp_path, local_tool_suite())
+    with engine.begin() as conn:
+        # SESSION's Turn owner settled its Turn without continuing it: the job is recovery's.
+        conn.execute(
+            update(session_turns)
+            .where(session_turns.c.session_id == SESSION)
+            .values(state="terminal", terminal_outcome="failed", terminal_at=NOW)
+        )
     recovery = _controller_with(harness.new_agent()).vibey_recovery
     try:
         # The first pass settles ses_b and reports SESSION, never success over a failure.
@@ -4418,10 +4741,11 @@ async def test_startup_recovery_hands_a_job_over_with_its_turns_authorization(
     job_id = await _remote_turn_with_open_call(harness, tmp_path, snapshot=snapshot, author_id=author_id)
     suite = harness.agent._tool_suite
     try:
-        # The process restarted: no live request, only the Turn's durable rows.
+        # The process restarted: no live request, only the Turn's durable rows; the Turn owner
+        # settles this Session before its notice.
         agent = harness.new_agent()
         agent._tool_suite = None
-        assert await agent.recover_runtime_state() == []
+        assert await agent.recover_runtime_state(SESSION) == []
 
         watch = _job_watch(job_id)
         assert watch is not None and watch.agent_name == "vibey"

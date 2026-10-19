@@ -17,6 +17,8 @@ from core.agent_core.tools.base import CallInstance, JobHost, JobStatus, ToolRes
 
 #: ``None`` means the job holds no result for the call (it never ran, or ended for an unrecorded reason).
 RecoveryRenderer = Callable[[ToolCallBlock, str, JobStatus, Optional[str]], Awaitable[Optional[ToolResult]]]
+#: For a job still running: settle it as its live call would; its status then, and the Watch it went to, if any.
+ForegroundWait = Callable[[ToolCallBlock, str], Awaitable[tuple[JobStatus, Optional[str]]]]
 
 # recovery.md T2: no job evidence can establish whether a file mutation ran.
 UNRECORDED_EFFECT = "[tool call interrupted; it may or may not have completed; re-read the file before continuing]"
@@ -31,6 +33,7 @@ async def settle_open_calls(
     jobs: JobHost,
     job_ids: Mapping[CallInstance, str],
     render_result: RecoveryRenderer,
+    wait_running: Optional[ForegroundWait] = None,
 ) -> tuple[ContextEntry, ...]:
     """Commit one result per open call, using original-owner job lookup.
 
@@ -43,10 +46,17 @@ async def settle_open_calls(
     Store writes remain under the caller's single-writer ownership. A concurrent
     second recovery or Agent.run for that Session is not permitted.
     Without job state, the result explicitly leaves the effect uncertain.
-    The adapter settles the interrupted Turn after this step; no tool or model
-    is invoked and only a new user input starts another Turn (T4). The adapter
-    also runs it when a run ends without completing (a Stop), so the calls that
-    run left open carry their jobs' recorded reason at once.
+    No tool or model is invoked here; after this step the Turn owner continues
+    the interrupted Turn from the committed transcript or settles it (T4). The
+    adapter also runs it when a run ends without completing (a Stop), so the
+    calls that run left open carry their jobs' recorded reason at once.
+
+    ``wait_running`` is the Turn that continues after a restart: a job still
+    running is settled as its live call would settle it (its foreground window
+    from the job's launch, then a Watch, or the foreground when no Watch can take
+    it; a Stop ends it), so only a job still running then is handed over. The
+    wait commits nothing, so a crash during it leaves the call open for the next
+    settlement, and no job is ever started here.
     """
     committed: list[ContextEntry] = []
     rows = list(await store.load(session_id))
@@ -59,7 +69,10 @@ async def settle_open_calls(
         else:
             status = jobs.status(job_id)
             details["job_id"] = job_id
-            watch_id = await jobs.hand_over(job_id) if status.state == "running" else None
+            if status.state == "running" and wait_running is not None:
+                status, watch_id = await wait_running(deepcopy(call), job_id)
+            else:
+                watch_id = await jobs.hand_over(job_id) if status.state == "running" else None
             result = await render_result(deepcopy(call), job_id, status, watch_id)
             if result is not None:
                 message = ToolResultMessage(call.id, call.name, result.content, result.is_error)

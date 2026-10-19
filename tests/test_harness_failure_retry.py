@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -12,12 +13,12 @@ from sqlalchemy import select
 from core import internal_server
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.scheduled_tasks import ScheduledTaskService, TaskExecutionStore
-from core.session_turns import DeliveryRequest, SessionTurnManager
+from core.session_turns import DeliveryRequest, SessionTurnManager, capture_scheduled_provenance
 from storage import message_deliveries, messages_service
 from storage.background import attach_agent_run_delivery_in_connection
 from storage.db import create_sqlite_engine
 from storage.models import agent_runs
-from tests.backend_failure_retry_helpers import seed_failed_notice
+from tests.backend_failure_retry_helpers import previous_process as _previous_process, seed_failed_notice
 from tests.scenario_harness.message_delivery import MessageDeliveryController
 from tests.test_harness_failure_visibility import _drain_service
 from tests.test_internal_server import _bind_test_native_start, _build_controller_double
@@ -213,3 +214,180 @@ def test_harness_notice_keeps_retry_boundary_guards(isolated_state, tmp_path, ch
         )
     assert response.status_code == 409
     dispatch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("step", ["tool", "steered", "steer_retried"])
+def test_a_vibey_agent_run_cut_by_a_restart_settles_from_the_continued_work(
+    isolated_state, tmp_path, monkeypatch, step
+):
+    """MESSAGE-DELIVERY-328: shutdown leaves the Run with its Turn, startup reruns that Turn in
+    place, and the Run settles once, from the rerun's result, owing no notice. A Run whose steer
+    the dead run accepted, its receipt not yet materialized, joins the Turn and settles the same
+    way; when the receipt cannot be materialized at startup, the Turn waits open for the retry."""
+    from core.session_turns import Turn
+
+    _scope_id, session_id = _make_session(tmp_path, agent_backend="vibey")
+    engine = create_sqlite_engine()
+    controller = MessageDeliveryController(platform="avibe")
+    controller.config.language = "zh"
+    request_store = TaskExecutionStore()
+    service = _drain_service(tmp_path, controller, request_store.sqlite_backend, request_store)
+    service._t = ScheduledTaskService._t.__get__(service, ScheduledTaskService)
+    controller.scheduled_task_service = service
+    controller.emit_agent_message = ConsolidatedMessageDispatcher(controller).emit_agent_message
+
+    def context(sid):
+        value = _context(sid)
+        value.platform_specific["agent_session_target"]["agent_backend"] = "vibey"
+        return value
+
+    manager = SessionTurnManager(controller, build_context=context)
+    manager._engine = engine
+    controller.session_turns = manager
+    controller._session_id_from_context = lambda ctx: str(
+        (ctx.platform_specific or {}).get("agent_session_id") or ""
+    )
+    run = request_store.enqueue_agent_run(
+        message="整理日志并汇报", session_id=session_id, agent_name="worker", agent_backend="vibey",
+        callback_session_id="ses_caller",
+    )
+
+    steered = request_store.enqueue_agent_run(
+        message="也看一下告警", session_id=session_id, agent_name="worker", agent_backend="vibey",
+    )
+    assert request_store.claim(steered.id) is not None
+
+    def callbacks():
+        return [(row["status"], row["result_text"]) for row in request_store.list_pending_callbacks() if row["id"] == run.id]
+
+    assert request_store.claim(run.id) is not None
+    started = []
+
+    async def accept(_sid, ctx, _text, **_kwargs):
+        started.append(ctx)
+        _bind_test_native_start(engine, ctx)
+
+    manager._run = accept
+
+    harness_context = context(session_id)
+    harness_context.platform_specific.update(
+        {"task_execution_id": run.id, "task_trigger_kind": "agent_run", "callback_session_id": "ses_caller"}
+    )
+
+    async def scenario():
+        original = await manager.deliver(
+            DeliveryRequest(
+                session_id=session_id, priority="p3", content=run.prompt,
+                source="harness", author="harness", message_type="harness",
+                metadata={"scheduled_provenance": capture_scheduled_provenance(harness_context)},
+            ),
+            context=context(session_id),
+        )
+        with engine.begin() as conn:
+            assert attach_agent_run_delivery_in_connection(
+                conn, run.id, session_id=session_id, delivery_id=original.delivery_id,
+            )
+            if step in {"steered", "steer_retried"}:
+                # A second Run steered into the Turn: the run accepted it, then the process
+                # died after the receipt and before the Delivery was materialized.
+                steer_id = message_deliveries.new_delivery_id()
+                steer = message_deliveries.insert_delivery(
+                    conn, delivery_id=steer_id, session_id=session_id, priority="p1", state="reserved",
+                    snapshot=message_deliveries.message_snapshot(
+                        scope_id=None, session_id=session_id, platform="avibe", author="harness",
+                        source="harness", message_type="harness", text="也看一下告警",
+                    ),
+                    dispatch_text="也看一下告警",
+                )
+                assert attach_agent_run_delivery_in_connection(
+                    conn, steered.id, session_id=session_id, delivery_id=steer_id,
+                )
+                cut = message_deliveries.get_turn(conn, original.turn_id)
+                opened = message_deliveries.open_steer_attempt(
+                    conn, steer_id, expected_version=int(steer["version"]), turn_id=original.turn_id,
+                    attempt_id="atm_steer", expected_native_turn_id=cut["native_turn_id"],
+                )
+                assert message_deliveries.mark_attempt_receipt(
+                    conn, steer_id, expected_version=int(opened["version"]), outcome="accepted", receipt={},
+                )
+        # Service shutdown while the Turn runs: nobody asked it to stop.
+        running = asyncio.create_task(asyncio.Event().wait())
+        manager.in_flight[session_id] = Turn(
+            task=running, context=started[-1], logical_turn_id=original.turn_id,
+        )
+        assert await manager.release_for_service_shutdown() == 0
+        assert not running.cancelled()
+        with engine.connect() as conn:
+            assert message_deliveries.get_turn(conn, original.turn_id)["state"] == "active"
+        assert request_store.get_run(run.id)["status"] == "running"
+        running.cancel()
+        manager.in_flight.clear()
+        return original
+
+    original = asyncio.run(scenario())
+    # The next start: T2 settled the cut call, then Turn recovery.
+    _previous_process("tool")(engine, session_id, original.turn_id)
+    manager._active_identity = lambda *_args: None
+    if step == "steer_retried":
+        # Startup cannot materialize the receipt (its CAS is lost); the retry can.
+        finish = manager._finish_steer
+        lost = []
+
+        async def lost_once(*args, **kwargs):
+            if not lost:
+                lost.append(args[0])
+                return SimpleNamespace(state="reconciling_steer")
+            return await finish(*args, **kwargs)
+
+        manager._finish_steer = lost_once
+        monkeypatch.setattr(SessionTurnManager, "RESTART_RECOVERY_RETRY_DELAYS", (0.05, 0.05))
+
+    async def startup():
+        await manager.recover_durable_delivery_state(session_id, service_restart=True)
+        if step == "steer_retried":
+            # Nothing completed or reran without the steer: the Turn stays open.
+            with engine.connect() as conn:
+                assert message_deliveries.get_turn(conn, original.turn_id)["state"] == "active"
+            assert len(started) == 1 and lost
+            # The first retry pass fails outright; the retries go on.
+            recover, failed = manager.recover_durable_delivery_state, []
+
+            async def fails_once(*args, **kwargs):
+                if not failed:
+                    failed.append(True)
+                    raise RuntimeError("database is locked")
+                return await recover(*args, **kwargs)
+
+            manager.recover_durable_delivery_state = fails_once
+            for _ in range(100):
+                if len(started) > 1:
+                    break
+                await asyncio.sleep(0.02)
+
+    asyncio.run(startup())
+
+    stored = request_store.get_run(run.id)
+    with engine.connect() as conn:
+        source = message_deliveries.get_turn(conn, original.turn_id)
+    assert source["state"] == "active"
+    continued = started[-1]
+    # The cut Turn itself reruns as a transcript resume, with the Run's Harness provenance.
+    assert continued.platform_specific["turn_token"] == original.turn_id
+    assert continued.platform_specific["vibey_resume"] is True
+    assert continued.platform_specific["vibey_source_turn_id"] == original.turn_id
+    assert continued.platform_specific["task_execution_id"] == run.id
+    assert stored["status"] == "running" and callbacks() == []
+    assert stored["delivery_id"] == original.delivery_id
+    owned = {run.id} | ({steered.id} if step != "tool" else set())
+    assert set(continued.platform_specific["accepted_agent_run_ids"]) == owned
+    # The rerun's own result settles the Runs, exactly once.
+    asyncio.run(controller.emit_agent_message(continued, "result", "日志已整理完毕"))
+    stored = request_store.get_run(run.id)
+    assert stored["status"] == "succeeded"
+    assert stored["result_text"] == "日志已整理完毕"
+    if step != "tool":
+        assert request_store.get_run(steered.id)["status"] == "succeeded"
+    # The caller's callback reports the work's own result, once.
+    assert callbacks() == [("succeeded", stored["result_text"])]
+    assert request_store.sqlite_backend.owed_failure_notice(run.id) is None
+    assert "interrupt_reason" not in (stored.get("metadata") or {})
