@@ -208,16 +208,19 @@ Hosted tools §6 holds, with these changes:
   search chain reads. A model route through the same Source (DeepSeek) is unaffected. A 429's `Retry-After` is read
   by the Model Hub retry coordinator's advice parser (seconds or HTTP date) and honored in full, never shortened;
   without advice, and for a 408, 5xx, timeout, connection failure, refused redirect or unreadable body, the
-  cooldown is 30 s, doubling on each consecutive failure up to 300 s. A success resets it, and a restart forgets it. It writes no
-  Source health.
+  cooldown is 30 s, doubling on each consecutive failure up to 300 s. A success resets it, and a restart forgets
+  it. It writes no Source health. A cooldown longer than 60 s is visible: the Tools read's candidate carries
+  `cooldown_until`, the row says "暂停至 HH:MM（服务要求稍后重试）", and its detail offers "立即重试", which clears the
+  cooldown (advancing its generation) so the next search may try the service.
 - **Recovery.** Replacing the key clears an invalid-key state, as for every Source. A `search` Source in the balance
   or limit state gets "重新启用" in its detail. For a balance state it runs the catalog's free check where one
   exists: `pass` clears the state; `invalid` moves the Source to the existing invalid-key state, whose repair is
   replacing the key; `balance` and `unknown` keep the current state. A free check only proves the key, and Tavily's `/usage` answers
   200 while the account is still over its limit, so a limit state, and a balance state with no free check, are
-  cleared directly into a one-shot trial: the Source admits exactly one search request, reserved by the first
-  search that reaches it, and every other search skips it as `cooling` until that request settles. If the trial
-  answers with the same failure, the Source goes back to `needs_action`; otherwise the gate opens. Nothing retries on its own. A model Source with
+  not cleared at once. The persisted `needs_action` state stays, and the press arms an in-memory one-shot trial:
+  the Source admits exactly one search request, reserved by the first search that reaches it, while every other
+  search skips it as `blocked`. A trial that completes clears the persisted state; one that fails keeps it. A restart
+  drops an unused trial, so the Source stays blocked and the user can press again. This fails closed. Nothing retries on its own. A model Source with
   a search API (DeepSeek) recovers through the existing model Source paths.
 - **Every state an attempt writes is fenced.** Source health uses the Source-global attempt-start settlement
   generation (`model-hub.md`). The service cooldown uses its own generation per (Source, service id), which only
@@ -285,8 +288,10 @@ Hosted tools §6 holds, with these changes:
     limit), and only a tool-only `search` Source in a balance or limit state adds "重新启用". A `disabled` entry's
     remedy is turning "用于网页搜索" back on;
   - `superseded: true` marks a failed entry whose settlement any fence dropped (a newer attempt, a key replacement,
-    a removal or "重新启用"). The surfaces say "这次请求失败，状态已由之后的操作更新" for it and show no repair, since
-    the Source's current state is not the one this failure would have set;
+    a removal or "重新启用"). The projection also treats an entry as superseded when the Source's current health no
+    longer matches it, for example a key replaced after the failure settled but before the call ended. The surfaces
+    say "这次请求失败，状态已由之后的操作更新" for it and show no repair, since the Source's current state is not
+    the one this failure set;
   - `label` is the Source's display name when the chain reached it, bounded to 64 characters. The projection shows
     the Source's current name and falls back to `label` for a Source removed since.
 
@@ -308,7 +313,9 @@ Hosted tools §6 holds, with these changes:
   the catalog's billing rule charges: DeepSeek only a 200 with results, the others any 200), `reported_usd` and
   `reported_requests` (the reported costs and the requests they cover), and `list_usd` (the sum of the list-priced
   costs recorded at call time, page surcharges included). The row's cost is `reported_usd + list_usd`; nothing is
-  revalued from counts later. Released ledger rows without these fields load as zero. The label comes from
+  revalued from counts later. Released ledger rows without these fields load as zero. In `usage-summary`
+  aggregates, a service row adds that cost to the Source's and the total `api_cost_usd` as a known cost. It never
+  sets the lower-bound flag, which stays about model calls without a token report. The label comes from
   the catalog, not from model inventory (§8).
 
 ## 5. Catalog: first batch
@@ -422,7 +429,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - `api.md`'s Source create and credential replace sections: the search branch (§3.1), with its outcomes in
   `api-response.schema.json`.
 - `hosted-tools-status.schema.json`: `prefer_native`, `services`, `executor_candidates[].kind` and settings,
-  `service_vendors[]`, and `ListPrice.extra[]`'s `page` unit and `when` (§3.5); the PUT body.
+  `service_vendors[]`, `ListPrice.extra[]`'s `page` unit and `when` (§3.5), and a candidate's `cooldown_until`
+  (§4.2); the PUT body.
 - `capability-evidence.schema.json`, and `status.latest_ok.mode` and `status.verified[].mode` in
   `hosted-tools-status.schema.json` with the UI's types: `mode: "service"`.
 - No new Source health detail: plan and spending limits reuse `models.source.needs_action.spend_limit_reached`.
@@ -431,7 +439,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   by Source and `service_id`, counting requests rather than model calls, with the additive `billable_requests`,
   `reported_usd`, `reported_requests` and `list_usd` fields and load fixtures for released rows that lack them (§4.3).
 - `HOSTED_ERROR_CODES`: `search_query_too_long` and `search_sources_blocked`, with copy on every surface.
-- `api.md`: the read and PUT changes, and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
+- `api.md`: the read and PUT changes, the "立即重试" cooldown clear (§4.2), and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
 - The turn trace's `hosted_tools`: the frozen `prefer_native`, candidate list and per-candidate `results` and
   `content` (§3.2).
@@ -465,7 +473,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 4. Automatic order is search services, then model executors; a saved order is honored; with `prefer_native` off,
    every hop declares the function.
 5. Invalid-key, balance and limit failures put the Source in `needs_action` and skip it until the key is replaced
-   or the user re-enables it; transient failures change no state; an empty answer ends the chain.
+   or a re-enable check or trial succeeds; transient failures change no state; an empty answer ends the chain.
 6. Each call yields one canonical record; the card and the IM line name the service and, from `attempts[]`, say
    which services failed or were blocked before it, and how to repair a blocked one.
 7. A `search` Source never appears as a model route candidate, in discovery, in a model probe or in engine config.
@@ -482,8 +490,8 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 | Create | the search branch skips observation and discovery; free-check pass saves verified, a DeepSeek balance with `is_available: false` saves verified in the balance state, 401 saves nothing, other failures and no-check vendors save pending and the first success clears it; replacement keeps the old key on 401 |
 | Config | `protocol: "search"` accepted only in its combination; `prefer_native` and `services` round-trip and default; a release-before loader ignores the new `hosted_tools` fields |
 | Custody | the adapter call attaches the key, refuses redirects and non-catalog hosts, caps the body, and returns no key material; nothing outside the adapter reads the key |
-| Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips, with `record.attempts[]` present when nothing executed and a blocked model executor showing its own remedy; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check, and only one request admitted while a re-enable trial is pending; a reported cost above the ceiling falls back to the list price |
-| Usage | only sent requests are metered, and DeepSeek's empty or failed requests cost nothing; an Exa content call without a reported cost keeps its page surcharge across a restart; a non-200 attempt records $0; a superseded failure, from any fence, shows no repair; the skip classification order; `service_order` survives a reload and decides the automatic order; a reported cost survives a restart through the ledger; a released ledger row without the new fields loads |
+| Chain | automatic and saved order, and insertion before the first model executor in a saved order; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips, with `record.attempts[]` present when nothing executed and a blocked model executor showing its own remedy; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check, only one request admitted while a re-enable trial is pending, and a restart before the trial leaves the Source blocked; a long cooldown is shown with `cooldown_until` and cleared by "立即重试"; a reported cost above the ceiling falls back to the list price |
+| Usage | service rows add known costs to the totals without the lower-bound flag; only sent requests are metered, and DeepSeek's empty or failed requests cost nothing; an Exa content call without a reported cost keeps its page surcharge across a restart; a non-200 attempt records $0; a superseded failure, from any fence or from a repair after it settled, shows no repair; the skip classification order; `service_order` survives a reload and decides the automatic order; a reported cost survives a restart through the ledger; a released ledger row without the new fields loads |
 | Mapping | one recorded response per vendor maps to the canonical record with bounds; an empty results array is `completed` and ends the chain; unreadable bodies; a released native `HostedSource` row longer than the new bounds still loads |
 | Hop facts | `prefer_native` off declares the function on a native-capable hop, and a native result in history replays in the synthetic form |
 | UI | the card states, add dialog, service detail, Sources rows, copy in both locales |
