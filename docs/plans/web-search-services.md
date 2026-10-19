@@ -401,8 +401,10 @@ Hosted tools §6 holds, with these changes:
 - Every candidate that sent a request is metered on its Source; a skip is never metered. The Usage tab therefore
   shows real search requests per service. A service request reaches no model, so the usage ledger gains a service
   row: the Source, the catalog's `service_id` in place of a model, `requests` (sent), `billable_requests` (those
-  the catalog's billing rule charges: DeepSeek only a 200 with results, the others any 200), the list-priced quantities of every billable request
-  whose quantities are known: `list_requests` and `list_pages` per content type (Exa: `text`), and,
+  the catalog's billing rule charges: DeepSeek only a 200 with results, the others any 200), and the list-priced
+  quantities: every billable request is valued at the request price (its count is `billable_requests`, so no
+  separate request counter exists), plus `list_pages` per content type (Exa: `text`) for the pages that were read,
+  and,
   in parallel, `reported_usd` and `reported_requests` for the requests the vendor priced itself. Usage values the
   quantities at the current price table, as it values model tokens, so `api_cost_usd` is one list valuation with
   one `price_table_date`. Reported costs are the vendor's own figures, exposed beside it as `service_reported_usd`
@@ -410,9 +412,10 @@ Hosted tools §6 holds, with these changes:
   `requests` and to a separate `uncertain_requests`, never to `billable_requests`, so the counts stay exact and
   the uncertainty is visible. Released ledger rows without these fields load as zero. The counters keep their
   relations on write and on read, as the model counters do (a corrupt or hand-edited row is repaired, not
-  published): `billable_requests + uncertain_requests ≤ requests`, and `reported_requests ≤ billable_requests`,
-  `list_requests ≤ billable_requests`; an excess is reduced to the bound. A quantity whose carrier count is zero is
-  zeroed: `list_pages` when `list_requests` is 0, `reported_usd` when `reported_requests` is 0.
+  published): `billable_requests + uncertain_requests ≤ requests` and `reported_requests ≤ billable_requests`; an excess
+  is reduced to the bound. A quantity whose carrier count is zero is zeroed (`list_pages` when `billable_requests`
+  is 0, `reported_usd` when `reported_requests` is 0), and `lower_bound` is forced true whenever
+  `uncertain_requests` is non-zero.
 - Pricing presence is unchanged: `pricing` and every cost field appear exactly when the model price table can be
   read. Service quantities are then valued at the catalog prices shipped with the release, whose verification date
   is the new `pricing.service_price_date`; without a model table the summary carries counts only, for services as
@@ -420,7 +423,7 @@ Hosted tools §6 holds, with these changes:
 - `usage-summary` keeps every model shape unchanged and gives service usage its own closed branch, so a service is
   never dressed as a model and model `requests` never count service requests:
   - `UsageBucketRow` becomes `oneOf`: the released model row (no `kind`), or a service row with `kind: "service"`,
-    `source_id`, `service_id`, `requests`, `billable_requests`, `uncertain_requests`, `list_requests`,
+    `source_id`, `service_id`, `requests`, `billable_requests`, `uncertain_requests`,
     `list_pages` (per content type, Exa: `text`), `reported_requests`, and the cost fields `reported_usd`, `api_cost_usd` and
     `api_cost_lower_bound`, which, like `service_reported_usd`, are present exactly when `pricing` is (the ledger
     keeps them regardless; only the summary follows the presence rule).
@@ -570,7 +573,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - The vendor catalog (`vibe/data/api_key_vendors.json` and its schema): search vendors and DeepSeek's search API row.
 - Usage (`usage-summary.schema.json`, `api.md`'s Usage section, and the on-disk usage ledger): a service row keyed
   by Source and `service_id`, counting requests rather than model calls, with the additive `billable_requests`,
-  `reported_usd`, `reported_requests`, `list_requests`, `list_pages`, `uncertain_requests` and `lower_bound` fields; the
+  `reported_usd`, `reported_requests`, `list_pages`, `uncertain_requests` and `lower_bound` fields; the
   summary's `kind: "service"` bucket-row branch, `services[]` (`ServiceUsage`, with `priced`), `service_reported_usd`, `excluded_service_requests` and `pricing.service_price_date` (§4.3); and load fixtures for released rows that lack them (§4.3).
 - `HOSTED_ERROR_CODES`: `search_query_too_long` and `search_sources_blocked`, with copy on every surface.
 - The recovery actions run in the controller, which owns the trial gate and the cooldowns. The UI process forwards
@@ -599,7 +602,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   a search chain's candidate is a search-service Source (called through the adapter search operation) or a model
   Source with an executor model, in the §4.1 order with its skips; a service attempt's classified failure changes
   that Source's health (§4.2), while a model executor attempt still never does; a service attempt the catalog does
-  not bill records an explicit zero cost, a possibly billed one is listed in `failed_attempts[]` with no `cost`, and
+  not bill records an explicit zero cost, an earlier possibly billed one is listed in `failed_attempts[]` with no `cost` (a terminal one stays the attempt
+  `execution` names, with no cost, and its `attempts[]` entry has none either), and
   `HostedCost.lower_bound` marks a partial total (§4.3); a service response is `completed` when it answered 200
   with a `results` array that is empty or keeps at least one row after the §4.3 bounds, and a non-empty array whose
   every row the bounds reject is `service_unreadable` and fails over; and the terminal reasons `search_query_too_long` and `search_sources_blocked`
