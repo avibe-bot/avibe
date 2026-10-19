@@ -185,9 +185,11 @@ transition (instant under reduced motion), taking no space and no clicks.
 - **No closed frame.** Freshness is derived while rendering, so when the turn
   ends in the same render its result lands, the bubble stays open throughout.
   The only state is which replies have expired; nothing reopens the slot.
-- **On-screen time.** The 10s count only while the document is visible, the
-  slot is drawing this bubble (not the input, the dictation marquee, or the
-  loading and unavailable notices) and the pointer is not over the bubble.
+- **On-screen time.** The 10s count only while the reply itself is on
+  screen: the document is visible, the slot is drawing this bubble (not the
+  input, the dictation marquee, or the loading and unavailable notices), its
+  summary row is the reply (not "thinking" while the turn still reads as
+  running, nor a failure notice), and the pointer is not over the bubble.
   Typing or dictating pauses it, and the rest plays when the bubble is back.
   Leaving the bubble with the pointer leaves at least 3s. One timer, rescheduled
   whenever these change.

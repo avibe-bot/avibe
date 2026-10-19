@@ -660,16 +660,19 @@ const PetSurface: React.FC = () => {
   // the same render its result lands, the bubble never closes in between.
   const latestResultId = exchange.results.at(-1)?.id ?? null;
   const freshResultId = latestResultId !== null && data.isFresh(latestResultId) ? latestResultId : null;
-  // The speech slot is drawing this bubble rather than the input or the
-  // dictation marquee; only then is the linger's time on screen.
-  const slotShowsBubble = hasBubbleContent && Boolean(binding) && !voice.listening && !(composing && canChat && !uncertain);
+  // The reply is on screen: the speech slot is drawing this bubble (not the
+  // input or the dictation marquee), and its summary row is the reply (not
+  // "thinking" while the turn still runs, nor a failure notice). Only then
+  // does the linger spend its time.
+  const replyOnScreen = hasBubbleContent && Boolean(binding) && !voice.listening && !(composing && canChat && !uncertain)
+    && !data.running && !failure;
   const documentVisible = useDocumentVisible();
   const [pointerOverBubble, setPointerOverBubble] = useState(false);
   const bubbleRef = useRef<HTMLDivElement>(null);
   const { lingeringId, expire: expireReply, keepAtLeast } = useReplyLinger({
     scope: epoch,
     candidateId: freshResultId,
-    counting: documentVisible && slotShowsBubble && !pointerOverBubble,
+    counting: documentVisible && replyOnScreen && !pointerOverBubble,
     keyboardHeld: () => {
       const node = bubbleRef.current;
       const active = document.activeElement;

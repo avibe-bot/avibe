@@ -2513,6 +2513,29 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     expect(bubbleOpen()).toBe(false);
   });
 
+  it('spends nothing while the turn still reads as running, so a late turn end still gets the full 10s', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'], shouldAdvanceTime: true });
+    tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' })];
+    let running = true;
+    api.getTurnState.mockImplementation(async () => (running ? { ...idleTurn, in_flight: true, foreground: 'running' as const } : idleTurn));
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+    // The result lands, but its turn end is late: the summary still says thinking.
+    const result = message('r', 'S', { text: 'Late end', read_at: null });
+    tails.S = [...tails.S, result];
+    await emit((h) => h.onMessageNew?.(result));
+    act(() => { vi.advanceTimersByTime(30_000); });
+    expect(bubbleOpen()).toBe(true);
+    running = false;
+    await emit((h) => h.onTurnEnd?.({ session_id: 'S' }));
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-toggle .pet-mini-running-dot')).toBeNull());
+    act(() => { vi.advanceTimersByTime(9_800); });
+    expect(bubbleOpen()).toBe(true);
+    act(() => { vi.advanceTimersByTime(400); });
+    expect(bubbleOpen()).toBe(false);
+  });
+
   it('counts a reply that arrives live before the first tail read as fresh', async () => {
     const reply = message('r', 'S', { text: 'Early reply', read_at: null });
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), reply];

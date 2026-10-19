@@ -56,6 +56,10 @@ export type PetSessionData = {
 
 type Freshness = { identity: unknown; baseline: ReadonlySet<string> | null; live: ReadonlySet<string> };
 
+// Only Vibey's replies are ever asked about, so only they are recorded: the
+// sets grow with the replies in an epoch, not with its tool and progress rows.
+const isReply = (row: WorkbenchMessage) => row.author === 'agent' && row.type === 'result';
+
 // `loaded`: a tail read has applied. Until then the rows are only what live
 // events merged, so they cannot be read as a complete window.
 type Tail = { messages: WorkbenchMessage[]; hasOlder: boolean; loaded: boolean };
@@ -148,7 +152,7 @@ export function usePetSession(sessionId: string | null): PetSessionData {
         const owner = currentIdentity.current;
         setFreshness((current) => {
           const scoped = current.identity === owner ? current : { identity: owner, baseline: null, live: new Set<string>() };
-          return scoped.baseline ? scoped : { ...scoped, baseline: new Set(value.messages.map((row) => row.id)) };
+          return scoped.baseline ? scoped : { ...scoped, baseline: new Set(value.messages.filter(isReply).map((row) => row.id)) };
         });
       },
     }),
@@ -198,7 +202,7 @@ export function usePetSession(sessionId: string | null): PetSessionData {
       onMessageNew: (row) => {
         if (!mine(row.session_id)) return;
         const owner = currentIdentity.current;
-        setFreshness((current) => {
+        if (isReply(row)) setFreshness((current) => {
           const scoped = current.identity === owner ? current : { identity: owner, baseline: null, live: new Set<string>() };
           return { ...scoped, live: new Set([...scoped.live, row.id]) };
         });
