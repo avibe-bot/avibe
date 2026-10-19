@@ -183,8 +183,9 @@ transition (instant under reduced motion), taking no space and no clicks.
   from running to done while the current epoch (binding and authorization)
   watches; the local send grace (which shows "thinking" before the server
   registers a turn) is not part of it. The reply is the newest non-empty agent
-  result after the input of that turn, not a background run's detached
-  completion, or the promoted result that answers an earlier input. A stopped
+  result after the input of that turn that is not a background run's detached
+  completion; nothing before that input counts, so a promoted answer to an
+  earlier input (#2815) keeps the badge but does not linger. A stopped
   turn (which ends with an empty result) or a turn with no reply does not
   linger; a reply that lands after its turn end lingers once it arrives. The
   summary shows the pinned reply for as long as it lingers, even if a later
@@ -219,9 +220,9 @@ transition (instant under reduced motion), taking no space and no clicks.
   whether the history was opened from the lingering reply (a Vibey click or its
   toggle row) or the reply arrived while it was already open; closing the
   history hides the bubble. A reply that arrives only after the history has
-  closed was not seen there, so it lingers. While a history request still waits on the shell, the
-  reply keeps holding the bubble, and if the shell refuses, it plays out its
-  time. A new running turn holds the bubble again, and its
+  closed was not seen there, so it lingers. A history the user asked for that
+  the shell has not confirmed yet holds the bubble and pauses the linger; if
+  the shell refuses, the request is dropped and the linger resumes. A new running turn holds the bubble again, and its
   own result lingers anew.
 
 Unread replies only light Vibey's badge and never hold the bubble; quick
