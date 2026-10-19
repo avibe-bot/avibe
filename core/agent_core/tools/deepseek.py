@@ -164,9 +164,13 @@ async def _post_direct(url: str, payload: Mapping[str, Any], key: str) -> Any:
             async with client.stream("POST", url, json=payload, headers=headers) as response:
                 if response.status_code != 200:
                     body = bytearray()
+                    limit = 64 * 1024
                     async for chunk in response.aiter_bytes():
-                        body.extend(chunk)
-                        if len(body) > 64 * 1024:
+                        remaining = limit - len(body)
+                        if remaining <= 0:
+                            break
+                        body.extend(chunk[:remaining])
+                        if len(body) >= limit:
                             break
                     raise _ToolError(_http_error_message(response.status_code, bytes(body), key))
                 body = bytearray()
