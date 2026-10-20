@@ -49,6 +49,7 @@ from core.session_activities import SessionActivity, activity_completion_output
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
 from modules.agents.claude_process_reaper import (
     AVIBE_CLAUDE_SESSION_OWNER,
+    claude_diagnostic_without_stderr,
     claude_process_exit_reason_i18n,
     claude_process_exit_signal,
     get_claude_client_returncode,
@@ -873,13 +874,21 @@ class ClaudeAgent(BaseAgent):
 
         A CLI that a signal ended (the OOM killer, a service stop) was
         terminated, and that is the failure's cause whatever its diagnostic
-        says. The diagnostic carries the CLI's captured stderr, where the CLI
-        prints notices that mention the account login at every start, so
-        reading it for auth words would send every killed process to OAuth.
-        An auth failure the CLI reports still reaches recovery: it arrives as
-        the CLI's own result, or from a process that exited by itself.
+        says.
+
+        The CLI's stderr is never auth evidence. The CLI reports an auth
+        failure as frames: an Assistant message whose ``error`` is
+        ``authentication_failed``, then an ``is_error`` Result, and those
+        reach recovery on their own path. Stderr carries its notices, such as
+        one naming the claude.ai login at every start when an API key
+        outranks it, so reading it for auth words sent ordinary crashes to
+        OAuth. The diagnostic keeps stderr for the user; only this check
+        leaves it out.
         """
         if claude_process_exit_signal(get_claude_client_returncode(client)) is not None:
+            return False
+        evidence = claude_diagnostic_without_stderr(str(terminal_error or ""))
+        if not classify_auth_error("claude", f"{error_notify}\n{evidence}"):
             return False
         return await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
             context,

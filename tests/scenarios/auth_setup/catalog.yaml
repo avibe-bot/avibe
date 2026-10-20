@@ -365,21 +365,24 @@ scenarios:
     supporting_tests:
       - tests/test_claude_cli_path.py::test_web_auth_uses_configured_claude_cli_path_without_session_handler
   - id: AUTH-SETUP-912
-    name: A Claude CLI ended by a signal is reported as terminated, never sent to re-login
+    name: A Claude CLI that ends mid-Turn is reported as terminated, and its stderr never sends the user to re-login
     status: covered
     kind: historical_regression
     layer: scenario_backed_runtime
     backend: claude
     # The CLI's stderr notice that an API key outranks the claude.ai login sits in
     # every such runtime's diagnostic and matched the auth classifier, so an OOM
-    # kill (-9) or service stop (-15, 143) told the user to log in again.
-    test: tests/test_claude_agent_sessions.py::ClaudeRuntimeFailureAuthClassificationTests::test_signal_exit_during_a_turn_reports_termination_without_relogin
+    # kill (-9), a service stop (-15, 143) or a crash (1) told the user to log in
+    # again. Stderr is no longer auth evidence, and a signal exit is a termination.
+    test: tests/test_claude_agent_sessions.py::ClaudeRuntimeFailureAuthClassificationTests::test_cli_exit_during_a_turn_reports_termination_without_relogin
   - id: AUTH-SETUP-913
     name: An auth failure the Claude CLI reports keeps the re-login prompt beside its stderr login notice
     status: covered
     kind: negative_path
     layer: scenario_backed_runtime
     backend: claude
+    # In SDK mode the CLI reports an auth failure as frames (an Assistant message
+    # with error authentication_failed, then an is_error Result), not on stderr.
     test: tests/test_claude_agent_sessions.py::ClaudeRuntimeFailureAuthClassificationTests::test_auth_failure_the_cli_reports_keeps_the_relogin_prompt
   - id: AUTH-SETUP-119
     name: Runtime manual provider code reaches native persistence and controller-confirmed readiness

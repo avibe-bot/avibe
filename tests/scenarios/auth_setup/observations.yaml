@@ -26,13 +26,17 @@ observations:
     related_scenarios:
       - AUTH-SETUP-912
       - AUTH-SETUP-913
-    summary: A Claude CLI killed by the OOM killer or a service stop told the user to log in again.
+    summary: A Claude CLI killed by the OOM killer, stopped with the service, or crashed told the user to log in again.
     previous_assumption: A Claude process failure whose diagnostic mentions the login is an auth failure.
     observed_behavior: >-
       With an API key or another auth source beside a claude.ai login, the CLI writes a
       connectors notice naming that login to stderr at every start. The stderr tail joins
       every failure diagnostic, so exit -9 and 143 matched the auth classifier, posted the
       re-login prompt and retired the runtime as an auth failure while the login was fine.
+      A hermetic run of the bundled CLI against a 401 stub, and with no login, reported
+      both failures only as an Assistant frame with error authentication_failed and an
+      is_error Result; stderr stayed empty.
     required_updates:
+      - keep CLI stderr out of Claude auth evidence while the diagnostic still shows it
       - let a signal exit outrank auth words in the diagnostic
       - keep the prompt for an auth failure the CLI reports itself

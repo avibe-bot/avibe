@@ -3406,13 +3406,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             output=ANY,
             terminal_error=terminal_error,
         )
-        controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once_with(
-            context,
-            "claude",
-            "❌ Connection to Claude was lost. Please try your message again.",
-            output=ANY,
-            terminal_error=terminal_error,
-        )
+        # Nothing in the failure reads as auth, so recovery is never offered.
+        controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_not_awaited()
         persist.assert_called_once()
         self.assertEqual(
             persist.call_args.args,
@@ -5128,32 +5123,37 @@ class ClaudeRuntimeFailureAuthClassificationTests(unittest.IsolatedAsyncioTestCa
             await agent._receive_messages(client, "slack_C1", "/tmp/work", context)
         return [call.args[2] for call in persist.call_args_list if call.args[1] == "notify"]
 
-    async def test_signal_exit_during_a_turn_reports_termination_without_relogin(self):
+    async def test_cli_exit_during_a_turn_reports_termination_without_relogin(self):
         """Scenario: AUTH-SETUP-912
 
-        The OOM killer (``-9``) and a service stop (``-15``, or ``143`` when the
-        CLI exits on SIGTERM itself) end a Claude CLI whose stderr tail names the
-        claude.ai login. That is a termination: the user gets its notice and the
-        session resets, with no re-login prompt.
+        A Claude CLI whose stderr names the claude.ai login ends mid-Turn: the
+        OOM killer (``-9``), a service stop (``-15``, or ``143`` when the CLI
+        exits on SIGTERM itself), or an exit of its own (``1``). The user gets
+        the termination notice and the session resets, with no re-login
+        prompt. A signal exit stays a termination even when the error itself
+        mentions the login.
         """
         from core.agent_auth_service import classify_auth_error
         from vibe.i18n import t
 
         relogin = t("command.setup.resetPromptPlain", "en", backend="claude")
-        for returncode, reason in (
-            (-9, t("error.claudeProcessSignal", "en", signal="SIGKILL", number=9)),
-            (-15, t("error.claudeProcessSignal", "en", signal="SIGTERM", number=15)),
-            (143, t("error.claudeProcessExitCode", "en", code=143)),
+        sigkill = t("error.claudeProcessSignal", "en", signal="SIGKILL", number=9)
+        for returncode, error, reason in (
+            (-9, None, sigkill),
+            (-15, None, t("error.claudeProcessSignal", "en", signal="SIGTERM", number=15)),
+            (143, None, t("error.claudeProcessExitCode", "en", code=143)),
+            (1, None, t("error.claudeProcessExitCode", "en", code=1)),
+            (-9, RuntimeError("Cannot write to terminated process after OAuth login failed"), sigkill),
         ):
-            with self.subTest(returncode=returncode):
-                agent, client, context, im, handler = self._harness(returncode)
+            with self.subTest(returncode=returncode, error=str(error or "")):
+                agent, client, context, im, handler = self._harness(returncode, error=error)
 
                 notices = await self._run(agent, client, context)
 
                 termination = t("error.claudeProcessTerminated", "en", reason=reason)
                 self.assertEqual(im.sent_button_messages, [])
                 self.assertEqual(im.sent_messages, [termination])
-                self.assertEqual(notices, [f"❌ {termination}"])
+                self.assertEqual(notices, [f"\u274c {termination}"])
                 self.assertNotIn(relogin, "\n".join(notices))
                 handler.cleanup_session.assert_awaited_once_with(
                     self.composite_key,
@@ -5163,9 +5163,9 @@ class ClaudeRuntimeFailureAuthClassificationTests(unittest.IsolatedAsyncioTestCa
                 )
                 settlement = agent.controller.emit_agent_message.await_args
                 self.assertTrue(settlement.kwargs["is_error"])
-                # The settled diagnostic still carries the login notice that the
-                # auth classifier matches, so the assertions above are about the
-                # exit cause outranking it, not about a quiet diagnostic.
+                # The settled diagnostic still quotes the stderr notice, which the
+                # auth classifier matches: the user keeps it, the auth check does
+                # not read it.
                 self.assertIn(_CLAUDE_CONNECTORS_NOTICE, settlement.kwargs["terminal_error"])
                 self.assertTrue(classify_auth_error("claude", settlement.kwargs["terminal_error"]))
 
@@ -5197,11 +5197,34 @@ class ClaudeRuntimeFailureAuthClassificationTests(unittest.IsolatedAsyncioTestCa
         """Scenario: AUTH-SETUP-913
 
         The same runtime, login notice in its stderr, with an auth failure the
-        CLI itself reports: as its result frame while it runs, or as the error
-        of a process that exited by itself. Both keep today's re-login prompt.
+        CLI itself reports. In SDK mode it reports one as frames: a synthetic
+        Assistant message whose ``error`` is ``authentication_failed``, then an
+        ``is_error`` Result (the shape the bundled CLI emits for a missing
+        login, with nothing on stderr). A result frame alone, and the error of
+        a process that exited by itself, are reported too. Each keeps today's
+        re-login prompt.
         """
+        from modules.claude_sdk_compat import AssistantMessage, ResultMessage
         from vibe.i18n import t
 
+        not_logged_in = "Not logged in \u00b7 Please run /login"
+        cli_frames = (
+            AssistantMessage(
+                content=[TextBlock(text=not_logged_in)],
+                model="<synthetic>",
+                error="authentication_failed",
+            ),
+            ResultMessage(
+                subtype="success",
+                duration_ms=0,
+                duration_api_ms=0,
+                is_error=True,
+                num_turns=1,
+                session_id="native-1",
+                result=not_logged_in,
+                terminal_reason="api_error",
+            ),
+        )
         expired = (
             'Failed to authenticate. API Error: 401 {"type":"error","error":'
             '{"type":"authentication_error","message":"OAuth token has expired."}}'
@@ -5213,6 +5236,7 @@ class ClaudeRuntimeFailureAuthClassificationTests(unittest.IsolatedAsyncioTestCa
         relogin_button = t("command.setup.resetPrompt", "en", backend="claude")
         relogin = t("command.setup.resetPromptPlain", "en", backend="claude")
         for name, harness in (
+            ("cli auth frames", dict(returncode=1, frames=cli_frames)),
             ("result frame", dict(returncode=None, frames=(result,))),
             ("self exit", dict(returncode=1, error=RuntimeError(expired))),
         ):
