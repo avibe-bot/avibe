@@ -172,7 +172,7 @@ Persisted `definition.json`:
 
 - **Owner:** the Controller, over existing control IPC. UI and CLI hold no runtimes.
 - **Identity:** existing caller context (`core/caller_context.py`, `AVIBE_SESSION_ID`, …) as used by `vibe task/watch/agent`. No MCP-specific token.
-- **Permission:** instance-global. The local OS user has full rights. Management commands go through the same existing CLI command admission (role floor) as other config-changing `vibe` commands; list/help and tool calls use the same floor as using Skills (Editor), matching who sees the prompt index. Remote-context callers thus get exactly the permissions they have elsewhere. No MCP-specific policy.
+- **Permission:** instance-global. The local OS user has full rights. Management commands (add/save, generate/regenerate, enable/disable, remove) are Owner-only through the existing CLI command admission, because generating a stdio definition runs an arbitrary local command; list/help and tool calls use the same floor as using Skills (Editor), matching who sees the prompt index. Remote-context callers thus get exactly the permissions they have elsewhere. No MCP-specific policy.
 - **Connections:** one client connection per (revision, caller session) for every transport — a stdio process, or an HTTP client holding its own `Mcp-Session-Id` (closed with the connection). This matches Claude Code and Codex (one client per session). Context-free calls are one-shot. Calls within one session are serialized on its connection. A connection whose call ends with `unknown_outcome` is closed, never reused. An HTTP `Session not found` (pre-dispatch) closes the client and the call is retried once on a fresh connection.
 - **Limits** (constants): at most 8 stdio processes in total, including generation; at the cap a new connection fails with `capacity`. Idle close 10 min; call timeout 120 s; generation 5 min. HTTP is not capped.
 - Servers that lock a shared resource (e.g. Playwright's default persistent profile) need their own isolation flag in the provider config (`--isolated`); Avibe does not rewrite server argv.
@@ -207,7 +207,7 @@ POST   /api/mcp/{name}/disable
 DELETE /api/mcp/{name}
 ```
 
-Native async FastAPI routes calling the owner over IPC. Routes are classified in the existing Web route authorization (`vibe/authorization.py`): read routes (`GET /api/mcp`, `GET /api/mcp/{name}`, `GET /api/mcp/{name}/tools`) at Editor like Skills, management routes at the same role as other config-changing routes; and forward the validated Web user context to the owner like existing config APIs do.
+Native async FastAPI routes calling the owner over IPC. Routes are classified in the existing Web route authorization (`vibe/authorization.py`): read routes (`GET /api/mcp`, `GET /api/mcp/{name}`, `GET /api/mcp/{name}/tools`) at Editor like Skills, management routes Owner-only; and forward the validated Web user context to the owner like existing config APIs do.
 
 ## 9. Prior art
 
