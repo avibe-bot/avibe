@@ -1694,6 +1694,30 @@ describe('desktop mini v2 interaction contract', () => {
     });
   });
 
+  it('cancels an in-flight finish so Escape and an epoch change do not stick on Finishing', async () => {
+    const done = deferred<string>();
+    const abort = vi.fn();
+    class Dictation {
+      done = done.promise;
+      start = async () => {};
+      finish = () => {};
+      abort = abort;
+    }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      mainSession('S'); render(<PetPage />); tapHotkey();
+      await userEvent.click(await screen.findByLabelText('pet.voice.open'));
+      expect(pose()).toBe('listening');
+      await userEvent.click(screen.getByLabelText('pet.voice.stop'));
+      expect(screen.getByText('pet.voice.finishing')).toBeTruthy();
+      await userEvent.keyboard('{Escape}');
+      expect(abort).toHaveBeenCalled();
+      expect(screen.queryByText('pet.voice.finishing')).toBeNull();
+      expect(await screen.findByRole('textbox')).toBeTruthy();
+      await act(async () => done.resolve('late cleaned words'));
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('');
+    });
+  });
+
   it('does not let a queued old animation report replace the new epochs hit regions', async () => {
     const frames: FrameRequestCallback[] = [];
     vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => frames.push(callback)));

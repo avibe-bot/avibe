@@ -1043,14 +1043,19 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
   }, [enabled, epoch]);
   const stop = useCallback((commit: boolean) => {
     const capture = captureRef.current;
-    if (!capture || capture.ending) return;
-    capture.ending = true;
+    if (!capture) return;
+    // A second commit is a no-op. Cancel must still abort an in-flight finish
+    // (Escape, epoch change) so finishing cannot stick on the next surface.
     if (commit) {
+      if (capture.ending) return;
+      capture.ending = true;
       setListening(false);
       setFinishing(true);
       capture.dictation.finish();
       return;
     }
+    if (capture.cancelled) return;
+    capture.ending = true;
     capture.cancelled = true;
     captureRef.current = null;
     capture.dictation.abort();
