@@ -194,6 +194,26 @@ python3 scripts/incus_regression.py reconcile
 python3 scripts/incus_regression.py reconcile --yes
 ```
 
+Protect a worktree environment while long-running work uses it, then release
+it when that work finishes:
+
+```bash
+python3 scripts/incus_regression.py hold --target worktree --slug <slug> --owner <session-id-or-name> --reason "Long-running evaluation"
+python3 scripts/incus_regression.py status --target worktree --slug <slug>
+python3 scripts/incus_regression.py release --target worktree --slug <slug>
+```
+
+The instance itself stores `user.avibe-regression.hold.owner`, `.hold.reason`,
+and `.hold.since` (UTC), so another checkout sees the same hold. `hold` sets or
+replaces it; `release` clears only these fields. `status` and `reconcile` show
+the owner, reason, and time, including for instances without runner metadata.
+`delete` refuses a held environment before removing anything, even with
+`--yes`; only an explicit `--ignore-hold` overrides it. Deletion previews
+(`--dry-run`) also check the live hold and require a reachable Incus daemon
+unless explicitly overridden. Reconcile never includes that flag in its
+printed commands. Holds do not expire automatically or stop
+`up`/`down`, and old runners or raw Incus commands do not enforce them.
+
 Fresh-install worktree environment, for testing the first-run experience:
 
 ```bash
@@ -221,8 +241,12 @@ config and state to rerun the wizard while keeping CLI logins made in it. The
 master environment is always seeded.
 
 Delete worktree environments promptly after the worktree is merged, abandoned,
-or removed. The persistent `master` environment should stay running and preserve
-its product state across normal source updates.
+or removed. Before proposing or performing deletion of any regression
+environment, check its hold with `status` or `reconcile`; if held, tell the user
+who holds it and why, and do not offer a one-click delete. Long-running work
+must hold its environment for as long as it runs. The persistent `master`
+environment should stay running and preserve its product state across normal
+source updates.
 
 `reconcile` answers "what is actually still here?". It enumerates worktree
 environments from Incus rather than from the runner's metadata, so an
