@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -2563,6 +2564,134 @@ def reconcile_fixture(
     return runtime / "worktrees.json", commands
 
 
+def hold_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str = "worktree"):
+    """Fake Incus config storage; run the real CLI without any host environment."""
+    project, instance = ("avr-master", "avibe-master") if target == "master" else ("avr-wt-eval", "avibe-wt-eval")
+    config = {"user.avibe-regression.seed": "regression"}
+    commands = []
+
+    class RecordingRunner(incus_regression.Runner):
+        names, records = daemon_listing(project, instance, config=config)
+
+        def run(self, command, **kwargs):
+            if self.dry_run:
+                return super().run(command, **kwargs)
+            commands.append(command)
+            if command[3:5] == ["config", "set"]:
+                for setting in command[6:]:
+                    key, value = setting.split("=", 1)
+                    config[key] = value
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setenv("INCUS_CMD", "incus")
+    monkeypatch.setattr(incus_regression, "Runner", RecordingRunner)
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda root: root)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda *args: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    return config, commands
+
+
+@pytest.mark.parametrize("target", ["worktree", "master"])
+@pytest.mark.parametrize("dry_run", [False, True], ids=["apply", "dry-run"])
+def test_hold_then_status_and_release_preserve_unrelated_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], target: str, dry_run: bool
+) -> None:
+    """The CLI persists/shows/releases one instance hold; existing seed tests never cover this marker."""
+    config, commands = hold_fixture(tmp_path, monkeypatch, target)
+    original = dict(config)
+    flags = ["--target", target, "--slug", "eval"] + (["--dry-run"] if dry_run else [])
+    before = datetime.now(timezone.utc)
+    assert incus_regression.main(["hold", *flags, "--owner", "session-one", "--reason", "Evaluation in progress"]) == 0
+    after = datetime.now(timezone.utc)
+    capsys.readouterr()
+    assert incus_regression.main(["status", *flags]) == 0
+    out = capsys.readouterr().out
+    if dry_run:
+        assert config == original
+        assert commands == []
+    else:
+        since = config["user.avibe-regression.hold.since"]
+        assert before <= datetime.fromisoformat(since) <= after
+        assert since.endswith("+00:00")
+        assert config == {
+            **original,
+            "user.avibe-regression.hold.owner": "session-one",
+            "user.avibe-regression.hold.reason": "Evaluation in progress",
+            "user.avibe-regression.hold.since": since,
+        }
+        assert f"HELD: owner=session-one; reason=Evaluation in progress; since={since}" in out
+        assert len([command for command in commands if "set" in command]) == 1
+    assert incus_regression.main(["release", *flags]) == 0
+    assert {key: value for key, value in config.items() if value} == original
+    capsys.readouterr()
+    assert incus_regression.main(["status", *flags]) == 0
+    assert "HELD:" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("target", ["worktree", "master"])
+def test_delete_held_worktree_refuses_before_mutation_unless_explicitly_overridden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], target: str
+) -> None:
+    """A persistent hold (not the existing build lock) must protect a running evaluation."""
+    config, commands = hold_fixture(tmp_path, monkeypatch, target)
+    config.update({
+        "user.avibe-regression.hold.owner": "session-one",
+        "user.avibe-regression.hold.reason": "Evaluation in progress",
+        "user.avibe-regression.hold.since": "2026-10-20T12:00:00+00:00",
+    })
+    original = dict(config)
+    flags = ["delete", "--target", target, "--slug", "eval", "--yes"]
+    if target == "worktree":
+        assert incus_regression.main(flags) == 1
+        err = capsys.readouterr().err
+        assert "session-one" in err and "Evaluation in progress" in err
+        assert "--ignore-hold" in err
+        assert commands == []
+        assert config == original
+        assert not incus_regression.mapping_path(tmp_path).exists()
+        flags.append("--ignore-hold")
+    # Master retains its existing --yes behavior, even if somebody sets a hold.
+    assert incus_regression.main(flags) == 0
+    project, instance = ("avr-master", "avibe-master") if target == "master" else ("avr-wt-eval", "avibe-wt-eval")
+    assert commands == [
+        ["incus", "--project", project, "delete", instance, "--force"],
+        ["incus", "project", "delete", project],
+    ]
+
+
+def test_reconcile_reports_holds_on_every_observed_instance_without_an_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Untracked and misplaced instances must retain their holds in the inventory report."""
+    mapping_path, commands = reconcile_fixture(
+        tmp_path, monkeypatch, entries={}, projects=("avr-wt-eval",),
+        instances=tuple(
+            {
+                "name": "avibe-wt-eval", "project": project, "status": "Running",
+                "config": {
+                    "user.avibe-regression.hold.owner": owner,
+                    "user.avibe-regression.hold.reason": "Long evaluation",
+                    "user.avibe-regression.hold.since": "2026-10-20T12:00:00+00:00",
+                },
+            }
+            for project, owner in (("avr-wt-eval", "session-one"), ("default", "session-two"))
+        ),
+    )
+    before = mapping_path.read_bytes()
+    assert incus_regression.main(["reconcile", "--yes"]) == 0
+    out = capsys.readouterr().out
+    for project, owner in (("avr-wt-eval", "session-one"), ("default", "session-two")):
+        assert (
+            f"{project}/avibe-wt-eval: HELD: owner={owner}; "
+            "reason=Long evaluation; since=2026-10-20T12:00:00+00:00"
+        ) in out
+    assert "delete --target worktree --slug eval --yes" in out
+    assert "--ignore-hold" not in out
+    assert not any("delete" in command for command in commands)
+    assert mapping_path.read_bytes() == before
+
+
 def test_reconcile_reports_environments_incus_holds_without_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3261,6 +3390,7 @@ def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch:
             dry_run=False,
             remote=None,
             yes=True,
+            ignore_hold=False,
         )
     )
 
@@ -3270,6 +3400,7 @@ def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch:
         ["incus", "project", "delete", project],
     ]
     assert listings == [
+        (["incus", "project", "list", "--format", "json"], "Incus projects"),
         (["incus", "project", "list", "--format", "json"], "Incus projects"),
         (["incus", "list", "--all-projects", "--format", "json"], "Incus instances"),
     ]
@@ -3311,9 +3442,18 @@ def test_delete_keeps_worktree_metadata_until_absence_is_confirmed(
         ["incus", "list", "--all-projects", "--format", "json"],
     ]
     commands = []
+    preflight = [
+        listing_commands[0],
+        ["incus", "--project", row["project"], "list", "--format", "json"],
+    ]
 
     def run(command, **kwargs):
         assert incus_regression.target_run_in_flight(repo, None, row["project"])
+        if len(commands) < len(preflight):
+            assert command == preflight[len(commands)]
+            objects = [{"name": row["project"]}] if not commands else [{"name": row["instance"], "config": {}}]
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(objects))
         commands.append(command)
         if command in delete_commands:
             assert kwargs["check"] is False
@@ -3349,7 +3489,7 @@ def test_delete_keeps_worktree_metadata_until_absence_is_confirmed(
         listing_commands[:1] if inventory in {"project-list-fails", "unreadable-project-list"}
         else listing_commands
     )
-    assert commands == delete_commands + expected_listings
+    assert commands == preflight + delete_commands + expected_listings
     assert not incus_regression.target_run_in_flight(repo, None, row["project"])
     payload = json.loads(mapping_path.read_text(encoding="utf-8"))
     assert payload["worktrees"] == ({"another-worktree": other_row} if inventory == "absent" else rows)
@@ -3380,6 +3520,8 @@ def test_delete_against_a_remote_keeps_the_local_metadata(
     mapping_path.write_text(json.dumps({"schema_version": 1, "worktrees": {slug: row}}), encoding="utf-8")
 
     class RecordingRunner:
+        names, records = daemon_listing(row["project"], row["instance"])
+
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
@@ -3405,6 +3547,7 @@ def test_delete_against_a_remote_keeps_the_local_metadata(
             dry_run=False,
             remote="lab",
             yes=True,
+            ignore_hold=False,
         )
     )
 
@@ -3427,6 +3570,7 @@ def _delete_args(slug: str, **overrides) -> argparse.Namespace:
         "dry_run": False,
         "remote": None,
         "yes": True,
+        "ignore_hold": False,
     }
     fields.update(overrides)
     return argparse.Namespace(**fields)
@@ -5095,9 +5239,10 @@ def test_an_empty_remote_names_the_local_daemon_for_every_command() -> None:
     assert checked, "no subcommand accepts --remote"
 
     for name in checked:
+        required = ["--owner", "session", "--reason", "evaluation"] if name == "hold" else []
         for spelling in ("", "   "):
-            assert parser.parse_args([name, "--remote", spelling]).remote is None, name
-        assert parser.parse_args([name, "--remote", " lab "]).remote == "lab", name
+            assert parser.parse_args([name, *required, "--remote", spelling]).remote is None, name
+        assert parser.parse_args([name, *required, "--remote", " lab "]).remote == "lab", name
 
     # The consequence, at the reader that used to disagree with `remote_ref`.
     empty = parser.parse_args(["up", "--remote", ""])

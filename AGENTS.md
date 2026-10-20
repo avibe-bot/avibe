@@ -126,6 +126,10 @@ Hard rules:
   explicitly with
   `python3 scripts/incus_regression.py delete --target worktree --slug <slug> --yes`
   when merged, abandoned, or stale
+- before proposing or performing deletion of any regression environment, check
+  its hold with `status` or `reconcile`; if held, tell the user who holds it and
+  why, and do not offer a one-click delete. Long-running work must hold its
+  environment for as long as it runs.
 - `reconcile` reports every worktree environment held by Incus, including
   environments created outside the runner, and only forgets metadata for
   environments that are no longer present. It never deletes an environment.
