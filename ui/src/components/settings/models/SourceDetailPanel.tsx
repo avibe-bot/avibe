@@ -57,7 +57,7 @@ import {
 } from './mutationSettlement';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
-import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction } from './repair';
+import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction, wasBlocked } from './repair';
 import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
 import { SourceTestDialog } from './SourceTestDialog';
@@ -792,7 +792,7 @@ export const SourceDetailPanel: React.FC<{
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto">
           {capabilityFailure}
-          {state.key && (source.state.status === 'needs_action' || source.state.status === 'error') && <div className="model-hub-status-gold m-5 flex flex-col gap-2 rounded-lg border p-3" role="status">
+          {state.key && wasBlocked(source.state) && <div className="model-hub-status-gold m-5 flex flex-col gap-2 rounded-lg border p-3" role="status">
             <p className="font-semibold">{t(state.key, state.values)}</p>
             <p className="model-hub-tool-note">{t(source.state.detail_key ?? 'models.source.error.unclassified')}</p>
             {source.vendor === 'tavily' && source.state.detail_key === 'models.source.needs_action.spend_limit_reached' && <p className="model-hub-tool-note">{t('settings.models.searchServices.tavilyLimit')}</p>}
