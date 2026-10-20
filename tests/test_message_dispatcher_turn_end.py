@@ -14,11 +14,13 @@ when the Turn delivered none.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -229,6 +231,22 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
 
     def harness_run(self, run_id: str | None = None) -> dict:
         return self.runs.get_run(run_id or self.run_id)
+
+    @staticmethod
+    def agent_presentations() -> list[tuple[str, dict]]:
+        engine = create_sqlite_engine()
+        try:
+            with engine.connect() as conn:
+                return [
+                    (row.type, json.loads(row.metadata_json or "{}").get("presentation"))
+                    for row in conn.execute(
+                        select(messages.c.type, messages.c.metadata_json)
+                        .where(messages.c.session_id == SESSION, messages.c.author == "agent")
+                        .order_by(messages.c.created_at, messages.c.id)
+                    )
+                ]
+        finally:
+            engine.dispose()
 
     def pushed_texts(self) -> list[str]:
         return [push["body"] for push in _ScheduledPush.pushes]
@@ -503,6 +521,56 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(restarted.committed_turns), 1)
                 run = self.harness_run()
                 self.assertEqual((run["status"], run["result_text"] or ""), ("succeeded", expected))
+
+    async def test_each_message_records_and_follows_its_presentation_decision(self):
+        """Scenario: MESSAGE-DELIVERY-337: every message the dispatcher writes records the
+        presentation decision it executed (``metadata["presentation"]``): a Web reply
+        is a pushed transcript message, long narration keeps a muted ``interim`` copy
+        beside its Activity row, and the released ``output`` type stays a muted,
+        unpushed transcript row. The decision is what the dispatcher executes: a policy
+        that declines the push leaves the reply's row without one."""
+        with self.state():
+            controller = _Controller("avibe")
+            context = self.context()
+            await controller.emit_agent_message(context, "assistant", FIVE_LINES)
+            await controller.emit_agent_message(context, "result", FIRST, output=REPLY)
+            await controller.emit_agent_message(
+                context,
+                "output",
+                "Generated images:\n\n![a](/tmp/a.png)",
+                output=MessageOutput(completes_turn=False, completes_run=False, records_run_output=False),
+            )
+
+            recorded = {row_type: presentation for row_type, presentation in self.agent_presentations()}
+            self.assertEqual(
+                recorded,
+                {
+                    "assistant": {"policy": "default/1", "transcript": True, "muted": True, "web_push": False, "im": "log"},
+                    "interim": {"policy": "default/1", "transcript": True, "muted": True, "web_push": False, "im": "log"},
+                    "result": {"policy": "default/1", "transcript": True, "muted": False, "web_push": True, "im": "message"},
+                    "output": {"policy": "default/1", "transcript": True, "muted": True, "web_push": False, "im": "message"},
+                },
+            )
+            self.assertEqual(self.pushed_texts(), [FIRST])
+
+        class _NoPush:
+            id = "no-push/1"
+
+            def __init__(self, inner):
+                self.inner = inner
+
+            def decide(self, presentation):
+                return replace(self.inner.decide(presentation), policy=self.id, web_push=False)
+
+        with self.state():
+            controller = _Controller("avibe")
+            controller.dispatcher.presentation_policy = _NoPush(controller.dispatcher.presentation_policy)
+            await controller.emit_agent_message(self.context(), "result", FIRST, output=REPLY)
+
+            self.assertEqual(self.agent_rows(), [("result", FIRST)])
+            self.assertEqual(self.pushed_texts(), [])
+            [(_, presentation)] = self.agent_presentations()
+            self.assertEqual((presentation["policy"], presentation["web_push"]), ("no-push/1", False))
 
     async def test_a_reply_or_a_failure_keeps_its_type_attached_or_detached(self):
         """Scenario: MESSAGE-DELIVERY-334.
