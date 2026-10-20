@@ -522,6 +522,18 @@ scenarios:
       - tests/test_agent_output.py::test_each_event_maps_to_one_dispatch_call
       - tests/test_agent_output.py::test_an_event_cannot_contradict_its_lifecycle
       - tests/test_agent_output.py::test_an_emit_answers_with_its_delivery_receipt
+  - id: MESSAGE-DELIVERY-337
+    name: Every agent output with content gets one presentation decision from a replaceable policy (transcript row, muted, Web Push, outward, IM form), and an output without content is never asked about; the default policy holds the rules the dispatcher applied inline, unchanged (level, background visibility, the Web interim threshold, the catalog's Web Push flags, tool-call delivery, the concise status line, hidden types, editing, progress style), the dispatcher accepts only the default decision plus its allowed deltas (narration's Web transcript copy on or off, a declined Web Push), executes them in full, and refuses any other decision, and each output's record (a fixed, best-effort fact of its type) stores the decision under metadata.presentation
+    status: covered
+    kind: contract
+    layer: contract
+    test:
+      - tests/test_presentation.py::test_the_default_policy_decides_each_rule
+      - tests/test_presentation.py::test_only_the_default_decision_and_its_allowed_deltas_are_accepted
+      - tests/test_presentation.py::test_the_interim_threshold_counts_lines_and_display_width
+      - tests/test_presentation.py::test_a_decision_is_recorded_as_stable_metadata
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_each_message_records_and_follows_its_presentation_decision
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_each_allowed_delta_is_what_the_dispatcher_executes
   - id: MESSAGE-DELIVERY-338
     name: Every input source (Web composer, IM, Harness, Show annotation, failure retry, agent-initiated) is normalized into one envelope and admitted through one entry; one default admission policy holds each source's released priority (the OpenCode subagent exception, an Agent Run's --queue and legacy send_now, the scheduled P3 included) and the admitting history event records which policy decided and why
     status: covered

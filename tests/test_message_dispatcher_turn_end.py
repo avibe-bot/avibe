@@ -14,11 +14,13 @@ when the Turn delivered none.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
 import unittest
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -31,6 +33,7 @@ from core.citations import CitationSource, register_citations
 from core import message_dispatcher as dispatcher_module
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput, stop_output_for, terminal_turn_output
+from core.presentation import ImDelivery
 from core.session_turns import SessionTurnManager
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.im import MessageContext
@@ -51,6 +54,7 @@ from tests.test_message_dispatcher_status_bubble import (
 SESSION = "ses_turn_end"
 NOW = "2026-10-19T03:00:00Z"
 FIRST = "The cache is shared; two writers race. Fixed in #12."
+SHOWN = {"policy": "default/1", "outward": True}
 SECOND = "Yes, the fix also covers the CLI path."
 REPLY = MessageOutput(completes_turn=False, completes_run=False)
 
@@ -229,6 +233,37 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
 
     def harness_run(self, run_id: str | None = None) -> dict:
         return self.runs.get_run(run_id or self.run_id)
+
+    @staticmethod
+    def agent_metadata() -> list[str]:
+        engine = create_sqlite_engine()
+        try:
+            with engine.connect() as conn:
+                return list(
+                    conn.execute(
+                        select(messages.c.metadata_json)
+                        .where(messages.c.session_id == SESSION, messages.c.author == "agent")
+                        .order_by(messages.c.created_at, messages.c.id)
+                    ).scalars()
+                )
+        finally:
+            engine.dispose()
+
+    @staticmethod
+    def agent_presentations() -> list[tuple[str, dict]]:
+        engine = create_sqlite_engine()
+        try:
+            with engine.connect() as conn:
+                return [
+                    (row.type, json.loads(row.metadata_json or "{}").get("presentation"))
+                    for row in conn.execute(
+                        select(messages.c.type, messages.c.metadata_json)
+                        .where(messages.c.session_id == SESSION, messages.c.author == "agent")
+                        .order_by(messages.c.created_at, messages.c.id)
+                    )
+                ]
+        finally:
+            engine.dispose()
 
     def pushed_texts(self) -> list[str]:
         return [push["body"] for push in _ScheduledPush.pushes]
@@ -503,6 +538,161 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(restarted.committed_turns), 1)
                 run = self.harness_run()
                 self.assertEqual((run["status"], run["result_text"] or ""), ("succeeded", expected))
+
+    async def test_each_message_records_and_follows_its_presentation_decision(self):
+        """Scenario: MESSAGE-DELIVERY-337: every message the dispatcher writes records the
+        presentation decision it executed (``metadata["presentation"]``): a Web reply
+        is a pushed transcript message, long narration keeps a muted ``interim`` copy
+        beside its Activity row, and the released ``output`` type stays a muted,
+        unpushed transcript row. The decision is what the dispatcher executes: a policy
+        that declines the push leaves the reply's row without one."""
+        with self.state():
+            controller = _Controller("avibe")
+            context = self.context()
+            await controller.emit_agent_message(context, "assistant", FIVE_LINES)
+            await controller.emit_agent_message(context, "result", FIRST, output=REPLY)
+            await controller.emit_agent_message(
+                context,
+                "output",
+                "Generated images:\n\n![a](/tmp/a.png)",
+                output=MessageOutput(completes_turn=False, completes_run=False, records_run_output=False),
+            )
+
+            recorded = {row_type: presentation for row_type, presentation in self.agent_presentations()}
+            self.assertEqual(
+                recorded,
+                {
+                    "assistant": {**SHOWN, "transcript": True, "muted": True, "web_push": False, "im": "log"},
+                    "interim": {**SHOWN, "transcript": True, "muted": True, "web_push": False, "im": "log"},
+                    "result": {**SHOWN, "transcript": True, "muted": False, "web_push": True, "im": "message"},
+                    "output": {**SHOWN, "transcript": True, "muted": True, "web_push": False, "im": "message"},
+                },
+            )
+            self.assertEqual(self.pushed_texts(), [FIRST])
+
+        class _NoPush:
+            id = "no-push/1"
+
+            def __init__(self, inner):
+                self.inner = inner
+
+            def decide(self, presentation):
+                return replace(self.inner.decide(presentation), policy=self.id, web_push=False)
+
+        with self.state():
+            controller = _Controller("avibe")
+            controller.dispatcher.presentation_policy = _NoPush(controller.dispatcher.presentation_policy)
+            await controller.emit_agent_message(self.context(), "result", FIRST, output=REPLY)
+
+            self.assertEqual(self.agent_rows(), [("result", FIRST)])
+            self.assertEqual(self.pushed_texts(), [])
+            [(_, presentation)] = self.agent_presentations()
+            self.assertEqual((presentation["policy"], presentation["web_push"]), ("no-push/1", False))
+
+    async def test_each_allowed_delta_is_what_the_dispatcher_executes(self):
+        """Scenario: MESSAGE-DELIVERY-337: with the real dispatcher and store, a policy that
+        makes one allowed delta to the default decision changes exactly that behavior and
+        nothing else: the reply's push declined, narration's muted copy kept or dropped.
+        Any other change (the reply kept local, the log line sent nowhere or as the status
+        line, the reply not sent) raises before anything is written or sent. An output
+        without content is never asked about."""
+
+        def flip(**fields):
+            class _Flip:
+                id = "flip/1"
+
+                def __init__(self, inner):
+                    self.inner = inner
+
+                def decide(self, presentation):
+                    decision = self.inner.decide(presentation)
+                    if presentation.message_type != fields["kind"]:
+                        return decision
+                    changes = {key: value for key, value in fields.items() if key != "kind"}
+                    return replace(decision, policy=self.id, **changes)
+
+            return _Flip
+
+        async def reply(controller, context):
+            await controller.emit_agent_message(context, "result", FIRST, output=REPLY)
+
+        async def short_narration(controller, context):
+            await controller.emit_agent_message(context, "assistant", "Checking the lock.")
+
+        async def long_narration(controller, context):
+            await controller.emit_agent_message(context, "assistant", FIVE_LINES)
+
+        cases = {
+            "the push declined": (reply, flip(kind="result", web_push=False), {"pushes"}),
+            "a copy for short narration": (
+                short_narration,
+                flip(kind="assistant", transcript=True, muted=True),
+                {"rows", "published"},
+            ),
+            "no copy for long narration": (
+                long_narration,
+                flip(kind="assistant", transcript=False, muted=False),
+                {"rows", "published"},
+            ),
+        }
+
+        async def observe(emit, policy=None):
+            with self.state():
+                controller = _Controller("avibe")
+                controller.get_progress_style_for_context = lambda _context: "verbose"
+                if policy is not None:
+                    controller.dispatcher.presentation_policy = policy(controller.dispatcher.presentation_policy)
+                await emit(controller, self.context())
+                rows = self.agent_rows()
+                return {
+                    "rows": rows,
+                    "pushes": self.pushed_texts(),
+                    "sent": [text for _, _, text, _ in controller.im_client.sent],
+                    "published": [event for event, _ in self.published if event in {"message.new", "inbox.session.updated"}],
+                    "suppressed": any(
+                        bool(json.loads(metadata or "{}").get("delivery_suppressed"))
+                        for metadata in self.agent_metadata()
+                    ),
+                    "status_line": bool(controller.dispatcher._concise_bubble_keys),
+                }
+
+        for name, (emit, policy, changed) in cases.items():
+            with self.subTest(name):
+                default, flipped = await observe(emit), await observe(emit, policy)
+                self.assertEqual(
+                    {key for key in default if default[key] != flipped[key]}, changed, (default, flipped)
+                )
+
+        class _NeverAsked:
+            id = "never/1"
+
+            def decide(self, presentation):
+                raise AssertionError(f"a policy was asked about an output without content: {presentation!r}")
+
+        with self.subTest("an output without content is never asked about"), self.state():
+            controller = _Controller("avibe")
+            controller.dispatcher.presentation_policy = _NeverAsked()
+            await controller.emit_agent_message(self.context(), "assistant", "  ")
+            await controller.emit_agent_message(self.context(), "result", FIRST, output=REPLY, level="silent")
+            self.assertEqual((self.agent_rows(), self.pushed_texts(), controller.im_client.sent), ([], [], []))
+
+        rejected = {
+            "the reply kept local": (
+                reply,
+                flip(kind="result", outward=False, web_push=False, im=ImDelivery.NONE),
+            ),
+            "the reply not sent": (reply, flip(kind="result", im=ImDelivery.NONE)),
+            "the log line sent nowhere": (short_narration, flip(kind="assistant", im=ImDelivery.NONE)),
+            "the log line as the status line": (short_narration, flip(kind="assistant", im=ImDelivery.STATUS)),
+        }
+        for name, (emit, policy) in rejected.items():
+            with self.subTest(name), self.state():
+                controller = _Controller("avibe")
+                controller.get_progress_style_for_context = lambda _context: "verbose"
+                controller.dispatcher.presentation_policy = policy(controller.dispatcher.presentation_policy)
+                with self.assertRaises(ValueError):
+                    await emit(controller, self.context())
+                self.assertEqual((self.agent_rows(), self.pushed_texts(), controller.im_client.sent), ([], [], []))
 
     async def test_a_reply_or_a_failure_keeps_its_type_attached_or_detached(self):
         """Scenario: MESSAGE-DELIVERY-334.

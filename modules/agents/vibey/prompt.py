@@ -17,7 +17,7 @@ framing. The backend's built-in Agent is Vibey, Avibe's own agent
 (``VIBEY_PREAMBLE``); any other Agent on the backend gets ``AGENT_PREAMBLE``, and its
 own definition, in the Avibe sections, says who it is. ``FINAL_REPLY_RULE`` is
 Avibe's too: text between tool calls reaches the user only above the shared interim
-threshold (``ConsolidatedMessageDispatcher._is_interim_worthy``).
+threshold (``core.presentation.interim_worthy``).
 """
 
 from __future__ import annotations

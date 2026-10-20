@@ -7,12 +7,12 @@ embedded in ``Controller.emit_agent_message``.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import logging
 import re
 import tempfile
 import time
-import unicodedata
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -35,6 +35,13 @@ from core.message_mirror import (
     delivered_committed_row,
     persist_agent_message,
     persist_silent_terminal,
+)
+from core.presentation import (
+    DefaultPresentationPolicy,
+    ImDelivery,
+    PresentationInput,
+    PresentationPolicy,
+    validate_decision,
 )
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
@@ -77,6 +84,9 @@ from vibe.i18n import t as i18n_t
 from vibe.message_types import TRANSCRIPT_COPY_KEY
 
 logger = logging.getLogger(__name__)
+
+# The types the presentation policy decides by name; any other is shown as narration.
+_PRESENTED_TYPES = frozenset({"result", "output", "notify", "system", "assistant", "toolcall"})
 
 # Harness prompt echo (``emit_harness_prompt``). The echo is context for the reply
 # that follows, not the payload, so a long generated prompt is cut rather than split
@@ -313,8 +323,6 @@ _ACTION_TIME_HINT_S = 10.0
 # above a per-step "now doing X" preamble, which stays in Activity. Length is
 # display width, a wide (CJK) character counting two columns, so one bound
 # means about 250 Chinese or 500 Latin characters.
-_INTERIM_MIN_LINES = 5
-_INTERIM_MIN_WIDTH = 500
 # Name the result attachment gets when a platform has no native Markdown upload
 # and the full text has to ride its ordinary file path instead.
 _RESULT_DOCUMENT_NAME = "result.md"
@@ -422,6 +430,9 @@ class ConsolidatedMessageDispatcher:
         # first use per turn (see ``_concise_progress_style``), dropped in
         # ``_drop_status_keys``.
         self._turn_progress_style: dict[str, str] = {}
+        # Decides how each output is shown (``core.presentation``); the seam a later
+        # policy replaces.
+        self.presentation_policy: PresentationPolicy = DefaultPresentationPolicy()
         # Harness deliveries whose prompt has already been echoed to IM, kept as a
         # bounded FIFO (see ``emit_harness_prompt``). Per-process only: a restart
         # replay writes a new Delivery anyway, and a duplicated echo is cosmetic
@@ -2239,6 +2250,62 @@ class ConsolidatedMessageDispatcher:
             )
             return []
 
+    def _presentation_input(
+        self,
+        context: MessageContext,
+        *,
+        im_client: Any,
+        settings_manager: Any,
+        settings_key: str,
+        canonical_type: str,
+        communication_type: str,
+        level: str,
+        text: Optional[str],
+        raw_text: Optional[str],
+        citations: Optional[CitationBundle],
+        output_semantics: MessageOutput,
+        background: bool,
+    ) -> tuple[PresentationInput, Any]:
+        """The presentation policy's input for one output, and the narration bubble it measured.
+
+        Everything here is what the dispatcher has always consulted, read the same
+        way: the target's platform and tool-call delivery, the channel's editing,
+        and, only when the policy asks, its hidden types and the turn's progress
+        style. A type that is neither an answer nor a process-log type is shown as
+        narration, as the log path has always treated it.
+        """
+
+        target_context = self._get_target_context(context)
+        kind = canonical_type if canonical_type in _PRESENTED_TYPES else "assistant"
+        log_kind = kind in {"system", "assistant", "toolcall"}
+        narration = None
+        if kind == "assistant" and level != "process" and not background and target_context.platform == "avibe":
+            # The bubble is the agent's words like a reply, so it gets the same
+            # button parse, and only the remaining body decides if it is one.
+            narration = process_reply(
+                raw_text,
+                include_quick_replies=getattr(self.controller.config, "reply_enhancements", True),
+                allow_unseparated_quick_replies=self._supports_quick_replies(target_context),
+                keep_file_links=True,
+            )
+        presentation = PresentationInput(
+            message_type=kind,
+            row_type=communication_type,
+            level=level,
+            platform=target_context.platform,
+            background=background,
+            body=text or "",
+            log_chunk=strip_file_links(materialize_citations(text, citations) or "").strip() if log_kind else "",
+            narration_body=narration.text if narration is not None else None,
+            metadata=output_semantics.metadata,
+            tools_deliverable=self._supports_toolcall_delivery(target_context) if kind == "toolcall" else True,
+            log_editable=self._supports_message_editing(im_client, context) if log_kind else True,
+            # Read once at most, however often the policy and the envelope check ask.
+            hidden=functools.cache(lambda: settings_manager.is_message_type_hidden(settings_key, kind)),
+            progress_style=functools.cache(lambda: self._concise_progress_style(context)),
+        )
+        return presentation, narration
+
     @staticmethod
     def _writes_on_delivery(canonical_type: str, output_semantics: MessageOutput) -> bool:
         """Whether this output's derived writes wait for its delivery evidence.
@@ -2849,14 +2916,6 @@ class ConsolidatedMessageDispatcher:
         while len(self._harness_prompt_echo_order) > HARNESS_PROMPT_ECHO_MEMORY:
             self._harness_prompt_echo_keys.discard(self._harness_prompt_echo_order.pop(0))
 
-    @staticmethod
-    def _is_interim_worthy(text: Optional[str]) -> bool:
-        body = (text or "").strip()
-        width = sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in body)
-        if width >= _INTERIM_MIN_WIDTH:
-            return True
-        return sum(1 for line in body.splitlines() if line.strip()) >= _INTERIM_MIN_LINES
-
     async def emit_agent_message(
         self,
         context: MessageContext,
@@ -3058,12 +3117,29 @@ class ConsolidatedMessageDispatcher:
                         "output_provenance": output_semantics.provenance(context),
                     },
                 )
-        # ``level="silent"`` is the explicit visibility control (orthogonal to type):
-        # the message already settled the dot above (for a terminal result), so here
-        # we release the SSE waiter and return BEFORE any delivery / persistence /
-        # streaming — no user-facing bubble, regardless of body. An empty/stripped
-        # body (e.g. a ``<silent>`` directive reduced to nothing) is silent too.
-        if level == "silent" or not text or not text.strip():
+        # How an output with content is shown is decided once, by the presentation
+        # policy (``core.presentation``); every branch below executes that decision,
+        # and a decision outside what they can execute is refused rather than half-run.
+        presentation, narration = self._presentation_input(
+            context,
+            im_client=im_client,
+            settings_manager=settings_manager,
+            settings_key=settings_key,
+            canonical_type=canonical_type,
+            communication_type=communication_type,
+            level=level,
+            text=text,
+            raw_text=raw_text,
+            citations=citations,
+            output_semantics=output_semantics,
+            background=bool((context.platform_specific or {}).get("suppress_delivery")),
+        )
+        # Nothing to show (``level="silent"``, or a body that is empty once silent
+        # directives are stripped) is a fact of the output, not a decision: no policy
+        # is asked, nothing is recorded or delivered, and only its lifecycle runs. The
+        # message already settled the dot above (for a terminal result), so release
+        # the SSE waiter and return BEFORE any delivery, persistence, or streaming.
+        if presentation.content_free:
             async with self._terminal_emit(
                 context,
                 output_semantics,
@@ -3157,15 +3233,16 @@ class ConsolidatedMessageDispatcher:
                     settle_invisible_output()
                 return None
 
+        decision = validate_decision(presentation, self.presentation_policy.decide(presentation))
+        # Not outward: local history only, for any context, as a background Session's.
+        suppresses_outward_delivery = not decision.outward
+
         # Resolve the delivery target once. Routed / post_to / thread replies
         # land in a different channel than the source context, and the persisted
         # row must follow the reply to where it was actually delivered (IM
         # cross-platform history) — persist_agent_message attributes IM rows to
         # this target's scope.
         target_context = self._get_target_context(context)
-        suppresses_outward_delivery = bool(
-            (context.platform_specific or {}).get("suppress_delivery")
-        )
         output_metadata = output_semantics.provenance(context) if output is not None else None
         if suppresses_outward_delivery:
             # A background transcript row is local history, not an outward receipt.
@@ -3345,7 +3422,7 @@ class ConsolidatedMessageDispatcher:
         # and the persisted row is the inbox/transcript source of truth.
         persists_without_delivery = target_context.platform == "avibe"
 
-        if suppresses_outward_delivery:
+        if not decision.outward:
             async with self._terminal_emit(
                 context,
                 output_semantics,
@@ -3387,6 +3464,7 @@ class ConsolidatedMessageDispatcher:
                             native_message_id=native_output_id,
                             citations=citations,
                             existing_row_id=existing_row_id,
+                            presentation=decision,
                             **background_reply,
                         )
                     else:
@@ -3399,6 +3477,7 @@ class ConsolidatedMessageDispatcher:
                             native_message_id=native_output_id,
                             citations=citations,
                             existing_row_id=existing_row_id,
+                            presentation=decision,
                             **background_reply,
                         )
                 else:
@@ -3410,6 +3489,7 @@ class ConsolidatedMessageDispatcher:
                         native_message_id=native_output_id,
                         citations=citations,
                         existing_row_id=existing_row_id,
+                        presentation=decision,
                     )
                 # The return value is the delivery evidence, and a background output's
                 # receipt is its local row: no row, no id (never a synthetic one), so a
@@ -3512,6 +3592,7 @@ class ConsolidatedMessageDispatcher:
                     native_message_id=native_output_id,
                     error_sink=persist_errors,
                     citations=citations,
+                    presentation=decision,
                 )
                 if delivery is not None:
                     delivery.persisted_row = persisted_notify
@@ -3817,6 +3898,7 @@ class ConsolidatedMessageDispatcher:
                             native_message_id=native_output_id,
                             citations=citations,
                             existing_row_id=existing_row_id,
+                            presentation=decision,
                             **delivered_reply,
                         )
                     else:
@@ -3829,6 +3911,7 @@ class ConsolidatedMessageDispatcher:
                             native_message_id=native_output_id,
                             citations=citations,
                             existing_row_id=existing_row_id,
+                            presentation=decision,
                             **delivered_reply,
                         )
 
@@ -4039,40 +4122,20 @@ class ConsolidatedMessageDispatcher:
             )
             return None
 
-        # Web only: substantial narration also lands as a transcript-visible
+        # Web only: substantial narration also lands as a transcript-visible, muted
         # ``interim`` row. Every backend emits ``assistant`` only once later output
         # has proved the text is not the Turn's final answer, so this never
-        # duplicates the result. ``level="process"`` keeps a row log-only (for
-        # example reasoning summaries).
+        # duplicates the result.
         interim_row = None
-        if (
-            canonical_type == "assistant"
-            and level != "process"
-            and target_context.platform == "avibe"
-        ):
-            # The bubble is the agent's words like a reply, so it gets the same
-            # button parse, and only the remaining body decides if it is one.
-            interim = process_reply(
-                raw_text,
-                include_quick_replies=getattr(
-                    self.controller.config, "reply_enhancements", True
-                ),
-                allow_unseparated_quick_replies=self._supports_quick_replies(
-                    target_context
-                ),
-                keep_file_links=True,
+        if decision.transcript and narration is not None:
+            interim_row = persist_agent_message(
+                target_context,
+                "interim",
+                narration.text,
+                quick_replies=[b.text for b in _written_buttons(narration.buttons, citations)] or None,
+                citations=citations,
+                presentation=decision,
             )
-            if self._is_interim_worthy(interim.text):
-                interim_row = persist_agent_message(
-                    target_context,
-                    "interim",
-                    interim.text,
-                    quick_replies=[
-                        b.text for b in _written_buttons(interim.buttons, citations)
-                    ]
-                    or None,
-                    citations=citations,
-                )
         # Persist the intermediate log row BEFORE the mute filter so muted
         # assistant / tool_call messages still land in the store (product
         # requirement: the process log is complete even when a channel hides it).
@@ -4085,6 +4148,7 @@ class ConsolidatedMessageDispatcher:
             metadata={TRANSCRIPT_COPY_KEY: "interim"} if interim_row else None,
             existing_row_id=existing_row_id,
             hosted=hosted if canonical_type == "toolcall" else None,
+            presentation=decision,
         )
 
         # The row above is the only copy of an intermediate message that carries a
@@ -4093,62 +4157,36 @@ class ConsolidatedMessageDispatcher:
         # the citations into ``text`` once here rather than at each of them.
         text = materialize_citations(text, citations)
 
-        # Target platform toolcall-delivery gate stays in FRONT of the concise
-        # shortcut: when a turn is routed via ``delivery_override`` to a target
-        # that cannot deliver toolcalls (e.g. the WeChat override flow), the
-        # toolcall stays persisted-only and must NOT attempt a status bubble.
-        if canonical_type == "toolcall" and not self._supports_toolcall_delivery(target_context):
-            logger.info(
-                "Skipping toolcall delivery for platform %s; persisted local process log only.",
-                self._get_platform(target_context),
-            )
+        if decision.im is ImDelivery.NONE:
+            if decision.reason == "tools_unsupported":
+                # A turn routed to a target that cannot deliver tool calls (the WeChat
+                # override flow) keeps them persisted only, without a status bubble.
+                logger.info(
+                    "Skipping toolcall delivery for platform %s; persisted local process log only.",
+                    self._get_platform(target_context),
+                )
+            elif decision.reason == "hidden":
+                preview = text if len(text) <= 500 else f"{text[:500]}…"
+                logger.info(
+                    "Skipping %s message for settings %s (hidden). Preview: %s",
+                    canonical_type,
+                    settings_key,
+                    preview,
+                )
             return None
 
-        # The concise status bubble is a single ephemeral status line, NOT the
-        # verbose per-message log that ``show_message_types`` governs. When a
-        # status-bubble platform (Slack/Discord) is in ``concise`` style, render
-        # tool-step / muttering emits into the bubble regardless of the
-        # ``is_message_type_hidden`` visibility toggle below: persistence already
-        # happened above so nothing is lost, and users who want zero process
-        # output use ``off``. This bypasses ONLY the visibility toggle — the
-        # target toolcall-delivery gate above still applies. ``system`` emits
-        # carry no status label and stay on the gated path.
-        if canonical_type in {"assistant", "toolcall"} and self._concise_progress_style(context) == "concise":
-            # ``_render_concise_status`` renders a footer-only bubble when the
-            # stripped body is empty but ``status_label`` is present, so do not
-            # drop empty-body toolcall emits here.
-            concise_chunk = strip_file_links(text).strip()
-            return await self._render_concise_status(
-                im_client, context, concise_chunk, status_label=status_label
-            )
-
-        if settings_manager.is_message_type_hidden(settings_key, canonical_type):
-            preview = text if len(text) <= 500 else f"{text[:500]}…"
-            logger.info(
-                "Skipping %s message for settings %s (hidden). Preview: %s",
-                canonical_type,
-                settings_key,
-                preview,
-            )
-            return None
-
+        # The concise status bubble (Slack/Discord) is one replace-not-append line
+        # that is later edited into the result. ``_render_concise_status`` renders a
+        # footer-only bubble when the stripped body is empty but ``status_label`` is
+        # present, so an empty-body tool call still updates it.
         chunk = strip_file_links(text).strip()
+        if decision.im is ImDelivery.STATUS:
+            return await self._render_concise_status(im_client, context, chunk, status_label=status_label)
 
-        if not chunk:
-            return None
-
+        # ``LOG``: one message per output where the platform cannot edit one, else
+        # the turn's consolidated, appended log (the verbose style).
         if not self._supports_message_editing(im_client, context):
             return await self._send_unconsolidated_log_message(im_client, context, chunk)
-
-        # Concise status bubble (Slack/Discord): one replace-not-append line that
-        # is later edited into the result. ``off`` shows no process bubble at all
-        # (typing + final result only). ``verbose`` falls through to the legacy
-        # append/split consolidation below (and is the path for all other platforms).
-        progress_style = self._concise_progress_style(context)
-        if progress_style == "off":
-            return None
-        if progress_style == "concise":
-            return await self._render_concise_status(im_client, context, chunk, status_label=status_label)
 
         consolidated_key = self._get_consolidated_message_key(context)
         lock = self._get_consolidated_message_lock(consolidated_key)

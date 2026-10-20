@@ -2,8 +2,9 @@
 
 Status: approved by the owner (cyhhao), 2026-10-19. PR 1 (merged): shared
 contract, Vibey, and Claude's pre-steer phase typed as a reply. PR 2a (merged):
-Codex and OpenCode on the reply rule, and rule 5 owned by the dispatcher. PR 2b:
-typed output events. Later: see Next steps.
+Codex and OpenCode on the reply rule, and rule 5 owned by the dispatcher. PR 2b
+(merged): typed output events. PR 3: the presentation decision point. Later: see
+Next steps.
 
 ## Background
 
@@ -329,7 +330,26 @@ Approved by the owner, in this order:
    point per output event: transcript or not, muted, push, IM delivery.
    Today's rules move into it unchanged as the default policy: the interim
    length threshold, hidden types, IM concise mode, `suppress_delivery`. The
-   decision is recorded on the message.
+   decision is recorded on the message. Shape (`core/presentation.py`): the
+   dispatcher builds a `PresentationInput` per output (its type, `level`,
+   target platform, background, body, and, read only when the policy asks,
+   the channel's hidden types and the turn's progress style), asks its
+   `presentation_policy`, and executes the `PresentationDecision` (`transcript`,
+   `muted`, `web_push`, `outward`, `im`: none, status, log or message). The
+   dispatcher accepts only the default decision for the same output plus
+   allowed deltas, each executed in full: narration's Web transcript copy (its
+   muted `interim` bubble) on or off, and a declined Web Push; any other
+   difference is refused. A later delta is added on its own, with its executor
+   support and tests, in the change that needs it. An output without content
+   (`level="silent"` or an empty body) is a fact of the input, not a decision:
+   no policy is asked, and only its lifecycle runs. Whether an output has a
+   record is a fixed, best-effort fact of its type (a `messages` row, a tool
+   call's `agent_events` trace event, none for `system`), not a decision.
+   `DefaultPresentationPolicy` (`default/1`) is the only policy; a later one (a
+   decision model, or one that wraps the default) replaces it through the same
+   protocol. Each record stores the decision under `metadata["presentation"]`
+   (additive; released readers ignore it). Vibey's
+   generated-images fallback goes through it with its released `output` type.
 3. PR 4, structural only with no behavior change. One admission entry for
    every input source: Web composer, IM, Harness, Show annotation, failure
    retry, agent-initiated. Each input is normalized to sender, kind and
