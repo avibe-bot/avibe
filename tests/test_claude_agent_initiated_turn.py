@@ -32,6 +32,7 @@ from modules.claude_sdk_compat import (
     TextBlock,
     ToolUseBlock,
 )
+from core.agent_output import DeliveryReceipt
 from core.controller import Controller
 from core.message_context import resolve_turn_sink_key
 from core.message_output import MessageOutput, terminal_output_for
@@ -366,7 +367,7 @@ def _dispatcher_owned_emit(service: AgentService, *, message_id="message-id"):
                 output,
                 accepted_message_exists=True,
             )
-        return message_id
+        return DeliveryReceipt(message_id)
 
     return AsyncMock(side_effect=emit)
 
@@ -803,7 +804,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 accepted_message_exists=True,
             )
             service.release_runtime_turn(ctx)
-            return "message-id"
+            return DeliveryReceipt("message-id")
 
         agent.emit_result_message = AsyncMock(side_effect=_emit_result)
         await agent._receive_messages(
@@ -1161,7 +1162,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             retry_succeeded.set()
-            return "message-id"
+            return DeliveryReceipt("message-id")
 
         agent.emit_result_message = AsyncMock(side_effect=emit_result)
 
@@ -1228,7 +1229,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         )
         retained = agent._detached_phase(composite_key)
         agent._classify_output_record(retained, context, text="retained payload")
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
         assistant_seen = asyncio.Event()
         release_result = asyncio.Event()
 
@@ -1314,7 +1315,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             attempts.append((text, kwargs["output"]))
             if not accept.is_set():
                 raise RuntimeError("transport temporarily unavailable")
-            return "accepted"
+            return DeliveryReceipt("accepted")
 
         agent.emit_result_message = AsyncMock(side_effect=emit)
 
@@ -1704,7 +1705,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         async def _emit_result(context, _text, *, request=None, output=None, **_kwargs):
             semantics = output or terminal_output_for(request)
             emitted_provenance.append(semantics.provenance(context))
-            return "message-id"
+            return DeliveryReceipt("message-id")
 
         agent.emit_result_message = AsyncMock(side_effect=_emit_result)
         composite_key = "session-foreground-bash:/tmp/work"
@@ -1829,7 +1830,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                     output,
                     accepted_message_exists=True,
                 )
-            return "message-id"
+            return DeliveryReceipt("message-id")
 
         agent.emit_result_message = AsyncMock(side_effect=emit_result)
 
@@ -1934,7 +1935,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             if attempts == 1:
                 raise RuntimeError("temporary delivery failure")
             retry_succeeded.set()
-            return "message-id"
+            return DeliveryReceipt("message-id")
 
         agent.emit_result_message = AsyncMock(side_effect=emit_result)
 
@@ -2106,12 +2107,12 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             output = kwargs["output"]
             attempts.append((text, output))
             if not allow_success.is_set():
-                return None
+                return DeliveryReceipt(None)
             service.activities.settle_completed_output_batch(
                 output,
                 accepted_message_exists=True,
             )
-            return f"message-{len(attempts)}"
+            return DeliveryReceipt(f"message-{len(attempts)}")
 
         agent.emit_result_message = AsyncMock(side_effect=emit_result)
         class _Client:
@@ -2207,12 +2208,12 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         async def emit_result(_context, text, **kwargs):
             attempts.append(text)
             if not allow_success.is_set():
-                return None
+                return DeliveryReceipt(None)
             service.activities.settle_completed_output_batch(
                 kwargs["output"],
                 accepted_message_exists=True,
             )
-            return "message-id"
+            return DeliveryReceipt("message-id")
 
         agent.emit_result_message = AsyncMock(side_effect=emit_result)
 
@@ -2314,7 +2315,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 kwargs["output"],
                 accepted_message_exists=True,
             )
-            return "message-id"
+            return DeliveryReceipt("message-id")
 
         agent.emit_result_message = AsyncMock(side_effect=emit_result)
 
@@ -2420,7 +2421,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
 
                 return _iterate()
 
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
         receiver = asyncio.create_task(
             agent._receive_messages(
                 _Client(),
@@ -3560,7 +3561,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         record = agent._retain_activity_output_record(
             composite_key, [activity], text="Full background result",
         )
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
 
         should_retry = await agent._flush_detached_activity_output(composite_key, context)
 
@@ -3749,7 +3750,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
                 metadata={"summary": f"{activity_id} finished"},
                 expects_output=True,
             )
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
 
         should_retry = await agent._flush_completed_activity_outputs(
             composite_key,
@@ -3834,7 +3835,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             metadata={"summary": "Background verification finished"},
             expects_output=True,
         )
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
 
         should_retry = await agent._flush_completed_activity_outputs(
             composite_key,
@@ -3891,14 +3892,14 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
             nonlocal emit_attempts
             emit_attempts += 1
             if emit_attempts == 1:
-                return None
+                return DeliveryReceipt(None)
             self.assertTrue(
                 service.activities.settle_completed_output_batch(
                     kwargs["output"],
                     accepted_message_exists=True,
                 )
             )
-            return "delivered-message-id"
+            return DeliveryReceipt("delivered-message-id")
 
         agent.emit_result_message = AsyncMock(side_effect=emit_result)
         agent._remove_result_pending_reaction = AsyncMock()
@@ -4560,7 +4561,7 @@ class ReceiverOpensAgentInitiatedTurnTests(unittest.IsolatedAsyncioTestCase):
         )
         # A real turn is in flight: one pending request already enqueued.
         agent._pending_requests[composite_key] = [SimpleNamespace(context=context)]
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
 
         await agent._receive_messages(
             _one_result_client(),

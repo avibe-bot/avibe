@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Collection, Mapping
 
 from vibe.i18n import t as i18n_t
+from core.agent_output import Narration, Reply, ToolActivity, emit_output
 from core.backend_failure import emit_backend_failure
 from core.message_output import MessageOutput
 from core.citations import (
@@ -631,28 +632,26 @@ class CodexEventHandler:
         level: str = "normal",
         output_key: str | None = None,
     ) -> None:
-        await self._agent.controller.emit_agent_message(
-            request.context,
-            role,
-            text,
-            parse_mode=parse_mode or "markdown",
+        event: Reply | Narration | ToolActivity
+        if role == _REPLY_ROLE:
             # A reply that does not end the Turn, identified by its item id so two
-            # replies with the same text stay two; narration keeps the call it had.
-            **(
-                {
-                    "output": MessageOutput(
-                        completes_turn=False, completes_run=False, idempotency_key=output_key
-                    )
-                }
-                if role == _REPLY_ROLE
-                else {}
-            ),
-            # Forwarded only when non-default, like ``citations`` below.
-            **({"level": level} if level != "normal" else {}),
-            # Forwarded only when there is a sidecar, so a message without
-            # citations keeps the call it always had.
-            **({"citations": citations} if citations else {}),
-        )
+            # replies with the same text stay two.
+            event = Reply(
+                text or "",
+                parse_mode=parse_mode or "markdown",
+                citations=citations,
+                output=MessageOutput(completes_turn=False, completes_run=False, idempotency_key=output_key),
+            )
+        elif role == "toolcall":
+            event = ToolActivity(text or "", parse_mode=parse_mode or "markdown", citations=citations)
+        else:
+            event = Narration(
+                text or "",
+                parse_mode=parse_mode or "markdown",
+                process_only=level == "process",
+                citations=citations,
+            )
+        await emit_output(self._agent.controller, request.context, event)
 
     async def _drain_narration(
         self, turn_state: CodexTurnState | None, *, force: bool = False

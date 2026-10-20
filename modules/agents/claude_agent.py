@@ -14,12 +14,20 @@ from core.handlers.session_handler import (
     ClaudeInputNotSentError,
     ClaudeSessionNotFoundError,
 )
+from core.agent_output import (
+    DeliveryReceipt,
+    Narration,
+    Notice,
+    Reply,
+    ToolActivity,
+    TurnEnd,
+    TurnOutcome,
+    emit_output,
+)
 from core.message_dispatcher import ActivityOutputDeliveryError
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
     MessageOutput,
-    contained_teardown_output_for,
-    stop_output_for,
     terminal_output_for,
     terminal_turn_output,
 )
@@ -912,18 +920,15 @@ class ClaudeAgent(BaseAgent):
         machine-readable cause; the footer only has to stop claiming success.
         """
 
-        await self.controller.emit_agent_message(
+        await emit_output(
+            self.controller,
             context,
-            "result",
-            "",
-            is_error=True,
-            level="silent",
-            output=(
-                contained_teardown_output_for(request)
-                if contained
-                else terminal_output_for(request)
+            TurnEnd(
+                outcome=TurnOutcome.TEARDOWN if contained else TurnOutcome.FAILED,
+                silent=True,
+                terminal_error=None if contained else diagnostic,
+                output=terminal_output_for(request),
             ),
-            terminal_error=None if contained else diagnostic,
         )
 
     def _release_service_runtime_turn(self, context: MessageContext) -> None:
@@ -965,10 +970,13 @@ class ClaudeAgent(BaseAgent):
         AskUserQuestion programmatically. See: https://github.com/anthropics/claude-code/issues/10168
         """
         # AskUserQuestion support disabled
-        await self.controller.emit_agent_message(
+        await emit_output(
+            self.controller,
             request.context,
-            "notify",
-            "AskUserQuestion support is currently disabled. Claude Code SDK does not support programmatic responses to this tool.",
+            Notice(
+                "AskUserQuestion support is currently disabled. Claude Code SDK does not support programmatic"
+                " responses to this tool."
+            ),
         )
         return
 
@@ -1422,13 +1430,10 @@ class ClaudeAgent(BaseAgent):
 
         if context is not None:
             try:
-                await self.controller.emit_agent_message(
+                await emit_output(
+                    self.controller,
                     context,
-                    "result",
-                    "",
-                    is_error=True,
-                    level="silent",
-                    output=terminal_output_for(pending_request),
+                    TurnEnd(outcome=TurnOutcome.FAILED, silent=True, output=terminal_output_for(pending_request)),
                 )
             except Exception:
                 logger.debug(
@@ -1936,10 +1941,8 @@ class ClaudeAgent(BaseAgent):
         client = self.claude_sessions[composite_key]
         if not hasattr(client, "interrupt"):
             request.stop_failure_reason = "unsupported"
-            await self.controller.emit_agent_message(
-                request.context,
-                "notify",
-                "⚠️ This Claude session cannot be interrupted; consider /new.",
+            await emit_output(
+                self.controller, request.context, Notice("⚠️ This Claude session cannot be interrupted; consider /new.")
             )
             return False
 
@@ -1974,10 +1977,8 @@ class ClaudeAgent(BaseAgent):
         except Exception as err:
             request.stop_failure_reason = "interrupt_failed"
             logger.error(f"Failed to interrupt Claude session {composite_key}: {err}")
-            await self.controller.emit_agent_message(
-                request.context,
-                "notify",
-                "⚠️ Failed to interrupt Claude session. Please try /new.",
+            await emit_output(
+                self.controller, request.context, Notice("⚠️ Failed to interrupt Claude session. Please try /new.")
             )
             return False
 
@@ -2030,12 +2031,10 @@ class ClaudeAgent(BaseAgent):
             # disconnecting. ``stop_output_for`` (not the terminal-turn default) keeps
             # this empty body out of the run's terminal state so the stop settles it
             # ``canceled`` instead of ``succeeded`` — see its docstring.
-            await self.controller.emit_agent_message(
+            await emit_output(
+                self.controller,
                 request.context,
-                "result",
-                "",
-                level="silent",
-                output=stop_output_for(request),
+                TurnEnd(outcome=TurnOutcome.STOPPED, silent=True, output=terminal_output_for(request)),
             )
         except Exception as err:
             logger.error("Failed to emit Claude stop result for session %s: %s", composite_key, err, exc_info=True)
@@ -2449,23 +2448,16 @@ class ClaudeAgent(BaseAgent):
 
                         pending = self._pending_assistant_message.pop(composite_key, None)
                         if pending:
-                            await self.controller.emit_agent_message(
-                                context,
-                                "assistant",
-                                pending,
-                                parse_mode="markdown",
-                            )
+                            await emit_output(self.controller, context, Narration(pending))
 
                         for toolcall_text, toolcall_label in toolcalls:
                             # Persisted/verbose text stays the original
                             # ``format_toolcall`` output; ``status_label`` carries
                             # the clean claude-pipe label for the concise bubble only.
-                            await self.controller.emit_agent_message(
+                            await emit_output(
+                                self.controller,
                                 context,
-                                "toolcall",
-                                toolcall_text,
-                                parse_mode="markdown",
-                                status_label=toolcall_label,
+                                ToolActivity(toolcall_text, status_label=toolcall_label),
                             )
 
                         if text_parts:
@@ -4008,12 +4000,14 @@ class ClaudeAgent(BaseAgent):
         settled = asyncio.Event()
         self._synthetic_owner_settlements[composite_key] = settled
         try:
-            await self.controller.emit_agent_message(
+            # Releases the Turn only: another owner settles its Runs.
+            await emit_output(
+                self.controller,
                 owner_context,
-                "result",
-                "",
-                is_error=is_error,
-                output=MessageOutput(completes_turn=True, completes_run=False),
+                TurnEnd(
+                    outcome=TurnOutcome.FAILED if is_error else TurnOutcome.DONE,
+                    output=MessageOutput(completes_turn=True, completes_run=False),
+                ),
             )
         except BaseException as exc:
             # No backend result will ever arrive for this Turn again and its
@@ -4812,19 +4806,12 @@ class ClaudeAgent(BaseAgent):
                 )
                 previous = self._pending_assistant_message.pop(composite_key, None)
                 if previous:
-                    await self.controller.emit_agent_message(
-                        context,
-                        "assistant",
-                        previous,
-                        parse_mode="markdown",
-                    )
+                    await emit_output(self.controller, context, Narration(previous))
                 for toolcall_text, toolcall_label in toolcalls:
-                    await self.controller.emit_agent_message(
+                    await emit_output(
+                        self.controller,
                         context,
-                        "toolcall",
-                        toolcall_text,
-                        parse_mode="markdown",
-                        status_label=toolcall_label,
+                        ToolActivity(toolcall_text, status_label=toolcall_label),
                     )
                 if assistant_text:
                     self._pending_assistant_message[composite_key] = assistant_text
@@ -4894,17 +4881,11 @@ class ClaudeAgent(BaseAgent):
         )
         # A completed phase is a reply like any other: a ``result`` that does not end
         # the Turn (docs/plans/reply-and-turn-end.md).
-        message_id = await self.controller.emit_agent_message(
-            context,
-            "result",
-            emitted_text,
-            parse_mode="markdown",
-            output=output,
-        )
+        receipt = await emit_output(self.controller, context, Reply(emitted_text, output=output))
         if activity is None:
             return
         if strip_silent_blocks(emitted_text).strip():
-            self._require_activity_delivery(activity, message_id)
+            self._require_activity_delivery(activity, receipt)
         self._clear_request_activities(request)
         if request is not None:
             request.output = terminal_turn_output()
@@ -5371,9 +5352,9 @@ class ClaudeAgent(BaseAgent):
     @staticmethod
     def _require_activity_delivery(
         activity: SessionActivity,
-        message_id: str | None,
+        receipt: DeliveryReceipt,
     ) -> None:
-        if message_id is None:
+        if not receipt.delivered:
             raise ActivityOutputDeliveryError(
                 f"Claude Activity output {activity.id} was not persisted or delivered",
                 delivered=False,
@@ -5386,12 +5367,10 @@ class ClaudeAgent(BaseAgent):
         """Close the origin Turn if delivery failed before its terminal chokepoint."""
 
         try:
-            await self.controller.emit_agent_message(
+            await emit_output(
+                self.controller,
                 context,
-                "result",
-                "",
-                level="silent",
-                output=MessageOutput(completes_turn=True, completes_run=False),
+                TurnEnd(silent=True, output=MessageOutput(completes_turn=True, completes_run=False)),
             )
         except Exception:
             logger.debug(
@@ -5429,15 +5408,14 @@ class ClaudeAgent(BaseAgent):
             )
         visible_text = str(text or "")
         if not strip_silent_blocks(visible_text).strip():
-            await self.controller.emit_agent_message(
+            # The Turn's content-free end, or detached work's content-free answer.
+            await emit_output(
+                self.controller,
                 context,
-                "result",
-                "",
-                is_error=(subtype or "").startswith("error"),
-                output=output,
+                self._result_event("", parse_mode="markdown", failed=(subtype or "").startswith("error"), output=output),
             )
             return
-        message_id = await self.emit_result_message(
+        receipt = await self.emit_result_message(
             context,
             visible_text,
             subtype=subtype,
@@ -5446,7 +5424,7 @@ class ClaudeAgent(BaseAgent):
             request=request,
             output=output,
         )
-        self._require_activity_delivery(activity, message_id)
+        self._require_activity_delivery(activity, receipt)
 
     @staticmethod
     def _unsolicited_message_output(
@@ -5591,14 +5569,14 @@ class ClaudeAgent(BaseAgent):
                         activities=record.activities, output=output,
                     )
                 elif record.text:
-                    message_id = await self.emit_result_message(
+                    receipt = await self.emit_result_message(
                         record.context or context, record.text,
                         subtype=record.subtype, duration_ms=record.duration_ms,
                         parse_mode="markdown", output=record.output,
                     )
                     # A silent-only reply settles without a Message, so it has no
                     # receipt; retrying it would block every later record.
-                    if message_id is None and strip_silent_blocks(record.text).strip():
+                    if not receipt.delivered and strip_silent_blocks(record.text).strip():
                         raise ActivityOutputDeliveryError(
                             "Claude detached output was not accepted", delivered=False,
                         )
@@ -6398,12 +6376,7 @@ class ClaudeAgent(BaseAgent):
             original_model or "<unknown>",
             fallback_model or "<unknown>",
         )
-        await self.controller.emit_agent_message(
-            context,
-            "notify",
-            text,
-            parse_mode="markdown",
-        )
+        await emit_output(self.controller, context, Notice(text))
 
     async def _handle_auth_failure_result(
         self,

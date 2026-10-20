@@ -16,6 +16,7 @@ from config.v2_config import (
 from core.backend_failure import emit_backend_failure
 from core.handlers.model_hub.retry import RECOVERY_EXHAUSTED_CODE
 from core.message_context import build_context_session_key
+from core.agent_output import Narration, Notice, Reply, ToolActivity, TurnEnd, TurnOutcome, emit_output
 from core.message_output import MessageOutput, terminal_output_for, terminal_turn_output
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
@@ -555,18 +556,19 @@ class OpenCodePollLoop:
                 message_id,
                 settlement_id,
             )
-            delivered = await self._agent.controller.emit_agent_message(
+            receipt = await emit_output(
+                self._agent.controller,
                 context,
-                "result",
-                text,
-                parse_mode="markdown",
                 # OpenCode's message id: two replies with the same text stay two
                 # deliveries, and a restored poll's replay of one stays one.
-                output=MessageOutput(
-                    completes_turn=False, completes_run=False, idempotency_key=str(message_id)
+                Reply(
+                    text,
+                    output=MessageOutput(
+                        completes_turn=False, completes_run=False, idempotency_key=str(message_id)
+                    ),
                 ),
             )
-            if not delivered:
+            if not receipt.delivered:
                 logger.warning(
                     "OpenCode reply %s was not delivered; it stays unrecorded as emitted",
                     message_id,
@@ -727,12 +729,10 @@ class OpenCodePollLoop:
                         logger.warning("Aborting OpenCode session %s after disabled question tool call", session_id)
                         # Terminal abort → error RESULT so the outbound chokepoint
                         # turns the dot red (not a bare notify that never settles it).
-                        await self._agent.controller.emit_agent_message(
+                        await emit_output(
+                            self._agent.controller,
                             request.context,
-                            "result",
-                            message,
-                            is_error=True,
-                            output=terminal_output_for(request),
+                            TurnEnd(outcome=TurnOutcome.FAILED, text=message, output=terminal_output_for(request)),
                         )
                         try:
                             await server.abort_session(session_id, request.working_path)
@@ -745,12 +745,7 @@ class OpenCodePollLoop:
                         tool_input,
                         get_relative_path=_relative_path,
                     )
-                    await self._agent.controller.emit_agent_message(
-                        request.context,
-                        "toolcall",
-                        toolcall,
-                        parse_mode="markdown",
-                    )
+                    await emit_output(self._agent.controller, request.context, ToolActivity(toolcall))
                     seen_tool_calls.add(call_key)
 
                 if (
@@ -760,12 +755,7 @@ class OpenCodePollLoop:
                 ):
                     text = self._agent._extract_response_text(message)
                     if text:
-                        await self._agent.controller.emit_agent_message(
-                            request.context,
-                            "assistant",
-                            text,
-                            parse_mode="markdown",
-                        )
+                        await emit_output(self._agent.controller, request.context, Narration(text))
                     emitted_assistant_messages.add(message_id)
                     self._persist_emitted_assistant_messages(
                         session_id, emitted_assistant_messages
@@ -929,10 +919,8 @@ class OpenCodePollLoop:
         )
         bind_persisted_launch(context, processing_snapshot.get("model_hub_launch"))
 
-        await self._agent.controller.emit_agent_message(
-            context,
-            "notify",
-            "Resuming interrupted OpenCode session after restart...",
+        await emit_output(
+            self._agent.controller, context, Notice("Resuming interrupted OpenCode session after restart...")
         )
 
         baseline_message_ids = set(poll_info.baseline_message_ids)
@@ -1065,12 +1053,10 @@ class OpenCodePollLoop:
                                 session_id,
                             )
                             # Terminal abort → error RESULT (settles the dot red).
-                            await self._agent.controller.emit_agent_message(
+                            await emit_output(
+                                self._agent.controller,
                                 context,
-                                "result",
-                                message,
-                                is_error=True,
-                                output=terminal_turn_output(),
+                                TurnEnd(outcome=TurnOutcome.FAILED, text=message, output=terminal_turn_output()),
                             )
                             try:
                                 await server.abort_session(session_id, poll_info.working_path)
@@ -1105,7 +1091,7 @@ class OpenCodePollLoop:
                                 if path:
                                     tool_summary = f"`{tool_name}`: `{_relative_path(path)}`"
 
-                            await self._agent.controller.emit_agent_message(context, "tool_call", tool_summary)
+                            await emit_output(self._agent.controller, context, ToolActivity(tool_summary))
 
                     if (
                         info.get("time", {}).get("completed")
@@ -1114,12 +1100,7 @@ class OpenCodePollLoop:
                     ):
                         text = self._agent._extract_response_text(message)
                         if text:
-                            await self._agent.controller.emit_agent_message(
-                                context,
-                                "assistant",
-                                text,
-                                parse_mode="markdown",
-                            )
+                            await emit_output(self._agent.controller, context, Narration(text))
                         emitted_assistant_messages.add(message_id)
                         poll_info.emitted_assistant_messages = sorted(emitted_assistant_messages)
                         self._persist_emitted_assistant_messages(

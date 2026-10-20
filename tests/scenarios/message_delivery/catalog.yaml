@@ -513,5 +513,14 @@ scenarios:
       - tests/test_vibey_agent.py::test_a_reply_a_steer_superseded_is_a_result_and_the_turn_ends_once_after_both
       - tests/test_vibey_agent.py::test_a_restart_rerun_ends_with_the_final_its_cut_run_committed
       - tests/test_agent_silent_result.py::AgentSilentResultTests::test_a_footer_only_end_is_content_free
+  - id: MESSAGE-DELIVERY-336
+    name: Every backend reports output through one typed event set (Reply, Narration, ToolActivity, TurnEnd with its outcome, AgentError, Notice) through one entry; one pure mapping names each event's message type and lifecycle (a Reply never ends the Turn, a TurnEnd always does, its outcome supplies stop, teardown and failure semantics) and reproduces the call each backend made before, and every emit answers with a typed delivery receipt
+    status: covered
+    kind: contract
+    layer: contract
+    test:
+      - tests/test_agent_output.py::test_each_event_maps_to_one_dispatch_call
+      - tests/test_agent_output.py::test_an_event_cannot_contradict_its_lifecycle
+      - tests/test_agent_output.py::test_an_emit_answers_with_its_delivery_receipt
 next_priority:
-  - MESSAGE-DELIVERY-336
+  - MESSAGE-DELIVERY-337

@@ -525,6 +525,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             context,
             "result",
             "",
+            parse_mode="markdown",
             is_error=True,
             level="silent",
             output=ANY,
@@ -2907,7 +2908,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         # Suppressing the DIAGNOSTIC is what separates this from a real failure —
         # the dispatcher reads the pair as an intentional silent end (``stopped``)
         # rather than a fault, and the settlement carries the machine-readable cause.
-        self.assertIsNone(call.kwargs["terminal_error"])
+        self.assertIsNone(call.kwargs.get("terminal_error"))
 
     def assert_uncontained_settlement(self, emitter, diagnostic_fragment):
         """An ordinary backend failure still settles as one."""
@@ -3339,6 +3340,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             context,
             "result",
             "",
+            parse_mode="markdown",
             is_error=True,
             level="silent",
             output=ANY,
@@ -3388,6 +3390,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             context,
             "result",
             "",
+            parse_mode="markdown",
             is_error=True,
             level="silent",
             output=ANY,
@@ -3854,6 +3857,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             context,
             "result",
             "",
+            parse_mode="markdown",
             is_error=True,
             level="silent",
             output=ANY,
@@ -3964,6 +3968,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             pending_context,
             "result",
             "",
+            parse_mode="markdown",
             is_error=True,
             level="silent",
             output=ANY,
@@ -4038,6 +4043,7 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             context,
             "result",
             "",
+            parse_mode="markdown",
             is_error=True,
             level="silent",
             output=ANY,

@@ -26,7 +26,8 @@ from config.v2_config import (
 from core.backend_failure import emit_backend_failure
 from core.agent_input import AgentInputMetadata
 from core.caller_context import caller_env_for_platform_payload
-from core.message_output import stop_output_for, terminal_output_for
+from core.agent_output import TurnEnd, TurnOutcome, emit_output
+from core.message_output import terminal_output_for
 from core.managed_skills import (
     managed_skill_environment,
     managed_skill_project_base,
@@ -1315,15 +1316,13 @@ class CodexAgent(BaseAgent):
             # bubble. The user already knows they stopped it (avibe shows the dot go
             # idle; IM shows the ⏹️ receipt stamped above). ``level="silent"`` is
             # the explicit visibility grade rather than faking it via empty text.
-            # ``stop_output_for`` (not the terminal-turn default) keeps this empty body
+            # A ``STOPPED`` end (not the terminal-turn default) keeps this empty body
             # out of the run's terminal state so the stop settles it ``canceled``
-            # instead of ``succeeded`` — see its docstring.
-            await self.controller.emit_agent_message(
+            # instead of ``succeeded`` (``stop_output_for`` explains why).
+            await emit_output(
+                self.controller,
                 request.context,
-                "result",
-                "",
-                level="silent",
-                output=stop_output_for(request),
+                TurnEnd(outcome=TurnOutcome.STOPPED, silent=True, output=terminal_output_for(request)),
             )
             logger.info("Codex turn %s interrupted via /stop", turn_id)
             return True

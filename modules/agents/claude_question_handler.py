@@ -13,6 +13,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
+from core.agent_output import Notice, emit_output
 from modules.agents.base import AgentRequest
 from modules.agents.question_ui import (
     Question,
@@ -181,21 +182,15 @@ class ClaudeQuestionHandler:
                 client is not None,
                 composite_session_id,
             )
-            await self._controller.emit_agent_message(
-                request.context,
-                "notify",
-                "Claude question context is missing. Please retry your request.",
+            await emit_output(
+                self._controller, request.context, Notice("Claude question context is missing. Please retry your request.")
             )
             return False
 
         # Parse answer from callback data
         answers_payload = self._parse_answer(request.message, pending)
         if answers_payload is None:
-            await self._controller.emit_agent_message(
-                request.context,
-                "notify",
-                "Please provide an answer.",
-            )
+            await emit_output(self._controller, request.context, Notice("Please provide an answer."))
             return False
 
         # Update UI to show selection
@@ -209,10 +204,8 @@ class ClaudeQuestionHandler:
             await self._submit_tool_result(client, composite_session_id, tool_use_id, answer_text)
         except Exception as err:
             logger.error(f"Failed to submit answer to Claude: {err}", exc_info=True)
-            await self._controller.emit_agent_message(
-                request.context,
-                "notify",
-                f"Failed to submit answer to Claude: {err}. Please retry.",
+            await emit_output(
+                self._controller, request.context, Notice(f"Failed to submit answer to Claude: {err}. Please retry.")
             )
             return False
 

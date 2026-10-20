@@ -1,9 +1,9 @@
 # A reply is not the end of a Turn
 
 Status: approved by the owner (cyhhao), 2026-10-19. PR 1 (merged): shared
-contract, Vibey, and Claude's pre-steer phase typed as a reply. PR 2a: Codex and
-OpenCode on the reply rule, and rule 5 owned by the dispatcher. PR 2b and later:
-see Next steps.
+contract, Vibey, and Claude's pre-steer phase typed as a reply. PR 2a (merged):
+Codex and OpenCode on the reply rule, and rule 5 owned by the dispatcher. PR 2b:
+typed output events. Later: see Next steps.
 
 ## Background
 
@@ -295,7 +295,9 @@ Scenarios `MESSAGE-DELIVERY-334` (PR 1) and `MESSAGE-DELIVERY-335` (PR 2a)
 - Activity grouping, fork completion, and the UI message-role helpers keep their
   rendering for single-reply Turns and treat a mid-Turn reply as a phase
   boundary.
-- PR 2b: one primary regression per backend at its owning boundary.
+- PR 2b: the event-to-dispatcher mapping is table-tested (`MESSAGE-DELIVERY-336`);
+  every existing suite passes with only mechanical updates (canonical options on
+  asserted calls, receipts instead of raw ids).
 
 ## Next steps
 
@@ -314,8 +316,10 @@ Approved by the owner, in this order:
      included. A footer-only end is content-free.
    - PR 2b (structural only, no behavior change, branched from master after
      2a merges): every backend, Vibey included, reports output through one
-     typed event set: reply, narration, tool activity, turn end (outcome), and
-     error. This replaces type strings plus `MessageOutput` flags, so the
+     typed event set (`core/agent_output.py`): reply, narration, tool activity,
+     turn end (outcome), error, and notice for the rest of a backend's visible
+     notices. Vibey's generated-images fallback keeps its released `output` type
+     on the legacy entry until the presentation decision point (PR 3). This replaces type strings plus `MessageOutput` flags, so the
      dispatcher no longer infers semantics. Vibey's agent-event schema is the
      starting point, and rule 5 moves onto the typed Turn-end event. Emits
      return a typed delivery receipt (delivered, with its receipt row or the
