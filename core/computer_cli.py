@@ -199,6 +199,7 @@ _COMPUTER_ERROR_I18N_KEYS = {
     "computer_js_code_too_large": "computer.cli.error.jsCodeTooLarge",
     "js_call_inactive": "computer.cli.error.jsCallInactive",
     "js_kernel_error": "computer.cli.error.jsKernelError",
+    "js_kernel_busy": "computer.cli.error.jsKernelBusy",
     "js_kernel_reset": "computer.cli.error.jsKernelReset",
     "js_kernel_unavailable": "computer.cli.error.jsKernelUnavailable",
     "js_timeout": "computer.cli.error.jsTimeout",

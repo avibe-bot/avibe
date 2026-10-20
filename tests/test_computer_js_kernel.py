@@ -389,6 +389,89 @@ def test_computer_use_off_cancels_an_executing_call() -> None:
     assert returncode is not None
 
 
+async def _reset_event(h: _Harness) -> None:
+    await h.reset()
+
+
+async def _archive_event(h: _Harness) -> None:
+    h.kernels.discard_session(SESSION)
+
+
+async def _off_event(h: _Harness) -> None:
+    h.status = "off"
+
+
+async def _shutdown_event(h: _Harness) -> None:
+    h.kernels.close_all()
+
+
+@pytest.mark.parametrize(
+    ("event", "reason"),
+    [
+        (_reset_event, "reset"),
+        (_archive_event, "session_archived"),
+        (_off_event, "computer_use_off"),
+        (_shutdown_event, "shutdown"),
+    ],
+)
+def test_invalidation_cancels_every_admitted_call(event, reason: str) -> None:
+    """Invariant: calls admitted before an invalidation never execute."""
+
+    async def scenario(h: _Harness) -> tuple[list[dict], list, Any]:
+        await h.js("1")
+        executing = asyncio.create_task(h.js("await new Promise(() => {})", timeout_ms=10000))
+        await asyncio.sleep(0.2)
+        queued = [
+            asyncio.create_task(
+                h.js("globalThis.executed = true; await computer.app({ bundleId: 'com.apple.mail' })")
+            )
+            for _ in range(3)
+        ]
+        await asyncio.sleep(0.1)
+        await event(h)
+        reports = await asyncio.wait_for(asyncio.gather(executing, *queued), 5)
+        await asyncio.sleep(0.2)
+        return reports, h.driver.calls, h.kernels._slots.get(SESSION)
+
+    scenario.options = {"status_poll_seconds": 0.05}
+    reports, calls, slot = _run(scenario)
+    for report in reports:
+        assert report["error"]["code"] == "js_kernel_reset"
+        assert report["error"]["params"] == {"reason": reason}
+    assert calls == []
+    assert slot is None
+
+
+def test_a_queued_call_keeps_its_full_budget_after_taking_the_lock() -> None:
+    async def scenario(h: _Harness) -> dict:
+        await h.js("1")
+        first = asyncio.create_task(h.js("await new Promise((r) => setTimeout(r, 600))"))
+        await asyncio.sleep(0.1)
+        second = await h.js(
+            "await new Promise((r) => setTimeout(r, 300)); 'finished'",
+            timeout_ms=400,
+        )
+        await first
+        return second
+
+    assert _run(scenario)["result"] == "finished"
+
+
+def test_the_session_queue_is_capped() -> None:
+    async def scenario(h: _Harness) -> dict:
+        await h.js("1")
+        executing = asyncio.create_task(h.js("await new Promise((r) => setTimeout(r, 400))"))
+        await asyncio.sleep(0.1)
+        queued = asyncio.create_task(h.js("1"))
+        await asyncio.sleep(0.05)
+        refused = await h.js("1")
+        await asyncio.gather(executing, queued)
+        return refused
+
+    scenario.options = {"queue_limit": 1}
+    assert _run(scenario)["error"]["code"] == "js_kernel_busy"
+
+
 def test_concurrent_calls_in_one_session_are_serialized() -> None:
     async def scenario(h: _Harness) -> Any:
         await h.js("globalThis.order = []")

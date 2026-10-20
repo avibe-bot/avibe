@@ -957,6 +957,7 @@
         "jsTimeout": "调用超时，已被取消。内核及其变量均已保留。之前的操作可能已经生效，重试前请先重新观察。",
         "jsKernelReset": "JavaScript 内核已重置，所有变量均已丢弃。之前的操作可能已经生效，重试前请先重新观察。",
         "jsCallInactive": "只有在 vibe computer js 调用执行期间才能发起 Computer Use 请求。",
+        "jsKernelBusy": "本 Session 已有过多 JavaScript 调用在排队，请等它们结束后再重试。",
         "jsKernelUnavailable": "无法启动 JavaScript 内核。",
         "jsKernelError": "JavaScript 内核在执行本次调用时出错。",
         "missingCallerSession": "Computer Use 需要 Avibe Agent 调用方 Session。",

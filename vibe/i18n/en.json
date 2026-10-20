@@ -957,6 +957,7 @@
         "jsTimeout": "The call exceeded its timeout and was cancelled. The kernel and its bindings were kept. Earlier actions may have happened; observe before retrying.",
         "jsKernelReset": "The JavaScript kernel was reset; all bindings were discarded. Earlier actions may have happened; observe before retrying.",
         "jsCallInactive": "Computer Use requests are only allowed while a vibe computer js call is executing.",
+        "jsKernelBusy": "Too many JavaScript calls are already waiting in this Session. Wait for them to finish, then retry.",
         "jsKernelUnavailable": "The JavaScript kernel could not be started.",
         "jsKernelError": "The JavaScript kernel failed while evaluating the call.",
         "missingCallerSession": "Computer Use requires an Avibe Agent caller Session.",
