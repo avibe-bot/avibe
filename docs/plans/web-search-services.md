@@ -680,7 +680,9 @@ freeze rule says (`vibey-hosted-tools.md` §12). A lane that lands after a relea
 its additions instead, so a shipped version number never changes meaning. Because release
 candidates are cut from the default branch at any time, every lane is safe on its own until the event closes:
 before S2, a `search` Source is never requested and never affects model routing, discovery or engine config, and
-the shapes S1a and S1b write are final, so later lanes read them without migration. No release turns on a new third-party data flow before
+the shapes S1a and S1b write are final except for what S1c removes. S1c drops the page-content fields, and its
+loader ignores a `services.<id>.content` key that a pre-S1c build saved, so no migration write is needed. S4 and S2
+build on the post-S1c shape, so they read it without migration. No release turns on a new third-party data flow before
 it is disclosed: S2's release carries S6's disclosure and a release note naming DeepSeek's automatic enrolment and
 how to turn it off (the `services.<id>.enabled` switch, available through S1b's PUT). S2 is the activation lane: on its head the
 read starts listing service candidates and `service_vendors` and the chain starts calling services, and S4
