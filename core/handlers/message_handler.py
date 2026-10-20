@@ -1072,25 +1072,29 @@ class MessageHandler(BaseHandler):
                         backend=agent_name,
                         subagent=explicit_subagent,
                     )
-                    # The writer lock is held and this identity was just looked
-                    # up absent, so the entry inserts rather than deduplicates.
+                    delivery_id = message_deliveries.new_delivery_id()
                     admitted = admit_input(
                         conn,
                         envelope,
-                        delivery_id=message_deliveries.new_delivery_id(),
+                        delivery_id=delivery_id,
                         dedupe_key=message_deliveries.native_dedupe_key(
                             platform,
                             envelope.provenance.native_message_id,
                             scope_id=scope_id,
                         ),
                         admission_context=admission_context,
+                        reuse_existing=True,
                     )
+                    if str(admitted.delivery["id"]) != delivery_id:
+                        raise RuntimeError(
+                            "native Delivery appeared after writer reservation"
+                        )
                     request = DeliveryRequest(
                         session_id=session_id,
                         priority=admitted.decision.priority,
                         content=dispatch_text,
                         has_content=True,
-                        delivery_id=str(admitted.delivery["id"]),
+                        delivery_id=delivery_id,
                         scope_id=scope_id,
                         platform=platform,
                         source=envelope.provenance.origin,

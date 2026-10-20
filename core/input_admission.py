@@ -193,6 +193,42 @@ class AdmittedInput:
     decision: AdmissionDecision
 
 
+def existing_delivery(
+    conn: Connection,
+    *,
+    session_id: str,
+    delivery_id: str,
+    platform: str,
+    native_message_id: str | None,
+    scope_id: str | None,
+) -> dict[str, Any] | None:
+    """The Delivery an input already has: its own id, then its native identity.
+
+    A Delivery that belongs to another Session is refused, never reused.
+    """
+
+    existing = message_deliveries.get_delivery(conn, delivery_id)
+    if existing is not None:
+        if existing["session_id"] != session_id:
+            raise ValueError("Delivery does not belong to the target Session")
+        return existing
+    if not message_deliveries.native_dedupe_key(
+        platform, native_message_id, scope_id=scope_id
+    ):
+        return None
+    existing = message_deliveries.get_delivery_by_native_identity(
+        conn,
+        platform=platform,
+        native_message_id=str(native_message_id or ""),
+        scope_id=scope_id,
+        session_id=session_id,
+        normalize_legacy=True,
+    )
+    if existing is not None and existing["session_id"] != session_id:
+        raise ValueError("Delivery dedupe identity belongs to another Session")
+    return existing
+
+
 def decide_admission(
     envelope: InputEnvelope,
     *,
@@ -250,11 +286,28 @@ def admit_input(
     dedupe_key: str | None = None,
     admission_context: Mapping[str, Any] | None = None,
     history: Mapping[str, Any] | None = None,
+    reuse_existing: bool = False,
     policy: AdmissionPolicy = DEFAULT_ADMISSION_POLICY,
 ) -> AdmittedInput:
-    """Decide one input's priority and reserve its Delivery."""
+    """Decide one input's priority and reserve its Delivery.
+
+    With ``reuse_existing`` an input that already has a Delivery, by id or by
+    its native identity (``existing_delivery``), gets that Delivery back and
+    nothing is written.
+    """
 
     decision = decide_admission(envelope, policy=policy)
+    if reuse_existing:
+        existing = existing_delivery(
+            conn,
+            session_id=envelope.session_id,
+            delivery_id=delivery_id,
+            platform=envelope.provenance.platform,
+            native_message_id=envelope.provenance.native_message_id,
+            scope_id=envelope.scope_id,
+        )
+        if existing is not None:
+            return AdmittedInput(delivery=existing, decision=decision)
     delivery = reserve_input(
         conn,
         envelope,

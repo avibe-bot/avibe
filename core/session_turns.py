@@ -2714,30 +2714,24 @@ class SessionTurnManager:
         priority: str,
         state: str,
     ) -> dict[str, Any]:
+        from core.input_admission import existing_delivery
+
         delivery_id = request.delivery_id or delivery_store.new_delivery_id()
-        existing = delivery_store.get_delivery(conn, delivery_id)
+        existing = existing_delivery(
+            conn,
+            session_id=request.session_id,
+            delivery_id=delivery_id,
+            platform=request.platform,
+            native_message_id=request.native_message_id,
+            scope_id=request.scope_id,
+        )
         if existing is not None:
-            if existing["session_id"] != request.session_id:
-                raise ValueError("Delivery does not belong to the target Session")
             return existing
         dedupe_key = delivery_store.native_dedupe_key(
             request.platform,
             request.native_message_id,
             scope_id=request.scope_id,
         )
-        if dedupe_key:
-            existing = delivery_store.get_delivery_by_native_identity(
-                conn,
-                platform=request.platform,
-                native_message_id=str(request.native_message_id or ""),
-                scope_id=request.scope_id,
-                session_id=request.session_id,
-                normalize_legacy=True,
-            )
-            if existing is not None:
-                if existing["session_id"] != request.session_id:
-                    raise ValueError("Delivery dedupe identity belongs to another Session")
-                return existing
         return delivery_store.insert_delivery(
             conn,
             delivery_id=delivery_id,

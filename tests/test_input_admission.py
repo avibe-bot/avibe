@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pytest
+from sqlalchemy import func, select
 
 from core.input_admission import (
     DEFAULT_ADMISSION_POLICY,
@@ -17,6 +19,7 @@ from core.input_admission import (
 from storage import message_deliveries
 from storage.db import create_sqlite_engine
 from storage.models import agent_sessions, metadata
+from storage.models import message_deliveries as message_deliveries_table
 
 
 SESSION_ID = "ses_admission"
@@ -190,6 +193,42 @@ def test_a_source_owned_admission_event_carries_the_decision(engine) -> None:
         **binding,
         "policy": {"id": "default", "reason": "source:failure_retry"},
     }
+
+
+def test_an_input_that_already_has_a_delivery_gets_it_back(engine) -> None:
+    """MESSAGE-DELIVERY-338: a duplicate native id reuses its Delivery, never a second one."""
+
+    envelope = replace(
+        _envelope("im", platform="slack", backend="codex"),
+        provenance=InputProvenance(source="im", platform="slack", native_message_id="171.1"),
+    )
+    dedupe_key = message_deliveries.native_dedupe_key("slack", "171.1")
+    first, _ = _admit(engine, envelope, dedupe_key=dedupe_key, reuse_existing=True)
+    again, _ = _admit(engine, envelope, dedupe_key=dedupe_key, reuse_existing=True)
+
+    assert again.delivery["id"] == first.delivery["id"]
+    with engine.connect() as conn:
+        assert conn.execute(
+            select(func.count()).select_from(message_deliveries_table)
+        ).scalar_one() == 1
+    with engine.begin() as conn:
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_other",
+                agent_backend="codex",
+                agent_variant="default",
+                session_anchor="ses_other",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at="2026-10-20T00:00:00+00:00",
+                updated_at="2026-10-20T00:00:00+00:00",
+                last_active_at="2026-10-20T00:00:00+00:00",
+            )
+        )
+    other = replace(envelope, session_id="ses_other")
+    with pytest.raises(ValueError, match="belongs to another Session"):
+        _admit(engine, other, dedupe_key=dedupe_key, reuse_existing=True)
 
 
 def test_the_record_names_whichever_policy_decided(engine) -> None:

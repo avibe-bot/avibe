@@ -530,6 +530,7 @@ scenarios:
     test:
       - tests/test_input_admission.py::test_each_source_is_admitted_with_its_released_priority_and_records_the_decision
       - tests/test_input_admission.py::test_a_source_owned_admission_event_carries_the_decision
+      - tests/test_input_admission.py::test_an_input_that_already_has_a_delivery_gets_it_back
       - tests/test_input_admission.py::test_the_record_names_whichever_policy_decided
 next_priority:
   - MESSAGE-DELIVERY-339
