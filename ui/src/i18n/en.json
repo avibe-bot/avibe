@@ -5947,6 +5947,7 @@
     "voice": {
       "cloudRequired": "Voice input needs Avibe Cloud. You can type a message instead.",
       "listening": "Listening…",
+      "finishing": "Finishing…",
       "open": "Voice input",
       "stop": "Stop voice input",
       "startFailed": "Couldn't use the microphone. Check microphone access in system settings, or type instead.",
