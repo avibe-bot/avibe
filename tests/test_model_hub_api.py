@@ -6276,20 +6276,24 @@ def test_search_source_replacement_unknown_keeps_old_key_and_revokes_new_ref(tmp
 
 
 @pytest.mark.parametrize(
-    ("outcome", "detail_key"),
+    ("outcome", "detail_key", "stays_pending"),
     [
-        ("balance", "models.source.needs_action.balance_exhausted"),
-        ("limit", "models.source.needs_action.spend_limit_reached"),
-        ("unknown", "models.source.needs_action.balance_exhausted"),
+        ("pass", None, False),
+        ("balance", "models.source.needs_action.balance_exhausted", False),
+        ("limit", "models.source.needs_action.spend_limit_reached", False),
+        ("unknown", "models.source.needs_action.balance_exhausted", True),
+        ("invalid", "models.source.needs_action.credential_revoked", True),
     ],
 )
 def test_search_source_reenable_free_check_keeps_or_reclassifies_state(
     tmp_path,
     outcome: str,
-    detail_key: str,
+    detail_key: str | None,
+    stays_pending: bool,
 ):
     service, store, adapter = _service(tmp_path)
     adapter.search_check_outcome = outcome
+    marker = "vp_" + "a" * 32
     source = ModelHubSourceConfig(
         id="src_searchbalance",
         kind="api_key",
@@ -6304,6 +6308,8 @@ def test_search_source_reenable_free_check_keeps_or_reclassifies_state(
         ),
         models=[],
         credential_ref="cred_searchbalance",
+        verification_pending=marker,
+        credential_generation=marker,
     )
     store.config.sources = [source]
 
@@ -6311,8 +6317,15 @@ def test_search_source_reenable_free_check_keeps_or_reclassifies_state(
 
     assert result["trial_armed"] is False
     assert result["source"]["state"]["detail_key"] == detail_key
+    assert result["source"]["state"]["status"] == ("standby" if detail_key is None else "needs_action")
     assert not service.search_reenable_trial_armed(source.id)
-    assert store.load().sources[0].state.detail_key == detail_key
+    persisted = store.load().sources[0]
+    assert persisted.state.detail_key == detail_key
+    assert result["source"].get("verification_pending") == (marker if stays_pending else None)
+    assert persisted.verification_pending == (marker if stays_pending else None)
+    assert result["source"]["credential_generation"] == marker
+    assert persisted.credential_generation == marker
+    assert persisted.credential_ref == "cred_searchbalance"
 
 
 

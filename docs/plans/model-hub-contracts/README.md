@@ -135,11 +135,19 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    bound credential under the fixed vendor protocol. A newly stored Hub credential
    that no add-time observation authenticated — an explicit unverified save, a
    native-config import, Hub OAuth admission, any credential or endpoint replacement —
-   carries an opaque `verification_pending` identity until an actual
-   matching-credential model call succeeds. Its clearing is a fresh cross-process
-   field mutation; model discovery never clears it. A typed Base URL never
-   supplies protocol ownership. Model-free validation, altered-credential controls
-   and publicly readable model lists do not prove authentication; on a protocol that
+   carries an opaque `verification_pending` identity. Model Sources keep the
+   matching-credential model-call rule: a successful model call with the same current
+   credential and marker may clear it. A `search` Source never makes a model call.
+   Its marker clears on an authenticated search outcome with the matching credential
+   (any 200, a 402, or a catalog-named limit), or a free-check `pass`, `balance` or
+   `limit` for that credential. A 200 proves authentication even when its results
+   are empty or its body is unreadable. Clearing requires the same current credential
+   and marker and is a fresh cross-process field mutation; `credential_generation`
+   does not change. Free-check `unknown` and `invalid` leave it unchanged.
+   Model discovery never clears it.
+   A typed Base URL never supplies protocol ownership. For model observation,
+   model-free validation, altered-credential controls and publicly readable model
+   lists do not prove authentication; on a protocol that
    already has an owner, a model listing that answers the credential while refusing
    the identical uncredentialed request does. See the 2026-09-07 rulings
    in `docs/plans/model-hub.md` and the create/Source schemas for the complete policy.

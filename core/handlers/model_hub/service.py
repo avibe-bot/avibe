@@ -4891,6 +4891,8 @@ class ModelHubService:
                 trial_armed = True
             else:
                 outcome = await self._search_free_check(source)
+                if outcome in {"pass", "balance", "limit"}:
+                    source.verification_pending = None
                 if outcome == "pass":
                     source.state = ModelHubSourceStateConfig(status="standby")
                     self._drop_search_reenable_trial(source.id)

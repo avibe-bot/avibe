@@ -427,6 +427,29 @@ def _auth_status_branch(node: ast.AST) -> bool:
     )
 
 
+@pytest.mark.parametrize("surface", ["README.md", "source.schema.json"])
+def test_verification_contract_distinguishes_search_from_model_calls(surface: str) -> None:
+    # These published rules guide S2's settlement implementation. Runtime tests
+    # cannot catch a contract that still requires a tool-only Source to call a model.
+    text = (ROOT / "docs/plans/model-hub-contracts" / surface).read_text(encoding="utf-8")
+    if surface.endswith(".json"):
+        text = json.loads(text)["properties"]["verification_pending"]["description"]
+    else:
+        text = text.split("## Invariants", 1)[1].split("\n3.", 1)[0]
+    text = " ".join(text.replace("`", "").split())
+    for clause in (
+        "matching-credential model-call rule",
+        "search Source never makes a model call",
+        "authenticated search outcome with the matching credential",
+        "any 200, a 402, or a catalog-named limit",
+        "free-check pass, balance or limit",
+        "same current credential and marker",
+        "credential_generation does not change",
+        "Free-check unknown and invalid leave it unchanged",
+    ):
+        assert clause in text, (surface, clause)
+
+
 def test_g1_cancelled_error_has_one_boundary_owner() -> None:
     # A new ``except asyncio.CancelledError`` outside _handle_request must fail.
     tree = _tree(TURN_GATEWAY)
