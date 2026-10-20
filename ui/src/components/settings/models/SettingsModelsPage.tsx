@@ -12,6 +12,8 @@ import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext
 import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
+import { AddSearchServiceDialog } from './AddSearchServiceDialog';
+import { searchServicesActive, webSearchTool } from './searchServices';
 import { BackendModelCatalogDialog, type CatalogFocus } from './BackendModelCatalogDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { GatewayModule } from './GatewayModule';
@@ -438,6 +440,8 @@ export const SettingsModelsPage: React.FC = () => {
   /** Bumped by the explicit refresh, so a native login made since is noticed. */
   const [migrationScanEpoch, setMigrationScanEpoch] = React.useState(0);
   const [apiKeyOpen, setApiKeyOpen] = React.useState(false);
+  const [searchServiceOpen, setSearchServiceOpen] = React.useState(false);
+  const [serviceDetailView, setServiceDetailView] = React.useState(false);
   const [subscriptionPickerOpen, setSubscriptionPickerOpen] = React.useState(false);
   const [subscriptionPickerIndex, setSubscriptionPickerIndex] = React.useState(0);
   const [subscriptionVendor, setSubscriptionVendor] = React.useState<string | null>(null);
@@ -1156,10 +1160,12 @@ export const SettingsModelsPage: React.FC = () => {
   type SourceDetailSelection = {
     sourceId: string;
     returnFocus: () => HTMLElement | null;
+    serviceView?: boolean;
   };
   const applySourceDetailSelection = React.useCallback((selection: SourceDetailSelection | null) => {
     if (selection) sourceDetailReturnFocusRef.current = selection.returnFocus;
     setSelectedSourceId(selection?.sourceId ?? null);
+    setServiceDetailView(selection?.serviceView ?? false);
   }, []);
   const selectSource = React.useCallback((selection: SourceDetailSelection | null) => {
     sourceIntentAuthority.commit(() => applySourceDetailSelection(selection));
@@ -1207,7 +1213,23 @@ export const SettingsModelsPage: React.FC = () => {
         selectedSource.base_url ?? null, selectedSource.credential_ref ?? null, selectedSource.credential_generation ?? null,
       ])
     : null;
-  const hostedTools = useHostedTools(tab === 'tools' || selectedSource !== null, selectedSourceIdentity);
+  const hostedTools = useHostedTools(runtimeConfigurationVisible && (tab === 'tools' || tab === 'sources' || selectedSource !== null), selectedSourceIdentity, tab);
+  const searchTool = webSearchTool(foldRegionRead(hostedTools.read, {
+    loading: () => null, unread: () => null, ready: (data) => data, degraded: (data) => data,
+  }));
+  const openSearchServices = (opener: HTMLButtonElement) => {
+    apiKeyTriggerRef.current = opener;
+    setSearchServiceOpen(true);
+  };
+  const openSearchSource = (sourceId: string) => selectSource({
+    sourceId,
+    serviceView: true,
+    // Source selection refreshes the Tools read and can remount its rows. Resolve
+    // the live row at close, or the current tab while that read is still out.
+    returnFocus: () => [...(pageRef.current?.querySelectorAll<HTMLButtonElement>('[data-search-source]') ?? [])]
+      .find((button) => button.dataset.searchSource === sourceId)
+      ?? pageRef.current?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]') ?? null,
+  });
   // A committed Source change (a model added, removed or refetched, or its
   // identity) can drop that Source's evidence on the server, so the
   // hosted-tools report follows it once the Sources settle.
@@ -1456,8 +1478,10 @@ export const SettingsModelsPage: React.FC = () => {
         authority: sourceIntentAuthority,
         apply: () => {
           setApiKeyOpen(false);
+          setSearchServiceOpen(false);
           applySourceDetailSelection({
             sourceId: created.source.id,
+            serviceView: searchServiceOpen,
             returnFocus: () => apiKeyTriggerRef.current,
           });
         },
@@ -1596,7 +1620,7 @@ export const SettingsModelsPage: React.FC = () => {
                         selectSource({ sourceId, returnFocus: () => opener });
                       }}
                     />
-                    : tab === 'tools' ? <ToolsTab read={hostedTools.read} sources={sources} pending={hostedTools.pending} onSave={(tool, body) => void hostedTools.save(tool, body)} onClear={(tool, body) => void hostedTools.clear(tool, body)} onRetry={() => void hostedTools.refresh()} />
+                    : tab === 'tools' ? <ToolsTab read={hostedTools.read} sources={sources} pending={hostedTools.pending} onSave={(tool, body) => void hostedTools.save(tool, body)} onClear={(tool, body) => void hostedTools.clear(tool, body)} onRetry={() => void hostedTools.refresh()} onAddService={openSearchServices} onOpenService={openSearchSource} onRetryService={(sourceId) => void hostedTools.retryService(sourceId)} />
                     : tab === 'usage' ? <UsageTab usage={usageRead} windowKey={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
                     : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
                     : directEmpty ? <DirectHome agents={installedNativeAgents} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onSwitch={switchToGateway} />
@@ -1608,7 +1632,7 @@ export const SettingsModelsPage: React.FC = () => {
                           onOpenChange={(open) => { if (!open) closeSubscriptionPicker(); }}
                         >
                           <PopoverAnchor virtualRef={subscriptionAnchorRef} />
-                          <SourcesCard read={sourcesDisplayRead} activeBackends={activeBackends} retryRef={sourcesRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source, opener) => selectSource({ sourceId: source.id, returnFocus: () => opener })} onAddApiKey={(opener) => { apiKeyTriggerRef.current = opener; setApiKeyOpen(true); }} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
+                          <SourcesCard read={sourcesDisplayRead} searchTool={searchTool} onAddSearchService={openSearchServices} activeBackends={activeBackends} retryRef={sourcesRetryRef} retryDisabled={routeCommitStatus?.pending === true} readFailureCopy={routeCommitStatus?.failed.has('sources') ? t('settings.models.routeDialog.impact.refreshFail') : undefined} onRetry={() => routeCommitStatus?.failed.has('sources') ? retryRouteCommit() : void retrySources()} onOpenSource={(source, opener) => selectSource({ sourceId: source.id, returnFocus: () => opener })} onAddApiKey={(opener) => { apiKeyTriggerRef.current = opener; setApiKeyOpen(true); }} onAddSubscription={toggleSubscriptionPicker} subscriptionPickerOpen={subscriptionPickerOpen} subscriptionTriggerRef={subscriptionTriggerRef} />
                           <PopoverContent
                             role="menu"
                             aria-label={t('settings.models.upstream.addSubscription')}
@@ -1742,6 +1766,10 @@ export const SettingsModelsPage: React.FC = () => {
             ? <SourceDetailPanel
                 key={selectedSource.id}
                 source={selectedSource}
+                serviceView={serviceDetailView}
+                onManageSource={() => setServiceDetailView(false)}
+                onSaveSearch={(body) => void hostedTools.save('web_search', body)}
+                onRetryService={(sourceId) => void hostedTools.retryService(sourceId)}
                 hostedTools={hostedTools.read}
                 onRetryHostedTools={() => void hostedTools.refresh()}
                 hostedPending={hostedTools.pending}
@@ -1756,6 +1784,10 @@ export const SettingsModelsPage: React.FC = () => {
             : <section className="grid min-h-0 flex-1 place-items-center px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>}
         </DialogContent>
       </Dialog>
+      {searchServiceOpen && searchServicesActive(searchTool) && searchTool && <AddSearchServiceDialog tool={searchTool} pending={hostedTools.pending.has('web_search')} sourceReads={sourceCollectionReads} onClose={() => setSearchServiceOpen(false)} onAdded={(created) => void sourceAdded(created)} onOpenSource={(sourceId) => {
+        setSearchServiceOpen(false);
+        selectSource({ sourceId, returnFocus: () => apiKeyTriggerRef.current, serviceView: true });
+      }} />}
       <AddApiKeyDialog open={apiKeyOpen} sourceReads={sourceCollectionReads} onClose={() => setApiKeyOpen(false)} onAdded={(created) => void sourceAdded(created)} />
       {subscriptionVendor && (
         <OAuthConnectDialog

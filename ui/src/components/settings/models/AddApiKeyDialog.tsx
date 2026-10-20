@@ -13,6 +13,8 @@ import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { useToast } from '@/context/ToastContext';
 import { ApiKeyField, ApiKeySourceForm } from './ApiKeySourceForm';
+import { apiKeyVendorPreset } from './apiKeyVendors';
+import { SearchServiceNotes, SearchServicePrice, SearchVendorFacts } from './SearchServiceParts';
 import {
   apiKeySourceCreate,
   apiKeyWriteSettled,
@@ -40,6 +42,7 @@ import { mayHaveWritten, REPAIR_TOAST, wasBlocked } from './repair';
 import { serverText } from './serverCopy';
 import {
   type Source,
+  type HostedSearchServiceVendor,
   type SupplyGap,
 } from './types';
 
@@ -71,6 +74,8 @@ type AddApiKeyDialogProps = {
 } & (
   | {
       mode?: 'add';
+      /** A catalog-selected search service reuses create settlement, with a key-only form. */
+      serviceVendor?: HostedSearchServiceVendor;
       onAdded: (created: SourceCreated) => void;
       sourceReads: CollectionReadAuthority<Source[]>;
     }
@@ -93,6 +98,7 @@ const REPLACE_FAILURE_KEY: Record<ModelHubFailureClass, TranslationKey> = {
 export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const { open, onClose } = props;
   const replaceMode = props.mode === 'replace';
+  const serviceVendor = replaceMode ? undefined : props.serviceVendor;
   const addSourceReads = replaceMode ? null : props.sourceReads;
   const addOnAdded = replaceMode ? null : props.onAdded;
   const replaceSourceId = replaceMode ? props.source.id : null;
@@ -156,14 +162,20 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const persist = React.useCallback(async (seq: ContinuationTicket) => {
     if (continuation.settle(seq, () => setPhase({ kind: 'working' })) === 'stale') return;
     try {
-      const created = await modelsApi.createApiKeySource(apiKeySourceCreate(draft, clientNonce.current));
+      const created = await modelsApi.createApiKeySource(serviceVendor ? {
+        kind: 'api_key', vendor: serviceVendor.id, key: draft.apiKey.trim(), client_nonce: clientNonce.current,
+        ...(serviceVendor.facts.tool_only ? { protocol: 'search' as const } : {
+          protocol: apiKeyVendorPreset(serviceVendor.id)?.protocol,
+          save_unverified: true,
+        }),
+      } : apiKeySourceCreate(draft, clientNonce.current));
       createdDelivery.settle(continuation, seq, created);
     } catch (error) {
       continuation.settle(seq, () => setPhase(apiKeyWriteSettled(error)
         ? { kind: 'persist_failure', messageKey: failureMessageKey(apiFailure(error)) }
         : { kind: 'save_unconfirmed' }));
     }
-  }, [continuation, createdDelivery, draft]);
+  }, [continuation, createdDelivery, draft, serviceVendor]);
 
   // `plan` is the guard's question already answered: the write echoes it, and a
   // plan that moved before the forced write lands is resent, not asked again.
@@ -298,7 +310,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
   const isWorking = phase.kind === 'working';
   const formLocked = isWorking || phase.kind === 'save_unconfirmed';
   const canCancel = replaceMode ? replacePhase.kind !== 'submitting' : !isWorking;
-  const canSubmit = draftComplete(draft) && !formLocked;
+  const canSubmit = (serviceVendor ? Boolean(apiKey.trim()) : draftComplete(draft)) && !formLocked;
   const replaceTerminalFailure = replacePhase.kind === 'failure'
     && replacePhase.failureClass === 'authoritative-terminal';
   const replaceFieldLocked = replacePhase.kind === 'submitting' || replaceTerminalFailure;
@@ -316,7 +328,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
             <DialogPrimitive.Title className="model-hub-add-key-title font-bold text-foreground">
               {replaceMode
                 ? t('settings.models.repair.replaceTitle', { name: props.source.display_name })
-                : t('settings.models.addKey.title')}
+                : serviceVendor ? t('settings.models.searchServices.addVendor', { vendor: serviceVendor.name }) : t('settings.models.addKey.title')}
             </DialogPrimitive.Title>
             <Button
               type="button"
@@ -333,7 +345,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
           <DialogPrimitive.Description className="model-hub-add-key-subtitle model-hub-ink-muted-b3 font-mono">
             {replaceMode
               ? t('settings.models.repair.replaceBody')
-              : t('settings.models.addKey.saveFirstHint')}
+              : serviceVendor ? t(serviceVendor.facts.tool_only ? 'settings.models.searchServices.noModels' : 'settings.models.searchServices.createModelSource', { vendor: serviceVendor.name }) : t('settings.models.addKey.saveFirstHint')}
           </DialogPrimitive.Description>
         </header>
 
@@ -372,13 +384,19 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
 
         {!replaceMode && (
           <div className="model-hub-add-key-body flex flex-col">
-            <ApiKeySourceForm
+            {serviceVendor ? <>
+              <SearchVendorFacts vendor={serviceVendor} />
+              <SearchServicePrice price={serviceVendor.price} />
+              <ApiKeyField value={apiKey} revealed={revealed} disabled={formLocked} autoFocus label={t('settings.models.addKey.field.apiKey')} onChange={editKey} onToggleReveal={() => setRevealed((value) => !value)} onEnter={canSubmit ? () => void persist(continuation.begin()) : undefined} />
+              <p className="model-hub-tool-note">{t(serviceVendor.facts.free_check ? 'settings.models.searchServices.freeCheck' : 'settings.models.searchServices.noFreeCheck')}</p>
+              <SearchServiceNotes vendor={serviceVendor} />
+            </> : <ApiKeySourceForm
               draft={draft}
               disabled={formLocked}
               revealed={revealed}
               onChange={editDraft}
               onToggleReveal={() => setRevealed((value) => !value)}
-            />
+            />}
             {isWorking && <div className="model-hub-add-key-strip model-hub-add-key-strip--working">
               <LoaderCircle className="model-hub-ink-mint size-3.5 animate-spin" />
               <span className="model-hub-add-key-strip-title">{t('settings.models.addKey.saving')}</span>
@@ -439,7 +457,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                 disabled={!canCancel}
                 onClick={cancel}
               >
-                {t('settings.models.addKey.cancel')}
+                {t(serviceVendor ? 'common.back' : 'settings.models.addKey.cancel')}
               </Button>
               <Button type="button" variant="brand" className="model-hub-add-key-action"
                 disabled={isWorking || (phase.kind !== 'save_unconfirmed' && !canSubmit)}
@@ -447,7 +465,7 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                   ? retry() : persist(continuation.begin()))}>
                 {isWorking ? <LoaderCircle className="size-3 animate-spin" /> : <Save className="size-3" />}
                 {t(isWorking ? 'settings.models.addKey.saving'
-                  : phase.kind === 'form' ? 'settings.models.addKey.confirm' : 'settings.models.addKey.retry')}
+                  : phase.kind === 'form' ? serviceVendor ? 'common.save' : 'settings.models.addKey.confirm' : 'settings.models.addKey.retry')}
               </Button>
             </>
           )}

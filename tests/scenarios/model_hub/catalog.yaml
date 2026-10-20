@@ -488,12 +488,12 @@ scenarios:
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-003: prices each executor where a price is known, and never shows unknown as zero'
       - 'ui/src/components/settings/models/format.test.ts::MH-HOSTED-UI-003: keeps the first significant digits of a per-call price, and never shows a nonzero price as zero'
   - id: MH-HOSTED-UI-005
-    name: The hosted-tools report stays unread until the Tools tab opens, re-reads on every open, and again after a committed Source change
+    name: The hosted-tools report reads activation on Sources without blocking first paint, refreshes on each surface change, and again after a committed Source change
     status: covered
     kind: observation
     layer: unit
     test:
-      - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-005: leaves the hosted-tools report unread until its tab opens, then re-reads on every open'
+      - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-005: reads activation on Sources without gating first paint, then refreshes when its surface changes'
       - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-005: reads the hosted-tools report again after a committed Source change, since a Source change can drop its evidence'
   - id: MH-HOSTED-UI-006
     name: A Source model shows one chip per feature with a record, a refusal over a success, and an unused model draws nothing
@@ -502,7 +502,8 @@ scenarios:
     layer: unit
     test:
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: draws one chip per feature with a record, a refusal over a success, and nothing for an unused model'
-      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: says when the capability read failed instead of drawing a Source with no evidence'
+      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: lets a failed capability read retry in serviceDetail=false instead of leaving held controls stranded'
+      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: lets a failed capability read retry in serviceDetail=true instead of leaving held controls stranded'
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: adds no capability column when no model has evidence'
       - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-006: gives each pair one record, a refusal over a success and a call refusal over a replay one'
       - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-006: gives a Source model one capability per feature, a call refusal hiding the success and the replay'
