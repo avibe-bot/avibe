@@ -3171,20 +3171,179 @@ def test_cloud_token_for_request_requires_editor_role(monkeypatch) -> None:
     assert called is False
 
 
-def test_cloud_token_endpoint_local_origin_without_session_degrades_to_unavailable(
+def test_mint_device_cloud_token_posts_scope_with_device_secret_header(monkeypatch) -> None:
+    config = _cloud_broker_config()
+    captured: dict = {}
+
+    def fake_json_request(url, payload, timeout=20.0, headers=None):
+        captured.update(url=url, payload=payload, headers=headers)
+        return {"access_token": "ct_device", "token_type": "Bearer", "expires_in": 3600}
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_json_request)
+
+    minted = remote_access.mint_device_cloud_token(config)
+
+    assert minted == {"access_token": "ct_device", "token_type": "Bearer", "expires_in": 3600}
+    assert captured["url"] == "https://avibe.bot/api/v1/instances/inst_123/device-token"
+    assert captured["payload"] == {"scope": "asr"}
+    assert captured["headers"] == {"X-Vibe-Device-Secret": "device-secret"}
+
+
+def test_mint_device_cloud_token_returns_none_when_unpaired_or_rejected(monkeypatch) -> None:
+    calls = 0
+
+    def unpaired_request(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return {}
+
+    monkeypatch.setattr(remote_access, "_json_request", unpaired_request)
+    assert remote_access.mint_device_cloud_token(_config()) is None
+    assert calls == 0
+
+    config = _cloud_broker_config()
+    for error in ({"error": "not_found"}, {"error": "tunnel_not_running"}):
+
+        def rejected_request(*args, error=error, **kwargs):
+            raise remote_access.BackendRequestError(409, error)
+
+        monkeypatch.setattr(remote_access, "_json_request", rejected_request)
+        assert remote_access.mint_device_cloud_token(config) is None
+
+
+def test_cloud_token_for_local_device_matches_the_remote_token_shape(monkeypatch) -> None:
+    config = _cloud_broker_config()
+    monkeypatch.setattr(
+        remote_access,
+        "_json_request",
+        lambda *a, **k: {
+            "access_token": "ct_device",
+            "expires_in": 3600,
+            "capabilities": ["realtime_reply_context", 7],
+        },
+    )
+
+    token = remote_access.cloud_token_for_local_device(config)
+
+    assert token is not None
+    assert set(token) == {"base_url", "token", "expires_at", "scope", "capabilities"}
+    assert token["base_url"] == "https://avibe.bot"
+    assert token["token"] == "ct_device"
+    assert token["scope"] == "asr"
+    assert token["expires_at"] > int(time.time())
+    assert token["capabilities"] == ["realtime_reply_context"]
+    assert remote_access.cloud_token_for_local_device(config, scope="future") is None
+
+
+def _record_device_mints(monkeypatch) -> list[str]:
+    urls: list[str] = []
+
+    def fake_json_request(url, *args, **kwargs):
+        urls.append(url)
+        return {"access_token": "ct_device", "token_type": "Bearer", "expires_in": 3600}
+
+    monkeypatch.setattr(remote_access, "_json_request", fake_json_request)
+    return urls
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [{"Referer": "http://127.0.0.1:5123/chat"}, {"Origin": "http://127.0.0.1:5123"}],
+    ids=["referer", "origin"],
+)
+def test_cloud_token_endpoint_mints_device_token_for_same_origin_loopback_browser(
     monkeypatch,
     tmp_path,
+    headers,
 ) -> None:
-    """Issue #1491: a local-origin request has no avibe.bot session cookie by
-    design, so the endpoint must return the documented 503 ``cloud_unavailable``
-    fallback instead of the login-required signal that triggers the frontend's
-    full-page redirect to ``/auth/login`` (which the local host rejects)."""
+    """The machine's own Workbench (local browser or desktop shell) has no
+    avibe.bot session; it receives a device-principal token so realtime voice
+    can reach the cloud directly."""
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
-    config = _cloud_broker_config()
-    config.save()
+    _cloud_broker_config().save()
+    urls = _record_device_mints(monkeypatch)
 
     response = ui_server.app.test_client().get(
         "/api/cloud/token",
+        headers=headers,
+        base_url="http://127.0.0.1:5123",
+    )
+
+    assert response.status_code == 200, response.get_json()
+    payload = response.get_json()
+    assert payload["token"] == "ct_device"
+    assert payload["base_url"] == "https://avibe.bot"
+    assert payload["scope"] == "asr"
+    assert response.headers["Cache-Control"] == "no-store, private"
+    assert urls == ["https://avibe.bot/api/v1/instances/inst_123/device-token"]
+
+
+@pytest.mark.parametrize(
+    ("headers", "base_url", "environ"),
+    [
+        ({}, "http://127.0.0.1:5123", {}),
+        ({"Origin": "https://evil.example"}, "http://127.0.0.1:5123", {}),
+        ({"Referer": "https://evil.example/page"}, "http://127.0.0.1:5123", {}),
+        ({"Origin": "http://evil.example:5123"}, "http://evil.example:5123", {}),
+        (
+            {"Origin": "http://127.0.0.1:5123", "X-Forwarded-For": "203.0.113.9"},
+            "http://127.0.0.1:5123",
+            {},
+        ),
+        (
+            {"Origin": "http://192.168.2.10:5123"},
+            "http://192.168.2.10:5123",
+            {"REMOTE_ADDR": "192.168.2.50"},
+        ),
+    ],
+    ids=["no-origin", "foreign-origin", "foreign-referer", "rebound-host", "forwarded", "lan-peer"],
+)
+def test_cloud_token_endpoint_withholds_device_token_from_other_local_callers(
+    monkeypatch,
+    tmp_path,
+    headers,
+    base_url,
+    environ,
+) -> None:
+    """Only a direct same-origin loopback browser may receive the device
+    token, so every other caller is refused before any mint. Issue #1491: none
+    of them may get the login-required signal either; a rebound host is already
+    refused by the host guard before the endpoint runs."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _cloud_broker_config().save()
+    urls = _record_device_mints(monkeypatch)
+
+    response = ui_server.app.test_client().get(
+        "/api/cloud/token",
+        headers=headers,
+        base_url=base_url,
+        environ_base=environ,
+    )
+
+    payload = response.get_json()
+    assert response.status_code in {403, 503}, payload
+    assert "token" not in payload
+    assert payload["error"] in {"cloud_unavailable", "remote_access_host_mismatch"}
+    assert urls == []
+
+
+def test_cloud_token_endpoint_falls_back_when_device_mint_is_refused(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A backend that predates ``device-token`` or refuses it (stale runtime,
+    tunnel down) keeps today's relay fallback."""
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    _cloud_broker_config().save()
+
+    def refused(*args, **kwargs):
+        raise remote_access.BackendRequestError(404, {"error": "not_found"})
+
+    monkeypatch.setattr(remote_access, "_json_request", refused)
+
+    response = ui_server.app.test_client().get(
+        "/api/cloud/token",
+        headers={"Origin": "http://127.0.0.1:5123"},
         base_url="http://127.0.0.1:5123",
     )
 

@@ -1909,14 +1909,52 @@ def mint_cloud_token(
     when the cloud isn't configured or the mint fails — the caller then falls
     back to the local relay.
     """
-    config = config or V2Config.load()
+    return _mint_instance_cloud_token(
+        config or V2Config.load(),
+        "user-token",
+        {"sub": sub, "email": email, "scope": scope},
+        timeout=timeout,
+    )
+
+
+def mint_device_cloud_token(
+    config: V2Config | None = None,
+    *,
+    scope: str = "asr",
+    timeout: float = 8.0,
+) -> dict[str, Any] | None:
+    """Exchange this instance's device secret for a short-lived cloud token
+    whose principal is the device itself rather than an avibe.bot user.
+
+    The Workbench opened on this machine's loopback origin (a local browser or
+    the desktop shell) carries no avibe.bot session, so it cannot be vouched for
+    through ``user-token``. avibe.bot grants this token nothing the device
+    secret does not already grant, under the device-secret ASR runtime gate.
+    Returns ``None`` when the cloud isn't configured or the mint fails,
+    including against a backend that predates the endpoint.
+    """
+    return _mint_instance_cloud_token(
+        config or V2Config.load(),
+        "device-token",
+        {"scope": scope},
+        timeout=timeout,
+    )
+
+
+def _mint_instance_cloud_token(
+    config: V2Config,
+    endpoint: str,
+    payload: dict[str, Any],
+    *,
+    timeout: float,
+) -> dict[str, Any] | None:
     cloud = config.remote_access.vibe_cloud
     if not (cloud.enabled and cloud.instance_id and cloud.instance_secret and cloud.backend_url):
         return None
     try:
         return _json_request(
-            f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{cloud.instance_id}/user-token",
-            {"sub": sub, "email": email, "scope": scope},
+            f"{cloud.backend_url.rstrip('/')}/api/v1/instances/{cloud.instance_id}/{endpoint}",
+            payload,
             timeout=timeout,
             headers={"X-Vibe-Device-Secret": cloud.instance_secret},
         )
@@ -1967,7 +2005,27 @@ def cloud_token_for_authorization(
     sub = str(payload.get("sub", "")).strip()
     if not email or not sub:
         return None
-    minted = mint_cloud_token(config, sub=sub, email=email, scope=scope)
+    return _browser_cloud_token(config, mint_cloud_token(config, sub=sub, email=email, scope=scope), scope)
+
+
+def cloud_token_for_local_device(config: V2Config, *, scope: str = "asr") -> dict[str, Any] | None:
+    """Mint a device-principal Cloud ASR token for this machine's own Workbench.
+
+    Returns the same ``{base_url, token, expires_at, scope, capabilities}``
+    shape as ``cloud_token_for_authorization``. The caller owns the decision
+    that the request is a direct loopback browser on this machine; this helper
+    never sees the request.
+    """
+    if scope != "asr":
+        return None
+    return _browser_cloud_token(config, mint_device_cloud_token(config, scope=scope), scope)
+
+
+def _browser_cloud_token(
+    config: V2Config,
+    minted: Mapping[str, Any] | None,
+    scope: str,
+) -> dict[str, Any] | None:
     if not minted or not minted.get("access_token"):
         return None
     cloud = config.remote_access.vibe_cloud

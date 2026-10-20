@@ -7808,11 +7808,13 @@ def _remote_resource_access_context():
 
 @app.route("/api/cloud/token", methods=["GET"])
 def api_cloud_token():
-    """Broker a short-lived avibe.bot user token for the workbench frontend so it
+    """Broker a short-lived avibe.bot token for the workbench frontend so it
     can call the cloud directly (no tunnel relay). Exempt from the auth redirect
-    (like ``/api/session``) and self-checks the session: returns 503
-    ``cloud_unavailable`` when there's no authenticated user / no pairing / the
-    mint fails, so the frontend cleanly falls back to the local relay."""
+    (like ``/api/session``) and self-checks the caller: a remote-access browser
+    gets a token for its signed-in user, and a direct same-origin loopback
+    browser on this machine gets one whose principal is this paired device.
+    Returns 503 ``cloud_unavailable`` for any other caller, without pairing, or
+    when the mint fails, so the frontend cleanly falls back to the local relay."""
     from vibe import remote_access
 
     config = _load_remote_access_config()
@@ -7829,7 +7831,19 @@ def api_cloud_token():
         # Degrade to the documented ``cloud_unavailable`` fallback instead;
         # only genuine remote-access requests get the login signal.
         if not _is_remote_access_request(config):
-            return jsonify({"error": "cloud_unavailable"}), 503
+            # The machine's own Workbench (a local browser or the desktop
+            # shell) acts as the instance owner, so it receives a token whose
+            # principal is this paired device. Without one it has no realtime
+            # voice. Proxies, LAN setup hosts, and pages without same-origin
+            # evidence keep the relay fallback.
+            local_result = (
+                remote_access.cloud_token_for_local_device(config)
+                if _is_direct_loopback_browser_request()
+                else None
+            )
+            if local_result is None:
+                return jsonify({"error": "cloud_unavailable"}), 503
+            return _cloud_token_response(local_result)
         return jsonify({"ok": False, "error": "remote_access_login_required"}), 401
     resolution = remote_access.resolve_current_authorization(config, identity)
     if resolution.state == "revoked":
@@ -7845,6 +7859,10 @@ def api_cloud_token():
     )
     if result is None:
         return jsonify({"error": "cloud_unavailable"}), 503
+    return _cloud_token_response(result)
+
+
+def _cloud_token_response(result: dict[str, Any]):
     response = jsonify(result)
     # Bearer material must never be cached by intermediaries (Cloudflare etc.).
     response.headers["Cache-Control"] = "no-store, private"

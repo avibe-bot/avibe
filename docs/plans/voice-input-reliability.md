@@ -34,7 +34,9 @@ raw intermediate text to the client or requiring a transcript database. If the
 recording stops exactly at a segment boundary, the client sends a small
 finalize-only request containing the receipts and cursor context.
 
-When the browser cannot obtain a cloud token, the compatibility path remains:
+The local Workbench obtains its cloud token as a device principal; see
+`docs/voice-realtime-prototype.md`. When the browser cannot obtain a cloud
+token, the compatibility path remains:
 
 ```text
 getUserMedia / AudioWorklet
