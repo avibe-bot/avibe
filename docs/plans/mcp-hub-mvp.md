@@ -55,7 +55,7 @@ List all servers: `vibe mcp --list`.
 ```
 
 - One line per package, sorted by name; description sanitized to one line, max 160 chars.
-- Description: user-provided, else a localized generic string. Server-provided text is not used.
+- Description: from the active revision's manifest (user-provided at generation, else a localized generic string); pending unregenerated edits are not shown. Server-provided text is not used.
 - List at most 50 servers; if more exist, append the omitted count and `vibe mcp --list`.
 - No tool names, schemas, URLs, commands, credentials or management commands.
 - The block has two fixed parts: stable shared instructions (examples must stay parser-valid), then one `<server>: <description>` line per package, where `<server>` is the exact CLI selector.
@@ -88,7 +88,7 @@ vibe mcp docs search --args-json '{"query":"async Python","limit":5}'   # also -
 - Calls go to the owner, print one JSON document to stdout, diagnostics to stderr.
 - Errors point to the next useful command (root list, service list or tool help).
 
-Exit codes: `0` success, `2` usage/argument error, `1` any other failure (including command-admission denial). The JSON `error.type` carries the category (`not_found`, `disabled`, `connection`, `tool_error`, `timeout`, `capacity`, `input_required_unsupported`, …). `unknown_outcome` marks any failure after `tools/call` was sent other than a returned tool error or a known pre-dispatch rejection; it must not be retried. An IPC timeout or disconnect after the CLI submitted the call to the owner is also `unknown_outcome`, following the existing IPC acceptance-ambiguity handling in `vibe/internal_client.py`.
+Exit codes: `0` success, `2` usage/argument error, `1` any other failure (including command-admission denial). The JSON `error.type` carries the category (`not_found`, `disabled`, `connection`, `tool_error`, `timeout`, `capacity`, …). `unknown_outcome` marks any failure after `tools/call` was sent other than a returned tool error or a known pre-dispatch rejection; it must not be retried. An IPC timeout or disconnect after the CLI submitted the call to the owner is also `unknown_outcome`, following the existing IPC acceptance-ambiguity handling in `vibe/internal_client.py`.
 
 ### 4.2 Schema to flags
 
@@ -172,12 +172,12 @@ Persisted `definition.json`:
 
 - **Owner:** the Controller, over existing control IPC. UI and CLI hold no runtimes.
 - **Identity:** existing caller context (`core/caller_context.py`, `AVIBE_SESSION_ID`, …) as used by `vibe task/watch/agent`. No MCP-specific token.
-- **Permission:** instance-global. The local OS user has full rights. Management commands (add/save, generate/regenerate, enable/disable, remove) are Owner-only through the existing CLI command admission, because generating a stdio definition runs an arbitrary local command; list/help and tool calls use the same floor as using Skills (Editor), matching who sees the prompt index. Remote-context callers thus get exactly the permissions they have elsewhere. No MCP-specific policy.
+- **Permission:** instance-global. The local OS user has full rights. Management commands (add/save, generate/regenerate, enable/disable, remove) are Owner-only through the existing CLI command admission, because generating a stdio definition runs an arbitrary local command; list/help (admission runs before any help is rendered) and tool calls use the same floor as using Skills (Editor), matching who sees the prompt index. Remote-context callers thus get exactly the permissions they have elsewhere. No MCP-specific policy.
 - **Connections:** one client connection per (revision, caller session) for every transport — a stdio process, or an HTTP client holding its own `Mcp-Session-Id` (closed with the connection). This matches Claude Code and Codex (one client per session). Context-free calls are one-shot. Calls within one session are serialized on its connection. A connection whose call ends with `unknown_outcome` is closed, never reused. An HTTP `Session not found` (pre-dispatch) closes the client and the call is retried once on a fresh connection.
 - **Limits** (constants): at most 8 stdio processes in total, including generation; at the cap a new connection fails with `capacity`. Idle close 10 min; call timeout 120 s; generation 5 min. HTTP is not capped.
 - Servers that lock a shared resource (e.g. Playwright's default persistent profile) need their own isolation flag in the provider config (`--isolated`); Avibe does not rewrite server argv.
-- **Schemas at call time:** the CLI parses and validates against the published revision only. A new runtime connection lists all `tools/list` pages through the SDK before its first call, so the SDK knows every tool's output schema and header annotations; that list never changes the published package.
-- **Calls:** the owner checks enabled state, connects or reuses, sends `tools/call` and returns the result with the revision used. Elicitation/sampling/roots are out of scope: the client's callbacks for them reject, and the resulting error is reported as `input_required_unsupported`, not as an unknown outcome. The owner fixes the revision at admission and validates arguments against it.
+- **Schemas at call time:** the CLI parses and validates against the published revision only. A new runtime connection lists all `tools/list` pages through the SDK before its first call (same 100-page cap as generation), so the SDK knows every tool's output schema and header annotations; that list never changes the published package.
+- **Calls:** the owner checks enabled state, connects or reuses, sends `tools/call` and returns the result with the revision used. Elicitation/sampling/roots are out of scope: the client's callbacks for them reject; since the tool may already have acted, the call ends as `unknown_outcome`. The owner fixes the revision at admission and validates arguments against it.
 - **Disable/remove/regenerate:** disable/remove block new calls; all three close the package's superseded idle connections at once (busy ones close when their call settles); in-flight work may finish or report unknown outcome.
 - **Event loop:** all MCP SDK sessions run on one dedicated runtime thread with its own event loop, owned by the Controller; the SDK's synchronous result validation therefore never blocks the Controller loop. All other MCP work — argument validation, generation, artifact I/O, result envelope serialization and sizing — also runs off the Controller loop; the Controller loop only hands IPC requests over, per the repo's controller-loop rules.
 
