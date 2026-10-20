@@ -34,6 +34,27 @@ The `b44e519d7` inventory covers ten findings-bearing heads and all 16 threads; 
 
 The independent review also verified the real summary from comment `6186377372`: its inline `Reviews are triggered when you` preamble differs from the older split `Codex reviews are triggered when you` footer. Accept both complete known footer forms, keeping arbitrary footer content reportable and leaving trigger policy unchanged. The existing progress/error matrix now covers both forms; the two live-form progress cases failed before this compatibility fix, while the 12 controls passed.
 
+## Receipt-form clean pass (2026-10-20)
+
+Codex now posts its clean pass as a receipt comment: a `<!-- codex-review-receipt:v1 -->` marker, the verdict line
+ending in a rotating sign-off (`:+1:`, "Chef's kiss.", "Keep them coming!", ...), the `Reviewed commit` line, and a
+details footer that differs from the summary comment's. The classifier accepted only the bare two-line form, so on
+avibe#2868 the receipt for `c02d7ae5cd` was reported as an unfamiliar payload while CI was still running; the later
+green CI was then a quiet half-success, and the lane was never woken although the PR stayed Merge-ready for eight
+hours. All 30 receipts on this repository's last 60 PRs have this shape.
+
+Two changes close the class:
+
+- The clean-pass shape accepts the complete receipt: the optional marker, a sign-off of at most 80 plain characters
+  with no problem text or markup, the `Reviewed commit` line, and the exact receipt footer. Anything else, including
+  text after the footer, still reports.
+- Liveness for an unclassified verdict: when the latest current-head Codex verdict is neither a recognized pass nor a
+  recognized problem (problem text, changes requested, inline comments, or unresolved threads), a later complete green
+  CI result is reported once as ordinary CI activity, not as a success candidate. The Agent that judged the verdict
+  gets the signal it is waiting for; recognized findings and errors keep green CI quiet as before.
+
+No state field, waiter option or supervisor behavior changes.
+
 ## Validation evidence
 
 - With only the new parser flag present, both arrival-order regressions failed because the unchanged waiter emitted a single success (`rc=0` instead of the expected quiet wait).
