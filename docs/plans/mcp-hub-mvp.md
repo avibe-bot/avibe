@@ -24,8 +24,9 @@ Out of scope: OAuth, SSE (explicit `unsupported_transport_sse` error), project s
   definition.json          # editable connection definition (may hold plaintext env/header values)
   state.json               # {"enabled": bool}
   current.json             # pointer to the published revision
-  revisions/<revision>/
-    manifest.json          # versions, effective definition, description
+  revisions/<revision>/    # <revision> = generation timestamp + random suffix
+    definition.json        # immutable snapshot of the definition used to generate and to connect
+    manifest.json          # description, generatedAt, serverInfo.version (shown in UI)
     tools.json             # original tool descriptors
     commands.json          # generated flags and help
 ```
@@ -76,30 +77,18 @@ prompt index
 
 ```bash
 vibe mcp --list                         # enabled packages; --all includes disabled/draft/error
-vibe mcp docs --list [--page N] [--page-size N] [--format json]
+vibe mcp docs --list [--format json]
 vibe mcp docs search --help
 vibe mcp docs search --query 'async Python' --limit 5
 vibe mcp docs search --args-json '{"query":"async Python","limit":5}'   # also --args-file, --args-stdin
 ```
 
 - List/help read local artifacts only; they work offline and with the owner down.
-- Pagination: default 20, max 100, sorted by name; JSON output includes `hasMore`.
+- Lists print all entries, sorted by name.
 - Calls go to the owner, print one JSON document to stdout, diagnostics to stderr.
 - Errors point to the next useful command (root list, service list or tool help).
 
-Exit codes (the JSON error `type` is authoritative; command-admission denials keep the existing `vibe` CLI exit code 1):
-
-| Code | Meaning |
-|---:|---|
-| 0 | success |
-| 2 | syntax / argument validation |
-| 3 | package or artifact missing/invalid, or `package_changed` |
-| 4 | package disabled |
-| 5 | connection / unsupported transport, or a server-side pre-dispatch rejection such as `HEADER_MISMATCH` |
-| 6 | tool not found or tool error |
-| 7 | timeout or cancelled before `tools/call` was sent |
-| 8 | any failure after `tools/call` was sent other than a returned tool error or a known pre-dispatch rejection — timeout, cancel, disconnect, protocol/decoding or client-side output validation (unknown outcome; do not retry) |
-| 9 | owner unavailable or at capacity |
+Exit codes: `0` success, `2` usage/argument error, `1` any other failure (including command-admission denial). The JSON `error.type` carries the category (`not_found`, `disabled`, `connection`, `tool_error`, `timeout`, `capacity`, `input_required_unsupported`, …). `unknown_outcome` marks any failure after `tools/call` was sent other than a returned tool error or a known pre-dispatch rejection; it must not be retried.
 
 ### 4.2 Schema to flags
 
@@ -168,15 +157,14 @@ Persisted `definition.json`:
 
 ## 6. Generation and versions
 
-- Uses its own connection; the SDK's high-level client negotiates the protocol (modern discovery or legacy `initialize`) and the selected version is recorded; then fetches all `tools/list` pages (cursors are opaque; stop when absent; fail after 100 pages), builds the revision.
+- Uses its own connection; the SDK's high-level client negotiates the protocol; then fetches all `tools/list` pages (cursors are opaque; stop when absent; fail after 100 pages), builds the revision.
 - Publish = write the full revision directory, then atomically replace `current.json`. Any failure leaves the previous revision active.
 - The owner serializes save/generate/enable/disable/remove per package, so these never race.
-- Initial generate enables the package on success: it writes `state.json` (enabled) before switching `current.json`, so a crash in between leaves an enabled draft that simply regenerates; no transaction needed. Regenerate never changes `state.json`.
-- Keep the current and previous revision; delete older ones after publish. An offline list/help reader that finds a revision file missing rereads `current.json` once and retries.
-- `revision` = sha256 of the canonical manifest inputs (definition, versions, tools, commands), excluding timestamps. An identical rebuild reports "no change".
-- Manifest records `protocolVersion`, `serverInfo`, `generatorVersion`, `generatedAt` as provenance only; nothing compares them or detects updates. `tools/list_changed` is ignored.
+- Initial generate publishes, then sets `state.json` enabled; a crash in between leaves a generated but disabled package that the user enables. Regenerate never changes `state.json`.
+- Keep the current and previous revision; delete older ones after publish. All readers go through one read helper that, if a revision file is missing, rereads `current.json` once.
+- Every generate publishes a new revision; there is no content hashing or "no change" detection. Nothing compares versions or detects updates; `tools/list_changed` is ignored.
 - Regenerate does not upgrade server software. A stale schema surfaces as a call error suggesting regeneration; calls are never replayed.
-- The manifest embeds the complete effective definition (including env/header values; owner-private via the same helpers, masked in UI). Calls always connect with the admitted revision's own definition, never the edited `definition.json`, so a pending edit cannot mix an old URL with a new header. Changing a value is a definition change and needs regeneration.
+- Calls connect with the admitted revision's `definition.json` snapshot (owner-private, may hold plaintext values), never the edited top-level file, so a pending edit cannot mix old schemas with a new URL/header/argv. Edits take effect on regeneration.
 - Tools with `execution.taskSupport: "required"` are skipped with a generation diagnostic (tasks are out of scope).
 
 ## 7. Runtime
@@ -184,11 +172,11 @@ Persisted `definition.json`:
 - **Owner:** the Controller, over existing control IPC. UI and CLI hold no runtimes.
 - **Identity:** existing caller context (`core/caller_context.py`, `AVIBE_SESSION_ID`, …) as used by `vibe task/watch/agent`. No MCP-specific token.
 - **Permission:** instance-global. The local OS user has full rights. Management commands go through the same existing CLI command admission (role floor) as other config-changing `vibe` commands; list/help and tool calls use the same floor as using Skills (Editor), matching who sees the prompt index. Remote-context callers thus get exactly the permissions they have elsewhere. No MCP-specific policy.
-- **Connections:** one client connection per (revision, caller session) for every transport — a stdio process, or an HTTP client holding its own `Mcp-Session-Id` (closed with the connection). This matches Claude Code and Codex (one client per session). Context-free calls are one-shot. Calls within one session are serialized on its connection. A connection whose call ends with an unknown outcome (exit 8) is closed, never reused.
-- **Limits** (constants): at most 8 stdio processes in total, including generation. At the cap, close the longest-idle process (no in-flight call) to make room; fail with exit 9 only if all are busy. Idle close 10 min; call timeout 120 s; generation 5 min. HTTP is not capped.
+- **Connections:** one client connection per (revision, caller session) for every transport — a stdio process, or an HTTP client holding its own `Mcp-Session-Id` (closed with the connection). This matches Claude Code and Codex (one client per session). Context-free calls are one-shot. Calls within one session are serialized on its connection. A connection whose call ends with `unknown_outcome` is closed, never reused.
+- **Limits** (constants): at most 8 stdio processes in total, including generation; at the cap a new connection fails with `capacity`. Idle close 10 min; call timeout 120 s; generation 5 min. HTTP is not capped.
 - Servers that lock a shared resource (e.g. Playwright's default persistent profile) need their own isolation flag in the provider config (`--isolated`); Avibe does not rewrite server argv.
-- **Schemas at call time:** the CLI parses and validates against the published revision only. Each new runtime connection runs one ordinary `tools/list` through the SDK, which is how the SDK learns output schemas and `x-mcp-header` annotations; that list is never written back and never changes the published package.
-- **Calls:** the owner checks enabled state, connects or reuses, sends `tools/call` and returns the result with the revision used. Elicitation/sampling/roots are out of scope: the client's callbacks for them reject, and the resulting error is reported as `input_required_unsupported` (exit 6), not as an unknown outcome. If `current.json` changed between CLI parse and admission, it returns `package_changed`.
+- **Schemas at call time:** the CLI parses and validates against the published revision only. The SDK may list tools on a new connection as its protocol handling requires; that never changes the published package.
+- **Calls:** the owner checks enabled state, connects or reuses, sends `tools/call` and returns the result with the revision used. Elicitation/sampling/roots are out of scope: the client's callbacks for them reject, and the resulting error is reported as `input_required_unsupported`, not as an unknown outcome. The owner fixes the revision at admission and validates arguments against it.
 - **Disable/remove:** blocks new calls and closes connections; in-flight work may finish or report unknown outcome.
 - **Event loop:** all MCP SDK sessions run on one dedicated runtime thread with its own event loop, owned by the Controller; the SDK's synchronous result validation therefore never blocks the Controller loop. Generation's serialization, hashing, artifact reads/writes and schema compilation also run off the Controller loop (worker thread), per the repo's controller-loop rules.
 
@@ -199,7 +187,7 @@ Result envelope:
  "result": {"content": [], "isError": false}}
 ```
 
-Preserve typed content, `structuredContent`, `isError` and explicit null/false/empty values. Results above a fixed byte cap (set in C0; no shared IPC cap exists) are not returned: the call still completed, so the envelope keeps `isError` and reports `resultOmitted: "too_large"` — `status: "ok"`/exit 0, or the normal tool-error status/exit 6 when `isError` is true — so Agents never retry a committed call.
+Preserve typed content, `structuredContent`, `isError` and explicit null/false/empty values. Results above a fixed byte cap (set in C0; no shared IPC cap exists) are not returned: the call still completed, so the envelope keeps `isError` and reports `resultOmitted: "too_large"` — success, or the normal tool error when `isError` is true — so Agents never retry a committed call.
 
 ## 8. UI / API
 
@@ -232,10 +220,10 @@ Lifecycle follows mcporter `generate-cli` (inspected at [`5362d60`](https://gith
 
 Acceptance:
 
-1. Page and `vibe mcp add` produce identical definitions; Claude-style syntax is parser-tested; add never connects; env/header values live only in owner-private `definition.json` and revision manifests, and are masked in UI/API and never printed by Avibe's own logs.
+1. Page and `vibe mcp add` produce identical definitions; Claude-style syntax is parser-tested; add never connects; env/header values live only in owner-private definition files, and are masked in UI/API and never printed by Avibe's own logs.
 2. Help/list work with the server and owner down; schema-to-flag contracts hold; injected prompt examples are parser-tested.
-3. Generation never publishes partial tool lists; readers never see mixed revisions; identical rebuilds keep the revision; initial generate enables, regenerate preserves state.
-4. Tool execution uses `tools/call` against the admitted revision (SDK-required auxiliary requests such as runtime `tools/list` are allowed); unknown-outcome connections are closed; process cap, idle close and timeouts hold; unknown outcomes are not retried.
+3. Generation never publishes partial tool lists; readers never see mixed revisions; initial generate enables, regenerate preserves state.
+4. Tool execution uses `tools/call` against the admitted revision (SDK-internal auxiliary requests allowed); unknown-outcome connections are closed; process cap, idle close and timeouts hold; unknown outcomes are not retried.
 5. Results keep structured/multimodal/error content; disabled packages reject calls; tests cannot touch real user state.
 
 ## 11. Next action
