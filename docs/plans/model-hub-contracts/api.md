@@ -73,7 +73,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | GET `/api/models/quota` | → `{quota: QuotaSummary}` | Rate-limit windows of every hub-held subscription Source, from the vendor's own usage report, plus each Source's API-price `value` (see Subscription quota). Served from the server cache; a Source older than five minutes is re-read before answering, bounded by a short deadline, and a Source still being read is listed in `pending`. Never starts the engine. |
 | POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. |
 | GET `/api/models/hosted-tools` | → `{hosted_tools: HostedToolsStatus}` | Models → Tools (`hosted-tools-status.schema.json`): every catalog tool with its switch (absent setting = on), its passive status from real use (`latest_ok`, current `refused[]`, per-pair `verified[]`), for a search tool the saved and effective executor order with every eligible executor candidate and its unit rates, and for `image_generate` the saved and effective default and the available image models. Memory only; nothing is probed. |
-| PUT `/api/models/hosted-tools/<tool>` | `{enabled?: boolean, executor_order?: null \| [source_id], default_model?: null \| {source_id, model_id}, prefer_native?: boolean, services?: {source_id: null \| {results?: integer \| null, content?: boolean \| null, enabled?: boolean \| null}}}` → `{hosted_tools: HostedToolsStatus}` | Changes one tool's settings field by field: an absent field is unchanged, `null` resets `executor_order` to automatic or `default_model` to the default. `executor_order` is for search tools and `default_model` for `image_generate`; values are saved as given, never resolved. It applies from the next turn and interrupts nothing. An unknown tool returns `404 hosted_tool_not_found`; an empty or malformed body `400 invalid_parameter`, including a null `enabled`, an id that is not a Source id (`src_…`), or a model id with surrounding whitespace. |
+| PUT `/api/models/hosted-tools/<tool>` | `{enabled?: boolean, executor_order?: null \| [source_id], default_model?: null \| {source_id, model_id}, prefer_native?: boolean, services?: {source_id: null \| {results?: integer \| null, enabled?: boolean \| null}}}` → `{hosted_tools: HostedToolsStatus}` | Changes one tool's settings field by field: an absent field is unchanged, `null` resets `executor_order` to automatic or `default_model` to the default. `executor_order` is for search tools and `default_model` for `image_generate`; values are saved as given, never resolved. It applies from the next turn and interrupts nothing. An unknown tool returns `404 hosted_tool_not_found`; an empty or malformed body `400 invalid_parameter`, including a null `enabled`, an id that is not a Source id (`src_…`), or a model id with surrounding whitespace. |
 | POST `/api/models/hosted-tools/<tool>/clear` | `{source_id?, model_id?}` → `{hosted_tools: HostedToolsStatus}` | Clears the tool's refusals (`call` and `replay`): on one Source and model, on one Source (every model), or with `{}` on every Source. `model_id` requires `source_id`; neither is nullable, so a malformed body is refused rather than widened into a broader clear. A Source or model with nothing to clear is a no-op that answers the read. The file is written first: a failed write returns `500 state_write_failed` and changes nothing. A cleared Source is assumed again from its next request. An unknown tool returns `404 hosted_tool_not_found`; any other body `400 invalid_parameter`. |
 | POST `/api/models/sources/<source_id>/evidence/clear` | `{model_id, feature: {kind: "effort", name}}` → `{source: Source}` | Clears one effort refusal of a Source's model, so the next request at that effort may reach it. A missing record is a no-op. An unknown Source returns `404 source_not_found`; a hosted-tool feature or any other body `400 invalid_parameter` (hosted refusals clear through the Tools clear); a failed write `500 state_write_failed` with nothing changed. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
@@ -111,12 +111,12 @@ activation toggle exists.
 
 The service variant is frozen for S4/S2 in `hosted-tools-status.schema.json`:
 `model_id` is the catalog service id; `billing: "metered"`, `relay: false`, and
-`price` is the catalog list price, including optional `extra[].when: "content"`
-and unit `page`. `settings` holds effective `{results, content, enabled}`;
+`price` is the catalog list price per search, with no page-text surcharge.
+`settings` holds effective `{results, enabled}`;
 `state` is the Source's health, `trial_pending` covers both armed and in-flight
 one-shot trials, and `cooldown_until` is nullable (S2 owns service cooldowns).
 `service_vendors` contains `{id, name, price, free_tier, facts, results_max,
-content_supported, content_changes_price, source_ids}`. Facts are the catalog's
+source_ids}`. Facts are the catalog's
 `{tool_only, auto_enroll, free_check}` booleans. A free tier not verified in the
 catalog reads as null, never a promise of zero cost. `source_ids` includes
 opted-out search-capable Sources, but not relays or subscriptions.
@@ -125,17 +125,19 @@ PUT accepts `prefer_native` and `services` only for `web_search`. `prefer_native
 is a boolean, not nullable. `services` is a Source-keyed patch: an absent Source
 is untouched, a present object merges only its supplied fields, and a null
 Source or null field removes its saved override. An empty patch is a no-op.
-Defaults are `results: min(5, vendor maximum)`, `content: false`, and `enabled:
-true`, except false for a model vendor without `auto_enroll`. Writes reject
-non-integer/out-of-range results and page text where the catalog does not offer
-it; unknown/non-search-capable Sources reject non-null patches. Null may clear
+Defaults are `results: min(5, vendor maximum)` and `enabled: true`, except false
+for a model vendor without `auto_enroll`. Writes reject non-integer/out-of-range
+results and unknown fields (including `content`); unknown/non-search-capable
+Sources reject non-null patches. Null may clear
 a stale Source override. A rejected patch changes nothing. Concurrent edits to
 different Sources or fields serialize against the current saved settings.
 
-Loading ignores removed Sources and clamps obsolete catalog bounds in memory
-without changing the file: results to the current maximum, content to false
-when page text is no longer offered. The next authorized config write persists
-normalization; absent overrides remain absent.
+Loading ignores removed Sources and clamps results to the current catalog maximum
+in memory without changing the file. Unknown service-entry fields, including a
+dev build's retired `content` override, are ignored with a warning without losing
+other saved settings. The next authorized config write persists normalization;
+absent overrides remain absent. Phase-1 search returns snippets only; page reading
+is deferred to the phase-2 `web_fetch` tool.
 
 Every `web_search.executor_order` save also writes `executor_order_kinds` from
 the resulting per-Source settings: each extant named Source's `service` or

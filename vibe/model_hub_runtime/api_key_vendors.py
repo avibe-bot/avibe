@@ -172,17 +172,6 @@ def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] |
         raise ValueError("api-key vendor search catalog service id is invalid")
     if item.get("auth") not in {"bearer", "x-api-key"} or not isinstance(item.get("request"), dict) or not isinstance(item.get("result"), dict) or not isinstance(item.get("limits"), dict):
         raise ValueError("api-key vendor search catalog mapping is invalid")
-    if "content_max_chars" in item["request"]:
-        content_max_chars = item["request"]["content_max_chars"]
-        if (
-            not isinstance(content_max_chars, dict)
-            or set(content_max_chars) != {"path", "value"}
-            or not isinstance(content_max_chars.get("path"), str)
-            or not content_max_chars["path"]
-            or type(content_max_chars.get("value")) is not int
-            or not 1 <= content_max_chars["value"] <= 4000
-        ):
-            raise ValueError("api-key vendor search catalog content maximum is invalid")
     if "reported_cost" in item["result"]:
         reported_cost = item["result"]["reported_cost"]
         if (
@@ -194,7 +183,7 @@ def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] |
         ):
             raise ValueError("api-key vendor search catalog reported cost is invalid")
     results_max = item["limits"].get("results_max")
-    # Usage page counters use this fixed ceiling even after a catalog update.
+    # Keep a fixed per-request results ceiling across catalog updates.
     if isinstance(results_max, bool) or not isinstance(results_max, int) or not 1 <= results_max <= 100:
         raise ValueError("api-key vendor search catalog results maximum is invalid")
     price = item.get("price")
@@ -202,7 +191,7 @@ def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] |
         raise ValueError("api-key vendor search catalog price is invalid")
     if not isinstance(price.get("usd_per_1k"), (int, float)) or isinstance(price.get("usd_per_1k"), bool) or price["usd_per_1k"] < 0:
         raise ValueError("api-key vendor search catalog price is invalid")
-    if not isinstance(price.get("extra"), list) or not isinstance(price.get("as_of"), str) or not isinstance(price.get("url"), str):
+    if price.get("extra") != [] or not isinstance(price.get("as_of"), str) or not isinstance(price.get("url"), str):
         raise ValueError("api-key vendor search catalog price is invalid")
     if not isinstance(item.get("tool_only"), bool) or item["tool_only"] != (protocol == "search"):
         raise ValueError("api-key vendor search catalog protocol is invalid")

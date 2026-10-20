@@ -82,10 +82,10 @@ def test_defaults_follow_catalog_without_freezing_overrides(monkeypatch):
     assert setting.prefer_native is True
     assert setting.services == {} and setting.executor_order_kinds is None
     for source in config.sources[1:]:
-        assert hosted_tools.search_service_settings(setting, source) == {"results": 5, "content": False, "enabled": True}
+        assert hosted_tools.search_service_settings(setting, source) == {"results": 5, "enabled": True}
     _catalog_change(monkeypatch, "deepseek", auto_enroll=False, limits={"results_max": 3})
     assert hosted_tools.search_service_settings(setting, config.sources[-1]) == {
-        "results": 3, "content": False, "enabled": False,
+        "results": 3, "enabled": False,
     }
     assert setting.to_payload() == {"enabled": True}
     # A subscription or relay cannot inherit an official API's search permission.
@@ -100,7 +100,7 @@ async def test_mixed_order_and_role_snapshot_survive_real_v2_restart(tmp_path):
     order = [MODEL, TAVILY, GONE, DEEPSEEK, EXA]
     await service.set_hosted_tool("web_search", {
         "prefer_native": False, "executor_order": order,
-        "services": {TAVILY: {"results": 7, "content": True}, DEEPSEEK: {"enabled": False}},
+        "services": {TAVILY: {"results": 7, "enabled": False}, DEEPSEEK: {"enabled": False}},
     })
     saved = json.loads(path.read_text())["model_hub"]["hosted_tools"]["web_search"]
     assert saved["executor_order"] == order
@@ -167,20 +167,18 @@ def test_retargeted_source_keeps_its_opt_out_until_search_capability_returns(tmp
 
 @pytest.mark.asyncio
 async def test_catalog_downgrade_clamps_on_load_without_rewriting_until_next_save(tmp_path, monkeypatch):
-    """A catalog maximum/content removal cannot disable the tool or silently edit disk on read."""
-    service, path, _ = _disk_service(tmp_path, _config({"services": {TAVILY: {"results": 20, "content": True}}}))
+    """A catalog maximum reduction cannot disable the tool or silently edit disk on read."""
+    service, path, _ = _disk_service(tmp_path, _config({"services": {TAVILY: {"results": 20}}}))
     original = path.read_bytes()
-    result_mapping = dict(api_key_vendors.api_key_vendor_entry("tavily").search["result"])
-    result_mapping.pop("content")
-    _catalog_change(monkeypatch, "tavily", limits={"results_max": 2}, result=result_mapping)
+    _catalog_change(monkeypatch, "tavily", limits={"results_max": 2})
     loaded = V2Config.load().model_hub.hosted_tools["web_search"]
     assert loaded.enabled
-    assert loaded.services[TAVILY].to_payload() == {"results": 2, "content": False}
-    assert _web(service)["services"][TAVILY] == {"results": 2, "content": False}
+    assert loaded.services[TAVILY].to_payload() == {"results": 2}
+    assert _web(service)["services"][TAVILY] == {"results": 2}
     assert path.read_bytes() == original
     await service.set_hosted_tool("web_search", {"prefer_native": False})
     written = json.loads(path.read_text())["model_hub"]["hosted_tools"]["web_search"]
-    assert written["services"][TAVILY] == {"results": 2, "content": False}
+    assert written["services"][TAVILY] == {"results": 2}
     assert V2ModelHubConfigStore().load().hosted_tools["web_search"].to_payload() == written
 
 
@@ -188,15 +186,15 @@ async def test_catalog_downgrade_clamps_on_load_without_rewriting_until_next_sav
 async def test_put_merges_absent_sources_fields_and_null_resets(tmp_path):
     """MH-HOSTED-004: partial clients cannot echo defaults over other clients' saved choices."""
     service, path, _ = _disk_service(tmp_path, _config({"services": {
-        TAVILY: {"results": 8, "content": True, "enabled": False}, EXA: {"content": True},
+        TAVILY: {"results": 8, "enabled": False}, EXA: {"results": 10},
     }}))
     await service.set_hosted_tool("web_search", {"services": {TAVILY: {"results": 9}}})
     assert _web(service)["services"] == {
-        TAVILY: {"results": 9, "content": True, "enabled": False}, EXA: {"content": True},
+        TAVILY: {"results": 9, "enabled": False}, EXA: {"results": 10},
     }
-    await service.set_hosted_tool("web_search", {"services": {TAVILY: {"content": None}, EXA: None}})
-    assert _web(service)["services"] == {TAVILY: {"results": 9, "enabled": False}}
-    await service.set_hosted_tool("web_search", {"services": {TAVILY: {"results": None, "enabled": None}}})
+    await service.set_hosted_tool("web_search", {"services": {TAVILY: {"enabled": None}, EXA: None}})
+    assert _web(service)["services"] == {TAVILY: {"results": 9}}
+    await service.set_hosted_tool("web_search", {"services": {TAVILY: {"results": None}}})
     assert _web(service)["services"] == {}
     before = path.read_bytes()
     await service.set_hosted_tool("web_search", {"services": {}})
@@ -210,7 +208,7 @@ async def test_concurrent_different_fields_and_sources_are_not_lost(tmp_path):
     service, _, _ = _disk_service(tmp_path, _config())
     async with service._mutation_lock:
         writes = [asyncio.create_task(service.set_hosted_tool("web_search", patch)) for patch in (
-            {"services": {TAVILY: {"results": 11}}}, {"services": {TAVILY: {"content": True}}},
+            {"services": {TAVILY: {"results": 11}}}, {"services": {TAVILY: {"enabled": False}}},
             {"services": {EXA: {"enabled": False}}}, {"prefer_native": False},
         )]
         await asyncio.sleep(0)
@@ -218,7 +216,7 @@ async def test_concurrent_different_fields_and_sources_are_not_lost(tmp_path):
     await asyncio.gather(*writes)
     restarted = V2ModelHubConfigStore().load().hosted_tools["web_search"]
     assert restarted.to_payload() == {"enabled": True, "prefer_native": False, "services": {
-        TAVILY: {"results": 11, "content": True}, EXA: {"enabled": False},
+        TAVILY: {"results": 11, "enabled": False}, EXA: {"enabled": False},
     }}
 
 
@@ -229,7 +227,10 @@ async def test_concurrent_different_fields_and_sources_are_not_lost(tmp_path):
     ("web_search", {"services": {TAVILY: {"results": 21}}}),
     ("web_search", {"services": {TAVILY: {"results": True}}}),
     ("web_search", {"services": {TAVILY: {"results": 0}}}),
-    ("web_search", {"services": {TAVILY: {"content": 1}}}),
+    ("web_search", {"services": {TAVILY: {"enabled": 1}}}),
+    ("web_search", {"services": {TAVILY: {"content": True}}}),
+    ("web_search", {"services": {TAVILY: {"content": False}}}),
+    ("web_search", {"services": {TAVILY: {"content": None}}}),
     ("web_search", {"services": {TAVILY: {"unknown": True}}}),
     ("web_search", {"services": {GONE: {"results": 5}}}),
     ("web_search", {"services": {MODEL: {"enabled": True}}}),
@@ -245,18 +246,31 @@ async def test_invalid_patches_are_atomic(tmp_path, tool, patch):
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("content", [True, False, None, "obsolete"])
 @pytest.mark.asyncio
-async def test_content_write_requires_catalog_page_text(tmp_path, monkeypatch):
+async def test_development_content_override_is_ignored_without_losing_saved_choices(tmp_path, caplog, content):
+    """MH-HOSTED-002: pre-withdrawal dev settings must not break load or erase opt-outs.
+
+    Existing released-shape tests predate services.content. Read this fixture through V2,
+    not through the current writer, which must no longer be able to produce the field.
+    """
     service, path, _ = _disk_service(tmp_path, _config())
-    result = dict(api_key_vendors.api_key_vendor_entry("tavily").search["result"])
-    result.pop("content")
-    _catalog_change(monkeypatch, "tavily", result=result)
+    fixture = Path(__file__).parent / "fixtures/model_hub/development_search_content.json"
+    saved = json.loads(fixture.read_text(encoding="utf-8"))
+    saved["services"][TAVILY]["content"] = content
+    payload = json.loads(path.read_text())
+    payload["model_hub"]["hosted_tools"]["web_search"] = saved
+    path.write_text(json.dumps(payload), encoding="utf-8")
     before = path.read_bytes()
-    with pytest.raises(ModelHubError):
-        await service.set_hosted_tool("web_search", {"services": {TAVILY: {"content": True}}})
+    expected = {**saved, "services": {TAVILY: {"results": 7, "enabled": False}}}
+    loaded = V2ModelHubConfigStore().load().hosted_tools["web_search"]
+    assert loaded.to_payload() == expected
+    assert _web(service)["services"] == expected["services"]
+    assert "content" in caplog.text and "ignores unknown fields" in caplog.text
     assert path.read_bytes() == before
-    await service.set_hosted_tool("web_search", {"services": {TAVILY: {"content": False}}})
-    assert _web(service)["services"][TAVILY] == {"content": False}
+    await service.set_hosted_tool("x_search", {"enabled": False})
+    assert json.loads(path.read_text())["model_hub"]["hosted_tools"]["web_search"] == expected
+    assert V2ModelHubConfigStore().load().hosted_tools["web_search"].to_payload() == expected
 
 
 def test_service_order_read_skips_removed_sources_without_rewriting_saved_order(tmp_path):
@@ -303,7 +317,7 @@ def test_removed_source_settings_are_ignored_before_validation():
 
 
 @pytest.mark.parametrize("field,value", [("prefer_native", None), ("services", None),
-                                        ("services", {TAVILY: {"content": None}})])
+                                        ("services", {TAVILY: {"enabled": None}})])
 def test_damaged_optional_settings_disable_only_web_search(field, value):
     config = _config({"executor_order": [TAVILY], field: value})
     assert not config.hosted_tools["web_search"].enabled
@@ -356,9 +370,9 @@ async def test_dormant_read_and_future_service_variant_validate_without_paid_cal
     exa = next(row for row in visible["executor_candidates"] if row["source_id"] == EXA)
     assert exa == {
         "kind": "service", "source_id": EXA, "model_id": "exa/search", "billing": "metered", "relay": False,
-        "price": {"unit": "search", "usd_per_1k": 7, "extra": [{"unit": "page", "usd_per_1k": 1, "when": "content"}],
+        "price": {"unit": "search", "usd_per_1k": 7, "extra": [],
                   "as_of": "2026-10-19", "url": "https://exa.ai/blog/exa-3"},
-        "settings": {"results": 5, "content": False, "enabled": True},
+        "settings": {"results": 5, "enabled": True},
         "state": {"status": "needs_action", "retry_at": None, "detail_key": "models.source.needs_action.balance_exhausted"},
         "trial_pending": True, "cooldown_until": None,
     }
@@ -368,9 +382,16 @@ async def test_dormant_read_and_future_service_variant_validate_without_paid_cal
     deepseek = next(vendor for vendor in visible["service_vendors"] if vendor["id"] == "deepseek")
     assert deepseek["source_ids"] == [DEEPSEEK] and deepseek["facts"]["auto_enroll"] is True
     assert deepseek["free_tier"] is None
-    assert next(vendor for vendor in visible["service_vendors"] if vendor["id"] == "exa")["content_changes_price"]
+    for vendor in visible["service_vendors"]:
+        assert set(vendor) == {"id", "name", "price", "free_tier", "facts", "results_max", "source_ids"}
+        assert vendor["price"]["extra"] == []
     validator = Draft7Validator({"$ref": CONTRACT + "#/definitions/ServiceExecutor"}, registry=_api_response_registry())
-    for changed in ({"kind": "model"}, {"billing": "monthly"}, {"settings": {"results": 5}}, {"trial_pending": None}):
+    for changed in (
+        {"kind": "model"}, {"billing": "monthly"}, {"settings": {"results": 5}}, {"trial_pending": None},
+        {"settings": {"results": 5, "enabled": True, "content": False}},
+        {"price": {**exa["price"], "extra": [{"unit": "page", "usd_per_1k": 1}]}},
+        {"price": {**exa["price"], "extra": [{"unit": "search", "usd_per_1k": 1, "when": "content"}]}},
+    ):
         with pytest.raises(ValidationError):
             validator.validate({**exa, **changed})
 
@@ -389,7 +410,7 @@ def test_http_tools_put_and_read_preserve_patch_and_dormant_contract(tmp_path, m
     origin = "http://127.0.0.1:15131"
     response = client.put(
         "/api/models/hosted-tools/web_search", base_url=origin, headers=csrf_headers(client, origin),
-        json={"prefer_native": False, "services": {TAVILY: {"results": 7, "content": True}}},
+        json={"prefer_native": False, "services": {TAVILY: {"results": 7, "enabled": False}}},
     )
     assert response.status_code == 200
     written = response.get_json()
@@ -398,7 +419,7 @@ def test_http_tools_put_and_read_preserve_patch_and_dormant_contract(tmp_path, m
     Draft7Validator({"$ref": "model-hub/api-response.schema.json#/definitions/HostedToolsResponse"},
                     registry=_api_response_registry()).validate(written)
     web = written["hosted_tools"]["tools"][0]
-    assert web["prefer_native"] is False and web["services"] == {TAVILY: {"results": 7, "content": True}}
+    assert web["prefer_native"] is False and web["services"] == {TAVILY: {"results": 7, "enabled": False}}
     assert "service_vendors" not in web and all(row["kind"] == "model" for row in web["executor_candidates"])
 
 

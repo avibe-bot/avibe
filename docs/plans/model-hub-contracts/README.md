@@ -3,15 +3,23 @@
 Status: **contract_version 18**, 2026-10-20: web-search settings and dormant Tools
 read (S1b, `../web-search-services.md` §3.2/§3.5). The RC tag `gh-v3.2.2rc12`
 contains S1a and v17, so these additions open a new event rather than changing v17.
-- V2 adds `prefer_native`, partial Source-keyed `services` overrides with catalog
-  clamping, and server-owned `executor_order_kinds` saved with each web-search order.
+- V2 adds `prefer_native`, partial Source-keyed `services` overrides (`results` and
+  `enabled`) with catalog result-count clamping, and server-owned `executor_order_kinds`
+  saved with each web-search order.
 - The PUT merges Source/field patches and supports null override resets.
 - The Tools read adds `prefer_native`, saved `services`, read-only `service_order`,
   model/service candidate discriminants, service settings/health/trial/cooldown
-  fields, service vendor facts, and page-text list-price extras.
+  fields, and service vendor facts.
 - Service candidates and `service_vendors` remain absent behind the single internal
   activation gate until S2. There is no new UI, service execution, placement rule,
   turn freeze or native-preference routing change in S1b.
+- The 2026-10-20 owner decision makes phase-1 web search snippet-only. This event
+  withdraws v17's bundled page-content request/result mappings, `content_max_chars`
+  and per-page price extras; Exa's included `contents.highlights`, reported-cost
+  mapping and estimate flag remain. Page reading belongs to phase-2 `web_fetch`.
+  S1b's unshipped `content` setting and vendor content flags are removed from this
+  v18 event. A dev build's saved `services.<id>.content` is ignored with the normal
+  unknown-field warning, preserving the tool switch, search opt-outs and orders.
 - The versioned mirrors advance together; persisted TurnProvenance retains v5–v17
   and adds v18. The rc12 hosted-tools loader ignores new optional config fields
   and retains the whole-tool switch and both orders, not per-Source service
@@ -21,22 +29,19 @@ contains S1a and v17, so these additions open a new event rather than changing v
 It builds on v17 (2026-10-19): search-service foundations
 (`../web-search-services.md`). Tool-only Sources use `protocol: search`; the catalog,
 credential custody, free checks, re-enable response and service-order persistence
-ship before search execution. S1b, S2 and S3 extend this same version event only
-while it is unshipped; if an RC has carried v17, the next lane opens v18 instead.
-S2 activates the service reads and search chain.
+shipped before search execution in `gh-v3.2.2rc12`. Its page-content metadata is
+withdrawn by v18 as recorded above. Later lanes extend the current version event
+only while it is unshipped; an RC freezes its meaning. S2 activates the service
+reads and snippet-only search chain.
 
 Catalog metadata verified on **2026-10-20**:
 - `search.auto_enroll` is explicit for model vendors with search; only DeepSeek is
   enabled automatically. S1b and S2 own the resulting settings defaults.
-- Exa's `search.result.reported_cost` names `costDollars.total` with `estimate: true`.
-  Its `search.request.content_max_chars` names `contents.text.maxCharacters` with
-  `value: 4000`, applied only when page content is requested. Both follow the
-  [Exa Search reference](https://exa.ai/docs/reference/search).
-- The [DeepSeek Search reference](https://api-docs.deepseek.com/api/search) and
-  [Tavily Search OpenAPI](https://docs.tavily.com/documentation/api-reference/openapi.json)
-  publish no hard per-page text bound. They retain the content setting with no
-  invented `content_results_max`. The adapter's hard 8 MiB response cap remains;
-  an over-cap body is unreadable, not a guarantee that every legitimate page fits.
+- Exa's `search.result.reported_cost` names `costDollars.total` with `estimate: true`,
+  following the [Exa Search reference](https://exa.ai/docs/reference/search).
+  Its always-requested `contents.highlights` supplies snippets and is included in
+  the search price. The catalog has no page-content request or result mapping.
+- The adapter's hard 8 MiB response cap remains; an over-cap body is unreadable.
   S2 applies the design's billing, cooldown and failover rules to that outcome.
 - Tavily's usage response may omit account pairs. A valid key pair with headroom
   (including `limit: null`) then passes the free credential check; it proves key

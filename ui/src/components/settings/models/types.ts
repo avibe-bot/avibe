@@ -1084,14 +1084,11 @@ export type HostedModelExecutorCandidate = {
   price: HostedToolListPrice | null;
 };
 
-/** Service prices extend model tool prices with page-text surcharges, without changing model-only renderers. */
-export type HostedServiceListPrice = Omit<HostedToolListPrice, 'unit' | 'extra'> & {
-  unit: 'search';
-  extra: { unit: HostedToolPriceUnit | 'page'; usd_per_1k: number; when?: 'content' }[];
-};
+/** A search service's catalog list price, in searches rather than model calls. */
+export type HostedServiceListPrice = HostedToolListPrice & { unit: 'search' };
 
 /** Effective settings. Saved settings and PUT patches keep omitted fields absent instead. */
-export type HostedSearchServiceSettings = { results: number; content: boolean; enabled: boolean };
+export type HostedSearchServiceSettings = { results: number; enabled: boolean };
 
 /** Defined now, but the server lists no service candidate until S2 activates the chain. */
 export type HostedServiceExecutorCandidate = {
@@ -1117,8 +1114,6 @@ export type HostedSearchServiceVendor = {
   free_tier: string | null;
   facts: { tool_only: boolean; auto_enroll: boolean; free_check: boolean };
   results_max: number;
-  content_supported: boolean;
-  content_changes_price: boolean;
   /** Includes opted-out Sources, so a disabled DeepSeek still reads as already added. */
   source_ids: string[];
 };

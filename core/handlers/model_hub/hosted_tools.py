@@ -542,8 +542,6 @@ def _service_vendors(config: ModelHubConfig) -> list[dict[str, Any]]:
                 "free_check": service["free_check"] is not None,
             },
             "results_max": service["limits"]["results_max"],
-            "content_supported": bool(service["result"].get("content")),
-            "content_changes_price": any(part.get("when") == "content" for part in service["price"]["extra"]),
             "source_ids": [
                 source.id for source in config.sources
                 if source.vendor == vendor.id and model_hub_search_service(source) is not None
@@ -776,7 +774,7 @@ def _patch_search_services(config: ModelHubConfig, payload: object) -> dict[str,
             continue
         source = live.get(source_id)
         service = model_hub_search_service(source) if source is not None else None
-        if service is None or not isinstance(patch, dict) or set(patch) - {"results", "content", "enabled"}:
+        if service is None or not isinstance(patch, dict) or set(patch) - {"results", "enabled"}:
             raise ValueError("services must name a search-capable Source and known fields")
         merged = saved.get(source_id, ModelHubSearchServiceSettings()).clamped(service).to_payload()
         for key, value in patch.items():
@@ -787,8 +785,6 @@ def _patch_search_services(config: ModelHubConfig, payload: object) -> dict[str,
         parsed = ModelHubSearchServiceSettings.from_payload(merged)
         if parsed.results is not None and parsed.results > service["limits"]["results_max"]:
             raise ValueError("results exceeds the catalog maximum")
-        if parsed.content and not service["result"].get("content"):
-            raise ValueError("the service does not return page text")
         if parsed.to_payload():
             saved[source_id] = parsed
         else:
