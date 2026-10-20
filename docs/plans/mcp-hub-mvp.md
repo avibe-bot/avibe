@@ -41,8 +41,10 @@ The shared system prompt gets a short discovery index (outside `core/managed_ski
 ```text
 ## MCP capabilities
 
-Use `vibe mcp <server> --list` to discover tools, `vibe mcp <server> <tool> --help` to inspect arguments,
-and `vibe mcp <server> <tool> [arguments]` to call.
+Use `vibe mcp <server> --list` to discover available tools.
+Use `vibe mcp <server> <tool> --help` to inspect arguments before calling.
+Call tools with `vibe mcp <server> <tool> [arguments]`.
+Help and lists read local generated definitions; tool calls access the MCP server.
 
 Available servers:
 - context7: Find current library documentation and code examples.
@@ -55,6 +57,18 @@ List all servers: `vibe mcp --list`.
 - Description: user-provided, else sanitized `serverInfo.title`/`name` captured at generation, else a localized generic string.
 - List at most 50 servers; if more exist, append the omitted count and `vibe mcp --list`.
 - No tool names, schemas, URLs, commands, credentials or management commands.
+- The block has two fixed parts: stable shared instructions (examples must stay parser-valid), then one `<server>: <description>` line per package, where `<server>` is the exact CLI selector.
+- Disable/remove takes effect on the next prompt build; new calls are rejected immediately even if a running turn still sees the old list.
+- The index grants nothing: every call rechecks enabled state at the owner.
+
+Agents discover details on demand:
+
+```text
+prompt index
+  → vibe mcp context7 --list
+  → vibe mcp context7 resolve-library-id --help
+  → vibe mcp context7 resolve-library-id --args-json '{"libraryName":"react","query":"React hooks"}'
+```
 
 ## 4. CLI
 
