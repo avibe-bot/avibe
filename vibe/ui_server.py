@@ -83,6 +83,7 @@ from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
 from vibe.runtime import get_ui_dist_path, get_working_dir
 from vibe.sentry_integration import init_sentry
+from vibe import ui_asset_archive
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
 
 if TYPE_CHECKING:
@@ -17184,12 +17185,19 @@ def serve_static(path):
     if ui_dist.resolve() not in resolved_path.parents and resolved_path != ui_dist.resolve():
         return jsonify({"error": "not_found"}), 404
 
+    if not (resolved_path.exists() and resolved_path.is_file()) and path.startswith("assets/"):
+        # A page loaded before an upgrade still requests its own build's chunks.
+        archived_path = ui_asset_archive.find_archived_asset(path.removeprefix("assets/"))
+        if archived_path is not None:
+            resolved_path = archived_path
+
     if resolved_path.exists() and resolved_path.is_file():
         mime_type, _ = mimetypes.guess_type(str(resolved_path))
         if path.startswith("assets/"):
             cache_control = "public, max-age=31536000, immutable"
         elif resolved_path.name == "index.html":
             cache_control = "no-store, private"
+            ui_asset_archive.record_served_build(ui_dist)
         else:
             cache_control = "public, max-age=3600"
         return _ui_static_file_response(
@@ -17202,6 +17210,7 @@ def serve_static(path):
     if "." not in path:
         index_path = ui_dist / "index.html"
         if index_path.exists():
+            ui_asset_archive.record_served_build(ui_dist)
             return _ui_static_file_response(
                 index_path,
                 content_type="text/html",

@@ -156,7 +156,10 @@
     "title": "Something went wrong",
     "body": "This part of the app hit an unexpected error. The rest still works — retry, or reload the page.",
     "retry": "Retry",
-    "reload": "Reload page"
+    "reload": "Reload page",
+    "reloading": "Reloading…",
+    "chunkLoadTitle": "Reload to continue",
+    "chunkLoadBody": "This part couldn't load, most likely because Avibe was updated after this page opened. Reload the page to continue."
   },
   "remoteLogin": {
     "title": "Sign in to continue",
