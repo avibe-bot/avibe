@@ -299,7 +299,9 @@ Hosted tools §6 holds, with these changes:
      largest limit among the skipped candidates ("query exceeds 400 characters"), so a query that short reaches at
      least one of them. The surfaces' localized copy for the code is fixed, "搜索词太长，请缩短后重试", so the code
      needs no stored parameter. The model can fix it at
-     once and reach that candidate;
+     once and reach that candidate. Failing that, a tried candidate's `service_refused` (a query-specific 4xx) is
+     the reason, with its own code and the vendor's text in `error`: a different query fixes it too, so it ranks
+     ahead of any repair the user must make;
   2. a `blocked` skip, or a `disabled` skip when every candidate is disabled: `search_sources_blocked`; the user
      repairs a Source or turns its search back on. A Source the user turned off never decides the reason while an
      enabled candidate exists, so toggling an unused Source does not change it (it still appears in `attempts[]`);
@@ -650,8 +652,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 | --- | --- | --- | --- |
 | **S1a** Catalog and Sources | foundation | search vendors in the catalog; `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the protocol vocabulary split; the create and replace branch with free checks; "重新启用" (`reenable_search_source`, its free check and the armed-trial state); `service_order` maintenance on create and remove; the adapter's search call and free-check operation with custody and transport rules; opening the v17 version event | — |
 | **S1b** Settings and Tools read | foundation | `prefer_native`, `services` (the patch semantics and load-time clamping) and `executor_order_kinds` (loaded, written with each order save, and kept across a restart); the Tools read (`executor_candidates` with `kind`, `service_vendors`, `trial_pending`) and PUT; their v17 entries | S1a |
-| **S2** Chain and records | gateway | candidates, automatic order and the saved-order placement rule, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1a, S1b |
-| **S3** Model text | Vibey | `content` in the model-facing text and its bounds; the card's executor label | S2's record |
+| **S2** Chain and records | gateway | candidates, automatic order and the saved-order placement rule, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1a, S1b, S3 |
+| **S3** Model text | Vibey | C-1's optional `HostedSource.content` and the model-facing text that renders it, with its bounds; the card's executor label (read from `attempts[]` when present) | S1a's open v17 event |
 | **S4** Tools, dialog, Sources | UI | §6 with en and zh copy | S1b's read; S2 (the add dialog and service rows land with or after S2) |
 | **S5** Frames | design | §6 frames in `design.pen` through Pencil | — |
 | **S6** Public docs | docs | Models → Tools: services, order, defaults, privacy and cost, in English and Chinese | S4 |
@@ -660,7 +662,9 @@ The version event follows the v15 precedent in `model-hub-contracts/README.md`: 
 Source side, and S1b, S2 and S3 edit the same v17 section before it ships, with no second bump. Because release
 candidates are cut from the default branch at any time, every lane is safe on its own until the event closes:
 before S2, a `search` Source is never requested and never affects model routing, discovery or engine config, and
-the shapes S1a and S1b write are final, so later lanes read them without migration. No user-facing surface offers a
+the shapes S1a and S1b write are final, so later lanes read them without migration. S3 lands before or with S2: the chain
+never requests page text (billed for Exa) that the model-facing text cannot yet show, since S3 reads an optional
+field that can exist before any producer. No user-facing surface offers a
 service before the gateway can run it: the add dialog and service rows (S4) land with or after S2, so before then
 a `search` Source can only be created through the API.
 
