@@ -11,7 +11,7 @@ import { ToastProvider } from '@/context/ToastProvider';
 import i18n from '@/i18n';
 import { classifyModelHubFailure, createPendingWrites } from './asyncLifetime';
 import { MANAGE_DESTINATION, type ManageKind } from './manage';
-import { readyRegion, unreadRegion } from './regionRead';
+import { degradedRegion, readyRegion, unreadRegion } from './regionRead';
 import { ApiCallError, modelsApi } from './modelsApi';
 import type {
   PresentSourceMutationCommit,
@@ -23,6 +23,7 @@ import type {
 } from './mutationSettlement';
 import { GuardGapList } from './GuardGapList';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, repairAction, type RepairKind } from './repair';
+import { ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import {
   COOLDOWN_DETAIL_KEYS,
@@ -1329,9 +1330,9 @@ describe('SourceDetailPanel', () => {
     // Still bounded well below a hung render.
   }, 15_000);
 
-  it('runs the dedicated re-enable action for a blocked search Source', async () => {
+  it.each([false, true])('runs the dedicated re-enable action with search services active=%s and holds an armed trial', async (active) => {
     const blockedSearch: Source = {
-      ...source,
+      ...SEARCH_SOURCES[0],
       protocol: 'search',
       base_url: null,
       models: [],
@@ -1341,17 +1342,18 @@ describe('SourceDetailPanel', () => {
         detail_key: 'models.source.needs_action.balance_exhausted',
       },
     };
-    const answer = { ...blockedSearch, state: { status: 'standby' as const, retry_at: null, detail_key: null } };
+    const answer = { ...blockedSearch, trial_pending: true };
     const reenable = vi.spyOn(modelsApi, 'reenableSearchSource').mockResolvedValue(answer);
     const onSource = vi.fn().mockResolvedValue(undefined);
     const trackMutation: TrackSourceMutation = (work) => work(blockedSearch, settlement({ source: onSource }));
 
-    render(<I18nextProvider i18n={i18n}><CommittedPanel source={blockedSearch} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>);
-
-    await userEvent.click(screen.getByRole('button', { name: /^Check again$|^重新检查$/i }));
-
+    const panel = (current: Source) => <I18nextProvider i18n={i18n}><CommittedPanel source={current} hostedTools={active ? readyRegion({ tools: [ACTIVE_SEARCH] }) : undefined} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>;
+    const view = render(panel(blockedSearch));
+    await userEvent.click(screen.getByRole('button', { name: /^Re-enable$|^重新启用$/i }));
     await waitFor(() => expect(reenable).toHaveBeenCalledWith(blockedSearch.id));
     expect(onSource).toHaveBeenCalledWith(answer);
+    view.rerender(panel(answer));
+    expect((screen.getByRole('button', { name: /^Re-enable$|^重新启用$/i }) as HTMLButtonElement).disabled).toBe(true);
   });
   it('clears the re-enable failure when an inventory read confirms success', async () => {
     const blockedSearch: Source = {
@@ -1379,7 +1381,7 @@ describe('SourceDetailPanel', () => {
 
     render(<I18nextProvider i18n={i18n}><CommittedPanel source={blockedSearch} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>);
 
-    await userEvent.click(screen.getByRole('button', { name: /^Check again$|^重新检查$/i }));
+    await userEvent.click(screen.getByRole('button', { name: /^Re-enable$|^重新启用$/i }));
 
     await waitFor(() => expect(onSource).toHaveBeenCalledWith(answer));
     expect(screen.queryByText(i18n.t('settings.models.repair.failed'))).toBeNull();
@@ -1545,11 +1547,11 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
     await waitFor(() => expect(landed.source).toHaveBeenCalledWith(answered));
   });
 
-  it('MH-HOSTED-UI-006: says when the capability read failed instead of drawing a Source with no evidence', async () => {
+  it.each([false, true])('MH-HOSTED-UI-006: lets a failed capability read retry in serviceDetail=%s instead of leaving held controls stranded', async (serviceDetail) => {
     const retry = vi.fn();
     render(
       <I18nextProvider i18n={i18n}>
-        <CommittedPanel source={twoModels} hostedTools={unreadRegion()} onRetryHostedTools={retry} trackMutation={immediateTrack} onReauth={noReauth} />
+        <CommittedPanel source={serviceDetail ? SEARCH_SOURCES[1] : twoModels} hostedTools={serviceDetail ? degradedRegion({ tools: [ACTIVE_SEARCH] }, 'read_failed', true) : unreadRegion()} onRetryHostedTools={retry} trackMutation={immediateTrack} onReauth={noReauth} />
       </I18nextProvider>,
     );
     const line = screen.getByRole('status');

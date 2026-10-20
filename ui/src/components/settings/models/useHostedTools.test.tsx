@@ -47,6 +47,7 @@ const wrapper: React.FC<{ children: React.ReactNode }> = ({ children }) => (
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('useHostedTools ordering', () => {
@@ -263,6 +264,31 @@ describe('useHostedTools ordering', () => {
     expect(result.current.pending.has('web_search')).toBe(true);
 
     await act(async () => { clear.resolve(status(true)); await writes[1]; });
+    expect(result.current.pending.has('web_search')).toBe(false);
+  });
+
+  // Retry has no status payload: unlike PUT/clear it must keep the write queue
+  // held through its follow-up GET, or an older read could overwrite a later save.
+  it('serializes a service retry and its authoritative read before subsequent settings writes', async () => {
+    const refresh = deferred<HostedToolsStatus>();
+    vi.spyOn(document, 'cookie', 'get').mockReturnValue('vibe_csrf_token=fixture-token');
+    const get = vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValueOnce(status(false)).mockReturnValueOnce(refresh.promise);
+    const fetch = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+    vi.stubGlobal('fetch', fetch);
+    const put = vi.spyOn(modelsApi, 'putHostedTool').mockResolvedValue(status(false));
+    const { result } = renderHook(() => useHostedTools(true), { wrapper });
+    await waitFor(() => expect(shown(result.current.read)).toBe(false));
+    let retrying!: Promise<void>;
+    act(() => { retrying = result.current.retryService('src_exa000001'); });
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+    expect(fetch).toHaveBeenCalledWith('/api/models/hosted-tools/web_search/services/src_exa000001/retry', expect.objectContaining({ method: 'POST', body: '{}' }));
+    expect(result.current.pending.has('web_search')).toBe(true);
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.save('web_search', { services: { src_exa000001: { results: 10 } } }); });
+    expect(put).not.toHaveBeenCalled();
+    await act(async () => { refresh.resolve(status(true)); await retrying; await saving; });
+    expect(put).toHaveBeenCalledWith('web_search', { services: { src_exa000001: { results: 10 } } });
+    expect(shown(result.current.read)).toBe(false);
     expect(result.current.pending.has('web_search')).toBe(false);
   });
 

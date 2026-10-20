@@ -10,17 +10,22 @@ import { SourcePrivateValue } from './SourcePrivacy';
 import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
-import type { AgentBackend, Source } from './types';
+import { serviceVendorForSource } from './searchServices';
+import { SearchCandidateStatus } from './SearchServiceParts';
+import type { AgentBackend, HostedWebSearchToolStatus, Source } from './types';
 
 export const SourceRow: React.FC<{
   source: Source;
   onOpen: (source: Source, opener: HTMLButtonElement) => void;
   activeBackends?: ReadonlySet<AgentBackend>;
-}> = ({ source, onOpen, activeBackends }) => {
+  searchTool?: HostedWebSearchToolStatus;
+}> = ({ source, onOpen, activeBackends, searchTool }) => {
   const { t, i18n } = useTranslation();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
   const detail = sourceDetail(source);
+  const service = source.protocol === 'search' && serviceVendorForSource(searchTool, source.id);
+  const candidate = service && searchTool?.executor_candidates.find((row) => row.source_id === source.id);
   const interfaceLabel = t(PROTOCOL_COPY_KEYS[source.protocol]);
   const adoptedBy = activeSourceAdoption(source.adopted_by, activeBackends);
   const adoptedBackends = [...new Set((adoptedBy ?? []).map(({ backend }) => getBackendUiMeta(backend).label))];
@@ -66,7 +71,9 @@ export const SourceRow: React.FC<{
         </span>
         {source.account_label && <span data-source-account><SourcePrivateValue value={source.account_label} className="model-hub-upstream-detail mt-1 text-[10.5px] leading-[14px]" /></span>}
         {detail && <SourcePrivateValue value={detail} className="model-hub-upstream-detail mt-1 text-[10.5px] leading-[14px]" />}
-        {state.key && <span className={cn('mt-1 flex items-center gap-[5px] text-[10.5px] font-semibold', state.textClass)}>
+        {service && <span className="model-hub-tool-note mt-1 block">{t('settings.models.searchServices.noModels')}</span>}
+        {candidate && searchTool && <span className="mt-1 block"><SearchCandidateStatus candidate={candidate} tool={searchTool} source={source} /></span>}
+        {!service && state.key && <span className={cn('mt-1 flex items-center gap-[5px] text-[10.5px] font-semibold', state.textClass)}>
           <span className={cn('size-[5px] rounded-full', state.dotClass)} />
           {t(state.key, state.values)}
         </span>}
