@@ -229,15 +229,17 @@ def test_remove_project_no_p_flag(monkeypatch):
     rec = _Recorder({"ok": True})
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.remove_skill("askill", "pdf-tools", scope="project", project_dir="/p", backends=["claude"]))
-    assert rec.calls[0]["args"] == ["remove", "pdf-tools", "-a", "claude-code", "opencode", "codex"]
+    assert rec.calls[0]["args"] == ["remove", "pdf-tools"]
     assert rec.calls[0]["cwd"] == "/p"
 
 
 def test_remove_global(monkeypatch):
+    # A Skill can be installed for an agent outside Avibe's backend map.
+    # Removing it must not restrict askill to Avibe's three backend agents.
     rec = _Recorder({"ok": True})
     monkeypatch.setattr(skills, "_run_askill", rec)
-    _run(skills.remove_skill("askill", "pdf-tools", scope="global"))
-    assert rec.calls[0]["args"] == ["remove", "pdf-tools", "-g", "-a", "claude-code", "opencode", "codex"]
+    _run(skills.remove_skill("askill", "beautiful-mermaid", scope="global"))
+    assert rec.calls[0]["args"] == ["remove", "beautiful-mermaid", "-g"]
     assert rec.calls[0]["cwd"] is None
 
 
@@ -655,7 +657,7 @@ def test_active_org_members_mutate_skills_without_owner_preflight(monkeypatch, t
             )
         ) == {"ok": True}
         assert [call["args"] for call in member_recorder.calls] == [
-            ["remove", "private-skill", "-g", "-a", "claude-code", "opencode", "codex"]
+            ["remove", "private-skill", "-g"]
         ]
         with engine.connect() as connection:
             assert resource_access_service.get_resource_policy(
@@ -760,7 +762,7 @@ def test_remove_skill_deletes_all_legacy_backend_policies(monkeypatch, tmp_path)
 
     assert result["ok"] is True
     assert [call["args"] for call in recorder.calls] == [
-        ["remove", "shared-skill", "-g", "-a", "claude-code", "opencode", "codex"]
+        ["remove", "shared-skill", "-g"]
     ]
     assert codex_policy is None
     assert claude_policy is None

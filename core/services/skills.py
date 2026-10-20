@@ -945,7 +945,7 @@ async def remove_skill(
     backends: Optional[list[str]] = None,
     user_context: Any = None,
 ) -> dict[str, Any]:
-    """Remove one logical Skill installation from every managed backend link.
+    """Remove one logical Skill installation from every askill agent link.
 
     The optional legacy ``backends`` field is validated but no longer narrows removal.
     """
@@ -975,11 +975,15 @@ async def remove_skill(
             user_context=context,
             allow_missing_policy=False,
         )
+    # Do not pass a backend filter here. The list endpoint can expose Skills
+    # installed for agents outside Avibe's backend map (for example, a legacy
+    # or third-party agent). ``askill remove`` without ``-a`` removes the
+    # logical Skill from every installed agent link; restricting the command to
+    # BACKEND_TO_AGENT would leave those rows unremovable.
     args = [
         "remove",
         name,
         *_target_scope_flag(scope),
-        *_agent_flags(list(BACKEND_TO_AGENT)),
     ]
     result = await _run_askill(askill_path, args, cwd=_cwd_for(scope, project_dir))
     if result.get("ok"):
