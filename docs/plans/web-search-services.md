@@ -643,7 +643,10 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - The recovery actions run in the controller, which owns the trial gate and the cooldowns. The UI process forwards
   them over the Model Hub RPC (`ModelHubRemoteService`) as `reenable_search_source(source_id)` (S1a) and
   `clear_service_cooldown(source_id, service_id)` (S2), the path other hosted-tool writes already take. Endpoints:
-  `POST /api/models/sources/<id>/reenable` and `POST /api/models/hosted-tools/web_search/services/<source_id>/retry`, where the path names the Source and the
+  `POST /api/models/sources/<id>/reenable` and `POST /api/models/hosted-tools/web_search/services/<source_id>/retry`,
+  both added to the Model Hub management allow-list in `vibe/authorization.py` (unknown routes default to
+  Owner-only) with role-policy tests, so a Member who can edit hosted-tool settings can also use them: re-enable
+  in S1a, retry in S2, where the path names the Source and the
   controller derives the `service_id` from its catalog row (one search service per Source).
 - `api.md`: the read and PUT changes, the "立即重试" cooldown clear (§4.2), and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
@@ -691,7 +694,9 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 | **S6** Public docs | docs | Models → Tools: services, order, defaults, privacy and cost, in English and Chinese. The disclosure part (an official DeepSeek Source joins the search order automatically, which data goes to each service, what it costs, and how to turn it off) publishes no later than the release that ships S2; the UI walkthrough follows S4 | the disclosure lands before or with S2 (S2 depends on it); the walkthrough follows S4 |
 
 The version event follows the v15 precedent in `model-hub-contracts/README.md`: S1a opens v17 and publishes the
-Source side, and S1b, S2 and S3 edit the same v17 section before it ships, with no second bump. Because release
+Source side, and S1b, S2 and S3 edit the same v17 section only while it is unshipped, as the hosted-tools
+freeze rule says (`vibey-hosted-tools.md` §12). A lane that lands after a release has carried v17 opens v18 for
+its additions instead, so a shipped version number never changes meaning. Because release
 candidates are cut from the default branch at any time, every lane is safe on its own until the event closes:
 before S2, a `search` Source is never requested and never affects model routing, discovery or engine config, and
 the shapes S1a and S1b write are final, so later lanes read them without migration. S3 lands before or with S2: the chain
