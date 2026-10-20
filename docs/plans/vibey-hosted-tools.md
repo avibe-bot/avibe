@@ -780,6 +780,10 @@ when metered, sources, failure reason); citations through the existing citation 
 `🔎 Web search "query" · native (xAI) · 6 sources · $0.01`. The image card shows the prompt, the image, the model
 used and the cost; IM attaches the file.
 
+Who ran a call is its vendor's catalog label. A Source whose vendor the catalog does not name, as a compatible
+endpoint's `custom` does not, is named by its Source name in the vendor's place on both surfaces, and is not repeated
+beside it (amended 2026-10-20, #2873).
+
 **When a search ran by proxy because the turn's own Source refused it** (`hosted.fallback_from`, set by Vibey on a
 hop whose C-6 facts say `refused`), both surfaces say so, so the switch is never silent:
 - the Web card keeps a note in view, collapsed or expanded: "relay-gpt 不支持网页搜索，已改用 Anthropic（relay-claude）"

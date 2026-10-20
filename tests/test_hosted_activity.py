@@ -304,6 +304,23 @@ def test_a_response_scoped_summary_is_shown_once():
         # A proxy that ran because the turn's own Source refused the tool says so, in place of how it ran.
         (proxy_fallback, "zh", "🔎 网页搜索 “Anthropic announcements October 2026” · relay-gpt 不支持，已改用 Anthropic · 1 个来源 · ≈ $0.01"),
         (proxy_fallback, "en", "🔎 Web search “Anthropic announcements October 2026” · relay-gpt doesn't support it, now using Anthropic · 1 source · ≈ $0.01"),
+        # A compatible endpoint's vendor id is custom, which names no vendor: its Source names who ran it (#2873).
+        (
+            lambda: replace(native_web_search(), provider="custom", source_name="My relay"),
+            "en",
+            "🔎 Web search “OpenAI announcements October 2026” · native (My relay) · 2 sources · ≈ $0.01",
+        ),
+        (
+            lambda: replace(proxy_x_search(), provider="custom", source_name="My relay"),
+            "zh",
+            "🔎 X 搜索 “from:OpenAI within_time:7d” · 由 My relay 代理（grok-4.6） · 2 条帖子 · $0.11",
+        ),
+        (
+            lambda: replace(proxy_fallback(), provider="custom", source_name="My relay"),
+            "en",
+            "🔎 Web search “Anthropic announcements October 2026” · relay-gpt doesn't support it, now using My relay"
+            " · 1 source · ≈ $0.01",
+        ),
     ],
 )
 def test_the_im_line_states_tool_query_mode_count_and_known_cost(build, lang, line):
@@ -416,11 +433,14 @@ def _slots(text: str):
         "fallback source": fallback,
         "executor model": replace(proxy_x_search(), model=text),
         "image model": replace(direct_image(), model=text),
+        "compatible endpoint": replace(native_web_search(), provider="custom", source_name=text),
     }
 
 
 @pytest.mark.parametrize("text", HOSTILE)
-@pytest.mark.parametrize("slot", ["subject", "error", "fallback source", "executor model", "image model"])
+@pytest.mark.parametrize(
+    "slot", ["subject", "error", "fallback source", "executor model", "image model", "compatible endpoint"],
+)
 def test_the_im_line_leaves_no_mention_or_masked_link_live_in_untrusted_text(slot, text):
     """MH-HOSTED-UI-010: a query, a provider's error, and a user's Source or model name are not Avibe's words. The
     line neutralizes their mentions and masked links before the platform escape, which alone leaves Discord's
