@@ -252,10 +252,15 @@ one-shot wait. Prefer `--coalesce-success` for delivery loops:
 | Both successes at the same head, with no unresolved threads | One combined success **candidate** for Agent verification |
 | A requested CI run fails/cancels/times out | Report immediately, even if another workflow is missing/running |
 | Review findings, Codex errors, or unfamiliar review payloads | Report without waiting for CI |
+| CI turns green after an unfamiliar verdict was reported | Report the CI result once, since the Agent may be judging that verdict |
 
 Recognized review successes are Codex-authored clean-pass comments/reviews naming
 the current SHA, and a new Codex `+1` on the PR body observed after an unchanged
-head's baseline. A reaction present at seeding or first seen with a head change
+head's baseline. A clean-pass comment is either the bare two-line verdict or
+Codex's complete receipt: the `codex-review-receipt` marker, the verdict with a short
+plain sign-off (`:+1:`, "Chef's kiss.", ...), the `Reviewed commit` line, and its
+standard details footer. Any other text in it, or problem text in the sign-off,
+keeps it reportable. A reaction present at seeding or first seen with a head change
 cannot be bound this way; head-transition reactions remain visible as ordinary
 activity. A reaction candidate still needs the repository's stricter epoch and
 prior-review checks in the follow-up; the waiter does not certify that gate.

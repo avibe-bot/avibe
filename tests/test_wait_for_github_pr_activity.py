@@ -4356,6 +4356,23 @@ def _clean_codex_comment(comment_id=601, *, head=COALESCED_HEAD, author="chatgpt
     }
 
 
+def _codex_receipt_body(*, head=COALESCED_HEAD, sign_off=":+1:"):
+    """Codex's live clean-pass receipt (avibe-bot/avibe#2868, comment 6283459288)."""
+
+    return (
+        "<!-- codex-review-receipt:v1 -->\n\n"
+        f"Codex Review: Didn't find any major issues. {sign_off}\n\n"
+        f"**Reviewed commit:** `{head[:10]}`\n\n"
+        "<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n"
+        "[Your team has set up Codex to review pull requests in this repo]"
+        "(https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n"
+        "- Open a pull request for review\n- Mark a draft as ready\n- Comment \"@codex review\".\n\n"
+        "If Codex has suggestions, it will comment; otherwise it will react with 👍.\n\n\n\n\n"
+        "Codex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".\n"
+        "            \n</details>\n"
+    )
+
+
 def _success_state(*runs, clean=False, head=COALESCED_HEAD, **items):
     state = _pr_state(
         issue_comments=[_clean_codex_comment(head=head)] if clean else items.pop("issue_comments", []),
@@ -4400,14 +4417,23 @@ def test_coalesced_success_waits_for_both_gates_across_restart_and_delivers_once
     assert repeated == ""
 
 
-@pytest.mark.parametrize("shape", ["comment", "review", "reaction", "api-reaction"])
+@pytest.mark.parametrize("shape", [
+    "comment", "review", "reaction", "api-reaction",
+    "receipt", "receipt-chefs-kiss", "receipt-keep-them-coming",
+])
 def test_coalesced_success_recognizes_all_supported_codex_shapes(tmp_path, shape):
     module = _load_module()
     path = tmp_path / "ci.json"
     pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
     _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
     items = {"issue_comments": [_clean_codex_comment()]}
-    if shape == "review":
+    if shape.startswith("receipt"):
+        sign_off = {
+            "receipt": ":+1:", "receipt-chefs-kiss": "Chef's kiss.",
+            "receipt-keep-them-coming": "Keep them coming!",
+        }[shape]
+        items = {"issue_comments": [{**_clean_codex_comment(), "body": _codex_receipt_body(sign_off=sign_off)}]}
+    elif shape == "review":
         review = {**_clean_codex_comment(), "state": "COMMENTED", "commit_id": COALESCED_HEAD}
         items = {"reviews": [review]}
     elif "reaction" in shape:
@@ -4449,6 +4475,41 @@ def test_coalescing_never_hides_findings_errors_or_unknown_evidence(tmp_path, ev
     assert rc == 0
     assert "success candidate" not in output
     assert "GitHub PR activity" in output
+
+
+@pytest.mark.parametrize("verdict, reaches_agent", [
+    ("unrecognized", True),
+    ("error", False),
+    ("inline", False),
+])
+def test_coalesced_green_ci_reaches_an_agent_judging_an_unrecognized_verdict(tmp_path, verdict, reaches_agent):
+    # The Agent may judge an unrecognized verdict a pass and then wait for CI; a
+    # quiet green would strand it. Recognized problems keep green CI quiet.
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    items = {
+        "unrecognized": {"issue_comments": [{**_clean_codex_comment(), "body": "A new verdict format worth inspecting"}]},
+        "error": {"issue_comments": [{**_clean_codex_comment(), "body": "Something went wrong. Please try again."}]},
+        "inline": {"review_comments": [_review_comment(501)]},
+    }[verdict]
+    options = ("--coalesce-success",)
+
+    rc, output, _ = _ci_cycle(module, path, [_success_state(pending, **items)], extra_args=options)
+    assert rc == 0 and "GitHub PR activity" in output
+
+    green = _success_state(_ci_run(head=COALESCED_HEAD), **items)
+    rc, output, _ = _ci_cycle(module, path, [green], delivery="2", extra_args=options)
+    if reaches_agent:
+        assert rc == 0
+        assert "GitHub Actions success" in output
+        assert "success candidate" not in output
+    else:
+        assert (rc, output) == (124, "")
+
+    rc, output, _ = _ci_cycle(module, path, [green], delivery="3", extra_args=options)
+    assert (rc, output) == (124, "")
 
 
 @pytest.mark.parametrize("other", ["missing", "running", "missing-known-run"])
@@ -4862,13 +4923,19 @@ def test_coalescing_does_not_restore_old_reactions_when_report_head_differs(tmp_
     "Changes requested",
     "## Review findings\nRace allows duplicate notifications",
 ])
-def test_coalescing_surfaces_mixed_clean_and_error_text(tmp_path, suffix):
+@pytest.mark.parametrize("placement", ["after-verdict", "after-receipt-footer", "receipt-sign-off"])
+def test_coalescing_surfaces_mixed_clean_and_error_text(tmp_path, suffix, placement):
     module = _load_module()
     path = tmp_path / "ci.json"
     pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
     _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
     mixed = _clean_codex_comment()
-    mixed["body"] += "\n\n" + suffix
+    if placement == "after-verdict":
+        mixed["body"] += "\n\n" + suffix
+    elif placement == "after-receipt-footer":
+        mixed["body"] = _codex_receipt_body() + "\n\n" + suffix
+    else:
+        mixed["body"] = _codex_receipt_body(sign_off=suffix)
     rc, output, _ = _ci_cycle(
         module, path, [_success_state(pending, issue_comments=[mixed])], extra_args=("--coalesce-success",),
     )

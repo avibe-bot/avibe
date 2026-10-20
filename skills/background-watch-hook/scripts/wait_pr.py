@@ -72,6 +72,22 @@ CODEX_STANDARD_SUMMARY_FOOTER = (
     "Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 once all reviews finish with no findings.",
     "</details>",
 )
+# The clean-pass receipt Codex posts as a PR conversation comment. Its verdict line
+# ends with a rotating sign-off (":+1:", "Chef's kiss.", "Keep them coming!"), and
+# its details footer differs from the summary comment's.
+CODEX_RECEIPT_MARKER = "<!-- codex-review-receipt:v1 -->"
+CODEX_RECEIPT_FOOTER = (
+    "<details> <summary>ℹ️ About Codex in GitHub</summary>",
+    "<br/>",
+    "[Your team has set up Codex to review pull requests in this repo](https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you",
+    "- Open a pull request for review",
+    "- Mark a draft as ready",
+    "- Comment \"@codex review\".",
+    "If Codex has suggestions, it will comment; otherwise it will react with 👍.",
+    "Codex can also answer questions or update the PR. Try commenting \"@codex address that feedback\".",
+    "</details>",
+)
+CODEX_SIGN_OFF_MAX_CHARS = 80
 
 # Comments that only drive the review loop rather than report its result. On a
 # busy PR these outnumber the real findings, and each one costs a full Agent turn.
@@ -387,15 +403,29 @@ def _is_codex_summary_shape(body: str) -> bool:
     }
 
 
+def _is_codex_sign_off(text: str) -> bool:
+    """A short plain-text sign-off, never markup or anything that reads as a problem."""
+
+    return (
+        len(text) <= CODEX_SIGN_OFF_MAX_CHARS
+        and not _has_codex_problem_text(text)
+        and re.search(r"[`\[\]<>#|]|https?:", text) is None
+    )
+
+
 def _codex_clean_pass_body_sha(body: str) -> str | None:
     lines = [line.strip() for line in body.splitlines() if line.strip()]
-    if not lines or not re.fullmatch(
-        r"Codex Review:\s*Didn['’]t find any major issues\.?", lines[0], re.IGNORECASE,
-    ):
+    if lines and lines[0] == CODEX_RECEIPT_MARKER:
+        lines = lines[1:]
+    verdict = re.fullmatch(
+        r"Codex Review:\s*Didn['’]t find any major issues\.?(?:\s+(.+))?",
+        lines[0] if lines else "", re.IGNORECASE,
+    )
+    if not verdict or (verdict.group(1) is not None and not _is_codex_sign_off(verdict.group(1))):
         return None
     if len(lines) == 1:
         return ""
-    if len(lines) != 2:
+    if len(lines) != 2 and tuple(lines[2:]) != CODEX_RECEIPT_FOOTER:
         return None
     match = re.fullmatch(
         r"\*{0,2}Reviewed commit\*{0,2}:\*{0,2}\s*`([0-9a-f]{7,40})`",
@@ -423,6 +453,20 @@ def _is_codex_clean_pass(item: dict[str, Any], head_sha: str) -> bool:
         return False
     reviewed = item_sha or body_sha
     return len(reviewed) >= 7 and head_sha.casefold().startswith(reviewed.casefold())
+
+
+def _awaits_review_judgment(state: dict[str, Any], batch: dict[str, Any]) -> bool:
+    """The latest Codex verdict is neither a recognized pass nor a recognized problem."""
+
+    outcome = batch.get("outcome")
+    if batch.get("review") is not None or not outcome or outcome["kind"] not in {"reviews", "issue_comments"}:
+        return False
+    item = next((item for item in state[outcome["kind"]] if item.get("id") == outcome["id"]), None)
+    return (
+        item is not None
+        and str(item.get("state") or "").lower() not in {"changes_requested", "dismissed"}
+        and not _has_codex_problem_text(str(item.get("body") or ""))
+    )
 
 
 def _is_codex_progress(item: dict[str, Any]) -> bool:
@@ -2899,7 +2943,13 @@ def main() -> int:
                         )
                 # A green CI result alone must not advance its delivery baseline.
                 # The review evidence above is still adopted on quiet/problem polls.
-                if not failed:
+                # A reported verdict the waiter could not classify is the Agent's to
+                # judge, so the green result that judgment may be waiting on is reported.
+                if not failed and not (
+                    ci_output and not unresolved
+                    and str(batch["head_sha"]).casefold() == _active_ci_head_sha().casefold()
+                    and _awaits_review_judgment(state, batch)
+                ):
                     return pr_result
 
             actions_output = _render_new_actions()
