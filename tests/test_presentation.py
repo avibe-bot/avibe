@@ -18,6 +18,7 @@ from core.presentation import (
     PresentationDecision,
     PresentationInput,
     interim_worthy,
+    validate_decision,
 )
 
 LONG = "\n".join(f"line {n}" for n in range(5))
@@ -70,12 +71,12 @@ def _style(value):
         # level and an empty body
         pytest.param(
             _input("result", level="silent"),
-            _decision(persisted=False, reason="content_free"),
+            _decision(persisted=False, outward=False, reason="content_free"),
             id="silent-level-shows-nothing",
         ),
         pytest.param(
             _input("assistant", body="  "),
-            _decision(persisted=False, reason="content_free"),
+            _decision(persisted=False, outward=False, reason="content_free"),
             id="empty-body-shows-nothing",
         ),
         # answers and notices
@@ -128,13 +129,13 @@ def _style(value):
             id="short-narration-is-activity-only",
         ),
         pytest.param(
-            _input("assistant", platform="avibe", level="process", narration_body=LONG, hidden=lambda: False,
+            _input("assistant", platform="avibe", level="process", hidden=lambda: False,
                    progress_style=_style("verbose")),
             _decision(im=ImDelivery.LOG),
             id="process-narration-keeps-no-copy",
         ),
         pytest.param(
-            _input("assistant", platform="avibe", background=True, narration_body=LONG),
+            _input("assistant", platform="avibe", background=True),
             _decision(outward=False, reason="background"),
             id="background-narration-keeps-no-copy",
         ),
@@ -187,9 +188,59 @@ def _style(value):
     ],
 )
 def test_the_default_policy_decides_each_rule(presentation, expected):
-    """MESSAGE-DELIVERY-337: each of the dispatcher's former inline rules, as one decision;
-    the hidden types and the progress style are read only when a rule needs them."""
-    assert DefaultPresentationPolicy().decide(presentation) == expected
+    """MESSAGE-DELIVERY-337: each of the dispatcher's former inline rules, as one decision
+    inside the executable envelope; the hidden types and the progress style are read only
+    when a rule needs them."""
+    decision = DefaultPresentationPolicy().decide(presentation)
+    assert decision == expected
+    assert validate_decision(presentation, decision) is decision
+
+
+WEB_REPLY = _input("result", platform="avibe")
+WEB_NARRATION = _input("assistant", platform="avibe", narration_body="short")
+SLACK_TOOL = _input("toolcall", tools_deliverable=False)
+EMPTY_LOG = _input("system", log_chunk="")
+
+
+@pytest.mark.parametrize(
+    ("presentation", "decision", "accepted"),
+    [
+        pytest.param(WEB_REPLY, _decision(persisted=False, outward=False), True, id="nothing-at-all"),
+        pytest.param(WEB_REPLY, _decision(persisted=False), False, id="no-record-but-outward"),
+        pytest.param(WEB_REPLY, _decision(persisted=False, outward=False, im=ImDelivery.MESSAGE), False,
+                     id="no-record-but-sent"),
+        pytest.param(WEB_REPLY, _decision(transcript=True, outward=False), True, id="local-history"),
+        pytest.param(WEB_REPLY, _decision(transcript=True, outward=False, im=ImDelivery.MESSAGE), False,
+                     id="local-history-sent"),
+        pytest.param(WEB_REPLY, _decision(transcript=True, outward=False, web_push=True), False,
+                     id="local-history-pushed"),
+        pytest.param(WEB_REPLY, _decision(transcript=True, im=ImDelivery.MESSAGE), True, id="reply-without-push"),
+        pytest.param(WEB_REPLY, _decision(transcript=True, im=ImDelivery.NONE), False, id="outward-reply-not-sent"),
+        pytest.param(WEB_REPLY, _decision(transcript=False, im=ImDelivery.MESSAGE), False, id="reply-without-row"),
+        pytest.param(WEB_REPLY, _decision(transcript=True, muted=True, im=ImDelivery.MESSAGE), False,
+                     id="reply-muted"),
+        pytest.param(_input("notify", platform="avibe"), _decision(transcript=True, web_push=True,
+                     im=ImDelivery.MESSAGE), False, id="push-the-catalog-does-not-allow"),
+        pytest.param(WEB_NARRATION, _decision(transcript=True, muted=True, im=ImDelivery.LOG), True,
+                     id="short-narration-with-a-copy"),
+        pytest.param(WEB_NARRATION, _decision(transcript=True, im=ImDelivery.LOG), False, id="copy-not-muted"),
+        pytest.param(_input("assistant", narration_body=None), _decision(transcript=True, muted=True,
+                     im=ImDelivery.LOG), False, id="copy-without-a-measured-body"),
+        pytest.param(WEB_NARRATION, _decision(im=ImDelivery.MESSAGE), False, id="narration-as-a-message"),
+        pytest.param(EMPTY_LOG, _decision(im=ImDelivery.LOG), False, id="empty-log-line"),
+        pytest.param(EMPTY_LOG, _decision(im=ImDelivery.STATUS), True, id="empty-status-line"),
+        pytest.param(SLACK_TOOL, _decision(im=ImDelivery.STATUS), False, id="undeliverable-tool-call-sent"),
+        pytest.param(SLACK_TOOL, _decision(), True, id="undeliverable-tool-call-kept"),
+    ],
+)
+def test_only_decisions_the_dispatcher_can_execute_are_accepted(presentation, decision, accepted):
+    """MESSAGE-DELIVERY-337: the executable envelope (``PresentationDecision``). A decision
+    inside it is executed in full; one outside it raises instead of being half-executed."""
+    if accepted:
+        assert validate_decision(presentation, decision) is decision
+    else:
+        with pytest.raises(ValueError):
+            validate_decision(presentation, decision)
 
 
 @pytest.mark.parametrize(
@@ -214,6 +265,8 @@ def test_a_decision_is_recorded_as_stable_metadata():
     decision = _decision(transcript=True, web_push=True, im=ImDelivery.MESSAGE)
     assert decision.to_metadata() == {
         "policy": "default/1",
+        "persisted": True,
+        "outward": True,
         "transcript": True,
         "muted": False,
         "web_push": True,

@@ -32,7 +32,7 @@ from typing import Any, Optional
 from sqlalchemy.exc import IntegrityError
 
 from core.citations import CitationBundle, finalize_citations, materialize_citations
-from core.presentation import PresentationDecision, presentation_metadata
+from core.presentation import PRESENTATION_METADATA_KEY, PresentationDecision, presentation_metadata
 from core.run_settlement import NON_COMPLETING_TURN_SETTLEMENTS
 from core.services import sessions as workbench_sessions_service
 from modules.im.base import MessageContext
@@ -366,8 +366,9 @@ def persist_agent_message(
     rule 5). A replayed output that finds its receipt already written records nothing.
 
     ``presentation`` is the dispatcher's decision for this output
-    (``core.presentation``): the row records it under ``metadata["presentation"]``,
-    and it decides the Web Push; without one the catalog's flags decide, as before.
+    (``core.presentation``): the row (a tool call's trace event too) records it under
+    ``metadata["presentation"]``, it may decline the Web Push the catalog allows, and
+    an output it keeps local is not published to the Web, as with ``suppress_delivery``.
 
     ``existing_row_id`` names a row the backend already committed as its transcript
     (the Avibe Agent): its display columns are written instead of inserting a
@@ -399,7 +400,11 @@ def persist_agent_message(
     if (canonical_type or "") == "system":
         return
     session_id = (context.platform_specific or {}).get("agent_session_id")
-    suppress_delivery = bool((context.platform_specific or {}).get("suppress_delivery"))
+    # A decision that keeps the output local suppresses Web publication for any
+    # context, exactly as a background Session's ``suppress_delivery`` does.
+    suppress_delivery = bool((context.platform_specific or {}).get("suppress_delivery")) or (
+        presentation is not None and not presentation.outward
+    )
     try:
         engine = get_cached_sqlite_engine()
         inbox_row = None
@@ -457,6 +462,11 @@ def persist_agent_message(
                         ),
                     },
                     metadata={
+                        **(
+                            {PRESENTATION_METADATA_KEY: presentation.to_metadata()}
+                            if presentation is not None
+                            else {}
+                        ),
                         "canonical_type": canonical_type or "tool_call",
                         # A native hosted call happened before the text of the response that
                         # carried it, though it is emitted after that row commits.

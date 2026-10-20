@@ -33,6 +33,7 @@ from core.citations import CitationSource, register_citations
 from core import message_dispatcher as dispatcher_module
 from core.message_dispatcher import ConsolidatedMessageDispatcher
 from core.message_output import MessageOutput, stop_output_for, terminal_turn_output
+from core.presentation import ImDelivery
 from core.session_turns import SessionTurnManager
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.im import MessageContext
@@ -53,6 +54,7 @@ from tests.test_message_dispatcher_status_bubble import (
 SESSION = "ses_turn_end"
 NOW = "2026-10-19T03:00:00Z"
 FIRST = "The cache is shared; two writers race. Fixed in #12."
+SHOWN = {"policy": "default/1", "persisted": True, "outward": True}
 SECOND = "Yes, the fix also covers the CLI path."
 REPLY = MessageOutput(completes_turn=False, completes_run=False)
 
@@ -231,6 +233,21 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
 
     def harness_run(self, run_id: str | None = None) -> dict:
         return self.runs.get_run(run_id or self.run_id)
+
+    @staticmethod
+    def agent_metadata() -> list[str]:
+        engine = create_sqlite_engine()
+        try:
+            with engine.connect() as conn:
+                return list(
+                    conn.execute(
+                        select(messages.c.metadata_json)
+                        .where(messages.c.session_id == SESSION, messages.c.author == "agent")
+                        .order_by(messages.c.created_at, messages.c.id)
+                    ).scalars()
+                )
+        finally:
+            engine.dispose()
 
     @staticmethod
     def agent_presentations() -> list[tuple[str, dict]]:
@@ -545,10 +562,10 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 recorded,
                 {
-                    "assistant": {"policy": "default/1", "transcript": True, "muted": True, "web_push": False, "im": "log"},
-                    "interim": {"policy": "default/1", "transcript": True, "muted": True, "web_push": False, "im": "log"},
-                    "result": {"policy": "default/1", "transcript": True, "muted": False, "web_push": True, "im": "message"},
-                    "output": {"policy": "default/1", "transcript": True, "muted": True, "web_push": False, "im": "message"},
+                    "assistant": {**SHOWN, "transcript": True, "muted": True, "web_push": False, "im": "log"},
+                    "interim": {**SHOWN, "transcript": True, "muted": True, "web_push": False, "im": "log"},
+                    "result": {**SHOWN, "transcript": True, "muted": False, "web_push": True, "im": "message"},
+                    "output": {**SHOWN, "transcript": True, "muted": True, "web_push": False, "im": "message"},
                 },
             )
             self.assertEqual(self.pushed_texts(), [FIRST])
@@ -571,6 +588,98 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.pushed_texts(), [])
             [(_, presentation)] = self.agent_presentations()
             self.assertEqual((presentation["policy"], presentation["web_push"]), ("no-push/1", False))
+
+    async def test_each_decision_field_is_what_the_dispatcher_executes(self):
+        """Scenario: MESSAGE-DELIVERY-337: a policy that changes one field of the default
+        decision, inside the executable envelope, changes exactly that behavior and nothing
+        else, with the real dispatcher and store: the reply's push, whether the reply goes
+        out at all (no Web publication, no send, its row local-only), narration's muted
+        copy in both directions, and the process line's form."""
+
+        def flip(**fields):
+            class _Flip:
+                id = "flip/1"
+
+                def __init__(self, inner):
+                    self.inner = inner
+
+                def decide(self, presentation):
+                    decision = self.inner.decide(presentation)
+                    if presentation.message_type != fields["kind"]:
+                        return decision
+                    changes = {key: value for key, value in fields.items() if key != "kind"}
+                    return replace(decision, policy=self.id, **changes)
+
+            return _Flip
+
+        async def reply(controller, context):
+            await controller.emit_agent_message(context, "result", FIRST, output=REPLY)
+
+        async def short_narration(controller, context):
+            await controller.emit_agent_message(context, "assistant", "Checking the lock.")
+
+        async def long_narration(controller, context):
+            await controller.emit_agent_message(context, "assistant", FIVE_LINES)
+
+        cases = {
+            "the push declined": (reply, flip(kind="result", web_push=False), {"pushes"}),
+            "the reply kept local": (
+                reply,
+                flip(kind="result", outward=False, web_push=False, im=ImDelivery.NONE),
+                {"pushes", "sent", "published", "suppressed"},
+            ),
+            "a copy for short narration": (
+                short_narration,
+                flip(kind="assistant", transcript=True, muted=True),
+                {"rows", "published"},
+            ),
+            "no copy for long narration": (
+                long_narration,
+                flip(kind="assistant", transcript=False, muted=False),
+                {"rows", "published"},
+            ),
+            "the log line sent nowhere": (short_narration, flip(kind="assistant", im=ImDelivery.NONE), {"sent"}),
+            "the log line as the status line": (
+                short_narration,
+                flip(kind="assistant", im=ImDelivery.STATUS),
+                {"status_line"},
+            ),
+        }
+
+        async def observe(emit, policy=None):
+            with self.state():
+                controller = _Controller("avibe")
+                controller.get_progress_style_for_context = lambda _context: "verbose"
+                if policy is not None:
+                    controller.dispatcher.presentation_policy = policy(controller.dispatcher.presentation_policy)
+                await emit(controller, self.context())
+                rows = self.agent_rows()
+                return {
+                    "rows": rows,
+                    "pushes": self.pushed_texts(),
+                    "sent": [text for _, _, text, _ in controller.im_client.sent],
+                    "published": [event for event, _ in self.published if event in {"message.new", "inbox.session.updated"}],
+                    "suppressed": any(
+                        bool(json.loads(metadata or "{}").get("delivery_suppressed"))
+                        for metadata in self.agent_metadata()
+                    ),
+                    "status_line": bool(controller.dispatcher._concise_bubble_keys),
+                }
+
+        for name, (emit, policy, changed) in cases.items():
+            with self.subTest(name):
+                default, flipped = await observe(emit), await observe(emit, policy)
+                self.assertEqual(
+                    {key for key in default if default[key] != flipped[key]}, changed, (default, flipped)
+                )
+
+        with self.subTest("outside the envelope"), self.state():
+            controller = _Controller("avibe")
+            controller.dispatcher.presentation_policy = flip(kind="result", im=ImDelivery.NONE)(
+                controller.dispatcher.presentation_policy
+            )
+            with self.assertRaises(ValueError):
+                await controller.emit_agent_message(self.context(), "result", FIRST, output=REPLY)
 
     async def test_a_reply_or_a_failure_keeps_its_type_attached_or_detached(self):
         """Scenario: MESSAGE-DELIVERY-334.

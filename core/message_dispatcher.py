@@ -40,6 +40,7 @@ from core.presentation import (
     ImDelivery,
     PresentationInput,
     PresentationPolicy,
+    validate_decision,
 )
 from core.message_output import (
     HARNESS_RUN_ID_TRIGGER_KINDS,
@@ -2294,7 +2295,7 @@ class ConsolidatedMessageDispatcher:
             background=background,
             body=text or "",
             log_chunk=strip_file_links(materialize_citations(text, citations) or "").strip() if log_kind else "",
-            narration_body=narration.text if narration is not None else "",
+            narration_body=narration.text if narration is not None else None,
             metadata=output_semantics.metadata,
             tools_deliverable=self._supports_toolcall_delivery(target_context) if kind == "toolcall" else True,
             log_editable=self._supports_message_editing(im_client, context) if log_kind else True,
@@ -3115,10 +3116,8 @@ class ConsolidatedMessageDispatcher:
                     },
                 )
         # How this output is shown is decided once, by the presentation policy
-        # (``core.presentation``); every branch below executes that decision.
-        suppresses_outward_delivery = bool(
-            (context.platform_specific or {}).get("suppress_delivery")
-        )
+        # (``core.presentation``); every branch below executes that decision, and a
+        # decision outside what they can execute is refused rather than half-run.
         presentation, narration = self._presentation_input(
             context,
             im_client=im_client,
@@ -3131,9 +3130,11 @@ class ConsolidatedMessageDispatcher:
             raw_text=raw_text,
             citations=citations,
             output_semantics=output_semantics,
-            background=suppresses_outward_delivery,
+            background=bool((context.platform_specific or {}).get("suppress_delivery")),
         )
-        decision = self.presentation_policy.decide(presentation)
+        decision = validate_decision(presentation, self.presentation_policy.decide(presentation))
+        # Not outward: local history only, for any context, as a background Session's.
+        suppresses_outward_delivery = not decision.outward
         # Nothing to show (``level="silent"``, or a body that is empty once silent
         # directives are stripped): the message already settled the dot above (for
         # a terminal result), so release the SSE waiter and return BEFORE any
@@ -4122,7 +4123,7 @@ class ConsolidatedMessageDispatcher:
         # has proved the text is not the Turn's final answer, so this never
         # duplicates the result.
         interim_row = None
-        if decision.muted and narration is not None:
+        if decision.transcript and narration is not None:
             interim_row = persist_agent_message(
                 target_context,
                 "interim",

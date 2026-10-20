@@ -61,7 +61,9 @@ class PresentationInput:
     ``output``, ``notify``, ``assistant``, ``toolcall``, ``system``), ``row_type`` the
     type its transcript row would carry. ``body`` is the visible text with silent
     directives removed; ``log_chunk`` what a process log would show;
-    ``narration_body`` the bubble body a Web narration copy would carry. The
+    ``narration_body`` the bubble body a Web narration copy would carry, None where
+    no copy can be written (not a Web narration, ``level="process"``, or a background
+    Session). The
     channel's hidden types and the turn's progress style are read only when a policy
     asks, as the dispatcher has always read them. ``log_editable`` says whether the
     channel can edit a message, which a consolidated log and a status line need.
@@ -74,7 +76,7 @@ class PresentationInput:
     background: bool
     body: str
     log_chunk: str = ""
-    narration_body: str = ""
+    narration_body: Optional[str] = None
     metadata: Optional[Mapping[str, Any]] = None
     tools_deliverable: bool = True
     log_editable: bool = True
@@ -84,7 +86,29 @@ class PresentationInput:
 
 @dataclass(frozen=True)
 class PresentationDecision:
-    """How one output is shown; ``reason`` names why it does not go out, when it does not."""
+    """How one output is shown; ``reason`` names why it does not go out, when it does not.
+
+    Every field the dispatcher accepts, it executes in full. A decision outside the
+    envelope it can execute raises ``ValueError`` (``validate_decision``) rather than
+    being half-executed; a later policy that needs more extends the executor. The
+    envelope:
+
+    * not ``persisted`` is nothing at all: no record, not ``outward``, no push, ``im``
+      ``none``, no transcript row;
+    * not ``outward`` is local history only: ``im`` ``none``, no push, no Web
+      publication (no ``message.new``, no Inbox update), the row marked
+      ``delivery_suppressed``;
+    * an answer or notice (``result``, ``output``, ``error``, ``notify``) that is
+      persisted and outward goes out as a message (``im`` ``message``), as a
+      transcript row, muted exactly when its type renders muted (``output``);
+    * process-log outputs (``assistant``, ``toolcall``, ``system``) go out as
+      ``none``, ``status``, or ``log``, never a message; a ``log`` line needs a body,
+      and a tool call the target cannot deliver goes out as ``none``;
+    * a transcript row of narration is its muted ``interim`` copy (``transcript`` and
+      ``muted`` together), which needs the narration body the dispatcher measured;
+      tool calls and system lines have none;
+    * ``web_push`` may decline a push the catalog allows, never add one.
+    """
 
     policy: str
     persisted: bool
@@ -100,6 +124,8 @@ class PresentationDecision:
 
         return {
             "policy": self.policy,
+            "persisted": self.persisted,
+            "outward": self.outward,
             "transcript": self.transcript,
             "muted": self.muted,
             "web_push": self.web_push,
@@ -153,7 +179,7 @@ class DefaultPresentationPolicy:
         kind = presentation.message_type
         # ``level="silent"``, or nothing left to show: no record, no delivery.
         if presentation.level == "silent" or not presentation.body.strip():
-            return decision(persisted=False, reason="content_free")
+            return decision(persisted=False, outward=False, reason="content_free")
         if kind in _MESSAGE_TYPES:
             transcript = {"transcript": True, "muted": presentation.row_type in _MUTED_TYPES}
             if presentation.background:
@@ -169,12 +195,7 @@ class DefaultPresentationPolicy:
             return decision(outward=False, reason="background")
         # Long Web narration also keeps a muted, transcript-visible ``interim`` copy;
         # ``level="process"`` keeps it log-only.
-        copy = (
-            kind == "assistant"
-            and presentation.level != "process"
-            and presentation.platform == "avibe"
-            and interim_worthy(presentation.narration_body)
-        )
+        copy = presentation.narration_body is not None and interim_worthy(presentation.narration_body)
         shown = {"transcript": copy, "muted": copy}
         if kind == "toolcall" and not presentation.tools_deliverable:
             return decision(**shown, reason="tools_unsupported")
@@ -198,6 +219,47 @@ class DefaultPresentationPolicy:
         return decision(**shown, im=ImDelivery.LOG)
 
 
+def validate_decision(presentation: PresentationInput, decision: PresentationDecision) -> PresentationDecision:
+    """``decision`` when the dispatcher can execute it in full, else ``ValueError``.
+
+    The envelope is documented on ``PresentationDecision``.
+    """
+
+    def reject(why: str) -> PresentationDecision:
+        raise ValueError(f"presentation policy {decision.policy!r}: {why} ({decision!r})")
+
+    kind = presentation.message_type
+    if not decision.persisted:
+        if decision.outward or decision.transcript or decision.muted or decision.web_push:
+            return reject("an output that is not persisted is nothing at all")
+        if decision.im is not ImDelivery.NONE:
+            return reject("an output that is not persisted goes nowhere")
+        return decision
+    if not decision.outward and (decision.im is not ImDelivery.NONE or decision.web_push):
+        return reject("local history goes out nowhere")
+    if decision.web_push and not (
+        presentation.platform == "avibe" and _web_push(presentation.row_type, presentation.metadata)
+    ):
+        return reject("a push the catalog does not allow cannot be added")
+    if kind in _MESSAGE_TYPES:
+        if not decision.transcript or decision.muted is not (presentation.row_type in _MUTED_TYPES):
+            return reject("an answer or notice is a transcript row, muted exactly when its type is")
+        if decision.outward and decision.im is not ImDelivery.MESSAGE:
+            return reject("an answer or notice that goes out goes out as a message")
+        return decision
+    if decision.im is ImDelivery.MESSAGE:
+        return reject("a process-log output never goes out as a message")
+    if decision.transcript is not decision.muted:
+        return reject("narration's transcript row is its muted interim copy")
+    if decision.transcript and (kind != "assistant" or not decision.outward or presentation.narration_body is None):
+        return reject("only Web narration the dispatcher measured has an interim copy")
+    if decision.im is ImDelivery.LOG and not presentation.log_chunk:
+        return reject("a log line needs a body")
+    if kind == "toolcall" and not presentation.tools_deliverable and decision.im is not ImDelivery.NONE:
+        return reject("a tool call the target cannot deliver goes out nowhere")
+    return decision
+
+
 def presentation_metadata(
     decision: Optional[PresentationDecision], metadata: Optional[Mapping[str, Any]] = None
 ) -> Optional[dict[str, Any]]:
@@ -219,4 +281,5 @@ __all__ = [
     "PresentationPolicy",
     "interim_worthy",
     "presentation_metadata",
+    "validate_decision",
 ]
