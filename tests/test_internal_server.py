@@ -3978,7 +3978,6 @@ def test_hfr_482_create_per_run_delivery_adopts_reserved_session(monkeypatch, tm
             session_id,
             ctx,
             "fresh session prompt",
-            delivery_intent="queue",
         )
         await asyncio.wait_for(started.wait(), timeout=3)
         return result

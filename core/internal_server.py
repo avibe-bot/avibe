@@ -281,11 +281,13 @@ def create_app(
         context: MessageContext,
         text: str,
         *,
-        delivery_intent: str = "steer",
+        delivery_intent: str | None = None,
     ) -> Any:
         """Run a Harness input through the same durable owner as interactive Chat.
 
-        The explicit source intent decides whether this content queues or steers.
+        The admission policy decides whether this content queues or steers, from
+        the sender's explicit ``delivery_intent`` when it made one and otherwise
+        from the context's trigger kind (``core.input_admission``).
         Content-bearing P1 targets this Delivery; content-free P1 promotion is
         exposed separately through ``SessionTurnManager.send_now``.
         The submission remains a Delivery until exact native acceptance materializes
@@ -295,8 +297,16 @@ def create_app(
             submission = await manager.submit(None, context, text, source=SOURCE_SCHEDULED)
             return submission.route
 
+        from dataclasses import replace
+
+        from core.input_admission import (
+            InputEnvelope,
+            InputProvenance,
+            InputSender,
+            decide_admission,
+            reserve_input,
+        )
         from core.message_mirror import _scope_id_for_session
-        from core.message_priority import normalize_delivery_intent
         from core.runtime_work import answer_caught_cancellation, step_failed
         from core.session_turns import (
             DeliveryRequest,
@@ -326,8 +336,29 @@ def create_app(
         delivery_owner_transferred = False
         target_was_busy = False
         legacy_send_now = str(delivery_intent or "").strip().lower() == "send_now"
-        delivery_intent = normalize_delivery_intent(delivery_intent)
-        effective_delivery_intent = delivery_intent
+        # The scope is resolved inside the admission transaction below.
+        envelope = InputEnvelope(
+            session_id=session_id,
+            scope_id=None,
+            sender=InputSender("harness", author_id, author_name),
+            kind="harness",
+            provenance=InputProvenance(
+                source="harness",
+                platform=submission_platform,
+                origin="harness",
+                native_message_id=native_message_id or None,
+                trigger=author_name,
+            ),
+            dispatch_text=text,
+            text=text,
+            metadata={
+                **dict(submission_spec.get("message_metadata") or {}),
+                SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(context),
+            },
+            requested_intent=delivery_intent,
+        )
+        decision = decide_admission(envelope)
+        effective_delivery_intent = decision.intent
         execution_id = str(
             (context.platform_specific or {}).get("task_execution_id") or ""
         ).strip()
@@ -420,10 +451,14 @@ def create_app(
                                     str(existing["id"]),
                                     expected_version=int(existing["version"]),
                                     expected_states=("queued",),
-                                    values={"priority": "p1", "state": "reserved"},
+                                    values={
+                                        "priority": decision.priority,
+                                        "state": "reserved",
+                                    },
                                     history_event={
                                         "kind": "legacy_send_now_re_admission",
                                         "from_priority": "p3",
+                                        "policy": decision.record(),
                                     },
                                 )
                                 if existing is None:
@@ -481,42 +516,13 @@ def create_app(
                             persisted_spec.get("task_execution_id") or execution_id
                         ).strip()
                 else:
-                    from core.message_priority import priority_for_delivery_intent
-
                     delivery_id = message_deliveries.new_delivery_id()
-                    admitted_state = "reserved"
-                    priority = priority_for_delivery_intent(delivery_intent)
-                    message_deliveries.insert_delivery(
+                    reserve_input(
                         conn,
+                        replace(envelope, scope_id=scope_id),
+                        decision,
                         delivery_id=delivery_id,
-                        session_id=session_id,
-                        priority=priority,
-                        state=admitted_state,
-                        snapshot=message_deliveries.message_snapshot(
-                            scope_id=scope_id,
-                            session_id=session_id,
-                            platform=submission_platform,
-                            author="harness",
-                            author_id=author_id,
-                            author_name=author_name,
-                            source="harness",
-                            message_type="harness",
-                            text=text,
-                            metadata={
-                                **dict(submission_spec.get("message_metadata") or {}),
-                                SCHEDULED_PROVENANCE_KEY: capture_scheduled_provenance(
-                                    context
-                                )
-                            },
-                            native_message_id=native_message_id or None,
-                        ),
-                        dispatch_text=text,
                         dedupe_key=dedupe_key,
-                        history_event={
-                            "kind": "admission",
-                            "priority": priority,
-                            "state": admitted_state,
-                        },
                     )
                 if execution_id and not delivery_owner_transferred:
                     if not attach_agent_run_delivery_in_connection(
@@ -559,11 +565,9 @@ def create_app(
             raise asyncio.CancelledError
 
         if delivery_request is None:
-            from core.message_priority import priority_for_delivery_intent
-
             delivery_request = DeliveryRequest(
                 session_id=session_id,
-                priority=priority_for_delivery_intent(delivery_intent),
+                priority=decision.priority,
                 content=text,
                 delivery_id=delivery_id,
                 scope_id=scope_id,

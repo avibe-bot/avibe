@@ -2759,24 +2759,6 @@ class SessionTurnManager:
             },
         )
 
-    @staticmethod
-    def reserve_delivery(
-        conn: Connection,
-        request: DeliveryRequest,
-    ) -> dict[str, Any]:
-        """Persist a producer-owned content reservation in the caller's transaction."""
-
-        if request.content is None:
-            raise ValueError("content Delivery requires a Message snapshot")
-        if request.priority not in {"p1", "p3"}:
-            raise ValueError("content reservation requires P1 or P3 priority")
-        return SessionTurnManager._insert_delivery(
-            conn,
-            request,
-            priority=request.priority,
-            state="reserved",
-        )
-
     def _active_identity(
         self,
         backend: str,
@@ -9727,41 +9709,45 @@ class SessionTurnManager:
                     ).mappings().one()
                     if session_row["status"] != "active":
                         return False
+                    from core.input_admission import (
+                        InputEnvelope,
+                        InputProvenance,
+                        InputSender,
+                        admit_input,
+                    )
+
                     delivery_id = delivery_store.new_delivery_id()
                     language = self._controller_language()
                     trigger_text = str(
                         payload.get("agent_initiated_trigger_text")
                         or i18n_t("harness.agentInitiatedContinuation", language)
                     )
-                    delivery = delivery_store.insert_delivery(
+                    delivery = admit_input(
                         conn,
-                        delivery_id=delivery_id,
-                        session_id=session_id,
-                        priority="p3",
-                        state="reserved",
-                        snapshot=delivery_store.message_snapshot(
-                            scope_id=session_row["scope_id"],
+                        InputEnvelope(
                             session_id=session_id,
-                            platform="avibe",
-                            author="harness",
-                            source="harness",
+                            scope_id=session_row["scope_id"],
+                            sender=InputSender("harness"),
                             # This durable row owns the backend-started Turn for
                             # Stop/FSM/history, but it is not a user instruction
                             # and must not render as a chat bubble.
-                            message_type="agent_initiated",
+                            kind="agent_initiated",
+                            provenance=InputProvenance(
+                                source="agent_initiated", origin="harness"
+                            ),
                             text=trigger_text,
                             metadata={
                                 "source": "agent_initiated",
                                 "runtime_key": payload.get("agent_runtime_turn_key"),
                             },
                         ),
-                        dispatch_text="",
-                        history_event={
+                        delivery_id=delivery_id,
+                        history={
                             "kind": "admission",
                             "turn_id": turn_token,
                             "outcome": "backend_initiated",
                         },
-                    )
+                    ).delivery
                     claimed = self._claim_start_batch(
                         conn,
                         owner=start_owner,

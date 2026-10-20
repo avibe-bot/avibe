@@ -522,5 +522,14 @@ scenarios:
       - tests/test_agent_output.py::test_each_event_maps_to_one_dispatch_call
       - tests/test_agent_output.py::test_an_event_cannot_contradict_its_lifecycle
       - tests/test_agent_output.py::test_an_emit_answers_with_its_delivery_receipt
+  - id: MESSAGE-DELIVERY-338
+    name: Every input source (Web composer, IM, Harness, Show annotation, failure retry, agent-initiated) is normalized into one envelope and admitted through one entry; one default admission policy holds each source's released priority (the OpenCode subagent exception, an Agent Run's --queue and legacy send_now, the scheduled P3 included) and the admitting history event records which policy decided and why
+    status: covered
+    kind: contract
+    layer: contract
+    test:
+      - tests/test_input_admission.py::test_each_source_is_admitted_with_its_released_priority_and_records_the_decision
+      - tests/test_input_admission.py::test_a_source_owned_admission_event_carries_the_decision
+      - tests/test_input_admission.py::test_the_record_names_whichever_policy_decided
 next_priority:
-  - MESSAGE-DELIVERY-337
+  - MESSAGE-DELIVERY-339

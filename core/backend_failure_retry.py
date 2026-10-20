@@ -7,11 +7,13 @@ All writers call these helpers while holding the SQLite writer reservation.
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.engine import Connection
 
+from core.input_admission import InputEnvelope, admit_input
 from storage import message_deliveries as deliveries, messages_service
 from storage.delivery_states import policy_for
 from storage.message_deliveries import (
@@ -129,9 +131,13 @@ def reserve_retry(
     *,
     session_id: str,
     notice_id: str,
-    snapshot: dict[str, Any],
+    envelope: InputEnvelope,
 ) -> dict[str, Any]:
-    """Resolve duplicate clicks or reserve one canonical, draft-independent input."""
+    """Resolve duplicate clicks or reserve one canonical, draft-independent input.
+
+    Retained inputs keep the admission they already recorded; a new retry input
+    is admitted through the input admission entry with its binding as the event.
+    """
     notice = _notice(conn, session_id, notice_id)
     link = notice["content"].get("failure_retry") or {}
     existing = deliveries.get_delivery(conn, str(link.get("delivery_id") or ""))
@@ -181,21 +187,11 @@ def reserve_retry(
             if saved is None:
                 raise RuntimeError("retry retained input claim lost")
     else:
-        retry_snapshot = dict(snapshot)
-        dispatch_text = "continue"
+        retry_input = replace(envelope, dispatch_text="continue")
         if vibey_resume:
             # Vibey resumes its committed transcript. Keep the Delivery as the
             # durable ownership record, but do not create a visible user input.
-            retry_snapshot.update(
-                {
-                    "author": "harness",
-                    "source": "harness",
-                    "type": "agent_initiated",
-                    "content_text": None,
-                    "content_json": "{}",
-                }
-            )
-            metadata = json.loads(str(retry_snapshot.get("metadata_json") or "{}"))
+            metadata = json.loads(str(envelope.snapshot().get("metadata_json") or "{}"))
             if not isinstance(metadata, dict):
                 metadata = {}
             metadata.update(
@@ -205,20 +201,17 @@ def reserve_retry(
                     deliveries.VIBEY_SOURCE_TURN_METADATA_KEY: turn["id"],
                 }
             )
-            retry_snapshot["metadata_json"] = json.dumps(
-                metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            retry_input = replace(
+                envelope,
+                sender=replace(envelope.sender, kind="harness"),
+                kind="agent_initiated",
+                provenance=replace(envelope.provenance, origin="harness"),
+                dispatch_text="",
+                text=None,
+                content=None,
+                metadata=metadata,
             )
-            dispatch_text = ""
-        deliveries.insert_delivery(
-            conn,
-            delivery_id=delivery_id,
-            session_id=session_id,
-            priority="p3",
-            state="reserved",
-            snapshot=retry_snapshot,
-            dispatch_text=dispatch_text,
-            history_event=binding,
-        )
+        admit_input(conn, retry_input, delivery_id=delivery_id, history=binding)
     content = dict(notice["content"])
     content["failure_retry"] = {"delivery_id": delivery_id}
     conn.execute(

@@ -5900,7 +5900,7 @@ async def test_concurrent_im_attachment_retry_keeps_one_reserved_owner(
             session_anchor="base-session",
             working_path="/tmp",
             vibe_agent=None,
-            delivery_intent="steer",
+            explicit_subagent=None,
             downloaded_attachment_paths=[str(path)],
             admission_context={},
         )
@@ -6004,11 +6004,12 @@ async def test_im_reply_answers_only_the_approvers_pending_script_confirm(
         display_text=answer,
         processed_files=[],
         session_key="slack::C1",
-        agent_name="codex",
+        # An explicit OpenCode subagent is the IM input the policy queues.
+        agent_name="opencode",
         session_anchor="base-session",
         working_path="/tmp",
         vibe_agent=None,
-        delivery_intent="queue",
+        explicit_subagent="reviewer",
         downloaded_attachment_paths=[],
         admission_context={},
     )
