@@ -87,14 +87,14 @@ vibe mcp docs search --args-json '{"query":"async Python","limit":5}'   # also -
 - Calls go to the owner, print one JSON document to stdout, diagnostics to stderr.
 - Errors point to the next useful command (root list, service list or tool help).
 
-Exit codes (the JSON error `type` is authoritative):
+Exit codes (the JSON error `type` is authoritative; command-admission denials keep the existing `vibe` CLI exit code 1):
 
 | Code | Meaning |
 |---:|---|
 | 0 | success |
 | 2 | syntax / argument validation |
 | 3 | package or artifact missing/invalid, or `package_changed` |
-| 4 | disabled, not permitted, or credential unavailable/needs approval |
+| 4 | package disabled |
 | 5 | connection / unsupported transport |
 | 6 | tool not found, tool error, or `result_too_large` |
 | 7 | timeout or cancelled before `tools/call` was sent |
@@ -146,7 +146,7 @@ Flow: paste → **Parse and preview** → **Save** → **Generate** (later **Reg
 ```
 
 - Accept the common provider shape: `command/args/env/cwd` → stdio; `url` with absent/`http`/`streamable_http` type → Streamable HTTP. Reject conflicting or unsupported fields with a field-specific message. Provider `enabled` is ignored.
-- Env and header values are stored as given, in plaintext, like Claude Code's own MCP config. No Vault integration in MVP. `<avibe-home>/mcp/` is created with the existing owner-private helpers (`core/private_fs.py`: `ensure_private_directory`, `make_private_file`; POSIX modes, Windows DACL); UI masks env/header values; logs never print them.
+- Env and header values are stored as given, in plaintext, like Claude Code's own MCP config. No Vault integration in MVP. `<avibe-home>/mcp/` is created with the existing owner-private helpers (`core/private_fs.py`: `ensure_private_directory`, `make_private_file`; POSIX modes, Windows DACL); UI/API mask env/header values using the existing config-secret pattern (`has_<field>` metadata; an empty submitted value means "unchanged", see `_strip_preserved_config_secrets` in `vibe/api.py`); logs never print them.
 - `cwd` must be absolute; absent means the sanitized Agent default.
 - Existing names require explicit replace; omitted services are untouched.
 
@@ -170,7 +170,7 @@ Persisted `definition.json`:
 - Uses its own connection; the SDK's high-level client negotiates the protocol (modern discovery or legacy `initialize`) and the selected version is recorded; then fetches all `tools/list` pages (stop on absent cursor; fail on repeated cursor or >100 pages), builds the revision.
 - Publish = write the full revision directory, then atomically replace `current.json`. Any failure leaves the previous revision active.
 - The owner serializes save/generate/enable/disable/remove per package, so these never race.
-- Initial generate enables the package on success; regenerate never changes `state.json`.
+- Initial generate enables the package on success: it writes `state.json` (enabled) before switching `current.json`, so a crash in between leaves an enabled draft that simply regenerates; no transaction needed. Regenerate never changes `state.json`.
 - Keep the current and previous revision; delete older ones after publish.
 - `revision` = sha256 of the canonical manifest inputs (definition, versions, tools, commands), excluding timestamps. An identical rebuild reports "no change".
 - Manifest records `protocolVersion`, `serverInfo`, `generatorVersion`, `generatedAt` as provenance only; nothing compares them or detects updates. `tools/list_changed` is ignored.
