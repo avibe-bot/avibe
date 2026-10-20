@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from core.agent_output import DeliveryReceipt
 from core.runtime_activation import RuntimeActivationRegistry
 from core.session_activities import SessionActivityRegistry, activity_completion_output
 from modules.agents.base import AgentRequest
@@ -59,7 +60,7 @@ async def test_generation_end_preserves_terminal_recovery_owner_and_gate(ending)
         attempts.append((text, kwargs["output"]))
         if not allow_delivery.is_set():
             raise RuntimeError("outbound unavailable")
-        return "durably-accepted"
+        return DeliveryReceipt("durably-accepted")
 
     async def controller_emit(ctx, _kind, _text, **kwargs):
         if kwargs["output"].completes_turn:
@@ -173,7 +174,7 @@ async def test_human_phase_and_successor_cannot_overwrite_or_be_released_by_old_
         else:
             human_emits.append(text)
             service.release_runtime_turn(ctx)
-        return "accepted"
+        return DeliveryReceipt("accepted")
 
     agent.emit_result_message = AsyncMock(side_effect=emit)
 
@@ -273,7 +274,7 @@ async def test_failure_replay_revalidates_after_steering_wait(ending, replace_wh
         ))
         if kwargs["output"].completes_turn:
             service.release_runtime_turn(ctx)
-        return "accepted"
+        return DeliveryReceipt("accepted")
 
     agent.controller.emit_agent_message = AsyncMock(side_effect=emit)
 
@@ -430,7 +431,7 @@ async def test_unowned_terminal_text_survives_claim_failure(
         return "accepted-output"
 
     async def emit_result(ctx, text, **kwargs):
-        return await accepted(ctx, "result", text, **kwargs)
+        return DeliveryReceipt(await accepted(ctx, "result", text, **kwargs))
 
     agent.emit_result_message = AsyncMock(side_effect=emit_result)
     agent.controller.emit_agent_message = AsyncMock(side_effect=accepted)
@@ -1263,7 +1264,7 @@ async def test_result_arriving_during_managed_retry_keeps_worker_responsibility(
             retry_entered.set()
             await release_retry.wait()
         delivered.append(text)
-        return "accepted"
+        return DeliveryReceipt("accepted")
 
     agent.emit_result_message = AsyncMock(side_effect=emit)
 
@@ -1424,7 +1425,7 @@ async def test_replaced_receiver_late_result_and_eof_cannot_consume_new_request(
 
     old = OldClient()
     agent.claude_sessions[key] = old
-    agent.emit_result_message = AsyncMock(return_value="delivered")
+    agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("delivered"))
     receiver = asyncio.create_task(
         agent._receive_messages(old, "recovery-replaced", "/tmp/work", context_for(key), composite_key=key)
     )
@@ -1499,10 +1500,10 @@ async def test_stop_interrupt_claim_precedes_every_late_result_route(origin):
     async def emit(ctx, _kind, _text, **kwargs):
         if kwargs["output"].completes_turn:
             service.release_runtime_turn(ctx)
-        return "settled"
+        return DeliveryReceipt("settled")
 
     agent.controller.emit_agent_message = AsyncMock(side_effect=emit)
-    agent.emit_result_message = AsyncMock(return_value="must-not-deliver")
+    agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("must-not-deliver"))
     client = Client()
     agent.claude_sessions[key] = client
     receiver = asyncio.create_task(

@@ -87,9 +87,10 @@ from core.services.agent_steering import (
     result as steer_result,
 )
 from core.backend_failure import emit_backend_failure
+from core.agent_output import Narration, Reply, ToolActivity, TurnEnd, TurnOutcome, emit_output
 from core.citations import CitationBundle, register_text_citations
 from core.hosted_activity import HostedActivity, hosted_line, native_activities, proxy_activity
-from core.message_output import MessageOutput, stop_output_for, terminal_output_for
+from core.message_output import MessageOutput, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
 from core.reply_enhancer import strip_silent_blocks
@@ -961,9 +962,7 @@ class VibeyAgent(BaseAgent):
             else:
                 # A reply the model chose to keep silent: the Turn's end with no reply of
                 # its own; any earlier reply in the Turn was already delivered as one.
-                await self.controller.emit_agent_message(
-                    context, "result", "", output=terminal_output_for(request)
-                )
+                await emit_output(self.controller, context, TurnEnd(output=terminal_output_for(request)))
             return
         # Generated images are paid for and already announced: they reach the user
         # whether or not a final reply follows.
@@ -971,15 +970,15 @@ class VibeyAgent(BaseAgent):
         if run.stop_requested and reason == "aborted":
             # The stop receipt IM shows, as for the other backends.
             await self._remove_ack_reaction(request, terminal_emoji=STOPPED_REACTION_EMOJI)
-            await self.controller.emit_agent_message(
-                context, "result", "", level="silent", output=stop_output_for(request)
+            await emit_output(
+                self.controller,
+                context,
+                TurnEnd(outcome=TurnOutcome.STOPPED, silent=True, output=terminal_output_for(request)),
             )
             return
         if reason in _COMPLETED and kind is None:
             # The run ended without a final reply by design (a terminating tool, a hook end).
-            await self.controller.emit_agent_message(
-                context, "result", "", level="silent", output=terminal_output_for(request)
-            )
+            await emit_output(self.controller, context, TurnEnd(silent=True, output=terminal_output_for(request)))
             return
         self._log_failure(run, reason, kind, origin, diagnostic)
         await self._fail(request, kind, diagnostic, reason=reason, refusal=run.refusal, source=source)
@@ -1524,7 +1523,7 @@ class VibeyAgent(BaseAgent):
 
     async def _emit_narration(self, run: _Run, row_id: str) -> None:
         """A non-final response through the same process path as the other backends' narration."""
-        await self._emit_non_final(run, row_id, "assistant")
+        await self._emit_non_final(run, row_id, reply=False)
 
     async def _emit_reply(self, run: _Run, row_id: str) -> None:
         """A completed reply later input took the final word from: a ``result`` that does not end the Turn.
@@ -1533,28 +1532,32 @@ class VibeyAgent(BaseAgent):
         it is green, notifies, and counts as unread like the final, whatever its
         length; the steered input's answer is the Turn's next reply.
         """
-        await self._emit_non_final(run, row_id, "result")
+        await self._emit_non_final(run, row_id, reply=True)
 
-    async def _emit_non_final(self, run: _Run, row_id: str, message_type: str) -> None:
+    async def _emit_non_final(self, run: _Run, row_id: str, *, reply: bool) -> None:
         message = run.responses.get(row_id)
         body, citations = self._display_with_citations(message, final=False) if message is not None else ("", None)
         if not body.strip():
             return
-        try:
-            await self.controller.emit_agent_message(
-                run.request.context,
-                message_type,
+        event: Reply | Narration
+        if reply:
+            # A reply is identified by its committed row: two replies with the same
+            # text stay two, and a replay of one stays one.
+            event = Reply(
                 body,
-                output=MessageOutput(
-                    completes_turn=False,
-                    completes_run=False,
-                    persisted_row_id=row_id,
-                    # A reply is identified by its committed row: two replies with the
-                    # same text stay two, and a replay of one stays one.
-                    idempotency_key=row_id if message_type == "result" else None,
-                ),
                 citations=citations,
+                output=MessageOutput(
+                    completes_turn=False, completes_run=False, persisted_row_id=row_id, idempotency_key=row_id
+                ),
             )
+        else:
+            event = Narration(
+                body,
+                citations=citations,
+                output=MessageOutput(completes_turn=False, completes_run=False, persisted_row_id=row_id),
+            )
+        try:
+            await emit_output(self.controller, run.request.context, event)
         except Exception:
             logger.exception("Vibey could not show response %s", row_id)
 
@@ -1619,6 +1622,8 @@ class VibeyAgent(BaseAgent):
         if not links:
             return
         try:
+            # The released ``output`` type stays until the presentation decision point
+            # (docs/plans/reply-and-turn-end.md, PR 3): not a reply, not a notice.
             await self.controller.emit_agent_message(
                 run.request.context,
                 "output",
@@ -1657,8 +1662,10 @@ class VibeyAgent(BaseAgent):
         formatter = self._get_formatter(run.request.context)
         line = hosted_line(activity, self._language(), escape=formatter.escape_special_chars)
         try:
-            await self.controller.emit_agent_message(
-                run.request.context, "toolcall", line, status_label=line, hosted=activity.to_payload()
+            await emit_output(
+                self.controller,
+                run.request.context,
+                ToolActivity(line, status_label=line, hosted=activity.to_payload()),
             )
         except Exception:
             logger.exception("Vibey could not show hosted call %s", activity.call_id)
@@ -1711,11 +1718,13 @@ class VibeyAgent(BaseAgent):
         formatter = self._get_formatter(run.request.context)
         relative = _relative_to(run.cwd)
         try:
-            await self.controller.emit_agent_message(
+            await emit_output(
+                self.controller,
                 run.request.context,
-                "toolcall",
-                formatter.format_toolcall(name, arguments, get_relative_path=relative),
-                status_label=formatter.format_toolcall_label(name, arguments, get_relative_path=relative),
+                ToolActivity(
+                    formatter.format_toolcall(name, arguments, get_relative_path=relative),
+                    status_label=formatter.format_toolcall_label(name, arguments, get_relative_path=relative),
+                ),
             )
         except Exception:
             logger.exception("Vibey could not show tool %s", name)

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.agent_output import DeliveryReceipt
 from core.citations import CitationSource, register_citations
 from modules.agents.base import AgentRequest, BaseAgent
 from modules.im import MessageContext
@@ -63,7 +64,7 @@ class AgentSilentResultTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(controller.messages, [("result", "", "markdown")])
-        self.assertEqual(message_id, "message-id")
+        self.assertEqual(message_id, DeliveryReceipt("message-id"))
 
     async def test_no_visible_result_with_duration_hidden_settles_via_outbound(self):
         # show_duration off + empty result/suffix is still a TERMINAL turn: it is
@@ -109,7 +110,7 @@ class AgentSilentResultTests(unittest.IsolatedAsyncioTestCase):
             controller.config.show_duration = show_duration
             message_id = await agent.emit_result_message(context, "Plain answer.")
 
-            self.assertEqual(message_id, "message-id")
+            self.assertEqual(message_id, DeliveryReceipt("message-id"))
         self.assertEqual([m[0] for m in controller.messages], ["result", "result"])
 
     async def test_a_cited_result_forwards_its_sidecar(self):

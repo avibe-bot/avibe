@@ -29,7 +29,8 @@ from core.caller_context import (
     caller_env_for_platform_payload,
     validated_caller_env_snapshot,
 )
-from core.message_output import stop_output_for
+from core.agent_output import TurnEnd, TurnOutcome, emit_output
+from core.message_output import terminal_output_for
 from core.managed_skills import (
     BUILTIN_SKILLS_ROOT_ENV,
     managed_skill_environment,
@@ -2604,15 +2605,13 @@ class OpenCodeAgent(OpenCodeMessageProcessorMixin, BaseAgent):
             # user-facing message: a single SILENT result settles the dot to idle +
             # releases the SSE waiter through the outbound chokepoint without a bubble
             # (``level="silent"`` makes that explicit rather than faking it via empty text).
-            # ``stop_output_for`` (not the terminal-turn default) keeps this empty body out
+            # A ``STOPPED`` end (not the terminal-turn default) keeps this empty body out
             # of the run's terminal state so the stop settles it ``canceled`` instead of
-            # ``succeeded`` — see its docstring.
-            await self.controller.emit_agent_message(
+            # ``succeeded`` (``stop_output_for`` explains why).
+            await emit_output(
+                self.controller,
                 request.context,
-                "result",
-                "",
-                level="silent",
-                output=stop_output_for(request),
+                TurnEnd(outcome=TurnOutcome.STOPPED, silent=True, output=terminal_output_for(request)),
             )
             logger.info(f"OpenCode session {request.base_session_id} terminated via /stop")
             return True

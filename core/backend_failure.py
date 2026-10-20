@@ -7,6 +7,7 @@ from dataclasses import replace
 from inspect import Parameter, signature
 from typing import Any
 
+from core.agent_output import AgentError, TurnEnd, TurnOutcome, emit_output
 from core.delivery_evidence import (
     ACK_EVIDENCE_DELIVERY_ONLY,
     ACK_EVIDENCE_RECEIPT,
@@ -347,15 +348,7 @@ async def emit_replayed_backend_failure(
     )
     # ``delivery`` is passed ONLY when a caller asked for it: controller-like objects
     # that implement ``emit_agent_message`` without the keyword must keep working.
-    notify_kwargs: dict[str, Any] = {"output": notification}
-    if delivery is not None:
-        notify_kwargs["delivery"] = delivery
-    await controller.emit_agent_message(
-        context,
-        "notify",
-        visible,
-        **notify_kwargs,
-    )
+    await emit_output(controller, context, AgentError(visible, output=notification, delivery=delivery))
 
 
 async def emit_backend_failure(
@@ -449,14 +442,10 @@ async def emit_backend_failure(
             failure_id=notification_identity,
             delivery=live_delivery,
         )
-        await controller.emit_agent_message(
+        await emit_output(
+            controller,
             context,
-            "result",
-            "",
-            is_error=True,
-            level="silent",
-            output=terminal_output,
-            terminal_error=error,
+            TurnEnd(outcome=TurnOutcome.FAILED, silent=True, terminal_error=error, output=terminal_output),
         )
 
     # Auth recovery is unconditional for non-Harness live callers, and there is no
@@ -495,7 +484,7 @@ async def emit_backend_failure(
     # ``delivery`` is passed only when the emitter supports it. Durable Turn and
     # Harness contexts create the object automatically, but controller-like test
     # and integration doubles with the legacy signature must keep working.
-    notify_kwargs: dict[str, Any] = {"output": notification}
+    accepts_delivery = False
     if live_delivery is not None:
         emit = controller.emit_agent_message
         try:
@@ -506,22 +495,19 @@ async def emit_backend_failure(
             )
         except (TypeError, ValueError):
             accepts_delivery = False
-        if accepts_delivery:
-            notify_kwargs["delivery"] = live_delivery
     try:
-        delivered_id = await controller.emit_agent_message(
+        receipt = await emit_output(
+            controller,
             context,
-            "notify",
-            visible,
-            **notify_kwargs,
+            AgentError(visible, output=notification, delivery=live_delivery if accepts_delivery else None),
         )
         if (
             live_delivery is not None
             and live_delivery.delivered_id is None
-            and delivered_id is not None
+            and receipt.delivered
             and not bool((context.platform_specific or {}).get("suppress_delivery"))
         ):
-            live_delivery.delivered_id = str(delivered_id)
+            live_delivery.delivered_id = str(receipt.message_id)
             live_delivery.send_returned = True
     finally:
         await settle_terminal_failure()

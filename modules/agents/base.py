@@ -13,6 +13,7 @@ from modules.im import MessageContext
 from modules.im.base import FileAttachment
 from core.agent_input import AgentInputMetadata
 from core.agent_session_context import resolve_context_agent_session_target
+from core.agent_output import DeliveryReceipt, Reply, TurnEnd, TurnOutcome, emit_output
 from core.citations import CitationBundle
 from core.message_output import MessageOutput, terminal_turn_output
 from core.reply_enhancer import strip_silent_blocks
@@ -607,8 +608,10 @@ class BaseAgent(ABC):
         request: Optional[AgentRequest] = None,
         output: MessageOutput | None = None,
         citations: Optional[CitationBundle] = None,
-    ) -> Optional[str]:
-        """Emit a terminal result.
+    ) -> DeliveryReceipt:
+        """Emit a backend's result: the Turn's end, or detached work's reply.
+
+        Returns the emit's ``DeliveryReceipt``.
 
         ``citations`` is the registered source bundle for the answer body (see
         ``core.citations``): the body carries an opaque token where each cited
@@ -637,59 +640,29 @@ class BaseAgent(ABC):
         visible_result = strip_silent_blocks(raw_result)
         visible_suffix = strip_silent_blocks(raw_suffix) if raw_suffix else None
         has_silent_directive = "<silent" in raw_result.lower() or "<silent" in raw_suffix.lower()
-        message_id: Optional[str] = None
 
         if has_silent_directive and not visible_result.strip() and not (visible_suffix or "").strip():
-            message_id = await self.controller.emit_agent_message(
+            receipt = await emit_output(
+                self.controller,
                 context,
-                "result",
-                "",
-                parse_mode=parse_mode,
-                is_error=is_error,
-                output=output,
+                self._result_event("", parse_mode=parse_mode, failed=is_error, output=output),
             )
             if request and settles_request:
                 await self._remove_ack_reaction(request)
-            return message_id
+            return receipt
 
-        # When show_duration is disabled, skip the entire result line
-        # unless there is actual result_text or suffix to deliver.
+        result_footer: Optional[str] = None
         if not show_duration:
+            # When show_duration is disabled, skip the entire result line unless
+            # there is actual result_text or suffix to deliver. No visible text is
+            # still a TERMINAL turn: its empty end settles it through the outbound
+            # status chokepoint (dot idle / failed, the web-Chat stream released).
             parts = []
             if raw_result and raw_result.strip():
                 parts.append(raw_result)
             if raw_suffix:
                 parts.append(raw_suffix)
-            if parts:
-                formatted = "\n".join(parts)
-                message_id = await self.controller.emit_agent_message(
-                    context,
-                    "result",
-                    formatted,
-                    parse_mode=parse_mode,
-                    is_error=is_error,
-                    output=output,
-                    # Forwarded ONLY when there is a sidecar to carry, for the
-                    # reason ``controller.emit_agent_message`` gives when it
-                    # forwards the same value: the controller is a substitutable
-                    # collaborator, and an always-present keyword would change the
-                    # required signature of every stand-in that has none.
-                    **({"citations": citations} if citations else {}),
-                )
-            else:
-                # No visible text (show_duration off + empty result/suffix) is still
-                # a TERMINAL turn: settle it through the OUTBOUND status chokepoint
-                # (empty result → dot idle / failed AND releases the web-Chat stream
-                # waiter), mirroring the silent-directive path above — otherwise the
-                # dot stays green and the stream hangs until the 600s timeout (Codex P2).
-                message_id = await self.controller.emit_agent_message(
-                    context,
-                    "result",
-                    "",
-                    parse_mode=parse_mode,
-                    is_error=is_error,
-                    output=output,
-                )
+            body = "\n".join(parts)
         else:
             token_field = ""
             get_token_field = getattr(self.controller, "session_token_field", None)
@@ -713,27 +686,59 @@ class BaseAgent(ABC):
                 parts.append(raw_result)
             if raw_suffix:
                 parts.append(raw_suffix)
-            body = "\n".join(parts)
             # A footer is never a reply: with no visible result or suffix this is the
             # Turn's content-free end, and the footer rides only as ``result_footer``
             # (the concise status bubble still shows its done line). The dispatcher
             # settles the Turn's Runs with its last reply, if any
             # (docs/plans/reply-and-turn-end.md).
-            message_id = await self.controller.emit_agent_message(
-                context,
-                "result",
+            body = "\n".join(parts)
+        receipt = await emit_output(
+            self.controller,
+            context,
+            self._result_event(
                 body,
                 parse_mode=parse_mode,
-                is_error=is_error,
-                result_footer=result_footer,
+                failed=is_error,
                 output=output,
-                **({"citations": citations} if citations else {}),
-            )
+                footer=result_footer,
+                # The sidecar rides only with a body to carry it.
+                citations=citations if body else None,
+            ),
+        )
 
         # Remove ack reaction after result is sent
         if request and settles_request:
             await self._remove_ack_reaction(request)
-        return message_id
+        return receipt
+
+    @staticmethod
+    def _result_event(
+        text: str,
+        *,
+        parse_mode: Optional[str],
+        failed: bool,
+        output: MessageOutput,
+        footer: Optional[str] = None,
+        citations: Optional[CitationBundle] = None,
+    ) -> Reply | TurnEnd:
+        """A result's event: the Turn's end when its output ends the Turn, else a reply.
+
+        Detached work (an Activity) answers through this path with an output that
+        does not end the current Turn; its answer is a reply that settles its own Runs.
+        """
+
+        if output.completes_turn:
+            return TurnEnd(
+                outcome=TurnOutcome.FAILED if failed else TurnOutcome.DONE,
+                text=text,
+                parse_mode=parse_mode,
+                citations=citations,
+                footer=footer,
+                output=output,
+            )
+        return Reply(
+            text=text, parse_mode=parse_mode, citations=citations, footer=footer, failed=failed, output=output
+        )
 
     @abstractmethod
     async def handle_message(self, request: AgentRequest) -> None:

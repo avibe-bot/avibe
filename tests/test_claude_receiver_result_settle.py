@@ -22,6 +22,7 @@ from unittest.mock import ANY, AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.agent_output import DeliveryReceipt
 from core.services.agent_steering import ActiveSteerTarget, SteerOutcome, SteerRequest
 from modules.agents.claude_agent import ClaudeAgent
 from modules.agents.service import AgentService
@@ -210,7 +211,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         composite_key = "session-interrupt-unknown:/tmp/work"
         primary_request = SimpleNamespace(context=context)
         agent._pending_requests[composite_key] = [primary_request]
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
         agent.controller.emit_agent_message = AsyncMock(return_value=None)
         result_ready = asyncio.Event()
         result_processed = asyncio.Event()
@@ -280,7 +281,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         composite_key = "session-steer:/tmp/work"
         primary_request = SimpleNamespace(context=context)
         agent._pending_requests[composite_key] = [primary_request]
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
         query_started = asyncio.Event()
         release_query = asyncio.Event()
         first_result_ready = asyncio.Event()
@@ -369,7 +370,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         composite_key = "session-buffered-result:/tmp/work"
         primary_request = SimpleNamespace(context=context)
         agent._pending_requests[composite_key] = [primary_request]
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
         query_started = asyncio.Event()
         release_query = asyncio.Event()
         consume_buffered_result = asyncio.Event()
@@ -464,7 +465,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         composite_key = "session-ambiguous:/tmp/work"
         primary_request = SimpleNamespace(context=context)
         agent._pending_requests[composite_key] = [primary_request]
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
         query_started = asyncio.Event()
         release_query = asyncio.Event()
         first_result_ready = asyncio.Event()
@@ -552,7 +553,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         composite_key = "session-ambiguous-undelivered:/tmp/work"
         primary_request = SimpleNamespace(context=context)
         agent._pending_requests[composite_key] = [primary_request]
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
         result_ready = asyncio.Event()
         input_ended = asyncio.Event()
 
@@ -624,7 +625,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         composite_key = "session-ambiguous-consumed:/tmp/work"
         primary_request = SimpleNamespace(context=context)
         agent._pending_requests[composite_key] = [primary_request]
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
         receipt = agent._register_native_input(
             composite_key,
             "ambiguous input",
@@ -674,7 +675,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         composite_key = "session-ambiguous-close-failed:/tmp/work"
         primary_request = SimpleNamespace(context=context)
         agent._pending_requests[composite_key] = [primary_request]
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
         query_started = asyncio.Event()
         release_query = asyncio.Event()
         result_ready = asyncio.Event()
@@ -762,7 +763,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         composite_key = "session-activity-steer:/tmp/work"
         primary_request = SimpleNamespace(context=context, output_activities=[])
         agent._pending_requests[composite_key] = [primary_request]
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
         query_started = asyncio.Event()
         release_query = asyncio.Event()
 
@@ -897,7 +898,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         agent._pending_requests[composite_key] = [primary_request]
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
         agent.controller.emit_agent_message = AsyncMock(return_value=None)
         agent._cleanup_runtime_session = AsyncMock()
         agent._release_service_runtime_turn = Mock()
@@ -1146,7 +1147,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
             ack_reaction_emoji=None,
         )
         agent._pending_requests[composite_key] = [primary_request]
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
         agent.controller.emit_agent_message = AsyncMock(return_value=None)
         agent._cleanup_runtime_session = AsyncMock()
         agent._remove_specific_pending_reaction = AsyncMock()
@@ -1302,7 +1303,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         composite_key = "session-assistant-failure:/tmp/work"
         primary_request = SimpleNamespace(context=context)
         agent._pending_requests[composite_key] = [primary_request]
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
         agent._detect_message_type = lambda message: (
             "assistant"
             if isinstance(message, _AssistantFailureMessage)
@@ -1497,7 +1498,7 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         composite_key = "session-2:/tmp/work"
 
         agent._pending_requests[composite_key] = [SimpleNamespace(context=context)]
-        agent.emit_result_message = AsyncMock(return_value=None)
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt(None))
 
         await agent._receive_messages(
             _one_result_client(), "session-2", "/tmp/work", context, composite_key=composite_key

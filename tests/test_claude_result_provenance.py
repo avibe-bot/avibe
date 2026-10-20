@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.agent_output import DeliveryReceipt
 from core.handlers.session_handler import ClaudeInputNotSentError
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
@@ -186,7 +187,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         context = _context(key)
         request = _pending_request(key)
         agent._pending_requests[key] = [request]
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
         await agent._receive_messages(
             _client(messages),
             "sess-provenance",
@@ -292,7 +293,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         context = _context(key)
         request = _pending_request(key)
         agent._pending_requests[key] = [request]
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
 
         class _Formatter:
             @staticmethod
@@ -436,7 +437,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 key = "session-proven-human-turn:/tmp/work"
                 agent, service = _build_agent()
                 context = _context(key)
-                agent.emit_result_message = AsyncMock(return_value="message-id")
+                agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
                 agent._get_formatter = lambda _context: _Formatter()
 
                 def visible():
@@ -526,7 +527,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         context = _context(key)
         request = _pending_request(key)
         agent._pending_requests[key] = [request]
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
         service.activities.start(
             backend="claude",
             runtime_key=key,
@@ -575,7 +576,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         request = _pending_request(key)
         agent._pending_requests[key] = [request]
         agent._get_formatter = lambda _context: _ToolcallFormatter()
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
         before_result = {}
 
         class _Client:
@@ -641,7 +642,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 request = _pending_request(key)
                 agent._pending_requests[key] = [request]
                 agent._get_formatter = lambda _context: _ToolcallFormatter()
-                agent.emit_result_message = AsyncMock(return_value="message-id")
+                agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
                 before_result = {}
                 tool_name = tool_block.name
 
@@ -717,7 +718,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 request = _pending_request(key)
                 agent._pending_requests[key] = [request]
                 agent._get_formatter = lambda _context: _ToolcallFormatter()
-                agent.emit_result_message = AsyncMock(return_value="message-id")
+                agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
                 _start_competing_activity(service, key)
                 receipt = agent._register_native_input(
                     key, "steered prompt", kind="steer"
@@ -793,7 +794,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         request = _pending_request(key)
         agent._pending_requests[key] = [request]
         agent._get_formatter = lambda _context: _ToolcallFormatter()
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
         _start_competing_activity(service, key)
         receipt = agent._register_native_input(key, "steered prompt", kind="steer")
         receipt.state = "accepted"
@@ -931,7 +932,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         context = _context(key)
         request = _pending_request(key)
         agent._pending_requests[key] = [request]
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
 
         class _Formatter:
             format_assistant_message = Mock(side_effect=RuntimeError("replay failed"))
@@ -1006,7 +1007,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         activity = service.activities.claim_completed_output("claude", key)
         self.assertIsNotNone(activity)
         agent._retain_activity_output_record(key, [activity])
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
 
         assistant = AssistantMessage(
             _block(TextBlock, text="detached progress"),
@@ -1065,7 +1066,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 context = _context(key)
                 request = _pending_request(key)
                 agent._pending_requests[key] = [request]
-                agent.emit_result_message = AsyncMock(return_value="message-id")
+                agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
                 terminal = TaskNotificationMessage("task-no-output", "not user text")
                 terminal.status = status
 
@@ -1127,7 +1128,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 service.controller.scheduled_task_service = SimpleNamespace(
                     settle_activity_runs=settle_activity,
                 )
-                agent.emit_result_message = AsyncMock(return_value="message-id")
+                agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
                 # Competing output keeps this task provisional until the human
                 # Result classifies its phase.
                 _start_competing_activity(service, key)
@@ -1204,7 +1205,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
             format_toolcall=lambda *_args, **_kwargs: "fixture tool",
             format_toolcall_label=lambda *_args, **_kwargs: "fixture tool",
         )
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
         service.activities.start(
             backend="claude",
             runtime_key=key,
@@ -1401,7 +1402,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         request = _pending_request(key)
         agent._pending_requests[key] = [request]
         agent._get_formatter = lambda _context: None
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
 
         failure_seen = asyncio.Event()
         release_result = asyncio.Event()
@@ -1452,7 +1453,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         context = _context(key)
         request = _pending_request(key)
         agent._pending_requests[key] = [request]
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
         agent._steering_closing_keys().add(key)
 
         await agent._receive_messages(
@@ -2035,7 +2036,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         agent, _service = _build_agent()
         request = _pending_request(key)
         agent._pending_requests[key] = [request]
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
         cleanup_entered = asyncio.Event()
         release_cleanup = asyncio.Event()
 
@@ -2193,7 +2194,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
         context = _context(key)
         request = _pending_request(key)
         agent._pending_requests[key] = [request]
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
         service.activities.classify_provisional_provenance = Mock(
             side_effect=RuntimeError("activity store unavailable")
         )
@@ -2319,7 +2320,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
             attempts.append(kwargs["output"])
             if len(attempts) == 1:
                 raise RuntimeError("temporary delivery failure")
-            return "message-id"
+            return DeliveryReceipt("message-id")
 
         agent.emit_result_message = AsyncMock(side_effect=emit_with_one_transient_failure)
 
@@ -2388,7 +2389,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
             attempts.append(text)
             if not allow_retry.is_set():
                 raise RuntimeError("detached delivery unavailable")
-            return "message-id"
+            return DeliveryReceipt("message-id")
 
         agent.emit_result_message = AsyncMock(side_effect=emit_result)
 
@@ -2451,7 +2452,7 @@ class ClaudeResultProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 return "fixture tool"
 
         agent._get_formatter = lambda _context: _Formatter()
-        agent.emit_result_message = AsyncMock(return_value="message-id")
+        agent.emit_result_message = AsyncMock(return_value=DeliveryReceipt("message-id"))
         snapshots = []
 
         class _Client:
