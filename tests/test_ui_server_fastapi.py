@@ -1,6 +1,7 @@
 import asyncio
 import gzip
 import json
+import shutil
 import threading
 from types import SimpleNamespace
 
@@ -2727,6 +2728,41 @@ def test_static_ui_assets_use_cache_headers(monkeypatch, tmp_path):
     assert index_response.headers["Cache-Control"] == "no-store, private"
     assert spa_response.status_code == 200
     assert spa_response.headers["Cache-Control"] == "no-store, private"
+
+
+def test_static_ui_serves_previous_build_chunks_after_upgrade(monkeypatch, tmp_path):
+    # An upgrade replaces ui/dist wholesale. A page loaded before it keeps
+    # requesting its own build's hashed chunks; the previous build must stay
+    # loadable, and a build two upgrades back must be pruned.
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path / "home"))
+    ui_dist = tmp_path / "dist"
+    monkeypatch.setattr(ui_server, "get_ui_dist_path", lambda: ui_dist)
+    client = app.test_client()
+
+    def install_build(build: str) -> None:
+        shutil.rmtree(ui_dist, ignore_errors=True)
+        assets_dir = ui_dist / "assets"
+        assets_dir.mkdir(parents=True)
+        (ui_dist / "index.html").write_text(f'<script src="/assets/index-{build}.js"></script>', encoding="utf-8")
+        (assets_dir / f"index-{build}.js").write_text(f"import('./Page-{build}.js')", encoding="utf-8")
+        (assets_dir / f"Page-{build}.js").write_text(f"// page {build}", encoding="utf-8")
+        (assets_dir / "shared-000.js").write_text("// shared", encoding="utf-8")
+        assert client.get("/workbench/session-1").status_code == 200
+
+    install_build("111")
+    install_build("222")
+
+    previous_chunk = client.get("/assets/Page-111.js")
+    assert previous_chunk.status_code == 200
+    assert previous_chunk.text == "// page 111"
+    assert previous_chunk.headers["Cache-Control"] == "public, max-age=31536000, immutable"
+    assert "javascript" in previous_chunk.headers["Content-Type"]
+
+    install_build("333")
+
+    assert client.get("/assets/Page-111.js").status_code == 404
+    assert client.get("/assets/Page-222.js").text == "// page 222"
+    assert client.get("/assets/shared-000.js").status_code == 200
 
 
 def test_static_ui_asset_omits_csrf_cookie(monkeypatch, tmp_path):
