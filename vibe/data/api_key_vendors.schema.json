@@ -16,6 +16,16 @@
       "search": {
         "type": ["object", "null"],
         "required": ["service_id", "endpoint", "auth", "request", "result", "limits", "price", "free_check", "service_refused_statuses", "tool_only"],
+        "allOf": [
+          {
+            "if": {"properties": {"tool_only": {"const": false}}},
+            "then": {"required": ["auto_enroll"]}
+          },
+          {
+            "if": {"properties": {"tool_only": {"const": true}}},
+            "then": {"not": {"required": ["auto_enroll"]}}
+          }
+        ],
         "additionalProperties": false,
         "properties": {
           "service_id": {"type": "string", "minLength": 1},
@@ -97,7 +107,11 @@
             "items": {"type": "integer", "minimum": 400, "maximum": 499},
             "uniqueItems": true
           },
-          "tool_only": {"type": "boolean"}
+          "tool_only": {"type": "boolean"},
+          "auto_enroll": {
+            "type": "boolean",
+            "description": "Whether an official model Source joins search automatically; tool-only Sources do not use this field."
+          }
         }
       }
     }

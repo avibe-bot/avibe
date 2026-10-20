@@ -68,6 +68,7 @@
         "invalid_statuses": [401]
       },
       "service_refused_statuses": [400],
+      "auto_enroll": true,
       "tool_only": false
     }
   },

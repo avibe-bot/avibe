@@ -2707,6 +2707,32 @@ def test_shipped_api_key_vendor_catalog_matches_its_schema() -> None:
     Draft7Validator(schema).validate(catalog)
 
 
+def test_only_deepseek_search_auto_enrolls_model_sources() -> None:
+    enrolled = [entry.id for entry in api_key_vendor_catalog() if entry.search and entry.search.get("auto_enroll")]
+    assert enrolled == ["deepseek"]
+    assert search_service("deepseek", "openai_chat")["auto_enroll"] is True
+    for vendor in ("tavily", "exa"):
+        assert "auto_enroll" not in search_service(vendor, "search")
+
+
+@pytest.mark.parametrize("auto_enroll", [True, False, "true", 1, None, "absent"])
+def test_model_search_auto_enrollment_matches_schema_and_runtime(auto_enroll) -> None:
+    catalog = json.loads(Path("vibe/data/api_key_vendors.json").read_text(encoding="utf-8"))
+    row = next(row for row in catalog if row["id"] == "deepseek")
+    if auto_enroll == "absent":
+        del row["search"]["auto_enroll"]
+    else:
+        row["search"]["auto_enroll"] = auto_enroll
+    schema = json.loads(Path("vibe/data/api_key_vendors.schema.json").read_text(encoding="utf-8"))
+    valid = isinstance(auto_enroll, bool)
+    assert Draft7Validator(schema).is_valid([row]) is valid
+    if valid:
+        assert _validate_search_catalog(row["search"], protocol="openai_chat")["auto_enroll"] is auto_enroll
+    else:
+        with pytest.raises(ValueError, match="search catalog"):
+            _validate_search_catalog(row["search"], protocol="openai_chat")
+
+
 @pytest.mark.parametrize("vendor", ["deepseek", "tavily", "exa"])
 @pytest.mark.parametrize("results_max", [1, 5, 100, 101, 0, -1, True, 1.5, "100", None])
 def test_search_catalog_results_ceiling_matches_schema_and_runtime(vendor, results_max) -> None:

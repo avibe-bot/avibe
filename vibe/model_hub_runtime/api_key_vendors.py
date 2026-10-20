@@ -161,6 +161,8 @@ def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] |
     if not isinstance(item, dict):
         raise ValueError("api-key vendor search catalog is invalid")
     required = {"service_id", "endpoint", "auth", "request", "result", "limits", "price", "free_check", "service_refused_statuses", "tool_only"}
+    if protocol != "search":
+        required.add("auto_enroll")
     if set(item) != required:
         raise ValueError("api-key vendor search catalog is invalid")
     endpoint = normalize_model_hub_base_url(item.get("endpoint"))
@@ -183,6 +185,8 @@ def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] |
         raise ValueError("api-key vendor search catalog price is invalid")
     if not isinstance(item.get("tool_only"), bool) or item["tool_only"] != (protocol == "search"):
         raise ValueError("api-key vendor search catalog protocol is invalid")
+    if protocol != "search" and not isinstance(item.get("auto_enroll"), bool):
+        raise ValueError("api-key vendor search catalog auto-enroll flag is invalid")
     if not isinstance(item.get("service_refused_statuses"), list) or any(
         isinstance(status, bool) or not isinstance(status, int) or status < 400 or status >= 500
         for status in item["service_refused_statuses"]
