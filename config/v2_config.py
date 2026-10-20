@@ -3204,11 +3204,15 @@ def _search_service_settings_from_payload(
     return settings
 
 
-def _executor_order_kinds_from_payload(payload: object, order: Optional[tuple[str, ...]]) -> Optional[dict[str, str]]:
+def _executor_order_kinds_from_payload(
+    payload: object, order: Optional[tuple[str, ...]], sources: Optional[list[ModelHubSourceConfig]]
+) -> Optional[dict[str, str]]:
     # This derived snapshot affects placement, not consent. Damage follows the released missing-map rule;
     # discarding the whole tool entry would erase service opt-outs on the next unrelated config write.
     if isinstance(payload, dict):
-        named = {key: value for key, value in payload.items() if key in (order or ())}
+        live = {source.id for source in sources} if sources is not None else None
+        named = {key: value for key, value in payload.items()
+                 if key in (order or ()) and (live is None or key in live)}
         if all(isinstance(value, str) and value in {"service", "model"} for value in named.values()):
             return named
     logger.warning("Config 'model_hub.hosted_tools.web_search.executor_order_kinds': ignoring damaged role map")
@@ -3272,7 +3276,7 @@ class ModelHubHostedToolConfig:
                 if tool == "web_search" and "services" in payload else {}
             ),
             executor_order_kinds=(
-                _executor_order_kinds_from_payload(payload["executor_order_kinds"], order)
+                _executor_order_kinds_from_payload(payload["executor_order_kinds"], order, sources)
                 if tool == "web_search" and "executor_order_kinds" in payload else None
             ),
             default_image=(

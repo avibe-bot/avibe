@@ -198,6 +198,7 @@ scenarios:
       - tests/test_model_hub_hosted_tools_config.py::test_hosted_tool_settings_round_trip_in_canonical_order
       - tests/test_model_hub_search_settings.py::test_released_order_keeps_missing_kinds_absent_and_ignores_unnamed_entries
       - tests/test_model_hub_search_settings.py::test_damaged_role_map_keeps_opt_out_across_load_write_and_reenable
+      - tests/test_model_hub_search_settings.py::test_role_metadata_drops_removed_sources_on_load_and_real_deletion
       - tests/test_model_hub_search_settings.py::test_rc12_loader_preserves_tool_switch_and_orders_but_drops_service_overrides
   - id: MH-HOSTED-003
     name: A refusal is routing state with no time limit that applies only under its Source identity and wire stamp; a success is display history that never replaces it; a clear is persisted before it takes effect
@@ -235,6 +236,7 @@ scenarios:
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_put_changes_only_the_fields_it_names
       - tests/test_model_hub_search_settings.py::test_put_merges_absent_sources_fields_and_null_resets
       - tests/test_model_hub_search_settings.py::test_http_tools_put_and_read_preserve_patch_and_dormant_contract
+      - tests/test_model_hub_search_settings.py::test_service_order_read_skips_removed_sources_without_rewriting_saved_order
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_put_refuses_what_the_contract_forbids
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_latest_success_is_the_newest_in_time_not_in_text
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_latest_success_is_the_newest_one_whose_source_is_still_the_same

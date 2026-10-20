@@ -97,7 +97,7 @@ DELETE restores automatic and POST preview evaluates the draft without a write.
 
 `web_search` additionally reads `prefer_native` (true when absent), `services`
 (saved partial overrides for currently search-capable Sources, not resolved defaults), and `service_order`
-(the server-owned tool-only Source creation order, `[]` when absent). Every search
+(the server-owned tool-only Source creation order with removed ids skipped, `[]` when absent). Every search
 executor now has a discriminant `kind: "model" | "service"`; `x_search` remains model-only.
 Extant retargeted or retired Sources are omitted from `services` while they cannot
 search, but their overrides (especially opt-out) stay in config for when capability
@@ -141,7 +141,9 @@ Every `web_search.executor_order` save also writes `executor_order_kinds` from
 the resulting per-Source settings: each extant named Source's `service` or
 `model` role. Removed ids remain in the saved order but have no map entry. Reset
 to automatic removes both fields. A missing map/entry reads as `model`; map ids
-not named by the order are ignored. A damaged map is treated as absent with a
+not named by the order or no longer naming an extant Source are ignored on load,
+including before role validation, and the next authorized write drops them. An
+extant retargeted/retired Source keeps its saved role. A damaged map is treated as absent with a
 warning, retaining the tool switch, service opt-outs and other saved choices.
 Neither `executor_order_kinds` nor `service_order` is client-writable. S2 owns the
 read-time placement rule; S1b preserves the saved order and kinds across restart

@@ -259,6 +259,43 @@ async def test_content_write_requires_catalog_page_text(tmp_path, monkeypatch):
     assert _web(service)["services"][TAVILY] == {"content": False}
 
 
+def test_service_order_read_skips_removed_sources_without_rewriting_saved_order(tmp_path):
+    """MH-HOSTED-004: a retained stale id is never presented as an automatic search Source."""
+    order = [EXA, GONE, TAVILY]
+    service, path, _ = _disk_service(tmp_path, _config({"service_order": order}))
+    before = path.read_bytes()
+    assert _web(service)["service_order"] == [EXA, TAVILY]
+    assert V2ModelHubConfigStore().load().hosted_tools["web_search"].service_order == tuple(order)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("stale_role", ["service", []])
+@pytest.mark.asyncio
+async def test_role_metadata_drops_removed_sources_on_load_and_real_deletion(tmp_path, stale_role):
+    """MH-HOSTED-002: removed roles are ignored before validation; normal deletion saves the same invariant."""
+    order = [GONE, TAVILY, DEEPSEEK, MODEL]
+    live_roles = {TAVILY: "service", DEEPSEEK: "service", MODEL: "model"}
+    config = _config({"executor_order": order, "executor_order_kinds": live_roles,
+                      "service_order": [TAVILY, EXA], "services": {DEEPSEEK: {"enabled": False}}})
+    config.sources[-1].base_url = "https://relay.invalid/v1"  # Retargeting is not deletion: keep its saved role.
+    service, path, _ = _disk_service(tmp_path, config)
+    raw = json.loads(path.read_text())
+    raw["model_hub"]["hosted_tools"]["web_search"]["executor_order_kinds"][GONE] = stale_role
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    before = path.read_bytes()
+    loaded = V2ModelHubConfigStore().load().hosted_tools["web_search"]
+    assert loaded.enabled and loaded.executor_order_kinds == live_roles
+    assert loaded.executor_order == tuple(order)
+    assert path.read_bytes() == before
+    await service.delete_source(TAVILY)
+    written = json.loads(path.read_text())["model_hub"]["hosted_tools"]["web_search"]
+    assert written["executor_order"] == order
+    assert written["executor_order_kinds"] == {DEEPSEEK: "service", MODEL: "model"}
+    assert written["services"] == {DEEPSEEK: {"enabled": False}}
+    assert written["service_order"] == [EXA]
+    assert V2ModelHubConfigStore().load().hosted_tools["web_search"].to_payload() == written
+
+
 def test_removed_source_settings_are_ignored_before_validation():
     config = _config({"services": {GONE: "obsolete", TAVILY: {"results": 6}}})
     assert config.hosted_tools["web_search"].enabled

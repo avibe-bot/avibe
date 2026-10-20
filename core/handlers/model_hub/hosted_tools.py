@@ -663,7 +663,7 @@ def hosted_tools_status(
                     for source_id, saved in setting.services.items()
                     if source_id in sources and (service := model_hub_search_service(sources[source_id])) is not None
                 }
-                entry["service_order"] = list(setting.service_order or ())
+                entry["service_order"] = [source_id for source_id in (setting.service_order or ()) if source_id in sources]
                 # This is the only activation gate for BOTH read additions. S2 supplies the unified chain
                 # and its placement rule here when enabling it; this lane only defines the projection.
                 if SEARCH_SERVICES_ACTIVE:

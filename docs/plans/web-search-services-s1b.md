@@ -19,6 +19,10 @@ Source of truth: `web-search-services.md` §3.2, §3.5, §8–9; S1a is merged a
   missing Sources have no map entry, missing roles read as model. A damaged
   derived role map warns and loads as absent without discarding consent settings;
   S2 owns interpreting roles at read time, with no dormant test-only helper here.
+  Loaded roles for removed Sources are ignored before validation and dropped at
+  the next authorized write, including normal Source deletion. Extant retargeted
+  Sources retain their saved role. The Tools read skips removed `service_order`
+  ids without mutating the saved order; `executor_order` remains as saved.
 - Define service candidate/vendor shapes and add model candidates' `kind`.
   One explicit internal activation switch suppresses both service candidates
   and service vendors until S2. No new UI, user toggle, chain or placement rule.
@@ -38,6 +42,9 @@ both the dormant public read and the defined future service variants against
 the closed schema. Exercise the pinned rc12 loader against new fields and its
 lossy downgrade write. The damaged-map regression fails before the fix and checks
 real V2 load, unrelated write, re-enable and restart without losing an opt-out.
+Removed-id regressions fail before the fix and cover the Tools projection and
+live role-map loading followed by normal Source deletion, preserving survivor
+order, retargeted roles and opt-outs.
 Run focused tests through `~/.local/bin/hd1-test`, changed-file Ruff, UI test
 typechecking (`npm run typecheck:tests`) and UI build.
 No paid search, live runtime restart or regression update is part of this lane.
