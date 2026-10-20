@@ -299,6 +299,48 @@ def test_turn_end_cancels_the_call_and_keeps_bindings() -> None:
     assert after["result"] == "kept" and after["kernel_fresh"] is False
 
 
+def test_a_queued_call_stays_bound_to_its_turn() -> None:
+    async def scenario(h: _Harness) -> tuple[dict, dict, dict, list]:
+        await h.js("1")
+        turn_a = h.controller.session_turns.in_flight[SESSION]
+        running = asyncio.create_task(h.js("await new Promise((r) => setTimeout(r, 500))"))
+        await asyncio.sleep(0.2)
+        queued = asyncio.create_task(
+            h.js("globalThis.executed = true; await computer.app({ bundleId: 'com.apple.mail' })")
+        )
+        await asyncio.sleep(0.1)
+        # Turn B is live before the queued Turn-A call can take the lock.
+        turn_a.task.cancel()
+        h.start_turn("turn-b")
+        first, second = await asyncio.wait_for(asyncio.gather(running, queued), 5)
+        after = await h.js("typeof executed")
+        return first, second, after, h.driver.calls
+
+    first, second, after, calls = _run(scenario)
+    assert first["error"]["code"] == "script_turn_ended"
+    assert second["error"]["code"] == "script_turn_ended"
+    assert after["result"] == "undefined" and after["kernel_fresh"] is False
+    assert calls == []
+
+
+def test_computer_use_off_cancels_an_executing_call() -> None:
+    async def scenario(h: _Harness) -> tuple[dict, int | None]:
+        await h.js("1")
+        process = h.kernel_process()
+        running = asyncio.create_task(h.js("await new Promise(() => {})", timeout_ms=10000))
+        await asyncio.sleep(0.2)
+        h.status = "off"
+        report = await asyncio.wait_for(running, 5)
+        await asyncio.wait_for(process.wait(), 5)
+        return report, process.returncode
+
+    scenario.options = {"status_poll_seconds": 0.05}
+    report, returncode = _run(scenario)
+    assert report["error"]["code"] == "js_kernel_reset"
+    assert report["error"]["params"] == {"reason": "computer_use_off"}
+    assert returncode is not None
+
+
 def test_concurrent_calls_in_one_session_are_serialized() -> None:
     async def scenario(h: _Harness) -> Any:
         await h.js("globalThis.order = []")

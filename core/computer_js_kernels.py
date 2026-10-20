@@ -52,6 +52,9 @@ KILL_GRACE_SECONDS = 2.0
 SPAWN_TIMEOUT_SECONDS = 10.0
 STATUS_POLL_SECONDS = 15.0
 _BINDING_GRACE_SECONDS = 5.0
+# A queued call's connection must outlive the calls ahead of it; it is still
+# closed as soon as the call ends, and its Turn ending invalidates it at once.
+_QUEUE_ALLOWANCE_SECONDS = MAX_TIMEOUT_MS / 1000 + 30.0
 _MESSAGE_LIMIT_BYTES = 16 * 1024 * 1024
 _ARTIFACT_PREFIX = "avibe-computer-js-"
 _KERNEL_FD_ENV = "AVIBE_COMPUTER_KERNEL_FD"
@@ -200,18 +203,35 @@ class ComputerJsKernelManager:
                 )
             )
 
-        slot = self._slots.setdefault(caller_session_id, _Slot())
-        async with slot.lock:
-            self._cancel_idle(slot)
+        from core.computer_script_sessions import ComputerScriptSessionError
+
+        # Admission happens when the request enters, before it queues: the call
+        # is bound to the Turn that issued it, never to whichever Turn is live
+        # when the lock frees up.
+        try:
+            opened = self._script_sessions.open(
+                caller_session_id,
+                timeout_ms / 1000 + _BINDING_GRACE_SECONDS + _QUEUE_ALLOWANCE_SECONDS,
+            )
+        except ComputerScriptSessionError as exc:
+            return _failed(_envelope(exc.code, exc.code))
+        session_id = opened["session_id"]
+        token = opened["connection_token"]
+        cancel: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._in_flight[token] = cancel
+        try:
+            slot = self._slots.setdefault(session_id, _Slot())
+            if not await self._acquire(slot.lock, cancel):
+                return _failed(_envelope(cancel.result(), cancel.result()))
             try:
-                return await self._evaluate_locked(
-                    caller_session_id,
-                    slot,
-                    code,
-                    timeout_ms,
-                )
+                self._cancel_idle(slot)
+                return await self._evaluate_locked(slot, token, cancel, code, timeout_ms)
             finally:
-                self._schedule_idle(caller_session_id, slot)
+                self._schedule_idle(slot)
+                slot.lock.release()
+        finally:
+            self._in_flight.pop(token, None)
+            self._script_sessions.close(token)
 
     def reset(self, caller_session_id: str) -> dict[str, Any]:
         """Discard the caller Session's kernel and every binding in it."""
@@ -254,15 +274,38 @@ class ComputerJsKernelManager:
 
     # Calls --------------------------------------------------------------
 
+    @staticmethod
+    async def _acquire(lock: asyncio.Lock, cancel: asyncio.Future[str]) -> bool:
+        """Wait for the Session lock unless the call's connection ends first."""
+
+        if cancel.done():
+            return False
+        acquire = asyncio.ensure_future(lock.acquire())
+
+        def give_back(task: asyncio.Future[Any]) -> None:
+            if not task.cancelled() and task.exception() is None:
+                lock.release()
+
+        try:
+            await asyncio.wait({acquire, cancel}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:
+            acquire.add_done_callback(give_back)
+            acquire.cancel()
+            raise
+        if cancel.done():
+            acquire.add_done_callback(give_back)
+            acquire.cancel()
+            return False
+        return True
+
     async def _evaluate_locked(
         self,
-        session_id: str,
         slot: _Slot,
+        token: str,
+        cancel: asyncio.Future[str],
         code: str,
         timeout_ms: int,
     ) -> dict[str, Any]:
-        from core.computer_script_sessions import ComputerScriptSessionError
-
         status = await self._computer_use_status()
         if getattr(status, "status", None) == "off":
             self._kill_slot(slot, "computer_use_off")
@@ -273,42 +316,25 @@ class ComputerJsKernelManager:
                     params={"status": "off", "reason": getattr(status, "reason", None)},
                 )
             )
-        try:
-            opened = self._script_sessions.open(
-                session_id,
-                timeout_ms / 1000 + _BINDING_GRACE_SECONDS,
-            )
-        except ComputerScriptSessionError as exc:
-            return _failed(_envelope(exc.code, exc.code))
-
-        token = opened["connection_token"]
-        # Registered before the kernel starts, so a Turn that ends while the
-        # kernel is starting still cancels this call.
-        cancel: asyncio.Future[str] = asyncio.get_running_loop().create_future()
-        self._in_flight[token] = cancel
-        try:
-            kernel_fresh = False
-            kernel = slot.kernel
-            if kernel is None or not kernel.alive:
-                try:
-                    kernel = await self._spawn()
-                except _KernelGone as exc:
-                    return _failed(
-                        _envelope(
-                            "js_kernel_unavailable",
-                            "The JavaScript kernel could not be started.",
-                            params={"reason": exc.reason},
-                        )
+        kernel_fresh = False
+        kernel = slot.kernel
+        if kernel is None or not kernel.alive:
+            try:
+                kernel = await self._spawn()
+            except _KernelGone as exc:
+                return _failed(
+                    _envelope(
+                        "js_kernel_unavailable",
+                        "The JavaScript kernel could not be started.",
+                        params={"reason": exc.reason},
                     )
-                slot.kernel = kernel
-                kernel_fresh = True
-            if cancel.done():
-                return _failed(_envelope(cancel.result(), cancel.result()), kernel_fresh=kernel_fresh)
-            report = await self._run_call(slot, kernel, token, cancel, code, timeout_ms)
-            return {**report, "kernel_fresh": kernel_fresh}
-        finally:
-            self._in_flight.pop(token, None)
-            self._script_sessions.close(token)
+                )
+            slot.kernel = kernel
+            kernel_fresh = True
+        if cancel.done():
+            return _failed(_envelope(cancel.result(), cancel.result()), kernel_fresh=kernel_fresh)
+        report = await self._run_call(slot, kernel, token, cancel, code, timeout_ms)
+        return {**report, "kernel_fresh": kernel_fresh}
 
     async def _run_call(
         self,
@@ -441,7 +467,7 @@ class ComputerJsKernelManager:
             )
         except OSError as exc:
             parent.close()
-            self._release_artifacts(artifact_directory)
+            await asyncio.to_thread(self._release_artifacts, artifact_directory)
             raise _KernelGone("spawn_failed") from exc
         finally:
             child.close()
@@ -529,7 +555,8 @@ class ComputerJsKernelManager:
             logger.warning("Computer Use JavaScript kernel %s was not reaped", kernel.process.pid)
         if kernel.reader_task is not None and kernel.reader_task is not asyncio.current_task():
             kernel.reader_task.cancel()
-        self._release_artifacts(kernel.artifact_directory)
+        # Pruning walks the temp directory; keep it off the Controller loop.
+        await asyncio.to_thread(self._release_artifacts, kernel.artifact_directory)
 
     @staticmethod
     def _release_artifacts(directory: Path) -> None:
@@ -551,7 +578,7 @@ class ComputerJsKernelManager:
             slot.idle_handle.cancel()
             slot.idle_handle = None
 
-    def _schedule_idle(self, session_id: str, slot: _Slot) -> None:
+    def _schedule_idle(self, slot: _Slot) -> None:
         self._cancel_idle(slot)
         if slot.kernel is None or not slot.kernel.alive:
             return
@@ -588,6 +615,7 @@ class ComputerJsKernelManager:
             await asyncio.sleep(self._status_poll_seconds)
             status = await self._computer_use_status()
             if getattr(status, "status", None) == "off":
+                # An executing call is cancelled with its kernel: it reports
+                # js_kernel_reset, and no binding outlives Computer Use off.
                 for slot in self._slots.values():
-                    if not slot.lock.locked():
-                        self._kill_slot(slot, "computer_use_off")
+                    self._kill_slot(slot, "computer_use_off")
