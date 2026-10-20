@@ -643,11 +643,11 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - The recovery actions run in the controller, which owns the trial gate and the cooldowns. The UI process forwards
   them over the Model Hub RPC (`ModelHubRemoteService`) as `reenable_search_source(source_id)` (S1a) and
   `clear_service_cooldown(source_id, service_id)` (S2), the path other hosted-tool writes already take. Endpoints:
-  `POST /api/models/sources/<id>/reenable` and `POST /api/models/hosted-tools/web_search/services/<source_id>/retry`,
-  both added to the Model Hub management allow-list in `vibe/authorization.py` (unknown routes default to
-  Owner-only) with role-policy tests, so a Member who can edit hosted-tool settings can also use them: re-enable
-  in S1a, retry in S2, where the path names the Source and the
-  controller derives the `service_id` from its catalog row (one search service per Source).
+  `POST /api/models/sources/<id>/reenable` and `POST /api/models/hosted-tools/web_search/services/<source_id>/retry`
+  (the path names the Source, and the controller derives the `service_id` from its catalog row, one search service
+  per Source). Both routes join the Model Hub management allow-list in `vibe/authorization.py` (unknown routes
+  default to Owner-only) with role-policy tests, so a Member who can edit hosted-tool settings can also use them:
+  re-enable in S1a, retry in S2.
 - `api.md`: the read and PUT changes, the "立即重试" cooldown clear (§4.2), and the "重新启用" action for a `search` Source in `needs_action` (§4.2), with
   its `api-response.schema.json` branch.
 - The turn trace's `hosted_tools`: the frozen `prefer_native`, candidate list and per-candidate `results` and
