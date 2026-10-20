@@ -98,7 +98,7 @@ Exit codes (the JSON error `type` is authoritative; command-admission denials ke
 | 5 | connection / unsupported transport |
 | 6 | tool not found or tool error |
 | 7 | timeout or cancelled before `tools/call` was sent |
-| 8 | timeout, cancel or disconnect after `tools/call` was sent (unknown outcome) |
+| 8 | any failure after `tools/call` was sent other than a returned tool error — timeout, cancel, disconnect, protocol/decoding or client-side output validation (unknown outcome; do not retry) |
 | 9 | owner unavailable or at capacity |
 
 ### 4.2 Schema to flags
@@ -168,7 +168,7 @@ Persisted `definition.json`:
 
 ## 6. Generation and versions
 
-- Uses its own connection; the SDK's high-level client negotiates the protocol (modern discovery or legacy `initialize`) and the selected version is recorded; then fetches all `tools/list` pages (stop on absent cursor; fail on repeated cursor or >100 pages), builds the revision.
+- Uses its own connection; the SDK's high-level client negotiates the protocol (modern discovery or legacy `initialize`) and the selected version is recorded; then fetches all `tools/list` pages (cursors are opaque; stop when absent; fail after 100 pages), builds the revision.
 - Publish = write the full revision directory, then atomically replace `current.json`. Any failure leaves the previous revision active.
 - The owner serializes save/generate/enable/disable/remove per package, so these never race.
 - Initial generate enables the package on success: it writes `state.json` (enabled) before switching `current.json`, so a crash in between leaves an enabled draft that simply regenerates; no transaction needed. Regenerate never changes `state.json`.
@@ -188,7 +188,7 @@ Persisted `definition.json`:
 - **Limits** (constants): at most 8 stdio processes in total, including generation. At the cap, close the longest-idle process (no in-flight call) to make room; fail with exit 9 only if all are busy. Idle close 10 min; call timeout 120 s; generation 5 min. HTTP is not capped.
 - Servers that lock a shared resource (e.g. Playwright's default persistent profile) need their own isolation flag in the provider config (`--isolated`); Avibe does not rewrite server argv.
 - **Schemas at call time:** the CLI parses and validates against the published revision only. The runtime SDK client may run its own `tools/list` when the protocol needs it (e.g. `x-mcp-header` → `Mcp-Param-*` headers); that never changes the published package.
-- **Calls:** the owner checks enabled state, connects or reuses, sends `tools/call` and returns the result with the revision used. If `current.json` changed between CLI parse and admission, it returns `package_changed`.
+- **Calls:** the owner checks enabled state, connects or reuses, sends `tools/call` and returns the result with the revision used. The client registers no elicitation/sampling/roots callbacks (out of scope); an input-required result is returned as `input_required_unsupported` (exit 6). If `current.json` changed between CLI parse and admission, it returns `package_changed`.
 - **Disable/remove:** blocks new calls and closes connections; in-flight work may finish or report unknown outcome.
 - **Event loop:** all MCP SDK sessions run on one dedicated runtime thread with its own event loop, owned by the Controller; the SDK's synchronous result validation therefore never blocks the Controller loop.
 
