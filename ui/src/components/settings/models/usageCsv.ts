@@ -2,6 +2,7 @@ import type { UsageBucketRow, UsageReport } from './types';
 import {
   filterBucketRows,
   emptyCounters,
+  isModelRow,
   modelLabel,
   usageNonCachedInput,
   usageTokensAreKnown,
@@ -42,15 +43,16 @@ export function buildUsageCsv(
   headers: UsageCsvHeaders,
   unknownModel: string,
 ): string {
-  // The export keeps every row under the IDs it was metered under; a label is
-  // what config names that ID, and a Source config let go reads as its ID.
+  // The export keeps every model row under the IDs it was metered under; a label
+  // is what config names that ID, and a Source config let go reads as its ID.
+  // Search requests are no model's calls or tokens, so they are not exported.
   const sourceLabel = (sourceId: string) => report.sources
     .find((source) => source.source_id === sourceId)?.label?.trim() || sourceId;
   const buckets = pinnedKey === null
     ? report.buckets
     : report.buckets.filter((bucket) => bucket.key === pinnedKey);
   const lines = buckets.flatMap((bucket) => {
-    const rows = filterBucketRows(bucket, filter);
+    const rows = filterBucketRows(bucket, filter).filter(isModelRow);
     const exportRows: Array<UsageBucketRow | null> = rows.length > 0 ? rows : [null];
     return exportRows.map((row) => {
       const counters = row ?? (bucket.history_complete ? emptyCounters() : null);

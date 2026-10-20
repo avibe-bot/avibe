@@ -1729,6 +1729,16 @@
           "outputTokens": "输出 token",
           "totalTokens": "总 token"
         },
+        "services": {
+          "title": "搜索服务",
+          "identity": "供应商 / 服务",
+          "billable": "计费请求",
+          "uncertain_one": "另有 {{requests}} 次计费未知",
+          "uncertain_other": "另有 {{requests}} 次计费未知",
+          "reported": "厂商报告",
+          "accounting": "搜索请求不是模型调用：不计入上方的 token 和请求数，只有折合 API 价格计入合计。",
+          "priceDate": "搜索价格日期 {{date}}。"
+        },
         "failure": "暂时没能读取用量报表。",
         "retry": "重试",
         "cost": {
@@ -1738,6 +1748,9 @@
           "excluded_one": "{{tokens}} tokens 暂无价格，未计入",
           "excluded_other": "{{tokens}} tokens 暂无价格，未计入",
           "tableDate": "价格表日期 {{date}}",
+          "reported": "厂商报告 {{usd}}",
+          "excludedServices_one": "{{requests}} 次搜索请求暂无价格，未计入",
+          "excludedServices_other": "{{requests}} 次搜索请求暂无价格，未计入",
           "tableDateUnknown": "暂无价格表日期",
           "tableFetching": "正在获取价格表…"
         }
@@ -2526,6 +2539,12 @@
         "removeNote": "移除后不再用于搜索，其他供应商不受影响。",
         "addProvider": "添加供应商",
         "menu": "搜索服务（Tavily、Exa…）",
+        "month": "本月",
+        "monthRequests_one": "{{requests}} 次请求",
+        "monthRequests_other": "{{requests}} 次请求",
+        "monthEstimate": "按 API 标价估算 {{usd}}",
+        "monthReported": "厂商报告 {{usd}}",
+        "openUsage": "查看用量",
         "vendor": {
           "deepseek": "通过官方 DeepSeek 供应商搜索，有结果才计费，空结果、失败和超时不计费。",
           "tavily": "为 AI Agent 设计的基础网页搜索，返回与搜索词相关的片段。",
@@ -2544,6 +2563,7 @@
           "native": "最近一次真实调用在这个模型上原生执行了{{toolInline}}。只用于显示，不影响路由。",
           "executor": "这个模型作为执行者，为其他模型执行了{{toolInline}}。只用于显示，不影响路由。",
           "direct": "这个模型通过图片接口生成了图片。只用于显示，不影响路由。",
+          "service": "最近一次真实请求通过这个搜索服务执行了{{toolInline}}。只用于显示，不影响路由。",
           "refused": "此供应商在这个模型的真实请求中拒绝了{{toolInline}}。清除前，Vibey 会改用其他方式完成。",
           "replay": "这个模型能在此供应商上执行{{toolInline}}，但拒绝回放历史结果，之后历史结果会以文本形式发回。"
         },
@@ -5034,15 +5054,57 @@
           "provider_image_unusable": "供应商返回的图片无法使用。",
           "search_not_run": "模型没有搜索就直接作答了。",
           "search_failed": "供应商的搜索失败了。",
-          "response_ended_early": "回复提前结束了。"
+          "response_ended_early": "回复提前结束了。",
+          "service_key_invalid": "搜索服务密钥无效。",
+          "service_balance": "搜索服务账户余额不足。",
+          "service_limit": "搜索服务已达到用量上限。",
+          "service_unavailable": "搜索服务暂时不可用。",
+          "service_refused": "搜索服务拒绝了这次搜索。",
+          "service_unreadable": "搜索服务返回了无法读取的结果。",
+          "search_query_too_long": "搜索词太长，请缩短后重试。",
+          "search_sources_blocked": "所有搜索来源都被阻止或停用了。"
         },
         "mode": {
           "native": "原生 · {{provider}}",
           "proxy": "由 {{provider}} 代理",
+          "service": "通过 {{provider}}",
           "direct": "{{provider}} 直连",
           "directModel": "{{model}} · {{source}}",
           "proxyModel": "由 {{provider}} 代理 · {{model}}"
         },
+        "repair": {
+          "disabled": "需要在 模型 › 工具 中启用网页搜索",
+          "key": "需要更换密钥",
+          "reauthorize": "需要重新授权登录",
+          "balance": "需要充值",
+          "balanceReenable": "需要充值，然后在 模型 › 工具 中重新启用",
+          "limit": "需要提高消费或用量上限",
+          "limitReenable": "需要提高消费或用量上限，然后在 模型 › 工具 中重新启用",
+          "tavilyLimit": "需要在 Tavily 后台升级套餐或提高该密钥的用量上限（432），或提高按量上限（433），然后在 模型 › 工具 中重新启用",
+          "plan": "需要升级为包含此产品的套餐",
+          "account": "需要联系供应商恢复账户",
+          "error": "需要在 模型 › 供应商 中处理"
+        },
+        "reason": {
+          "failed": "失败",
+          "superseded": "这次请求失败，状态已由之后的操作更新",
+          "service_key_invalid": "密钥无效",
+          "service_balance": "余额不足",
+          "service_limit": "已达用量上限",
+          "service_unavailable": "暂时不可用",
+          "service_refused": "拒绝了这次搜索",
+          "service_unreadable": "返回了无法读取的结果"
+        },
+        "skip": {
+          "blocked": "当时被阻止",
+          "disabled": "当时未用于搜索",
+          "cooling": "当时正在等待重试",
+          "query_too_long": "不支持这么长的搜索词",
+          "unavailable": "当时不可用"
+        },
+        "listSeparator": "、",
+        "itemSeparator": "；",
+        "switch": "{{failed}}，已改用 {{provider}}",
         "status": {
           "failed": "失败",
           "incomplete": "未完成",
@@ -5067,6 +5129,7 @@
         "ranNative": "原生执行：{{where}}",
         "ranProxy": "代理执行：{{where}}",
         "ranDirect": "直连执行：{{where}}",
+        "ranService": "搜索服务执行：{{where}}",
         "fallback": {
           "ranOn": "{{from}} 不支持{{toolInline}}，已改用 {{provider}}（{{source}}）",
           "ran": "{{from}} 不支持{{toolInline}}，已改用 {{provider}}",

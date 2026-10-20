@@ -255,12 +255,13 @@ from .usage import (
     USAGE_DEFAULT_WINDOW_DAYS,
     USAGE_WINDOW_KEYS,
     BoundedUsageLedger,
+    ServiceCatalogEntry,
     SourceIdentity,
     UsageWriter,
     local_usage_day,
 )
 
-CONTRACT_VERSION = 18
+CONTRACT_VERSION = 19
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -383,8 +384,8 @@ def _described_as_unfit_for_agent_turns(match: Mapping[str, Any]) -> bool:
     )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 18
-PROBE_RESULT_CONTRACT_VERSION = 18
+AGENT_CHAIN_CONTRACT_VERSION = 19
+PROBE_RESULT_CONTRACT_VERSION = 19
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 # Background inventory refresh. The first tick doubles as the startup delay, so
@@ -1375,7 +1376,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 18,
+        "contract_version": 19,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -8504,15 +8505,30 @@ class ModelHubService:
             )
             for source in config.sources
         ]
+        # The release's search services label and value service rows, as the price
+        # table values model tokens; a row a later catalog dropped stays unpriced.
+        service_catalog = [
+            ServiceCatalogEntry(
+                service_id=entry.search["service_id"],
+                label=entry.label,
+                usd_per_1k=float(entry.search["price"]["usd_per_1k"]),
+                price_date=entry.search["price"]["as_of"],
+            )
+            for entry in api_key_vendor_catalog()
+            if entry.search is not None
+        ]
         now = self.now()
         prices = self.price_table()
         if window is not None:
-            return self.usage.report(window=window, now=now, identities=identities, prices=prices)
+            return self.usage.report(
+                window=window, now=now, identities=identities, prices=prices, service_catalog=service_catalog
+            )
         return self.usage.summary(
             days=USAGE_DEFAULT_WINDOW_DAYS if days is None else days,
             now=now,
             identities=identities,
             prices=prices,
+            service_catalog=service_catalog,
         )
 
     async def _fetch_subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> Mapping[str, Any]:

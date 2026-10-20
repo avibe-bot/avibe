@@ -1855,7 +1855,15 @@
       "provider_image_unusable": "the provider returned an image that couldn't be used",
       "search_not_run": "the model answered without searching",
       "search_failed": "the provider's search failed",
-      "response_ended_early": "the response ended early"
+      "response_ended_early": "the response ended early",
+      "service_key_invalid": "the search service key is invalid",
+      "service_balance": "the search service account has no balance",
+      "service_limit": "the search service limit has been reached",
+      "service_unavailable": "the search service is unavailable",
+      "service_refused": "the search service refused this query",
+      "service_unreadable": "the search service returned an unreadable response",
+      "search_query_too_long": "the search query is too long; shorten it and try again",
+      "search_sources_blocked": "all search sources are blocked or disabled"
     },
     "tool": {
       "web_search": "Web search",
@@ -1885,6 +1893,39 @@
       "calls": "{cost} for {calls} calls",
       "atLeast": "at least {cost}"
     },
+    "repair": {
+      "disabled": "needs web search enabled in Models › Tools",
+      "key": "needs a replacement key",
+      "reauthorize": "needs a new sign-in",
+      "balance": "needs an account top-up",
+      "balanceReenable": "needs an account top-up, then re-enabling in Models › Tools",
+      "limit": "needs a higher spending or usage limit",
+      "limitReenable": "needs a higher spending or usage limit, then re-enabling in Models › Tools",
+      "tavilyLimit": "needs a plan upgrade or a higher key usage limit (432), or a higher pay-as-you-go limit (433) in Tavily, then re-enabling in Models › Tools",
+      "plan": "needs a plan that includes this product",
+      "account": "needs the account restored by the provider",
+      "error": "needs attention in Models › Providers"
+    },
+    "reason": {
+      "failed": "failed",
+      "superseded": "failed on this request; a later action has since updated its state",
+      "service_key_invalid": "has an invalid key",
+      "service_balance": "is out of balance",
+      "service_limit": "reached its usage limit",
+      "service_unavailable": "was unavailable",
+      "service_refused": "refused this query",
+      "service_unreadable": "returned an unreadable response"
+    },
+    "skip": {
+      "blocked": "was blocked",
+      "disabled": "was not enabled for search",
+      "cooling": "was waiting to retry",
+      "query_too_long": "can't take a query this long",
+      "unavailable": "was unavailable"
+    },
+    "listSeparator": ", ",
+    "itemSeparator": "; ",
+    "switch": "{failed}; switched to {provider}",
     "status": {
       "failed": "failed: {error}",
       "incomplete": "incomplete: {error}",

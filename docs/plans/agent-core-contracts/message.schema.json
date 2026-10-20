@@ -49,6 +49,31 @@
         }
       }
     },
+    "ServiceExecutorOrigin": {
+      "type": "object",
+      "required": [
+        "provider",
+        "api",
+        "model"
+      ],
+      "additionalProperties": false,
+      "description": "A search service executor, not a model-wire origin.",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Search vendor identity, for example `tavily` or `deepseek`."
+        },
+        "api": {
+          "const": "search_api"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1,
+          "description": "The catalog service id."
+        }
+      }
+    },
     "LargeRef": {
       "type": "object",
       "required": [
@@ -924,6 +949,105 @@
         }
       }
     },
+    "HostedAttempt": {
+      "type": "object",
+      "required": [
+        "source_id",
+        "label",
+        "kind",
+        "outcome"
+      ],
+      "additionalProperties": false,
+      "description": "One candidate reached by a search chain, including candidates skipped before a request.",
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "pattern": "^src_[a-z0-9]{8,}$"
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "kind": {
+          "enum": [
+            "service",
+            "model"
+          ]
+        },
+        "outcome": {
+          "enum": [
+            "completed",
+            "failed",
+            "skipped"
+          ]
+        },
+        "error_code": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,63}$"
+        },
+        "skipped": {
+          "enum": [
+            "blocked",
+            "disabled",
+            "cooling",
+            "query_too_long",
+            "unavailable"
+          ]
+        },
+        "retry_at": {
+          "type": "string",
+          "minLength": 1
+        },
+        "needs_action": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cost": {
+          "$ref": "#/definitions/HostedCost"
+        },
+        "superseded": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "skipped"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "skipped"
+            ]
+          },
+          "else": {"not": {"required": ["skipped"]}}
+        },
+        {
+          "if": {"required": ["retry_at"]},
+          "then": {"required": ["skipped"], "properties": {"skipped": {"const": "cooling"}}}
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "completed"
+              }
+            }
+          },
+          "then": {
+            "not": {
+              "required": [
+                "error_code"
+              ]
+            }
+          }
+        }
+      ]
+    },
     "HostedImage": {
       "type": "object",
       "required": [
@@ -998,6 +1122,12 @@
           "type": "array",
           "items": {
             "$ref": "#/definitions/HostedImage"
+          }
+        },
+        "attempts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/HostedAttempt"
           }
         }
       },
@@ -1154,7 +1284,8 @@
         "basis"
       ],
       "additionalProperties": false,
-      "description": "`reported`: the provider's figure; `list`: computed by Model Hub's pricing module; `included`: a subscription Source, no per-call charge.",
+      "description": "`reported`: the provider's figure; `list`: computed by Model Hub's pricing module; `included`: a subscription Source, no per-call charge. `estimate` marks a vendor estimate; it does not change the reported basis.",
+      "allOf": [{"if": {"required": ["estimate"], "properties": {"estimate": {"const": true}}}, "then": {"required": ["usd"]}}],
       "properties": {
         "basis": {
           "enum": [
@@ -1166,6 +1297,9 @@
         "usd": {
           "type": "number",
           "minimum": 0
+        },
+        "estimate": {
+          "type": "boolean"
         }
       },
       "if": {
@@ -1239,7 +1373,14 @@
           ]
         },
         "executor_origin": {
-          "$ref": "#/definitions/Origin"
+          "oneOf": [
+            {
+              "$ref": "#/definitions/Origin"
+            },
+            {
+              "$ref": "#/definitions/ServiceExecutorOrigin"
+            }
+          ]
         },
         "executor_source_id": {
           "type": "string",

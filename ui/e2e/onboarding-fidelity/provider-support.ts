@@ -129,7 +129,7 @@ const CONFIG = {
 /** Installed, verified and serving: the screen's `gatewayIntent` reads `running` and
  *  starts no install, which is the state every proof below is about something else. */
 const RUNTIME = {
-  contract_version: 18,
+  contract_version: 19,
   enabled: true,
   host_platform: 'darwin',
   manifest: {

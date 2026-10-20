@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import en from '../../i18n/en.json';
 import zh from '../../i18n/zh.json';
 import fixture from '../../lib/hostedActivity.fixture.json';
+import services from '../../lib/hostedServiceActivity.fixture.json';
 import { groupFromWire } from '../../lib/agentActivity';
 import { ActivityChip } from './AgentActivityGroup';
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
@@ -211,5 +212,42 @@ describe('hosted tool cards', () => {
     const proxy = row('call_x1');
     within(proxy).getByText('由 xAI 代理 · grok-4.6');
     within(proxy).getByText('2 条帖子');
+  });
+});
+
+describe('search service cards', () => {
+  // The cards `tests/test_hosted_activity.py` projects from a search chain and its Sources' current state, with the
+  // words both surfaces show for them: the note here is the sentence the IM line carries.
+  it.each(['en', 'zh'] as const)('MH-HOSTED-UI-008 (%s): names the service that ran, what it found and cost, and why it moved past a Source', (lng) => {
+    const { service_completed: completed, service_switch: switched, service_estimate: estimated, service_blocked: blocked } = services;
+    renderGroup([completed.payload, switched.payload, estimated.payload, blocked.payload], lng);
+
+    for (const { payload, [lng]: says } of [completed, switched, estimated]) {
+      const card = row(payload.call_id);
+      within(card).getByText(says.chip);
+      within(card).getByText(says.count);
+      within(card).getByText(says.cost);
+      const note = card.querySelector('[data-hosted-switch]');
+      expect(note?.textContent ?? null).toBe('note' in says ? says.note : null);
+    }
+
+    // A call that did not complete names every Source it reached, each with what it needs now.
+    const failed = row(blocked.payload.call_id);
+    within(failed).getByText(blocked[lng].status);
+    within(failed).getByText(blocked[lng].cost);
+    expect(failed.querySelector('[data-hosted-attempts]')?.textContent).toBe(blocked[lng].note);
+    // A service is named as its Source, never by its catalog service id.
+    expect(document.body.textContent).not.toMatch(/\/search/);
+  });
+
+  it('says who ran it, and reads a reason this client does not know yet as a failure', () => {
+    renderGroup([
+      services.service_completed.payload,
+      { ...services.service_blocked.payload, attempts: [{ ...services.service_blocked.payload.attempts[0], remedy_key: 'repair.someday' }] },
+    ]);
+    const card = row('call_ws1');
+    fireEvent.click(within(card).getByRole('button'));
+    within(card).getByText('Run by search service Tavily · ≈ $0.008');
+    expect(row('call_ws4').querySelector('[data-hosted-attempts]')?.textContent).toBe('Tavily failed');
   });
 });

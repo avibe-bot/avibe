@@ -49,7 +49,7 @@ const manifest = {
 } satisfies RuntimeManifest;
 
 const runtime: RuntimeDependency = {
-  contract_version: 18,
+  contract_version: 19,
   manifest,
   status: { installed_version: '1', verified: true, health: 'ok' },
 };
@@ -120,7 +120,7 @@ const takeoverAgent: AgentSupply = {
 };
 
 const takeoverChain: AgentChain = { manual_override: {hops:[{source_id:'src_head',model_id:'gpt-5.6-sol'},{source_id:'src_relay',model_id:'gpt-5.6-sol'}]}, route_origin: "manual" as const,
-  contract_version: 18,
+  contract_version: 19,
   backend: 'codex',
   model_id: 'gpt-5.6-sol',
   current: { source_id: 'src_relay', model_id: 'gpt-5.6-sol' },
@@ -152,6 +152,7 @@ const usageSummary: UsageReport = {
     output_tokens: 4120,
     models: [{ model_id: 'claude-opus-4-6', label: 'claude-opus-4-6', requests: 12, token_reports: 12, input_tokens: 148230, cached_input_tokens: 96010, output_tokens: 4120 }],
   }],
+  services: [],
   days: [{ day: '2026-08-18', requests: 12, token_reports: 12, input_tokens: 148230, cached_input_tokens: 96010, output_tokens: 4120 }],
   window_key: '24h',
   granularity: 'hour',
@@ -223,7 +224,7 @@ const routedHubAgent: AgentSupply = {
 const routedChain: AgentChain = {
   manual_override: { hops: [{ source_id: retainedSource.id, model_id: routedModelId }] },
   route_origin: 'manual' as const,
-  contract_version: 18,
+  contract_version: 19,
   backend: 'claude',
   model_id: routedModelId,
   current: { source_id: retainedSource.id, model_id: routedModelId },
@@ -2828,6 +2829,18 @@ describe('SettingsModelsPage tools region', () => {
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'DeepSeek' })));
     await userEvent.click(screen.getByRole('button', { name: 'Add search service' }));
     expect(await screen.findByRole('dialog', { name: 'Add search service' })).toBeTruthy();
+  });
+
+  it('MH-USAGE-038: leaves a service detail for the Usage tab, whose window the detail read never moved', async () => {
+    renderPage(SEARCH_SOURCES, undefined, runtime, { tools: [ACTIVE_SEARCH] });
+    await screen.findByRole('button', { name: 'Add provider' });
+    await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Exa' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'View usage' }));
+    await waitFor(() => expect(screen.getByRole('tab', { name: /^Usage$/ }).getAttribute('aria-selected')).toBe('true'));
+    await waitFor(() => expect(vi.mocked(modelsApi.getUsageSummary).mock.calls).toEqual([['60d'], ['24h']]));
+    expect(screen.getByRole('radio', { name: '24 hours', checked: true })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Exa' })).toBeNull();
   });
 
   it('MH-HOSTED-UI-005: reads activation on Sources without gating first paint, then refreshes when its surface changes', async () => {

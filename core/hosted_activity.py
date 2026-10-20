@@ -12,23 +12,31 @@ later surface render the same facts for a native and a proxied call alike:
 Nothing here prices, routes or replays anything: it reads what the producers
 recorded. ``HostedActivity.to_payload`` is the wire shape a ``toolcall`` row
 carries as ``content.hosted`` (version 1), read by the Web activity group.
+
+A search chain that reached a search-capable candidate records ``attempts``
+(``web-search-services.md`` §4.3). This module alone decides, from those facts
+and each Source's current state, who ran the call, what it cost, the switch
+note, and each entry's reason and repair; the IM line and the Web card only put
+the decided keys into words.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Callable, Literal, Optional
+from dataclasses import dataclass, fields
+from typing import Any, Callable, Literal, Mapping, Optional
 
 from core.agent_core.messages import (
     HOSTED_ERROR_CODES,
     AssistantMessage,
     HostedAction,
+    HostedAttempt,
     HostedCost,
     HostedImage,
     HostedResult,
     HostedSource,
     HostedToolBlock,
     ProxyExecution,
+    ServiceExecutorOrigin,
     ToolCallBlock,
 )
 from core.citations import safe_url
@@ -41,10 +49,74 @@ HOSTED_ACTIVITY_VERSION = 1
 LINE_SUBJECT_MAX_CHARS = 60
 
 SourceNames = Callable[[str], Optional[str]]
+#: A Source as Model Hub holds it now: ``protocol``, ``vendor``, ``needs_action`` (its ``needs_action`` or ``error``
+#: detail key, absent while it is healthy) and, for a search-capable Source, its effective ``enabled``. ``None`` is a
+#: Source removed since. A caller that could not read Model Hub passes no ``SourceState`` at all.
+SourceState = Callable[[str], Optional[Mapping[str, Any]]]
+
+_NEEDS_ACTION = "models.source.needs_action."
+# The Source health each search-service failure sets (§4.2), so a failed entry is matched against the Source's
+# current health even when the producer recorded none beside the code.
+_CODE_HEALTH = {
+    "service_key_invalid": f"{_NEEDS_ACTION}credential_revoked",
+    "service_balance": f"{_NEEDS_ACTION}balance_exhausted",
+    "service_limit": f"{_NEEDS_ACTION}spend_limit_reached",
+}
+_HEALTH_CODE = {health: code for code, health in _CODE_HEALTH.items()}
+# Failures with a reason of their own; any other, a model executor's included, says it failed.
+_FAILURE_REASONS = (
+    "service_key_invalid",
+    "service_balance",
+    "service_limit",
+    "service_unavailable",
+    "service_refused",
+    "service_unreadable",
+)
+# Each existing Source health detail's repair; any other detail (the generic error) points to the Source.
+_REPAIRS = {
+    f"{_NEEDS_ACTION}credential_revoked": "repair.key",
+    f"{_NEEDS_ACTION}oauth_expired": "repair.reauthorize",
+    f"{_NEEDS_ACTION}balance_exhausted": "repair.balance",
+    f"{_NEEDS_ACTION}spend_limit_reached": "repair.limit",
+    f"{_NEEDS_ACTION}plan_excludes_product": "repair.plan",
+    f"{_NEEDS_ACTION}account_banned": "repair.account",
+}
+# A tool-only search Source leaves a balance or limit state only through "重新启用", so its repair ends with it; a
+# model Source recovers on its own paths (§4.2). Tavily's catalog row names both of its limits' repairs (432, 433).
+_SEARCH_REPAIRS = {
+    f"{_NEEDS_ACTION}balance_exhausted": "repair.balanceReenable",
+    f"{_NEEDS_ACTION}spend_limit_reached": "repair.limitReenable",
+}
+_VENDOR_SEARCH_REPAIRS = {("tavily", f"{_NEEDS_ACTION}spend_limit_reached"): "repair.tavilyLimit"}
 
 
 def _no_names(_source_id: str) -> Optional[str]:
     return None
+
+
+@dataclass(frozen=True)
+class HostedAttemptView(HostedAttempt):
+    """One recorded chain entry as the surfaces show it now.
+
+    The recorded facts are kept as written, except ``label``, which is the Source's current name (the recorded one
+    for a Source removed since), and ``superseded``, which is also set when the Source's current health no longer
+    matches the failure. ``reason_key`` says what happened to the Source in this call and ``remedy_key`` what it
+    needs now, if anything, both relative to each surface's hosted-tool copy (``hostedTools.`` for IM,
+    ``chat.agentActivity.hosted.`` for the Web). A completed entry has no reason.
+    """
+
+    reason_key: Optional[str] = None
+    remedy_key: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class HostedSwitch:
+    """A completed search that moved past Sources that failed or were blocked: their names, why (one Source's own
+    reason, or "failed" for several), and the Source that answered."""
+
+    sources: tuple[str, ...]
+    reason_key: str
+    to: str
 
 
 @dataclass(frozen=True)
@@ -91,6 +163,11 @@ class HostedActivity:
     # with its current name.
     fallback_source_id: Optional[str] = None
     fallback_source_name: Optional[str] = None
+    # Every candidate a search chain reached (§4.3), as shown now; None for the released shape, which has none.
+    attempts: Optional[tuple[HostedAttemptView, ...]] = None
+    # Whether a search service or a model executor ran it; None when the record does not say (released records).
+    executor_kind: Optional[Literal["service", "model"]] = None
+    switch: Optional[HostedSwitch] = None
 
     @property
     def completed(self) -> bool:
@@ -129,10 +206,19 @@ class HostedActivity:
             "revised_prompt": self.revised_prompt,
             "duration_ms": self.duration_ms,
             "response_id": self.response_id,
+            "executor_kind": self.executor_kind,
         }
         payload.update({key: value for key, value in optional.items() if value is not None})
         if self.extra_queries:
             payload["extra_queries"] = list(self.extra_queries)
+        if self.attempts is not None:
+            payload["attempts"] = [_attempt_payload(attempt) for attempt in self.attempts]
+        if self.switch is not None:
+            payload["switch"] = {
+                "sources": list(self.switch.sources),
+                "reason_key": self.switch.reason_key,
+                "to": self.switch.to,
+            }
         if self.fallback_source_id is not None:
             fallback: dict[str, Any] = {"source_id": self.fallback_source_id}
             if self.fallback_source_name is not None:
@@ -142,10 +228,32 @@ class HostedActivity:
             cost: dict[str, Any] = {"basis": self.cost.basis, "calls": self.cost_calls}
             if self.cost.usd is not None:
                 cost["usd"] = self.cost.usd
+            if self.cost.estimate:
+                cost["estimate"] = True
             if self.cost_at_least:
                 cost["at_least"] = True
             payload["cost"] = cost
         return payload
+
+
+def _attempt_payload(attempt: HostedAttemptView) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "source_id": attempt.source_id,
+        "label": attempt.label,
+        "kind": attempt.kind,
+        "outcome": attempt.outcome,
+    }
+    for name in ("error_code", "skipped", "retry_at", "needs_action", "superseded", "reason_key", "remedy_key"):
+        value = getattr(attempt, name)
+        if value is not None:
+            out[name] = value
+    if attempt.cost is not None:
+        out["cost"] = {"basis": attempt.cost.basis}
+        if attempt.cost.usd is not None:
+            out["cost"]["usd"] = attempt.cost.usd
+        if attempt.cost.estimate:
+            out["cost"]["estimate"] = True
+    return out
 
 
 def _source_payload(source: HostedSource) -> dict[str, Any]:
@@ -244,15 +352,117 @@ def native_activities(
     return activities
 
 
+def _repair(detail: str, current: Mapping[str, Any]) -> str:
+    """What a Source in health ``detail`` needs: the detail's existing repair, ending with "重新启用" for a tool-only
+    search Source in a balance or limit state."""
+
+    if current.get("protocol") == "search":
+        repair = _VENDOR_SEARCH_REPAIRS.get((current.get("vendor"), detail)) or _SEARCH_REPAIRS.get(detail)
+        if repair:
+            return repair
+    return _REPAIRS.get(detail, "repair.error")
+
+
+def _view(attempt: HostedAttempt, source_names: SourceNames, source_state: Optional[SourceState]) -> HostedAttemptView:
+    """One entry as shown now. Current state governs every repair, never the record: a Source repaired, re-enabled
+    or removed since shows none, and without a Model Hub read nothing is offered at all. Only a failed entry can be
+    superseded: explicitly, by a removal, or by a current health other than the one its failure set (§4.3)."""
+
+    current = source_state(attempt.source_id) if source_state is not None else None
+    superseded = bool(attempt.superseded)
+    reason: Optional[str] = None
+    remedy: Optional[str] = None
+    if attempt.outcome == "failed":
+        health = attempt.needs_action or _CODE_HEALTH.get(attempt.error_code or "")
+        if source_state is not None and not superseded:
+            superseded = current is None or (health is not None and current.get("needs_action") != health)
+        if superseded:
+            reason = "reason.superseded"
+        else:
+            reason = f"reason.{attempt.error_code}" if attempt.error_code in _FAILURE_REASONS else "reason.failed"
+            if health is not None and current is not None:
+                remedy = _repair(health, current)
+    elif attempt.skipped == "blocked":
+        # The skip stays as recorded; its repair is whatever the Source needs now, if anything.
+        recorded = _HEALTH_CODE.get(attempt.needs_action or "")
+        reason = f"reason.{recorded}" if recorded else "skip.blocked"
+        if current is not None and current.get("needs_action"):
+            remedy = _repair(current["needs_action"], current)
+    elif attempt.skipped is not None:
+        reason = f"skip.{attempt.skipped}"
+        if attempt.skipped == "disabled" and current is not None and current.get("enabled") is False:
+            remedy = "repair.disabled"
+    return HostedAttemptView(
+        **{field.name: getattr(attempt, field.name) for field in fields(HostedAttempt)}
+        | {"label": source_names(attempt.source_id) or attempt.label, "superseded": superseded or None},
+        reason_key=reason,
+        remedy_key=remedy,
+    )
+
+
+def _last_tried(attempts: tuple[HostedAttemptView, ...]) -> Optional[int]:
+    """Where the entry that ran the call is: the last one tried."""
+
+    return next((index for index in range(len(attempts) - 1, -1, -1) if attempts[index].outcome != "skipped"), None)
+
+
+def _switch(status: str, attempts: tuple[HostedAttemptView, ...], last: Optional[int]) -> Optional[HostedSwitch]:
+    """The Sources a completed chain moved past before its answer: the failed ones and the blocked or disabled
+    skips. A Source cooling down, refusing a long query or gone since the turn began was not a failure of its own."""
+
+    if status != "completed" or last is None or attempts[last].outcome != "completed":
+        return None
+    winner = attempts[last]
+    before = [
+        attempt
+        for attempt in attempts[:last]
+        if attempt.outcome == "failed" or attempt.skipped in ("blocked", "disabled")
+    ]
+    if not before:
+        return None
+    reason = before[0].reason_key if len(before) == 1 and before[0].reason_key else "reason.failed"
+    return HostedSwitch(sources=tuple(attempt.label for attempt in before), reason_key=reason, to=winner.label)
+
+
+def _attempts_cost(attempts: tuple[HostedAttemptView, ...]) -> tuple[Optional[HostedCost], bool]:
+    """What a chain cost, from its tried entries alone (§4.3), and whether that is only a lower bound.
+
+    A skip sent nothing. An exact $0 is never an estimate, so the total's basis comes from its non-zero figures: it
+    is approximate when any of them is a list price or an estimate, and an all-zero total is an exact "$0". A tried
+    entry without a cost makes a known total a lower bound; with no known figure the cost is unknown.
+    """
+
+    tried = [attempt for attempt in attempts if attempt.outcome != "skipped"]
+    known = [attempt.cost for attempt in tried if attempt.cost is not None]
+    if not known:
+        return None, False
+    unpriced = len(known) < len(tried)
+    priced = [cost for cost in known if cost.basis != "included"]
+    if not priced:
+        return (HostedCost(basis="included"), False) if not unpriced else (None, False)
+    nonzero = [cost for cost in priced if cost.usd]
+    reported = bool(nonzero) and all(cost.basis == "reported" for cost in nonzero)
+    estimate = reported and any(cost.estimate for cost in nonzero)
+    usd = round(sum(cost.usd or 0.0 for cost in priced), 6)
+    return HostedCost(basis="reported" if reported else "list", usd=usd, estimate=True if estimate else None), unpriced
+
+
 def proxy_activity(
     call: ToolCallBlock,
     result: HostedResult,
     *,
     source_names: SourceNames = _no_names,
+    source_state: Optional[SourceState] = None,
     duration_ms: Optional[int] = None,
 ) -> HostedActivity:
     """A hosted call that ran outside the model: the model's own call, and the record its search executor
-    (``proxy``) or image endpoint (``direct``) returned."""
+    (``proxy``) or image endpoint (``direct``) returned.
+
+    With ``attempts`` (§4.3) the chain alone says who ran it and what it cost: the last tried entry, and the sum of
+    the tried entries. ``execution`` then adds only the model of that same entry, which the entry does not store;
+    a chain that tried nothing names no executor, whatever ``execution`` says. Without them, the released reading
+    holds, and a ``search_api`` origin still marks a search service.
+    """
 
     arguments = call.arguments if isinstance(call.arguments, dict) else {}
     subject = next(
@@ -261,10 +471,37 @@ def proxy_activity(
     )
     size = arguments.get("size") if isinstance(arguments.get("size"), str) else None
     execution = result.execution
-    cost, at_least = _chain_cost(execution)
+    attempts = None
+    last = switch = None
+    executor = execution
+    if result.record.attempts is None:
+        cost, at_least = _chain_cost(execution)
+    else:
+        attempts = tuple(_view(attempt, source_names, source_state) for attempt in result.record.attempts)
+        index = _last_tried(attempts)
+        last = attempts[index] if index is not None else None
+        if last is None or execution is None or execution.executor_source_id != last.source_id:
+            executor = None
+        cost, at_least = _attempts_cost(attempts)
+        switch = _switch(result.record.status, attempts, index)
+    origin = executor.executor_origin if executor is not None else None
+    service = isinstance(origin, ServiceExecutorOrigin)
+    kind = last.kind if last is not None else ("service" if service else None)
     # What the executor reports it did (an image's rendered prompt and resolved size and quality), read as a native
     # call's block action is.
     ran = result.action if result.action is not None and result.action.type == "generate" else None
+    if origin is not None and not service and kind != "service":
+        model = origin.model
+    else:
+        # The model a refused image call named: it never moves to another (§7.4). A search service has no model:
+        # its catalog service id is not shown (§4.3).
+        model = ran.model if ran is not None and attempts is None and origin is None else None
+    if last is not None:
+        source_id, source_name = last.source_id, last.label
+    elif executor is not None:
+        source_id, source_name = executor.executor_source_id, source_names(executor.executor_source_id)
+    else:
+        source_id = source_name = None
     return HostedActivity(
         call_id=call.id,
         tool=call.name,
@@ -276,15 +513,10 @@ def proxy_activity(
         subject=subject,
         action=None,
         extra_queries=(),
-        provider=execution.executor_origin.provider if execution is not None else None,
-        source_id=execution.executor_source_id if execution is not None else None,
-        source_name=source_names(execution.executor_source_id) if execution is not None else None,
-        model=(
-            execution.executor_origin.model
-            if execution is not None
-            # The model a refused image call named: it never moves to another (§7.4).
-            else ran.model if ran is not None else None
-        ),
+        provider=origin.provider if origin is not None else None,
+        source_id=source_id,
+        source_name=source_name,
+        model=model,
         sources=tuple(result.record.sources),
         images=tuple(result.record.images or ()),
         size=(ran.size if ran is not None and ran.size else size),
@@ -298,6 +530,9 @@ def proxy_activity(
             source_names(result.fallback_from.source_id) if result.fallback_from is not None else None
         ),
         cost_at_least=at_least,
+        attempts=attempts,
+        executor_kind=kind,
+        switch=switch,
     )
 
 
@@ -326,18 +561,19 @@ def _runner_label(activity: HostedActivity, escape: Callable[[str], str]) -> Opt
     """Who ran a call, as the IM line names it: its vendor's catalog label, else the Source's own name.
 
     A Source added as a compatible endpoint has the vendor id ``custom``, which names no vendor, so its name is the
-    only thing that tells the reader where the call ran. A Source name is the user's text, so it is made inert. A
-    vendor id with neither stays as it is, as for a row stored without a Source.
+    only thing that tells the reader where the call ran. A search service is named by its Source first, as the user
+    named it (§4.3). A Source name is the user's text, so it is made inert. A vendor id with neither stays as it is,
+    as for a row stored without a Source.
     """
 
-    if not activity.provider:
-        return None
     from vibe.model_hub_runtime.api_key_vendors import catalog_api_key_vendor_label
 
-    label = catalog_api_key_vendor_label(activity.provider)
-    if label:
+    label = catalog_api_key_vendor_label(activity.provider) if activity.provider else None
+    if label and activity.executor_kind != "service":
         return label
-    return _untrusted(activity.source_name, escape) if activity.source_name else activity.provider
+    if activity.source_name:
+        return _untrusted(activity.source_name, escape)
+    return label or activity.provider
 
 
 def _usd(value: float) -> str:
@@ -364,7 +600,8 @@ def _ran(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> l
     """How a completed call ran and what it produced, as the IM line names them.
 
     A direct image call names the image model and the image's size rather than a vendor: the model is what the call
-    picked, and the image is the result. A proxied search names its executor's model beside the vendor.
+    picked, and the image is the result. A proxied search names its executor's model beside the vendor, and a search
+    that moved past failing Sources says so in place of how it ran.
     """
 
     if activity.mode == "direct":
@@ -373,12 +610,18 @@ def _ran(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> l
         more = _count(activity, lang) if len(activity.images) > 1 else None
         return [_untrusted(activity.model, escape) if activity.model else None, size, more]
     vendor = _runner_label(activity, escape)
-    if not vendor:
-        mode = None
-    elif activity.mode == "proxy" and activity.fallback_source_id is not None:
+    if vendor and activity.mode == "proxy" and activity.fallback_source_id is not None:
         # Why it ran by proxy: the turn's own Source refused the native tool (§8.3, mockup 06).
         refused_by = _untrusted(activity.fallback_source_name or activity.fallback_source_id, escape)
         mode = i18n_t("hostedTools.mode.fallback", lang, source=refused_by, provider=vendor)
+    elif activity.switch is not None:
+        # Why it ran where it did: the Sources before it failed or were blocked (§6.5).
+        mode = _switch_text(activity.switch, lang, escape)
+    elif not vendor:
+        mode = None
+    elif activity.executor_kind == "service":
+        # A search service is named alone: "🔎 网页搜索 “…” · Tavily · 5 个来源" (§6.5).
+        mode = vendor
     elif activity.mode == "proxy" and activity.model:
         mode = i18n_t("hostedTools.mode.proxyModel", lang, provider=vendor, model=_untrusted(activity.model, escape))
     else:
@@ -408,8 +651,9 @@ def _cost(activity: HostedActivity, lang: str) -> Optional[str]:
     elif cost.usd is None:
         return None
     else:
-        key = "hostedTools.cost.list" if cost.basis == "list" else "hostedTools.cost.reported"
-        text = i18n_t(key, lang, usd=_usd(cost.usd))
+        # A zero is exact; any other figure is approximate when it is a list price or the vendor's own estimate.
+        approximate = cost.usd != 0 and (cost.basis == "list" or bool(cost.estimate))
+        text = i18n_t(f"hostedTools.cost.{'list' if approximate else 'reported'}", lang, usd=_usd(cost.usd))
     if activity.cost_at_least:
         text = i18n_t("hostedTools.cost.atLeast", lang, cost=text)
     if activity.cost_calls > 1:
@@ -429,12 +673,33 @@ def _error_text(activity: HostedActivity, lang: str) -> str:
     return activity.error or ""
 
 
+def _switch_text(switch: HostedSwitch, lang: str, escape: Callable[[str], str]) -> str:
+    names = i18n_t("hostedTools.listSeparator", lang).join(_untrusted(name, escape) for name in switch.sources)
+    failed = f"{names} {i18n_t(f'hostedTools.{switch.reason_key}', lang)}"
+    return i18n_t("hostedTools.switch", lang, failed=failed, provider=_untrusted(switch.to, escape))
+
+
+def _attempt_items(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> Optional[str]:
+    """Every Source a call that did not complete reached, whichever supplied its reason: each with what it needs
+    now, else what happened to it (§4.3)."""
+
+    if activity.completed or not activity.attempts:
+        return None
+    items = [
+        f"{_untrusted(attempt.label, escape)} {i18n_t(f'hostedTools.{key}', lang)}"
+        for attempt in activity.attempts
+        if (key := attempt.remedy_key or attempt.reason_key)
+    ]
+    return i18n_t("hostedTools.itemSeparator", lang).join(items) or None
+
+
 def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], str] = lambda text: text) -> str:
     """The one-line form IM shows per hosted call.
 
     ``🔎 Web search "query" · native (xAI) · 6 sources · $0.01``, or for an image
     ``🖼 Image generation "prompt" · gpt-image-2 · 1536×1024 · $0.02``. A call that did
-    not complete says why instead of how it ran or what it found, and keeps a
+    not complete says why instead of how it ran or what it found, names every
+    Source its search chain reached with what each needs now, and keeps a
     known cost (``HostedActivity.completed``). ``escape`` is the destination
     formatter's literal-text operation (``escape_special_chars``), so a quoted
     query such as ``*domain*`` reads as written rather than as markup.
@@ -450,5 +715,6 @@ def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], 
         parts.append(
             i18n_t(f"hostedTools.status.{activity.status}", lang, error=_untrusted(_error_text(activity, lang), escape))
         )
+        parts.append(_attempt_items(activity, lang, escape))
     parts.append(_cost(activity, lang))
     return " · ".join(part for part in parts if part)

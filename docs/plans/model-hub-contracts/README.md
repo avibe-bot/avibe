@@ -1,8 +1,35 @@
 # Model Hub contracts
 
-Status: **contract_version 18**, 2026-10-20: web-search settings and dormant Tools
-read (S1b, `../web-search-services.md` §3.2/§3.5). The RC tag `gh-v3.2.2rc12`
-contains S1a and v17, so these additions open a new event rather than changing v17.
+Status: **contract_version 19**, 2026-10-21: dormant web-search-service readers
+(S2a, `../web-search-services.md` §4.3, §6.5, §8). The RC tag `gh-v3.2.2rc13`
+carries v18, so these additions open a new event rather than changing v18.
+- C-1 (`../agent-core-contracts/message.schema.json`) accepts `HostedRecord.attempts[]`
+  (`HostedAttempt`), `HostedCost.estimate`, and a `ServiceExecutorOrigin`
+  (`{provider, api: "search_api", model}`) beside the released `Origin` in
+  `ProxyExecution.executor_origin`. `HOSTED_ERROR_CODES` gains the six `service_*`
+  attempt codes, `search_query_too_long` and `search_sources_blocked`. `HostedSource`
+  and the assistant's four-protocol `Origin` are unchanged, and released records load
+  and serialize unchanged.
+- Capability evidence (`capability-evidence.schema.json`) and the Tools read's
+  `status.latest_ok.mode` and `status.verified[].mode`
+  (`hosted-tools-status.schema.json`) accept `mode: "service"`.
+- Usage (`usage-summary.schema.json`, `api.md` Search-service usage): service ledger
+  rows keyed by Source and catalog `service_id`, the required `services[]`,
+  `kind: "service"` bucket rows, `service_reported_usd` and `excluded_service_requests`
+  on totals and days, and `pricing.service_price_date`. Model counts never include
+  service requests.
+- These are readers only. No search runs, no service request is metered, no service
+  evidence is written, and `SEARCH_SERVICES_ACTIVE` stays off; service candidates and
+  `service_vendors` remain absent from the Tools read. S2b owns the producers and
+  activation, and the downgrade boundary of `../web-search-services.md` §12 begins
+  when it writes these shapes.
+- The versioned mirrors advance together; persisted TurnProvenance retains v5–v18
+  and adds v19.
+
+It builds on v18 (2026-10-20, carried by `gh-v3.2.2rc13`): web-search settings and
+dormant Tools read (S1b, `../web-search-services.md` §3.2/§3.5). The RC tag
+`gh-v3.2.2rc12` contains S1a and v17, so these additions opened a new event rather
+than changing v17.
 - V2 adds `prefer_native`, partial Source-keyed `services` overrides (`results` and
   `enabled`) with catalog result-count clamping, and server-owned `executor_order_kinds`
   saved with each web-search order.
@@ -20,8 +47,8 @@ contains S1a and v17, so these additions open a new event rather than changing v
   S1b's unshipped `content` setting and vendor content flags are removed from this
   v18 event. A dev build's saved `services.<id>.content` is ignored with the normal
   unknown-field warning, preserving the tool switch, search opt-outs and orders.
-- The versioned mirrors advance together; persisted TurnProvenance retains v5–v17
-  and adds v18. The rc12 hosted-tools loader ignores new optional config fields
+- The versioned mirrors advanced together; persisted TurnProvenance retained v5–v17
+  and added v18. The rc12 hosted-tools loader ignores new optional config fields
   and retains the whole-tool switch and both orders, not per-Source service
   opt-outs. An rc12 config write drops those overrides; re-upgrading then uses
   service defaults, so DeepSeek's opt-out must be reapplied before execution.
@@ -296,7 +323,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 18 must coexist in all registered version locations on the same tested head:
+`contract_version` 19 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`

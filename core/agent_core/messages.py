@@ -35,6 +35,11 @@ HOSTED_RESULT_TOOLS: tuple[str, ...] = (*HOSTED_TOOLS, "image_generate")
 EXECUTION_MODES: tuple[str, ...] = ("proxy", "direct")
 HostedStatus = Literal["completed", "failed", "incomplete", "pending"]
 HOSTED_STATUSES: tuple[str, ...] = ("completed", "failed", "incomplete", "pending")
+HostedAttemptKind = Literal["service", "model"]
+HostedAttemptOutcome = Literal["completed", "failed", "skipped"]
+HOSTED_ATTEMPT_KINDS: tuple[str, ...] = ("service", "model")
+HOSTED_ATTEMPT_OUTCOMES: tuple[str, ...] = ("completed", "failed", "skipped")
+HOSTED_SKIP_REASONS: tuple[str, ...] = ("blocked", "disabled", "cooling", "query_too_long", "unavailable")
 HOSTED_ERROR_MAX_CHARS = 400
 #: The largest hosted count a summary holds: the largest integer every JSON reader holds exactly. A provider's count
 #: past it is no count, and no price or display has to survive one.
@@ -67,6 +72,14 @@ HOSTED_ERROR_CODES: tuple[str, ...] = (
     "search_not_run",
     "search_failed",
     "response_ended_early",
+    "service_key_invalid",
+    "service_balance",
+    "service_limit",
+    "service_unavailable",
+    "service_refused",
+    "service_unreadable",
+    "search_query_too_long",
+    "search_sources_blocked",
 )
 COST_BASES: tuple[str, ...] = ("reported", "list", "included")
 SOURCE_BILLINGS: tuple[str, ...] = ("monthly", "metered")
@@ -374,6 +387,54 @@ def image_deliverable(image: HostedImage) -> bool:
 
 
 @dataclass(frozen=True)
+class HostedAttempt:
+    """One candidate reached by a search chain, including candidates skipped before a request."""
+
+    source_id: str
+    label: str
+    kind: HostedAttemptKind
+    outcome: HostedAttemptOutcome
+    error_code: Optional[str] = None
+    skipped: Optional[str] = None
+    retry_at: Optional[str] = None
+    needs_action: Optional[str] = None
+    cost: Optional[HostedCost] = None
+    superseded: Optional[bool] = None
+
+    def __post_init__(self) -> None:
+        _require(self.source_id, str, "attempt source id")
+        if not _SOURCE_ID_RE.fullmatch(self.source_id):
+            raise ValueError(f"invalid source id: {self.source_id!r}")
+        _require_text(self.label, "attempt label")
+        if len(self.label) > 64:
+            raise ValueError("attempt label is at most 64 characters")
+        _require(self.kind, str, "attempt kind")
+        if self.kind not in HOSTED_ATTEMPT_KINDS:
+            raise ValueError(f"unknown attempt kind: {self.kind}")
+        _require(self.outcome, str, "attempt outcome")
+        if self.outcome not in HOSTED_ATTEMPT_OUTCOMES:
+            raise ValueError(f"unknown attempt outcome: {self.outcome}")
+        _require(self.error_code, str, "attempt error code", optional=True)
+        if self.error_code is not None and not _ERROR_CODE_RE.fullmatch(self.error_code):
+            raise ValueError("attempt error code is snake_case")
+        _require(self.skipped, str, "attempt skip reason", optional=True)
+        if self.skipped is not None and self.skipped not in HOSTED_SKIP_REASONS:
+            raise ValueError(f"unknown attempt skip reason: {self.skipped}")
+        _require_text(self.retry_at, "attempt retry_at", optional=True)
+        _require_text(self.needs_action, "attempt needs_action", optional=True)
+        _require(self.cost, HostedCost, "attempt cost", optional=True)
+        _require(self.superseded, bool, "attempt superseded", optional=True)
+        if self.outcome == "skipped" and self.skipped is None:
+            raise ValueError("a skipped attempt needs a skip reason")
+        if self.outcome != "skipped" and self.skipped is not None:
+            raise ValueError("only a skipped attempt has a skip reason")
+        if self.skipped != "cooling" and self.retry_at is not None:
+            raise ValueError("only a cooling attempt has retry_at")
+        if self.outcome == "completed" and self.error_code is not None:
+            raise ValueError("a completed attempt has no error code")
+
+
+@dataclass(frozen=True)
 class HostedRecord:
     """Per-call facts. ``images`` is set exactly for ``image_generate`` (possibly empty).
 
@@ -389,6 +450,7 @@ class HostedRecord:
     sources: tuple[HostedSource, ...] = ()
     images: Optional[tuple[HostedImage, ...]] = None
     error_code: Optional[str] = None
+    attempts: Optional[tuple[HostedAttempt, ...]] = None
 
     def __post_init__(self) -> None:
         _require(self.status, str, "hosted status")
@@ -408,6 +470,10 @@ class HostedRecord:
             not isinstance(self.images, tuple) or not all(isinstance(i, HostedImage) for i in self.images)
         ):
             raise ValueError("hosted images must be a tuple of HostedImage")
+        if self.attempts is not None and (
+            not isinstance(self.attempts, tuple) or not all(isinstance(a, HostedAttempt) for a in self.attempts)
+        ):
+            raise ValueError("hosted attempts must be a tuple of HostedAttempt")
 
     def check_tool(self, tool: str) -> None:
         if (self.images is not None) != (tool == "image_generate"):
@@ -460,6 +526,7 @@ class HostedCost:
 
     basis: str
     usd: Optional[float] = None
+    estimate: Optional[bool] = None
 
     def __post_init__(self) -> None:
         _require(self.basis, str, "cost basis")
@@ -473,6 +540,9 @@ class HostedCost:
             require_json_value(self.usd, "cost usd")
             if self.usd < 0:
                 raise ValueError("cost usd must not be negative")
+        _require(self.estimate, bool, "cost estimate", optional=True)
+        if self.estimate and self.usd is None:
+            raise ValueError("an estimated cost needs usd")
 
 
 @dataclass(frozen=True)
@@ -526,7 +596,7 @@ class ProxyExecution:
     absent when the call never reached one. ``cost`` is this attempt's own; ``failed_attempts`` lists the earlier
     billed ones, and ``core/hosted_activity`` totals them for display."""
 
-    executor_origin: Origin
+    executor_origin: Union[Origin, ServiceExecutorOrigin]
     executor_source_id: str
     executor_billing: str
     cost: Optional[HostedCost] = None
@@ -541,7 +611,8 @@ class ProxyExecution:
             isinstance(attempt, FailedAttempt) for attempt in self.failed_attempts
         ):
             raise ValueError("failed attempts must be a tuple of FailedAttempt")
-        _require(self.executor_origin, Origin, "executor origin")
+        if not isinstance(self.executor_origin, (Origin, ServiceExecutorOrigin)):
+            raise ValueError("executor origin must be Origin or ServiceExecutorOrigin")
         _require(self.executor_source_id, str, "executor source id")
         if not _SOURCE_ID_RE.fullmatch(self.executor_source_id):
             raise ValueError(f"invalid source id: {self.executor_source_id!r}")
@@ -606,6 +677,24 @@ class Origin:
             raise ValueError("an origin needs a provider and a model")
         if self.api not in PROTOCOLS:
             raise ValueError(f"unknown protocol: {self.api}")
+
+
+@dataclass(frozen=True)
+class ServiceExecutorOrigin:
+    """A search service origin, distinct from the four model-wire protocols."""
+
+    provider: str
+    api: Literal["search_api"]
+    model: str
+
+    def __post_init__(self) -> None:
+        _require(self.provider, str, "service origin.provider")
+        _require(self.api, str, "service origin.api")
+        if self.api != "search_api":
+            raise ValueError("service origin api must be search_api")
+        _require(self.model, str, "service origin.model")
+        if not self.provider or not self.model:
+            raise ValueError("a service origin needs a provider and a service id")
 
 
 @dataclass(frozen=True)
@@ -785,6 +874,8 @@ def _record_to_dict(record: HostedRecord) -> dict[str, Any]:
     _put(out, "error", record.error)
     _put(out, "error_code", record.error_code)
     out["sources"] = [_source_to_dict(source) for source in record.sources]
+    if record.attempts is not None:
+        out["attempts"] = [_attempt_to_dict(attempt) for attempt in record.attempts]
     if record.images is not None:
         images = []
         for image in record.images:
@@ -798,7 +889,12 @@ def _record_to_dict(record: HostedRecord) -> dict[str, Any]:
 
 
 def _record_from_dict(data: Any) -> HostedRecord:
-    f = _read(data, "hosted record", {"status": str, "sources": list}, {"error": str, "error_code": str, "images": list})
+    f = _read(
+        data,
+        "hosted record",
+        {"status": str, "sources": list},
+        {"error": str, "error_code": str, "images": list, "attempts": list},
+    )
     images = None
     if "images" in f:
         images = tuple(
@@ -813,6 +909,7 @@ def _record_from_dict(data: Any) -> HostedRecord:
         sources=tuple(_source_from_dict(source) for source in f["sources"]),
         images=images,
         error_code=f.get("error_code"),
+        attempts=tuple(_attempt_from_dict(attempt) for attempt in f["attempts"]) if "attempts" in f else None,
     )
 
 
@@ -835,16 +932,60 @@ def _action_from_dict(data: Any) -> HostedAction:
     return HostedAction(**f)
 
 
+def _attempt_to_dict(attempt: HostedAttempt) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "source_id": attempt.source_id,
+        "label": attempt.label,
+        "kind": attempt.kind,
+        "outcome": attempt.outcome,
+    }
+    for name in ("error_code", "skipped", "retry_at", "needs_action"):
+        _put(out, name, getattr(attempt, name))
+    if attempt.cost is not None:
+        out["cost"] = _cost_to_dict(attempt.cost)
+    _put(out, "superseded", attempt.superseded)
+    return out
+
+
+def _attempt_from_dict(data: Any) -> HostedAttempt:
+    f = _read(
+        data,
+        "hosted attempt",
+        {"source_id": str, "label": str, "kind": str, "outcome": str},
+        {
+            "error_code": str,
+            "skipped": str,
+            "retry_at": str,
+            "needs_action": str,
+            "cost": dict,
+            "superseded": bool,
+        },
+    )
+    return HostedAttempt(
+        source_id=f["source_id"],
+        label=f["label"],
+        kind=f["kind"],
+        outcome=f["outcome"],
+        error_code=f.get("error_code"),
+        skipped=f.get("skipped"),
+        retry_at=f.get("retry_at"),
+        needs_action=f.get("needs_action"),
+        cost=_cost_from_dict(f["cost"]) if "cost" in f else None,
+        superseded=f.get("superseded"),
+    )
+
+
 def _cost_to_dict(cost: HostedCost) -> dict[str, Any]:
     out: dict[str, Any] = {"basis": cost.basis}
     _put(out, "usd", cost.usd)
+    _put(out, "estimate", cost.estimate)
     return out
 
 
 def _cost_from_dict(data: Any) -> HostedCost:
     if isinstance(data, Mapping) and isinstance(data.get("usd"), int) and not isinstance(data.get("usd"), bool):
         data = {**data, "usd": float(data["usd"])}
-    return HostedCost(**_read(data, "hosted cost", {"basis": str}, {"usd": float}))
+    return HostedCost(**_read(data, "hosted cost", {"basis": str}, {"usd": float, "estimate": bool}))
 
 
 def _citation_to_dict(citation: Citation) -> dict[str, Any]:
@@ -960,6 +1101,17 @@ def origin_from_dict(data: Any) -> Origin:
     return Origin(**_read(data, "origin", {"provider": str, "api": str, "model": str}))
 
 
+def executor_origin_to_dict(origin: Union[Origin, ServiceExecutorOrigin]) -> dict[str, str]:
+    return {"provider": origin.provider, "api": origin.api, "model": origin.model}
+
+
+def executor_origin_from_dict(data: Any) -> Union[Origin, ServiceExecutorOrigin]:
+    fields = _read(data, "executor origin", {"provider": str, "api": str, "model": str})
+    if fields["api"] == "search_api":
+        return ServiceExecutorOrigin(**fields)
+    return Origin(**fields)
+
+
 def message_to_dict(message: Message) -> dict[str, Any]:
     if isinstance(message, UserMessage):
         return {"role": "user", "content": [_block_to_dict(b) for b in message.content]}
@@ -998,11 +1150,7 @@ def message_to_dict(message: Message) -> dict[str, Any]:
             if execution is not None:
                 hosted_result["execution"] = {
                     "mode": execution.mode,
-                    "executor_origin": {
-                        "provider": execution.executor_origin.provider,
-                        "api": execution.executor_origin.api,
-                        "model": execution.executor_origin.model,
-                    },
+                    "executor_origin": executor_origin_to_dict(execution.executor_origin),
                     "executor_source_id": execution.executor_source_id,
                     "executor_billing": execution.executor_billing,
                 }
@@ -1097,7 +1245,7 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
                         )
                     )
                 execution = ProxyExecution(
-                    executor_origin=origin_from_dict(e["executor_origin"]),
+                    executor_origin=executor_origin_from_dict(e["executor_origin"]),
                     executor_source_id=e["executor_source_id"],
                     executor_billing=e["executor_billing"],
                     cost=_cost_from_dict(e["cost"]) if "cost" in e else None,

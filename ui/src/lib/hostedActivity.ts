@@ -1,7 +1,8 @@
 // A hosted tool call's card, as a ``toolcall`` row carries it in ``content.hosted``
-// (``core/hosted_activity.py``, version 1; the shared fixture is
-// ``hostedActivity.fixture.json``). The row's ``text`` is the IM line; the Web
-// renders the card from these fields instead.
+// (``core/hosted_activity.py``, version 1; the shared fixtures are
+// ``hostedActivity.fixture.json`` and, for search services,
+// ``hostedServiceActivity.fixture.json``). The row's ``text`` is the IM line; the
+// Web renders the card from these fields instead.
 
 export type HostedToolName = 'web_search' | 'x_search' | 'image_generate';
 
@@ -12,6 +13,27 @@ export type HostedActivitySource = {
   snippet?: string;
   page_age?: string;
 };
+
+/** One candidate a search chain reached, as the producer projected it now: ``label`` is the Source's current
+ *  name, and ``reason_key`` (what happened) and ``remedy_key`` (what the Source needs now) are keys under
+ *  ``chat.agentActivity.hosted``, decided once for the Web card and the IM line alike. */
+export type HostedActivityAttempt = {
+  source_id: string;
+  label: string;
+  kind: 'service' | 'model';
+  outcome: 'completed' | 'failed' | 'skipped';
+  error_code?: string;
+  skipped?: 'blocked' | 'disabled' | 'cooling' | 'query_too_long' | 'unavailable';
+  retry_at?: string;
+  needs_action?: string;
+  cost?: { basis: 'reported' | 'list' | 'included'; usd?: number; estimate?: boolean };
+  superseded?: boolean;
+  reason_key?: string;
+  remedy_key?: string;
+};
+
+/** A completed search that moved past Sources that failed or were blocked, and the Source that answered. */
+export type HostedActivitySwitch = { sources: string[]; reason_key: string; to: string };
 
 export type HostedActivityImage = {
   path: string;
@@ -40,6 +62,8 @@ export type HostedActivity = {
   extra_queries?: string[];
   /** Vendor id of whoever ran it: the response's for native, the executor's for proxy. */
   provider?: string;
+  /** Whether a search service or a model executor ran it; absent when the record does not say. */
+  executor_kind?: 'service' | 'model';
   source_id?: string;
   source_name?: string;
   model?: string;
@@ -51,13 +75,32 @@ export type HostedActivity = {
   duration_ms?: number;
   /** The Source that refused to run this search natively, so it ran by proxy instead; absent otherwise. */
   fallback_from?: { source_id: string; source_name?: string };
-  /** Absent when no price is known: unknown is never shown as zero. ``calls`` is how many calls it covers, and
-   *  ``at_least`` marks a lower bound: an attempt reported no price. */
-  cost?: { basis: 'reported' | 'list' | 'included'; usd?: number; calls: number; at_least?: boolean };
+  /** Every candidate a search chain reached; absent for a record that has none, as a model-only chain's. */
+  attempts?: HostedActivityAttempt[];
+  switch?: HostedActivitySwitch;
+  /** Absent when no price is known: unknown is never shown as zero. ``calls`` is how many calls it covers,
+   *  ``at_least`` marks a lower bound (an attempt reported no price), and ``estimate`` a vendor's own estimate. */
+  cost?: { basis: 'reported' | 'list' | 'included'; usd?: number; calls: number; estimate?: boolean; at_least?: boolean };
 };
 
 const TOOLS: readonly string[] = ['web_search', 'x_search', 'image_generate'];
 const STATUSES: readonly string[] = ['completed', 'failed', 'incomplete', 'pending'];
+const optionalString = (value: unknown): boolean => value === undefined || typeof value === 'string';
+const attemptFrom = (raw: unknown): HostedActivityAttempt | undefined => {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const attempt = raw as Record<string, unknown>;
+  if (typeof attempt.source_id !== 'string' || typeof attempt.label !== 'string') return undefined;
+  if (attempt.kind !== 'service' && attempt.kind !== 'model') return undefined;
+  if (attempt.outcome !== 'completed' && attempt.outcome !== 'failed' && attempt.outcome !== 'skipped') return undefined;
+  if (!optionalString(attempt.reason_key) || !optionalString(attempt.remedy_key)) return undefined;
+  return attempt as unknown as HostedActivityAttempt;
+};
+const switchFrom = (raw: unknown): HostedActivitySwitch | undefined => {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const note = raw as Record<string, unknown>;
+  if (!Array.isArray(note.sources) || !note.sources.every((name) => typeof name === 'string')) return undefined;
+  return typeof note.reason_key === 'string' && typeof note.to === 'string' ? note as unknown as HostedActivitySwitch : undefined;
+};
 
 /** The card a row carries, or undefined for anything that is not one this client reads. */
 export const hostedActivityFrom = (raw: unknown): HostedActivity | undefined => {
@@ -71,6 +114,8 @@ export const hostedActivityFrom = (raw: unknown): HostedActivity | undefined => 
     ...(card as unknown as HostedActivity),
     sources: Array.isArray(card.sources) ? (card.sources as HostedActivitySource[]).filter((s) => typeof s?.url === 'string' || typeof s?.title === 'string') : [],
     images: Array.isArray(card.images) ? (card.images as HostedActivityImage[]).filter((i) => typeof i?.path === 'string') : [],
+    attempts: Array.isArray(card.attempts) ? card.attempts.map(attemptFrom).filter((attempt): attempt is HostedActivityAttempt => attempt !== undefined) : undefined,
+    switch: switchFrom(card.switch),
   };
 };
 

@@ -1633,24 +1633,42 @@ class VibeyAgent(BaseAgent):
         except Exception:
             logger.exception("Vibey could not deliver %d generated image(s)", len(run.hosted_images))
 
-    async def _source_names(self) -> Mapping[str, str]:
-        """Each Model Hub Source's display name by id, as Model Hub holds them now.
+    async def _source_display(self) -> tuple[Mapping[str, str], Optional[Mapping[str, Mapping[str, Any]]]]:
+        """Each Model Hub Source's display name and current state by id, as Model Hub holds them now.
 
-        Read through the Model Hub runtime, the one owner of its current config, off
-        the event loop: ``self.config`` is the controller's app config, which carries
-        no Model Hub state, and a Source renamed or added since start must show as it
-        is now.
+        Read through the Model Hub runtime, the one owner of its current config, off the event loop: ``self.config``
+        is the controller's app config, which carries no Model Hub state, and a Source renamed, repaired, turned off
+        for search or removed since must show as it is now (``core.hosted_activity.SourceState``). Without a read
+        the states are None, so a card offers no repair it could not check.
         """
         runtime = getattr(self.controller, "model_hub_runtime", None)
         if runtime is None:
-            return {}
+            return {}, None
+
+        def read() -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+            from config.v2_config import hosted_tool_setting
+            from core.handlers.model_hub.hosted_tools import search_service_settings
+
+            hub = runtime.snapshot()
+            web_search = hosted_tool_setting(hub, "web_search")
+            names = {source.id: source.display_name for source in hub.sources if source.display_name}
+            states: dict[str, dict[str, Any]] = {}
+            for source in hub.sources:
+                state: dict[str, Any] = {"protocol": source.protocol, "vendor": source.vendor}
+                if source.state.status in ("needs_action", "error"):
+                    state["needs_action"] = source.state.detail_key
+                service = search_service_settings(web_search, source)
+                if service is not None:
+                    state["enabled"] = service["enabled"]
+                states[source.id] = state
+            return names, states
+
         try:
-            hub = await asyncio.to_thread(runtime.snapshot)
+            return await asyncio.to_thread(read)
         except Exception:
-            # A name is display only: the card and the line still show the Source by id.
-            logger.warning("Vibey could not read Model Hub's Sources for display names", exc_info=True)
-            return {}
-        return {source.id: source.display_name for source in hub.sources if source.display_name}
+            # Display only: the card and the line still show each Source by its id or the label it was recorded with.
+            logger.warning("Vibey could not read Model Hub's Sources for display", exc_info=True)
+            return {}, None
 
     async def _emit_hosted(self, run: _Run, activity: HostedActivity) -> None:
         """One hosted call: its line for IM and its card for the Web (``core.hosted_activity``)."""
@@ -1674,7 +1692,7 @@ class VibeyAgent(BaseAgent):
         message = run.responses.get(row_id)
         if message is None:
             return
-        names = await self._source_names()
+        names, _states = await self._source_display()
         for activity in native_activities(message, source_names=names.get, response_id=row_id):
             await self._emit_hosted(run, activity)
 
@@ -1695,8 +1713,17 @@ class VibeyAgent(BaseAgent):
             await self._emit_tool_line(run, call.name, dict(call.arguments))
             return
         duration = int((time.monotonic() - started) * 1000) if started is not None else None
-        names = await self._source_names()
-        await self._emit_hosted(run, proxy_activity(call, result.hosted, source_names=names.get, duration_ms=duration))
+        names, states = await self._source_display()
+        await self._emit_hosted(
+            run,
+            proxy_activity(
+                call,
+                result.hosted,
+                source_names=names.get,
+                source_state=states.get if states is not None else None,
+                duration_ms=duration,
+            ),
+        )
 
     def _committed_tool_result(self, event_id: str) -> Optional[ToolResultMessage]:
         """The tool result a ``ToolFinished`` names: one row, by primary key."""

@@ -37,7 +37,7 @@
               "properties": {
                 "source_id": { "$ref": "#/definitions/SourceId" },
                 "model_id": { "type": "string", "minLength": 1 },
-                "mode": { "enum": ["native", "executor", "direct"] },
+                "mode": { "enum": ["native", "executor", "service", "direct"] },
                 "at": { "$ref": "#/definitions/Moment" }
               }
             }
@@ -67,7 +67,7 @@
             "properties": {
               "source_id": { "$ref": "#/definitions/SourceId" },
               "model_id": { "type": "string", "minLength": 1 },
-              "mode": { "enum": ["native", "executor", "direct"] },
+              "mode": { "enum": ["native", "executor", "service", "direct"] },
               "at": { "$ref": "#/definitions/Moment" }
             }
           }
