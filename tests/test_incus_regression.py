@@ -2630,7 +2630,7 @@ def test_hold_then_status_and_release_preserve_unrelated_config(
 
 
 @pytest.mark.parametrize("target", ["worktree", "master"])
-def test_delete_held_worktree_refuses_before_mutation_unless_explicitly_overridden(
+def test_delete_held_environment_refuses_before_mutation_unless_explicitly_overridden(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], target: str
 ) -> None:
     """A persistent hold (not the existing build lock) must protect a running evaluation."""
@@ -2642,16 +2642,15 @@ def test_delete_held_worktree_refuses_before_mutation_unless_explicitly_overridd
     })
     original = dict(config)
     flags = ["delete", "--target", target, "--slug", "eval", "--yes"]
+    assert incus_regression.main(flags) == 1
+    err = capsys.readouterr().err
+    assert "session-one" in err and "Evaluation in progress" in err
+    assert "--ignore-hold" in err
+    assert commands == []
+    assert config == original
     if target == "worktree":
-        assert incus_regression.main(flags) == 1
-        err = capsys.readouterr().err
-        assert "session-one" in err and "Evaluation in progress" in err
-        assert "--ignore-hold" in err
-        assert commands == []
-        assert config == original
         assert not incus_regression.mapping_path(tmp_path).exists()
-        flags.append("--ignore-hold")
-    # Master retains its existing --yes behavior, even if somebody sets a hold.
+    flags.append("--ignore-hold")
     assert incus_regression.main(flags) == 0
     project, instance = ("avr-master", "avibe-master") if target == "master" else ("avr-wt-eval", "avibe-wt-eval")
     assert commands == [

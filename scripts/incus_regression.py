@@ -3083,7 +3083,7 @@ def cmd_delete(args: argparse.Namespace) -> int:
     with target_update_lock(repo_root, args.remote, lock_project, dry_run=args.dry_run, blocking=False):
         target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False, slug=slug)
         runner = Runner(dry_run=args.dry_run)
-        if target.target == WORKTREE_TARGET and not args.ignore_hold:
+        if not getattr(args, "ignore_hold", False):
             hold = describe_instance_hold(instance_record(runner, args.remote, target.project, target.instance))
             if hold:
                 raise RegressionError(
@@ -3365,7 +3365,7 @@ def build_parser() -> argparse.ArgumentParser:
         add_target_args(sub)
         if name == "delete":
             sub.add_argument("--yes", action="store_true")
-            sub.add_argument("--ignore-hold", action="store_true", help="Explicitly override a worktree environment's hold.")
+            sub.add_argument("--ignore-hold", action="store_true", help="Explicitly override an environment's hold.")
         if name == "hold":
             sub.add_argument("--owner", required=True, help="Session id or name holding this environment.")
             sub.add_argument("--reason", required=True, help="Why this environment must be kept.")
