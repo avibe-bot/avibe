@@ -7,6 +7,7 @@ embedded in ``Controller.emit_agent_message``.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import logging
 import re
@@ -2299,8 +2300,9 @@ class ConsolidatedMessageDispatcher:
             metadata=output_semantics.metadata,
             tools_deliverable=self._supports_toolcall_delivery(target_context) if kind == "toolcall" else True,
             log_editable=self._supports_message_editing(im_client, context) if log_kind else True,
-            hidden=lambda: settings_manager.is_message_type_hidden(settings_key, kind),
-            progress_style=lambda: self._concise_progress_style(context),
+            # Read once at most, however often the policy and the envelope check ask.
+            hidden=functools.cache(lambda: settings_manager.is_message_type_hidden(settings_key, kind)),
+            progress_style=functools.cache(lambda: self._concise_progress_style(context)),
         )
         return presentation, narration
 

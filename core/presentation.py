@@ -13,7 +13,8 @@ copy of long narration, the catalog's Web Push flags, the target platform's tool
 delivery, the channel's hidden message types, and the turn's progress style. It is
 the only policy; the protocol is the seam a later policy (a decision model, or one
 that wraps this one) replaces it through, set as ``presentation_policy`` on the
-dispatcher.
+dispatcher. A replacement may differ from the default only by the allowed deltas
+documented on ``PresentationDecision``.
 """
 
 from __future__ import annotations
@@ -104,24 +105,18 @@ class PresentationDecision:
     a ``messages`` row, a tool call an ``agent_events`` trace event, a ``system`` line
     none. The record stores the decision under ``metadata["presentation"]``.
 
-    Every field the dispatcher accepts, it executes in full. A decision outside the
-    envelope it can execute raises ``ValueError`` (``validate_decision``) rather than
-    being half-executed; a later policy that needs more extends the executor. The
-    envelope:
+    The dispatcher accepts the default policy's decision for the same output plus only
+    these deltas, each executed in full; any other difference raises ``ValueError``
+    (``validate_decision``) rather than being half-executed:
 
-    * not ``outward`` is local history only: ``im`` ``none``, no push, no Web
-      publication (no ``message.new``, no Inbox update), the record marked
-      ``delivery_suppressed``;
-    * an answer or notice (``result``, ``output``, ``error``, ``notify``) that is
-      outward goes out as a message (``im`` ``message``); it is always a transcript
-      row, muted exactly when its type renders muted (``output``);
-    * process-log outputs (``assistant``, ``toolcall``, ``system``) go out as
-      ``none``, ``status``, or ``log``, never a message; a ``log`` line needs a body,
-      and a tool call the target cannot deliver goes out as ``none``;
-    * a transcript row of narration is its muted ``interim`` copy (``transcript`` and
-      ``muted`` together), which needs the narration body the dispatcher measured;
-      tool calls and system lines have none;
-    * ``web_push`` may decline a push the catalog allows, never add one.
+    * narration's transcript copy on or off: for Web narration the dispatcher measured
+      (``assistant`` with a ``narration_body``), ``transcript`` and ``muted`` together
+      keep or drop its muted ``interim`` bubble;
+    * ``web_push`` declined where the default pushes.
+
+    Everything else (``outward``, ``im``, ``reason``, and the transcript of any other
+    output) equals the default. A later delta is added on its own, with its executor
+    support and tests, in the change that needs it.
     """
 
     policy: str
@@ -228,37 +223,28 @@ class DefaultPresentationPolicy:
 
 
 def validate_decision(presentation: PresentationInput, decision: PresentationDecision) -> PresentationDecision:
-    """``decision`` when the dispatcher can execute it in full, else ``ValueError``.
+    """``decision`` when it is the default decision plus allowed deltas, else ``ValueError``.
 
-    The envelope is documented on ``PresentationDecision``.
+    The allowed deltas are documented on ``PresentationDecision``.
     """
 
-    def reject(why: str) -> PresentationDecision:
-        raise ValueError(f"presentation policy {decision.policy!r}: {why} ({decision!r})")
-
-    kind = presentation.message_type
-    if not decision.outward and (decision.im is not ImDelivery.NONE or decision.web_push):
-        return reject("local history goes out nowhere")
-    if decision.web_push and not (
-        presentation.platform == "avibe" and _web_push(presentation.row_type, presentation.metadata)
-    ):
-        return reject("a push the catalog does not allow cannot be added")
-    if kind in _MESSAGE_TYPES:
-        if not decision.transcript or decision.muted is not (presentation.row_type in _MUTED_TYPES):
-            return reject("an answer or notice is a transcript row, muted exactly when its type is")
-        if decision.outward and decision.im is not ImDelivery.MESSAGE:
-            return reject("an answer or notice that goes out goes out as a message")
-        return decision
-    if decision.im is ImDelivery.MESSAGE:
-        return reject("a process-log output never goes out as a message")
-    if decision.transcript is not decision.muted:
-        return reject("narration's transcript row is its muted interim copy")
-    if decision.transcript and (kind != "assistant" or not decision.outward or presentation.narration_body is None):
-        return reject("only Web narration the dispatcher measured has an interim copy")
-    if decision.im is ImDelivery.LOG and not presentation.log_chunk:
-        return reject("a log line needs a body")
-    if kind == "toolcall" and not presentation.tools_deliverable and decision.im is not ImDelivery.NONE:
-        return reject("a tool call the target cannot deliver goes out nowhere")
+    default = DefaultPresentationPolicy().decide(presentation)
+    delta = {
+        field
+        for field in ("transcript", "muted", "web_push", "outward", "im", "reason")
+        if getattr(decision, field) != getattr(default, field)
+    }
+    allowed = set()
+    if presentation.message_type == "assistant" and presentation.narration_body is not None:
+        if decision.transcript is decision.muted:
+            allowed |= {"transcript", "muted"}
+    if default.web_push and not decision.web_push:
+        allowed.add("web_push")
+    if delta - allowed:
+        raise ValueError(
+            f"presentation policy {decision.policy!r} changes {sorted(delta - allowed)} of the default "
+            f"decision, which is not an allowed delta ({decision!r} vs {default!r})"
+        )
     return decision
 
 

@@ -10,6 +10,8 @@ message it writes.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from core.presentation import (
@@ -184,42 +186,46 @@ def test_the_default_policy_decides_each_rule(presentation, expected):
     assert validate_decision(presentation, decision) is decision
 
 
+_SHOWN = {"hidden": lambda: False, "progress_style": _style("verbose")}
 WEB_REPLY = _input("result", platform="avibe")
-WEB_NARRATION = _input("assistant", platform="avibe", narration_body="short")
-SLACK_TOOL = _input("toolcall", tools_deliverable=False)
-EMPTY_LOG = _input("system", log_chunk="")
+WEB_NOTIFY = _input("notify", platform="avibe")
+BACKGROUND_REPLY = _input("result", platform="avibe", background=True)
+SHORT_NARRATION = _input("assistant", platform="avibe", narration_body="short", **_SHOWN)
+LONG_NARRATION = _input("assistant", platform="avibe", narration_body=LONG, **_SHOWN)
+UNMEASURED_NARRATION = _input("assistant", **_SHOWN)
+UNEDITABLE_NARRATION = _input("assistant", platform="wechat", log_editable=False, **_SHOWN)
+WEB_TOOL = _input("toolcall", platform="avibe", **_SHOWN)
 
 
 @pytest.mark.parametrize(
-    ("presentation", "decision", "accepted"),
+    ("presentation", "changes", "accepted"),
     [
-        pytest.param(WEB_REPLY, _decision(transcript=True, outward=False), True, id="local-history"),
-        pytest.param(WEB_REPLY, _decision(transcript=True, outward=False, im=ImDelivery.MESSAGE), False,
-                     id="local-history-sent"),
-        pytest.param(WEB_REPLY, _decision(transcript=True, outward=False, web_push=True), False,
-                     id="local-history-pushed"),
-        pytest.param(WEB_REPLY, _decision(transcript=True, im=ImDelivery.MESSAGE), True, id="reply-without-push"),
-        pytest.param(WEB_REPLY, _decision(transcript=True, im=ImDelivery.NONE), False, id="outward-reply-not-sent"),
-        pytest.param(WEB_REPLY, _decision(transcript=False, im=ImDelivery.MESSAGE), False, id="reply-without-row"),
-        pytest.param(WEB_REPLY, _decision(transcript=True, muted=True, im=ImDelivery.MESSAGE), False,
-                     id="reply-muted"),
-        pytest.param(_input("notify", platform="avibe"), _decision(transcript=True, web_push=True,
-                     im=ImDelivery.MESSAGE), False, id="push-the-catalog-does-not-allow"),
-        pytest.param(WEB_NARRATION, _decision(transcript=True, muted=True, im=ImDelivery.LOG), True,
-                     id="short-narration-with-a-copy"),
-        pytest.param(WEB_NARRATION, _decision(transcript=True, im=ImDelivery.LOG), False, id="copy-not-muted"),
-        pytest.param(_input("assistant", narration_body=None), _decision(transcript=True, muted=True,
-                     im=ImDelivery.LOG), False, id="copy-without-a-measured-body"),
-        pytest.param(WEB_NARRATION, _decision(im=ImDelivery.MESSAGE), False, id="narration-as-a-message"),
-        pytest.param(EMPTY_LOG, _decision(im=ImDelivery.LOG), False, id="empty-log-line"),
-        pytest.param(EMPTY_LOG, _decision(im=ImDelivery.STATUS), True, id="empty-status-line"),
-        pytest.param(SLACK_TOOL, _decision(im=ImDelivery.STATUS), False, id="undeliverable-tool-call-sent"),
-        pytest.param(SLACK_TOOL, _decision(), True, id="undeliverable-tool-call-kept"),
+        pytest.param(WEB_REPLY, {}, True, id="the-default"),
+        pytest.param(WEB_REPLY, {"web_push": False}, True, id="push-declined"),
+        pytest.param(SHORT_NARRATION, {"transcript": True, "muted": True}, True, id="copy-on"),
+        pytest.param(LONG_NARRATION, {"transcript": False, "muted": False}, True, id="copy-off"),
+        pytest.param(WEB_NOTIFY, {"web_push": True}, False, id="push-added"),
+        pytest.param(WEB_REPLY, {"outward": False, "web_push": False, "im": ImDelivery.NONE}, False,
+                     id="reply-kept-local"),
+        pytest.param(BACKGROUND_REPLY, {"outward": True, "im": ImDelivery.MESSAGE, "reason": ""}, False,
+                     id="background-sent-outward"),
+        pytest.param(UNEDITABLE_NARRATION, {"im": ImDelivery.STATUS}, False, id="status-line-without-editing"),
+        pytest.param(SHORT_NARRATION, {"im": ImDelivery.NONE}, False, id="log-line-sent-nowhere"),
+        pytest.param(WEB_TOOL, {"outward": False, "im": ImDelivery.NONE}, False, id="tool-call-kept-local"),
+        pytest.param(WEB_REPLY, {"transcript": False}, False, id="reply-without-row"),
+        pytest.param(WEB_REPLY, {"muted": True}, False, id="reply-muted"),
+        pytest.param(SHORT_NARRATION, {"transcript": True}, False, id="copy-not-muted"),
+        pytest.param(UNMEASURED_NARRATION, {"transcript": True, "muted": True}, False,
+                     id="copy-without-a-measured-body"),
+        pytest.param(WEB_TOOL, {"transcript": True, "muted": True}, False, id="copy-of-a-tool-call"),
+        pytest.param(SHORT_NARRATION, {"reason": "hidden"}, False, id="reason-changed"),
     ],
 )
-def test_only_decisions_the_dispatcher_can_execute_are_accepted(presentation, decision, accepted):
-    """MESSAGE-DELIVERY-337: the executable envelope (``PresentationDecision``). A decision
-    inside it is executed in full; one outside it raises instead of being half-executed."""
+def test_only_the_default_decision_and_its_allowed_deltas_are_accepted(presentation, changes, accepted):
+    """MESSAGE-DELIVERY-337: the envelope is the default decision plus two deltas, narration's
+    Web transcript copy on or off and a declined Web Push (``PresentationDecision``); any
+    other difference raises instead of being half-executed."""
+    decision = replace(DefaultPresentationPolicy().decide(presentation), policy="other/1", **changes)
     if accepted:
         assert validate_decision(presentation, decision) is decision
     else:

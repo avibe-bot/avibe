@@ -335,8 +335,12 @@ Approved by the owner, in this order:
    target platform, background, body, and, read only when the policy asks,
    the channel's hidden types and the turn's progress style), asks its
    `presentation_policy`, and executes the `PresentationDecision` (`transcript`,
-   `muted`, `web_push`, `outward`, `im`: none, status, log or message) in full,
-   refusing one outside its documented envelope. An output without content
+   `muted`, `web_push`, `outward`, `im`: none, status, log or message). The
+   dispatcher accepts only the default decision for the same output plus
+   allowed deltas, each executed in full: narration's Web transcript copy (its
+   muted `interim` bubble) on or off, and a declined Web Push; any other
+   difference is refused. A later delta is added on its own, with its executor
+   support and tests, in the change that needs it. An output without content
    (`level="silent"` or an empty body) is a fact of the input, not a decision:
    no policy is asked, and only its lifecycle runs. Whether an output has a
    record is a fixed, best-effort fact of its type (a `messages` row, a tool

@@ -589,13 +589,13 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
             [(_, presentation)] = self.agent_presentations()
             self.assertEqual((presentation["policy"], presentation["web_push"]), ("no-push/1", False))
 
-    async def test_each_decision_field_is_what_the_dispatcher_executes(self):
-        """Scenario: MESSAGE-DELIVERY-337: a policy that changes one field of the default
-        decision, inside the executable envelope, changes exactly that behavior and nothing
-        else, with the real dispatcher and store: the reply's push, whether the reply goes
-        out at all (no Web publication, no send, its row local-only), narration's muted
-        copy in both directions, and the process line's form. An output without content
-        is never asked about."""
+    async def test_each_allowed_delta_is_what_the_dispatcher_executes(self):
+        """Scenario: MESSAGE-DELIVERY-337: with the real dispatcher and store, a policy that
+        makes one allowed delta to the default decision changes exactly that behavior and
+        nothing else: the reply's push declined, narration's muted copy kept or dropped.
+        Any other change (the reply kept local, the log line sent nowhere or as the status
+        line, the reply not sent) raises before anything is written or sent. An output
+        without content is never asked about."""
 
         def flip(**fields):
             class _Flip:
@@ -624,11 +624,6 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
 
         cases = {
             "the push declined": (reply, flip(kind="result", web_push=False), {"pushes"}),
-            "the reply kept local": (
-                reply,
-                flip(kind="result", outward=False, web_push=False, im=ImDelivery.NONE),
-                {"pushes", "sent", "published", "suppressed"},
-            ),
             "a copy for short narration": (
                 short_narration,
                 flip(kind="assistant", transcript=True, muted=True),
@@ -638,12 +633,6 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
                 long_narration,
                 flip(kind="assistant", transcript=False, muted=False),
                 {"rows", "published"},
-            ),
-            "the log line sent nowhere": (short_narration, flip(kind="assistant", im=ImDelivery.NONE), {"sent"}),
-            "the log line as the status line": (
-                short_narration,
-                flip(kind="assistant", im=ImDelivery.STATUS),
-                {"status_line"},
             ),
         }
 
@@ -687,13 +676,23 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
             await controller.emit_agent_message(self.context(), "result", FIRST, output=REPLY, level="silent")
             self.assertEqual((self.agent_rows(), self.pushed_texts(), controller.im_client.sent), ([], [], []))
 
-        with self.subTest("outside the envelope"), self.state():
-            controller = _Controller("avibe")
-            controller.dispatcher.presentation_policy = flip(kind="result", im=ImDelivery.NONE)(
-                controller.dispatcher.presentation_policy
-            )
-            with self.assertRaises(ValueError):
-                await controller.emit_agent_message(self.context(), "result", FIRST, output=REPLY)
+        rejected = {
+            "the reply kept local": (
+                reply,
+                flip(kind="result", outward=False, web_push=False, im=ImDelivery.NONE),
+            ),
+            "the reply not sent": (reply, flip(kind="result", im=ImDelivery.NONE)),
+            "the log line sent nowhere": (short_narration, flip(kind="assistant", im=ImDelivery.NONE)),
+            "the log line as the status line": (short_narration, flip(kind="assistant", im=ImDelivery.STATUS)),
+        }
+        for name, (emit, policy) in rejected.items():
+            with self.subTest(name), self.state():
+                controller = _Controller("avibe")
+                controller.get_progress_style_for_context = lambda _context: "verbose"
+                controller.dispatcher.presentation_policy = policy(controller.dispatcher.presentation_policy)
+                with self.assertRaises(ValueError):
+                    await emit(controller, self.context())
+                self.assertEqual((self.agent_rows(), self.pushed_texts(), controller.im_client.sent), ([], [], []))
 
     async def test_a_reply_or_a_failure_keeps_its_type_attached_or_detached(self):
         """Scenario: MESSAGE-DELIVERY-334.
