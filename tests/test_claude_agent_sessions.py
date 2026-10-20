@@ -2302,7 +2302,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
                     "Failed to authenticate: OAuth login required",
                 )
             ),
-            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-6)),
+            # The CLI exited by itself; a signal exit is a termination, not auth.
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=1)),
             _vibe_runtime_base_session_id="wechat_o9:reviewer",
             _vibe_runtime_session_key=runtime_key,
         )
@@ -3287,11 +3288,12 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             handle_session_error=AsyncMock(),
             cleanup_session=AsyncMock(),
             claude_error_diagnostic=lambda _key, _error: (
-                "OAuth login failed; Claude process terminated: SIGABRT"
+                "OAuth login failed; Claude process terminated: exit code 1"
             ),
         )
+        # The CLI exited by itself; a signal exit is a termination, not auth.
         client = SimpleNamespace(
-            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=-6)),
+            _transport=SimpleNamespace(_process=SimpleNamespace(returncode=1)),
         )
         controller.claude_sessions[composite_key] = client
         controller.receiver_tasks[composite_key] = asyncio.current_task()
@@ -3323,6 +3325,10 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         agent.session_handler = SimpleNamespace(handle_session_error=AsyncMock())
         agent._clear_pending_reactions = AsyncMock()
         context = SimpleNamespace()
+        # The Turn the receiver error interrupts.
+        agent._pending_requests["session-1:/tmp/work"] = [
+            SimpleNamespace(context=SimpleNamespace(platform_specific={}))
+        ]
 
         class _FailingClient:
             def receive_messages(self):
@@ -3370,6 +3376,10 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
         )
         agent._clear_pending_reactions = AsyncMock()
         context = SimpleNamespace()
+        # The Turn the receiver error interrupts.
+        agent._pending_requests["session-1:/tmp/work"] = [
+            SimpleNamespace(context=SimpleNamespace(platform_specific={}))
+        ]
 
         class _FailingClient:
             def receive_messages(self):
@@ -3396,13 +3406,8 @@ class ClaudeAgentSessionTests(unittest.IsolatedAsyncioTestCase):
             output=ANY,
             terminal_error=terminal_error,
         )
-        controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_awaited_once_with(
-            context,
-            "claude",
-            "❌ Connection to Claude was lost. Please try your message again.",
-            output=ANY,
-            terminal_error=terminal_error,
-        )
+        # Nothing in the failure reads as auth, so recovery is never offered.
+        controller.agent_auth_service.maybe_emit_auth_recovery_message.assert_not_awaited()
         persist.assert_called_once()
         self.assertEqual(
             persist.call_args.args,
@@ -5007,6 +5012,244 @@ class BindReservedWorkbenchSessionTests(unittest.TestCase):
         self.assertEqual(ret, "ses_wb")
         self.assertEqual(ctx.platform_specific["agent_session_id"], "ses_wb")
         self.assertEqual(ensure_calls, [], "must not mint a hidden row when a workbench id is reserved")
+
+
+# The Claude CLI prints this on stderr at every start when an API key or another
+# auth source outranks a claude.ai login, so it sits in the stderr tail of every
+# such runtime's failure diagnostic.
+_CLAUDE_CONNECTORS_NOTICE = (
+    "⚠ claude.ai connectors are disabled because ANTHROPIC_API_KEY or another auth "
+    "source is set and takes precedence over your claude.ai login · Unset it to load "
+    "your organization's connectors"
+)
+
+
+class _RecordingIM:
+    def __init__(self):
+        self.formatter = SimpleNamespace(format_error=lambda text: text)
+        self.sent_messages = []
+        self.sent_button_messages = []
+
+    async def send_message(self, context, text, parse_mode=None):
+        self.sent_messages.append(text)
+        return "msg-1"
+
+    async def send_message_with_buttons(self, context, text, keyboard, parse_mode=None):
+        self.sent_button_messages.append(text)
+        return "btn-1"
+
+
+class ClaudeRuntimeFailureAuthClassificationTests(unittest.IsolatedAsyncioTestCase):
+    """A Claude runtime failure reaches the real diagnostic, notice and auth classifier."""
+
+    composite_key = "slack_C1:/tmp/work"
+
+    def _harness(self, returncode, *, frames=(), error=None, in_flight=True):
+        from claude_agent_sdk import ProcessError
+
+        from core.agent_auth_service import AgentAuthService
+        from core.handlers.session_handler import SessionHandler
+        from modules.im import MessageContext
+
+        controller = _StubController()
+        controller.config.language = "en"
+        controller.stored_session_mappings = {}
+        im = _RecordingIM()
+        controller.im_client = im
+        controller.get_im_client_for_context = lambda _context: im
+        controller._get_session_key = lambda _context: "slack::C1"
+        controller.emit_agent_message = AsyncMock()
+        handler = SessionHandler(controller)
+        handler.cleanup_session = AsyncMock()
+        controller.session_handler = handler
+        # The recovery classifier and messages are the real ones; only the
+        # service's construction-time Claude settings recovery is skipped.
+        auth_service = AgentAuthService.__new__(AgentAuthService)
+        auth_service.controller = controller
+        controller.agent_auth_service = auth_service
+        agent = ClaudeAgent(controller)
+        agent._clear_pending_reactions = AsyncMock()
+        agent._remove_ack_reaction = AsyncMock()
+
+        if error is None:
+            error = ProcessError(
+                f"Command failed with exit code {returncode}",
+                exit_code=returncode,
+                stderr="Check stderr output for details",
+            )
+
+        class _Client:
+            _transport = SimpleNamespace(_process=SimpleNamespace(returncode=returncode))
+            _vibe_stderr_lines = [_CLAUDE_CONNECTORS_NOTICE]
+
+            async def disconnect(self):
+                return None
+
+            def receive_messages(self):
+                async def _iterate():
+                    for frame in frames:
+                        yield frame
+                    raise error
+
+                return _iterate()
+
+        client = _Client()
+        controller.claude_sessions[self.composite_key] = client
+        controller.receiver_tasks[self.composite_key] = asyncio.current_task()
+        context = MessageContext(
+            user_id="U1",
+            channel_id="C1",
+            platform="slack",
+            platform_specific={"turn_token": "turn-1"},
+        )
+        if in_flight:
+            agent._pending_requests[self.composite_key] = [
+                SimpleNamespace(
+                    context=MessageContext(
+                        user_id="U1",
+                        channel_id="C1",
+                        platform="slack",
+                        platform_specific={"turn_token": "turn-1"},
+                    )
+                )
+            ]
+        return agent, client, context, im, handler
+
+    async def _run(self, agent, client, context):
+        with patch(
+            "core.handlers.session_handler.observe_agent_resource_pressure",
+            lambda _controller: None,
+        ), patch("core.message_mirror.persist_agent_message") as persist:
+            await agent._receive_messages(client, "slack_C1", "/tmp/work", context)
+        return [call.args[2] for call in persist.call_args_list if call.args[1] == "notify"]
+
+    async def test_cli_exit_during_a_turn_reports_termination_without_relogin(self):
+        """Scenario: AUTH-SETUP-912
+
+        A Claude CLI whose stderr names the claude.ai login ends mid-Turn: the
+        OOM killer (``-9``), a service stop (``-15``, or ``143`` when the CLI
+        exits on SIGTERM itself), or an exit of its own (``1``). The user gets
+        the termination notice and the session resets, with no re-login
+        prompt. A signal exit stays a termination even when the error itself
+        mentions the login.
+        """
+        from core.agent_auth_service import classify_auth_error
+        from vibe.i18n import t
+
+        relogin = t("command.setup.resetPromptPlain", "en", backend="claude")
+        sigkill = t("error.claudeProcessSignal", "en", signal="SIGKILL", number=9)
+        for returncode, error, reason in (
+            (-9, None, sigkill),
+            (-15, None, t("error.claudeProcessSignal", "en", signal="SIGTERM", number=15)),
+            (143, None, t("error.claudeProcessExitCode", "en", code=143)),
+            (1, None, t("error.claudeProcessExitCode", "en", code=1)),
+            (-9, RuntimeError("Cannot write to terminated process after OAuth login failed"), sigkill),
+        ):
+            with self.subTest(returncode=returncode, error=str(error or "")):
+                agent, client, context, im, handler = self._harness(returncode, error=error)
+
+                notices = await self._run(agent, client, context)
+
+                termination = t("error.claudeProcessTerminated", "en", reason=reason)
+                self.assertEqual(im.sent_button_messages, [])
+                self.assertEqual(im.sent_messages, [termination])
+                self.assertEqual(notices, [f"\u274c {termination}"])
+                self.assertNotIn(relogin, "\n".join(notices))
+                handler.cleanup_session.assert_awaited_once_with(
+                    self.composite_key,
+                    current_receiver_task=asyncio.current_task(),
+                    expected_client=client,
+                    reason="process_terminated",
+                )
+                settlement = agent.controller.emit_agent_message.await_args
+                self.assertTrue(settlement.kwargs["is_error"])
+                # The settled diagnostic still quotes the stderr notice, which the
+                # auth classifier matches: the user keeps it, the auth check does
+                # not read it.
+                self.assertIn(_CLAUDE_CONNECTORS_NOTICE, settlement.kwargs["terminal_error"])
+                self.assertTrue(classify_auth_error("claude", settlement.kwargs["terminal_error"]))
+
+    async def test_idle_runtime_death_posts_nothing_to_its_conversation(self):
+        """Scenario: HFR-489
+
+        Its last Turn already settled, so a killed idle runtime retires quietly
+        whatever ended it: no notice, no re-login prompt, no Turn settlement.
+        """
+        for returncode in (-9, 143, 1):
+            with self.subTest(returncode=returncode):
+                agent, client, context, im, handler = self._harness(returncode, in_flight=False)
+
+                notices = await self._run(agent, client, context)
+
+                self.assertEqual(im.sent_messages, [])
+                self.assertEqual(im.sent_button_messages, [])
+                self.assertEqual(notices, [])
+                agent.controller.emit_agent_message.assert_not_awaited()
+                handler.cleanup_session.assert_awaited_once_with(
+                    self.composite_key,
+                    current_receiver_task=asyncio.current_task(),
+                    activation_retired=False,
+                    reason="receiver_error_without_turn",
+                    expected_client=client,
+                )
+
+    async def test_auth_failure_the_cli_reports_keeps_the_relogin_prompt(self):
+        """Scenario: AUTH-SETUP-913
+
+        The same runtime, login notice in its stderr, with an auth failure the
+        CLI itself reports. In SDK mode it reports one as frames: a synthetic
+        Assistant message whose ``error`` is ``authentication_failed``, then an
+        ``is_error`` Result (the shape the bundled CLI emits for a missing
+        login, with nothing on stderr). A result frame alone, and the error of
+        a process that exited by itself, are reported too. Each keeps today's
+        re-login prompt.
+        """
+        from modules.claude_sdk_compat import AssistantMessage, ResultMessage
+        from vibe.i18n import t
+
+        not_logged_in = "Not logged in \u00b7 Please run /login"
+        cli_frames = (
+            AssistantMessage(
+                content=[TextBlock(text=not_logged_in)],
+                model="<synthetic>",
+                error="authentication_failed",
+            ),
+            ResultMessage(
+                subtype="success",
+                duration_ms=0,
+                duration_api_ms=0,
+                is_error=True,
+                num_turns=1,
+                session_id="native-1",
+                result=not_logged_in,
+                terminal_reason="api_error",
+            ),
+        )
+        expired = (
+            'Failed to authenticate. API Error: 401 {"type":"error","error":'
+            '{"type":"authentication_error","message":"OAuth token has expired."}}'
+        )
+        result = type("ResultMessage", (), {})()
+        result.subtype = "error"
+        result.result = expired
+        result.duration_ms = 0
+        relogin_button = t("command.setup.resetPrompt", "en", backend="claude")
+        relogin = t("command.setup.resetPromptPlain", "en", backend="claude")
+        for name, harness in (
+            ("cli auth frames", dict(returncode=1, frames=cli_frames)),
+            ("result frame", dict(returncode=None, frames=(result,))),
+            ("self exit", dict(returncode=1, error=RuntimeError(expired))),
+        ):
+            with self.subTest(name):
+                agent, client, context, im, handler = self._harness(**harness)
+
+                notices = await self._run(agent, client, context)
+
+                self.assertEqual(len(im.sent_button_messages), 1)
+                self.assertTrue(im.sent_button_messages[0].endswith(f"\n\n{relogin_button}"))
+                self.assertEqual(len(notices), 1)
+                self.assertTrue(notices[0].endswith(f"\n\n{relogin}"))
+                self.assertEqual(im.sent_messages, [])
 
 
 if __name__ == "__main__":

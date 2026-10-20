@@ -25,7 +25,7 @@ from modules.agents.claude_process_reaper import (
     AVIBE_CLAUDE_SESSION_OWNER,
     get_claude_client_pid,
     get_claude_client_returncode,
-    get_claude_client_stderr_tail,
+    claude_stderr_tail_section,
     claude_process_exit_reason,
     claude_process_exit_reason_i18n,
     register_claude_owned_process,
@@ -471,8 +471,7 @@ class SessionHandler(BaseHandler):
             return False
 
         reason = claude_process_exit_reason(returncode)
-        stderr_tail = get_claude_client_stderr_tail(client)
-        diagnostic = f"\nClaude stderr tail:\n{stderr_tail}" if stderr_tail else ""
+        diagnostic = claude_stderr_tail_section(client)
         logger.warning(
             "Recreating cached Claude SDK client for %s because its process terminated (%s)%s",
             composite_key,
@@ -3065,10 +3064,8 @@ class SessionHandler(BaseHandler):
                 setattr(client, "_vibe_resource_failure_checked", True)
             if resource_failure is not None:
                 diagnostic = f"{diagnostic}\nResource diagnosis: {resource_failure.message}"
-        stderr_tail = get_claude_client_stderr_tail(client)
-        if stderr_tail:
-            diagnostic = f"{diagnostic}\nClaude stderr tail:\n{stderr_tail}"
-        return diagnostic
+        # Last, so auth classification can leave the CLI's stderr out.
+        return f"{diagnostic}{claude_stderr_tail_section(client)}"
 
     def capture_session_id(
         self,

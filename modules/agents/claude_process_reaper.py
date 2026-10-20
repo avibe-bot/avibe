@@ -78,6 +78,22 @@ def get_claude_client_returncode(client: object | None) -> int | None:
     return _process_returncode(get_claude_client_process(client))
 
 
+def claude_process_exit_signal(returncode: int | None) -> int | None:
+    """The signal that ended a Claude CLI, or None when it exited on its own.
+
+    Python reports a process a signal killed as ``-N``. A CLI that catches the
+    signal and exits itself follows the shell convention ``128 + N``, which is
+    how the Claude CLI ends on SIGTERM (exit code 143).
+    """
+    if returncode is None or isinstance(returncode, bool):
+        return None
+    if returncode < 0:
+        return -returncode
+    if 128 < returncode < 128 + signal.NSIG:
+        return returncode - 128
+    return None
+
+
 def claude_process_exit_reason(returncode: int) -> str:
     """Format a subprocess exit code for logs and user-facing diagnostics."""
     if returncode < 0:
@@ -108,6 +124,24 @@ def get_claude_client_stderr_tail(client: object | None) -> str:
     if not isinstance(lines, (list, tuple)):
         return ""
     return "\n".join(str(line).strip() for line in lines if str(line).strip())
+
+
+_CLAUDE_STDERR_TAIL_HEADER = "\nClaude stderr tail:\n"
+
+
+def claude_stderr_tail_section(client: object | None) -> str:
+    """The diagnostic section quoting what a Claude CLI wrote on stderr.
+
+    A diagnostic ends with it, so ``claude_diagnostic_without_stderr`` can
+    leave it out.
+    """
+    stderr_tail = get_claude_client_stderr_tail(client)
+    return f"{_CLAUDE_STDERR_TAIL_HEADER}{stderr_tail}" if stderr_tail else ""
+
+
+def claude_diagnostic_without_stderr(diagnostic: str) -> str:
+    """A Claude failure diagnostic without its stderr section."""
+    return diagnostic.partition(_CLAUDE_STDERR_TAIL_HEADER)[0]
 
 
 def _released_lstart_reading(started: float) -> float:

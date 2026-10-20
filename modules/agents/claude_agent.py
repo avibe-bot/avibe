@@ -49,7 +49,9 @@ from core.session_activities import SessionActivity, activity_completion_output
 from modules.claude_sdk_compat import TextBlock, ToolUseBlock, is_claude_sdk_buffer_error
 from modules.agents.claude_process_reaper import (
     AVIBE_CLAUDE_SESSION_OWNER,
+    claude_diagnostic_without_stderr,
     claude_process_exit_reason_i18n,
+    claude_process_exit_signal,
     get_claude_client_returncode,
     register_claude_owned_process,
 )
@@ -778,10 +780,10 @@ class ClaudeAgent(BaseAgent):
                 # over incidental auth words in a path, model id, or diagnostic.
                 handled = False
                 if not missing_session and not input_not_sent and not hub_refusal:
-                    handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+                    handled = await self._offer_auth_recovery(
                         context,
-                        "claude",
                         error_notify,
+                        client=client,
                         output=terminal_output_for(request),
                         terminal_error=diagnostic,
                     )
@@ -858,6 +860,43 @@ class ClaudeAgent(BaseAgent):
                     self._release_service_runtime_turn(context)
         finally:
             await self._delete_ack(context, request)
+
+    async def _offer_auth_recovery(
+        self,
+        context: MessageContext,
+        error_notify: str,
+        *,
+        client,
+        output,
+        terminal_error: str,
+    ) -> bool:
+        """Offer re-login for a failed Claude call that can be an auth failure.
+
+        A CLI that a signal ended (the OOM killer, a service stop) was
+        terminated, and that is the failure's cause whatever its diagnostic
+        says.
+
+        The CLI's stderr is never auth evidence. The CLI reports an auth
+        failure as frames: an Assistant message whose ``error`` is
+        ``authentication_failed``, then an ``is_error`` Result, and those
+        reach recovery on their own path. Stderr carries its notices, such as
+        one naming the claude.ai login at every start when an API key
+        outranks it, so reading it for auth words sent ordinary crashes to
+        OAuth. The diagnostic keeps stderr for the user; only this check
+        leaves it out.
+        """
+        if claude_process_exit_signal(get_claude_client_returncode(client)) is not None:
+            return False
+        evidence = claude_diagnostic_without_stderr(str(terminal_error or ""))
+        if not classify_auth_error("claude", f"{error_notify}\n{evidence}"):
+            return False
+        return await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+            context,
+            "claude",
+            error_notify,
+            output=output,
+            terminal_error=terminal_error,
+        )
 
     def _teardown_is_intentional(self, composite_key: str, error: Exception, *, client=None) -> bool:
         """Did the service kill this Claude process itself?
@@ -3306,10 +3345,10 @@ class ClaudeAgent(BaseAgent):
             )
             if not intentional_teardown:
                 await self.record_model_hub_native_failure(failure_context, diagnostic)
-            auth_handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+            auth_handled = await self._offer_auth_recovery(
                 context,
-                "claude",
                 error_notify,
+                client=client,
                 output=terminal_output_for(pending_request),
                 terminal_error=diagnostic,
             )
@@ -3542,6 +3581,26 @@ class ClaudeAgent(BaseAgent):
                 error,
                 client=errored_client,
             )
+            if pending_request is None:
+                # No Turn is in flight: the last one already settled, and an
+                # agent-initiated Turn would hold a FIFO entry. Nobody waits on
+                # this runtime, so its end is no news for the conversation and
+                # no evidence about a Model Hub source. Retire it quietly, as an
+                # idle EOF does; the next Turn starts a fresh process.
+                logger.warning(
+                    "Claude runtime %s ended with no Turn in flight: %s",
+                    composite_key,
+                    diagnostic,
+                )
+                await self._cleanup_runtime_session(
+                    composite_key,
+                    current_receiver_task=asyncio.current_task(),
+                    expected_client=errored_client,
+                    preserve_pending_request_state=True,
+                    reason="receiver_error_without_turn",
+                )
+                self._refresh_activity_provenance_barrier(composite_key)
+                return
             error_notify = self._format_error_notify(
                 error,
                 composite_key=composite_key,
@@ -3553,10 +3612,10 @@ class ClaudeAgent(BaseAgent):
             )
             if not intentional_teardown:
                 await self.record_model_hub_native_failure(failure_context, diagnostic)
-            handled = await self.controller.agent_auth_service.maybe_emit_auth_recovery_message(
+            handled = await self._offer_auth_recovery(
                 context,
-                "claude",
                 error_notify,
+                client=errored_client,
                 output=terminal_output_for(pending_request),
                 terminal_error=diagnostic,
             )
