@@ -239,7 +239,7 @@ from .resolver import (
     source_supports_passthrough,
     source_runnable,
 )
-from .revocations import CredentialRevocationJournal, RevocationOperation
+from .revocations import CredentialRevocationJournal, PendingCredentialRevocation, RevocationOperation
 from .retry import (
     RECOVERY_ADMISSION_MARGIN_SECONDS,
     RECOVERY_EXHAUSTED_CODE,
@@ -1177,6 +1177,8 @@ async def _acquire_credential_ref_with_cancellation_ownership(
     service: "ModelHubService",
     operation: Awaitable[str],
     rollback_source_id: str,
+    *,
+    rollback_operation: RevocationOperation | None = None,
 ) -> str:
     """Keep ownership of an engine ref when the caller is cancelled mid-provision."""
 
@@ -1193,6 +1195,7 @@ async def _acquire_credential_ref_with_cancellation_ownership(
             service,
             rollback_source_id,
             transient_ref,
+            operation=rollback_operation,
         )
         raise cancelled
 
@@ -2168,65 +2171,65 @@ class ModelHubService:
             pending_revocations = self.revocations.list()
             if self._engine_synced and not pending_revocations:
                 return
-            config = self.store.load()
-            takeover = self.migration_journal.load()
-            takeover_credentials = {
-                (credential["source_id"], credential["credential_ref"])
-                for credential in (takeover or {}).get("credentials", [])
-            }
+            await self._replay_credential_revocations_locked(
+                self.store.load(), pending_revocations, sync_engine=True,
+            )
+
+    async def _replay_credential_revocations_locked(
+        self,
+        config: ModelHubConfig,
+        pending_revocations: list[PendingCredentialRevocation],
+        *,
+        sync_engine: bool = False,
+    ) -> None:
+        """Share custody guards across model demand and engine-free API-key cleanup."""
+
+        takeover = self.migration_journal.load()
+        takeover_credentials = {
+            (credential["source_id"], credential["credential_ref"])
+            for credential in (takeover or {}).get("credentials", [])
+        }
+        if sync_engine:
             await self._sync_sources(config, force_empty=bool(pending_revocations))
             self._engine_synced = True
-            active_credentials = {
-                source.id: source.credential_ref for source in config.sources
-            }
-            for pending in pending_revocations:
-                if active_credentials.get(pending.source_id) == pending.credential_ref:
-                    try:
-                        self.revocations.remove(
-                            pending.source_id,
-                            pending.credential_ref,
-                        )
-                    except OSError:
-                        pass
-                    continue
-                if (pending.source_id, pending.credential_ref) in takeover_credentials:
-                    # A prepared takeover owns refs before they appear in
-                    # config. Other Hub consumers may reconcile between a
-                    # failed request and recovery; they cannot revoke its grant.
-                    continue
-                if pending.operation == "cleanup_orphaned_oauth_material":
-                    try:
-                        cleaned = (
-                            await self.adapter.cleanup_orphaned_oauth_material(
-                                pending.credential_ref
-                            )
-                        )
-                    except Exception:
-                        continue
-                    if not cleaned:
-                        continue
-                elif pending.operation == "revoke_api_key_credential":
-                    try:
-                        await self.adapter.revoke_api_key_credential(pending.credential_ref)
-                    except Exception:
-                        # Only successful exact-namespace cleanup establishes
-                        # absence. Metadata errors are not retirement proof.
-                        continue
-                else:
-                    try:
-                        await self.adapter.revoke_credential(
-                            pending.credential_ref
-                        )
-                    except Exception as error:
-                        if not self._credential_was_already_revoked(error):
-                            continue
+        active_credentials = {
+            source.id: source.credential_ref for source in config.sources
+        }
+        for pending in pending_revocations:
+            if active_credentials.get(pending.source_id) == pending.credential_ref:
                 try:
-                    self.revocations.remove(
-                        pending.source_id,
-                        pending.credential_ref,
-                    )
+                    self.revocations.remove(pending.source_id, pending.credential_ref)
                 except OSError:
                     pass
+                continue
+            if (pending.source_id, pending.credential_ref) in takeover_credentials:
+                # A prepared takeover owns refs before they appear in config.
+                # Other consumers cannot revoke its not-yet-committed grant.
+                continue
+            if pending.operation == "cleanup_orphaned_oauth_material":
+                try:
+                    cleaned = await self.adapter.cleanup_orphaned_oauth_material(pending.credential_ref)
+                except Exception:
+                    continue
+                if not cleaned:
+                    continue
+            elif pending.operation == "revoke_api_key_credential":
+                try:
+                    await self.adapter.revoke_api_key_credential(pending.credential_ref)
+                except Exception:
+                    # Only successful exact-namespace cleanup establishes
+                    # absence. Metadata errors are not retirement proof.
+                    continue
+            else:
+                try:
+                    await self.adapter.revoke_credential(pending.credential_ref)
+                except Exception as error:
+                    if not self._credential_was_already_revoked(error):
+                        continue
+            try:
+                self.revocations.remove(pending.source_id, pending.credential_ref)
+            except OSError:
+                pass
 
     async def _prepare_engine_for_demand(self, *, already_synced: bool = False) -> None:
         try:
@@ -4058,25 +4061,37 @@ class ModelHubService:
         source = ModelHubSourceConfig.from_payload(source.to_payload())
         nonce_claimed = False
         release_nonce = True
-        persisted = False
-        credential_ref: str | None = None
-        credential_cleaned = False
         try:
-            if client_nonce is not None:
-                async with self._mutation_lock:
+            async with self._mutation_lock:
+                if client_nonce is not None:
                     self._claim_source_create_nonce_locked(client_nonce)
                     nonce_claimed = True
+                pending = [
+                    entry for entry in self.revocations.list()
+                    if entry.operation == "revoke_api_key_credential"
+                ]
+                if pending:
+                    # Search custody needs no engine projection. The typed
+                    # adapter operation refuses bound refs and retires API keys
+                    # locally; OAuth/generic intents remain with engine demand.
+                    await self._replay_credential_revocations_locked(self.store.load(), pending)
             credential_ref = await _acquire_credential_ref_with_cancellation_ownership(
                 self,
-                self.adapter.provision_credential(
-                    vendor, "search", key, None,
-                ),
+                self.adapter.provision_credential(vendor, "search", key, None),
                 source.id,
+                rollback_operation="revoke_api_key_credential",
             )
+            persisted = False
             try:
                 source.credential_ref = credential_ref
                 source.masked_credential = _mask_credential(key)
                 outcome = await self._search_free_check(source)
+                if outcome == "invalid":
+                    raise ModelHubError(
+                        "discovery_failed",
+                        status=422,
+                        detail="modelHub.errors.authentication_failed",
+                    )
                 if outcome in {"balance", "limit"}:
                     source.state = ModelHubSourceStateConfig(
                         status="needs_action",
@@ -4091,72 +4106,33 @@ class ModelHubService:
                 else:
                     source.verification_pending = None
                 source = ModelHubSourceConfig.from_payload(source.to_payload())
+                async with self._mutation_lock:
+                    await self._commit_new_source_locked(
+                        source,
+                        display_name_defaulted=display_name_defaulted,
+                    )
+                    persisted = True
+                return self._source_creation_result(source.to_payload())
             except asyncio.CancelledError:
-                await _rollback_credential_before_settling(
-                    self,
-                    source.id,
-                    credential_ref,
-                    operation="revoke_api_key_credential",
-                )
-                credential_cleaned = True
+                persisted = self._persisted_credential(self.store.load(), source.id, credential_ref)
+                if not persisted:
+                    await _rollback_credential_before_settling(
+                        self, source.id, credential_ref, operation="revoke_api_key_credential",
+                    )
                 raise
             except Exception:
-                await _require_credential_cleanup(
-                    self,
-                    source.id,
-                    credential_ref,
-                    operation="revoke_api_key_credential",
-                )
-                credential_cleaned = True
+                if not persisted:
+                    await _rollback_credential_before_settling(
+                        self, source.id, credential_ref, operation="revoke_api_key_credential",
+                    )
                 raise
-            if outcome == "invalid":
-                await _require_credential_cleanup(
-                    self,
-                    source.id,
-                    credential_ref,
-                    operation="revoke_api_key_credential",
-                )
-                credential_cleaned = True
-                raise ModelHubError(
-                    "discovery_failed",
-                    status=422,
-                    detail="modelHub.errors.authentication_failed",
-                )
-            async with self._mutation_lock:
-                await self._commit_new_source_locked(
-                    source,
-                    display_name_defaulted=display_name_defaulted,
-                )
-                persisted = True
-            return self._source_creation_result(source.to_payload())
-        except asyncio.CancelledError:
-            if (
-                credential_ref is not None
-                and not credential_cleaned
-                and not self._persisted_credential(self.store.load(), source.id, credential_ref)
-            ):
-                await _rollback_credential_before_settling(
-                    self,
-                    source.id,
-                    credential_ref,
-                    operation="revoke_api_key_credential",
-                )
-            raise
         except CredentialCleanupUnsettledError:
             release_nonce = False
-            raise
-        except Exception:
-            if credential_ref is not None and not persisted and not credential_cleaned:
-                await _require_credential_cleanup(
-                    self,
-                    source.id,
-                    credential_ref,
-                    operation="revoke_api_key_credential",
-                )
             raise
         finally:
             if nonce_claimed and release_nonce:
                 self._source_create_nonces.discard(cast(str, client_nonce))
+
     async def create_source(self, payload: dict) -> dict:
         if not isinstance(payload, dict):
             raise ModelHubError("discovery_failed")
@@ -4433,33 +4409,33 @@ class ModelHubService:
                     source.id,
                 )
             )
-            source.credential_ref = rollback_credential_ref
-            source.masked_credential = _mask_credential(cast(str, credential_value))
-            if _search_service_for_source(source) is not None:
-                outcome = await self._search_free_check(source)
-                if outcome == "invalid":
-                    raise ModelHubError(
-                        "discovery_failed",
-                        status=422,
-                        detail="modelHub.errors.authentication_failed",
-                    )
-                if outcome in {"balance", "limit"}:
-                    source.verification_pending = None
-                    source.state = ModelHubSourceStateConfig(
-                        status="needs_action",
-                        detail_key=(
-                            "models.source.needs_action.balance_exhausted"
-                            if outcome == "balance"
-                            else "models.source.needs_action.spend_limit_reached"
-                        ),
-                    )
-                elif outcome == "pass":
-                    source.verification_pending = None
-                elif outcome == "unknown" and source.protocol == "search":
-                    self._mark_source_unverified(source)
-            source = ModelHubSourceConfig.from_payload(source.to_payload())
             persisted = False
             try:
+                source.credential_ref = rollback_credential_ref
+                source.masked_credential = _mask_credential(cast(str, credential_value))
+                if _search_service_for_source(source) is not None:
+                    outcome = await self._search_free_check(source)
+                    if outcome == "invalid":
+                        raise ModelHubError(
+                            "discovery_failed",
+                            status=422,
+                            detail="modelHub.errors.authentication_failed",
+                        )
+                    if outcome in {"balance", "limit"}:
+                        source.verification_pending = None
+                        source.state = ModelHubSourceStateConfig(
+                            status="needs_action",
+                            detail_key=(
+                                "models.source.needs_action.balance_exhausted"
+                                if outcome == "balance"
+                                else "models.source.needs_action.spend_limit_reached"
+                            ),
+                        )
+                    elif outcome == "pass":
+                        source.verification_pending = None
+                    elif outcome == "unknown" and source.protocol == "search":
+                        self._mark_source_unverified(source)
+                source = ModelHubSourceConfig.from_payload(source.to_payload())
                 if save_unverified:
                     # Inventory is useful, not admission evidence. Work on a
                     # clone so a failed listing cannot partly replace manual
@@ -4495,7 +4471,7 @@ class ModelHubService:
                 raise
             except Exception:
                 if not persisted:
-                    await _require_credential_cleanup(
+                    await _rollback_credential_before_settling(
                         self,
                         source.id,
                         rollback_credential_ref,
