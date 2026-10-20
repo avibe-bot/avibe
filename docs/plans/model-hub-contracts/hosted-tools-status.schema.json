@@ -89,23 +89,14 @@
             "required": ["unit", "usd_per_1k"],
             "additionalProperties": false,
             "properties": {
-              "unit": { "enum": ["call", "search", "post", "profile", "page"] },
-              "usd_per_1k": { "type": "number", "minimum": 0 },
-              "when": { "const": "content", "description": "Charged only when page text is requested; highlights are included in the search price." }
+              "unit": { "enum": ["call", "search", "post", "profile"] },
+              "usd_per_1k": { "type": "number", "minimum": 0 }
             }
           }
         },
         "as_of": { "type": "string", "format": "date" },
         "url": { "type": "string", "pattern": "^https://" }
       }
-    },
-    "ModelListPrice": {
-      "allOf": [
-        { "$ref": "#/definitions/ListPrice" },
-        { "properties": { "extra": { "items": { "properties": {
-          "unit": { "enum": ["call", "search", "post", "profile"] }, "when": false
-        } } } } }
-      ]
     },
     "ServiceListPrice": {
       "allOf": [{ "$ref": "#/definitions/ListPrice" }, { "properties": { "unit": { "const": "search" } } }]
@@ -115,14 +106,13 @@
       "additionalProperties": false,
       "properties": {
         "results": { "type": "integer", "minimum": 1, "maximum": 100 },
-        "content": { "type": "boolean" },
         "enabled": { "type": "boolean" }
       }
     },
     "ServiceSettings": {
       "allOf": [
         { "$ref": "#/definitions/SavedServiceSettings" },
-        { "required": ["results", "content", "enabled"] }
+        { "required": ["results", "enabled"] }
       ]
     },
     "ModelExecutor": {
@@ -135,7 +125,7 @@
         "model_id": { "type": "string", "minLength": 1 },
         "billing": { "enum": ["monthly", "metered"] },
         "relay": { "type": "boolean", "description": "A non-official endpoint is priced at its vendor's API price." },
-        "price": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ModelListPrice" }] }
+        "price": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ListPrice" }] }
       }
     },
     "ServiceExecutor": {
@@ -159,7 +149,7 @@
     "ServiceVendor": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "price", "free_tier", "facts", "results_max", "content_supported", "content_changes_price", "source_ids"],
+      "required": ["id", "name", "price", "free_tier", "facts", "results_max", "source_ids"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
         "name": { "type": "string", "minLength": 1 },
@@ -176,8 +166,6 @@
           }
         },
         "results_max": { "type": "integer", "minimum": 1, "maximum": 100 },
-        "content_supported": { "type": "boolean" },
-        "content_changes_price": { "type": "boolean" },
         "source_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/definitions/SourceId" }, "description": "All current search-capable Sources for this vendor, including opted-out Sources. Empty means not added." }
       }
     },

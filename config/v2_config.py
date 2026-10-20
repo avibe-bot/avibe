@@ -3146,22 +3146,20 @@ class ModelHubSearchServiceSettings:
     """Partial saved overrides, not resolved defaults (web-search-services.md §3.2)."""
 
     results: Optional[int] = None
-    content: Optional[bool] = None
     enabled: Optional[bool] = None
 
     @classmethod
     def from_payload(cls, payload: object) -> "ModelHubSearchServiceSettings":
         if not isinstance(payload, dict):
             raise ValueError("Config 'model_hub.hosted_tools.web_search.services' entries must be objects")
-        unknown = set(payload) - {"results", "content", "enabled"}
+        unknown = set(payload) - {"results", "enabled"}
         if unknown:
             logger.warning("Config 'model_hub.hosted_tools.web_search.services' ignores unknown fields %s", sorted(unknown))
         if "results" in payload and (type(payload["results"]) is not int or payload["results"] < 1):
             raise ValueError("Config search service results must be a positive integer")
-        for key in ("content", "enabled"):
-            if key in payload and not isinstance(payload[key], bool):
-                raise ValueError(f"Config search service {key} must be a boolean")
-        return cls(**{key: payload[key] for key in ("results", "content", "enabled") if key in payload})
+        if "enabled" in payload and not isinstance(payload["enabled"], bool):
+            raise ValueError("Config search service enabled must be a boolean")
+        return cls(**{key: payload[key] for key in ("results", "enabled") if key in payload})
 
     def clamped(self, service: Mapping[str, Any]) -> "ModelHubSearchServiceSettings":
         """Read an obsolete override safely; disk is unchanged until an authorized write."""
@@ -3169,19 +3167,17 @@ class ModelHubSearchServiceSettings:
         return replace(
             self,
             results=min(self.results, service["limits"]["results_max"]) if self.results is not None else None,
-            content=False if self.content and not service["result"].get("content") else self.content,
         )
 
     def effective(self, service: Mapping[str, Any]) -> dict[str, Any]:
         saved = self.clamped(service)
         return {
             "results": saved.results if saved.results is not None else min(5, service["limits"]["results_max"]),
-            "content": saved.content if saved.content is not None else False,
             "enabled": saved.enabled if saved.enabled is not None else bool(service["tool_only"] or service.get("auto_enroll")),
         }
 
     def to_payload(self) -> dict[str, Any]:
-        return {key: value for key in ("results", "content", "enabled") if (value := getattr(self, key)) is not None}
+        return {key: value for key in ("results", "enabled") if (value := getattr(self, key)) is not None}
 
 
 def _search_service_settings_from_payload(

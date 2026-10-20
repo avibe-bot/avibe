@@ -37,15 +37,13 @@
       "request": {
         "method": "POST",
         "query": "query",
-        "results": "count",
-        "content": "need_content"
+        "results": "count"
       },
       "result": {
         "results": "results",
         "url": "url",
         "title": "title",
         "snippet": "snippet",
-        "content": "content",
         "page_age": "date"
       },
       "limits": {
@@ -140,15 +138,13 @@
       "request": {
         "method": "POST",
         "query": "query",
-        "results": "max_results",
-        "content": "include_raw_content"
+        "results": "max_results"
       },
       "result": {
         "results": "results",
         "url": "url",
         "title": "title",
         "snippet": "content",
-        "content": "raw_content",
         "page_age": "published_date"
       },
       "limits": {
@@ -194,8 +190,6 @@
         "method": "POST",
         "query": "query",
         "results": "numResults",
-        "content": "contents.text",
-        "content_max_chars": {"path": "contents.text.maxCharacters", "value": 4000},
         "highlights": "contents.highlights"
       },
       "result": {
@@ -203,7 +197,6 @@
         "url": "url",
         "title": "title",
         "snippet": "highlights",
-        "content": "text",
         "page_age": "publishedDate",
         "reported_cost": {"path": "costDollars.total", "estimate": true}
       },
@@ -215,9 +208,7 @@
       "price": {
         "unit": "search",
         "usd_per_1k": 7.0,
-        "extra": [
-          {"unit": "page", "usd_per_1k": 1.0, "when": "content"}
-        ],
+        "extra": [],
         "as_of": "2026-10-19",
         "url": "https://exa.ai/blog/exa-3"
       },
