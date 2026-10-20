@@ -129,7 +129,7 @@ vibe mcp generate|regenerate|enable|disable|remove <name>
 - Avibe extensions: `--description`, `--cwd`, `--replace`, `--json-stdin`.
 - `--scope`, SSE and OAuth options fail explicitly.
 - Add only saves. An existing name needs `--replace`, which keeps state and the active revision until regeneration.
-- Names: `[a-z][a-z0-9-]{0,62}`, excluding `add`, `generate`, `regenerate`, `enable`, `disable`, `remove`. Immutable in MVP.
+- Names: `[a-z][a-z0-9-]{0,62}`, excluding `add`, `generate`, `regenerate`, `enable`, `disable`, `remove` and Windows reserved device names (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`), since names are directory names on every platform. Immutable in MVP.
 
 ## 5. Page configuration
 
