@@ -38,7 +38,10 @@ logger = logging.getLogger(__name__)
 
 KEEP_BUILDS = 2
 
-_ASSET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# One path segment, as Vite emits them (including names such as
+# ``__vite-browser-external-<hash>.js``). A leading dot is reserved for this
+# archive's in-progress files and excludes ``.`` and ``..``.
+_ASSET_NAME = re.compile(r"[^./\\\x00][^/\\\x00]*")
 _record_lock = threading.Lock()
 _recorded_index_key: tuple[str, str] | None = None
 

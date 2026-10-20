@@ -2746,6 +2746,8 @@ def test_static_ui_serves_previous_build_chunks_after_upgrade(monkeypatch, tmp_p
         (ui_dist / "index.html").write_text(f'<script src="/assets/index-{build}.js"></script>', encoding="utf-8")
         (assets_dir / f"index-{build}.js").write_text(f"import('./Page-{build}.js')", encoding="utf-8")
         (assets_dir / f"Page-{build}.js").write_text(f"// page {build}", encoding="utf-8")
+        # Vite emits some chunk names with a leading underscore.
+        (assets_dir / f"__vite-browser-external-{build}.js").write_text("export default {}", encoding="utf-8")
         (assets_dir / "shared-000.js").write_text("// shared", encoding="utf-8")
         assert client.get("/workbench/session-1").status_code == 200
 
@@ -2757,6 +2759,7 @@ def test_static_ui_serves_previous_build_chunks_after_upgrade(monkeypatch, tmp_p
     assert previous_chunk.text == "// page 111"
     assert previous_chunk.headers["Cache-Control"] == "public, max-age=31536000, immutable"
     assert "javascript" in previous_chunk.headers["Content-Type"]
+    assert client.get("/assets/__vite-browser-external-111.js").status_code == 200
 
     install_build("333")
 
