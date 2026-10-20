@@ -6211,6 +6211,13 @@ def test_search_source_delete_keeps_journal_when_revocation_fails(tmp_path):
     assert [(entry.source_id, entry.credential_ref, entry.operation) for entry in pending] == [
         (source["id"], source["credential_ref"], "revoke_api_key_credential"),
     ]
+    before = adapter.credential_count
+    with pytest.raises(ModelHubError) as blocked:
+        asyncio.run(service.create_source({"kind": "api_key", "vendor": "tavily", "key": "test-next-key"}))
+    assert (blocked.value.code, blocked.value.status) == ("engine_down", 503)
+    assert adapter.credential_count == before
+    assert store.config.sources == []
+    assert service.revocations.list() == pending
 
 
 @pytest.mark.parametrize("outcome", ["pass", "balance", "limit", "unknown", "invalid"])

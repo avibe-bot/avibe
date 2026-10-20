@@ -3,8 +3,9 @@
 Status: **contract_version 17**, 2026-10-19: search-service foundations
 (`../web-search-services.md`). Tool-only Sources use `protocol: search`; the catalog,
 credential custody, free checks, re-enable response and service-order persistence
-ship before search execution. S1b, S2 and S3 extend this same version event before
-release; S2 activates the service reads and search chain.
+ship before search execution. S1b, S2 and S3 extend this same version event only
+while it is unshipped; if an RC has carried v17, the next lane opens v18 instead.
+S2 activates the service reads and search chain.
 
 Catalog metadata verified on **2026-10-20**:
 - `search.auto_enroll` is explicit for model vendors with search; only DeepSeek is

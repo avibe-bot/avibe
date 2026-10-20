@@ -2181,8 +2181,8 @@ class ModelHubService:
         pending_revocations: list[PendingCredentialRevocation],
         *,
         sync_engine: bool = False,
-    ) -> None:
-        """Share custody guards across model demand and engine-free API-key cleanup."""
+    ) -> list[PendingCredentialRevocation]:
+        """Replay with shared custody guards and return remaining unowned intents."""
 
         takeover = self.migration_journal.load()
         takeover_credentials = {
@@ -2230,6 +2230,33 @@ class ModelHubService:
                 self.revocations.remove(pending.source_id, pending.credential_ref)
             except OSError:
                 pass
+
+        # A retained intent is not necessarily failed cleanup: active Sources
+        # and prepared takeovers still own their refs. Re-read after replay so
+        # callers can gate new custody on the actual unowned postcondition.
+        return [
+            pending for pending in self.revocations.list()
+            if active_credentials.get(pending.source_id) != pending.credential_ref
+            and (pending.source_id, pending.credential_ref) not in takeover_credentials
+        ]
+
+    async def _require_api_key_cleanup_locked(self, config: ModelHubConfig) -> None:
+        """Refuse new search custody while prior unowned API keys await cleanup."""
+
+        try:
+            pending = [
+                entry for entry in self.revocations.list()
+                if entry.operation == "revoke_api_key_credential"
+            ]
+            if not pending:
+                return
+            remaining = await self._replay_credential_revocations_locked(config, pending)
+        except OSError:
+            raise ModelHubError("engine_down", status=503) from None
+        if any(entry.operation == "revoke_api_key_credential" for entry in remaining):
+            # The journal owns the old ref, so a create nonce can be released,
+            # but that durable ownership does not permit another credential.
+            raise ModelHubError("engine_down", status=503)
 
     async def _prepare_engine_for_demand(self, *, already_synced: bool = False) -> None:
         try:
@@ -4066,15 +4093,9 @@ class ModelHubService:
                 if client_nonce is not None:
                     self._claim_source_create_nonce_locked(client_nonce)
                     nonce_claimed = True
-                pending = [
-                    entry for entry in self.revocations.list()
-                    if entry.operation == "revoke_api_key_credential"
-                ]
-                if pending:
-                    # Search custody needs no engine projection. The typed
-                    # adapter operation refuses bound refs and retires API keys
-                    # locally; OAuth/generic intents remain with engine demand.
-                    await self._replay_credential_revocations_locked(self.store.load(), pending)
+                # Typed cleanup is engine-free; OAuth/generic intents remain
+                # with model demand. Replaying alone is not admission proof.
+                await self._require_api_key_cleanup_locked(self.store.load())
             credential_ref = await _acquire_credential_ref_with_cancellation_ownership(
                 self,
                 self.adapter.provision_credential(vendor, "search", key, None),
@@ -4602,15 +4623,16 @@ class ModelHubService:
                 or not source.credential_ref
             ):
                 raise ModelHubError("discovery_failed")
-            if _search_service_for_source(source) is not None:
-                self._drop_search_reenable_trial(source.id)
             if source.protocol == "search":
+                await self._require_api_key_cleanup_locked(previous)
                 return await self._replace_search_credential_locked(
                     previous,
                     config,
                     source,
                     key,
                 )
+            if _search_service_for_source(source) is not None:
+                self._drop_search_reenable_trial(source.id)
 
             old_credential_ref = source.credential_ref
             auth_scheme = await self._engine_call(

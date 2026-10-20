@@ -20,7 +20,8 @@ def _draft(**changes):
 
 @pytest.mark.parametrize("restart", [False, True])
 @pytest.mark.parametrize("nonce", [NONCE, "scn_searchcleanup0002", None])
-def test_search_create_replays_durable_cleanup_before_new_custody(tmp_path, monkeypatch, restart, nonce):
+@pytest.mark.parametrize("failure", ["revoke", "journal_remove"])
+def test_search_create_waits_for_durable_cleanup_before_new_custody(tmp_path, monkeypatch, restart, nonce, failure):
     service, store, adapter = _service(tmp_path)
     adapter.search_check_outcome = "invalid"
 
@@ -55,6 +56,24 @@ def test_search_create_replays_durable_cleanup_before_new_custody(tmp_path, monk
     draft = _draft(client_nonce=nonce)
     if nonce is None:
         draft.pop("client_nonce")
+    pending = service.revocations.list()
+    before = adapter.credential_count
+    with monkeypatch.context() as patch:
+        if failure == "revoke":
+            patch.setattr(adapter, "revoke_api_key_credential", unavailable)
+        else:
+            def fail_remove(*_args):
+                raise OSError("test journal removal unavailable")
+            patch.setattr(service.revocations, "remove", fail_remove)
+        for _ in range(2):
+            with pytest.raises(ModelHubError) as blocked:
+                asyncio.run(service.create_source(draft))
+            assert (blocked.value.code, blocked.value.status) == ("engine_down", 503)
+            assert adapter.credential_count == before
+            assert service.revocations.list() == pending
+            assert not service._source_create_nonces
+            assert not store.load().sources
+    operations.clear()
     result = asyncio.run(service.create_source(draft))
     assert operations == ["revoke", "provision"]
     assert result["source"].get("client_nonce") == nonce
@@ -84,26 +103,105 @@ def test_search_retry_removes_the_real_local_orphan_without_an_engine(tmp_path, 
     assert adapter.synced == []
 
 
-def test_search_cleanup_replay_preserves_live_and_takeover_credentials(tmp_path, monkeypatch):
+@pytest.mark.parametrize("remove_fails", [False, True])
+def test_search_cleanup_admission_preserves_live_and_takeover_credentials(tmp_path, monkeypatch, remove_fails):
     service, store, adapter = _service(tmp_path)
     source = asyncio.run(service.create_source(_draft()))["source"]
     service.revocations.add(source["id"], source["credential_ref"], operation="revoke_api_key_credential")
     service.revocations.add("src_takeover01", "cred_takeover01", operation="revoke_api_key_credential")
     service.revocations.add("src_oauthold01", "cred_oauthold01")
+    service.revocations.add("src_oauthorphan01", "cred_oauthorphan01", operation="cleanup_orphaned_oauth_material")
     monkeypatch.setattr(service.migration_journal, "load", lambda: {
         "credentials": [{"source_id": "src_takeover01", "credential_ref": "cred_takeover01"}],
     })
-    async def replay():
+    if remove_fails:
+        def fail_remove(*_args):
+            raise OSError("test active-intent removal unavailable")
+        monkeypatch.setattr(service.revocations, "remove", fail_remove)
+    async def admit():
         async with service._mutation_lock:
-            await service._replay_credential_revocations_locked(
-                store.load(),
-                [row for row in service.revocations.list() if row.operation == "revoke_api_key_credential"],
-            )
+            await service._require_api_key_cleanup_locked(store.load())
 
-    asyncio.run(replay())
+    asyncio.run(admit())
     assert not adapter.revoked
-    assert {entry.credential_ref for entry in service.revocations.list()} == {"cred_takeover01", "cred_oauthold01"}
+    assert not adapter.orphan_cleanup_calls
+    expected = {"cred_takeover01", "cred_oauthold01", "cred_oauthorphan01"}
+    if remove_fails:
+        expected.add(source["credential_ref"])
+    assert {entry.credential_ref for entry in service.revocations.list()} == expected
     assert store.load().sources[0].credential_ref == source["credential_ref"]
+    assert adapter.synced == []
+
+
+@pytest.mark.parametrize("outcome", ["pass", "invalid"])
+@pytest.mark.parametrize("next_mutation", ["create", "replace"])
+def test_search_replacement_cleanup_gates_subsequent_custody(tmp_path, monkeypatch, outcome, next_mutation):
+    service, store, adapter = _service(tmp_path)
+    source = asyncio.run(service.create_source(_draft()))["source"]
+
+    async def unavailable(_ref):
+        raise OSError("test retirement unavailable")
+
+    async def mutate():
+        if next_mutation == "replace":
+            return await service.replace_credential(source["id"], {"key": "test-next-key"})
+        return await service.create_source(_draft(client_nonce="scn_searchcleanup0002"))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(adapter, "revoke_api_key_credential", unavailable)
+        adapter.search_check_outcome = outcome
+        if outcome == "invalid":
+            with pytest.raises(ModelHubError):
+                asyncio.run(service.replace_credential(source["id"], {"key": "test-replacement-key"}))
+        else:
+            asyncio.run(service.replace_credential(source["id"], {"key": "test-replacement-key"}))
+        pending = service.revocations.list()
+        assert len(pending) == 1
+        assert pending[0].operation == "revoke_api_key_credential"
+        assert pending[0].credential_ref == (source["credential_ref"] if outcome == "pass" else "cred_test002")
+        before_config, before_count = store.load().to_payload(), adapter.credential_count
+        adapter.search_check_outcome = "pass"
+        for _ in range(2):
+            with pytest.raises(ModelHubError) as blocked:
+                asyncio.run(mutate())
+            assert (blocked.value.code, blocked.value.status) == ("engine_down", 503)
+            assert adapter.credential_count == before_count
+            assert store.load().to_payload() == before_config
+            assert service.revocations.list() == pending
+    asyncio.run(mutate())
+    assert service.revocations.list() == []
+    assert adapter.credential_count == before_count + 1
+    assert adapter.synced == []
+
+
+@pytest.mark.parametrize("failure", ["unreadable", "cancelled"])
+def test_search_cleanup_admission_failure_releases_nonce_without_provisioning(tmp_path, monkeypatch, failure):
+    service, store, adapter = _service(tmp_path)
+    service.revocations.add("src_orphan01", "cred_orphan01", operation="revoke_api_key_credential")
+    pending = service.revocations.list()
+
+    def unreadable():
+        raise OSError("test journal unreadable")
+
+    async def cancelled(_ref):
+        raise asyncio.CancelledError
+
+    with monkeypatch.context() as patch:
+        if failure == "unreadable":
+            patch.setattr(service.revocations, "list", unreadable)
+        else:
+            patch.setattr(adapter, "revoke_api_key_credential", cancelled)
+        with pytest.raises(ModelHubError if failure == "unreadable" else asyncio.CancelledError) as blocked:
+            asyncio.run(service.create_source(_draft()))
+        if failure == "unreadable":
+            assert (blocked.value.code, blocked.value.status) == ("engine_down", 503)
+    assert not store.load().sources
+    assert not service._source_create_nonces
+    assert adapter.credential_count == 0
+    assert service.revocations.list() == pending
+    asyncio.run(service.create_source(_draft()))
+    assert service.revocations.list() == []
+    assert adapter.credential_count == 1
     assert adapter.synced == []
 
 
