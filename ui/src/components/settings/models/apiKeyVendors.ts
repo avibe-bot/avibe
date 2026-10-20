@@ -30,10 +30,19 @@ export const CUSTOM_VENDOR = 'custom';
 
 /** Catalog order is file order. The backend ships the list already ranked, and
  *  re-sorting it here would put the ranking in a second place. */
-export const API_KEY_VENDOR_PRESETS = catalog as readonly ApiKeyVendorPreset[];
+export const ALL_API_KEY_VENDOR_PRESETS = catalog as readonly ApiKeyVendorPreset[];
 
-/** The preset a vendor id names, or `null` for 自定义 — which is also what an id
- *  the shipped catalog no longer carries resolves to, so a row dropped upstream
- *  degrades to the custom path rather than pinning a protocol nothing defines. */
+/** Tool-only search rows belong to the web-search card, not the generic API-key
+ * model form. Keep the generic picker dormant until that card sends the
+ * tool-only request shape. */
+export const API_KEY_VENDOR_PRESETS = ALL_API_KEY_VENDOR_PRESETS.filter(
+  (preset) => preset.protocol !== 'search',
+);
+
+/** The full catalog lookup is also used for labels on already persisted rows. */
 export const apiKeyVendorPreset = (vendor: string): ApiKeyVendorPreset | null =>
+  ALL_API_KEY_VENDOR_PRESETS.find((preset) => preset.id === vendor) ?? null;
+
+/** Resolve only a model-capable row for the generic API-key form. */
+export const modelApiKeyVendorPreset = (vendor: string): ApiKeyVendorPreset | null =>
   API_KEY_VENDOR_PRESETS.find((preset) => preset.id === vendor) ?? null;

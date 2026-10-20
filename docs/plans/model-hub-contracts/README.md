@@ -1,6 +1,33 @@
 # Model Hub contracts
 
-Status: **contract_version 16**, 2026-10-16: two non-self-healing Source causes,
+Status: **contract_version 17**, 2026-10-19: search-service foundations
+(`../web-search-services.md`). Tool-only Sources use `protocol: search`; the catalog,
+credential custody, free checks, re-enable response and service-order persistence
+ship before search execution. S1b, S2 and S3 extend this same version event only
+while it is unshipped; if an RC has carried v17, the next lane opens v18 instead.
+S2 activates the service reads and search chain.
+
+Catalog metadata verified on **2026-10-20**:
+- `search.auto_enroll` is explicit for model vendors with search; only DeepSeek is
+  enabled automatically. S1b and S2 own the resulting settings defaults.
+- Exa's `search.result.reported_cost` names `costDollars.total` with `estimate: true`.
+  Its `search.request.content_max_chars` names `contents.text.maxCharacters` with
+  `value: 4000`, applied only when page content is requested. Both follow the
+  [Exa Search reference](https://exa.ai/docs/reference/search).
+- The [DeepSeek Search reference](https://api-docs.deepseek.com/api/search) and
+  [Tavily Search OpenAPI](https://docs.tavily.com/documentation/api-reference/openapi.json)
+  publish no hard per-page text bound. They retain the content setting with no
+  invented `content_results_max`. The adapter's hard 8 MiB response cap remains;
+  an over-cap body is unreadable, not a guarantee that every legitimate page fits.
+  S2 applies the design's billing, cooldown and failover rules to that outcome.
+- Tavily's usage response may omit account pairs. A valid key pair with headroom
+  (including `limit: null`) then passes the free credential check; it proves key
+  authentication, while the first search confirms payment. A key at its limit
+  still reports `limit`; malformed or half-present pairs report `unknown`.
+- The query bound is 128 characters for DeepSeek only. Tavily and Exa document no
+  query-length maximum, so their catalog `query_max_chars` remains null.
+
+It builds on v16 (2026-10-16): two non-self-healing Source causes,
 `plan_excludes_product` (`models.source.needs_action.plan_excludes_product`), for a plan that does not include the
 product, and `spend_limit_reached` (`models.source.needs_action.spend_limit_reached`), for an account past a spend or
 usage limit only raising it lifts, join the resolution-event, provenance, Source, agent-chain and probe vocabularies,
@@ -97,7 +124,11 @@ commit is not evidence that the complete final protocol has landed.
   inherited routing through the same Restore/Undo/Save flow, never empty Manual.
 - A hop whose upstream `model_id` differs from its menu model is an explicit configured
   mapping. There is no separate mapping object or runtime mapping event.
-- The protocol vocabulary is exactly `anthropic | openai_responses | openai_chat | google`.
+- The Source protocol vocabulary is `anthropic | openai_responses | openai_chat | google | search`.
+`MODEL_PROTOCOLS` is the four invocable model-wire protocols (`anthropic | openai_responses |
+openai_chat | google`); `SOURCE_PROTOCOLS` is that tuple plus the tool-only `search` protocol.
+Model observation, probes, discovery, auto-detection, provider overlays, and hop schemas use
+`MODEL_PROTOCOLS`; only persisted Source and Source-create shapes use `SOURCE_PROTOCOLS`.
   `base_url` distinguishes official endpoints from relays and self-hosted gateways.
   Google is explicitly declared through API/config; the three-option UI picker and
   custom Auto-detection set remain unchanged.
@@ -131,11 +162,20 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    bound credential under the fixed vendor protocol. A newly stored Hub credential
    that no add-time observation authenticated — an explicit unverified save, a
    native-config import, Hub OAuth admission, any credential or endpoint replacement —
-   carries an opaque `verification_pending` identity until an actual
-   matching-credential model call succeeds. Its clearing is a fresh cross-process
-   field mutation; model discovery never clears it. A typed Base URL never
-   supplies protocol ownership. Model-free validation, altered-credential controls
-   and publicly readable model lists do not prove authentication; on a protocol that
+   carries an opaque `verification_pending` identity. Model Sources keep the
+   matching-credential model-call rule: a successful model call with the same current
+   credential and marker may clear it. A tool-only `search` Source never makes a model call.
+   For every search-capable Source, including an official DeepSeek model Source
+   saved unverified, the marker clears on an authenticated search outcome with the matching credential
+   (any 200, a 402, or a catalog-named limit), or a free-check `pass`, `balance` or
+   `limit` for that credential. A 200 proves authentication even when its results
+   are empty or its body is unreadable. Clearing requires the same current credential
+   and marker and is a fresh cross-process field mutation; `credential_generation`
+   does not change. Free-check `unknown` and `invalid` leave it unchanged.
+   Model discovery never clears it.
+   A typed Base URL never supplies protocol ownership. For model observation,
+   model-free validation, altered-credential controls and publicly readable model
+   lists do not prove authentication; on a protocol that
    already has an owner, a model listing that answers the credential while refusing
    the identical uncredentialed request does. See the 2026-09-07 rulings
    in `docs/plans/model-hub.md` and the create/Source schemas for the complete policy.
@@ -233,7 +273,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 16 must coexist in all registered version locations on the same tested head:
+`contract_version` 17 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`
@@ -269,8 +309,10 @@ persisted-shape rule that governs config files. It therefore accepts the release
 as a set ending at the terminal one, and nothing branches on which member a record
 carries.
 
-The four-value protocol closure includes `source.schema.json`, `adapter-interface.py`,
-and the byte-identical `core/handlers/model_hub/adapter.py` on the same tested head.
+The five-value Source protocol closure includes `source.schema.json`, `source-create.schema.json`,
+and the storage/admission constants. The model-only closure is the four-value
+`source-probe-result.schema.json` protocol and its `MODEL_PROTOCOLS` consumers; search is not
+admitted by observation, probes, discovery, auto-detection, provider overlays, or hop schemas.
 
 After implementation lands, these contracts are read-only for downstream lanes. An
 implementation-discovered mismatch is reported to the orchestrator for a targeted
@@ -280,7 +322,7 @@ revision; the discovering lane does not reinterpret or edit the contract in plac
 
 | File | Authority and consumer role |
 | --- | --- |
-| `source.schema.json` | Source identity, channel, four protocols, state, usage, inventory, credential reference, and audit metadata. |
+| `source.schema.json` | Source identity, channel, five protocols, state, usage, inventory, credential reference, and audit metadata. |
 | `source-create.schema.json` | API-key Source creation request, transient credential boundary, optional single-protocol constraint, and lost-response correlation. |
 | `agent-supply.schema.json` | Backend mode, default Source membership/order and sparse manual intent, configuration eligibility, model-supply and backend-health projections. |
 | `backend-model.schema.json` | Backend Agent model identity, editable capability metadata, and server-owned lock/routeability projection. |

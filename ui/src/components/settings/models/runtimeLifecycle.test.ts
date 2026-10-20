@@ -11,7 +11,7 @@ const asset = (platform: 'darwin-arm64' | 'linux-amd64') => ({
 });
 
 const runtime = (resolution: 'resolved' | 'unresolved' | 'unsupported'): RuntimeDependency => ({
-  contract_version: 16,
+  contract_version: 17,
   host_platform: 'darwin-arm64',
   manifest: resolution === 'unresolved'
     ? { name: 'cliproxyapi', resolution, assets: [] }

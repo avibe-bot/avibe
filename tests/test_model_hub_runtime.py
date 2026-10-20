@@ -31,10 +31,12 @@ from core.handlers.model_hub.adapter import (
     EngineHealth,
     OAuthSubmissionRejectedError,
     OriginNotAllowedError,
+    MODEL_PROTOCOLS,
     RawCallOutcome,
     RawOutcomeKind,
     RetainedMaterialDisposition,
     RuntimePlatformUnsupportedError,
+    SearchResponse,
     SOURCE_PROTOCOLS,
     SourceBinding,
 )
@@ -56,7 +58,12 @@ from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime import installer as runtime_installer_module
 from vibe.model_hub_runtime import supervisor as supervisor_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
-from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog, official_models_dev_provider
+from vibe.model_hub_runtime.api_key_vendors import (
+    _validate_search_catalog,
+    api_key_vendor_catalog,
+    official_models_dev_provider,
+    search_service,
+)
 from vibe.model_hub_runtime.client import (
     EngineClient,
     EngineClientError,
@@ -109,6 +116,7 @@ API_KEY_VENDOR_RUNTIME_CASES = tuple(
         *[
             pytest.param(entry.id, entry.protocol, entry.official_base_url, id=entry.id)
             for entry in api_key_vendor_catalog()
+            if entry.protocol in MODEL_PROTOCOLS
         ],
         pytest.param("codex", "openai_responses", "https://api.openai.com/v1", id="codex"),
     ]
@@ -1359,7 +1367,7 @@ def test_manifest_resolution_drives_admission_persistence_and_schema(
         installer=manager,
         state_store=EngineStateStore(tmp_path / "state"),
     )
-    projected = {"contract_version": 16, **supervisor.status()}
+    projected = {"contract_version": 17, **supervisor.status()}
     schema = json.loads(
         Path("docs/plans/model-hub-contracts/runtime-dependency.schema.json").read_text(
             encoding="utf-8"
@@ -2258,6 +2266,340 @@ def test_a_persisted_key_source_survives_a_repin_of_its_vendor(tmp_path: Path) -
     ]
 
 
+def test_search_free_check_uses_bounded_catalog_transport(monkeypatch):
+    calls: dict[str, object] = {}
+    caller_thread = threading.current_thread().name
+
+    class Store:
+        def read_api_key(self, credential_ref):
+            calls["read_thread"] = threading.current_thread().name
+            return "tvly-secret"
+
+        def credential_metadata(self, credential_ref):
+            calls["metadata_thread"] = threading.current_thread().name
+            return {"vendor": "tavily"}
+
+    class ResponseContent:
+        async def iter_chunked(self, _chunk_size):
+            yield b'{"key":{"usage": 1, "limit": 10}, "account":{"plan_usage": 1, "plan_limit": 10}}'
+
+    class Response:
+        status = 200
+        headers = {"Content-Type": "application/json", "X-Leak": "must-not-cross"}
+        content = ResponseContent()
+
+    class Request:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Session:
+        def __init__(self, **kwargs):
+            calls["session_kwargs"] = kwargs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def request(self, method, endpoint, **kwargs):
+            calls["request"] = (method, endpoint, kwargs)
+            return Request()
+
+    monkeypatch.setattr(runtime_adapter_module.aiohttp, "ClientSession", Session)
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=Store())  # type: ignore[arg-type]
+    catalog = {
+        "vendor": "tavily",
+        "endpoint": "https://api.tavily.com/search",
+        "auth": "bearer",
+        "free_check": {
+            "method": "GET",
+            "endpoint": "https://api.tavily.com/usage",
+            "pass": {"status": 200},
+            "limit": {"pairs": [
+                {"usage": "key.usage", "limit": "key.limit"},
+                {"usage": "account.plan_usage", "limit": "account.plan_limit"},
+                {"usage": "account.paygo_usage", "limit": "account.paygo_limit"},
+            ]},
+            "invalid_statuses": [401],
+        },
+    }
+
+    outcome = asyncio.run(adapter.check_search_credential("cred_search", catalog))
+
+    assert outcome.outcome == "pass"
+    timeout = calls["session_kwargs"]["timeout"]
+    assert timeout.total == 10.0
+    assert timeout.connect == 5.0
+    assert calls["session_kwargs"]["trust_env"] is False
+    assert calls["request"][2]["allow_redirects"] is False
+    assert calls["request"][2]["headers"] == {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": "Bearer tvly-secret",
+    }
+    assert calls["read_thread"] != caller_thread
+    assert calls["metadata_thread"] != caller_thread
+
+
+@pytest.mark.parametrize(
+    ("body_error", "expected_error"),
+    [
+        (asyncio.TimeoutError(), "timeout"),
+        (ValueError("body read failed"), "connection"),
+        (asyncio.CancelledError(), "cancelled"),
+    ],
+)
+def test_search_response_retains_wire_facts_after_body_read_failure(
+    monkeypatch, body_error, expected_error
+):
+    calls: list[str] = []
+
+    class Store:
+        def read_api_key(self, _credential_ref):
+            return "tvly-secret"
+
+        def credential_metadata(self, _credential_ref):
+            return {"vendor": "tavily"}
+
+    class ResponseContent:
+        async def iter_chunked(self, _chunk_size):
+            raise body_error
+            yield b""  # pragma: no cover
+
+    class Response:
+        status = 503
+        headers = {"Content-Type": "application/json", "Retry-After": "2"}
+        content = ResponseContent()
+
+    class Request:
+        def __init__(self, traces):
+            self.traces = traces
+
+        async def __aenter__(self):
+            for trace in self.traces:
+                for callback in trace.on_connection_create_end:
+                    await callback(None, None, None)
+            calls.append("write")
+            return Response()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Session:
+        def __init__(self, *, trace_configs, **_kwargs):
+            self.traces = trace_configs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def request(self, _method, _endpoint, **_kwargs):
+            return Request(self.traces)
+
+    monkeypatch.setattr(runtime_adapter_module.aiohttp, "ClientSession", Session)
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=Store())  # type: ignore[arg-type]
+
+    response = asyncio.run(
+        adapter.search(
+            "src_search",
+            "tavily",
+            "tavily/search",
+            "cred_search",
+            {"query": "hello", "max_results": 1},
+            on_sent=lambda: calls.append("sent"),
+        )
+    )
+
+    assert response.http_status == 503
+    assert response.headers == {"Content-Type": "application/json", "Retry-After": "2"}
+    assert response.response_received_at is not None
+    assert response.error == expected_error
+    assert response.on_sent_fired is True
+    assert calls == ["sent", "write"]
+
+
+def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypatch):
+    calls: list[str] = []
+
+    class Store:
+        def read_api_key(self, _credential_ref):
+            return "tvly-secret"
+
+        def credential_metadata(self, _credential_ref):
+            return {"vendor": "tavily"}
+
+    class ResponseContent:
+        async def iter_chunked(self, _chunk_size):
+            yield b'{"results": []}'
+
+    class Response:
+        status = 200
+        headers = {}
+        content = ResponseContent()
+
+    class Request:
+        def __init__(self, traces):
+            self.traces = traces
+
+        async def __aenter__(self):
+            for trace in self.traces:
+                for callback in trace.on_connection_create_end:
+                    await callback(None, None, None)
+                for callback in trace.on_connection_reuseconn:
+                    await callback(None, None, None)
+            calls.append("write")
+            return Response()
+
+        async def __aexit__(self, *_args):
+            return None
+
+    class Session:
+        def __init__(self, *, trace_configs, **_kwargs):
+            self.traces = trace_configs
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def request(self, _method, _endpoint, **_kwargs):
+            return Request(self.traces)
+
+    monkeypatch.setattr(runtime_adapter_module.aiohttp, "ClientSession", Session)
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=Store())  # type: ignore[arg-type]
+
+    response = asyncio.run(
+        adapter.search(
+            "src_search",
+            "tavily",
+            "tavily/search",
+            "cred_search",
+            {"query": "hello", "max_results": 1},
+            on_sent=lambda: calls.append("sent"),
+        )
+    )
+
+    assert response.http_status == 200
+    assert response.on_sent_fired is True
+    assert calls == ["sent", "write"]
+
+
+def test_search_free_check_propagates_cancelled_transport(monkeypatch):
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=object())  # type: ignore[arg-type]
+    service = search_service("tavily", "search")
+    assert service is not None
+
+    async def response(**_kwargs):
+        return SearchResponse(401, {"Retry-After": "2"}, None, "cancelled", True)
+
+    monkeypatch.setattr(adapter, "_search_http", response)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            adapter.check_search_credential(
+                "cred_search",
+                {"vendor": "tavily", **service},
+            )
+        )
+
+
+def test_tavily_free_check_classifies_reported_usage_limit(monkeypatch):
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=object())  # type: ignore[arg-type]
+    service = search_service("tavily", "search")
+    assert service is not None
+
+    async def response(**_kwargs):
+        return SearchResponse(200, {}, b'{"key":{"usage": 10, "limit": 10}, "account":{"plan_usage": 1, "plan_limit": 20}}')
+
+    monkeypatch.setattr(adapter, "_search_http", response)
+    outcome = asyncio.run(
+        adapter.check_search_credential(
+            "cred_search",
+            {"vendor": "tavily", **service},
+        )
+    )
+
+    assert outcome.outcome == "limit"
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ({"key": {"usage": 1, "limit": 10}}, "pass"),
+        ({"key": {"usage": 1, "limit": None}}, "pass"),
+        ({"key": {"usage": 1, "limit": 10}, "account": {}}, "pass"),
+        ({"key": {"usage": 10, "limit": 10}}, "limit"),
+        ({"key": {"usage": 11, "limit": 10}}, "limit"),
+        ({"key": {"usage": 1, "limit": None}, "account": {"plan_usage": 1, "plan_limit": 10}}, "pass"),
+        ({"account": {"plan_usage": 1, "plan_limit": 10}}, "pass"),
+        ({"account": {"plan_usage": 10, "plan_limit": 10, "paygo_usage": 1, "paygo_limit": 10}}, "pass"),
+        ({"key": {"usage": 1, "limit": 10}, "account": {"plan_usage": 10, "plan_limit": 10}}, "limit"),
+    ],
+)
+def test_tavily_free_check_accepts_valid_pairs_with_optional_account(monkeypatch, body, expected):
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=object())  # type: ignore[arg-type]
+    service = search_service("tavily", "search")
+    assert service is not None
+
+    async def response(**_kwargs):
+        return SearchResponse(200, {}, json.dumps(body).encode("utf-8"))
+
+    monkeypatch.setattr(adapter, "_search_http", response)
+    outcome = asyncio.run(
+        adapter.check_search_credential(
+            "cred_search",
+            {"vendor": "tavily", **service},
+        )
+    )
+    assert outcome.outcome == expected
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"key": {}, "account": {}},
+        {"key": {"usage": "10", "limit": 20}},
+        {"key": {"usage": 1}},
+        {"key": {"limit": 10}},
+        {"key": {"limit": None}},
+        {"key": {"usage": True, "limit": 10}},
+        {"key": {"usage": 1, "limit": False}},
+        {"key": {"usage": float("nan"), "limit": 10}},
+        {"key": {"usage": 1, "limit": float("inf")}},
+        {"key": {"usage": 1, "limit": 10}, "account": {"plan_usage": 1}},
+        {"key": {"usage": 1, "limit": None}, "account": {"paygo_limit": 10}},
+        {"key": {"usage": 1, "limit": 10}, "account": None},
+        {"key": {"usage": 1, "limit": 10}, "account": []},
+        {"key": {"usage": 1, "limit": 10}, "account": "invalid"},
+        {"key": None, "account": {"plan_usage": 1, "plan_limit": 10}},
+        {"account": {"plan_usage": 10, "plan_limit": 20, "paygo_usage": "10"}},
+    ],
+)
+def test_tavily_free_check_returns_unknown_for_invalid_reported_usage_fields(monkeypatch, body):
+    adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=object())  # type: ignore[arg-type]
+    service = search_service("tavily", "search")
+    assert service is not None
+
+    async def response(**_kwargs):
+        return SearchResponse(200, {}, json.dumps(body).encode("utf-8"))
+
+    monkeypatch.setattr(adapter, "_search_http", response)
+    outcome = asyncio.run(
+        adapter.check_search_credential(
+            "cred_search",
+            {"vendor": "tavily", **service},
+        )
+    )
+
+    assert outcome.outcome == "unknown"
+
+
 def test_source_record_requires_valid_reasoning_state() -> None:
     payload = {
         "source_id": "src_fixture123",
@@ -2381,6 +2723,145 @@ def test_valid_source_state_is_loaded_without_touching_the_file(
     ]
 
 
+def test_shipped_api_key_vendor_catalog_matches_its_schema() -> None:
+    catalog = json.loads(Path("vibe/data/api_key_vendors.json").read_text(encoding="utf-8"))
+    schema = json.loads(Path("vibe/data/api_key_vendors.schema.json").read_text(encoding="utf-8"))
+    Draft7Validator(schema).validate(catalog)
+
+
+def test_exa_catalog_bounds_content_and_marks_reported_cost_as_estimate() -> None:
+    service = search_service("exa", "search")
+    assert service["result"]["reported_cost"] == {
+        "path": "costDollars.total", "estimate": True,
+    }
+    assert service["request"]["content_max_chars"] == {
+        "path": "contents.text.maxCharacters", "value": 4000,
+    }
+
+
+@pytest.mark.parametrize(("mapping", "valid"), [
+    ({"path": "contents.text.maxCharacters", "value": 4000}, True),
+    ({"path": "contents.text.maxCharacters", "value": 1}, True),
+    ("contents.text.maxCharacters", False),
+    (None, False),
+    ({}, False),
+    ({"path": "contents.text.maxCharacters"}, False),
+    ({"value": 4000}, False),
+    ({"path": "", "value": 4000}, False),
+    ({"path": 1, "value": 4000}, False),
+    ({"path": "contents.text.maxCharacters", "value": True}, False),
+    ({"path": "contents.text.maxCharacters", "value": "4000"}, False),
+    ({"path": "contents.text.maxCharacters", "value": 0}, False),
+    ({"path": "contents.text.maxCharacters", "value": -1}, False),
+    ({"path": "contents.text.maxCharacters", "value": 1.5}, False),
+    ({"path": "contents.text.maxCharacters", "value": 4001}, False),
+    ({"path": "contents.text.maxCharacters", "value": 4000, "unknown": 1}, False),
+])
+def test_search_content_limit_metadata_matches_schema_and_runtime(mapping, valid) -> None:
+    catalog = json.loads(Path("vibe/data/api_key_vendors.json").read_text(encoding="utf-8"))
+    row = next(row for row in catalog if row["id"] == "exa")
+    row["search"]["request"]["content_max_chars"] = mapping
+    schema = json.loads(Path("vibe/data/api_key_vendors.schema.json").read_text(encoding="utf-8"))
+    assert Draft7Validator(schema).is_valid([row]) is valid
+    if valid:
+        assert _validate_search_catalog(row["search"], protocol="search")["request"]["content_max_chars"] == mapping
+    else:
+        with pytest.raises(ValueError, match="content maximum"):
+            _validate_search_catalog(row["search"], protocol="search")
+
+
+@pytest.mark.parametrize(("mapping", "valid"), [
+    ({"path": "costDollars.total", "estimate": True}, True),
+    ({"path": "costDollars.total", "estimate": False}, True),
+    ("costDollars.total", False),
+    (None, False),
+    ({}, False),
+    ({"path": "costDollars.total"}, False),
+    ({"estimate": True}, False),
+    ({"path": "", "estimate": True}, False),
+    ({"path": 1, "estimate": True}, False),
+    ({"path": "costDollars.total", "estimate": "true"}, False),
+    ({"path": "costDollars.total", "estimate": 1}, False),
+    ({"path": "costDollars.total", "estimate": True, "unknown": 1}, False),
+])
+def test_search_reported_cost_metadata_matches_schema_and_runtime(mapping, valid) -> None:
+    catalog = json.loads(Path("vibe/data/api_key_vendors.json").read_text(encoding="utf-8"))
+    row = next(row for row in catalog if row["id"] == "exa")
+    row["search"]["result"]["reported_cost"] = mapping
+    schema = json.loads(Path("vibe/data/api_key_vendors.schema.json").read_text(encoding="utf-8"))
+    assert Draft7Validator(schema).is_valid([row]) is valid
+    if valid:
+        assert _validate_search_catalog(row["search"], protocol="search")["result"]["reported_cost"] == mapping
+    else:
+        with pytest.raises(ValueError, match="reported cost"):
+            _validate_search_catalog(row["search"], protocol="search")
+
+
+@pytest.mark.parametrize("has_null", [False, True])
+def test_vendor_catalog_keeps_absent_or_null_search_metadata_valid(has_null) -> None:
+    catalog = json.loads(Path("vibe/data/api_key_vendors.json").read_text(encoding="utf-8"))
+    row = next(row for row in catalog if row["id"] == "openai")
+    if has_null:
+        row["search"] = None
+    else:
+        row.pop("search", None)
+    schema = json.loads(Path("vibe/data/api_key_vendors.schema.json").read_text(encoding="utf-8"))
+    Draft7Validator(schema).validate([row])
+    assert _validate_search_catalog(row.get("search"), protocol=row["protocol"]) is None
+
+
+def test_search_query_limits_use_only_documented_vendor_bounds() -> None:
+    assert {
+        entry.id: entry.search["limits"]["query_max_chars"]
+        for entry in api_key_vendor_catalog() if entry.search is not None
+    } == {"deepseek": 128, "tavily": None, "exa": None}
+
+
+def test_only_deepseek_search_auto_enrolls_model_sources() -> None:
+    enrolled = [entry.id for entry in api_key_vendor_catalog() if entry.search and entry.search.get("auto_enroll")]
+    assert enrolled == ["deepseek"]
+    assert search_service("deepseek", "openai_chat")["auto_enroll"] is True
+    for vendor in ("tavily", "exa"):
+        assert "auto_enroll" not in search_service(vendor, "search")
+
+
+@pytest.mark.parametrize("auto_enroll", [True, False, "true", 1, None, "absent"])
+def test_model_search_auto_enrollment_matches_schema_and_runtime(auto_enroll) -> None:
+    catalog = json.loads(Path("vibe/data/api_key_vendors.json").read_text(encoding="utf-8"))
+    row = next(row for row in catalog if row["id"] == "deepseek")
+    if auto_enroll == "absent":
+        del row["search"]["auto_enroll"]
+    else:
+        row["search"]["auto_enroll"] = auto_enroll
+    schema = json.loads(Path("vibe/data/api_key_vendors.schema.json").read_text(encoding="utf-8"))
+    valid = isinstance(auto_enroll, bool)
+    assert Draft7Validator(schema).is_valid([row]) is valid
+    if valid:
+        assert _validate_search_catalog(row["search"], protocol="openai_chat")["auto_enroll"] is auto_enroll
+    else:
+        with pytest.raises(ValueError, match="search catalog"):
+            _validate_search_catalog(row["search"], protocol="openai_chat")
+
+
+@pytest.mark.parametrize("vendor", ["deepseek", "tavily", "exa"])
+@pytest.mark.parametrize("results_max", [1, 5, 100, 101, 0, -1, True, 1.5, "100", None])
+def test_search_catalog_results_ceiling_matches_schema_and_runtime(vendor, results_max) -> None:
+    catalog = json.loads(Path("vibe/data/api_key_vendors.json").read_text(encoding="utf-8"))
+    row = next(row for row in catalog if row["id"] == vendor)
+    if results_max is None:
+        del row["search"]["limits"]["results_max"]
+    else:
+        row["search"]["limits"]["results_max"] = results_max
+    schema = json.loads(Path("vibe/data/api_key_vendors.schema.json").read_text(encoding="utf-8"))
+    valid = type(results_max) is int and 1 <= results_max <= 100
+    assert Draft7Validator(schema).is_valid([row]) is valid
+    if valid:
+        assert _validate_search_catalog(row["search"], protocol=row["protocol"]) == row["search"]
+    else:
+        with pytest.raises(ValueError, match="results maximum"):
+            _validate_search_catalog(row["search"], protocol=row["protocol"])
+
+
 @pytest.mark.parametrize(
     ("vendor", "expected_base_url"),
     [
@@ -2453,6 +2934,7 @@ def test_openai_compatibility_engine_base_url_uses_configured_api_root(
     [
         pytest.param(entry.official_base_url, entry.protocol, id=entry.id)
         for entry in api_key_vendor_catalog()
+        if entry.protocol in MODEL_PROTOCOLS
     ],
 )
 def test_catalog_official_base_url_composes_one_probe_endpoint(
@@ -9279,7 +9761,7 @@ def test_every_oauth_start_vendor_binds_by_exactly_one_route(
             return {"status_code": 200, "body": json.dumps({"type": "message"})}
 
     observed: set[str] = set()
-    for protocol in SOURCE_PROTOCOLS:
+    for protocol in MODEL_PROTOCOLS:
         client = Client()
         try:
             runtime_adapter_module._probe_oauth_protocol_response(
@@ -9303,7 +9785,7 @@ def test_every_oauth_start_vendor_binds_by_exactly_one_route(
         f"{vendor} must bind by exactly one of a response probe or an engine-declared pin"
     )
     if pinned is not None:
-        assert pinned in SOURCE_PROTOCOLS
+        assert pinned in MODEL_PROTOCOLS
 
 
 def test_oauth_model_discovery_accepts_engine_definition_fields(tmp_path: Path) -> None:

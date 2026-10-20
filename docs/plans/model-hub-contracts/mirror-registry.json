@@ -1,5 +1,5 @@
 {
-  "contract_version": 16,
+  "contract_version": 17,
   "input_generation": {
     "mode": "same_run_live_files",
     "external_snapshot": "content_fingerprint_required"
@@ -63,12 +63,12 @@
       "allowed_property_values": [
         {
           "file": "docs/plans/model-hub-contracts/source.schema.json",
-          "property_path": ["allOf", 0, "then", "properties", "vendor"],
+          "property_path": ["allOf", 1, "then", "properties", "vendor"],
           "values": ["custom"]
         },
         {
           "file": "docs/plans/model-hub-contracts/source-create.schema.json",
-          "property_path": ["allOf", 0, "then", "properties", "vendor"],
+          "property_path": ["allOf", 1, "then", "properties", "vendor"],
           "values": ["custom"]
         }
       ],
@@ -598,11 +598,6 @@
         },
         {
           "kind": "marker_tail",
-          "file": "docs/plans/model-hub-contracts/opencode-overlay.md",
-          "marker": "authority-consumer: protocol "
-        },
-        {
-          "kind": "marker_tail",
           "file": "docs/plans/model-hub-contracts/api.md",
           "marker": "authority-consumer: protocol "
         },
@@ -610,17 +605,37 @@
           "kind": "schema_vocabulary",
           "schema": "source-create.schema.json",
           "paths": ["/properties/protocol"]
+        }
+      ]
+    },
+    {
+      "id": "D29",
+      "domain": "Model protocols",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "source-probe-result.schema.json",
+        "paths": ["/properties/protocol"]
+      },
+      "consumers": [
+        {
+          "kind": "python_string_assignment",
+          "file": "core/handlers/model_hub/adapter.py",
+          "name": "MODEL_PROTOCOLS"
         },
         {
-          "kind": "schema_vocabulary",
-          "schema": "source-probe-result.schema.json",
-          "paths": ["/properties/protocol"]
+          "kind": "python_string_assignment",
+          "file": "docs/plans/model-hub-contracts/adapter-interface.py",
+          "name": "MODEL_PROTOCOLS"
         },
         {
           "kind": "schema_vocabulary",
           "schema": "observation-result.schema.json",
-          "paths": ["/properties/protocol"],
-          "exclude": [null]
+          "paths": ["/properties/protocol"]
+        },
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/opencode-overlay.md",
+          "marker": "authority-consumer: protocol "
         }
       ]
     },

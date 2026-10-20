@@ -33,7 +33,9 @@ from core.handlers.model_hub.adapter import (
     RawOutcomeKind,
     RetainedMaterialDisposition,
     RuntimePlatformUnsupportedError,
-    SOURCE_PROTOCOLS,
+    SearchCredentialCheck,
+    SearchResponse,
+    MODEL_PROTOCOLS,
     SourceObservation,
     SourceBinding,
     make_source_observation,
@@ -63,6 +65,7 @@ from vibe.model_hub_runtime.client import (
 from vibe.model_hub_runtime.api_key_vendors import (
     anthropic_api_key_header,
     pinned_api_key_protocol,
+    search_service,
     validate_api_key_auth_scheme,
 )
 from vibe.model_hub_runtime.installer import (
@@ -145,6 +148,126 @@ _HUB_SUBSCRIPTION_PROTOCOLS = {
     "kimi": "openai_chat",
     "xai": "openai_chat",
 }
+_SEARCH_BODY_MAX_BYTES = 8 * 1024 * 1024
+_SEARCH_TIMEOUT_SECONDS = 30.0
+_SEARCH_CHECK_TIMEOUT_SECONDS = 10.0
+_SEARCH_CHECK_CONNECT_TIMEOUT_SECONDS = 5.0
+_SEARCH_RESPONSE_HEADERS = frozenset({"content-type", "retry-after", "date", "content-length"})
+
+
+async def _read_bounded_search_body(content: Any) -> tuple[bytes | None, bool]:
+    """Read a response to EOF while stopping as soon as the cap is exceeded."""
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in content.iter_chunked(64 * 1024):
+        data = bytes(chunk)
+        total += len(data)
+        if total > _SEARCH_BODY_MAX_BYTES:
+            return None, True
+        chunks.append(data)
+    return b"".join(chunks), False
+
+
+def _search_check_matches(body: object, rule: Mapping[str, Any]) -> bool:
+    if rule.get("status") is not None:
+        # Status is checked by the caller; keep this predicate about body facts.
+        pass
+    path = rule.get("path")
+    if path is None:
+        return True
+    current: object = body
+    for part in str(path).split("."):
+        if not isinstance(current, Mapping) or part not in current:
+            return False
+        current = current[part]
+    return current == rule.get("equals")
+
+
+def _search_limit_outcome(body: object, rule: Mapping[str, Any]) -> Literal["pass", "limit", "unknown"]:
+    """Classify complete Tavily usage/limit pairs; the account section is optional."""
+    pairs = rule.get("pairs")
+    if not isinstance(pairs, list) or not isinstance(body, Mapping):
+        return "unknown"
+    if any(name in body and not isinstance(body[name], Mapping) for name in ("key", "account")):
+        return "unknown"
+    missing = object()
+    values: dict[str, tuple[float, float | None] | None] = {
+        "key": None,
+        "plan": None,
+        "paygo": None,
+    }
+    paths = {
+        "key": ("key.usage", "key.limit"),
+        "plan": ("account.plan_usage", "account.plan_limit"),
+        "paygo": ("account.paygo_usage", "account.paygo_limit"),
+    }
+    for pair in pairs:
+        if not isinstance(pair, Mapping):
+            return "unknown"
+        usage_path = pair.get("usage")
+        limit_path = pair.get("limit")
+        if not isinstance(usage_path, str) or not isinstance(limit_path, str):
+            return "unknown"
+        role = next(
+            (
+                name
+                for name, expected in paths.items()
+                if expected == (usage_path, limit_path)
+            ),
+            None,
+        )
+        if role is None:
+            return "unknown"
+        usage: object = body
+        limit: object = body
+        for part in usage_path.split("."):
+            if not isinstance(usage, Mapping) or part not in usage:
+                usage = missing
+                break
+            usage = usage[part]
+        for part in limit_path.split("."):
+            if not isinstance(limit, Mapping) or part not in limit:
+                limit = missing
+                break
+            limit = limit[part]
+        if usage is missing and limit is missing:
+            continue
+        if (
+            usage is missing
+            or isinstance(usage, bool)
+            or not isinstance(usage, (int, float))
+            or not math.isfinite(float(usage))
+        ):
+            return "unknown"
+        if role == "key" and limit is None:
+            values[role] = (float(usage), None)
+            continue
+        if (
+            limit is missing
+            or isinstance(limit, bool)
+            or not isinstance(limit, (int, float))
+            or not math.isfinite(float(limit))
+        ):
+            return "unknown"
+        values[role] = (float(usage), float(limit))
+
+    if not any(value is not None for value in values.values()):
+        return "unknown"
+    key = values["key"]
+    plan = values["plan"]
+    paygo = values["paygo"]
+    if key is not None and key[1] is not None and key[0] >= key[1]:
+        return "limit"
+    if plan is None and paygo is None:
+        # A valid key pair with headroom authenticates the key even when
+        # account usage is absent; the first search confirms payment.
+        return "pass"
+    key_has_headroom = key is None or key[1] is None or key[0] < key[1]
+    account_has_headroom = (
+        (plan is not None and plan[0] < plan[1])
+        or (paygo is not None and paygo[0] < paygo[1])
+    )
+    return "pass" if key_has_headroom and account_has_headroom else "limit"
 _INSTALL_RECOVERY_WAIT_SECONDS = 30.0
 _INSTALL_RECOVERY_INITIAL_DELAY_SECONDS = 0.25
 _INSTALL_RECOVERY_MAX_DELAY_SECONDS = 4.0
@@ -1920,6 +2043,227 @@ class CLIProxyEngineAdapter:
             on_reserved=on_reserved,
         )
 
+    @staticmethod
+    def _search_catalog_parts(catalog: Mapping[str, Any]) -> tuple[str | None, Mapping[str, Any] | None]:
+        vendor = catalog.get("vendor")
+        service = catalog.get("search")
+        if isinstance(service, Mapping):
+            return vendor if isinstance(vendor, str) else None, service
+        return vendor if isinstance(vendor, str) else None, catalog
+
+    async def _search_http(
+        self,
+        *,
+        catalog: Mapping[str, Any],
+        credential_ref: str,
+        method: str,
+        endpoint: str,
+        payload: Mapping[str, Any] | None = None,
+        timeout_total: float = _SEARCH_TIMEOUT_SECONDS,
+        connect_timeout: float | None = None,
+        on_sent: Callable[[], None] | None = None,
+    ) -> SearchResponse:
+        """Call only the immutable catalog endpoint for one search operation."""
+        vendor, service = self._search_catalog_parts(catalog)
+        if service is None or not isinstance(service.get("endpoint"), str):
+            return SearchResponse(None, {}, None, "invalid_endpoint")
+        configured_endpoint = endpoint
+        parsed = urllib.parse.urlsplit(configured_endpoint)
+        catalog_endpoint = urllib.parse.urlsplit(str(service.get("endpoint") or ""))
+        allowed_paths = {catalog_endpoint.path}
+        check = service.get("free_check")
+        if isinstance(check, Mapping):
+            check_endpoint = urllib.parse.urlsplit(str(check.get("endpoint") or ""))
+            if check_endpoint.path:
+                allowed_paths.add(check_endpoint.path)
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or parsed.hostname.lower() != (catalog_endpoint.hostname or "").lower()
+            or parsed.port != catalog_endpoint.port
+            or parsed.path not in allowed_paths
+            or parsed.query
+            or parsed.fragment
+        ):
+            return SearchResponse(None, {}, None, "invalid_endpoint")
+        try:
+            key = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
+            metadata = await asyncio.to_thread(self.state_store.credential_metadata, credential_ref)
+        except Exception:
+            return SearchResponse(None, {}, None, "connection")
+        if vendor is None or metadata.get("vendor") != vendor:
+            return SearchResponse(None, {}, None, "invalid_endpoint")
+        auth = str(service.get("auth") or "bearer")
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
+        if auth == "x-api-key":
+            headers["x-api-key"] = key
+        else:
+            headers["Authorization"] = f"Bearer {key}"
+        timeout = aiohttp.ClientTimeout(total=timeout_total, connect=connect_timeout)
+        trace = aiohttp.TraceConfig()
+        callback_called = False
+        response_status: int | None = None
+        response_headers: dict[str, str] = {}
+        response_received_at: datetime | None = None
+
+        async def request_connection_ready(*_args: Any, **_kwargs: Any) -> None:
+            nonlocal callback_called
+            if callback_called or on_sent is None:
+                return
+            callback_called = True
+            on_sent()
+
+        trace.on_connection_create_end.append(request_connection_ready)
+        trace.on_connection_reuseconn.append(request_connection_ready)
+        try:
+            async with aiohttp.ClientSession(
+                timeout=timeout,
+                trust_env=False,
+                trace_configs=[trace],
+            ) as session:
+                async with session.request(
+                    method,
+                    configured_endpoint,
+                    headers=headers,
+                    json=dict(payload) if payload is not None else None,
+                    allow_redirects=False,
+                ) as response:
+                    response_status = response.status
+                    response_received_at = datetime.now(timezone.utc)
+                    response_headers = {
+                        name: value
+                        for name, value in response.headers.items()
+                        if name.lower() in _SEARCH_RESPONSE_HEADERS
+                    }
+                    body, body_too_large = await _read_bounded_search_body(response.content)
+                    if body_too_large:
+                        return SearchResponse(
+                            response_status,
+                            response_headers,
+                            None,
+                            "body_too_large",
+                            on_sent_fired=callback_called,
+                            response_received_at=response_received_at,
+                        )
+                    assert body is not None
+                    if 300 <= response_status < 400:
+                        return SearchResponse(
+                            response_status,
+                            response_headers,
+                            body,
+                            "redirect",
+                            on_sent_fired=callback_called,
+                            response_received_at=response_received_at,
+                        )
+                    return SearchResponse(
+                        response_status,
+                        response_headers,
+                        body,
+                        on_sent_fired=callback_called,
+                        response_received_at=response_received_at,
+                    )
+        except asyncio.CancelledError:
+            return SearchResponse(
+                response_status,
+                response_headers,
+                None,
+                "cancelled",
+                on_sent_fired=callback_called,
+                response_received_at=response_received_at,
+            )
+        except asyncio.TimeoutError:
+            return SearchResponse(
+                response_status,
+                response_headers,
+                None,
+                "timeout",
+                on_sent_fired=callback_called,
+                response_received_at=response_received_at,
+            )
+        except (aiohttp.ClientError, OSError, ValueError):
+            return SearchResponse(
+                response_status,
+                response_headers,
+                None,
+                "connection",
+                on_sent_fired=callback_called,
+                response_received_at=response_received_at,
+            )
+
+    async def check_search_credential(
+        self,
+        credential_ref: str,
+        catalog: Mapping[str, Any],
+    ) -> SearchCredentialCheck:
+        vendor, service = self._search_catalog_parts(catalog)
+        if vendor is None or service is None:
+            return SearchCredentialCheck("unknown")
+        check = service.get("free_check")
+        if not isinstance(check, Mapping):
+            return SearchCredentialCheck("unknown")
+        response = await self._search_http(
+            catalog=catalog,
+            credential_ref=credential_ref,
+            method=str(check.get("method") or "GET"),
+            endpoint=str(check.get("endpoint") or ""),
+            timeout_total=_SEARCH_CHECK_TIMEOUT_SECONDS,
+            connect_timeout=_SEARCH_CHECK_CONNECT_TIMEOUT_SECONDS,
+        )
+        if response.error == "cancelled":
+            raise asyncio.CancelledError
+        if response.http_status in set(check.get("invalid_statuses") or ()):
+            return SearchCredentialCheck("invalid")
+        if response.error or response.http_status is None:
+            return SearchCredentialCheck("unknown")
+        if response.http_status != 200 or response.body is None:
+            return SearchCredentialCheck("unknown")
+        try:
+            body = json.loads(response.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return SearchCredentialCheck("unknown")
+        limit_rule = check.get("limit")
+        if isinstance(limit_rule, Mapping):
+            limit_outcome = _search_limit_outcome(body, limit_rule)
+            if limit_outcome == "limit":
+                return SearchCredentialCheck("limit")
+            if limit_outcome == "unknown":
+                return SearchCredentialCheck("unknown")
+        passed = check.get("pass")
+        balance = check.get("balance")
+        if isinstance(passed, Mapping) and _search_check_matches(body, passed):
+            return SearchCredentialCheck("pass")
+        if isinstance(balance, Mapping) and _search_check_matches(body, balance):
+            return SearchCredentialCheck("balance")
+        if balance is None and isinstance(passed, Mapping) and passed.get("status") == 200:
+            return SearchCredentialCheck("pass")
+        return SearchCredentialCheck("unknown")
+
+    async def search(
+        self,
+        source_id: str,
+        vendor: str,
+        service_id: str,
+        credential_ref: str,
+        request: Mapping[str, Any],
+        *,
+        on_sent: Callable[[], None] | None = None,
+    ) -> SearchResponse:
+        service = search_service(vendor, "search" if vendor in {"tavily", "exa"} else "openai_chat")
+        if service is None or service.get("service_id") != service_id:
+            return SearchResponse(None, {}, None, "invalid_endpoint")
+        catalog = {"vendor": vendor, **service}
+        return await self._search_http(
+            catalog=catalog,
+            credential_ref=credential_ref,
+            method="POST",
+            endpoint=str(service.get("endpoint") or ""),
+            payload=request,
+            on_sent=on_sent,
+        )
+
+    async def revoke_search_credential(self, credential_ref: str) -> None:
+        await asyncio.to_thread(self.state_store.revoke_search_credential, credential_ref)
+
     async def provision_oauth_credential(
         self,
         source_id: str,
@@ -2186,8 +2530,12 @@ class CLIProxyEngineAdapter:
 
     async def revoke_api_key_credential(self, credential_ref: str) -> None:
         await asyncio.to_thread(self.state_store.assert_credential_unbound, credential_ref)
-        await asyncio.to_thread(self.state_store.credential_auth_scheme, credential_ref)
-        await asyncio.to_thread(self.supervisor.invalidate_configs)
+        is_search = await asyncio.to_thread(
+            self.state_store.api_key_credential_is_search,
+            credential_ref,
+        )
+        if not is_search:
+            await asyncio.to_thread(self.supervisor.invalidate_configs)
         await asyncio.to_thread(self.state_store.revoke_api_key_credential, credential_ref)
 
     async def revoke_credential(self, credential_ref: str) -> None:
@@ -2199,6 +2547,9 @@ class CLIProxyEngineAdapter:
             self.state_store.credential_metadata_if_present,
             credential_ref,
         )
+        if metadata is not None and metadata.get("protocol") == "search":
+            await self.revoke_search_credential(credential_ref)
+            return
         auth_name = metadata.get("auth_name") if metadata is not None and metadata.get("kind") == "oauth" else None
         if auth_name:
             if metadata.get("activation_state") != "staged":
@@ -2410,7 +2761,7 @@ class CLIProxyEngineAdapter:
         response_evidence_by_protocol: dict[str, _ProtocolEvidence] = {}
         ruled_out_protocols: set[str] = set()
         for protocol in protocol_order:
-            if protocol not in SOURCE_PROTOCOLS:
+            if protocol not in MODEL_PROTOCOLS:
                 raise EngineStateError("unsupported source protocol")
             owner_scoped_protocol = _protocol_is_persistable_without_shape_proof(
                 credential_kind=str(credential_kind),

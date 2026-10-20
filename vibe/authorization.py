@@ -526,7 +526,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("PATCH", r"^/api/models/sources/[^/]+$"),
         ("DELETE", r"^/api/models/sources/[^/]+$"),
         ("PUT", r"^/api/models/sources/[^/]+/credential$"),
-        ("POST", r"^/api/models/sources/[^/]+/(?:reauth|refresh|probe)$"),
+        ("POST", r"^/api/models/sources/[^/]+/(?:reauth|refresh|probe|reenable)$"),
         ("POST", r"^/api/models/sources/[^/]+/evidence/clear$"),
         ("POST", r"^/api/models/sources/[^/]+/models$"),
         # Model IDs are path parameters and may contain vendor/model slashes.

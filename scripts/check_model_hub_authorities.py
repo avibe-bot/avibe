@@ -310,17 +310,40 @@ def _python_literal_annotation(source: AuthorityInput, spec: dict[str, Any]) -> 
 
 def _python_string_assignment(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:
     tree = source.python_tree(spec["file"])
+    assignments: dict[str, ast.AST] = {}
     for node in tree.body:
-        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
-            continue
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        if not any(isinstance(target, ast.Name) and target.id == spec["name"] for target in targets):
-            continue
-        value = node.value
-        if value is None:
-            break
-        return _literal_strings(value)
-    raise ValueError(f"assignment not found: {spec['name']}")
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assignments[target.id] = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            assignments[node.target.id] = node.value
+
+    def evaluate(node: ast.AST, stack: set[str] | None = None) -> set[str]:
+        stack = set() if stack is None else stack
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return {node.value}
+        if isinstance(node, ast.Name):
+            if node.id in stack or node.id not in assignments:
+                return set()
+            return evaluate(assignments[node.id], {*stack, node.id})
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            values: set[str] = set()
+            for element in node.elts:
+                values |= evaluate(element, stack)
+            return values
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+            return evaluate(node.left, stack) | evaluate(node.right, stack)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in {"tuple", "frozenset", "set"}:
+            return evaluate(node.args[0], stack) if len(node.args) == 1 else set()
+        return _literal_strings(node)
+
+    if spec["name"] not in assignments:
+        raise ValueError(f"assignment not found: {spec['name']}")
+    values = evaluate(assignments[spec["name"]])
+    if not values:
+        raise ValueError(f"string assignment is empty: {spec['name']}")
+    return values
 
 
 def _typescript_string_union(source: AuthorityInput, spec: dict[str, Any]) -> set[str]:

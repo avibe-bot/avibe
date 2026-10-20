@@ -43,6 +43,7 @@ const blockedSource: Source = {
   id: 'src_revoked',
   display_name: 'Revoked key',
   credential_ref: 'cred_revoked',
+  credential_generation: 'gen_old',
   state: {
     status: 'needs_action',
     retry_at: null,
@@ -52,6 +53,7 @@ const blockedSource: Source = {
 
 const successfulReplacementSource = (): Source => ({
   ...blockedSource,
+  credential_generation: 'gen_new',
   state: { status: 'standby', retry_at: null, detail_key: null },
 });
 
@@ -557,6 +559,33 @@ describe('AddApiKeyDialog · replacement', () => {
       else expect(settled.readInventory).not.toHaveBeenCalled();
     },
   );
+
+  it('reconciles a committed but blocked replacement by credential generation', async () => {
+    const current = {
+      ...blockedSource,
+      credential_generation: 'gen_new',
+      state: {
+        status: 'needs_action' as const,
+        retry_at: null,
+        detail_key: 'models.source.needs_action.spend_limit_reached' as const,
+      },
+    };
+    vi.spyOn(modelsApi, 'replaceCredential').mockRejectedValueOnce(
+      new ApiCallError('bad_response', undefined, false),
+    );
+    const settled = neverResolvingSettlement({
+      readInventory: vi.fn().mockResolvedValue({ snapshot: 2, sources: [current] }),
+    });
+    const { onClose } = renderReplacement(blockedSource, settled);
+    const user = userEvent.setup();
+
+    await user.type(screen.getByLabelText(/^New API key$|^新的 API Key$/i), 'sk-blocked-committed');
+    await user.click(screen.getByRole('button', { name: /^Replace$|^更换$/i }));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+    expect(settled.source).toHaveBeenCalledWith(current);
+    expect(showToast).toHaveBeenCalledWith(i18n.t('settings.models.repair.unresolved'), 'warning');
+  });
 
   it('keeps Retry when an ambiguous replacement still observes the blocked source', async () => {
     vi.spyOn(modelsApi, 'replaceCredential').mockRejectedValueOnce(

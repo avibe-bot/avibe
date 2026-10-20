@@ -117,6 +117,9 @@ describe('repairAction — the one tap a stopped source offers', () => {
     expect(repairAction(blocked('models.source.needs_action.plan_excludes_product', subscription))).toBe('retest');
     // So is a spend or usage limit, raised in the vendor's console.
     expect(repairAction(blocked('models.source.needs_action.spend_limit_reached'))).toBe('retest');
+    expect(repairAction(blocked('models.source.needs_action.balance_exhausted', { protocol: 'search' }))).toBe('reenable');
+    expect(repairAction(blocked('models.source.needs_action.spend_limit_reached', { protocol: 'search' }))).toBe('reenable');
+    expect(repairAction(blocked('models.source.needs_action.account_banned', { protocol: 'search' }))).toBeNull();
   });
 
   it('treats an unclassified error as an upstream cause, not a credential one', () => {

@@ -21,7 +21,7 @@ export const chainKeyBackend = (key: string): AgentBackend =>
 
 /** Manual inventory is a credential-backed capability; subscriptions are read-only. */
 export function manualModelSources(sources: Source[]): Source[] {
-  return sources.filter((source) => source.kind === 'api_key');
+  return sources.filter((source) => source.kind === 'api_key' && source.protocol !== 'search');
 }
 
 /** Count suppliers from the complete route inventory, never a searched subset. */

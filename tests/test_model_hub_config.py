@@ -37,6 +37,7 @@ from core.handlers.model_hub.adapter import (
     OBSERVATION_TERMINAL_RULES,
     ObservationDiscovery,
     ObservationOutcome,
+    MODEL_PROTOCOLS,
     SOURCE_PROTOCOLS,
     SourceObservation,
     validate_source_observation,
@@ -88,7 +89,7 @@ def test_auto_detect_asks_for_responses_before_chat():
     """
 
     auto_sequence = ModelHubService._observation_protocols("custom", {})
-    assert set(auto_sequence) == set(SOURCE_PROTOCOLS) - {"google"}
+    assert set(auto_sequence) == set(MODEL_PROTOCOLS) - {"google"}
     assert ModelHubService._observation_protocols("custom", {"protocol": "google"}) == ("google",)
     assert len(auto_sequence) == len(set(auto_sequence))
     assert auto_sequence.index("openai_responses") < auto_sequence.index("openai_chat")
@@ -96,7 +97,7 @@ def test_auto_detect_asks_for_responses_before_chat():
 
 def test_unsaved_observation_schema_closes_all_terminal_shapes():
     schema = _schema("observation-result.schema.json")
-    assert schema["properties"]["contract_version"]["const"] == 16
+    assert schema["properties"]["contract_version"]["const"] == 17
     assert tuple(schema["properties"]["outcome"]["enum"]) == tuple(
         member.value for member in ObservationOutcome
     )
@@ -115,12 +116,12 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
     schema = Draft7Validator(_schema("observation-result.schema.json"))
     reachable_domain = frozenset({True, False, None})
     authenticated_domain = frozenset({True, False, None})
-    protocol_domain = frozenset({None, *SOURCE_PROTOCOLS})
+    protocol_domain = frozenset({None, *MODEL_PROTOCOLS})
     discovery_domain = frozenset(ObservationDiscovery)
 
     def payload(observation: SourceObservation) -> dict:
         return {
-            "contract_version": 16,
+            "contract_version": 17,
             "outcome": observation.outcome.value,
             "reachable": observation.reachable,
             "authenticated": (
@@ -665,6 +666,42 @@ def test_source_create_unavailable_inventory_consent_is_explicit_and_total():
         assert required in ac_54
 
 
+def test_source_create_applies_search_constraints_to_inferred_catalog_protocols():
+    validator = Draft7Validator(_schema("source-create.schema.json"))
+
+    for vendor in ("tavily", "exa"):
+        inferred = {
+            "vendor": vendor,
+            "key": "search-secret",
+            "base_url": "https://example.com",
+            "save_unverified": True,
+        }
+        with pytest.raises(ValidationError):
+            validator.validate(inferred)
+
+        validator.validate({"vendor": vendor, "key": "search-secret"})
+
+
+@pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
+@pytest.mark.parametrize("trial_pending", [False, True])
+def test_source_contract_limits_trial_pending_to_search(protocol, trial_pending):
+    validator = Draft7Validator(_schema("source.schema.json"))
+    source = ModelHubSourceConfig(
+        id="src_trialcontract",
+        kind="api_key",
+        vendor="tavily" if protocol == "search" else "custom",
+        display_name="Trial contract",
+        protocol=protocol,
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        credential_ref="cred_trialcontract",
+        models=[],
+    ).to_payload()
+    validator.validate(source)
+    assert validator.is_valid({**source, "trial_pending": trial_pending}) is (protocol == "search")
+
+
 def test_sparse_override_contract_has_one_default_order_owner():
     contract = (CONTRACTS.parent / "model-hub-routing-modes.md").read_text(encoding="utf-8")
     assert "sources.order` is the sole backend-default" in contract
@@ -700,7 +737,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
 
     route_refusal = {
         "ok": False,
-        "contract_version": 16,
+        "contract_version": 17,
         "error": "source_in_route_chain",
         "detail": "modelHub.errors.source_in_route_chain",
         "would_remove_hops": [hop],
@@ -716,7 +753,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
     }
     candidate_refusal = {
         "ok": False,
-        "contract_version": 16,
+        "contract_version": 17,
         "error": "candidate_suppliers_changed",
         "detail": "modelHub.errors.candidate_suppliers_changed",
         "changed": {
@@ -800,7 +837,7 @@ def test_v8_mirror_registry_is_executable_and_complete():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
-    assert registry["contract_version"] == 16
+    assert registry["contract_version"] == 17
     ids = [entry["id"] for entry in registry["entries"]]
     assert ids
     assert len(ids) == len(set(ids))
@@ -937,8 +974,8 @@ def test_model_hub_authority_closure_anchors_the_persisted_version_floor(monkeyp
         "kind": "contract_version_schema_drift",
         "domain": "V1",
         "file": "docs/plans/model-hub-contracts/turn-provenance.schema.json",
-        "values": [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-        "expected": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        "values": [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+        "expected": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
     } in result["findings"]
 
 
@@ -1249,7 +1286,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
         with pytest.raises(ValidationError):
             chain_validator.validate(interrupted)
     exact_hop = {
-        "contract_version": 16,
+        "contract_version": 17,
         "backend": "claude",
         "model_id": "claude-opus-4-6",
         "manual_override": None,
@@ -3107,6 +3144,34 @@ def test_backend_model_modalities_match_the_contract_directions():
 
     with pytest.raises(ValueError, match="output_modalities"):
         ModelHubBackendModelConfig.from_payload({"id": "custom-model", "output_modalities": ["pdf"]})
+
+
+def test_config_reload_preserves_search_source_when_catalog_vendor_is_missing(tmp_path):
+    payload = api.config_to_payload(default_config())
+    saved_source = ModelHubSourceConfig(
+        id="src_searchmissing",
+        kind="api_key",
+        vendor="retired-search-vendor",
+        display_name="Retired Search Vendor",
+        protocol="search",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[],
+        credential_ref="cred_searchmissing",
+        masked_credential="••••sing",
+    )
+    payload["model_hub"]["sources"] = [saved_source.to_payload()]
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = V2Config.load(config_path=path)
+
+    assert loaded.load_warnings == ()
+    assert loaded.recovered_sections == ()
+    assert loaded.model_hub.sources[0].vendor == "retired-search-vendor"
+    assert loaded.model_hub.sources[0].protocol == "search"
+    assert loaded.model_hub.sources[0].models == []
 
 
 def test_config_reload_preserves_legacy_routes_without_seeding_missing_models(tmp_path):

@@ -1,9 +1,12 @@
-"""Model Hub EngineAdapter interface. FINAL CONTRACT v16 (2026-10-16).
+"""Model Hub EngineAdapter interface. FINAL CONTRACT v17 (2026-10-19).
 
 This file is the canonical adapter boundary and must remain byte-identical to
 ``core/handlers/model_hub/adapter.py``. The adapter owns one-Source operations:
 credential custody, protocol observation, model discovery, OAuth, invocation,
-and cleanup. It never chooses or reorders Route hops, classifies cross-Source
+and cleanup. Model protocol operations use ``MODEL_PROTOCOLS`` (the four invocable
+wire protocols); ``SOURCE_PROTOCOLS`` adds the tool-only ``search`` value only for
+stored/created Source shapes. It never chooses or reorders Route hops, classifies
+cross-Source
 fallthrough, or exposes credential material. Contract changes route through the
 orchestrator and land with every affected consumer on the same tested head.
 """
@@ -19,7 +22,12 @@ from typing import Any, AsyncIterator, Callable, Final, Literal, Mapping, Protoc
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
 
 ENGINE_TRANSPORT_TIMEOUT_SECONDS: Final = 60.0
-SOURCE_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat", "google")
+# Model invocation/observation is a narrower domain than stored Sources.
+MODEL_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat", "google")
+# Source persistence/admission adds the tool-only search protocol.
+SOURCE_PROTOCOLS = MODEL_PROTOCOLS + ("search",)
+SEARCH_RESPONSE_MAX_BYTES: Final = 8 * 1024 * 1024
+SEARCH_TRANSPORT_TIMEOUT_SECONDS: Final = 30.0
 OBSERVATION_OUTCOMES = (
     "observed",
     "ambiguous",
@@ -71,12 +79,33 @@ class OAuthCredentialRejectedError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class SearchResponse:
+    """Bounded response from one catalog search endpoint.
+
+    The body is opaque to this boundary. It contains no credential material;
+    the adapter reads the key from custody only while making the request.
+    """
+
+    http_status: int | None
+    headers: Mapping[str, str]
+    body: bytes | None
+    error: Literal["", "timeout", "connection", "redirect", "body_too_large", "invalid_endpoint", "cancelled"] = ""
+    on_sent_fired: bool = False
+    response_received_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class SearchCredentialCheck:
+    outcome: Literal["pass", "balance", "limit", "invalid", "unknown"]
+
+
+@dataclass(frozen=True)
 class SourceBinding:
     """Engine-side registration of one hub-channel source (projection of config)."""
 
     source_id: str
     vendor: str
-    protocol: str  # "anthropic" | "openai_responses" | "openai_chat" | "google"
+    protocol: str  # "anthropic" | "openai_responses" | "openai_chat" | "google" | "search"
     base_url: str | None  # None => vendor official default
     credential_ref: str  # opaque handle; never secret material
     allowed_origins: tuple[str, ...]  # agent names allowed to draw on this
@@ -258,7 +287,7 @@ OBSERVATION_TERMINAL_RULES: Mapping[
     ObservationOutcome.OBSERVED: ObservationTerminalRule(
         reachable=frozenset({True}),
         authenticated=frozenset({True}),
-        protocols=frozenset(SOURCE_PROTOCOLS),
+        protocols=frozenset(MODEL_PROTOCOLS),
         discoveries=frozenset(
             {
                 ObservationDiscovery.SUCCEEDED,
@@ -519,8 +548,9 @@ class EngineAdapter(Protocol):
         auth_scheme: str | None = None,
         on_reserved: Callable[[str], None] | None = None,
     ) -> str:
-        """Store an API-key secret in the ENGINE-OWNED credential store and
-        return the opaque ``credential_ref``.
+        """Store an API-key secret in the Model Hub credential store. Search
+        Sources use this same opaque-ref custody, but are never rendered into
+        engine configuration or sent through the engine.
 
         ``secret`` is transient: the adapter must never log it; L2 must never
         persist it (config stores refs only). When supplied, ``on_reserved`` is
@@ -530,6 +560,36 @@ class EngineAdapter(Protocol):
         they are created engine-side by the OAuth flow and surfaced via
         ``OAuthFlowState.credential_ref``. ``auth_scheme`` optionally preserves
         an explicit static transport; omission retains legacy semantics."""
+        ...
+
+    async def check_search_credential(
+        self,
+        credential_ref: str,
+        catalog: Mapping[str, Any],
+    ) -> SearchCredentialCheck:
+        """Run one catalog free check without exposing its key or response."""
+        ...
+
+    async def search(
+        self,
+        source_id: str,
+        vendor: str,
+        service_id: str,
+        credential_ref: str,
+        request: Mapping[str, Any],
+        *,
+        on_sent: Callable[[], None] | None = None,
+    ) -> SearchResponse:
+        """Make exactly one catalog-host search request from Model Hub custody.
+
+        ``on_sent`` fires once after the connection (including TLS) is ready and
+        immediately before aiohttp writes this request. A callback failure stops
+        the request before any request bytes are sent.
+        """
+        ...
+
+    async def revoke_search_credential(self, credential_ref: str) -> None:
+        """Remove a search-only credential from Model Hub custody."""
         ...
 
     async def provision_oauth_credential(
@@ -670,6 +730,16 @@ class EngineAdapter(Protocol):
         document is missing/content-corrupt. Reject readable identity conflicts
         and unsafe paths. Never delete watched OAuth auth files or call OAuth
         management APIs. Return only after durable cleanup; failure is retryable.
+        """
+        ...
+
+    async def revoke_search_credential(self, credential_ref: str) -> None:
+        """Retire an unbound tool-only key under durable search-only intent.
+
+        Preserve API-key namespace and identity checks, but never access the
+        model engine or its configs, even when the document is already absent
+        or corrupt. The caller journals this operation before unlinking so
+        replay does not infer a lost protocol from credential metadata.
         """
         ...
 

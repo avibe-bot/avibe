@@ -92,7 +92,7 @@ export const RouteCandidatePopover: React.FC<{
     else result.push({ source: item.source, items: [item] });
     return result;
   }, []);
-  const typedSources = sources.filter((source) => source.kind === 'api_key');
+  const typedSources = sources.filter((source) => source.kind === 'api_key' && source.protocol !== 'search');
   const typedSource = typedSources.find((source) => source.id === customSource);
   const typedCandidate: RouteCandidate | null = customModel && typedSource
     && customModel === customModel.trim()

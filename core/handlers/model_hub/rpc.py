@@ -111,6 +111,8 @@ async def dispatch_model_hub_rpc(
             confirmed_remove_hops=payload.get("would_remove_hops"),
             confirmed_interruptions=payload.get("would_interrupt"),
         )
+    if operation == "reenable_search_source":
+        return await service.reenable_search_source(payload.get("source_id"))
     if operation == "list_agents":
         if payload.get("refresh_cli_presence") is True:
             await _refresh_agent_presence(service)

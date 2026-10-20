@@ -427,6 +427,32 @@ def _auth_status_branch(node: ast.AST) -> bool:
     )
 
 
+@pytest.mark.parametrize("surface", ["README.md", "source.schema.json"])
+def test_verification_contract_covers_every_search_capable_source(surface: str) -> None:
+    # These published rules guide S2's settlement implementation. Model Sources
+    # with a search API can authenticate by either kind of call; tool-only ones
+    # must never need a model call to verify their credential.
+    text = (ROOT / "docs/plans/model-hub-contracts" / surface).read_text(encoding="utf-8")
+    if surface.endswith(".json"):
+        text = json.loads(text)["properties"]["verification_pending"]["description"]
+    else:
+        text = text.split("## Invariants", 1)[1].split("\n3.", 1)[0]
+    text = " ".join(text.replace("`", "").split())
+    for clause in (
+        "matching-credential model-call rule",
+        "tool-only search Source never makes a model call",
+        "For every search-capable Source",
+        "including an official DeepSeek model Source",
+        "authenticated search outcome with the matching credential",
+        "any 200, a 402, or a catalog-named limit",
+        "free-check pass, balance or limit",
+        "same current credential and marker",
+        "credential_generation does not change",
+        "Free-check unknown and invalid leave it unchanged",
+    ):
+        assert clause in text, (surface, clause)
+
+
 def test_g1_cancelled_error_has_one_boundary_owner() -> None:
     # A new ``except asyncio.CancelledError`` outside _handle_request must fail.
     tree = _tree(TURN_GATEWAY)

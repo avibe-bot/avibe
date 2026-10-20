@@ -6,12 +6,13 @@ import json
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from typing import Any, Mapping
 from urllib.parse import urlsplit
 
 from config.v2_config import normalize_model_hub_base_url, normalize_model_hub_vendor_id
 
 
-_SUPPORTED_PROTOCOLS = {"anthropic", "openai_responses", "openai_chat", "google"}
+_SUPPORTED_PROTOCOLS = {"anthropic", "openai_responses", "openai_chat", "google", "search"}
 _LEGACY_OFFICIAL_BASE_URLS = {
     # ``codex`` remains a supported legacy vendor alias outside the shipped
     # api-key vendor preset catalog. Runtime official-URL fallback must keep
@@ -146,11 +147,87 @@ class APIKeyVendorCatalogEntry:
     # The models.dev provider whose entries describe what this vendor's
     # official endpoint accepts; ``None`` when no mapping has been verified.
     models_dev_provider: str | None = None
+    # Bundled wire metadata, never supplied by a caller or a remote catalog.
+    search: dict | None = None
 
 
 def _catalog_path() -> Path:
     return Path(__file__).resolve().parents[1] / "data" / "api_key_vendors.json"
 
+
+def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] | None:
+    if item is None:
+        return None
+    if not isinstance(item, dict):
+        raise ValueError("api-key vendor search catalog is invalid")
+    required = {"service_id", "endpoint", "auth", "request", "result", "limits", "price", "free_check", "service_refused_statuses", "tool_only"}
+    if protocol != "search":
+        required.add("auto_enroll")
+    if set(item) != required:
+        raise ValueError("api-key vendor search catalog is invalid")
+    endpoint = normalize_model_hub_base_url(item.get("endpoint"))
+    if endpoint is None or urlsplit(endpoint).scheme != "https":
+        raise ValueError("api-key vendor search catalog endpoint is invalid")
+    if not isinstance(item.get("service_id"), str) or not item["service_id"].strip():
+        raise ValueError("api-key vendor search catalog service id is invalid")
+    if item.get("auth") not in {"bearer", "x-api-key"} or not isinstance(item.get("request"), dict) or not isinstance(item.get("result"), dict) or not isinstance(item.get("limits"), dict):
+        raise ValueError("api-key vendor search catalog mapping is invalid")
+    if "content_max_chars" in item["request"]:
+        content_max_chars = item["request"]["content_max_chars"]
+        if (
+            not isinstance(content_max_chars, dict)
+            or set(content_max_chars) != {"path", "value"}
+            or not isinstance(content_max_chars.get("path"), str)
+            or not content_max_chars["path"]
+            or type(content_max_chars.get("value")) is not int
+            or not 1 <= content_max_chars["value"] <= 4000
+        ):
+            raise ValueError("api-key vendor search catalog content maximum is invalid")
+    if "reported_cost" in item["result"]:
+        reported_cost = item["result"]["reported_cost"]
+        if (
+            not isinstance(reported_cost, dict)
+            or set(reported_cost) != {"path", "estimate"}
+            or not isinstance(reported_cost.get("path"), str)
+            or not reported_cost["path"]
+            or not isinstance(reported_cost.get("estimate"), bool)
+        ):
+            raise ValueError("api-key vendor search catalog reported cost is invalid")
+    results_max = item["limits"].get("results_max")
+    # Usage page counters use this fixed ceiling even after a catalog update.
+    if isinstance(results_max, bool) or not isinstance(results_max, int) or not 1 <= results_max <= 100:
+        raise ValueError("api-key vendor search catalog results maximum is invalid")
+    price = item.get("price")
+    if not isinstance(price, dict) or set(price) != {"unit", "usd_per_1k", "extra", "as_of", "url"} or price.get("unit") != "search":
+        raise ValueError("api-key vendor search catalog price is invalid")
+    if not isinstance(price.get("usd_per_1k"), (int, float)) or isinstance(price.get("usd_per_1k"), bool) or price["usd_per_1k"] < 0:
+        raise ValueError("api-key vendor search catalog price is invalid")
+    if not isinstance(price.get("extra"), list) or not isinstance(price.get("as_of"), str) or not isinstance(price.get("url"), str):
+        raise ValueError("api-key vendor search catalog price is invalid")
+    if not isinstance(item.get("tool_only"), bool) or item["tool_only"] != (protocol == "search"):
+        raise ValueError("api-key vendor search catalog protocol is invalid")
+    if protocol != "search" and not isinstance(item.get("auto_enroll"), bool):
+        raise ValueError("api-key vendor search catalog auto-enroll flag is invalid")
+    if not isinstance(item.get("service_refused_statuses"), list) or any(
+        isinstance(status, bool) or not isinstance(status, int) or status < 400 or status >= 500
+        for status in item["service_refused_statuses"]
+    ) or len(set(item["service_refused_statuses"])) != len(item["service_refused_statuses"]):
+        raise ValueError("api-key vendor search catalog refusal statuses are invalid")
+    free_check = item.get("free_check")
+    if free_check is not None:
+        if not isinstance(free_check, dict):
+            raise ValueError("api-key vendor search catalog free check is invalid")
+        limit_rule = free_check.get("limit")
+        if limit_rule is not None:
+            pairs = limit_rule.get("pairs") if isinstance(limit_rule, dict) else None
+            if not isinstance(pairs, list) or any(
+                not isinstance(pair, dict)
+                or not isinstance(pair.get("usage"), str)
+                or not isinstance(pair.get("limit"), str)
+                for pair in pairs
+            ):
+                raise ValueError("api-key vendor search catalog free check is invalid")
+    return dict(item)
 
 @lru_cache(maxsize=1)
 def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
@@ -189,6 +266,7 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
                 official_base_url=official_base_url,
                 protocol=protocol,
                 models_dev_provider=models_dev_provider.strip() if models_dev_provider else None,
+                search=_validate_search_catalog(item.get("search"), protocol=protocol),
             )
         )
         seen_ids.add(vendor_id)
@@ -202,6 +280,22 @@ def _catalog_by_id() -> dict[str, APIKeyVendorCatalogEntry]:
 
 def api_key_vendor_entry(vendor: str) -> APIKeyVendorCatalogEntry | None:
     return _catalog_by_id().get(vendor.strip().lower())
+
+
+def search_service(vendor: str, protocol: str, base_url: str | None = None) -> dict | None:
+    """The catalog search API this Source can use, never a relay or an OAuth grant.
+
+    Callers also require kind=api_key. This pure predicate deliberately has no
+    health or enabled checks: those belong to admission, not catalog identity.
+    """
+    entry = api_key_vendor_entry(vendor)
+    if entry is None or entry.search is None:
+        return None
+    if entry.search["tool_only"]:
+        return entry.search if protocol == "search" and base_url is None else None
+    if protocol == "search" or (base_url is not None and not is_official_api_key_endpoint(vendor, base_url)):
+        return None
+    return entry.search
 
 
 def pinned_api_key_protocol(vendor: str) -> str | None:

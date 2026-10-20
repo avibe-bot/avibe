@@ -13,6 +13,7 @@
     {"method": "POST", "path": "/api/models/sources/<id>/reauth", "response_schema": "OAuthFlowResponse", "exercise": {"path": "/api/models/sources/src_subscribe01/reauth", "status": 200, "json": {"acknowledge_irreversible": true}}},
     {"method": "DELETE", "path": "/api/models/sources/<id>?force=<bool>", "response_schema": "SourceDeleteResponse", "exercise": {"path": "/api/models/sources/src_delete0001?force=false", "status": 200, "json": {}}},
     {"method": "POST", "path": "/api/models/sources/<id>/refresh", "response_schema": "SourceMutationResponse", "exercise": {"path": "/api/models/sources/src_conform001/refresh", "status": 200, "json": {}}},
+    {"method": "POST", "path": "/api/models/sources/<id>/reenable", "response_schema": "SourceReenableResponse", "exercise": {"path": "/api/models/sources/src_searchbalance/reenable", "status": 200, "json": {}}},
     {"method": "POST", "path": "/api/models/sources/<id>/probe", "response_schema": "SourceProbeResponse", "exercise": {"path": "/api/models/sources/src_conform001/probe", "status": 200, "json": {"model": "claude-opus-4-6"}}},
     {"method": "POST", "path": "/api/models/sources/<source_id>/models", "response_schema": "SourceResponse", "exercise": {"path": "/api/models/sources/src_conform001/models", "status": 201, "json": {"model_id": "manual-contract-model", "reasoning_efforts": []}}},
     {"method": "PATCH", "path": "/api/models/sources/<source_id>/models/<model_id>", "response_schema": "SourceResponse", "exercise": {"path": "/api/models/sources/src_conform001/models/retire-model", "status": 200, "json": {"reasoning_efforts": ["high"]}}},
@@ -60,7 +61,7 @@
       "required": ["ok", "contract_version", "probe"],
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "probe": {"$ref": "model-hub/source-probe-result.schema.json"}
       }
     },
@@ -159,7 +160,7 @@
     "SuccessCore": {
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16}
+        "contract_version": {"const": 17}
       }
     },
     "SourceListResponse": {
@@ -168,7 +169,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "sources": {"type": "array", "items": {"$ref": "#/definitions/SourceApi"}}
       }
     },
@@ -178,7 +179,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "observation": {"$ref": "model-hub/observation-result.schema.json"}
       }
     },
@@ -188,7 +189,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "source": {"$ref": "#/definitions/SourceApi"},
         "added_to": {"type": "array", "items": {"$ref": "#/definitions/AddedTo"}},
         "adopted_by": {"type": "array", "items": {"$ref": "#/definitions/AdoptedBy"}, "uniqueItems": true}
@@ -200,7 +201,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "source": {"$ref": "#/definitions/SourceApi"}
       }
     },
@@ -210,10 +211,28 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "source": {"$ref": "#/definitions/SourceApi"},
         "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
         "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
+      }
+    },
+    "SourceReenableResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "source", "removed_hops", "interrupted"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 17},
+        "source": {
+          "allOf": [
+            {"$ref": "#/definitions/SourceApi"},
+            {"properties": {"protocol": {"const": "search"}}}
+          ]
+        },
+        "removed_hops": {"type": "array", "maxItems": 0},
+        "interrupted": {"type": "array", "maxItems": 0},
+        "trial_armed": {"type": "boolean"}
       }
     },
     "SourceDeleteResponse": {
@@ -222,7 +241,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
         "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
       }
@@ -233,7 +252,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "agents": {"type": "array", "items": {"$ref": "#/definitions/AgentSupplyApi"}}
       }
     },
@@ -243,7 +262,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "agent": {"$ref": "#/definitions/AgentSupplyApi"}
       }
     },
@@ -260,7 +279,7 @@
           ],
           "properties": {
             "ok": {"const": true},
-            "contract_version": {"const": 16},
+            "contract_version": {"const": 17},
             "agent": {"$ref": "#/definitions/AgentSupplyApi"},
             "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}, "uniqueItems": true},
             "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}, "uniqueItems": true}
@@ -285,7 +304,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": false},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "error": {"const": "candidate_suppliers_changed"},
         "detail": {"type": "string", "minLength": 1},
         "changed": {
@@ -305,7 +324,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "agent": {
           "type": "object",
           "required": ["backend", "mode", "catalog_models"],
@@ -406,7 +425,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "candidates": {
           "type": "object",
           "required": ["builtin", "providers", "in_list"],
@@ -425,7 +444,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "matches": {
           "type": "array",
           "maxItems": 8,
@@ -459,7 +478,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "chain": {"$ref": "model-hub/agent-chain.schema.json"}
       }
     },
@@ -469,7 +488,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "chains": {"type": "array", "items": {"$ref": "model-hub/agent-chain.schema.json"}}
       }
     },
@@ -479,7 +498,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "chain": {"$ref": "model-hub/agent-chain.schema.json"},
         "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
         "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
@@ -491,7 +510,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "probe": {"$ref": "model-hub/probe-result.schema.json"}
       }
     },
@@ -501,7 +520,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "events": {"type": "array", "items": {"$ref": "model-hub/resolution-event.schema.json"}}
       }
     },
@@ -511,7 +530,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "usage": {"$ref": "model-hub/usage-summary.schema.json"}
       }
     },
@@ -521,7 +540,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "quota": {"$ref": "model-hub/quota-summary.schema.json"}
       }
     },
@@ -531,7 +550,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "hosted_tools": {"$ref": "model-hub/hosted-tools-status.schema.json"}
       }
     },
@@ -541,7 +560,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "flow": {
           "allOf": [
             {"$ref": "model-hub/oauth-flow.schema.json"},
@@ -563,7 +582,7 @@
           "additionalProperties": false,
           "properties": {
             "ok": {"const": true},
-            "contract_version": {"const": 16},
+            "contract_version": {"const": 17},
             "flow": {
               "allOf": [
                 {"$ref": "model-hub/oauth-flow.schema.json"},
@@ -586,7 +605,7 @@
           "additionalProperties": false,
           "properties": {
             "ok": {"const": true},
-            "contract_version": {"const": 16},
+            "contract_version": {"const": 17},
             "flow": {
               "allOf": [
                 {"$ref": "model-hub/oauth-flow.schema.json"},
@@ -611,7 +630,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16}
+        "contract_version": {"const": 17}
       }
     },
     "RuntimeApi": {
@@ -633,7 +652,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "scan": {"$ref": "model-hub/migration-scan.schema.json"}
       }
     },
@@ -643,7 +662,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "applied": {"type": "integer", "minimum": 0},
         "sources": {"type": "array", "items": {"$ref": "#/definitions/SourceApi"}},
         "added_to": {"type": "array", "items": {"$ref": "#/definitions/AddedTo"}}
@@ -655,7 +674,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "provenance": {"$ref": "model-hub/turn-provenance.schema.json"}
       }
     },
@@ -666,7 +685,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "provenance": {
           "anyOf": [
             {"$ref": "model-hub/turn-provenance.schema.json"},
@@ -681,7 +700,7 @@
       "additionalProperties": false,
       "properties": {
         "ok": {"const": true},
-        "contract_version": {"const": 16},
+        "contract_version": {"const": 17},
         "runtime": {"$ref": "#/definitions/RuntimeApi"}
       }
     }

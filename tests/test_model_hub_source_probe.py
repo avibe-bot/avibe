@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from config.v2_config import ModelHubSourceStateConfig
-from core.handlers.model_hub.adapter import DiscoveredModel, RawOutcomeKind, SOURCE_PROTOCOLS, SourceBinding
+from core.handlers.model_hub.adapter import DiscoveredModel, MODEL_PROTOCOLS, RawOutcomeKind, SourceBinding
 from core.handlers.model_hub.classification import ResolutionDecision
 from core.handlers.model_hub.service import ModelHubError
 from core.handlers.model_hub import service as service_module
@@ -17,7 +17,7 @@ from tests.test_model_hub_api import FakeAdapter, FakeInvokeHandle, _service
 from tests.test_model_hub_unverified import _draft
 
 
-@pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
+@pytest.mark.parametrize("protocol", MODEL_PROTOCOLS)
 @pytest.mark.parametrize("listing", ["success", "empty", "invalid", "failed"])
 def test_save_inventory_is_ordered_optional_and_never_authenticates(tmp_path, protocol, listing):
     service, store, adapter = _service(tmp_path)
@@ -43,7 +43,7 @@ def test_save_inventory_is_ordered_optional_and_never_authenticates(tmp_path, pr
     adapter.observe_source.assert_not_awaited()
 
 
-@pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
+@pytest.mark.parametrize("protocol", MODEL_PROTOCOLS)
 @pytest.mark.parametrize("kind", list(RawOutcomeKind))
 def test_probe_invokes_selected_source_even_without_agent_routes_and_isolates_failure(tmp_path, protocol, kind):
     service, store, adapter = _service(tmp_path)
@@ -185,7 +185,7 @@ def test_probe_refuses_invalid_or_unknown_selection_before_runtime_work(tmp_path
     adapter.invoke.assert_not_awaited()
 
 
-@pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
+@pytest.mark.parametrize("protocol", MODEL_PROTOCOLS)
 @pytest.mark.parametrize("model_id", ["fixture:free", "../fixture", "/fixture"])
 @pytest.mark.parametrize("selection", ["initial", "reconciled"])
 def test_saved_source_probe_checks_google_path_before_engine_and_at_admission(
@@ -286,7 +286,7 @@ def test_optional_discovery_preserves_manual_inventory(tmp_path, listing):
     assert source["verification_pending"]
 
 
-@pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
+@pytest.mark.parametrize("protocol", MODEL_PROTOCOLS)
 def test_source_probe_crosses_real_adapter_and_http_transport(tmp_path, protocol):
     from aiohttp import web
 

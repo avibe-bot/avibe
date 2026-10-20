@@ -53,10 +53,15 @@ export const canReplaceKey = (source: Source): boolean =>
 /** `POST …/refresh` is the contract's ONE recovery endpoint (「v3 does not add a
  *  second 'recover' endpoint」) and rejects native sources, which have nothing to
  *  re-discover. */
-export const canRetest = (source: Source): boolean => source.supply_channel === 'hub';
+export const canRetest = (source: Source): boolean =>
+  source.supply_channel === 'hub' && source.protocol !== 'search';
+
+/** Search Sources have a dedicated recovery check; model refetch is forbidden for them. */
+export const canReenable = (source: Source): boolean =>
+  source.protocol === 'search' && source.kind === 'api_key' && source.supply_channel === 'hub';
 
 /** What a stopped row offers as its one tap. */
-export type RepairKind = 'reauth' | 'replace_key' | 'retest';
+export type RepairKind = 'reauth' | 'replace_key' | 'retest' | 'reenable';
 
 /** Causes whose fix is a NEW credential, held by Avibe: the grant or the key
  *  itself stopped working, and only replacing it can help. */
@@ -98,6 +103,12 @@ export function repairAction(source: Source): RepairKind | null {
     if (canReplaceKey(source)) return 'replace_key';
     return null;
   }
+  if (canReenable(source)) {
+    return source.state.detail_key === 'models.source.needs_action.balance_exhausted'
+      || source.state.detail_key === 'models.source.needs_action.spend_limit_reached'
+      ? 'reenable'
+      : null;
+  }
   if (canRetest(source)) return 'retest';
   // Native has no recovery refresh — `refresh_source` refuses `native_cli` outright — so
   // rules 1 and 2 together leave a stopped native row with no tap at all, its
@@ -131,6 +142,7 @@ export const REPAIR_LABEL_KEY: Record<RepairKind, TranslationKey> = {
   reauth: 'settings.models.repair.reauth',
   replace_key: 'settings.models.repair.replaceKey',
   retest: 'settings.models.repair.retest',
+  reenable: 'settings.models.repair.reenable',
 };
 
 /**
@@ -139,12 +151,13 @@ export const REPAIR_LABEL_KEY: Record<RepairKind, TranslationKey> = {
  * this module exists to prevent. `retest` names the existing refetch control,
  * rather than being treated as an exception by the component or its test.
  */
-export type RepairDestination = 'reauth_dialog' | 'replace_key_dialog' | 'refetch_button';
+export type RepairDestination = 'reauth_dialog' | 'replace_key_dialog' | 'refetch_button' | 'reenable_button';
 
 export const REPAIR_DESTINATION: Record<RepairKind, RepairDestination> = {
   reauth: 'reauth_dialog',
   replace_key: 'replace_key_dialog',
   retest: 'refetch_button',
+  reenable: 'reenable_button',
 };
 
 /**

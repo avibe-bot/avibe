@@ -225,7 +225,7 @@ export const RouteChainDialog: React.FC<{
   const addCandidates = agent ? routeCandidates(agent, sources, draft) : [];
   const targetSources = agent ? eligibleSources(sources, agent) : [];
   const canEditRoute = draft.length > 0 || addCandidates.length > 0
-    || targetSources.some((source) => source.kind === 'api_key');
+    || targetSources.some((source) => source.kind === 'api_key' && source.protocol !== 'search');
   const backend = agent ? getBackendUiMeta(agent.backend).label : "";
   const valid = agent
     ? validateRouteDraft(agent, sources, origin, draft)

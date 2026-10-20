@@ -2713,7 +2713,7 @@ class TurnCorrelationRegistry:
 
             self.store.put(
                 {
-                    "contract_version": 16,
+                    "contract_version": 17,
                     "turn_id": normalized_turn_id,
                     "ts": ts or _utc_now_iso(),
                     "agent": trace.agent,

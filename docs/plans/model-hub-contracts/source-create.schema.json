@@ -8,8 +8,36 @@
   "additionalProperties": false,
   "allOf": [
     {
+      "if": { "required": ["protocol"], "properties": { "protocol": { "const": "search" } } },
+      "then": {
+        "required": ["vendor", "key", "protocol"],
+        "properties": {
+          "vendor": { "enum": ["tavily", "exa"] },
+          "base_url": { "type": "null" },
+          "protocol": { "const": "search" },
+          "save_unverified": { "const": false },
+          "accept_unavailable_inventory": { "const": false }
+        }
+      }
+    },
+    {
       "if": { "required": ["protocol"], "properties": { "protocol": { "const": "google" } } },
       "then": { "properties": { "vendor": { "const": "custom" } } }
+    },
+    {
+      "if": {
+        "required": ["vendor"],
+        "properties": { "vendor": { "enum": ["tavily", "exa"] } }
+      },
+      "then": {
+        "properties": {
+          "vendor": { "enum": ["tavily", "exa"] },
+          "base_url": { "type": "null" },
+          "protocol": { "const": "search" },
+          "save_unverified": { "const": false },
+          "accept_unavailable_inventory": { "const": false }
+        }
+      }
     }
   ],
   "properties": {
@@ -39,7 +67,7 @@
       "description": "Transient plaintext credential. It is never returned or persisted in Source state."
     },
     "protocol": {
-      "enum": ["anthropic", "openai_responses", "openai_chat", "google"],
+      "enum": ["anthropic", "openai_responses", "openai_chat", "google", "search"],
       "description": "Optional user-selected interface. When present, observation probes exactly this protocol. Omission selects the shipped vendor pin when one exists; otherwise custom Auto requires matching response proof. Explicit unverified saving requires a catalog pin or a concrete custom declaration and never guesses a protocol."
     },
     "client_nonce": {

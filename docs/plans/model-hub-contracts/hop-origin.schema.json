@@ -8,7 +8,7 @@
   "additionalProperties": false,
   "properties": {
     "provider": { "type": "string", "minLength": 1 },
-    "api": { "$ref": "source.schema.json#/properties/protocol" },
+    "api": { "$ref": "source-probe-result.schema.json#/properties/protocol" },
     "model": { "type": "string", "minLength": 1 }
   }
 }

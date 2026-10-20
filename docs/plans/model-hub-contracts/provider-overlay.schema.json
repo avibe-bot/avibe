@@ -161,7 +161,7 @@
         "hosted_tools": {
           "type": "object",
           "propertyNames": {
-            "$ref": "source.schema.json#/properties/protocol"
+            "$ref": "source-probe-result.schema.json#/properties/protocol"
           },
           "additionalProperties": {
             "type": "object",

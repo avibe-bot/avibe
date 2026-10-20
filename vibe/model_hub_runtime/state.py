@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 
 _CREDENTIAL_REF_RE = re.compile(r"^cred_[A-Za-z0-9_-]{6,128}$")
 _BEARER_CREDENTIAL_REF_RE = re.compile(r"^cred_auth_bearer_[0-9a-f]{32}$")
+_PROTOCOLS = {"anthropic", "openai_responses", "openai_chat", "google", "search"}
 _SOURCE_ID_RE = re.compile(r"^src_[a-z0-9]{8,}$")
-_PROTOCOLS = {"anthropic", "openai_responses", "openai_chat", "google"}
 # The engine writes its file log to ``logs`` under its working directory, the instance directory, only
 # when that directory already exists; otherwise it falls back to ``<auth-dir>/logs``, among the
 # credentials (CLIProxyAPI internal/logging/global_logger.go ResolveLogDirectory).
@@ -796,6 +796,21 @@ class EngineStateStore:
                 raise EngineStateError("API key credential is unavailable")
             return payload.get("auth_scheme")
 
+    def api_key_credential_is_search(self, credential_ref: str) -> bool:
+        """Identify tool-only retirement without requiring an intact old secret.
+
+        Missing/corrupt documents retain ordinary API-key config invalidation;
+        readable identity conflicts and unsafe paths still refuse retirement.
+        """
+        with self._lock:
+            payload = self._read_replacement_credential_document(credential_ref)
+            if payload is None:
+                return False
+            _validate_credential_auth_scheme(credential_ref, payload, require_secret=False)
+            if payload.get("kind") != "api_key":
+                raise EngineStateError("API key credential is unavailable")
+            return payload.get("protocol") == "search"
+
     def _private_credential_directory_present(self, directory: Path) -> bool:
         """Observe owned directories without creating or repairing them."""
         for path in (self.root, directory):
@@ -946,6 +961,14 @@ class EngineStateStore:
             self._remove_private_file_if_present(stage_temporary_path)
             self._remove_private_file_if_present(temporary_path)
             self._remove_private_file_if_present(path)
+
+    def revoke_search_credential(self, credential_ref: str) -> None:
+        """Retire a search-only namespace even after its document disappeared."""
+        with self._lock:
+            payload = self._read_replacement_credential_document(credential_ref)
+            if payload is not None and payload.get("protocol") != "search":
+                raise EngineStateError("credential is not a search API key")
+            self.revoke_api_key_credential(credential_ref)
 
     def revoke_api_key_credential(self, credential_ref: str) -> None:
         """Retire a known API-key ref, never a watched OAuth auth file.
@@ -1658,6 +1681,8 @@ def _validate_source_target(
     """
 
     if credential_kind != "api_key":
+        return
+    if protocol == "search":
         return
     if protocol == "google":
         try:

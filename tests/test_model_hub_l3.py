@@ -46,7 +46,7 @@ from core.handlers.model_hub.adapter import (
     EngineStatus,
     RawCallOutcome,
     RawOutcomeKind,
-    SOURCE_PROTOCOLS,
+    MODEL_PROTOCOLS,
     SourceBinding,
 )
 from core.handlers.model_hub.classification import ResolutionDecision, classify_outcome
@@ -142,6 +142,7 @@ NOW = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
 CATALOG_API_KEY_VENDOR_PROTOCOL_CASES = tuple(
     pytest.param(entry.id, entry.protocol, id=entry.id)
     for entry in api_key_vendor_catalog()
+    if entry.protocol in MODEL_PROTOCOLS
 )
 
 
@@ -5579,7 +5580,7 @@ def test_backend_failure_keeps_the_gateway_terminal_error_no_later_request_super
 def test_released_backend_rejection_records_read_unchanged(tmp_path: Path) -> None:
     """Records the earlier bridge wrote stay as written: no reason or phase is re-derived on read."""
     released = {
-        "contract_version": 16,
+        "contract_version": 17,
         "turn_id": "turn_released_rejection",
         "ts": NOW.isoformat(),
         "agent": "vibey",
@@ -7055,7 +7056,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     _assert_valid(
         "observation-result.schema.json",
         {
-            "contract_version": 16,
+            "contract_version": 17,
             "outcome": "adapter_error",
             "reachable": True,
             "authenticated": "unknown",
@@ -9510,7 +9511,7 @@ def test_probe_2xx_native_auth_error_uses_classified_blocker_detail(
             "anthropic",
             {"model", "max_tokens", "messages"},
         )
-        for source_protocol in SOURCE_PROTOCOLS
+        for source_protocol in MODEL_PROTOCOLS
     ]
     + [
         (
@@ -9519,7 +9520,7 @@ def test_probe_2xx_native_auth_error_uses_classified_blocker_detail(
             "openai_responses",
             {"model", "max_output_tokens", "input"},
         )
-        for source_protocol in SOURCE_PROTOCOLS
+        for source_protocol in MODEL_PROTOCOLS
     ]
     + [
         (
@@ -9533,7 +9534,7 @@ def test_probe_2xx_native_auth_error_uses_classified_blocker_detail(
                 else {"model", "max_tokens", "messages"}
             ),
         )
-        for source_protocol in SOURCE_PROTOCOLS
+        for source_protocol in MODEL_PROTOCOLS
     ],
 )
 def test_probe_request_matches_live_backend_protocol_matrix(
@@ -9589,7 +9590,7 @@ def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
 
     probe = asyncio.run(service.probe_agent("codex", "shared-model"))
     assert probe == {
-        "contract_version": 16,
+        "contract_version": 17,
         "backend": "codex",
         "channel": "native_cli",
         "reachable": True,

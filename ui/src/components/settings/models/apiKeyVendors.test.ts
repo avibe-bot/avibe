@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { API_KEY_VENDOR_PRESETS, apiKeyVendorPreset, CUSTOM_VENDOR } from './apiKeyVendors';
+import {
+  ALL_API_KEY_VENDOR_PRESETS,
+  API_KEY_VENDOR_PRESETS,
+  apiKeyVendorPreset,
+  CUSTOM_VENDOR,
+} from './apiKeyVendors';
 import { SOURCE_PROTOCOLS } from './types';
 
 // The dialog casts the shipped JSON to its preset type on the strength of the
@@ -12,6 +17,11 @@ import { SOURCE_PROTOCOLS } from './types';
 describe('the shipped API-key vendor catalog', () => {
   it('offers something to pick', () => {
     expect(API_KEY_VENDOR_PRESETS.length).toBeGreaterThan(0);
+  });
+
+  it('keeps tool-only search rows out of the generic model form', () => {
+    expect(ALL_API_KEY_VENDOR_PRESETS.filter((preset) => preset.protocol === 'search')).not.toHaveLength(0);
+    expect(API_KEY_VENDOR_PRESETS.every((preset) => preset.protocol !== 'search')).toBe(true);
   });
 
   it('pins every row to an interface this UI can name', () => {

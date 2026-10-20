@@ -186,9 +186,10 @@ export const SourceDetailPanel: React.FC<{
   const detailsHidden = useSourceDetailsHidden();
   const now = useDeadlineClock(source.state.status === 'cooldown' ? source.state.retry_at : null);
   const { Icon, accent } = sourceVisual(source);
-  const [pendingAction, setPendingAction] = React.useState<'refetch' | 'add_model' | 'other' | null>(null);
+  const [pendingAction, setPendingAction] = React.useState<'refetch' | 'reenable' | 'add_model' | 'other' | null>(null);
   const busy = pendingAction !== null;
   const refetching = pendingAction === 'refetch';
+  const reenabling = pendingAction === 'reenable';
   const [testing, setTesting] = React.useState(false);
   const [confirmingReauth, setConfirmingReauth] = React.useState(false);
   const [replacingKey, setReplacingKey] = React.useState(false);
@@ -197,6 +198,7 @@ export const SourceDetailPanel: React.FC<{
   const [guard, setGuard] = React.useState<GuardedAction | null>(null);
   const [result, setResult] = React.useState<{ added: string[]; removed: string[] } | null>(null);
   const [refetchFailed, setRefetchFailed] = React.useState(false);
+  const [reenableFailed, setReenableFailed] = React.useState(false);
   const [removeFailure, setRemoveFailure] = React.useState<{ modelId: string; retryRead: boolean } | null>(null);
   const [query, setQuery] = React.useState('');
   const models = source.models;
@@ -281,6 +283,33 @@ export const SourceDetailPanel: React.FC<{
       }
     }).finally(() => setPendingAction(null));
   };
+  const reenable = () => {
+    if (busy) return Promise.resolve();
+    setReenableFailed(false);
+    setPendingAction('reenable');
+    return trackMutation(async (latest, settlement) => {
+      try {
+        await settlement.source(await modelsApi.reenableSearchSource(latest.id));
+      } catch (error) {
+        if (apiFailure(error)?.code === 'source_not_found') {
+          await settlement.gone(latest.id);
+          return;
+        }
+        setReenableFailed(true);
+        try {
+          const inventory = await settlement.readInventory();
+          const current = inventory.sources.find((item) => item.id === latest.id);
+          if (current) {
+            if (current.state.status === 'standby' || current.trial_pending === true) setReenableFailed(false);
+            await settlement.source(current);
+          } else await settlement.gone(latest.id, inventory);
+        } catch {
+          settlement.release();
+        }
+      }
+    }).finally(() => setPendingAction(null));
+  };
+
   /** Clear one refused effort: the next request at it tries this Source again. The answer is the Source. */
   const clearEffort = (modelId: string, effort: string) => {
     if (busy) return Promise.resolve();
@@ -701,8 +730,8 @@ export const SourceDetailPanel: React.FC<{
     verificationPending: Boolean(source.verification_pending),
   });
   // One authority picks the remedy and another total Record names its concrete
-  // control. In particular, `retest` points at the existing refetch button; it is
-  // not a special case that can fall out of destination-completeness checks.
+  // control. `retest` points at model refetch; `reenable` points at the search
+  // Source's dedicated free-check/trial route.
   const repair = repairAction(source);
   const repairDestination = repair ? REPAIR_DESTINATION[repair] : null;
   const editDialogOpen = manageStage.kind === 'editing'
@@ -730,7 +759,7 @@ export const SourceDetailPanel: React.FC<{
   const lastFetched = source.last_discovered_at
     ? formatRelativeTime(source.last_discovered_at, t)
     : t('settings.models.sourceDetail.metadata.neverFetched');
-  const testable = source.kind === 'api_key' && source.supply_channel === 'hub';
+  const testable = source.kind === 'api_key' && source.protocol !== 'search' && source.supply_channel === 'hub';
   const usageSummary = adoptedBackends.length > 0
     ? t('settings.models.sourceDetail.usageSummary', { count: source.models.length, backends: adoptedBackends.join(i18n.language.startsWith('zh') ? '、' : ', ') })
     : t('settings.models.gateway.modelCount', { count: source.models.length });
@@ -761,10 +790,11 @@ export const SourceDetailPanel: React.FC<{
         <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.type')}</dt><dd className="truncate" title={interfaceLabel}>{interfaceLabel}</dd></div>
         <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.lastFetched')}</dt><dd className="truncate">{lastFetched}</dd></div>
       </dl>
-      {(result || refetchFailed || manageStage.kind === 'delete_failed') && <div className="model-hub-source-notices shrink-0 space-y-2 px-5 pt-3">
+      {(result || refetchFailed || reenableFailed || manageStage.kind === 'delete_failed') && <div className="model-hub-source-notices shrink-0 space-y-2 px-5 pt-3">
         {result && result.removed.length > 0 && <p className="model-hub-status-gold rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.removed', { count: result.removed.length, models: result.removed.join(', ') })}</p>}
         {result && result.added.length === 0 && result.removed.length === 0 && <p className="model-hub-status-mint rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.unchangedOnly')}</p>}
         {refetchFailed && <p className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t('settings.models.sourceDetail.fail.refetch')}</p>}
+        {reenableFailed && <p className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t('settings.models.repair.failed')}</p>}
         {manageStage.kind === 'delete_failed' && <p data-manage-failure="delete" data-manage-retry-read={String(manageStage.retryRead)} className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t(manageStage.retryRead ? 'settings.models.sourceDetail.fail.verifyDeleteSource' : 'settings.models.sourceDetail.fail.deleteSource')} <button type="button" disabled={busy} onClick={retryDelete} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button> <button type="button" disabled={busy} onClick={manageStage.retryRead ? dismissUnresolvedManage : cancelManage} className="font-semibold underline underline-offset-2">{t(manageStage.retryRead ? 'settings.models.sourceDetail.dismissUnverified' : 'common.cancel')}</button></p>}
       </div>}
       <section className="model-hub-source-toolbar flex shrink-0 flex-col gap-2 border-b border-border px-5 py-2.5 sm:flex-row sm:items-center">
@@ -776,9 +806,10 @@ export const SourceDetailPanel: React.FC<{
         <div className="flex shrink-0 items-center gap-2">
           {repairDestination === 'reauth_dialog' && <Button size="xs" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setConfirmingReauth(true)}><LogIn />{t(REPAIR_LABEL_KEY.reauth)}</Button>}
           {repairDestination === 'replace_key_dialog' && <Button size="xs" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setReplacingKey(true)}>{t(REPAIR_LABEL_KEY.replace_key)}</Button>}
-          {source.supply_channel === 'hub' && <Button variant="outline" size="xs" className="model-hub-source-action" data-repair-kind={repairDestination === 'refetch_button' ? repair : undefined} data-repair-destination={repairDestination === 'refetch_button' ? repairDestination : undefined} disabled={busy} onClick={() => void refetch()} aria-busy={refetching}>{refetching ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
+          {repairDestination === 'reenable_button' && <Button size="xs" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => void reenable()} aria-busy={reenabling}>{reenabling ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t(REPAIR_LABEL_KEY.reenable)}</Button>}
+          {source.supply_channel === 'hub' && source.protocol !== 'search' && <Button variant="outline" size="xs" className="model-hub-source-action" data-repair-kind={repairDestination === 'refetch_button' ? repair : undefined} data-repair-destination={repairDestination === 'refetch_button' ? repairDestination : undefined} disabled={busy} onClick={() => void refetch()} aria-busy={refetching}>{refetching ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
           {testable && <Button variant="outline" size="xs" className="model-hub-source-action" disabled={busy} onClick={() => setTesting(true)}><FlaskConical />{t('settings.models.sourceTest.open')}</Button>}
-          {source.kind === 'api_key' && <Button size="xs" className="model-hub-source-action" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
+          {source.kind === 'api_key' && source.protocol !== 'search' && <Button size="xs" className="model-hub-source-action" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
           <SourceManageMenu source={source} busy={busy || manageStage.kind !== 'idle'} onEdit={beginEdit} onDelete={beginDelete} />
         </div>
       </section>

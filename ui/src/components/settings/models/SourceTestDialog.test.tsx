@@ -26,7 +26,7 @@ const source: Source = {
   })),
 };
 const answer = (patch: Partial<SourceProbeResult> = {}): SourceProbeResult => ({
-  source_id: source.id, model_id: 'gpt-5.6-luna', protocol: source.protocol,
+  source_id: source.id, model_id: 'gpt-5.6-luna', protocol: 'openai_chat',
   reachable: true, latency_ms: 123, error: null, ...patch,
 });
 const landing = (sources: Source[] = [source]): SourceMutationLandingReads => ({

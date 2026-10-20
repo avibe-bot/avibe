@@ -10,19 +10,21 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 16 as const;
-export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] as const;
+export const CONTRACT_VERSION = 17 as const;
+export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
 // ── source.schema.json ──────────────────────────────────────────────────
 export type SourceKind = 'subscription' | 'api_key';
-export const SOURCE_PROTOCOLS = [
+export const MODEL_PROTOCOLS = [
   'anthropic',
   'openai_responses',
   'openai_chat',
   'google',
 ] as const;
+export type ModelProtocol = (typeof MODEL_PROTOCOLS)[number];
+export const SOURCE_PROTOCOLS = [...MODEL_PROTOCOLS, 'search'] as const;
 export type SourceProtocol = (typeof SOURCE_PROTOCOLS)[number];
 // Google is API/config-only until its picker frame is approved.
 export const SELECTABLE_SOURCE_PROTOCOLS = ['anthropic', 'openai_responses', 'openai_chat'] as const;
@@ -152,6 +154,8 @@ export type Source = {
   verification_pending?: string | null;
   /** Opaque identity of the latest credential or endpoint change; kept after verification. Not for display. */
   credential_generation?: string | null;
+  /** Response-only search recovery state; never persisted. */
+  trial_pending?: boolean;
   usage?: SourceUsage;
   /** Subscription identity for the row's mono sub-line (e.g. "me@gmail.com").
    *  Never secret material; may be null. */
@@ -644,7 +648,7 @@ export type RecordedAttempt = {
   channel: SupplyChannel;
   stripped_reasoning_efforts?: string[];
   declared_reasoning_efforts?: string[];
-  origin?: { provider: string; api: SourceProtocol; model: string };
+  origin?: { provider: string; api: ModelProtocol; model: string };
 };
 export type TurnProvenance = {
   contract_version: (typeof PERSISTED_TURN_CONTRACT_VERSIONS)[number];
@@ -661,7 +665,7 @@ export type TurnProvenance = {
     configured_model_id: string | null;
     channel: SupplyChannel | null;
     local_error_detail?: string;
-    origin?: { provider: string; api: SourceProtocol; model: string };
+    origin?: { provider: string; api: ModelProtocol; model: string };
     stripped_reasoning_efforts?: string[];
     declared_reasoning_efforts?: string[];
   } & ({
@@ -1162,7 +1166,7 @@ export type SourceObservation = {
   outcome: ObservationOutcome;
   reachable: boolean | null;
   authenticated: ObservationAuthentication;
-  protocol: SourceProtocol | null;
+  protocol: ModelProtocol | null;
   discovery: ObservationDiscovery;
   models: string[];
 };
@@ -1173,13 +1177,13 @@ export type ApiKeySourceObservation = {
   base_url?: string | null;
   key: string;
   /** Omission auto-detects; a value restricts observation to this protocol. */
-  protocol?: SourceProtocol;
+  protocol?: ModelProtocol;
 };
 
 export type SourceProbeResult = {
   source_id: string;
   model_id: string;
-  protocol: SourceProtocol;
+  protocol: ModelProtocol;
   reachable: boolean;
   latency_ms: number;
   error: string | null;

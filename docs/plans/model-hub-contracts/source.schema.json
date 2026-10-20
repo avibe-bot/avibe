@@ -22,12 +22,16 @@
     "verification_pending": {
       "type": ["string", "null"],
       "pattern": "^vp_[0-9a-f]{32}$",
-      "description": "Opaque, non-secret pending-verification identity, replaced whenever Hub credential material or endpoint is stored without an add-time observation that authenticated it, same-handle OAuth reauthentication included. Presence means nothing upstream has accepted this credential yet, independently of routing health. An invocation captures this marker before admission; any successful call with the same current credential and marker may clear it through a fresh cross-process config mutation. Later same-credential calls do not invalidate proof. Inventory never clears it. Null or omission retains legacy behavior without a retrospective verification claim."
+      "description": "Opaque, non-secret pending-verification identity, replaced whenever Hub credential material or endpoint is stored without authentication evidence, same-handle OAuth reauthentication included. Presence means nothing upstream has accepted this credential yet, independently of routing health. Model Sources keep the matching-credential model-call rule: an invocation captures this marker before admission, and a successful model call with the same current credential and marker may clear it. A tool-only search Source never makes a model call. For every search-capable Source, including an official DeepSeek model Source saved unverified, the marker clears on an authenticated search outcome with the matching credential (any 200, a 402, or a catalog-named limit), or a free-check pass, balance or limit for that credential. A 200 proves authentication even when its results are empty or its body is unreadable. Clearing requires the same current credential and marker and is a fresh cross-process config mutation; credential_generation does not change. Free-check unknown and invalid leave it unchanged. Later same-credential calls do not invalidate proof. Inventory never clears it. Null or omission retains legacy behavior without a retrospective verification claim."
     },
     "credential_generation": {
       "type": ["string", "null"],
       "pattern": "^vp_[0-9a-f]{32}$",
       "description": "Opaque, non-secret identity of the Source's latest credential or endpoint change: the verification marker that change minted, kept after verification clears verification_pending. The Source identity that evidence, retry state, a turn's native-content pin and opaque-payload binding follow includes it instead of verification_pending, so verification changes no identity and an identity never returns to one an earlier credential had, even when OAuth reauthentication keeps the credential's handle. Absent on a verified Source no such change has touched since the field existed; a Source still pending from before the field takes its verification_pending as its generation. Either way a released Source's identity is unchanged."
+    },
+    "trial_pending": {
+      "type": "boolean",
+      "description": "Response-only search recovery state: true while the one-shot re-enable trial is armed or its admitted request is in flight. Never persisted in model_hub.sources."
     },
     "id": {
       "type": "string",
@@ -64,7 +68,7 @@
     "vendor": {
       "type": "string",
       "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
-      "description": "Standard vendor id (anthropic|openai|zhipuai|kimi|xai|...) or 'custom'. Also the OpenCode provider prefix (see opencode-overlay.md)."
+      "description": "Normalized vendor id, including a preserved retired catalog vendor. Source reads do not re-apply catalog create admission; tool-only search creation remains limited to the shipped search vendors. Also the OpenCode provider prefix (see opencode-overlay.md)."
     },
     "display_name": {
       "type": "string",
@@ -75,7 +79,8 @@
         "anthropic",
         "openai_responses",
         "openai_chat",
-        "google"
+        "google",
+        "search"
       ]
     },
     "base_url": {
@@ -492,7 +497,7 @@
         "string",
         "null"
       ],
-      "description": "Opaque handle into the engine-owned credential store; secret material never appears in a payload. Null for native_cli Sources because their credential stays in the sanctioned CLI store, and non-null for hub Sources. Re-authenticating native_cli refreshes that CLI store and leaves this null; re-authenticating a hub Source replaces the engine-held grant behind its handle."
+      "description": "Opaque handle into the Model Hub credential store; secret material never appears in a payload. Null for native_cli Sources because their credential stays in the sanctioned CLI store, and non-null for hub Sources. Re-authenticating native_cli refreshes that CLI store and leaves this null; re-authenticating a hub Source replaces the Model Hub-held grant behind its handle."
     },
     "account_label": {
       "type": [
@@ -510,6 +515,19 @@
     }
   },
   "allOf": [
+    {
+      "if": { "properties": { "protocol": { "const": "search" } }, "required": ["protocol"] },
+      "then": {
+        "properties": {
+          "kind": { "const": "api_key" },
+          "supply_channel": { "const": "hub" },
+          "billing": { "const": "metered" },
+          "base_url": { "type": "null" },
+          "models": { "maxItems": 0 }
+        }
+      },
+      "else": { "not": { "required": ["trial_pending"] } }
+    },
     {
       "if": { "properties": { "protocol": { "const": "google" } } },
       "then": { "properties": { "vendor": { "const": "custom" } } }
@@ -538,7 +556,7 @@
       }
     },
     {
-      "$comment": "v2 (07-29, review round 4): the api_key shape. `supply_channel: hub` is not a default here but the only possibility — `native_cli` means the sanctioned CLI holds an OAuth credential in its own store (README 07-23 ruling), and a pasted key is provisioned into the engine-owned store instead, which is the hub channel by definition. `projected_exhaust_at` is pinned null for the reason at the field itself.",
+      "$comment": "v2 (07-29, review round 4): the api_key shape. `supply_channel: hub` is not a default here but the only possibility — `native_cli` means the sanctioned CLI holds an OAuth credential in its own store (README 07-23 ruling), and a pasted key is provisioned into the Model Hub credential store instead, which is the hub channel by definition. `projected_exhaust_at` is pinned null for the reason at the field itself.",
       "if": {
         "properties": {
           "kind": {

@@ -44,7 +44,7 @@ from config.v2_config import (
 )
 from tests.opencode_generation_fakes import ui_lease, lease_returning
 from core.agent_auth_service import AgentAuthService
-from core.handlers.model_hub.adapter import SOURCE_PROTOCOLS
+from core.handlers.model_hub.adapter import MODEL_PROTOCOLS
 from core.handlers.model_hub.service import (
     ModelHubError,
     _NATIVE_VENDOR_BACKENDS,
@@ -2473,7 +2473,7 @@ class AgentAuthSetupScenarioTests(unittest.IsolatedAsyncioTestCase):
                 # a path that was never taken.
                 self.assertEqual(
                     harness.adapter.observation_calls,
-                    [(vendor, None, SOURCE_PROTOCOLS)],
+                    [(vendor, None, MODEL_PROTOCOLS)],
                 )
                 # Clean: no Source, credential revoked and unjournaled, flow
                 # forgotten so the same vendor can be started again.
@@ -3860,8 +3860,8 @@ def test_catalog_api_key_setup_observe_then_create_closed_loop(monkeypatch, tmp_
 
 @pytest.mark.parametrize(
     ("vendor", "protocol"),
-    [(entry.id, entry.protocol) for entry in api_key_vendor_catalog()]
-    + [("custom", protocol) for protocol in SOURCE_PROTOCOLS],
+    [(entry.id, entry.protocol) for entry in api_key_vendor_catalog() if entry.protocol in MODEL_PROTOCOLS]
+    + [("custom", protocol) for protocol in MODEL_PROTOCOLS],
 )
 @pytest.mark.parametrize("auth_before_validation", [True, False])
 @pytest.mark.parametrize("public_inventory", [False, True])
