@@ -128,7 +128,7 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
 | `prefer_native` | boolean; absent means `true` (decision 3) |
 | `service_order` | the automatic order of tool-only `search` Sources: the server appends a Source's id when it is created and drops it when the Source is removed; the user never edits it directly (a reorder saves `executor_order`). Ids that no longer name a Source are skipped. |
 | `executor_order_kinds` | written by the server with every `executor_order` save: each named Source id mapped to `service` or `model`, its role at that save. Absent (a released order) means every entry was saved as `model`; an id the order does not name is ignored. An id the order names but that names no Source at the save (a stale client's removed Source) gets no entry and is skipped at read, as `executor_order` already skips it; an entry with no kind is read as `model`. The client never writes it. |
-| `services` | per search-capable Source: `results` (1 to the vendor's maximum, default 5), `content` (page text, default `false`, only where the vendor returns page text) and `enabled` (default `true`; `false` takes the Source out of the search order without removing it, which is how a DeepSeek Source keeps its models but stops searching). Absent means defaults. An entry for a Source that no longer exists is ignored. The catalog limits are enforced on write; on load a saved value the current catalog no longer allows is read as the nearest allowed one (`results` clamped to the maximum, `content: true` read as `false` where the vendor no longer returns page text) and kept as saved until the next write, so a catalog change never fails loading. |
+| `services` | per search-capable Source: `results` (1 to the vendor's maximum, default `min(5, the vendor's maximum)`), `content` (page text, default `false`, only where the vendor returns page text) and `enabled` (default `true`; `false` takes the Source out of the search order without removing it, which is how a DeepSeek Source keeps its models but stops searching). Absent means defaults. An entry for a Source that no longer exists is ignored. The catalog limits are enforced on write; on load a saved value the current catalog no longer allows is read as the nearest allowed one (`results` clamped to the maximum, `content: true` read as `false` where the vendor no longer returns page text) and kept as saved until the next write, so a catalog change never fails loading. |
 
 - `executor_order` keeps its rule (hosted tools §3.3) and now lists search-capable Sources beside model executors.
   Each save also writes `executor_order_kinds`, a map from each named Source id to the role it had when the order
@@ -198,7 +198,10 @@ overwrite each other.
 Hosted tools §6 holds, with these changes:
 
 - **Candidates** are the model executors of hosted tools §6 plus every search-capable Source: a `search` Source, or a
-  model Source with `kind: "api_key"` whose vendor lists a search API and whose endpoint is official (a subscription
+  model Source with `kind: "api_key"` whose vendor lists a search API and whose endpoint is official. Such a
+  Source joins the search order on its own only when its catalog row is marked `auto_enroll` (DeepSeek alone,
+  decision 4); for any other vendor that later gains a search API, `services.<id>.enabled` defaults to `false`,
+  so its queries go nowhere new until the user turns search on in the Source's detail (a subscription
   or `native_cli` Source has no API key for the search call, so it is never a search-service candidate). A Source holds one role in a chain:
   a model Source with a search API is a search-service candidate only, never also a model executor, so it has one
   row in the order and is called at most once per call. A Source with `services.<id>.enabled:
@@ -319,9 +322,10 @@ Hosted tools §6 holds, with these changes:
 - The result is the canonical `HostedRecord` (hosted tools §6). `sources[]` follows the service's ranking: `url`,
   `title`, `snippet` and `page_age` from the catalog's mapping, `snippet` taken from the vendor's model-oriented
   field (DeepSeek `summary`).
-- **Every field a service mapping writes is bounded before the record is written.** The bounds belong to the
-  mapping, not to the C-1 read shape, so released `HostedSource` rows from native and model-executor calls still
-  load unchanged. `url` is at most 2,048 characters, and a result
+- **Every field a service mapping writes is bounded before the record is written.** The bounds on the released
+  fields (`url`, `title`, `snippet`, `page_age`) belong to the mapping, not to the C-1 read shape, so released
+  `HostedSource` rows from native and model-executor calls still load unchanged. The new `content` is the
+  exception: its bound is also in C-1's schema and reader (§8), which clips it on every load. `url` is at most 2,048 characters, and a result
   with a longer or non-HTTP(S) URL is dropped. `title` is cut to 300, `snippet` to 1,000 and `page_age` to 64. A
   record keeps at most the configured number of results. An empty results array is a valid answer: a `completed`
   record with no sources (§4.2). `service_unreadable` is a body without a results array, or a non-empty array in
@@ -660,7 +664,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 | PR | Lane | Work | Depends on |
 | --- | --- | --- | --- |
 | **S1a** Catalog and Sources | foundation | search vendors in the catalog; the Source UI guards for a `search` Source (no model refresh, test or add-model controls; its row says "搜索服务"); `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the protocol vocabulary split; the create and replace branch with free checks; "重新启用" (`reenable_search_source`, its free check and the armed-trial state); `service_order` maintenance on create and remove; the adapter's search call and free-check operation with custody and transport rules; opening the v17 version event | — |
-| **S1b** Settings and Tools read | foundation | the existing Tools tab rendering a `kind: "service"` candidate as a plain service row (name and order, no model controls) until S4 replaces it; `prefer_native`, `services` (the patch semantics and load-time clamping) and `executor_order_kinds` (loaded, written with each order save, and kept across a restart); the Tools read (`executor_candidates` with `kind`, `service_vendors`, `trial_pending`) and PUT; their v17 entries | S1a |
+| **S1b** Settings and Tools read | foundation | no service candidate in the read until S2 (S2 turns their listing on with the chain, so an intermediate release shows no row the gateway cannot run, and the existing Tools tab never meets a `kind: "service"` candidate); `prefer_native`, `services` (the patch semantics and load-time clamping) and `executor_order_kinds` (loaded, written with each order save, and kept across a restart); the Tools read (`executor_candidates` with `kind`, `service_vendors`, `trial_pending`) and PUT; their v17 entries | S1a |
 | **S2** Chain and records | gateway | candidates, automatic order and the saved-order placement rule, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1a, S1b, S3 |
 | **S3** Model text | Vibey | C-1's optional `HostedSource.content` and the model-facing text that renders it, with its bounds; the card's executor label (read from `attempts[]` when present) | S1a's open v17 event |
 | **S4** Tools, dialog, Sources | UI | §6 with en and zh copy | S1b's read; S2 (the add dialog and service rows land with or after S2); S5's frames |
