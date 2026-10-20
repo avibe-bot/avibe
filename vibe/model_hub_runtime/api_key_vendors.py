@@ -170,6 +170,10 @@ def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] |
         raise ValueError("api-key vendor search catalog service id is invalid")
     if item.get("auth") not in {"bearer", "x-api-key"} or not isinstance(item.get("request"), dict) or not isinstance(item.get("result"), dict) or not isinstance(item.get("limits"), dict):
         raise ValueError("api-key vendor search catalog mapping is invalid")
+    results_max = item["limits"].get("results_max")
+    # Usage page counters use this fixed ceiling even after a catalog update.
+    if isinstance(results_max, bool) or not isinstance(results_max, int) or not 1 <= results_max <= 100:
+        raise ValueError("api-key vendor search catalog results maximum is invalid")
     price = item.get("price")
     if not isinstance(price, dict) or set(price) != {"unit", "usd_per_1k", "extra", "as_of", "url"} or price.get("unit") != "search":
         raise ValueError("api-key vendor search catalog price is invalid")

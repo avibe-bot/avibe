@@ -59,6 +59,7 @@ from vibe.model_hub_runtime import installer as runtime_installer_module
 from vibe.model_hub_runtime import supervisor as supervisor_module
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.api_key_vendors import (
+    _validate_search_catalog,
     api_key_vendor_catalog,
     official_models_dev_provider,
     search_service,
@@ -2698,6 +2699,31 @@ def test_valid_source_state_is_loaded_without_touching_the_file(
         if record.name == "vibe.model_hub_runtime.state"
         and record.levelno == logging.WARNING
     ]
+
+
+def test_shipped_api_key_vendor_catalog_matches_its_schema() -> None:
+    catalog = json.loads(Path("vibe/data/api_key_vendors.json").read_text(encoding="utf-8"))
+    schema = json.loads(Path("vibe/data/api_key_vendors.schema.json").read_text(encoding="utf-8"))
+    Draft7Validator(schema).validate(catalog)
+
+
+@pytest.mark.parametrize("vendor", ["deepseek", "tavily", "exa"])
+@pytest.mark.parametrize("results_max", [1, 5, 100, 101, 0, -1, True, 1.5, "100", None])
+def test_search_catalog_results_ceiling_matches_schema_and_runtime(vendor, results_max) -> None:
+    catalog = json.loads(Path("vibe/data/api_key_vendors.json").read_text(encoding="utf-8"))
+    row = next(row for row in catalog if row["id"] == vendor)
+    if results_max is None:
+        del row["search"]["limits"]["results_max"]
+    else:
+        row["search"]["limits"]["results_max"] = results_max
+    schema = json.loads(Path("vibe/data/api_key_vendors.schema.json").read_text(encoding="utf-8"))
+    valid = type(results_max) is int and 1 <= results_max <= 100
+    assert Draft7Validator(schema).is_valid([row]) is valid
+    if valid:
+        assert _validate_search_catalog(row["search"], protocol=row["protocol"]) == row["search"]
+    else:
+        with pytest.raises(ValueError, match="results maximum"):
+            _validate_search_catalog(row["search"], protocol=row["protocol"])
 
 
 @pytest.mark.parametrize(

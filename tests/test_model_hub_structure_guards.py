@@ -428,9 +428,10 @@ def _auth_status_branch(node: ast.AST) -> bool:
 
 
 @pytest.mark.parametrize("surface", ["README.md", "source.schema.json"])
-def test_verification_contract_distinguishes_search_from_model_calls(surface: str) -> None:
-    # These published rules guide S2's settlement implementation. Runtime tests
-    # cannot catch a contract that still requires a tool-only Source to call a model.
+def test_verification_contract_covers_every_search_capable_source(surface: str) -> None:
+    # These published rules guide S2's settlement implementation. Model Sources
+    # with a search API can authenticate by either kind of call; tool-only ones
+    # must never need a model call to verify their credential.
     text = (ROOT / "docs/plans/model-hub-contracts" / surface).read_text(encoding="utf-8")
     if surface.endswith(".json"):
         text = json.loads(text)["properties"]["verification_pending"]["description"]
@@ -439,7 +440,9 @@ def test_verification_contract_distinguishes_search_from_model_calls(surface: st
     text = " ".join(text.replace("`", "").split())
     for clause in (
         "matching-credential model-call rule",
-        "search Source never makes a model call",
+        "tool-only search Source never makes a model call",
+        "For every search-capable Source",
+        "including an official DeepSeek model Source",
         "authenticated search outcome with the matching credential",
         "any 200, a 402, or a catalog-named limit",
         "free-check pass, balance or limit",

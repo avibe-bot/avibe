@@ -137,8 +137,9 @@ No underlying engine expansion or OAuth alias substitution is part of this chang
    native-config import, Hub OAuth admission, any credential or endpoint replacement —
    carries an opaque `verification_pending` identity. Model Sources keep the
    matching-credential model-call rule: a successful model call with the same current
-   credential and marker may clear it. A `search` Source never makes a model call.
-   Its marker clears on an authenticated search outcome with the matching credential
+   credential and marker may clear it. A tool-only `search` Source never makes a model call.
+   For every search-capable Source, including an official DeepSeek model Source
+   saved unverified, the marker clears on an authenticated search outcome with the matching credential
    (any 200, a 402, or a catalog-named limit), or a free-check `pass`, `balance` or
    `limit` for that credential. A 200 proves authentication even when its results
    are empty or its body is unreadable. Clearing requires the same current credential
