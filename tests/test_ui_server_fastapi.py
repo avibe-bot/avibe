@@ -1,6 +1,7 @@
 import asyncio
 import gzip
 import json
+import os
 import shutil
 import threading
 from types import SimpleNamespace
@@ -20,7 +21,7 @@ from vibe.ui_compat import (
 )
 from starlette.websockets import WebSocketDisconnect
 
-from vibe import remote_access, ui_server
+from vibe import remote_access, ui_asset_archive, ui_server
 from vibe.ui_server import app
 from tests.test_api_save_config_merge import _full_config_payload
 from tests.ui_server_test_helpers import csrf_headers
@@ -2760,6 +2761,8 @@ def test_static_ui_serves_previous_build_chunks_after_upgrade(monkeypatch, tmp_p
     assert previous_chunk.headers["Cache-Control"] == "public, max-age=31536000, immutable"
     assert "javascript" in previous_chunk.headers["Content-Type"]
     assert client.get("/assets/__vite-browser-external-111.js").status_code == 200
+    # A chunk the current build shares is stored once, not once per install.
+    assert os.path.samefile(ui_asset_archive.find_archived_asset("shared-000.js"), ui_dist / "assets" / "shared-000.js")
 
     install_build("333")
 
