@@ -156,7 +156,10 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
   after a status arrived is settled by that status (§4.3). It reads the key from the state store (`read_api_key`, as credential
   retargeting does today) only for the duration of the request.
 - Transport rules: HTTPS only, host pinned to the catalog endpoint, redirects refused, environment proxies ignored
-  as the engine's own upstream requests ignore them, response body capped at 8 MiB. The credential file read, and the buffered body's JSON decoding, result
+  as the engine's own upstream requests ignore them, response body capped at 8 MiB. With `content` on, the request stays under the cap by asking the vendor
+  for bounded text where it can (Exa `contents.text.maxCharacters` at the 4,000-character source bound) and
+  otherwise by asking for at most the catalog row's `content_results_max` results (set from the vendor's documented
+  page-text size; the implementation lane verifies it), so a legitimate content response is never over the cap. The credential file read, and the buffered body's JSON decoding, result
   mapping and bounds, run off the controller loop (`asyncio.to_thread`, as the hosted-response parsers already do).
 - The engine is not involved: it only forwards model requests, and rendering a tool-only key into engine config
   would advertise a model provider that does not exist.
@@ -203,9 +206,11 @@ Hosted tools §6 holds, with these changes:
   decision 4); for any other vendor that later gains a search API, `services.<id>.enabled` defaults to `false`,
   so its queries go nowhere new until the user turns search on in the Source's detail (a subscription
   or `native_cli` Source has no API key for the search call, so it is never a search-service candidate). A Source holds one role in a chain:
-  a model Source with a search API is a search-service candidate only, never also a model executor, so it has one
-  row in the order and is called at most once per call. A Source with `services.<id>.enabled:
-  false` stays in the list as a `disabled` entry at the end; it is never requested.
+  a model Source with a search API takes the service role while its search is effectively enabled, and is then
+  never also a model executor, so it has one row in the order and is called at most once per call; while its
+  search is off it keeps whatever model-executor role it had (so a vendor that gains a search API without
+  `auto_enroll` loses nothing), and only when it has none is it listed as a `disabled` entry. A tool-only `search`
+  Source with `services.<id>.enabled: false` is likewise a `disabled` entry at the end; it is never requested.
 - **Automatic order** (no `executor_order`): `search` Sources in `service_order` (§3.2), then model Sources with a search API
   in Vibey's Source order, then model executors as today. A saved `executor_order` is used as saved, and one
   rule, applied whenever the order is read, places what it does not name: unnamed search-capable Sources go
@@ -274,8 +279,9 @@ Hosted tools §6 holds, with these changes:
   search skips it as `blocked`. A trial that completes clears the persisted state, and so does any other 200 (an unreadable body still proves
   the account answered and was billed; it then gets the service cooldown). A trial that fails is settled by the
   outcome table: a classified failure (401, 402, a limit code) replaces the blocker with its own state, so a
-  revoked key asks for a new key. Any other failure, whether transient or a query-specific `service_refused`,
-  keeps the current blocker. Every outcome ends the reservation, so the user can arm a new trial; a cancelled turn (the user
+  revoked key asks for a new key. Any other failure, whether transient or unreadable, keeps the current blocker. A
+  query-specific `service_refused` is unbilled and says nothing about the account, so it releases the reservation
+  and leaves the trial armed: the model's corrected query uses it. Every other outcome ends the reservation, so the user can arm a new trial; a cancelled turn (the user
   stops it while the trial request is in flight) releases the reservation and, if no status had arrived, keeps the
   blocker like a transient failure; a status that arrived before the stop settles the trial by the outcome table. A restart
   drops an unused trial, so the Source stays blocked and the user can press again. This fails closed. While a
@@ -421,7 +427,9 @@ Hosted tools §6 holds, with these changes:
   reads that list alone: the kind and label of the last tried entry (when no entry was tried, every candidate
   having been skipped, the projection has no executor, label or cost, and the card shows the terminal reason with
   the per-Source list, as the released no-candidate failure shows no executor), and the chain total as the sum of the tried
-  entries' `cost`; the total is a lower bound when any tried entry has no cost or a cost with `lower_bound: true`
+  entries' `cost`. With no known figure at all (every tried entry unpriced, such as a lone DeepSeek unreadable
+  200), the total is absent, as an unpriced chain is today; otherwise it is a lower bound when any tried entry has
+  no cost or a cost with `lower_bound: true`
   (a skipped entry sent nothing and has no cost by design, so it never makes the total incomplete). So a chain whose billable model
   attempt was followed by a service that failed before sending keeps both facts, whether or not `execution` is
   present; `execution` and `failed_attempts[]` keep their released meaning for older readers. Without
@@ -556,6 +564,11 @@ only DeepSeek Source is a relay gets the create flow, which adds an official Dee
 
 ### 6.3 Service detail
 
+The search-specific parts of a Source's detail (the "用于网页搜索" switch, results, content, this month's requests)
+appear only once the read lists that Source as a service candidate, the same S2 activation signal as the Tools
+rows; before it, a `search` Source's detail shows only its key, health and remove, so nothing presents a service
+as active.
+
 Status (latest success, or the Source's current health detail with its existing remedy copy; "重新启用" only for a
 tool-only `search` Source in a balance or limit state, §4.2, and the existing Source repair for DeepSeek), key (masked; "更换密钥",
 or for DeepSeek "使用供应商「DeepSeek」的 Key", managed under 供应商与路由), settings (results; page content only where
@@ -573,7 +586,8 @@ pill, "不提供模型", and their web search chip or `needs_action` chip.
 ### 6.5 Chat and IM
 
 The tool card and the IM line are hosted tools §8.3 with the service as the executor: "通过 Tavily · 5 个来源 · ≈ $0.008";
-`🔎 网页搜索 "…" · Tavily · 5 个来源 · ≈ $0.008` (a list-price figure keeps "≈"; a reported one and an exact $0 do not). A switch caused by a failing service shows on both surfaces:
+`🔎 网页搜索 "…" · Tavily · 5 个来源 · ≈ $0.008` (a list-price figure and a reported one with `estimate: true`, such as Exa's, keep "≈"; an exact reported figure
+and an exact $0 do not; a total keeps "≈" when any non-zero figure in it does). A switch caused by a failing service shows on both surfaces:
 "Tavily 密钥无效，已改用 DeepSeek". English copy follows the same keys; every string goes through `vibe/i18n` and
 `ui/src/i18n`.
 
