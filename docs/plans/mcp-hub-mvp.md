@@ -33,7 +33,7 @@ Out of scope: OAuth, SSE (explicit `unsupported_transport_sse` error), project s
 
 - `definition.json` and `state.json` are the only authorities; nothing is duplicated into V2 config or another registry. Every file is written with the existing `config/atomic_io.py` `write_atomic`.
 - `commands.json` is declarative data interpreted by the shared `vibe mcp` runner, not code. Tool implementations stay on the server/executable.
-- Revisions are derived data: a revision whose `formatVersion` this release does not read is shown as "needs regeneration" (definition kept, nothing deleted) instead of being migrated. Invalid or future-format definition files disable that package with a warning; startup never fails and bad files are not overwritten.
+- Revisions are derived data: a revision whose `formatVersion` this release does not read is shown as "needs regeneration" (definition kept, nothing deleted) instead of being migrated. Any other unreadable, invalid or future-format file of a package (`definition.json`, `state.json`, `current.json`) disables only that package with a warning; startup never fails and bad files are not overwritten.
 
 ## 3. Prompt injection
 
@@ -84,7 +84,7 @@ vibe mcp docs search --args-json '{"query":"async Python","limit":5}'   # also -
 ```
 
 - List/help read local artifacts only; they work offline and with the owner down.
-- Lists print all entries, sorted by name.
+- Lists print all entries, sorted by name. Human-readable output escapes control characters from server-provided text.
 - Calls go to the owner, print one JSON document to stdout, diagnostics to stderr.
 - Errors point to the next useful command (root list, service list or tool help).
 
@@ -173,10 +173,10 @@ Persisted `definition.json`:
 - **Owner:** the Controller, over existing control IPC. UI and CLI hold no runtimes.
 - **Identity:** existing caller context (`core/caller_context.py`, `AVIBE_SESSION_ID`, …) as used by `vibe task/watch/agent`. No MCP-specific token.
 - **Permission:** instance-global. The local OS user has full rights. Management commands go through the same existing CLI command admission (role floor) as other config-changing `vibe` commands; list/help and tool calls use the same floor as using Skills (Editor), matching who sees the prompt index. Remote-context callers thus get exactly the permissions they have elsewhere. No MCP-specific policy.
-- **Connections:** one client connection per (revision, caller session) for every transport — a stdio process, or an HTTP client holding its own `Mcp-Session-Id` (closed with the connection). This matches Claude Code and Codex (one client per session). Context-free calls are one-shot. Calls within one session are serialized on its connection. A connection whose call ends with `unknown_outcome` is closed, never reused.
+- **Connections:** one client connection per (revision, caller session) for every transport — a stdio process, or an HTTP client holding its own `Mcp-Session-Id` (closed with the connection). This matches Claude Code and Codex (one client per session). Context-free calls are one-shot. Calls within one session are serialized on its connection. A connection whose call ends with `unknown_outcome` is closed, never reused. An HTTP `Session not found` (pre-dispatch) closes the client and the call is retried once on a fresh connection.
 - **Limits** (constants): at most 8 stdio processes in total, including generation; at the cap a new connection fails with `capacity`. Idle close 10 min; call timeout 120 s; generation 5 min. HTTP is not capped.
 - Servers that lock a shared resource (e.g. Playwright's default persistent profile) need their own isolation flag in the provider config (`--isolated`); Avibe does not rewrite server argv.
-- **Schemas at call time:** the CLI parses and validates against the published revision only. The SDK may list tools on a new connection as its protocol handling requires; that never changes the published package.
+- **Schemas at call time:** the CLI parses and validates against the published revision only. A new runtime connection lists all `tools/list` pages through the SDK before its first call, so the SDK knows every tool's output schema and header annotations; that list never changes the published package.
 - **Calls:** the owner checks enabled state, connects or reuses, sends `tools/call` and returns the result with the revision used. Elicitation/sampling/roots are out of scope: the client's callbacks for them reject, and the resulting error is reported as `input_required_unsupported`, not as an unknown outcome. The owner fixes the revision at admission and validates arguments against it.
 - **Disable/remove/regenerate:** disable/remove block new calls; all three close the package's superseded idle connections at once (busy ones close when their call settles); in-flight work may finish or report unknown outcome.
 - **Event loop:** all MCP SDK sessions run on one dedicated runtime thread with its own event loop, owned by the Controller; the SDK's synchronous result validation therefore never blocks the Controller loop. All other MCP work — argument validation, generation, artifact I/O, result envelope serialization and sizing — also runs off the Controller loop; the Controller loop only hands IPC requests over, per the repo's controller-loop rules.
