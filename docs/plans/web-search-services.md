@@ -439,7 +439,9 @@ Hosted tools §6 holds, with these changes:
   content type at most `billable_requests` times 100, a fixed ceiling every catalog version honors (the catalog
   schema caps a row's maximum `results` at 100, and a page is a returned result), so a row written under an older
   catalog is never judged by a newer, lower maximum,
-  and no `reported_usd` without a reported request. A row that breaks any relation keeps
+  and `reported_usd` a finite, non-negative amount no larger than `reported_requests` times $1 (a fixed ceiling,
+  above every catalog version's per-request ceiling) and zero without a reported request. A row that breaks any
+  relation keeps
   `requests`, has its counts reduced to the bounds, drops the quantities that depended on a reduced count
   (`list_pages`, `reported_usd`, `reported_requests`), and is marked `lower_bound`; `lower_bound` is also forced
   true whenever `uncertain_requests` is non-zero.
@@ -654,8 +656,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 
 | PR | Lane | Work | Depends on |
 | --- | --- | --- | --- |
-| **S1a** Catalog and Sources | foundation | search vendors in the catalog; `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the protocol vocabulary split; the create and replace branch with free checks; "重新启用" (`reenable_search_source`, its free check and the armed-trial state); `service_order` maintenance on create and remove; the adapter's search call and free-check operation with custody and transport rules; opening the v17 version event | — |
-| **S1b** Settings and Tools read | foundation | `prefer_native`, `services` (the patch semantics and load-time clamping) and `executor_order_kinds` (loaded, written with each order save, and kept across a restart); the Tools read (`executor_candidates` with `kind`, `service_vendors`, `trial_pending`) and PUT; their v17 entries | S1a |
+| **S1a** Catalog and Sources | foundation | search vendors in the catalog; the Source UI guards for a `search` Source (no model refresh, test or add-model controls; its row says "搜索服务"); `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the protocol vocabulary split; the create and replace branch with free checks; "重新启用" (`reenable_search_source`, its free check and the armed-trial state); `service_order` maintenance on create and remove; the adapter's search call and free-check operation with custody and transport rules; opening the v17 version event | — |
+| **S1b** Settings and Tools read | foundation | the existing Tools tab rendering a `kind: "service"` candidate as a plain service row (name and order, no model controls) until S4 replaces it; `prefer_native`, `services` (the patch semantics and load-time clamping) and `executor_order_kinds` (loaded, written with each order save, and kept across a restart); the Tools read (`executor_candidates` with `kind`, `service_vendors`, `trial_pending`) and PUT; their v17 entries | S1a |
 | **S2** Chain and records | gateway | candidates, automatic order and the saved-order placement rule, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1a, S1b, S3 |
 | **S3** Model text | Vibey | C-1's optional `HostedSource.content` and the model-facing text that renders it, with its bounds; the card's executor label (read from `attempts[]` when present) | S1a's open v17 event |
 | **S4** Tools, dialog, Sources | UI | §6 with en and zh copy | S1b's read; S2 (the add dialog and service rows land with or after S2) |
