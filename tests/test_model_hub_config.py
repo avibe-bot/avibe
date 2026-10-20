@@ -666,6 +666,22 @@ def test_source_create_unavailable_inventory_consent_is_explicit_and_total():
         assert required in ac_54
 
 
+def test_source_create_applies_search_constraints_to_inferred_catalog_protocols():
+    validator = Draft7Validator(_schema("source-create.schema.json"))
+
+    for vendor in ("tavily", "exa"):
+        inferred = {
+            "vendor": vendor,
+            "key": "search-secret",
+            "base_url": "https://example.com",
+            "save_unverified": True,
+        }
+        with pytest.raises(ValidationError):
+            validator.validate(inferred)
+
+        validator.validate({"vendor": vendor, "key": "search-secret"})
+
+
 def test_sparse_override_contract_has_one_default_order_owner():
     contract = (CONTRACTS.parent / "model-hub-routing-modes.md").read_text(encoding="utf-8")
     assert "sources.order` is the sole backend-default" in contract

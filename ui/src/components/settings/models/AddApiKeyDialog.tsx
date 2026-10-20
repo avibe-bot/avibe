@@ -219,7 +219,10 @@ export const AddApiKeyDialog: React.FC<AddApiKeyDialogProps> = (props) => {
                 () => settlement.gone(latest.id, inventory),
               );
               return;
-            } else if (!wasBlocked(current.state)) {
+            } else if (
+              !wasBlocked(current.state)
+              || current.credential_generation !== latest.credential_generation
+            ) {
               publishReplacementEvidence(
                 seq,
                 settlement,

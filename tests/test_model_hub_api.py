@@ -6112,6 +6112,7 @@ def test_create_source_defaults_a_catalog_vendor_to_its_pinned_protocol(tmp_path
     assert adapter.observed_protocol_orders == [("openai_chat",)]
     assert store.config.sources[0].protocol == "openai_chat"
     assert store.config.sources[0].base_url is None
+    assert store.config.sources[0].verification_pending is None
     assert adapter.revoked == ["cred_test001"]
 
 
@@ -6178,6 +6179,31 @@ def test_search_source_create_journals_cleanup_when_revocation_fails(tmp_path):
     assert len(entries) == 1
     assert entries[0].credential_ref == "cred_test001"
     assert entries[0].operation == "revoke_api_key_credential"
+
+def test_search_source_delete_keeps_journal_when_revocation_fails(tmp_path):
+    service, store, adapter = _service(tmp_path)
+    source = asyncio.run(
+        _create_source(
+            service,
+            {"kind": "api_key", "vendor": "tavily", "protocol": "search", "key": "tvly-delete"},
+        )
+    )
+
+    async def fail_revocation(_credential_ref):
+        raise OSError("credential directory fsync failed")
+
+    adapter.revoke_api_key_credential = fail_revocation
+
+    with pytest.raises(ModelHubError) as exc_info:
+        asyncio.run(service.delete_source(source["id"]))
+
+    assert exc_info.value.code == "engine_down"
+    assert store.config.sources == []
+    pending = service.revocations.list()
+    assert [(entry.source_id, entry.credential_ref, entry.operation) for entry in pending] == [
+        (source["id"], source["credential_ref"], "revoke_api_key_credential"),
+    ]
+
 
 @pytest.mark.parametrize("outcome", ["pass", "balance", "limit", "unknown", "invalid"])
 def test_search_source_create_uses_only_the_free_check_transaction(tmp_path, outcome: str):

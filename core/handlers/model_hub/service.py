@@ -4455,7 +4455,7 @@ class ModelHubService:
                     )
                 elif outcome == "pass":
                     source.verification_pending = None
-                elif outcome == "unknown":
+                elif outcome == "unknown" and source.protocol == "search":
                     self._mark_source_unverified(source)
             source = ModelHubSourceConfig.from_payload(source.to_payload())
             persisted = False
@@ -5287,6 +5287,11 @@ class ModelHubService:
                     )
                     await self._engine_call(revoke)
             except ModelHubError:
+                if source.protocol == "search":
+                    # The config deletion is already durable. A search Source
+                    # has no engine binding to restore, and the journal must
+                    # survive any partial credential retirement for replay.
+                    raise
                 restored = False
                 try:
                     await self._save_config(previous)

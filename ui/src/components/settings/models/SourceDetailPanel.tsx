@@ -299,8 +299,10 @@ export const SourceDetailPanel: React.FC<{
         try {
           const inventory = await settlement.readInventory();
           const current = inventory.sources.find((item) => item.id === latest.id);
-          if (current) await settlement.source(current);
-          else await settlement.gone(latest.id, inventory);
+          if (current) {
+            if (current.state.status === 'standby' || current.trial_pending === true) setReenableFailed(false);
+            await settlement.source(current);
+          } else await settlement.gone(latest.id, inventory);
         } catch {
           settlement.release();
         }

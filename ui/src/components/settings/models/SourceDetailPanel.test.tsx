@@ -1353,6 +1353,38 @@ describe('SourceDetailPanel', () => {
     await waitFor(() => expect(reenable).toHaveBeenCalledWith(blockedSearch.id));
     expect(onSource).toHaveBeenCalledWith(answer);
   });
+  it('clears the re-enable failure when an inventory read confirms success', async () => {
+    const blockedSearch: Source = {
+      ...source,
+      protocol: 'search',
+      base_url: null,
+      models: [],
+      state: {
+        status: 'needs_action',
+        retry_at: null,
+        detail_key: 'models.source.needs_action.spend_limit_reached',
+      },
+    };
+    const answer = {
+      ...blockedSearch,
+      trial_pending: true,
+      state: { status: 'needs_action' as const, retry_at: null, detail_key: 'models.source.needs_action.spend_limit_reached' as const },
+    };
+    vi.spyOn(modelsApi, 'reenableSearchSource').mockRejectedValue(new ApiCallError('bad_response', undefined, false));
+    const onSource = vi.fn().mockResolvedValue(undefined);
+    const trackMutation: TrackSourceMutation = (work) => work(blockedSearch, settlement({
+      source: onSource,
+      readInventory: async () => ({ snapshot: 2, sources: [answer] }),
+    }));
+
+    render(<I18nextProvider i18n={i18n}><CommittedPanel source={blockedSearch} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>);
+
+    await userEvent.click(screen.getByRole('button', { name: /^Check again$|^重新检查$/i }));
+
+    await waitFor(() => expect(onSource).toHaveBeenCalledWith(answer));
+    expect(screen.queryByText(i18n.t('settings.models.repair.failed'))).toBeNull();
+  });
+
   it('opens key replacement from the revoked hub credential repair tap', async () => {
     render(
       <I18nextProvider i18n={i18n}>
