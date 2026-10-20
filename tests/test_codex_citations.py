@@ -747,9 +747,11 @@ class CodexCitationReadinessTests(IsolatedCodexHome, unittest.IsolatedAsyncioTes
 
         await self.item(self.guide_search())
 
+        # Provider order: the message before the tool call goes out ahead of it
+        # (MESSAGE-DELIVERY-335), and the last message is the reply still held.
         self.assertEqual(
             self.delivered,
-            [f"First. [developers.openai.com]({GUIDE_URL})", "[bash]", "Second."],
+            [f"First. [developers.openai.com]({GUIDE_URL})", "Second.", "[bash]"],
         )
 
     async def test_a_second_held_message_resolves_against_its_own_ref(self):

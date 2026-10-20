@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Collection, Mapping
 
 from vibe.i18n import t as i18n_t
 from core.backend_failure import emit_backend_failure
+from core.message_output import MessageOutput
 from core.citations import (
     CitationBundle,
     CitationSource,
@@ -52,6 +53,12 @@ _MAX_CITATION_SOURCES_PER_THREAD = 512
 # Refs one thread is known not to define. Bounded like the sources it mirrors;
 # forgetting one costs a re-scan of that thread's history, never a citation.
 _MAX_CITATION_ABSENT_REFS_PER_THREAD = 512
+# ``agentMessage.phase`` values that make a message a reply: Codex's declared
+# answer, whether more output follows it or not. ``commentary`` is narration, and
+# a message with no phase keeps the last-visible rule (docs/plans/reply-and-turn-end.md).
+_REPLY_PHASES = frozenset({"final_answer", "partial_answer"})
+# The held role of a reply that does not end the Turn.
+_REPLY_ROLE = "result"
 
 
 class CodexEventHandler:
@@ -307,19 +314,24 @@ class CodexEventHandler:
 
         if item_type == "agentMessage":
             text = item.get("text", "")
-            if text:
+            phase = item.get("phase") if isinstance(item.get("phase"), str) else None
+            text_is_visible = bool(text and strip_silent_blocks(text).strip())
+            if phase == "commentary":
+                # Narration, never the Turn's reply.
+                if text_is_visible:
+                    await self._narrate(request, turn_state, thread_id, "assistant", text)
+            elif text:
+                if text_is_visible:
+                    # The held message is no longer the last word: it goes out first.
+                    await self._flush_pending(turn_state, thread_id, visible_follower=True)
                 prev = turn_state.pending_assistant if turn_state else None
-                text_is_visible = bool(strip_silent_blocks(text).strip())
                 prev_is_visible = bool(prev and strip_silent_blocks(prev[0]).strip())
-                if text_is_visible and prev_is_visible:
-                    prev_text, prev_pm = prev
-                    await self._narrate(
-                        request, turn_state, thread_id, "assistant", prev_text, prev_pm
-                    )
                 # A silent terminal response may settle the turn, but it must
                 # not displace an earlier visible result candidate.
                 if turn_state and (text_is_visible or not prev_is_visible):
                     turn_state.pending_assistant = (text, "markdown")
+                    turn_state.pending_assistant_phase = phase
+                    turn_state.pending_assistant_id = str(item.get("id") or "") or None
 
         elif item_type == "commandExecution":
             command = item.get("command", "")
@@ -555,9 +567,56 @@ class CodexEventHandler:
             resolved, citations, _ = await self._prepare_citations(text, thread_id, request)
             await self._emit_narration(request, role, resolved, parse_mode, citations, level)
             return
+        # What follows the held message makes it go out first, in turn order.
+        await self._flush_pending(turn_state, thread_id, visible_follower=level != "process")
+        await self._hold(turn_state, thread_id, role, text, parse_mode, level)
+
+    async def _flush_pending(
+        self, turn_state: CodexTurnState | None, thread_id: str, *, visible_follower: bool
+    ) -> None:
+        """Deliver the held message ahead of what follows it, in turn order.
+
+        Once anything follows the held visible message it is not the Turn's last
+        word (docs/plans/reply-and-turn-end.md). An answer Codex declared
+        (``agentMessage.phase``) is still a reply: a ``result`` that does not end the
+        Turn, whatever follows it. A message with no phase keeps the last-visible
+        rule: a visible item after it (another message, commentary, a tool call)
+        makes it narration; process-only narration (a reasoning summary) leaves it
+        where it is.
+        """
+        held = turn_state.pending_assistant if turn_state else None
+        if not held or not strip_silent_blocks(held[0]).strip():
+            return
+        if turn_state.pending_assistant_phase in _REPLY_PHASES:
+            role, output_key = _REPLY_ROLE, turn_state.pending_assistant_id
+        elif visible_follower:
+            role, output_key = "assistant", None
+        else:
+            return
+        turn_state.pending_assistant = None
+        turn_state.pending_assistant_phase = None
+        turn_state.pending_assistant_id = None
+        await self._hold(turn_state, thread_id, role, held[0], held[1], output_key=output_key)
+
+    async def _hold(
+        self,
+        turn_state: CodexTurnState,
+        thread_id: str,
+        role: str,
+        text: str,
+        parse_mode: str | None = "markdown",
+        level: str = "normal",
+        *,
+        output_key: str | None = None,
+    ) -> None:
         turn_state.pending_narration.append(
             CodexHeldMessage(
-                role=role, text=text, parse_mode=parse_mode, thread_id=thread_id, level=level
+                role=role,
+                text=text,
+                parse_mode=parse_mode,
+                thread_id=thread_id,
+                level=level,
+                output_key=output_key,
             )
         )
         await self._drain_narration(turn_state)
@@ -570,12 +629,24 @@ class CodexEventHandler:
         parse_mode: str | None,
         citations: CitationBundle | None,
         level: str = "normal",
+        output_key: str | None = None,
     ) -> None:
         await self._agent.controller.emit_agent_message(
             request.context,
             role,
             text,
             parse_mode=parse_mode or "markdown",
+            # A reply that does not end the Turn, identified by its item id so two
+            # replies with the same text stay two; narration keeps the call it had.
+            **(
+                {
+                    "output": MessageOutput(
+                        completes_turn=False, completes_run=False, idempotency_key=output_key
+                    )
+                }
+                if role == _REPLY_ROLE
+                else {}
+            ),
             # Forwarded only when non-default, like ``citations`` below.
             **({"level": level} if level != "normal" else {}),
             # Forwarded only when there is a sidecar, so a message without
@@ -605,7 +676,7 @@ class CodexEventHandler:
                 return
             held.pop(0)
             await self._emit_narration(
-                request, entry.role, resolved, entry.parse_mode, citations, entry.level
+                request, entry.role, resolved, entry.parse_mode, citations, entry.level, entry.output_key
             )
 
     def _persist_turn_generated_images(self, params: dict[str, Any]) -> None:

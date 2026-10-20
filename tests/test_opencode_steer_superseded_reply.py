@@ -136,25 +136,43 @@ def _assistant_emits(agent):
     ]
 
 
+def _reply_emits(agent):
+    """Replies delivered before the settlement: ``result`` rows that do not end the Turn,
+    each identified by its OpenCode message id (MESSAGE-DELIVERY-335)."""
+
+    replies = []
+    for call in agent.controller.emit_agent_message.await_args_list:
+        if call.args[1] != "result":
+            continue
+        output = call.kwargs.get("output")
+        assert output is not None and not output.completes_turn and not output.settles_run
+        assert output.idempotency_key == "reply-a"
+        replies.append(call.args[2])
+    return replies
+
+
 @pytest.mark.parametrize("path", ["live", "restored"])
 @pytest.mark.parametrize(
     ("messages", "expected_result", "expected_emits"),
     [
         # A silent answer to the steer must not replace the visible reply.
         (_turn(REPORT, SILENT), REPORT, []),
-        # A visible answer to the steer is the result; A still reaches the user.
+        # A visible answer to the steer rides the Turn end; A is a reply delivered before it.
         (_turn(REPORT, "Callbacks noted."), "Callbacks noted.", [REPORT]),
+        # The same text twice is two replies.
+        (_turn(REPORT, REPORT), REPORT, [REPORT]),
         # A silent reply superseded by a visible one is not re-sent.
         (_turn(SILENT, "Callbacks noted."), "Callbacks noted.", []),
         # When every reply is silent, the Turn stays silent.
         (_turn(SILENT, SILENT), SILENT, []),
     ],
-    ids=["silent-steer-reply", "visible-steer-reply", "silent-superseded", "all-silent"],
+    ids=["silent-steer-reply", "visible-steer-reply", "same-text-reply", "silent-superseded", "all-silent"],
 )
 async def test_steer_keeps_superseded_completed_reply(
     monkeypatch, path, messages, expected_result, expected_emits
 ):
-    """MESSAGE-DELIVERY-321."""
+    """MESSAGE-DELIVERY-321 / MESSAGE-DELIVERY-335: a completed reply a steer follows is a
+    reply, a ``result`` that does not end the Turn, never narration."""
 
     monkeypatch.setattr("modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0)
     results: list[str] = []
@@ -166,7 +184,8 @@ async def test_steer_keeps_superseded_completed_reply(
         final_text = await _restored_poll(messages, agent, results)
 
     assert final_text == expected_result
-    assert _assistant_emits(agent) == expected_emits
+    assert _reply_emits(agent) == expected_emits
+    assert _assistant_emits(agent) == []
 
 
 async def test_tool_call_step_text_is_not_emitted_twice(monkeypatch):
@@ -197,4 +216,21 @@ async def test_restored_poll_does_not_resend_a_persisted_superseded_reply(monkey
     )
 
     assert final_text == "Callbacks noted."
-    assert _assistant_emits(restored) == []
+    assert _reply_emits(restored) == [] and _assistant_emits(restored) == []
+
+
+async def test_an_undelivered_reply_is_not_recorded_as_emitted(monkeypatch):
+    """MESSAGE-DELIVERY-335: a reply the dispatcher could not deliver (no message id) is not
+    recorded as emitted, so a restored poll still owes it; the Turn still settles on the
+    steer's answer (a reply whose every send failed is not retried)."""
+
+    monkeypatch.setattr("modules.agents.opencode.poll_loop._POLL_INTERVAL_SECONDS", 0)
+    persisted: dict = {}
+    agent = _agent([], persisted)
+    agent.controller.emit_agent_message = AsyncMock(return_value=None)
+
+    final_text = await _live_poll(_turn(REPORT, "Callbacks noted."), agent)
+
+    assert final_text == "Callbacks noted."
+    assert [call.args[2] for call in agent.controller.emit_agent_message.await_args_list] == [REPORT]
+    assert "reply-a" not in persisted.get("emitted_assistant_messages", [])

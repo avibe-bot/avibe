@@ -714,13 +714,11 @@ class BaseAgent(ABC):
             if raw_suffix:
                 parts.append(raw_suffix)
             body = "\n".join(parts)
-            # Footer-only completion (show_duration on, no visible result/suffix):
-            # promote the footnote to the visible body so a duration/token-only turn
-            # is still delivered/persisted/streamed. An empty body would otherwise be
-            # treated as a silent terminal result and the footnote would be lost.
-            if not body.strip() and result_footer:
-                body = result_footer
-                result_footer = None
+            # A footer is never a reply: with no visible result or suffix this is the
+            # Turn's content-free end, and the footer rides only as ``result_footer``
+            # (the concise status bubble still shows its done line). The dispatcher
+            # settles the Turn's Runs with its last reply, if any
+            # (docs/plans/reply-and-turn-end.md).
             message_id = await self.controller.emit_agent_message(
                 context,
                 "result",

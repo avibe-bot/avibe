@@ -8,7 +8,22 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any, Iterable, Literal
 
-from sqlalchemy import Select, and_, func, literal_column, or_, select, text, union, union_all, update
+from sqlalchemy import (
+    Select,
+    String,
+    Text,
+    and_,
+    func,
+    literal,
+    literal_column,
+    or_,
+    select,
+    text,
+    union,
+    union_all,
+    update,
+)
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection
 
 from core.agent_input import HARNESS_SOURCE_FIELDS
@@ -24,6 +39,7 @@ from storage.models import (
     agent_sessions,
     message_deliveries,
     messages,
+    session_turn_replies,
     session_turns,
     show_session_events,
 )
@@ -882,6 +898,46 @@ def cas_turn(
         .values(**next_values)
     )
     return get_turn(conn, turn_id) if result.rowcount == 1 else None
+
+
+def record_turn_reply(conn: Connection, turn_id: str, text: str) -> bool:
+    """Record the Run copy of a reply the dispatcher delivered for a live Turn.
+
+    The Turn's last delivered reply is what a Turn that ends without a reply of its
+    own settles with (``docs/plans/reply-and-turn-end.md``, rule 5). One upsert keyed
+    by the Turn's id, guarded by the Turn being live: it lives in a table of its own,
+    so it never bumps the Turn's ``version`` or takes part in ``cas_turn``, and a Turn
+    that is no longer live keeps what it ended with.
+    """
+
+    live_turn = (
+        select(
+            session_turns.c.id,
+            literal(text, type_=Text()),
+            literal(utc_now_iso(), type_=String()),
+        )
+        .where(session_turns.c.id == turn_id)
+        .where(session_turns.c.state.in_(TURN_OWNER_STATES))
+    )
+    statement = sqlite_insert(session_turn_replies).from_select(
+        ["turn_id", "reply_text", "updated_at"], live_turn
+    )
+    statement = statement.on_conflict_do_update(
+        index_elements=[session_turn_replies.c.turn_id],
+        set_={
+            "reply_text": statement.excluded.reply_text,
+            "updated_at": statement.excluded.updated_at,
+        },
+    )
+    return conn.execute(statement).rowcount == 1
+
+
+def turn_last_reply(conn: Connection, turn_id: str) -> str | None:
+    """The Run copy of the Turn's last delivered reply, None when it delivered none."""
+
+    return conn.execute(
+        select(session_turn_replies.c.reply_text).where(session_turn_replies.c.turn_id == turn_id)
+    ).scalar_one_or_none()
 
 
 def cas_delivery(

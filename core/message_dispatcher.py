@@ -359,6 +359,11 @@ class _ResultSplit:
     links_whole: bool
 
 
+# The Turn-end read of a Turn's last delivered reply: three tries, and the pauses
+# between them (well under a second in all) before it is read as no reply.
+_TURN_REPLY_READ_BACKOFFS: tuple[Optional[float], ...] = (0.1, 0.3, None)
+
+
 class ConsolidatedMessageDispatcher:
     """Dispatch agent messages while preserving existing product behavior."""
 
@@ -2234,6 +2239,85 @@ class ConsolidatedMessageDispatcher:
             )
             return []
 
+    @staticmethod
+    def _writes_on_delivery(canonical_type: str, output_semantics: MessageOutput) -> bool:
+        """Whether this output's derived writes wait for its delivery evidence.
+
+        A reply that does not end its Turn (a ``result`` that settles no Run) records
+        its Run output entry, the Turn's last reply, and through the emit's return
+        value any backend mark, only at the delivered-reply point: on Web and
+        background delivery once its receipt row is persisted, on IM once the
+        platform accepted the send (docs/plans/reply-and-turn-end.md). Finals and
+        Activity outputs keep their own settlement order.
+        """
+
+        return (
+            canonical_type == "result"
+            and not output_semantics.settles_run
+            and not output_semantics.requires_delivery_for_run_settlement
+        )
+
+    @staticmethod
+    def _turn_reply(
+        context: MessageContext,
+        canonical_type: str,
+        output_semantics: MessageOutput,
+        run_copy: str,
+        *,
+        is_error: bool,
+        level: str,
+    ) -> dict[str, tuple[str, str]]:
+        """``persist_agent_message``'s ``turn_reply`` for a reply that does not end its Turn.
+
+        Such a reply is what a later content-free end settles with
+        (docs/plans/reply-and-turn-end.md, rule 5): its receipt write records its Run
+        copy for the Turn in the same transaction. A final carries its own text, and
+        narration, notices, failures, detached and Activity outputs belong to no
+        Turn's answer. Empty when there is nothing to record, so a stand-in for the
+        persistence call keeps the signature it always had.
+        """
+
+        if canonical_type != "result" or is_error or level == "silent" or not (run_copy or "").strip():
+            return {}
+        if (
+            output_semantics.completes_turn
+            or output_semantics.detached
+            or not output_semantics.records_run_output
+            or output_semantics.requires_delivery_for_run_settlement
+        ):
+            return {}
+        turn_id = str((context.platform_specific or {}).get("turn_token") or "").strip()
+        return {"turn_reply": (turn_id, run_copy)} if turn_id else {}
+
+    async def _turn_last_reply(self, context: MessageContext) -> Optional[str]:
+        """The Run copy of the Turn's last delivered reply, read off the loop.
+
+        Rule 5 is best effort (docs/plans/reply-and-turn-end.md): a read that still
+        fails after a short bounded retry is logged and read as no reply, so the Turn
+        settles with "" as a content-free end always did, rather than holding or
+        failing the Turn's end.
+        """
+
+        turn_id = str((context.platform_specific or {}).get("turn_token") or "").strip()
+        manager = getattr(self.controller, "session_turns", None)
+        read = getattr(manager, "turn_last_reply", None)
+        if not turn_id or not callable(read):
+            return None
+        for attempt, backoff in enumerate(_TURN_REPLY_READ_BACKOFFS, start=1):
+            try:
+                return await self._run_off_loop(lambda: read(turn_id))
+            except Exception as err:
+                if backoff is None:
+                    logger.warning(
+                        "Failed to read the last reply of Turn %s after %d attempts; settling with no reply: %s",
+                        turn_id,
+                        attempt,
+                        err,
+                    )
+                    return None
+                await asyncio.sleep(backoff)
+        return None
+
     async def _record_suppressed_agent_run_terminal_result(
         self,
         context: MessageContext,
@@ -2936,6 +3020,14 @@ class ConsolidatedMessageDispatcher:
                 context,
                 output_semantics,
             )
+        # A Turn that ends done without a reply of its own settles with its last
+        # delivered reply: the Run copy this dispatcher recorded for the Turn when it
+        # delivered that reply (``session_turn_replies``), or "" when it delivered none
+        # (docs/plans/reply-and-turn-end.md, rule 5).
+        ends_without_reply = mutates_turn_lifecycle and not (text and text.strip())
+        turn_reply: Optional[str] = None
+        if ends_without_reply and terminal_reason == "done" and output_semantics.settles_run:
+            turn_reply = await self._turn_last_reply(context)
         # Persist the exact terminal body in the Turn snapshot before delivery.
         # A steer accepted after this Turn settles can then complete its Agent Run
         # without guessing from transcript order or requiring a live sink.
@@ -2954,7 +3046,13 @@ class ConsolidatedMessageDispatcher:
                     is_error=is_error,
                     settled_by=self._turn_release_settlement(output_semantics),
                     terminal_evidence={
-                        "result_text": self._fold_footer(terminal_body, result_footer),
+                        # A footer is never a reply: an end without one records the
+                        # Turn's last reply, or nothing.
+                        "result_text": (
+                            (turn_reply or "")
+                            if ends_without_reply
+                            else self._fold_footer(terminal_body, result_footer)
+                        ),
                         "terminal_error": terminal_error,
                         "settles_run": output_semantics.settles_run,
                         "output_provenance": output_semantics.provenance(context),
@@ -3015,10 +3113,11 @@ class ConsolidatedMessageDispatcher:
                 if canonical_type == "result" and output_semantics.settles_run:
                     # Run completion is independent from visible Message and Turn
                     # completion cardinality. A detached/empty final output may
-                    # settle its origin Run without touching the current Turn.
+                    # settle its origin Run without touching the current Turn; a
+                    # Turn end without a reply of its own settles with the Turn's.
                     await self._record_agent_run_terminal_result(
                         context,
-                        materialize_citations(text, citations),
+                        turn_reply if turn_reply else materialize_citations(text, citations),
                         None,
                         is_error=is_error,
                         terminal_error=terminal_error,
@@ -3253,6 +3352,14 @@ class ConsolidatedMessageDispatcher:
                 mutates_turn_lifecycle=mutates_turn_lifecycle,
             ) as commit:
                 recorded_text = self._fold_footer(persist_text, result_footer)
+                # A run record carries text alone, so its copy is written here.
+                # The persisted row below keeps its tokens: it is finalized with
+                # a sidecar bound to the body the reader is actually shown.
+                written_recorded_text = materialize_citations(recorded_text, citations)
+                # A background Turn's local row is its reply's receipt.
+                background_reply = self._turn_reply(
+                    context, canonical_type, output_semantics, written_recorded_text, is_error=is_error, level=level
+                )
                 persisted_output = None
                 if visible_output_type:
                     if target_context.platform == "avibe":
@@ -3280,6 +3387,7 @@ class ConsolidatedMessageDispatcher:
                             native_message_id=native_output_id,
                             citations=citations,
                             existing_row_id=existing_row_id,
+                            **background_reply,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -3291,6 +3399,7 @@ class ConsolidatedMessageDispatcher:
                             native_message_id=native_output_id,
                             citations=citations,
                             existing_row_id=existing_row_id,
+                            **background_reply,
                         )
                 else:
                     persisted_output = persist_agent_message(
@@ -3302,9 +3411,10 @@ class ConsolidatedMessageDispatcher:
                         citations=citations,
                         existing_row_id=existing_row_id,
                     )
-                local_message_id = (persisted_output or {}).get("id") or (
-                    f"suppressed:{(context.platform_specific or {}).get('task_execution_id') or canonical_type}"
-                )
+                # The return value is the delivery evidence, and a background output's
+                # receipt is its local row: no row, no id (never a synthetic one), so a
+                # caller that waits for evidence never mistakes a failed write for it.
+                local_message_id = (persisted_output or {}).get("id")
                 terminal_status = None
                 # These two branches are one rule and must be edited as a pair:
                 # the ``elif`` is the negation of the ``if``. A terminal result on
@@ -3313,11 +3423,11 @@ class ConsolidatedMessageDispatcher:
                 # message recorder, except an intermediate message on a Harness run,
                 # which belongs to no output ledger entry and is recorded by neither.
                 suppressed_trigger_kind = (context.platform_specific or {}).get("task_trigger_kind")
-                # A run record carries text alone, so its copy is written here.
-                # The persisted row above keeps its tokens: it is finalized with
-                # a sidecar bound to the body the reader is actually shown.
-                written_recorded_text = materialize_citations(recorded_text, citations)
-                if canonical_type == "result" and suppressed_trigger_kind in HARNESS_TRIGGER_KINDS:
+                if persisted_output is None and self._writes_on_delivery(canonical_type, output_semantics):
+                    # A background reply's receipt is its local row: without one there
+                    # is nothing delivered to record.
+                    pass
+                elif canonical_type == "result" and suppressed_trigger_kind in HARNESS_TRIGGER_KINDS:
                     await self._record_suppressed_agent_run_terminal_result(
                         context,
                         written_recorded_text,
@@ -3651,7 +3761,8 @@ class ConsolidatedMessageDispatcher:
                 settlement_output_semantics = output_semantics
                 settlement_result_text = written_result_text
 
-                if not settlement_waits_for_persistence:
+                writes_on_delivery = self._writes_on_delivery(canonical_type, output_semantics)
+                if not settlement_waits_for_persistence and not writes_on_delivery:
                     await self._record_agent_run_terminal_result(
                         context,
                         written_result_text,
@@ -3666,6 +3777,12 @@ class ConsolidatedMessageDispatcher:
                 # failed every send/upload (primary_message_id is None) is NOT
                 # recorded, matching the old outbound mirror's success-only rule.
                 persisted_output = None
+                # The row written below is the reply's receipt (on avibe its delivery,
+                # on IM written once the send returned): the Turn's record of its last
+                # reply commits with it (rule 5).
+                delivered_reply = self._turn_reply(
+                    context, canonical_type, output_semantics, written_result_text, is_error=is_error, level=level
+                )
                 if persists_without_delivery or primary_message_id is not None:
                     # A failed terminal result persists as type='error' so it shows in
                     # the transcript/inbox like any terminal message but is NOT counted
@@ -3700,6 +3817,7 @@ class ConsolidatedMessageDispatcher:
                             native_message_id=native_output_id,
                             citations=citations,
                             existing_row_id=existing_row_id,
+                            **delivered_reply,
                         )
                     else:
                         persisted_output = persist_agent_message(
@@ -3711,7 +3829,25 @@ class ConsolidatedMessageDispatcher:
                             native_message_id=native_output_id,
                             citations=citations,
                             existing_row_id=existing_row_id,
+                            **delivered_reply,
                         )
+
+                # The delivered-reply point: a non-terminal reply's Run output entry is
+                # written only with its delivery evidence (its Turn record committed
+                # with the receipt above; the return value below is a backend's).
+                if writes_on_delivery and (
+                    persisted_output is not None
+                    if target_context.platform == "avibe"
+                    else primary_message_id is not None
+                ):
+                    await self._record_agent_run_terminal_result(
+                        context,
+                        written_result_text,
+                        primary_message_id,
+                        is_error=is_error,
+                        terminal_error=terminal_error,
+                        output_semantics=output_semantics,
+                    )
 
                 if settlement_waits_for_persistence:
                     accepted_message = persisted_output or (

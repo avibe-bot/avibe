@@ -35,7 +35,7 @@ from core.citations import CitationBundle, finalize_citations, materialize_citat
 from core.run_settlement import NON_COMPLETING_TURN_SETTLEMENTS
 from core.services import sessions as workbench_sessions_service
 from modules.im.base import MessageContext
-from storage import agent_events_service, messages_service, settings_service
+from storage import agent_events_service, message_deliveries, messages_service, settings_service
 from storage.db import get_cached_sqlite_engine
 from vibe.message_types import activity_role_for, spec_for
 
@@ -353,8 +353,15 @@ def persist_agent_message(
     error_sink: Optional[list] = None,
     existing_row_id: Optional[str] = None,
     hosted: Optional[dict] = None,
+    turn_reply: Optional[tuple[str, str]] = None,
 ) -> Optional[dict]:
     """Persist one agent output into the workbench ``messages`` store.
+
+    ``turn_reply`` is ``(turn_id, run_copy)`` for a reply that does not end its live
+    Turn: the reply's Run copy is recorded as the Turn's last delivered reply
+    (``session_turn_replies``) in the same transaction that writes this receipt, so
+    the receipt exists exactly when the record does (docs/plans/reply-and-turn-end.md,
+    rule 5). A replayed output that finds its receipt already written records nothing.
 
     ``existing_row_id`` names a row the backend already committed as its transcript
     (the Avibe Agent): its display columns are written instead of inserting a
@@ -534,6 +541,10 @@ def persist_agent_message(
                         parent_native_message_id=context.thread_id,
                         content=content,
                     )
+                if turn_reply is not None and appended_row is not None:
+                    # This write is the reply's receipt: the Turn's record commits
+                    # with it, or neither does (a failure here fails the receipt).
+                    message_deliveries.record_turn_reply(conn, *turn_reply)
                 if (
                     existing_row_id is None
                     and appended_row is None

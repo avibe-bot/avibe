@@ -376,7 +376,7 @@ scenarios:
     layer: contract
     test: tests/test_harness_failure_retry.py::test_harness_restart_notice_retries_through_web_and_controller
   - id: MESSAGE-DELIVERY-321
-    name: OpenCode steer keeps a superseded completed reply and a silent reply never displaces it
+    name: OpenCode steer keeps a superseded completed reply, delivered as a reply that does not end the Turn, and a silent reply never displaces it
     status: covered
     kind: regression
     layer: contract
@@ -470,13 +470,13 @@ scenarios:
       - tests/test_backend_failure_retry.py::test_a_cut_vibey_turn_that_no_longer_qualifies_keeps_the_restart_notice
       - tests/test_agent_transcript.py::test_the_restart_reads_of_a_turns_context_tail_stay_bounded
   - id: MESSAGE-DELIVERY-334
-    name: A reply is a result whether or not it ends its Turn; a Turn may reply more than once (a steered input's answer is a second result, each notified once), and only the Turn end settles the Run, writes the Turn snapshot, hides the thinking indicator, and finalizes IM, once; a silent final after a reply promotes nothing; the Activity read of a Session's terminal Turns stays an index-ordered SEARCH within its window
+    name: A reply is a result whether or not it ends its Turn; a Turn may reply more than once (a steered input's answer is a second result, each notified once), and only the Turn end settles the Run, writes the Turn snapshot, hides the thinking indicator, and finalizes IM, once; a content-free end after a reply promotes nothing; the Activity read of a Session's terminal Turns stays an index-ordered SEARCH within its window
     status: covered
     kind: regression
     layer: contract
     test:
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_turn_replies_twice_and_ends_once_after_both
-      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_silent_final_after_a_reply_promotes_nothing
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_an_end_without_a_reply_settles_with_the_last_delivered_reply
       - tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::test_steered_assistant_and_result_settle_the_pending_turn
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_reply_or_a_failure_keeps_its_type_attached_or_detached
       - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_only_a_reply_is_a_completed_turns_answer
@@ -492,5 +492,26 @@ scenarios:
       - ui/src/components/workbench/ChatPage.hydration.test.tsx
       - ui/src/lib/chatMessageTypes.test.ts
       - ui/src/pet/petState.test.ts
+  - id: MESSAGE-DELIVERY-335
+    name: Every backend types a complete reply a steer follows as a result that does not end the Turn (Codex by agentMessage.phase, commentary narration; OpenCode by a finish that is not tool-calls); a done Turn end with no reply of its own, a footer-only end included, posts nothing and settles its snapshot and every attached Run with the written copy of its last delivered reply, recorded by the dispatcher for the durable Turn (session_turn_replies) outside its compare-and-set, across a restart and repeated replies, or "" when it delivered none
+    status: covered
+    kind: regression
+    layer: contract
+    test:
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_an_end_without_a_reply_settles_with_the_last_delivered_reply
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_only_a_delivered_reply_is_what_the_turn_settles_with
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_a_turn_replies_twice_and_ends_once_after_both
+      - tests/test_message_dispatcher_turn_end.py::ReplyAndTurnEndTests::test_only_a_reply_is_a_completed_turns_answer
+      - tests/test_message_dispatcher_turn_end.py::TurnEndFinalizesImOnceTests::test_a_footer_only_end_posts_nothing_and_still_ends_the_turn
+      - tests/test_turn_last_reply_store.py::test_a_reply_write_and_a_turn_transition_both_land
+      - tests/test_turn_last_reply_store.py::test_the_reply_write_and_read_are_primary_key_searches
+      - tests/test_turn_last_reply_store.py::test_a_released_database_upgrades_and_its_running_turn_ends_without_a_reply
+      - tests/test_codex_event_handler.py::CodexEventHandlerTests::test_an_answer_a_steer_follows_stays_a_reply_in_turn_order
+      - tests/test_codex_event_handler.py::CodexEventHandlerTests::test_a_silent_answer_keeps_the_declared_answer_as_the_turns_reply
+      - tests/test_opencode_steer_superseded_reply.py::test_steer_keeps_superseded_completed_reply
+      - tests/test_claude_agent_sessions.py::ClaudeAgentSessionTests::test_steered_assistant_and_result_settle_the_pending_turn
+      - tests/test_vibey_agent.py::test_a_reply_a_steer_superseded_is_a_result_and_the_turn_ends_once_after_both
+      - tests/test_vibey_agent.py::test_a_restart_rerun_ends_with_the_final_its_cut_run_committed
+      - tests/test_agent_silent_result.py::AgentSilentResultTests::test_a_footer_only_end_is_content_free
 next_priority:
-  - MESSAGE-DELIVERY-335
+  - MESSAGE-DELIVERY-336

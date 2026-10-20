@@ -23,6 +23,8 @@ class CodexHeldMessage:
     parse_mode: Optional[str]
     thread_id: str
     level: str = "normal"
+    # A reply's stable identity (the ``agentMessage`` item id), None for narration.
+    output_key: Optional[str] = None
 
 
 @dataclass
@@ -30,6 +32,11 @@ class CodexTurnState:
     turn_id: str
     request: AgentRequest
     pending_assistant: Optional[Tuple[str, Optional[str]]] = None
+    # The ``agentMessage.phase`` Codex gave the held message, None when it named
+    # none (``docs/plans/reply-and-turn-end.md``).
+    pending_assistant_phase: Optional[str] = None
+    # Its ``agentMessage`` item id.
+    pending_assistant_id: Optional[str] = None
     # Narration this turn has produced but not yet delivered, oldest first,
     # because the source that will attribute part of it has not arrived. Held as
     # one queue per turn so the order the turn narrated in is the order the user
@@ -174,6 +181,8 @@ class CodexTurnRegistry:
 
         state.visible_to_user = False
         state.pending_assistant = None
+        state.pending_assistant_phase = None
+        state.pending_assistant_id = None
         # A hidden turn says nothing further, so everything it was still holding
         # back goes with it rather than surfacing under its successor.
         state.pending_narration.clear()

@@ -121,6 +121,14 @@ def _claude_launch_inputs(claude_config: Any) -> dict[str, Any]:
         if key not in _CLAUDE_LIVE_CONFIG_FIELDS
     }
 
+
+def _result_uuid(message: object) -> Optional[str]:
+    """A ``ResultMessage``'s stream identity, None when it carries none."""
+
+    value = getattr(message, "uuid", None)
+    return value if isinstance(value, str) and value else None
+
+
 class ClaudeAgent(BaseAgent):
     """Existing Claude Code integration extracted into an agent backend."""
 
@@ -2749,6 +2757,7 @@ class ClaudeAgent(BaseAgent):
                                     context,
                                     superseded_request,
                                     superseded_result_text,
+                                    reply_id=_result_uuid(message),
                                 )
                             self._clear_result_phase_state(composite_key)
                             logger.info(
@@ -4856,8 +4865,16 @@ class ClaudeAgent(BaseAgent):
         context: MessageContext,
         request: AgentRequest | None,
         text: str,
+        *,
+        reply_id: str | None = None,
     ) -> None:
-        """Emit a completed pre-steer phase without closing the shared Turn."""
+        """Emit a completed pre-steer phase without closing the shared Turn.
+
+        ``reply_id`` is the phase's ``ResultMessage.uuid`` when the stream gave one:
+        the reply's identity, so two phases with the same text stay two deliveries
+        and a replay of one stays one. A phase rebuilt from assistant frames at a
+        steer receipt has no Result, and so no identity.
+        """
 
         activities = self._request_activities(request)
         activity = activities[-1] if activities else None
@@ -4870,7 +4887,7 @@ class ClaudeAgent(BaseAgent):
             )
             if activity is not None
             # A reply: recorded on the Turn's Runs when it is delivered, like any other.
-            else MessageOutput(completes_turn=False, completes_run=False)
+            else MessageOutput(completes_turn=False, completes_run=False, idempotency_key=reply_id or None)
         )
         emitted_text = text or (
             str(activity.metadata.get("summary") or "") if activity else ""
@@ -4910,10 +4927,12 @@ class ClaudeAgent(BaseAgent):
         buffered_request = pending[0] if pending else None
         if buffered_text or self._request_activities(buffered_request):
             self._adopt_pending_turn_token(context, buffered_request)
+            buffered_message, _, _ = self._unpack_buffered_terminal(buffered)
             await self._emit_primary_phase_output(
                 context,
                 buffered_request,
                 buffered_text,
+                reply_id=_result_uuid(buffered_message),
             )
         return True
 
