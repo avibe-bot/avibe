@@ -152,7 +152,8 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
   coordinator anchors `Retry-After` to, as `model-hub-retry-experience.md` requires) and the body, the status and
   receipt time surviving a later body-read failure. Like the invocation contract's `on_admitted`, it takes an `on_sent`
   callback that it calls exactly once just before writing the request, after connect and TLS succeed; a failure or
-  cancellation before that call is pre-send ($0), and one after it is billing-unknown (§4.3). It reads the key from the state store (`read_api_key`, as credential
+  cancellation before that call is pre-send ($0); one after it and before any status is billing-unknown; and one
+  after a status arrived is settled by that status (§4.3). It reads the key from the state store (`read_api_key`, as credential
   retargeting does today) only for the duration of the request.
 - Transport rules: HTTPS only, host pinned to the catalog endpoint, redirects refused, environment proxies ignored
   as the engine's own upstream requests ignore them, response body capped at 8 MiB. The credential file read, and the buffered body's JSON decoding, result
@@ -216,7 +217,9 @@ Hosted tools §6 holds, with these changes:
 - **Skips.** A candidate is classified once, by the first reason that applies in the order `unavailable`,
   `disabled`, `blocked`, `cooling`, `query_too_long`, so `query_too_long` names only a Source a shorter query would
   reach. A candidate can be skipped without a request, for one of five reasons: `blocked` (its Source is in
-  `needs_action` or in a persistent `error`, the states admission already suppresses), `cooling` (a service cooldown, §4.2), `query_too_long` (the query exceeds what the service
+  `needs_action` or in a persistent `error`, the states admission already suppresses), `cooling` (a service cooldown, §4.2, or, for a model Source with a search API, its existing Source-global
+  `cooldown` that admission already treats as non-runnable; the skip carries the deadline, `cooldown_until` or the
+  Source's `retry_at`), `query_too_long` (the query exceeds what the service
   accepts: the catalog row's query limit, DeepSeek 128 characters and Tavily 400) or `unavailable` (the Source was removed, re-identified or refused by final
   admission after the turn froze its candidates, hosted tools §6) or `disabled` (a search-capable Source with
   `services.<id>.enabled: false`; the frozen list carries such Sources last, so they are reached only after every
@@ -267,8 +270,8 @@ Hosted tools §6 holds, with these changes:
   classified failure (401, 402, a limit code) replaces the blocker with its own state, so a revoked key asks for a
   new key. Any other failure, whether transient, unreadable or a query-specific `service_refused`, keeps the
   current blocker. Every outcome ends the reservation, so the user can arm a new trial; a cancelled turn (the user
-  stops it while the trial request is in flight) releases the reservation and keeps the blocker, like a transient
-  failure. A restart
+  stops it while the trial request is in flight) releases the reservation and, if no status had arrived, keeps the
+  blocker like a transient failure; a status that arrived before the stop settles the trial by the outcome table. A restart
   drops an unused trial, so the Source stays blocked and the user can press again. This fails closed. While a
   trial is armed or in flight, "重新启用" is disabled (the read reports `trial_pending`), and a repeated request is
   answered with the current trial without arming another or advancing the generation. Nothing retries on its own. A model Source with
@@ -404,7 +407,7 @@ Hosted tools §6 holds, with these changes:
   reads that list alone: the kind and label of the last tried entry (when no entry was tried, every candidate
   having been skipped, the projection has no executor, label or cost, and the card shows the terminal reason with
   the per-Source list, as the released no-candidate failure shows no executor), and the chain total as the sum of the tried
-  entries' `cost` (an entry without one makes the total a lower bound, as today). So a chain whose billable model
+  entries' `cost`; the total is a lower bound when any entry has no cost or a cost with `lower_bound: true`. So a chain whose billable model
   attempt was followed by a service that failed before sending keeps both facts, whether or not `execution` is
   present; `execution` and `failed_attempts[]` keep their released meaning for older readers. Without
   `attempts[]` (a model-only chain) the released projection is unchanged. For a
