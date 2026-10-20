@@ -156,10 +156,10 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
   after a status arrived is settled by that status (§4.3). It reads the key from the state store (`read_api_key`, as credential
   retargeting does today) only for the duration of the request.
 - Transport rules: HTTPS only, host pinned to the catalog endpoint, redirects refused, environment proxies ignored
-  as the engine's own upstream requests ignore them, response body capped at 8 MiB. With `content` on, the request stays under the cap by asking the vendor
-  for bounded text where it can (Exa `contents.text.maxCharacters` at the 4,000-character source bound) and
-  otherwise by asking for at most the catalog row's `content_results_max` results (set from the vendor's documented
-  page-text size; the implementation lane verifies it), so a legitimate content response is never over the cap. The credential file read, and the buffered body's JSON decoding, result
+  as the engine's own upstream requests ignore them, response body capped at 8 MiB. With `content` on, the request asks the vendor for bounded text where
+  the vendor offers it (Exa `contents.text.maxCharacters` at the 4,000-character source bound, the catalog's
+  `content_max_chars`). Tavily and DeepSeek document no page-text size bound (checked 2026-10-20), so no result
+  count can guarantee their body fits; a body over the cap is `service_unreadable` under the existing rules (§12, item 5). The credential file read, and the buffered body's JSON decoding, result
   mapping and bounds, run off the controller loop (`asyncio.to_thread`, as the hosted-response parsers already do).
 - The engine is not involved: it only forwards model requests, and rendering a tool-only key into engine config
   would advertise a model provider that does not exist.
@@ -230,7 +230,8 @@ Hosted tools §6 holds, with these changes:
   `needs_action` or in a persistent `error`, the states admission already suppresses), `cooling` (a service cooldown, §4.2, or, for a model Source with a search API, its existing Source-global
   `cooldown` that admission already treats as non-runnable; the skip carries the later of the unexpired deadlines when both apply, since both must pass, `cooldown_until` or the
   Source's `retry_at`), `query_too_long` (the query exceeds what the service
-  accepts: the catalog row's query limit, DeepSeek 128 characters and Tavily 400) or `unavailable` (the Source was removed, re-identified or refused by final
+  accepts: the catalog row's query limit, where the vendor documents one: DeepSeek 128 characters; Tavily and Exa document
+  none, so they have no query limit) or `unavailable` (the Source was removed, re-identified or refused by final
   admission after the turn froze its candidates, hosted tools §6) or `disabled` (a search-capable Source with
   `services.<id>.enabled: false`; the frozen list carries such Sources last, so they are reached only after every
   other candidate, and never sent a request). A skip costs nothing, writes no state, and is recorded in `attempts[]` (§4.3).
@@ -306,7 +307,7 @@ Hosted tools §6 holds, with these changes:
   reason, naming both remedies (add a search service, or an API key from a vendor that offers search). Otherwise it
   is chosen across every candidate, tried or skipped, by what can be acted on first:
   1. a `query_too_long` skip: `search_query_too_long`. The record's `error` text, which the model reads, names the
-     largest limit among the skipped candidates ("query exceeds 400 characters"), so a query that short reaches at
+     largest limit among the skipped candidates ("query exceeds 128 characters"), so a query that short reaches at
      least one of them. The surfaces' localized copy for the code is fixed, "搜索词太长，请缩短后重试", so the code
      needs no stored parameter. The model can fix it at
      once and reach that candidate. Failing that, a tried candidate's `service_refused` (a query-specific 4xx) is
@@ -507,7 +508,7 @@ includes, so the recorded list price stays exact.
 | Vendor | Request | Auth | Results | Content | List price (2026-10) | Free check |
 | --- | --- | --- | --- | --- | --- | --- |
 | DeepSeek | `POST https://api.deepseek.com/v1/tools/search` `{query, count, need_content}` | Bearer | 1–50 | `need_content` | $0.75 / 1k successful requests; empty results, failures and timeouts not billed | `GET /user/balance`: 200 with `is_available: true` is `pass`, with `false` is `balance`; 401 is `invalid` |
-| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: a 200 needs at least one numeric usage/limit pair (`key.usage`/`key.limit`, `account.plan_usage`/`account.plan_limit`, `account.paygo_usage`/`account.paygo_limit`), and each recognized pair must be wholly absent or have both members as valid numbers, otherwise the result is `unknown`; a `key.limit` of null is Tavily's unlimited key ([OpenAPI](https://docs.tavily.com/documentation/api-reference/openapi.json), 2026-10-20) and counts as a key pair with headroom. A present key pair at its limit is `limit`. Otherwise, with no account pair the answer proves nothing about payment and is `unknown`; with one, it is `pass` when the plan pair or the pay-as-you-go pair has headroom (pay-as-you-go continues after the plan allowance) and `limit` when none does; 401 is `invalid` |
+| Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `include_raw_content` | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: a 200 needs at least one numeric usage/limit pair (`key.usage`/`key.limit`, `account.plan_usage`/`account.plan_limit`, `account.paygo_usage`/`account.paygo_limit`), and each recognized pair must be wholly absent or have both members as valid numbers, otherwise the result is `unknown`; a `key.limit` of null is Tavily's unlimited key ([OpenAPI](https://docs.tavily.com/documentation/api-reference/openapi.json), 2026-10-20) and counts as a key pair with headroom. A present key pair at its limit is `limit`. Otherwise, with no account pair (Tavily's schema makes `account` optional) the answer still authenticates the key and is `pass`, payment being confirmed by the first search as for a vendor without a free check; with one, it is `pass` when the plan pair or the pay-as-you-go pair has headroom (pay-as-you-go continues after the plan allowance) and `limit` when none does; 401 is `invalid` |
 | Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | always `contents.highlights` (the `snippet` source, since a base result has no excerpt), included in the search price since Exa 3.0 ([announcement](https://exa.ai/blog/exa-3), 2026-10-19); `content: true` adds `contents.text`, +$1 / 1k pages ([pricing](https://exa.ai/pricing), 2026-10-20) | $7 / 1k (Exa Auto); the response's `costDollars` is used when present | none known |
 
 - DeepSeek facts that shape the UI (DeepSeek's Search & Fetch guide, 2026-10-19): the query is 1–128 characters and
@@ -683,11 +684,11 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 | --- | --- | --- | --- |
 | **S1a** Catalog and Sources | foundation | search vendors in the catalog; the Source UI guards for a `search` Source (no model refresh, test or add-model controls; its row says "搜索服务"); `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the protocol vocabulary split; the create and replace branch with free checks; "重新启用" (`reenable_search_source`, its free check and the armed-trial state); `service_order` maintenance on create and remove; the adapter's search call and free-check operation with custody and transport rules; opening the v17 version event | — |
 | **S1b** Settings and Tools read | foundation | no service candidate and no `service_vendors` in the read until S2 activates them; `prefer_native`, `services` (the patch semantics and load-time clamping) and `executor_order_kinds` (loaded, written with each order save, and kept across a restart); the Tools read (`executor_candidates` with `kind`, `service_vendors`, `trial_pending`) and PUT; their v17 entries | S1a |
-| **S2** Chain and records | gateway | candidates, automatic order and the saved-order placement rule, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1a, S1b, S3, S4 |
+| **S2** Chain and records | gateway | candidates, automatic order and the saved-order placement rule, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1a, S1b, S3, S4, S6's disclosure |
 | **S3** Model text | Vibey | C-1's optional `HostedSource.content` and the model-facing text that renders it, with its bounds; the card's executor label (read from `attempts[]` when present) | S1a's open v17 event |
 | **S4** Tools, dialog, Sources | UI | §6 with en and zh copy, built against the read shape with fixtures; it shows service rows and the add dialog's services only when the read lists them | S1b's read shape; S5's frames |
 | **S5** Frames | design | §6 frames in `design.pen` through Pencil (done: avibe-docs#73) | — |
-| **S6** Public docs | docs | Models → Tools: services, order, defaults, privacy and cost, in English and Chinese. The disclosure part (an official DeepSeek Source joins the search order automatically, which data goes to each service, what it costs, and how to turn it off) publishes no later than the release that ships S2; the UI walkthrough follows S4 | S2 for the disclosure, S4 for the walkthrough |
+| **S6** Public docs | docs | Models → Tools: services, order, defaults, privacy and cost, in English and Chinese. The disclosure part (an official DeepSeek Source joins the search order automatically, which data goes to each service, what it costs, and how to turn it off) publishes no later than the release that ships S2; the UI walkthrough follows S4 | the disclosure lands before or with S2 (S2 depends on it); the walkthrough follows S4 |
 
 The version event follows the v15 precedent in `model-hub-contracts/README.md`: S1a opens v17 and publishes the
 Source side, and S1b, S2 and S3 edit the same v17 section before it ships, with no second bump. Because release
@@ -760,7 +761,10 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 3. **Settings are per service, not per call.** The model cannot ask for more results or for page content.
    Vendors without page text have no content setting.
 4. **No paid test search.** A key without a free check is confirmed by its first real search.
-5. **Result quality differs between services.** The order is the user's control; the gateway does not judge results.
-6. **`web_fetch` is phase 2**, and other backends are not covered.
-7. **DeepSeek's own server-side tools** (its Anthropic- and Responses-compatible APIs) are native search for DeepSeek
+5. **An oversized page-text response fails.** Tavily and DeepSeek document no bound on page text, so a content
+   response over the 8 MiB transport cap is `service_unreadable` (billed by the vendor's rule, then cooldown and
+   failover). Content is off by default, and a full response is far below the cap in practice.
+6. **Result quality differs between services.** The order is the user's control; the gateway does not judge results.
+7. **`web_fetch` is phase 2**, and other backends are not covered.
+8. **DeepSeek's own server-side tools** (its Anthropic- and Responses-compatible APIs) are native search for DeepSeek
    models and are not part of this design.
