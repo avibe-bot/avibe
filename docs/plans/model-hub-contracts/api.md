@@ -8,11 +8,11 @@ credential redaction and supply-impact confirmation rules still apply; unknown
 API siblings retain the Owner default.
 
 
-Status: **Normative, `contract_version` 17** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
+Status: **Normative, `contract_version` 18** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
 
-Success envelope: `{ok: true, contract_version: 17, ...}`.
+Success envelope: `{ok: true, contract_version: 18, ...}`.
 Failure envelope:
-`{ok: false, contract_version: 17, error: <machine_code>, detail?: <i18n_key>}`.
+`{ok: false, contract_version: 18, error: <machine_code>, detail?: <i18n_key>}`.
 `detail` is always a string. Structured error data lives in a named sibling.
 Guarded mutation refusals specialize that envelope through
 `guard-refusal.schema.json`; both report arrays are required and together form the plan
@@ -24,7 +24,7 @@ table. The contract guard requires the two endpoint sets to be identical, requir
 exercised HTTP response for every registry entry, and validates that response against
 the route's named schema.
 
-The shared envelope and every versioned nested contract carry `contract_version` 17, the
+The shared envelope and every versioned nested contract carry `contract_version` 18, the
 terminal value. Supported persisted config shapes and historical TurnProvenance
 remain readable; ephemeral envelopes use only the terminal version.
 
@@ -73,7 +73,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | GET `/api/models/quota` | → `{quota: QuotaSummary}` | Rate-limit windows of every hub-held subscription Source, from the vendor's own usage report, plus each Source's API-price `value` (see Subscription quota). Served from the server cache; a Source older than five minutes is re-read before answering, bounded by a short deadline, and a Source still being read is listed in `pending`. Never starts the engine. |
 | POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. |
 | GET `/api/models/hosted-tools` | → `{hosted_tools: HostedToolsStatus}` | Models → Tools (`hosted-tools-status.schema.json`): every catalog tool with its switch (absent setting = on), its passive status from real use (`latest_ok`, current `refused[]`, per-pair `verified[]`), for a search tool the saved and effective executor order with every eligible executor candidate and its unit rates, and for `image_generate` the saved and effective default and the available image models. Memory only; nothing is probed. |
-| PUT `/api/models/hosted-tools/<tool>` | `{enabled?: boolean, executor_order?: null \| [source_id], default_model?: null \| {source_id, model_id}}` → `{hosted_tools: HostedToolsStatus}` | Changes one tool's settings field by field: an absent field is unchanged, `null` resets `executor_order` to automatic or `default_model` to the default. `executor_order` is for search tools and `default_model` for `image_generate`; values are saved as given, never resolved. It applies from the next turn and interrupts nothing. An unknown tool returns `404 hosted_tool_not_found`; an empty or malformed body `400 invalid_parameter`, including a null `enabled`, an id that is not a Source id (`src_…`), or a model id with surrounding whitespace. |
+| PUT `/api/models/hosted-tools/<tool>` | `{enabled?: boolean, executor_order?: null \| [source_id], default_model?: null \| {source_id, model_id}, prefer_native?: boolean, services?: {source_id: null \| {results?: integer \| null, content?: boolean \| null, enabled?: boolean \| null}}}` → `{hosted_tools: HostedToolsStatus}` | Changes one tool's settings field by field: an absent field is unchanged, `null` resets `executor_order` to automatic or `default_model` to the default. `executor_order` is for search tools and `default_model` for `image_generate`; values are saved as given, never resolved. It applies from the next turn and interrupts nothing. An unknown tool returns `404 hosted_tool_not_found`; an empty or malformed body `400 invalid_parameter`, including a null `enabled`, an id that is not a Source id (`src_…`), or a model id with surrounding whitespace. |
 | POST `/api/models/hosted-tools/<tool>/clear` | `{source_id?, model_id?}` → `{hosted_tools: HostedToolsStatus}` | Clears the tool's refusals (`call` and `replay`): on one Source and model, on one Source (every model), or with `{}` on every Source. `model_id` requires `source_id`; neither is nullable, so a malformed body is refused rather than widened into a broader clear. A Source or model with nothing to clear is a no-op that answers the read. The file is written first: a failed write returns `500 state_write_failed` and changes nothing. A cleared Source is assumed again from its next request. An unknown tool returns `404 hosted_tool_not_found`; any other body `400 invalid_parameter`. |
 | POST `/api/models/sources/<source_id>/evidence/clear` | `{model_id, feature: {kind: "effort", name}}` → `{source: Source}` | Clears one effort refusal of a Source's model, so the next request at that effort may reach it. A missing record is a no-op. An unknown Source returns `404 source_not_found`; a hosted-tool feature or any other body `400 invalid_parameter` (hosted refusals clear through the Tools clear); a failed write `500 state_write_failed` with nothing changed. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
@@ -83,7 +83,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[], clean_api_keys?: boolean}` → `{applied, sources, added_to}` | Applies one grouped, server-owned custody transaction. It checks saved configuration and custody locally, copies API keys without upstream validation, upgrades an existing native subscription Source in place when present, and commits Source/Routes/backend mode atomically. API-key originals are kept unless cleanup was selected. Pre-exposure failure is reversible; post-exposure recovery is forward-only and keeps the backend blocked until terminalized. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
-| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 17 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
+| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 18 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
 | POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Persists `enabled: true` and explicitly starts the managed engine. Service startup restores this intent; runtime availability has no separate enable-confirmation step. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 | POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine, persists `enabled: false`, and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any native backend is configured for Hub mode or Avibe has catalog models, so disabling the shared runtime cannot strand a configured route. An empty Avibe catalog does not keep the runtime open. |
@@ -92,6 +92,55 @@ The removed product-global route `PUT /api/models/priority` has no replacement. 
 PUT and compatibility chains/reorder share backend-default semantics and effective guards,
 preserving all manual arrays. Exact manual order is saved through the chain resource;
 DELETE restores automatic and POST preview evaluates the draft without a write.
+
+### Web-search settings and dormant service read (S1b)
+
+`web_search` additionally reads `prefer_native` (true when absent), `services`
+(the saved partial per-Source overrides, not resolved defaults), and `service_order`
+(the server-owned tool-only Source creation order, `[]` when absent). Every search
+executor now has a discriminant `kind: "model" | "service"`; `x_search` remains model-only.
+
+Until S2 activates execution, **the read contains no service candidates and omits
+`service_vendors` entirely**. One internal `SEARCH_SERVICES_ACTIVE` switch gates
+both. Settings load and save now, but `prefer_native` does not change hop facts
+and service settings do not change the model executor chain in S1b. No user-facing
+activation toggle exists.
+
+The service variant is frozen for S4/S2 in `hosted-tools-status.schema.json`:
+`model_id` is the catalog service id; `billing: "metered"`, `relay: false`, and
+`price` is the catalog list price, including optional `extra[].when: "content"`
+and unit `page`. `settings` holds effective `{results, content, enabled}`;
+`state` is the Source's health, `trial_pending` covers both armed and in-flight
+one-shot trials, and `cooldown_until` is nullable (S2 owns service cooldowns).
+`service_vendors` contains `{id, name, price, free_tier, facts, results_max,
+content_supported, content_changes_price, source_ids}`. Facts are the catalog's
+`{tool_only, auto_enroll, free_check}` booleans. A free tier not verified in the
+catalog reads as null, never a promise of zero cost. `source_ids` includes
+opted-out search-capable Sources, but not relays or subscriptions.
+
+PUT accepts `prefer_native` and `services` only for `web_search`. `prefer_native`
+is a boolean, not nullable. `services` is a Source-keyed patch: an absent Source
+is untouched, a present object merges only its supplied fields, and a null
+Source or null field removes its saved override. An empty patch is a no-op.
+Defaults are `results: min(5, vendor maximum)`, `content: false`, and `enabled:
+true`, except false for a model vendor without `auto_enroll`. Writes reject
+non-integer/out-of-range results and page text where the catalog does not offer
+it; unknown/non-search-capable Sources reject non-null patches. Null may clear
+a stale Source override. A rejected patch changes nothing. Concurrent edits to
+different Sources or fields serialize against the current saved settings.
+
+Loading ignores removed Sources and clamps obsolete catalog bounds in memory
+without changing the file: results to the current maximum, content to false
+when page text is no longer offered. The next authorized config write persists
+normalization; absent overrides remain absent.
+
+Every `web_search.executor_order` save also writes `executor_order_kinds` from
+the resulting per-Source settings: each extant named Source's `service` or
+`model` role. Removed ids remain in the saved order but have no map entry. Reset
+to automatic removes both fields. A missing map/entry reads as `model`; map ids
+not named by the order are ignored. Neither `executor_order_kinds` nor
+`service_order` is client-writable. S2 owns the read-time placement rule; S1b
+preserves the saved order and kinds across restart without changing execution.
 
 ### Usage report windows
 
@@ -649,7 +698,7 @@ The terminal result of both ordinary API-key creation and OAuth creation is:
 ```json
 {
   "ok": true,
-  "contract_version": 17,
+  "contract_version": 18,
   "source": {
     "id": "src_anthkey01",
     "kind": "api_key",
@@ -759,7 +808,7 @@ Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the c
 ```json
 {
   "ok": false,
-  "contract_version": 17,
+  "contract_version": 18,
   "error": "source_last_supplier",
   "would_remove_hops": [],
   "would_interrupt": [
@@ -898,7 +947,7 @@ API-key success:
 ```json
 {
   "ok": true,
-  "contract_version": 17,
+  "contract_version": 18,
   "source": {
     "id": "src_relay9c1x",
     "kind": "api_key",
@@ -993,7 +1042,7 @@ Status and submit return the same terminal shape:
 ```json
 {
   "ok": true,
-  "contract_version": 17,
+  "contract_version": 18,
   "flow": {
     "flow_id": "oaf_claude01",
     "client_nonce": "ofn_01j5w8z7p4n6q2rt",
@@ -1066,9 +1115,9 @@ a valid `interrupted` chain.
 ```json
 {
   "ok": true,
-  "contract_version": 17,
+  "contract_version": 18,
   "chain": {
-    "contract_version": 17,
+    "contract_version": 18,
     "backend": "codex",
     "model_id": "gpt-5.6",
     "manual_override": null,
@@ -1095,7 +1144,7 @@ In Direct mode both chain and probe refuse with:
 ```json
 {
   "ok": false,
-  "contract_version": 17,
+  "contract_version": 18,
   "error": "direct_mode",
   "detail": "models.hub.direct_mode"
 }
@@ -1109,9 +1158,9 @@ A successful probe nests its result:
 ```json
 {
   "ok": true,
-  "contract_version": 17,
+  "contract_version": 18,
   "probe": {
-    "contract_version": 17,
+    "contract_version": 18,
     "backend": "claude",
     "channel": "hub",
     "reachable": false,
@@ -1134,7 +1183,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 17,
+  "contract_version": 18,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": true,
@@ -1147,7 +1196,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 17,
+  "contract_version": 18,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": false,
@@ -1163,7 +1212,7 @@ No candidate is an API error with a typed model-scoped state:
 ```json
 {
   "ok": false,
-  "contract_version": 17,
+  "contract_version": 18,
   "error": "probe_no_candidate",
   "detail": "models.probe.no_candidate.waiting",
   "supply": {
@@ -1354,7 +1403,7 @@ The store retains at most 500 exactly attributed settled turns with its existing
 writes. Ambiguous attribution remains excluded; this is not a log of every upstream
 request. Null means no matching retained record, including eviction. A newer served,
 canceled or other record without a terminal error supersedes older error display.
-Success uses exactly `{ok: true, contract_version: 17, provenance: TurnProvenance | null}`;
+Success uses exactly `{ok: true, contract_version: 18, provenance: TurnProvenance | null}`;
 there is no `success` field or envelope exception.
 
 Local `engine_down` records may also contain `local_error_detail`, an OS-generated
@@ -1448,7 +1497,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 17,
+  "contract_version": 18,
   "error": "provenance_unavailable",
   "detail": "models.provenance.direct_mode"
 }
@@ -1457,7 +1506,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 17,
+  "contract_version": 18,
   "error": "provenance_unavailable",
   "detail": "models.provenance.attribution_ambiguous"
 }

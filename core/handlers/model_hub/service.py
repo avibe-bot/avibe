@@ -42,6 +42,7 @@ from config.v2_config import (
     normalize_storable_backend_model_text,
     normalize_model_hub_base_url,
     normalize_model_hub_vendor_id,
+    model_hub_search_service,
     normalized_model_hub_override,
     validate_model_hub_protocol_vendor,
     validate_model_hub_source_client_nonce,
@@ -259,7 +260,7 @@ from .usage import (
     local_usage_day,
 )
 
-CONTRACT_VERSION = 17
+CONTRACT_VERSION = 18
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -382,8 +383,8 @@ def _described_as_unfit_for_agent_turns(match: Mapping[str, Any]) -> bool:
     )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 17
-PROBE_RESULT_CONTRACT_VERSION = 17
+AGENT_CHAIN_CONTRACT_VERSION = 18
+PROBE_RESULT_CONTRACT_VERSION = 18
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 # Background inventory refresh. The first tick doubles as the startup delay, so
@@ -1110,9 +1111,7 @@ def _mask_credential(value: str) -> str:
 
 def search_capability_for_source(source: ModelHubSourceConfig) -> dict[str, Any] | None:
     """Return the bundled search service when this Source is search-capable."""
-    if not source.credential_ref:
-        return None
-    return search_service(source.vendor, source.protocol, source.base_url)
+    return model_hub_search_service(source)
 
 
 def _search_service_for_source(source: ModelHubSourceConfig) -> dict[str, Any] | None:
@@ -1376,7 +1375,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 17,
+        "contract_version": 18,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -6818,6 +6817,7 @@ class ModelHubService:
                 evidence=self.hosted_evidence(),
                 spec_for=hosted_tool_spec,
                 image_price=self._image_price,
+                search_trial_pending=self.search_reenable_trial_pending,
             )
         }
 

@@ -48,7 +48,7 @@ const manifest = {
 } satisfies RuntimeManifest;
 
 const runtime: RuntimeDependency = {
-  contract_version: 17,
+  contract_version: 18,
   manifest,
   status: { installed_version: '1', verified: true, health: 'ok' },
 };
@@ -119,7 +119,7 @@ const takeoverAgent: AgentSupply = {
 };
 
 const takeoverChain: AgentChain = { manual_override: {hops:[{source_id:'src_head',model_id:'gpt-5.6-sol'},{source_id:'src_relay',model_id:'gpt-5.6-sol'}]}, route_origin: "manual" as const,
-  contract_version: 17,
+  contract_version: 18,
   backend: 'codex',
   model_id: 'gpt-5.6-sol',
   current: { source_id: 'src_relay', model_id: 'gpt-5.6-sol' },
@@ -222,7 +222,7 @@ const routedHubAgent: AgentSupply = {
 const routedChain: AgentChain = {
   manual_override: { hops: [{ source_id: retainedSource.id, model_id: routedModelId }] },
   route_origin: 'manual' as const,
-  contract_version: 17,
+  contract_version: 18,
   backend: 'claude',
   model_id: routedModelId,
   current: { source_id: retainedSource.id, model_id: routedModelId },
@@ -252,7 +252,7 @@ const routedImpact = {
 const unused = { latest_ok: null, verified: [], refused: [] };
 const hostedToolsStatus: HostedToolsStatus = {
   tools: [
-    { name: 'web_search', enabled: true, status: unused, executor_order: null, effective_order: [], executor_candidates: [] },
+    { name: 'web_search', prefer_native: true, services: {}, service_order: [], enabled: true, status: unused, executor_order: null, effective_order: [], executor_candidates: [] },
     { name: 'x_search', enabled: true, status: unused, executor_order: null, effective_order: [], executor_candidates: [] },
     { name: 'image_generate', enabled: true, status: unused, default_model: null, effective_default: null, models: [], image_offered_by: [] },
   ],

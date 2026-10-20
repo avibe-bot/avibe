@@ -89,8 +89,9 @@
             "required": ["unit", "usd_per_1k"],
             "additionalProperties": false,
             "properties": {
-              "unit": { "enum": ["call", "search", "post", "profile"] },
-              "usd_per_1k": { "type": "number", "minimum": 0 }
+              "unit": { "enum": ["call", "search", "post", "profile", "page"] },
+              "usd_per_1k": { "type": "number", "minimum": 0 },
+              "when": { "const": "content", "description": "Charged only when page text is requested; highlights are included in the search price." }
             }
           }
         },
@@ -98,12 +99,113 @@
         "url": { "type": "string", "pattern": "^https://" }
       }
     },
+    "ModelListPrice": {
+      "allOf": [
+        { "$ref": "#/definitions/ListPrice" },
+        { "properties": { "extra": { "items": { "properties": {
+          "unit": { "enum": ["call", "search", "post", "profile"] }, "when": false
+        } } } } }
+      ]
+    },
+    "ServiceListPrice": {
+      "allOf": [{ "$ref": "#/definitions/ListPrice" }, { "properties": { "unit": { "const": "search" } } }]
+    },
+    "SavedServiceSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "results": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "content": { "type": "boolean" },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "ServiceSettings": {
+      "allOf": [
+        { "$ref": "#/definitions/SavedServiceSettings" },
+        { "required": ["results", "content", "enabled"] }
+      ]
+    },
+    "ModelExecutor": {
+      "type": "object",
+      "required": ["kind", "source_id", "model_id", "billing", "relay", "price"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "model" },
+        "source_id": { "$ref": "#/definitions/SourceId" },
+        "model_id": { "type": "string", "minLength": 1 },
+        "billing": { "enum": ["monthly", "metered"] },
+        "relay": { "type": "boolean", "description": "A non-official endpoint is priced at its vendor's API price." },
+        "price": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ModelListPrice" }] }
+      }
+    },
+    "ServiceExecutor": {
+      "type": "object",
+      "description": "Dormant until S2. A search API's catalog service id occupies model_id; Source health and one-shot trial state are display facts, not a probe.",
+      "required": ["kind", "source_id", "model_id", "billing", "relay", "price", "settings", "state", "trial_pending", "cooldown_until"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "service" },
+        "source_id": { "$ref": "#/definitions/SourceId" },
+        "model_id": { "type": "string", "minLength": 1 },
+        "billing": { "const": "metered" },
+        "relay": { "const": false },
+        "price": { "$ref": "#/definitions/ServiceListPrice" },
+        "settings": { "$ref": "#/definitions/ServiceSettings" },
+        "state": { "$ref": "source.schema.json#/properties/state" },
+        "trial_pending": { "type": "boolean" },
+        "cooldown_until": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/Moment" }] }
+      }
+    },
+    "ServiceVendor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "price", "free_tier", "facts", "results_max", "content_supported", "content_changes_price", "source_ids"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "price": { "$ref": "#/definitions/ServiceListPrice" },
+        "free_tier": { "type": ["string", "null"], "description": "Catalog-verified free-tier description, null when unknown (not a claim of no free tier). Currently null for every vendor." },
+        "facts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool_only", "auto_enroll", "free_check"],
+          "properties": {
+            "tool_only": { "type": "boolean" },
+            "auto_enroll": { "type": "boolean" },
+            "free_check": { "type": "boolean" }
+          }
+        },
+        "results_max": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "content_supported": { "type": "boolean" },
+        "content_changes_price": { "type": "boolean" },
+        "source_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/definitions/SourceId" }, "description": "All current search-capable Sources for this vendor, including opted-out Sources. Empty means not added." }
+      }
+    },
     "SearchTool": {
       "type": "object",
       "required": ["name", "enabled", "status", "executor_order", "effective_order", "executor_candidates"],
       "additionalProperties": false,
+      "allOf": [{
+        "if": { "properties": { "name": { "const": "web_search" } } },
+        "then": { "required": ["prefer_native", "services", "service_order"] },
+        "else": {
+          "properties": {
+            "prefer_native": false, "services": false, "service_order": false, "service_vendors": false,
+            "executor_candidates": { "items": { "$ref": "#/definitions/ModelExecutor" } }
+          }
+        }
+      }],
       "properties": {
         "name": { "enum": ["web_search", "x_search"] },
+        "prefer_native": { "type": "boolean", "description": "Saved preference, true when absent. S2 activates its effect on hop facts." },
+        "services": {
+          "type": "object",
+          "description": "Saved partial per-Source overrides, not resolved defaults. Removed Sources are ignored and obsolete catalog bounds read clamped.",
+          "propertyNames": { "$ref": "#/definitions/SourceId" },
+          "additionalProperties": { "$ref": "#/definitions/SavedServiceSettings" }
+        },
+        "service_order": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/definitions/SourceId" }, "description": "Server-owned tool-only Source creation order. Read-only; absent config reads as an empty list." },
+        "service_vendors": { "type": "array", "items": { "$ref": "#/definitions/ServiceVendor" }, "description": "Absent until S2 activates both service reads and execution. Not a client toggle." },
         "enabled": { "type": "boolean" },
         "status": { "$ref": "#/definitions/Status" },
         "executor_order": {
@@ -114,18 +216,7 @@
         "executor_candidates": {
           "type": "array",
           "description": "Every eligible executor Source for the tool, in effective order, with its vendor's executor model; a Claude subscription never is one.",
-          "items": {
-            "type": "object",
-            "required": ["source_id", "model_id", "billing", "relay", "price"],
-            "additionalProperties": false,
-            "properties": {
-              "source_id": { "$ref": "#/definitions/SourceId" },
-              "model_id": { "type": "string", "minLength": 1 },
-              "billing": { "enum": ["monthly", "metered"] },
-              "relay": { "type": "boolean", "description": "An API-key Source on an endpoint other than its vendor's own: its price is labelled \"at API price\"." },
-              "price": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ListPrice" }] }
-            }
-          }
+          "items": { "oneOf": [{ "$ref": "#/definitions/ModelExecutor" }, { "$ref": "#/definitions/ServiceExecutor" }] }
         }
       }
     },

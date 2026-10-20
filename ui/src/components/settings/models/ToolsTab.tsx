@@ -132,6 +132,8 @@ const StatusLines: React.FC<{ tool: HostedToolStatus; summary: RefusalSummary; l
 /** What one executor call costs: included on a subscription, else the overlay's list price; unknown is never zero. */
 const ExecutorPrice: React.FC<{ candidate: HostedExecutorCandidate }> = ({ candidate }) => {
   const { t } = useTranslation();
+  // Service variants are a dormant contract until S4 supplies their renderer and S2 activates the read.
+  if (candidate.kind === 'service') return null;
   if (candidate.billing === 'monthly') {
     return <span className="flex flex-col"><span className="font-semibold text-foreground">{t('settings.models.tools.cost.included')}</span><span className="model-hub-tool-cost-note">{t('settings.models.tools.cost.includedNote')}</span></span>;
   }

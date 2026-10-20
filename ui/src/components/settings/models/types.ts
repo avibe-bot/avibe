@@ -10,8 +10,8 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 17 as const;
-export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] as const;
+export const CONTRACT_VERSION = 18 as const;
+export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18] as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
@@ -1073,7 +1073,8 @@ export type HostedToolListPrice = {
 };
 
 /** A Source that can execute a search for models that cannot run it natively, with the vendor's executor model. */
-export type HostedExecutorCandidate = {
+export type HostedModelExecutorCandidate = {
+  kind: 'model';
   source_id: string;
   model_id: string;
   billing: 'monthly' | 'metered';
@@ -1081,6 +1082,45 @@ export type HostedExecutorCandidate = {
   relay: boolean;
   /** Null when no list price is known, never zero. */
   price: HostedToolListPrice | null;
+};
+
+/** Service prices extend model tool prices with page-text surcharges, without changing model-only renderers. */
+export type HostedServiceListPrice = Omit<HostedToolListPrice, 'unit' | 'extra'> & {
+  unit: 'search';
+  extra: { unit: HostedToolPriceUnit | 'page'; usd_per_1k: number; when?: 'content' }[];
+};
+
+/** Effective settings. Saved settings and PUT patches keep omitted fields absent instead. */
+export type HostedSearchServiceSettings = { results: number; content: boolean; enabled: boolean };
+
+/** Defined now, but the server lists no service candidate until S2 activates the chain. */
+export type HostedServiceExecutorCandidate = {
+  kind: 'service';
+  source_id: string;
+  /** Catalog service id, e.g. exa/search, never a model name. */
+  model_id: string;
+  billing: 'metered';
+  relay: false;
+  price: HostedServiceListPrice;
+  settings: HostedSearchServiceSettings;
+  state: SourceState;
+  trial_pending: boolean;
+  cooldown_until: string | null;
+};
+export type HostedExecutorCandidate = HostedModelExecutorCandidate | HostedServiceExecutorCandidate;
+
+export type HostedSearchServiceVendor = {
+  id: string;
+  name: string;
+  price: HostedServiceListPrice;
+  /** Catalog-verified description; null means unknown, not no free tier. */
+  free_tier: string | null;
+  facts: { tool_only: boolean; auto_enroll: boolean; free_check: boolean };
+  results_max: number;
+  content_supported: boolean;
+  content_changes_price: boolean;
+  /** Includes opted-out Sources, so a disabled DeepSeek still reads as already added. */
+  source_ids: string[];
 };
 
 export type HostedModelRef = { source_id: string; model_id: string };
@@ -1093,15 +1133,31 @@ export type HostedImageModel = HostedModelRef & { description: string; billing: 
 
 type HostedToolBase = { enabled: boolean; status: HostedToolRunStatus };
 
-export type HostedSearchToolStatus = HostedToolBase & {
-  name: HostedSearchToolName;
+type HostedSearchToolBase = HostedToolBase & {
   /** The saved order; null when automatic. */
   executor_order: string[] | null;
   /** The order the gateway would try now. */
   effective_order: string[];
-  /** Every eligible executor, in effective order. */
-  executor_candidates: HostedExecutorCandidate[];
 };
+
+export type HostedWebSearchToolStatus = HostedSearchToolBase & {
+  name: 'web_search';
+  prefer_native: boolean;
+  /** Saved partial overrides, never effective defaults. PUT merges only supplied fields. */
+  services: Record<string, Partial<HostedSearchServiceSettings>>;
+  /** Server-owned creation order; clients never write this back. */
+  service_order: string[];
+  executor_candidates: HostedExecutorCandidate[];
+  /** Absent until S2 activates service reads and the search chain together. */
+  service_vendors?: HostedSearchServiceVendor[];
+};
+
+export type HostedXSearchToolStatus = HostedSearchToolBase & {
+  name: 'x_search';
+  executor_candidates: HostedModelExecutorCandidate[];
+};
+
+export type HostedSearchToolStatus = HostedWebSearchToolStatus | HostedXSearchToolStatus;
 
 export type HostedImageToolStatus = HostedToolBase & {
   name: 'image_generate';
@@ -1121,6 +1177,10 @@ export type HostedToolsStatus = { tools: HostedToolStatus[] };
 /** PUT /api/models/hosted-tools/<tool>, per field: an absent field is unchanged, `null` resets it. */
 export type HostedToolPut = {
   enabled?: boolean;
+  /** web_search only; a boolean, never null. */
+  prefer_native?: boolean;
+  /** web_search only; null removes a Source override or one of its saved fields. */
+  services?: Record<string, { [K in keyof HostedSearchServiceSettings]?: HostedSearchServiceSettings[K] | null } | null>;
   executor_order?: string[] | null;
   default_model?: HostedModelRef | null;
 };
