@@ -307,6 +307,28 @@ def test_remove_passes_every_installed_agent_not_only_detected_backends(monkeypa
     ]
 
 
+def test_remove_surfaces_askill_listing_errors(monkeypatch):
+    rec = _Recorder(
+        {
+            "ok": False,
+            "error": {
+                "code": "ASKILL_LIST_FAILED",
+                "message": "cannot read the global Skill catalog",
+                "details": {"retryable": True},
+            },
+        }
+    )
+    monkeypatch.setattr(skills, "_run_askill", rec)
+
+    with pytest.raises(skills.SkillsError) as exc_info:
+        _run(skills.remove_skill("askill", "beautiful-mermaid", scope="global"))
+
+    assert exc_info.value.code == "ASKILL_LIST_FAILED"
+    assert exc_info.value.message == "cannot read the global Skill catalog"
+    assert exc_info.value.details == {"retryable": True}
+    assert rec.calls == [{"path": "askill", "args": ["list", "-g"], "cwd": None}]
+
+
 def test_find_passes_query(monkeypatch):
     rec = _Recorder({"ok": True, "skills": [{"name": "memory"}]})
     monkeypatch.setattr(skills, "_run_askill", rec)

@@ -714,8 +714,19 @@ def _installed_skill_targets_from_listing(
     backends: Optional[list[str]],
     allow_unknown_agents: bool = False,
 ) -> tuple[list[str], list[str]]:
-    if not listing.get("ok") or not isinstance(listing.get("skills"), list):
-        raise SkillAccessError()
+    if not listing.get("ok"):
+        error = listing.get("error")
+        if isinstance(error, dict):
+            code = str(error.get("code") or "askill_error")
+            message = str(error.get("message") or "askill listing failed")
+            details = error.get("details")
+        else:
+            code = "askill_error"
+            message = str(listing.get("message") or error or "askill listing failed")
+            details = None
+        raise SkillsError(code, message, details=details)
+    if not isinstance(listing.get("skills"), list):
+        raise SkillsError("askill_bad_response", "askill list returned no skills array")
     target_name = _normalize_skill_name(name)
     resource_ids: list[str] = []
     agent_ids: list[str] = []
