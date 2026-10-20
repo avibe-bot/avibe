@@ -60,11 +60,11 @@ from vibe.backend_model_catalog import (
     bundled_client_presets_once,
     bundled_provider_overlay,
     hosted_tool_spec,
-    provider_image_models,
 )
 from vibe.i18n import t as i18n_t
 from vibe.model_hub_runtime.client import RESPONSE_TOO_LARGE
 from vibe.model_hub_runtime.api_key_vendors import (
+    api_key_vendor_catalog,
     catalog_api_key_vendor_label,
     pinned_api_key_protocol,
 )
@@ -168,6 +168,8 @@ from .hosted_tools import (
     freeze_turn_tools,
     hop_hosted_tools,
     hosted_tools_status,
+    image_models_of,
+    refused_executors,
 )
 from .identifiers import (
     OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL,
@@ -1485,6 +1487,8 @@ class ModelHubService:
         self.avibe_release = avibe_release
         bundled_provider_overlay()
         bundled_client_presets_once()
+        # A custom Source's priors read its vendors' catalog protocols (``prior_vendors``).
+        api_key_vendor_catalog()
         self.migration_blocked_backends: set[str] = set()
         self.migration_guard = migration_guard or self._unavailable_migration_guard
         self.migration_reconcile_auth = migration_reconcile_auth
@@ -6635,6 +6639,16 @@ class ModelHubService:
             if not attempt.moves_on:
                 break
         if not attempts:
+            evidence = self.hosted_evidence()
+            # The config grows with use: read it off the controller loop.
+            refused = await asyncio.to_thread(
+                lambda: refused_executors(self.store.load(), tool, evidence=evidence, spec_for=hosted_tool_spec)
+            )
+            if refused:
+                # Sources that run the tool exist and refused it: clearing that refusal is the fix, not another key.
+                names = say("modelHub.hostedTools.listSeparator").join(source.display_name for source in refused)
+                text = say(f"modelHub.hostedTools.noExecutor.{tool}.refused", sources=names)
+                return {"record": failed_record(Failure(text, None))}
             vendors = [catalog_api_key_vendor_label(vendor) or vendor for vendor in executor_vendors(tool)]
             form = "one" if len(vendors) == 1 else "several"
             listed = say("modelHub.hostedTools.listSeparator").join(vendors)
@@ -6768,9 +6782,7 @@ class ModelHubService:
         if outcome.http_status in {400, 404} and machine_codes_name_model(outcome):
             refused = [model_id]
         elif outcome.http_status == 404:
-            refused = [
-                spec.id for spec in provider_image_models(source.vendor) if source.kind in spec.kinds
-            ] or [model_id]
+            refused = [spec.id for spec in image_models_of(source) if source.kind in spec.kinds] or [model_id]
         else:
             return
         await self.record_hosted_refusals(source, [(refused_id, feature, detail) for refused_id in refused])

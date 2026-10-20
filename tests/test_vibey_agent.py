@@ -3645,10 +3645,11 @@ async def test_vibeys_image_tool_runs_on_the_gateways_image_endpoint_from_the_ho
     from tests.test_model_hub_vibey_consumer import _vibey_service
 
     # GPT Image at a list price per delivered size, taking reference images.
-    bundled = hosted_tools_module.provider_image_models
+    bundled = hosted_tools_module.source_image_models
     priced = replaced(PRICED, params=("images", "n", "size"))
     monkeypatch.setattr(
-        hosted_tools_module, "provider_image_models", lambda vendor: (priced,) if vendor == "openai" else bundled(vendor)
+        hosted_tools_module, "source_image_models",
+        lambda vendor, protocol, listed: (priced,) if vendor == "openai" else bundled(vendor, protocol, listed),
     )
     (tmp_path / "cat.png").write_bytes(base64.b64decode(PNG))
     service = _vibey_service(tmp_path, _sources(), handles=[_served(PNG, source_id=GEMINI), _served(PNG, size="1536x1024")])
@@ -3827,7 +3828,10 @@ async def test_a_proxied_call_after_the_turn_moved_to_another_source_runs_on_the
     from tests.test_model_hub_hosted_executor import OPENAI, XAI, _served_by_openai, _sources
     from tests.test_model_hub_vibey_consumer import _vibey_service
 
-    monkeypatch.setattr(hosted_tools_module, "provider_executor_models", lambda vendor: ("gpt-6-astra",) if vendor == "openai" else ())
+    monkeypatch.setattr(
+        hosted_tools_module, "source_executor_models",
+        lambda vendor, protocol: ("gpt-6-astra",) if vendor == "openai" else (),
+    )
     service = _vibey_service(tmp_path, _sources(), handles=[_served_by_openai()])
     config = service.store.config
     config.hosted_tools["web_search"] = ModelHubHostedToolConfig(enabled=True, executor_order=(OPENAI,))
@@ -3960,7 +3964,10 @@ async def test_a_search_its_source_refused_names_that_source_through_the_real_ga
     from tests.test_model_hub_hosted_executor import OPENAI, XAI, _served_by_openai, _sources
     from tests.test_model_hub_vibey_consumer import _vibey_service
 
-    monkeypatch.setattr(hosted_tools_module, "provider_executor_models", lambda vendor: ("gpt-6-astra",) if vendor == "openai" else ())
+    monkeypatch.setattr(
+        hosted_tools_module, "source_executor_models",
+        lambda vendor, protocol: ("gpt-6-astra",) if vendor == "openai" else (),
+    )
     service = _vibey_service(tmp_path, _sources(), handles=[_served_by_openai()])
     service.store.config.hosted_tools["web_search"] = ModelHubHostedToolConfig(enabled=True, executor_order=(OPENAI,))
     xai = next(source for source in service.store.config.sources if source.id == XAI)

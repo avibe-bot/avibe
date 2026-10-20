@@ -5,7 +5,9 @@ overlay offers it there (``runs_on``) and no current refusal exists; Vibey then
 decides what each request declares. Search tools that are not native run
 through the executor chain, the Sources whose vendor offers the tool, each on
 its vendor's lightweight model. ``image_generate`` names its model, chosen from
-the image models the user's Sources make available.
+the image models the user's Sources make available. A ``custom`` Source names no
+vendor: each model it serves takes the priors of the vendor that claims it
+(``prior_vendor``), so a compatible relay runs what that vendor's own key would.
 
 Every function is pure over a config snapshot and a ``HostedEvidence`` reader,
 so it is safe off the loop and decides the same way wherever it is asked.
@@ -40,9 +42,10 @@ from vibe.backend_model_catalog import (
     HostedToolSpec,
     ImageModelSpec,
     bundled_provider_vendors,
-    provider_executor_models,
     provider_image_models,
     provider_overlay_entry,
+    source_executor_models,
+    source_image_models,
 )
 
 from .capability_evidence import (
@@ -231,7 +234,7 @@ def executor_candidates(
         return ()
     candidates: dict[str, ExecutorCandidate] = {}
     for source in _vibey_order(config):
-        model_id = listed_executor_model(source)
+        model_id = listed_executor_model(source, tool, spec_for=spec_for)
         candidate = executor_candidate(source, model_id, tool, evidence=evidence, spec_for=spec_for) if model_id else None
         if candidate is not None:
             candidates[source.id] = candidate
@@ -240,22 +243,41 @@ def executor_candidates(
     return tuple(first + [candidate for source_id, candidate in candidates.items() if source_id not in order])
 
 
-def listed_executor_model(source: ModelHubSourceConfig) -> Optional[str]:
-    """The model this Source runs proxied searches on: the first of its vendor's executor models it lists (§6).
+def listed_executor_model(source: ModelHubSourceConfig, tool: str, *, spec_for: SpecLookup) -> Optional[str]:
+    """The model this Source runs proxied ``tool`` searches on: the first of its executor models it lists that runs
+    the tool (§6).
 
     Only a listed model: an API-key Source admits unlisted models on a turn's
     hop, but an executor call nobody asked for must not guess. A dated snapshot
     of an entry counts as listing it, the latest first; a retired one does not.
+    A ``custom`` relay may list several vendors' executor models, and only some
+    of them run a given tool, so one that does not is passed over.
     """
 
     listed = {model.id for model in source.models if not model.retired}
-    for entry in provider_executor_models(source.vendor):
-        if entry in listed:
-            return entry
+    for entry in source_executor_models(source.vendor, source.protocol):
         snapshots = sorted(model for model in listed if _DATED_SNAPSHOT.fullmatch(model.removeprefix(entry)) and model != entry)
-        if snapshots:
-            return snapshots[-1]
+        model_id = entry if entry in listed else snapshots[-1] if snapshots else None
+        if model_id is not None and runs_on(source, model_id, tool, spec_for=spec_for) is not None:
+            return model_id
     return None
+
+
+def refused_executors(
+    config: ModelHubConfig, tool: str, *, evidence: HostedEvidence, spec_for: SpecLookup
+) -> tuple[ModelHubSourceConfig, ...]:
+    """The Sources that would run ``tool`` as executors but for a current refusal of it, in Vibey's Source order.
+
+    What sets a call with no executor apart from one with no Source to run it: these Sources exist and their
+    upstream refused the tool, so the fix is clearing that refusal, not adding a key.
+    """
+
+    refused = []
+    for source in _vibey_order(config):
+        model_id = listed_executor_model(source, tool, spec_for=spec_for)
+        if model_id is not None and evidence.unsupported(source, model_id, EvidenceFeature.hosted(tool, "call")):
+            refused.append(source)
+    return tuple(refused)
 
 
 def executor_candidate(
@@ -310,11 +332,19 @@ class ImageChoices:
     saved_default_available: bool = False
 
 
+def image_models_of(source: ModelHubSourceConfig) -> tuple[ImageModelSpec, ...]:
+    """The image models this Source may offer by its vendor, or on a ``custom`` Source by its listing (§7.2)."""
+
+    return source_image_models(source.vendor, source.protocol, (model.id for model in source.models if not model.retired))
+
+
 def _serves_image(source: ModelHubSourceConfig, spec: ImageModelSpec) -> bool:
     """The image model's route was verified on this kind of credential, and the Source serves the model.
 
     Only a Source whose protocol's engine entry serves the images endpoints is offered one: the engine refuses the
-    rest on its own, and that refusal is never learned, so it would be offered on every turn.
+    rest on its own, and that refusal is never learned, so it would be offered on every turn. For the same reason a
+    model must be one of ``image_models_of`` the Source: the engine registers its image models by that same rule
+    (``source_image_models``), and a model it did not register is refused locally.
     """
 
     return (
@@ -323,6 +353,7 @@ def _serves_image(source: ModelHubSourceConfig, spec: ImageModelSpec) -> bool:
         and source.kind in spec.kinds
         and credential_eligible(source)
         and _serves(source, spec.id)
+        and any(offered.id == spec.id for offered in image_models_of(source))
     )
 
 
@@ -338,7 +369,7 @@ def image_choices(config: ModelHubConfig, *, evidence: HostedEvidence) -> ImageC
     saved = hosted_tool_setting(config, "image_generate").default_image
     available: list[ImageChoice] = []
     for source in _vibey_order(config):
-        for spec in provider_image_models(source.vendor):
+        for spec in image_models_of(source):
             if not _serves_image(source, spec) or evidence.unsupported(
                 source, spec.id, EvidenceFeature.hosted("image_generate", "call")
             ):

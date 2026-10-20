@@ -104,6 +104,22 @@ The user has an Anthropic API key, an xAI API key and an OpenAI API key, and has
   only its listed models), for which the overlay declares the tool. A Claude subscription Source is never eligible:
   not for native mode, not as an executor, not for images. Anthropic restricts OAuth credentials to Claude Code and
   its own apps ([`model-hub-tos-review.md`](model-hub-tos-review.md)).
+- **A custom Source takes each model's own vendor's priors (amended 2026-10-20, #2873).** A Source added under
+  自定义 has `vendor: custom`, which has no overlay row, so it used to be excluded from every hosted tool however
+  clearly its models were one vendor's. Each model it serves now takes the priors of the one overlay vendor that
+  claims it (a model family of that vendor matches it, or it is one of that vendor's image models), on one
+  condition: the Source speaks that vendor's catalog protocol (`api_key_vendors.json`), the protocol the vendor's
+  declarations and image route were verified on. Everything else follows from those priors, exactly as for a
+  `vendor: openai` relay: the tool is assumed, called blind, and a refusal is learned (§3.2).
+  - Per model, not per Source: one relay that serves several vendors' models runs each vendor's tools on that
+    vendor's models, as far as its one protocol allows (a Responses relay runs OpenAI's and xAI's search; Claude's
+    is declared on `anthropic` only, so Claude models there use the proxy function).
+  - A model that no vendor claims, or that several do, takes no priors: its vendor is not guessed.
+  - Executor and image models come only from the Source's own listing. A catalog vendor's API key may be offered
+    its image models unlisted, but nothing except a relay's inventory says that it serves one.
+  - `prior_vendor` in `vibe/backend_model_catalog.py` is the one owner. `hosted_tool_spec`, the executor models, the image models, the
+    engine's image registration and the narrow rules all read through it, so what is declared, offered,
+    registered and learned stays one set.
 - **Translated paths are never native.** The engine coerces web search across protocols and it worked in the spike,
   but its result shapes are hybrids (Anthropic `web_search_result_location` citations inside a Responses message),
   so they are not a contract.
@@ -487,7 +503,8 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
   still metered. A candidate whose identity changed since the chain was built is not used.
 - **The chain, built at call time.**
   1. Candidates are the Sources whose vendor offers the tool natively (§3.1) and that list one of the vendor's
-     `executor_models`: the first one the Source lists, exactly or as a dated snapshot, never a retired one. `runs_on`
+     `executor_models`: the first one the Source lists that runs the tool, exactly or as a dated snapshot, never a
+     retired one (a custom relay may list several vendors' executor models, §3.1). `runs_on`
      must hold for it, with no current negative `call` evidence for that pair. A Source that lists none is excluded
      when the chain is built, not found by a 404: an API-key Source admits unlisted models on a turn's hop, but a
      call nobody asked for must not guess.
@@ -519,7 +536,9 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
      (the model chose not to; Anthropic is asked in the message alone) ends the chain with a `failed` record: it is
      a model choice, not a Source failure, and moving on would double the cost. Any other outcome ends the chain.
   5. With no admitted candidate, the call returns a `failed` record naming the providers whose Sources can run the
-     tool ("add a Source from one of these providers: xAI"). With candidates that were all tried and failed, it
+     tool ("add a Source from one of these providers: xAI"). When Sources that would run it exist but each has a
+     current refusal of the tool, the record names those Sources and points at clearing the refusal in Models › Tools
+     instead (amended 2026-10-20, #2873): an upstream refusal is not a missing credential. With candidates that were all tried and failed, it
      returns the last failure's reason and names the Sources tried, so the user sees that retrying, or those
      Sources, is the issue.
   - **One deadline for the whole chain**, the tool's call timeout (180 s for search), not one per candidate.
@@ -572,8 +591,8 @@ E2E stay.
      "n": {"type": "integer", "minimum": 1, "maximum": 4}}}}
   ```
 
-  - **The enum is the image models actually available**: the overlay's `image_models` (§3.1) for each Source where
-    `runs_on` holds for that model and no current negative `image_generate` evidence exists for the pair (§3.2: a
+  - **The enum is the image models actually available**: the overlay's `image_models` (§3.1; on a custom Source only
+    those it lists) for each Source where `runs_on` holds for that model and no current negative `image_generate` evidence exists for the pair (§3.2: a
     relay without the vendor's image endpoint refuses once and is then left out), deduplicated by model id (the first Source in Vibey's order serves an id that
     two Sources offer, unless `default_model` names the other). Each entry's one-line description goes into the
     `model` description; every line stays short, because the tool block is in every request's prefix. The default is listed first and marked "(default)"; the rest follow sorted by id. So the

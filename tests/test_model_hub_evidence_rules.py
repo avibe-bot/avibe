@@ -118,6 +118,33 @@ async def test_an_upstream_400_teaches_only_the_feature_it_names(
     assert (record.status, record.detail) == ("unsupported", detail)
 
 
+@pytest.mark.parametrize(
+    ("protocol", "model_id", "declared", "learned"),
+    [
+        # A custom relay runs OpenAI's declaration for an OpenAI model, so its refusal of it is learned (#2873).
+        ("openai_responses", "gpt-6-luna", "web_search", EvidenceFeature.hosted("web_search", "call")),
+        ("openai_responses", "grok-4.6", "x_search", EvidenceFeature.hosted("x_search", "call")),
+        # A declaration the relay was never assumed to run teaches nothing about it.
+        ("openai_responses", "deepseek-chat", "web_search", None),
+    ],
+    ids=["openai-model", "xai-model", "unclaimed-model"],
+)
+def test_a_custom_relays_refusal_of_a_declaration_it_was_assumed_to_run_is_learned(protocol, model_id, declared, learned):
+    """MH-HOSTED-006: the narrow rule reads the same bundled priors that declared the tool, so a relay that refuses
+    it is not sent the declaration again on every request."""
+    from core.handlers.model_hub.adapter import UpstreamRejection
+    from core.handlers.model_hub.evidence_rules import learn
+    from vibe.backend_model_catalog import hosted_tool_spec
+
+    relay = _source("src_relay0001", "Relay", vendor="custom", protocol=protocol, model_id=model_id)
+    rejection = UpstreamRejection(status=400, error_type="invalid_request_error", unsupported_tool_type=declared)
+    request = {"input": "hi", "tools": [{"type": declared}]}
+    found = learn(
+        request, rejection, request_protocol=protocol, source=relay, model_id=model_id, spec_for=hosted_tool_spec,
+    )
+    assert (found.feature if found is not None else None) == learned
+
+
 @pytest.mark.asyncio
 async def test_a_refused_effort_skips_its_hop_instead_of_another_provider_400(tmp_path):
     """MH-HOSTED-006: the next request at a refused effort fails locally, and the chain read shows it."""
@@ -271,19 +298,26 @@ async def test_a_refused_effort_still_waits_for_a_capable_hop_that_is_cooling_do
 
 
 @pytest.mark.asyncio
-async def test_no_request_path_reads_a_bundled_file_after_startup(tmp_path, monkeypatch):
-    """MH-HOSTED-006: every immutable bundled input is resolved when the service is built, never on a request."""
+@pytest.mark.parametrize(("vendor", "model_id"), [("openai", "shared-model"), ("custom", "gpt-6-luna")])
+async def test_no_request_path_reads_a_bundled_file_after_startup(tmp_path, monkeypatch, vendor, model_id):
+    """MH-HOSTED-006: every immutable bundled input is resolved when the service is built, never on a request.
+
+    A custom Source's priors read its vendors' catalog protocols too (#2873)."""
     from dataclasses import replace as replaced
     from pathlib import Path
 
     from core.handlers.model_hub.adapter import RawOutcomeKind, UpstreamRejection
     from core.handlers.model_hub.stream_wire import ProtocolUsageReport
     from tests.test_model_hub_l3 import _canonicalize_fixed_test_routes, _outcome, _service
+    from vibe.model_hub_runtime import api_key_vendors
 
-    source = _source("src_startup01", "Startup", vendor="openai", protocol="openai_responses")
+    # Read once per process: cleared so that only the service's own startup can have read it.
+    api_key_vendors.api_key_vendor_catalog.cache_clear()
+    api_key_vendors._catalog_by_id.cache_clear()
+    source = _source("src_startup01", "Startup", vendor=vendor, protocol="openai_responses", model_id=model_id)
     service = _service(tmp_path, sources=[source])
     model = _canonicalize_fixed_test_routes(service)["codex"]
-    watched = {"backend_models.json", "cliproxyapi_manifest.json"}
+    watched = {"backend_models.json", "cliproxyapi_manifest.json", "api_key_vendors.json"}
     reads = []
     read_text, path_open = Path.read_text, Path.open
 
@@ -308,15 +342,15 @@ async def test_no_request_path_reads_a_bundled_file_after_startup(tmp_path, monk
         rejection=UpstreamRejection(status=400, unsupported_tool_type="web_search"),
     )
     config = service.store.load()
-    assert service._effort_refused(source, "shared-model", request) is False
-    await service._learn_capability_evidence(source, "shared-model", request, rejected)
-    service.hosted_tools_for_hop(source, "shared-model", service.freeze_turn_hosted_tools(config))
+    assert service._effort_refused(source, model_id, request) is False
+    await service._learn_capability_evidence(source, model_id, request, rejected)
+    service.hosted_tools_for_hop(source, model_id, service.freeze_turn_hosted_tools(config))
     service.agent_chain("codex", model)
     service.list_sources()
     service.hosted_tools_status()
     service.hosted_call_cost(
         source,
-        "shared-model",
+        model_id,
         ("web_search",),
         usage=ProtocolUsageReport.of(input_tokens=10, cached_input_tokens=0, output_tokens=1),
         counts={"web_search_calls": 1},
