@@ -472,6 +472,41 @@ def test_the_session_queue_is_capped() -> None:
     assert _run(scenario)["error"]["code"] == "js_kernel_busy"
 
 
+def test_non_posix_platform_is_refused_before_any_process_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from core import computer_js_kernels
+
+    async def no_process(*_args, **_kwargs):
+        raise AssertionError("a kernel process was started")
+
+    monkeypatch.setattr(computer_js_kernels, "_kernel_platform_supported", lambda: False)
+    monkeypatch.setattr(computer_js_kernels.asyncio, "create_subprocess_exec", no_process)
+
+    async def scenario(h: _Harness) -> dict:
+        return await h.js("1")
+
+    report = _run(scenario)
+    assert report["error"]["code"] == "platform_unsupported"
+    assert report["kernel_fresh"] is False
+
+
+def test_the_cli_never_stops_waiting_before_the_controller_lease_ends() -> None:
+    from core.computer_cli import COMPUTER_JS_CONNECTION_LEASE_SECONDS
+    from core.computer_js_kernels import (
+        KILL_GRACE_SECONDS,
+        MAX_TIMEOUT_MS,
+        QUEUE_LIMIT,
+        SPAWN_TIMEOUT_SECONDS,
+    )
+    from vibe.internal_client import computer_js_client_timeout_seconds
+
+    assert computer_js_client_timeout_seconds() >= COMPUTER_JS_CONNECTION_LEASE_SECONDS
+    # Every queued predecessor plus the call itself settles inside the lease.
+    per_call = MAX_TIMEOUT_MS / 1000 + KILL_GRACE_SECONDS + SPAWN_TIMEOUT_SECONDS
+    assert (QUEUE_LIMIT + 1) * per_call <= COMPUTER_JS_CONNECTION_LEASE_SECONDS
+
+
 def test_concurrent_calls_in_one_session_are_serialized() -> None:
     async def scenario(h: _Harness) -> Any:
         await h.js("globalThis.order = []")

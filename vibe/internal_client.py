@@ -484,6 +484,17 @@ def computer_script_close_sync(
     )
 
 
+def computer_js_client_timeout_seconds() -> float:
+    """How long the CLI waits for one js call: never less than the Controller lease."""
+
+    from core.computer_cli import (
+        COMPUTER_JS_CLIENT_MARGIN_SECONDS,
+        COMPUTER_JS_CONNECTION_LEASE_SECONDS,
+    )
+
+    return COMPUTER_JS_CONNECTION_LEASE_SECONDS + COMPUTER_JS_CLIENT_MARGIN_SECONDS
+
+
 def computer_js_eval_sync(
     *,
     caller_session_id: str,
@@ -493,8 +504,8 @@ def computer_js_eval_sync(
 ) -> dict[str, Any]:
     """Run one call in the caller Session's persistent JavaScript kernel.
 
-    The Controller bounds the call (timeout, cancel grace, kernel start, and a
-    serialized predecessor), so the client only needs a generous backstop.
+    The Controller settles every admitted call inside its connection lease, so
+    the client waits for that lease plus a margin.
     """
 
     return _computer_script_post_sync(
@@ -505,7 +516,7 @@ def computer_js_eval_sync(
             "code": code,
             "timeout_ms": timeout_ms,
         },
-        timeout=timeout_ms / 1000 + 360.0,
+        timeout=computer_js_client_timeout_seconds(),
     )
 
 

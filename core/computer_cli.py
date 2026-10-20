@@ -38,6 +38,14 @@ OBSERVATION_TOOLS = frozenset(
 SCREENSHOT_TOOLS = frozenset({"get_window_state", "zoom"})
 
 
+# Upper bound on how long one ``vibe computer js`` call can stay admitted: the
+# Controller leases its exact-Turn connection for this long, and every path
+# (queue cap, per-call timeout, cancel grace, kernel start) settles inside it.
+# The CLI waits at least this long so it never gives up before the Controller.
+COMPUTER_JS_CONNECTION_LEASE_SECONDS = 3600.0
+COMPUTER_JS_CLIENT_MARGIN_SECONDS = 60.0
+
+
 class ComputerCliError(ValueError):
     """The CLI request cannot be translated into a driver call."""
 

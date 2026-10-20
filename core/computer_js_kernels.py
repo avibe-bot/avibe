@@ -32,6 +32,7 @@ import socket
 import tempfile
 from typing import TYPE_CHECKING, Any, Callable
 
+from core.computer_cli import COMPUTER_JS_CONNECTION_LEASE_SECONDS as _CONNECTION_LEASE_SECONDS
 from vibe.computer_script_runner import (
     _failure_envelope,
     _prune_retained_artifact_runs,
@@ -55,7 +56,6 @@ STATUS_POLL_SECONDS = 15.0
 # closed as soon as the call ends, and its Turn ending invalidates it at once.
 # The execution deadline starts only when the call holds the Session lock, and
 # the queue cap keeps every queued call's whole wait inside this lease.
-_CONNECTION_LEASE_SECONDS = 3600.0
 QUEUE_LIMIT = 8
 _MESSAGE_LIMIT_BYTES = 16 * 1024 * 1024
 _ARTIFACT_PREFIX = "avibe-computer-js-"
@@ -119,6 +119,13 @@ def _default_node() -> Path | None:
     from vibe.desktop_runtime import private_desktop_node_bin
 
     return private_desktop_node_bin()
+
+
+def _kernel_platform_supported() -> bool:
+    # The kernel transport (inherited socketpair, process-group kill) is POSIX.
+    # Computer Use itself is macOS-only in Phase 1; Windows IPC and termination
+    # belong to the future Windows Computer Use lane.
+    return os.name == "posix"
 
 
 def _default_status() -> Any:
@@ -371,6 +378,13 @@ class ComputerJsKernelManager:
         kernel_fresh = False
         kernel = slot.kernel
         if kernel is None or not kernel.alive:
+            if not _kernel_platform_supported():
+                return _failed(
+                    _envelope(
+                        "platform_unsupported",
+                        "The JavaScript kernel is unavailable on this platform.",
+                    )
+                )
             try:
                 kernel = await self._spawn()
                 if slot.invalidated is not None:
