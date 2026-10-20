@@ -183,6 +183,7 @@ scenarios:
       - tests/test_model_hub_vibey_consumer.py::test_both_hop_resolution_copies_state_the_same_contract
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_hops_facts_come_from_priors_and_refusals
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_executor_chain_follows_the_users_order_then_vibeys
+      - tests/test_model_hub_hosted_tools_resolution.py::test_a_custom_relays_models_take_the_priors_of_the_vendor_that_claims_each
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_image_enum_is_deterministic_with_the_default_first
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_its_own_facts
   - id: MH-HOSTED-002
@@ -361,6 +362,7 @@ scenarios:
     test: tests/test_model_hub_evidence_rules.py::test_an_upstream_400_teaches_only_the_feature_it_names
     related_tests:
       - tests/test_model_hub_evidence_rules.py::test_a_refused_effort_skips_its_hop_instead_of_another_provider_400
+      - tests/test_model_hub_evidence_rules.py::test_a_custom_relays_refusal_of_a_declaration_it_was_assumed_to_run_is_learned
       - tests/test_model_hub_reasoning_tiers.py::test_catalog_row_outranks_user_and_drops_its_client_presets
       - tests/test_model_hub_reasoning_tiers.py::test_a_persisted_catalog_list_offers_no_client_preset_to_vibey
       - tests/test_model_hub_vibey_consumer.py::test_a_released_vibey_row_loads_without_its_client_preset
@@ -2592,6 +2594,7 @@ scenarios:
     test: tests/test_model_hub_hosted_executor.py::test_a_proxied_call_that_cannot_complete_is_a_failed_record
     related_tests:
       - tests/test_model_hub_hosted_executor.py::test_the_chain_moves_on_only_past_a_source_failure
+      - tests/test_model_hub_hosted_executor.py::test_a_call_whose_executors_refused_the_tool_names_them_instead_of_asking_for_a_key
       - tests/test_model_hub_hosted_executor.py::test_a_call_runs_only_a_tool_its_live_turn_froze
       - tests/test_model_hub_hosted_executor.py::test_a_turn_keeps_its_tools_and_executor_order_until_the_next_turn
       - tests/test_model_hub_hosted_executor.py::test_a_malformed_proxy_call_is_refused_before_anything_runs
@@ -2626,6 +2629,7 @@ scenarios:
       - tests/test_model_hub_hosted_images.py::test_a_model_gone_mid_turn_is_unavailable_and_the_record_names_the_others
       - tests/test_model_hub_hosted_images.py::test_only_usable_images_complete_the_call
       - tests/test_model_hub_hosted_images.py::test_only_an_upstream_refusal_of_the_model_or_endpoint_is_learned
+      - tests/test_model_hub_hosted_images.py::test_a_custom_relay_offers_the_image_models_it_lists_until_its_endpoint_refuses_them
       - tests/test_model_hub_hosted_images.py::test_a_malformed_image_call_is_refused_before_anything_runs
       - tests/test_model_hub_hosted_images.py::test_an_image_call_body_is_bounded_by_its_reference_images
       - tests/test_model_hub_hosted_images.py::test_an_image_call_costs_its_delivered_images_at_their_list_price

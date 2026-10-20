@@ -799,7 +799,7 @@ def bundled_provider_overlay() -> Mapping[str, tuple[ProviderModelOverlay, ...]]
 def provider_executor_models(vendor: str) -> tuple[str, ...]:
     """The vendor's lightweight models that run proxied search calls, preferred first (vibey-hosted-tools.md §6).
 
-    A Source runs the first of them it lists; each names its dated snapshots too.
+    A Source runs the first of them it lists that runs the tool; each names its dated snapshots too.
     """
 
     entry = bundled_provider_vendors().get(vendor.strip().lower())
@@ -857,12 +857,85 @@ def provider_overlay_entry(vendor: str, model_id: str) -> ProviderModelOverlay |
 
 
 def hosted_tool_spec(vendor: str, protocol: str, model_id: str, tool: str) -> HostedToolSpec | None:
-    """Return the matching family's declaration, price and include for one tool."""
+    """Return the matching family's declaration, price and include for one tool, on a Source of ``vendor``."""
 
-    entry = provider_overlay_entry(vendor, model_id)
+    prior = prior_vendor(vendor, protocol, model_id)
+    entry = provider_overlay_entry(prior, model_id) if prior is not None else None
     if entry is None:
         return None
     return entry.hosted_tools.get(protocol, {}).get(tool)
+
+
+# The vendor of a Source added as a compatible endpoint (自定义, model-hub-vendor-preset-protocol.md): it names no
+# vendor, so the overlay has no entry for it.
+CUSTOM_VENDOR: Final = "custom"
+
+
+def prior_vendors(vendor: str, protocol: str) -> tuple[str, ...]:
+    """The overlay vendors whose priors a Source of ``vendor`` and ``protocol`` may take (vibey-hosted-tools.md §3.1).
+
+    A catalog vendor takes its own. A ``custom`` Source names none, so it may take those of every overlay vendor
+    whose catalog protocol it speaks, in overlay order: a route is offered only on the protocol its vendor's was
+    verified on, since the engine refuses the rest locally and a local refusal is never learned.
+    """
+
+    vendor = vendor.strip().lower()
+    if vendor != CUSTOM_VENDOR:
+        return (vendor,)
+    from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol
+
+    return tuple(name for name in bundled_provider_vendors() if pinned_api_key_protocol(name) == protocol)
+
+
+def prior_vendor(vendor: str, protocol: str, model_id: str) -> str | None:
+    """The vendor whose priors apply to ``model_id`` on a Source of ``vendor`` and ``protocol``; None for none.
+
+    A catalog vendor's own. On a ``custom`` Source, the one overlay vendor that claims the model (a model family of
+    its matches it, or it is one of its image models), when the Source may take that vendor's priors at all. A model
+    no vendor claims, or several do, takes none: its vendor is not guessed.
+    """
+
+    vendor = vendor.strip().lower()
+    if vendor != CUSTOM_VENDOR:
+        return vendor
+    from core.handlers.model_hub.identifiers import normalized_model_id
+
+    model = normalized_model_id(model_id)
+    claimers = [
+        name
+        for name, entry in bundled_provider_vendors().items()
+        if provider_overlay_entry(name, model) is not None or any(spec.id == model for spec in entry.image_models)
+    ]
+    return claimers[0] if len(claimers) == 1 and claimers[0] in prior_vendors(vendor, protocol) else None
+
+
+def source_executor_models(vendor: str, protocol: str) -> tuple[str, ...]:
+    """The executor models a Source of ``vendor`` and ``protocol`` may run proxied searches on, preferred first (§6).
+
+    Its vendor's; on a ``custom`` Source, those of every vendor whose priors it may take, in overlay order.
+    """
+
+    return tuple(
+        dict.fromkeys(model for name in prior_vendors(vendor, protocol) for model in provider_executor_models(name))
+    )
+
+
+def source_image_models(vendor: str, protocol: str, listed: Iterable[str]) -> tuple[ImageModelSpec, ...]:
+    """The image models a Source of ``vendor`` and ``protocol`` may offer, in catalog order (§7.2).
+
+    A catalog vendor's every image model. A ``custom`` Source's are only those it lists (``listed``), each of the
+    vendor that claims it: nothing but the endpoint's own inventory says that it serves one.
+    """
+
+    if vendor.strip().lower() != CUSTOM_VENDOR:
+        return provider_image_models(vendor)
+    names = frozenset(listed)
+    return tuple(
+        spec
+        for name in prior_vendors(vendor, protocol)
+        for spec in provider_image_models(name)
+        if spec.id in names and prior_vendor(vendor, protocol, spec.id) == name
+    )
 
 
 def _overlay_vendor_id(vendor: str) -> str:

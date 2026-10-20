@@ -106,6 +106,13 @@ def test_bundled_providers_section_satisfies_its_schema():
         ("openai", "openai_responses", "o3", "web_search", None),
         ("xai", "openai_responses", "grok-3", "web_search", None),
         ("xai", "anthropic", "grok-4.6", "web_search", None),
+        # A custom relay names no vendor: a model takes the priors of the vendor that claims it (#2873) ...
+        ("custom", "openai_responses", "gpt-6-luna", "web_search", OPENAI_WEB_SEARCH),
+        # ... but only on that vendor's own protocol, the one its declarations were verified on,
+        ("custom", "openai_chat", "gpt-6-luna", "web_search", None),
+        ("custom", "openai_responses", "claude-opus-5-5", "web_search", None),
+        # and a model no vendor claims takes none.
+        ("custom", "openai_responses", "deepseek-chat", "web_search", None),
     ],
 )
 def test_bundled_overlay_resolves_hosted_tools(vendor, protocol, model, tool, expected):

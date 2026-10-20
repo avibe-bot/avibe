@@ -41,7 +41,7 @@ from core.handlers.model_hub.hosted_tools import (
     image_choices,
 )
 from core.handlers.model_hub.hosted_turn import ExecutorSlot
-from vibe.backend_model_catalog import HostedToolPrice, HostedToolSpec, ImageModelPrice, ImageModelSpec
+from vibe.backend_model_catalog import HostedToolPrice, HostedToolSpec, ImageModelPrice, ImageModelSpec, hosted_tool_spec
 
 NOW = datetime(2026, 10, 15, 12, 0, tzinfo=timezone.utc)
 ENGINE, AVIBE = "model-hub-engine-v8.0.23-3", "3.2.1"
@@ -80,8 +80,13 @@ IMAGE_MODELS = {
 
 @pytest.fixture(autouse=True)
 def _overlay(monkeypatch):
-    monkeypatch.setattr(hosted_tools_module, "provider_executor_models", lambda vendor: EXECUTOR_MODELS.get(vendor, ()))
+    monkeypatch.setattr(
+        hosted_tools_module, "source_executor_models", lambda vendor, protocol: EXECUTOR_MODELS.get(vendor, ()),
+    )
     monkeypatch.setattr(hosted_tools_module, "provider_image_models", lambda vendor: IMAGE_MODELS.get(vendor, ()))
+    monkeypatch.setattr(
+        hosted_tools_module, "source_image_models", lambda vendor, protocol, listed: IMAGE_MODELS.get(vendor, ()),
+    )
     # The bundled overlay's vendors; which of them list image models is `IMAGE_MODELS`.
     monkeypatch.setattr(hosted_tools_module, "bundled_provider_vendors", lambda: dict.fromkeys(("anthropic", "openai", "xai")))
 
@@ -189,14 +194,64 @@ def test_an_executor_runs_on_a_model_its_source_lists(tmp_path, monkeypatch, lis
     """MH-HOSTED-001: an API-key Source admits unlisted models on a hop, but an executor call nobody asked for must
     not guess one: the first of the vendor's executor models the Source lists, or the Source is no executor."""
     monkeypatch.setattr(
-        hosted_tools_module, "provider_executor_models",
-        lambda vendor: ("claude-haiku-5-5", "claude-haiku-4-5") if vendor == "anthropic" else (),
+        hosted_tools_module, "source_executor_models",
+        lambda vendor, protocol: ("claude-haiku-5-5", "claude-haiku-4-5") if vendor == "anthropic" else (),
     )
     source = _source("src_rel00001", "anthropic", "anthropic", listed[0], listed=listed[1:])
     for model in source.models:
         model.retired = model.id in retired or None
     chain = executor_candidates(_config(sources=[source]), "web_search", evidence=_evidence(tmp_path), spec_for=_spec_for)
     assert [candidate.model_id for candidate in chain] == ([] if expected is None else [expected])
+
+
+RELAY_MODELS = ("gpt-6-luna", "grok-4.20-0309-non-reasoning", "claude-haiku-5-5", "gpt-image-2", "gemini-2.5-flash-image")
+
+
+@pytest.mark.parametrize(
+    ("protocol", "listed", "native", "executors", "images"),
+    [
+        # The reported relay (#2873): OpenAI's models on OpenAI's protocol run what an OpenAI key would.
+        ("openai_responses", ("gpt-6-luna", "gpt-image-2"), {"gpt-6-luna": {"web_search"}},
+         {"web_search": "gpt-6-luna"}, ["gpt-image-2"]),
+        # One relay serving several vendors: each model takes its own vendor's priors, and each tool runs on an
+        # executor model that runs it, not merely the first one listed.
+        ("openai_responses", RELAY_MODELS,
+         {"gpt-6-luna": {"web_search"}, "grok-4.20-0309-non-reasoning": {"web_search", "x_search"},
+          "claude-haiku-5-5": set()},
+         {"web_search": "gpt-6-luna", "x_search": "grok-4.20-0309-non-reasoning"}, ["gpt-image-2"]),
+        # Anthropic's protocol: Claude's web search, natively and as executor; it has no image endpoint.
+        ("anthropic", RELAY_MODELS, {"claude-haiku-5-5": {"web_search"}, "gpt-6-luna": set()},
+         {"web_search": "claude-haiku-5-5"}, []),
+        # Chat Completions declares no search; Gemini's image models are its vendor's Chat Completions ones.
+        ("openai_chat", RELAY_MODELS, {"gpt-6-luna": set()}, {}, ["gemini-2.5-flash-image"]),
+        # No executor model listed and no image model listed: the vendor's are not guessed, unlike a hop's model.
+        # A model no vendor claims takes no priors at all.
+        ("openai_responses", ("gpt-6-astra", "deepseek-chat"), {"gpt-6-astra": {"web_search"}, "deepseek-chat": set()},
+         {}, []),
+    ],
+    ids=["reported-relay", "multi-vendor-responses", "multi-vendor-anthropic", "multi-vendor-chat", "unlisted"],
+)
+def test_a_custom_relays_models_take_the_priors_of_the_vendor_that_claims_each(
+    tmp_path, monkeypatch, protocol, listed, native, executors, images,
+):
+    """MH-HOSTED-001: a custom Source names no vendor, so the bundled overlay's vendor that claims a model supplies
+    its priors, on that vendor's protocol only, with executor and image models only from the Source's listing."""
+    monkeypatch.undo()  # The bundled overlay, not this module's priors.
+    relay = _source("src_rly00001", "custom", protocol, listed[0], base_url="https://relay.example/v1", listed=listed[1:])
+    config, evidence = _config(sources=[relay]), _evidence(tmp_path)
+    assert {
+        model_id: {
+            tool for tool in ("web_search", "x_search")
+            if hosted_tool_facts(relay, model_id, tool, evidence=evidence, spec_for=hosted_tool_spec).native == "assumed"
+        }
+        for model_id in native
+    } == native
+    chains = {
+        tool: executor_candidates(config, tool, evidence=evidence, spec_for=hosted_tool_spec)
+        for tool in ("web_search", "x_search")
+    }
+    assert {tool: chain[0].model_id for tool, chain in chains.items() if chain} == executors
+    assert [choice.model_id for choice in image_choices(config, evidence=evidence).models] == images
 
 
 def test_the_executor_chain_follows_the_users_order_then_vibeys(tmp_path):

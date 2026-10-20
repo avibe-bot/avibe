@@ -12862,8 +12862,16 @@ def test_execute_request_avibe_routes_through_gate(monkeypatch, tmp_path) -> Non
     submitted: list[tuple] = []
     handler_calls: list = []
 
-    async def _submit_scheduled(sid, ctx, text, *, delivery_intent="steer"):
-        submitted.append((sid, text, getattr(ctx, "platform", None), delivery_intent))
+    async def _submit_scheduled(sid, ctx, text, *, delivery_intent=None):
+        submitted.append(
+            (
+                sid,
+                text,
+                getattr(ctx, "platform", None),
+                ctx.platform_specific["task_trigger_kind"],
+                delivery_intent,
+            )
+        )
 
     async def _handle_scheduled_message(context, message, parsed_session_key=None):
         handler_calls.append(message)
@@ -12888,8 +12896,9 @@ def test_execute_request_avibe_routes_through_gate(monkeypatch, tmp_path) -> Non
     )
 
     assert error is None, "dispatched-success returns None so ok=not error stays true"
+    # The admission policy decides from the trigger (scheduled queues).
     assert submitted == [
-        (session_id, "run the digest", "avibe", "queue")
+        (session_id, "run the digest", "avibe", "scheduled", None)
     ], "routed through the turn gate"
     assert handler_calls == [], "the direct handle_scheduled_message path is bypassed for avibe"
 
@@ -12909,8 +12918,10 @@ def test_execute_request_im_watch_steers_through_delivery_owner(
     submitted: list = []
     handler_calls: list = []
 
-    async def _submit_scheduled(sid, ctx, text, *, delivery_intent="steer"):
-        submitted.append((sid, text, delivery_intent))
+    async def _submit_scheduled(sid, ctx, text, *, delivery_intent=None):
+        submitted.append(
+            (sid, text, ctx.platform_specific["task_trigger_kind"], delivery_intent)
+        )
 
     async def _handle_scheduled_message(context, message, parsed_session_key=None):
         handler_calls.append((message, context.platform))
@@ -12944,7 +12955,8 @@ def test_execute_request_im_watch_steers_through_delivery_owner(
     )
 
     assert error is None
-    assert submitted == [(session_id, "send digest", "steer")]
+    # The admission policy decides from the trigger (a Watch steers).
+    assert submitted == [(session_id, "send digest", "watch", None)]
     assert handler_calls == []
 
 

@@ -407,7 +407,7 @@ class MessageHandlerTypingTests(unittest.IsolatedAsyncioTestCase):
         await handler.handle_user_message(context, "reviewer: check this")
 
         call = handler._admit_human_delivery.await_args.kwargs
-        self.assertEqual(call["delivery_intent"], "queue")
+        self.assertEqual(call["explicit_subagent"], "reviewer")
         self.assertEqual(
             call["admission_context"]["message_handler_route"]["subagent_name"],
             "reviewer",

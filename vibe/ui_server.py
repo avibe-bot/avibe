@@ -12111,6 +12111,7 @@ async def sessions_messages_create(session_id: str):
 
     def _persist_user_row() -> dict | None:
         """Atomically persist one unaccepted submission as a Delivery."""
+        from core.input_admission import InputEnvelope, InputProvenance, InputSender, admit_input
         from storage import message_deliveries
         from storage.agent_session_rows import reserve_write_lock
 
@@ -12131,17 +12132,18 @@ async def sessions_messages_create(session_id: str):
                 message_metadata[WEB_PUSH_AUTHORIZATION_CONTEXTS_METADATA] = [
                     web_push_authorization_context
                 ]
-            snapshot = message_deliveries.message_snapshot(
-                scope_id=session["scope_id"],
+            envelope = InputEnvelope(
                 session_id=session_id,
-                platform="avibe",
-                author="user",
-                source="user",
+                scope_id=session["scope_id"],
+                sender=InputSender("user", workbench_author_id, payload.get("author_name")),
+                kind="user",
+                provenance=InputProvenance(
+                    source="failure_retry" if retry_for else "web_composer",
+                ),
+                dispatch_text=dispatch_text,
                 text=text if isinstance(text, str) else None,
                 content=content if isinstance(content, dict) else None,
                 metadata=message_metadata,
-                author_id=workbench_author_id,
-                author_name=payload.get("author_name"),
                 message_kind=message_kind,
             )
             if retry_for:
@@ -12151,19 +12153,10 @@ async def sessions_messages_create(session_id: str):
                     conn,
                     session_id=session_id,
                     notice_id=retry_for,
-                    snapshot=snapshot,
+                    envelope=envelope,
                 )
             else:
-                row = message_deliveries.insert_delivery(
-                    conn,
-                    delivery_id=delivery_id,
-                    session_id=session_id,
-                    priority="p3",
-                    state="reserved",
-                    snapshot=snapshot,
-                    dispatch_text=dispatch_text,
-                    history_event={"kind": "admission", "priority": "p3", "state": "reserved"},
-                )
+                row = admit_input(conn, envelope, delivery_id=delivery_id).delivery
             if not quick_reply_for and not retry_for:
                 message_deliveries.set_draft(conn, session_id, None)
             draft = message_deliveries.get_draft_state(conn, session_id)

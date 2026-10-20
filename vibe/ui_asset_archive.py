@@ -15,7 +15,8 @@ page has to reload.
 
 Layout under ``<runtime>/ui-assets/``:
 
-- ``files/<name>``: one copy of each hashed asset (a hard link when possible)
+- ``files/<name>``: one copy of each hashed asset, hard-linked to the current
+  build's file when the filesystem allows
 - ``builds/<id>.json``: the asset names of one build and when it was last
   recorded
 """
@@ -38,7 +39,12 @@ logger = logging.getLogger(__name__)
 
 KEEP_BUILDS = 2
 
-_ASSET_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# One path segment of the characters Vite emits, including a leading
+# underscore (``__vite-browser-external-<hash>.js``). An allow-list keeps
+# separators and Windows drive or stream syntax (``D:name``) out of the path.
+# A leading dot is reserved for this archive's in-progress files and excludes
+# ``.`` and ``..``.
+_ASSET_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
 _record_lock = threading.Lock()
 _recorded_index_key: tuple[str, str] | None = None
 
@@ -101,16 +107,22 @@ def _archive_build(assets_dir: Path, archive: Path) -> None:
     builds_dir.mkdir(parents=True, exist_ok=True)
 
     for name in names:
+        source = assets_dir / name
         target = files_dir / name
-        if target.exists():
-            # Names are content hashes, so an existing file is this file.
+        exists = target.exists()
+        # Names are content hashes, so an existing file is this file. An upgrade
+        # still writes it anew, so re-link it to the current build's copy;
+        # otherwise every shared chunk keeps a superseded install's copy alive.
+        if exists and os.path.samefile(source, target):
             continue
         partial = files_dir / f".{name}.{os.getpid()}.partial"
         partial.unlink(missing_ok=True)
         try:
-            os.link(assets_dir / name, partial)
+            os.link(source, partial)
         except OSError:
-            shutil.copyfile(assets_dir / name, partial)
+            if exists:
+                continue
+            shutil.copyfile(source, partial)
         os.replace(partial, target)
 
     build_id = hashlib.sha256("\n".join(names).encode("utf-8")).hexdigest()[:16]

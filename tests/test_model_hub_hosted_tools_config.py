@@ -337,7 +337,9 @@ def test_an_image_models_card_price_is_only_an_unqualified_list_price(tmp_path, 
             for size, quality, usd in prices
         ),
     )
-    monkeypatch.setattr(hosted_tools_module, "provider_image_models", lambda vendor: (spec,) if vendor == "xai" else ())
+    monkeypatch.setattr(
+        hosted_tools_module, "source_image_models", lambda vendor, protocol, listed: (spec,) if vendor == "xai" else (),
+    )
     service, _store = _api_service(tmp_path)
     status = service.hosted_tools_status()["hosted_tools"]
     _validate_status(status)
@@ -354,7 +356,9 @@ def test_an_estimated_image_price_of_zero_is_no_unit_price(tmp_path, monkeypatch
     from vibe.backend_model_catalog import ImageModelSpec
 
     spec = ImageModelSpec("gemini-3-image", "Nano Banana", ("images",), (), tokens_per_image=1290)
-    monkeypatch.setattr(hosted_tools_module, "provider_image_models", lambda vendor: (spec,) if vendor == "xai" else ())
+    monkeypatch.setattr(
+        hosted_tools_module, "source_image_models", lambda vendor, protocol, listed: (spec,) if vendor == "xai" else (),
+    )
     service, _store = _api_service(tmp_path)
     monkeypatch.setattr(service, "hosted_call_cost", lambda *_args, **_kwargs: SimpleNamespace(usd=valued))
     image = next(tool for tool in service.hosted_tools_status()["hosted_tools"]["tools"] if tool["name"] == "image_generate")
