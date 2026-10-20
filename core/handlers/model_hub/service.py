@@ -761,6 +761,9 @@ class UnavailableEngineAdapter:
     async def revoke_api_key_credential(self, credential_ref: str) -> None:
         raise EngineUnavailableError
 
+    async def revoke_search_credential(self, credential_ref: str) -> None:
+        raise EngineUnavailableError
+
     async def sync_sources(self, bindings) -> None:
         raise EngineUnavailableError
 
@@ -2213,9 +2216,14 @@ class ModelHubService:
                     continue
                 if not cleaned:
                     continue
-            elif pending.operation == "revoke_api_key_credential":
+            elif pending.operation in {"revoke_api_key_credential", "revoke_search_credential"}:
+                revoker = (
+                    self.adapter.revoke_search_credential
+                    if pending.operation == "revoke_search_credential"
+                    else self.adapter.revoke_api_key_credential
+                )
                 try:
-                    await self.adapter.revoke_api_key_credential(pending.credential_ref)
+                    await revoker(pending.credential_ref)
                 except Exception:
                     # Only successful exact-namespace cleanup establishes
                     # absence. Metadata errors are not retirement proof.
@@ -2246,14 +2254,14 @@ class ModelHubService:
         try:
             pending = [
                 entry for entry in self.revocations.list()
-                if entry.operation == "revoke_api_key_credential"
+                if entry.operation in {"revoke_api_key_credential", "revoke_search_credential"}
             ]
             if not pending:
                 return
             remaining = await self._replay_credential_revocations_locked(config, pending)
         except OSError:
             raise ModelHubError("engine_down", status=503) from None
-        if any(entry.operation == "revoke_api_key_credential" for entry in remaining):
+        if any(entry.operation in {"revoke_api_key_credential", "revoke_search_credential"} for entry in remaining):
             # The journal owns the old ref, so a create nonce can be released,
             # but that durable ownership does not permit another credential.
             raise ModelHubError("engine_down", status=503)
@@ -2792,15 +2800,16 @@ class ModelHubService:
             None,
         )
         resolved_operation = operation or (
-            "revoke_api_key_credential"
+            "revoke_search_credential"
             if source is not None and source.protocol == "search"
             else "revoke_credential"
         )
-        revoker = (
-            self.adapter.revoke_api_key_credential
-            if resolved_operation == "revoke_api_key_credential"
-            else self.adapter.revoke_credential
-        )
+        if resolved_operation == "revoke_search_credential":
+            revoker = self.adapter.revoke_search_credential
+        elif resolved_operation == "revoke_api_key_credential":
+            revoker = self.adapter.revoke_api_key_credential
+        else:
+            revoker = self.adapter.revoke_credential
         journaled = False
         try:
             if resolved_operation == "revoke_credential":
@@ -4052,13 +4061,6 @@ class ModelHubService:
             return "unknown"
         return _search_check_outcome(result)
 
-    async def _revoke_search_credential(self, credential_ref: str) -> None:
-        revoker = getattr(self.adapter, "revoke_search_credential", None)
-        if callable(revoker):
-            await revoker(credential_ref)
-            return
-        await self.adapter.revoke_api_key_credential(credential_ref)
-
     async def _create_search_source(
         self,
         *,
@@ -4100,7 +4102,7 @@ class ModelHubService:
                 self,
                 self.adapter.provision_credential(vendor, "search", key, None),
                 source.id,
-                rollback_operation="revoke_api_key_credential",
+                rollback_operation="revoke_search_credential",
             )
             persisted = False
             try:
@@ -4138,13 +4140,13 @@ class ModelHubService:
                 persisted = self._persisted_credential(self.store.load(), source.id, credential_ref)
                 if not persisted:
                     await _rollback_credential_before_settling(
-                        self, source.id, credential_ref, operation="revoke_api_key_credential",
+                        self, source.id, credential_ref, operation="revoke_search_credential",
                     )
                 raise
             except Exception:
                 if not persisted:
                     await _rollback_credential_before_settling(
-                        self, source.id, credential_ref, operation="revoke_api_key_credential",
+                        self, source.id, credential_ref, operation="revoke_search_credential",
                     )
                 raise
         except CredentialCleanupUnsettledError:
@@ -4515,7 +4517,6 @@ class ModelHubService:
         old_credential_ref = source.credential_ref
         if not old_credential_ref:
             raise ModelHubError("discovery_failed")
-        self._drop_search_reenable_trial(source.id)
         committed = False
         old_revocation_recorded = False
         replacement_ref = await _acquire_credential_ref_with_cancellation_ownership(
@@ -4527,6 +4528,7 @@ class ModelHubService:
                 None,
             ),
             source.id,
+            rollback_operation="revoke_search_credential",
         )
         try:
             source.credential_ref = replacement_ref
@@ -4563,7 +4565,7 @@ class ModelHubService:
                 self.revocations.add(
                     source.id,
                     old_credential_ref,
-                    operation="revoke_api_key_credential",
+                    operation="revoke_search_credential",
                 )
                 old_revocation_recorded = True
 
@@ -4584,9 +4586,14 @@ class ModelHubService:
                     old_revocation_recorded=old_revocation_recorded,
                 )
             raise
+        finally:
+            # Persistence, not request success, retires the old trial. This
+            # also covers cancellation after the shielded config write landed.
+            if self._persisted_credential(self.store.load(), source.id, replacement_ref):
+                self._drop_search_reenable_trial(source.id)
         if old_credential_ref != replacement_ref:
             try:
-                await self._revoke_search_credential(old_credential_ref)
+                await self.adapter.revoke_search_credential(old_credential_ref)
             except Exception:
                 pass
             else:
@@ -5248,7 +5255,6 @@ class ModelHubService:
             source = self._source(config, source_id)
             removed_hops = [item for item in self._effective_hop_refs(previous) if item["source_id"] == source_id]
             config.sources = [item for item in config.sources if item.id != source_id]
-            self._drop_search_reenable_trial(source_id)
             if source.protocol == "search":
                 _maintain_search_service_order(config, source_id, add=False)
             for agent in config.agents.values():
@@ -5277,7 +5283,7 @@ class ModelHubService:
                 self.revocations.add(
                     source.id,
                     source.credential_ref,
-                    operation=("revoke_api_key_credential" if source.protocol == "search" else "revoke_credential"),
+                    operation=("revoke_search_credential" if source.protocol == "search" else "revoke_credential"),
                 )
             try:
                 await self._commit_synced(previous, config)
@@ -5285,10 +5291,13 @@ class ModelHubService:
                 if source.credential_ref:
                     self.revocations.remove(source.id, source.credential_ref)
                 raise
+            finally:
+                if not any(item.id == source_id for item in self.store.load().sources):
+                    self._drop_search_reenable_trial(source_id)
             try:
                 if source.credential_ref:
                     revoke = (
-                        self._revoke_search_credential(source.credential_ref)
+                        self.adapter.revoke_search_credential(source.credential_ref)
                         if source.protocol == "search"
                         else self.adapter.revoke_credential(source.credential_ref)
                     )

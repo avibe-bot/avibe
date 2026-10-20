@@ -297,6 +297,9 @@ class FakeAdapter:
     async def revoke_api_key_credential(self, credential_ref):
         await self.revoke_credential(credential_ref)
 
+    async def revoke_search_credential(self, credential_ref):
+        await self.revoke_api_key_credential(credential_ref)
+
     async def cleanup_orphaned_oauth_material(self, credential_ref):
         self.orphan_cleanup_calls.append(credential_ref)
         return self.orphan_cleanup_succeeds
@@ -6186,7 +6189,7 @@ def test_search_source_create_journals_cleanup_when_revocation_fails(tmp_path):
     entries = service.revocations._read()
     assert len(entries) == 1
     assert entries[0].credential_ref == "cred_test001"
-    assert entries[0].operation == "revoke_api_key_credential"
+    assert entries[0].operation == "revoke_search_credential"
 
 def test_search_source_delete_keeps_journal_when_revocation_fails(tmp_path):
     service, store, adapter = _service(tmp_path)
@@ -6209,7 +6212,7 @@ def test_search_source_delete_keeps_journal_when_revocation_fails(tmp_path):
     assert store.config.sources == []
     pending = service.revocations.list()
     assert [(entry.source_id, entry.credential_ref, entry.operation) for entry in pending] == [
-        (source["id"], source["credential_ref"], "revoke_api_key_credential"),
+        (source["id"], source["credential_ref"], "revoke_search_credential"),
     ]
     before = adapter.credential_count
     with pytest.raises(ModelHubError) as blocked:
@@ -6480,6 +6483,35 @@ def test_search_source_reenable_arms_without_clearing_limit(tmp_path):
     assert service.list_sources()[0]["trial_pending"] is False
     assert store.load().sources[0].state.detail_key == "models.source.needs_action.spend_limit_reached"
     assert adapter.search_check_outcome == "unknown"
+
+
+def test_preserved_search_vendor_list_response_matches_contract(monkeypatch, tmp_path):
+    save_config(tmp_path / "home")
+    service, store, adapter = _service(tmp_path)
+    source = ModelHubSourceConfig(
+        id="src_retiredsearch", kind="api_key", vendor="retired-search-vendor",
+        display_name="Retired search vendor", protocol="search", supply_channel="hub",
+        billing="metered", state=ModelHubSourceStateConfig(status="standby"),
+        models=[], credential_ref="cred_retiredsearch",
+    )
+    saved = store.config.to_payload()
+    saved["sources"] = [source.to_payload()]
+    store.config = ModelHubConfig.from_payload(saved)
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    response = app.test_client().get("/api/models/sources")
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["sources"][0]["vendor"] == "retired-search-vendor"
+    Draft7Validator(
+        {"$ref": "model-hub/api-response.schema.json#/definitions/SourceListResponse"},
+        registry=_api_response_registry(), format_checker=FormatChecker(),
+    ).validate(body)
+    with pytest.raises(ModelHubError):
+        asyncio.run(service.create_source({
+            "kind": "api_key", "vendor": source.vendor, "protocol": "search", "key": "test-retired-key",
+        }))
+    assert adapter.credential_count == 0
+    assert store.load().sources[0].vendor == source.vendor
 
 
 def test_create_source_rejects_wrong_protocol_for_a_catalog_vendor(tmp_path):

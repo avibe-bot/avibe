@@ -733,6 +733,16 @@ class EngineAdapter(Protocol):
         """
         ...
 
+    async def revoke_search_credential(self, credential_ref: str) -> None:
+        """Retire an unbound tool-only key under durable search-only intent.
+
+        Preserve API-key namespace and identity checks, but never access the
+        model engine or its configs, even when the document is already absent
+        or corrupt. The caller journals this operation before unlinking so
+        replay does not infer a lost protocol from credential metadata.
+        """
+        ...
+
     async def provision_transient_credential(
         self,
         vendor: str,

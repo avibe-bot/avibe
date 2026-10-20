@@ -962,6 +962,14 @@ class EngineStateStore:
             self._remove_private_file_if_present(temporary_path)
             self._remove_private_file_if_present(path)
 
+    def revoke_search_credential(self, credential_ref: str) -> None:
+        """Retire a search-only namespace even after its document disappeared."""
+        with self._lock:
+            payload = self._read_replacement_credential_document(credential_ref)
+            if payload is not None and payload.get("protocol") != "search":
+                raise EngineStateError("credential is not a search API key")
+            self.revoke_api_key_credential(credential_ref)
+
     def revoke_api_key_credential(self, credential_ref: str) -> None:
         """Retire a known API-key ref, never a watched OAuth auth file.
 

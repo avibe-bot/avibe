@@ -2262,8 +2262,7 @@ class CLIProxyEngineAdapter:
         )
 
     async def revoke_search_credential(self, credential_ref: str) -> None:
-        await asyncio.to_thread(self.state_store.assert_credential_unbound, credential_ref)
-        await asyncio.to_thread(self.state_store.revoke_api_key_credential, credential_ref)
+        await asyncio.to_thread(self.state_store.revoke_search_credential, credential_ref)
 
     async def provision_oauth_credential(
         self,

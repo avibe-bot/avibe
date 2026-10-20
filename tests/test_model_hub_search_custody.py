@@ -8,10 +8,15 @@ from core.handlers.model_hub.adapter import SearchCredentialCheck
 from core.handlers.model_hub.service import ModelHubError
 from tests.test_model_hub_api import _service
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
-from vibe.model_hub_runtime.state import EngineStateStore
+from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
 
 
 NONCE = "scn_searchcleanup0001"
+
+
+class _NoModelEngine:
+    def __getattr__(self, name):
+        pytest.fail(f"search custody reached the model engine: {name}")
 
 
 def _draft(**changes):
@@ -84,12 +89,8 @@ def test_search_create_waits_for_durable_cleanup_before_new_custody(tmp_path, mo
 
 
 def test_search_retry_removes_the_real_local_orphan_without_an_engine(tmp_path, monkeypatch):
-    class NoEngine:
-        def __getattr__(self, name):
-            pytest.fail(f"search cleanup reached the model engine: {name}")
-
     custody = EngineStateStore(tmp_path / "custody")
-    real = CLIProxyEngineAdapter(supervisor=NoEngine(), state_store=custody)
+    real = CLIProxyEngineAdapter(supervisor=_NoModelEngine(), state_store=custody)
     old_ref = asyncio.run(real.provision_credential("tavily", "search", "test-old-key", None))
     service, store, adapter = _service(tmp_path)
     service.revocations.add("src_oldsearch01", old_ref, operation="revoke_api_key_credential")
@@ -103,12 +104,136 @@ def test_search_retry_removes_the_real_local_orphan_without_an_engine(tmp_path, 
     assert adapter.synced == []
 
 
+@pytest.mark.parametrize("restart", [False, True])
+@pytest.mark.parametrize("failure", ["journal_remove", "after_unlink"])
+def test_search_cleanup_replay_keeps_its_identity_after_unlink(tmp_path, monkeypatch, restart, failure):
+    custody = EngineStateStore(tmp_path / "custody")
+    real = CLIProxyEngineAdapter(supervisor=_NoModelEngine(), state_store=custody)
+    service, store, adapter = _service(tmp_path)
+    monkeypatch.setattr(adapter, "provision_credential", real.provision_credential)
+    monkeypatch.setattr(adapter, "revoke_api_key_credential", real.revoke_api_key_credential)
+    monkeypatch.setattr(adapter, "revoke_search_credential", real.revoke_search_credential, raising=False)
+    adapter.search_check_outcome = "invalid"
+    retire = custody.revoke_api_key_credential
+
+    def fail_remove(*_args):
+        raise OSError("test journal removal unavailable")
+
+    def fail_after_unlink(ref):
+        retire(ref)
+        raise OSError("test directory flush failed after unlink")
+
+    with monkeypatch.context() as patch:
+        if failure == "journal_remove":
+            patch.setattr(service.revocations, "remove", fail_remove)
+        else:
+            patch.setattr(custody, "revoke_api_key_credential", fail_after_unlink)
+        with pytest.raises(ModelHubError) as failed:
+            asyncio.run(service.create_source(_draft()))
+        assert failed.value.detail == "modelHub.errors.authentication_failed"
+    pending = service.revocations.list()
+    assert len(pending) == 1
+    assert pending[0].operation == "revoke_search_credential"
+    assert custody.credential_metadata_if_present(pending[0].credential_ref) is None
+    assert not store.load().sources
+    if restart:
+        service, store, adapter = _service(tmp_path, adapter)
+    adapter.search_check_outcome = "pass"
+    created = asyncio.run(service.create_source(_draft()))["source"]
+    assert service.revocations.list() == []
+    assert custody.credential_metadata_if_present(created["credential_ref"]) is not None
+    assert store.load().sources[0].credential_ref == created["credential_ref"]
+    assert adapter.synced == []
+
+
+@pytest.mark.parametrize("document", ["missing", "corrupt", "model"])
+def test_search_retirement_uses_durable_intent_but_rejects_readable_model_identity(tmp_path, document):
+    custody = EngineStateStore(tmp_path / "custody")
+    adapter = CLIProxyEngineAdapter(supervisor=_NoModelEngine(), state_store=custody)
+    vendor, protocol = ("anthropic", "anthropic") if document == "model" else ("tavily", "search")
+    ref = asyncio.run(adapter.provision_credential(vendor, protocol, "test-only-key", None))
+    if document == "model":
+        with pytest.raises(EngineStateError, match="not a search API key"):
+            asyncio.run(adapter.revoke_search_credential(ref))
+        assert custody.credential_metadata_if_present(ref) is not None
+        return
+    if document == "missing":
+        custody.revoke_api_key_credential(ref)
+    else:
+        (custody.root / "credentials" / f"{ref}.json").write_text("{broken", encoding="utf-8")
+    asyncio.run(adapter.revoke_search_credential(ref))
+    asyncio.run(adapter.revoke_search_credential(ref))
+    assert custody.credential_metadata_if_present(ref) is None
+
+
+@pytest.mark.parametrize("inflight", [False, True])
+@pytest.mark.parametrize(("mutation", "failure"), [
+    ("replace", "provision"), ("replace", "cancel_provision"),
+    ("replace", "commit"), ("delete", "commit"),
+    ("replace", "cancel_before_commit"), ("delete", "cancel_before_commit"),
+    ("replace", "cancel_after_commit"), ("delete", "cancel_after_commit"),
+    ("replace", None), ("delete", None),
+])
+def test_search_trial_retirement_follows_mutation_commit(tmp_path, monkeypatch, inflight, mutation, failure):
+    from config.v2_config import ModelHubSourceStateConfig
+
+    service, store, adapter = _service(tmp_path)
+    created = asyncio.run(service.create_source(_draft(vendor="exa")))["source"]
+    source_id = created["id"]
+    store.config.sources[0].state = ModelHubSourceStateConfig(
+        status="needs_action", detail_key="models.source.needs_action.spend_limit_reached",
+    )
+    asyncio.run(service.reenable_search_source(source_id))
+    if inflight:
+        assert service.reserve_search_reenable_trial(source_id)
+    before = store.load().to_payload()
+    commit = service._commit_synced
+
+    async def failed_provision(*_args):
+        if failure == "cancel_provision":
+            raise asyncio.CancelledError
+        raise ModelHubError("engine_down", status=503)
+
+    async def failed_commit(*args, **kwargs):
+        if failure == "cancel_after_commit":
+            await commit(*args, **kwargs)
+        if failure.startswith("cancel_"):
+            raise asyncio.CancelledError
+        raise ModelHubError("engine_down", status=503)
+
+    if failure in {"provision", "cancel_provision"}:
+        monkeypatch.setattr(adapter, "provision_credential", failed_provision)
+    elif failure is not None:
+        monkeypatch.setattr(service, "_commit_synced", failed_commit)
+
+    async def mutate():
+        if mutation == "replace":
+            return await service.replace_credential(source_id, {"key": "test-replacement-key"})
+        return await service.delete_source(source_id)
+
+    if failure is None:
+        asyncio.run(mutate())
+    else:
+        with pytest.raises(asyncio.CancelledError if failure.startswith("cancel_") else ModelHubError):
+            asyncio.run(mutate())
+    committed = failure in {None, "cancel_after_commit"}
+    assert service.search_reenable_trial_pending(source_id) is not committed
+    assert service.search_reenable_trial_armed(source_id) is (not committed and not inflight)
+    if committed:
+        assert store.load().to_payload() != before
+    else:
+        assert store.load().to_payload() == before
+
+
 @pytest.mark.parametrize("remove_fails", [False, True])
-def test_search_cleanup_admission_preserves_live_and_takeover_credentials(tmp_path, monkeypatch, remove_fails):
+@pytest.mark.parametrize("operation", ["revoke_api_key_credential", "revoke_search_credential"])
+def test_search_cleanup_admission_preserves_live_and_takeover_credentials(
+    tmp_path, monkeypatch, remove_fails, operation,
+):
     service, store, adapter = _service(tmp_path)
     source = asyncio.run(service.create_source(_draft()))["source"]
-    service.revocations.add(source["id"], source["credential_ref"], operation="revoke_api_key_credential")
-    service.revocations.add("src_takeover01", "cred_takeover01", operation="revoke_api_key_credential")
+    service.revocations.add(source["id"], source["credential_ref"], operation=operation)
+    service.revocations.add("src_takeover01", "cred_takeover01", operation=operation)
     service.revocations.add("src_oauthold01", "cred_oauthold01")
     service.revocations.add("src_oauthorphan01", "cred_oauthorphan01", operation="cleanup_orphaned_oauth_material")
     monkeypatch.setattr(service.migration_journal, "load", lambda: {
@@ -157,7 +282,7 @@ def test_search_replacement_cleanup_gates_subsequent_custody(tmp_path, monkeypat
             asyncio.run(service.replace_credential(source["id"], {"key": "test-replacement-key"}))
         pending = service.revocations.list()
         assert len(pending) == 1
-        assert pending[0].operation == "revoke_api_key_credential"
+        assert pending[0].operation == "revoke_search_credential"
         assert pending[0].credential_ref == (source["credential_ref"] if outcome == "pass" else "cred_test002")
         before_config, before_count = store.load().to_payload(), adapter.credential_count
         adapter.search_check_outcome = "pass"
@@ -250,7 +375,7 @@ def test_cancelled_search_provision_journals_typed_cleanup_and_can_retry(tmp_pat
         assert not store.load().sources
         assert NONCE not in service._source_create_nonces
         assert [(row.credential_ref, row.operation) for row in service.revocations.list()] == [
-            ("cred_test001", "revoke_api_key_credential"),
+            ("cred_test001", "revoke_search_credential"),
         ]
         await service.create_source(_draft())
         assert service.revocations.list() == []

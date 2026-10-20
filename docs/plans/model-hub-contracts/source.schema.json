@@ -68,7 +68,7 @@
     "vendor": {
       "type": "string",
       "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
-      "description": "Standard vendor id (anthropic|openai|zhipuai|kimi|xai|...) or 'custom'. Also the OpenCode provider prefix (see opencode-overlay.md)."
+      "description": "Normalized vendor id, including a preserved retired catalog vendor. Source reads do not re-apply catalog create admission; tool-only search creation remains limited to the shipped search vendors. Also the OpenCode provider prefix (see opencode-overlay.md)."
     },
     "display_name": {
       "type": "string",
@@ -520,7 +520,6 @@
       "then": {
         "properties": {
           "kind": { "const": "api_key" },
-          "vendor": { "enum": ["tavily", "exa"] },
           "supply_channel": { "const": "hub" },
           "billing": { "const": "metered" },
           "base_url": { "type": "null" },
