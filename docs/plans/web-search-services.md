@@ -267,10 +267,11 @@ Hosted tools §6 holds, with these changes:
   press (from a second client, say) cannot supersede a current-key `pass`. A state the row's check cannot tell apart (Exa
   has no free check) is not cleared at once. The persisted `needs_action` state stays, and the press arms an in-memory one-shot trial:
   the Source admits exactly one search request, reserved by the first search that is about to send it, after every skip and final-admission check (a search that skips the Source never reserves it), while every other
-  search skips it as `blocked`. A trial that completes clears the persisted state. A trial that fails is settled by the outcome table: a
-  classified failure (401, 402, a limit code) replaces the blocker with its own state, so a revoked key asks for a
-  new key. Any other failure, whether transient, unreadable or a query-specific `service_refused`, keeps the
-  current blocker. Every outcome ends the reservation, so the user can arm a new trial; a cancelled turn (the user
+  search skips it as `blocked`. A trial that completes clears the persisted state, and so does any other 200 (an unreadable body still proves
+  the account answered and was billed; it then gets the service cooldown). A trial that fails is settled by the
+  outcome table: a classified failure (401, 402, a limit code) replaces the blocker with its own state, so a
+  revoked key asks for a new key. Any other failure, whether transient or a query-specific `service_refused`,
+  keeps the current blocker. Every outcome ends the reservation, so the user can arm a new trial; a cancelled turn (the user
   stops it while the trial request is in flight) releases the reservation and, if no status had arrived, keeps the
   blocker like a transient failure; a status that arrived before the stop settles the trial by the outcome table. A restart
   drops an unused trial, so the Source stays blocked and the user can press again. This fails closed. While a
@@ -377,7 +378,9 @@ Hosted tools §6 holds, with these changes:
     one of `service_key_invalid`, `service_balance`, `service_limit`, `service_unavailable`, `service_refused` and
     `service_unreadable`, each with en and zh copy. A model executor has one only when its failure already carries
     a code (`FAILURE_CODES`); otherwise the note says "失败" for that Source;
-  - `skipped` is `blocked`, `disabled`, `cooling`, `query_too_long` or `unavailable`;
+  - `skipped` is `blocked`, `disabled`, `cooling`, `query_too_long` or `unavailable`; a `cooling` entry also
+    carries `retry_at`, the deadline captured when the skip was decided, since a service cooldown is in memory
+    and a later read cannot rebuild it;
   - a `blocked` entry carries `needs_action`: the Source's existing health detail key at that moment, a
     `needs_action` or `error` detail (for example `models.source.needs_action.credential_revoked`, `oauth_expired`,
     `spend_limit_reached` or `models.source.error.unclassified`). The renderer shows that detail's existing remedy,
@@ -429,8 +432,9 @@ Hosted tools §6 holds, with these changes:
   `requests` and to a separate `uncertain_requests`, never to `billable_requests`, so the counts stay exact and
   the uncertainty is visible. Released ledger rows without these fields load as zero. The counters keep their
   relations on write and on read, as the model counters do (a corrupt or hand-edited row is repaired, not
-  published): `billable_requests + uncertain_requests ≤ requests`, `reported_requests ≤ billable_requests`, no `list_pages`
-  without a billable request and no `reported_usd` without a reported request. A row that breaks any relation keeps
+  published): `billable_requests + uncertain_requests ≤ requests`, `reported_requests ≤ billable_requests`, `list_pages` per
+  content type at most `billable_requests` times the catalog's maximum `results` (a page is a returned result),
+  and no `reported_usd` without a reported request. A row that breaks any relation keeps
   `requests`, has its counts reduced to the bounds, drops the quantities that depended on a reduced count
   (`list_pages`, `reported_usd`, `reported_requests`), and is marked `lower_bound`; `lower_bound` is also forced
   true whenever `uncertain_requests` is non-zero.
@@ -571,6 +575,10 @@ The tool card and the IM line are hosted tools §8.3 with the service as the exe
 One coordinated Model Hub version event under the freeze protocol (`model-hub-contracts/README.md`).
 
 - `source.schema.json` and `source-create.schema.json`: `protocol: "search"` and its combination rule (§3.1).
+- The verification invariant in `model-hub-contracts/README.md` and `source.schema.json`'s `verification_pending`
+  description: for a `search` Source, which never makes a model call, the marker clears on an authenticated search
+  outcome with the matching credential (any 200, a 402 or a catalog-named limit, §3.1) or a free-check `pass`,
+  `balance` or `limit`; model Sources keep the matching-credential model-call rule. The structure guards check it.
 - The protocol vocabulary's authorities: `model-hub-contracts/README.md` (the "exactly" list) and
   `adapter-interface.py`, which splits it in two. `MODEL_PROTOCOLS` keeps the four invocable wire protocols that
   observation, probes, discovery, the hop schemas (`hop-resolution`, `served-hop`, `hop-origin`) and
@@ -613,7 +621,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   executor kind (§4.3).
 - C-1 (`agent-core-contracts/message.schema.json`): the optional `HostedSource.content` (§4.3; the read shape
   gains no new limits);
-  `HostedRecord.attempts[]` with `source_id`, `label`, `kind`, `outcome`, `error_code`, `skipped`, `needs_action`, `cost` and
+  `HostedRecord.attempts[]` with `source_id`, `label`, `kind`, `outcome`, `error_code`, `skipped`, `retry_at`, `needs_action`, `cost` and
   `superseded`; `HostedCost.lower_bound` with its `core/hosted_activity` projection ("至少"), and a cost of exactly 0 rendered as
   "$0" without "≈" by that projection, `HostedToolRow` and the IM line, since a zero is never an estimate; and
   their reader and writer types, and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; and a
@@ -640,18 +648,19 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 
 | PR | Lane | Work | Depends on |
 | --- | --- | --- | --- |
-| **S1** Catalog, Sources, settings | foundation | search vendors in the catalog; `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the create and replace branch with free checks; `prefer_native`, `services`, `service_order` and `executor_order_kinds` (loaded, written with each order save, and kept across a restart); the adapter's search call and free-check operation with custody and transport rules; the Tools read and PUT; the version event | — |
-| **S2** Chain and records | gateway | candidates, automatic order and the saved-order placement rule, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1 |
+| **S1a** Catalog and Sources | foundation | search vendors in the catalog; `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the protocol vocabulary split; the create and replace branch with free checks; "重新启用" (`reenable_search_source`, its free check and the armed-trial state); `service_order` maintenance on create and remove; the adapter's search call and free-check operation with custody and transport rules; opening the v17 version event | — |
+| **S1b** Settings and Tools read | foundation | `prefer_native`, `services` (the patch semantics and load-time clamping) and `executor_order_kinds` (loaded, written with each order save, and kept across a restart); the Tools read (`executor_candidates` with `kind`, `service_vendors`, `trial_pending`) and PUT; their v17 entries | S1a |
+| **S2** Chain and records | gateway | candidates, automatic order and the saved-order placement rule, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1a, S1b |
 | **S3** Model text | Vibey | `content` in the model-facing text and its bounds; the card's executor label | S2's record |
-| **S4** Tools, dialog, Sources | UI | §6 with en and zh copy | S1's read; S2 (the add dialog and service rows land with or after S2) |
+| **S4** Tools, dialog, Sources | UI | §6 with en and zh copy | S1b's read; S2 (the add dialog and service rows land with or after S2) |
 | **S5** Frames | design | §6 frames in `design.pen` through Pencil | — |
 | **S6** Public docs | docs | Models → Tools: services, order, defaults, privacy and cost, in English and Chinese | S4 |
 
-The version event follows the v15 precedent in `model-hub-contracts/README.md`: S1 opens v17 and publishes the
+The version event follows the v15 precedent in `model-hub-contracts/README.md`: S1a opens v17 and publishes the
 Source side, and S1b, S2 and S3 edit the same v17 section before it ships, with no second bump. Because release
 candidates are cut from the default branch at any time, every lane is safe on its own until the event closes:
 before S2, a `search` Source is never requested and never affects model routing, discovery or engine config, and
-the shapes S1 writes are final, so later lanes read them without migration. No user-facing surface offers a
+the shapes S1a and S1b write are final, so later lanes read them without migration. No user-facing surface offers a
 service before the gateway can run it: the add dialog and service rows (S4) land with or after S2, so before then
 a `search` Source can only be created through the API.
 
