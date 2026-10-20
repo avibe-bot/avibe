@@ -3067,7 +3067,8 @@ def cmd_delete(args: argparse.Namespace) -> int:
     load_env_file(repo_root, args.env_file)
     if args.target == MASTER_TARGET and not args.yes:
         raise RegressionError("Deleting the master regression environment requires --yes.")
-    if not args.dry_run:
+    needs_incus = not args.dry_run or not getattr(args, "ignore_hold", False)
+    if needs_incus:
         require_incus()
     # Removing the objects and forgetting the row are one change to what this
     # slug names, so both happen under the environment's update lock -- the same

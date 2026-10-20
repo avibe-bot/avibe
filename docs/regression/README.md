@@ -208,8 +208,10 @@ and `.hold.since` (UTC), so another checkout sees the same hold. `hold` sets or
 replaces it; `release` clears only these fields. `status` and `reconcile` show
 the owner, reason, and time, including for instances without runner metadata.
 `delete` refuses a held environment before removing anything, even with
-`--yes`; only an explicit `--ignore-hold` overrides it. Reconcile never includes
-that flag in its printed commands. Holds do not expire automatically or stop
+`--yes`; only an explicit `--ignore-hold` overrides it. Deletion previews
+(`--dry-run`) also check the live hold and require a reachable Incus daemon
+unless explicitly overridden. Reconcile never includes that flag in its
+printed commands. Holds do not expire automatically or stop
 `up`/`down`, and old runners or raw Incus commands do not enforce them.
 
 Fresh-install worktree environment, for testing the first-run experience:

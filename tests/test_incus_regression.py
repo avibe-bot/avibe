@@ -2670,6 +2670,35 @@ def test_delete_held_environment_refuses_before_mutation_unless_explicitly_overr
         assert commands == expected
 
 
+@pytest.mark.parametrize(("dry_run", "ignore_hold"), [(False, False), (True, False), (True, True)])
+def test_delete_requires_incus_for_live_reads_as_well_as_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], dry_run: bool, ignore_hold: bool
+) -> None:
+    """A dry-run live read must validate its executable; only an overridden preview is fully offline."""
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda root: root)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda *args: None)
+    monkeypatch.setenv("INCUS_CMD", "/missing/incus")
+    monkeypatch.setattr(incus_regression.shutil, "which", lambda executable: None)
+    attempted = []
+
+    def missing_executable(command, **kwargs):
+        attempted.append(command)
+        raise FileNotFoundError(2, "No such file or directory", command[0])
+
+    monkeypatch.setattr(incus_regression.subprocess, "run", missing_executable)
+    flags = ["delete", "--target", "worktree", "--slug", "eval", "--yes"]
+    if dry_run:
+        flags.append("--dry-run")
+    if ignore_hold:
+        flags.append("--ignore-hold")
+    assert incus_regression.main(flags) == (0 if dry_run and ignore_hold else 1)
+    assert attempted == []
+    err = capsys.readouterr().err
+    if not (dry_run and ignore_hold):
+        assert "The Incus CLI executable was not found: /missing/incus" in err
+
+
 def test_reconcile_reports_holds_on_every_observed_instance_without_an_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
