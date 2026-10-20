@@ -198,7 +198,8 @@ overwrite each other.
 Hosted tools §6 holds, with these changes:
 
 - **Candidates** are the model executors of hosted tools §6 plus every search-capable Source: a `search` Source, or a
-  model Source whose vendor lists a search API and whose endpoint is official. A Source holds one role in a chain:
+  model Source with `kind: "api_key"` whose vendor lists a search API and whose endpoint is official (a subscription
+  or `native_cli` Source has no API key for the search call, so it is never a search-service candidate). A Source holds one role in a chain:
   a model Source with a search API is a search-service candidate only, never also a model executor, so it has one
   row in the order and is called at most once per call. A Source with `services.<id>.enabled:
   false` stays in the list as a `disabled` entry at the end; it is never requested.
@@ -407,7 +408,8 @@ Hosted tools §6 holds, with these changes:
   reads that list alone: the kind and label of the last tried entry (when no entry was tried, every candidate
   having been skipped, the projection has no executor, label or cost, and the card shows the terminal reason with
   the per-Source list, as the released no-candidate failure shows no executor), and the chain total as the sum of the tried
-  entries' `cost`; the total is a lower bound when any entry has no cost or a cost with `lower_bound: true`. So a chain whose billable model
+  entries' `cost`; the total is a lower bound when any tried entry has no cost or a cost with `lower_bound: true`
+  (a skipped entry sent nothing and has no cost by design, so it never makes the total incomplete). So a chain whose billable model
   attempt was followed by a service that failed before sending keeps both facts, whether or not `execution` is
   present; `execution` and `failed_attempts[]` keep their released meaning for older readers. Without
   `attempts[]` (a model-only chain) the released projection is unchanged. For a
@@ -575,7 +577,10 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   `provider-overlay.schema.json`'s `hosted_tools.propertyNames` (which today references the Source protocol enum
   and moves to the four-value model vocabulary) use, unchanged.
   `SOURCE_PROTOCOLS` is `MODEL_PROTOCOLS` plus `search`, used only where a Source is stored or created. The adapter's
-  search and free-check operations are also added to `adapter-interface.py`. The
+  search and free-check operations are also added to `adapter-interface.py`. The UI contract mirror splits the
+  same way: `ui/src/components/settings/models/types.ts` gains a four-value `ModelProtocol` for recorded and
+  terminal origins and for observation and probe payloads, and `SourceProtocol` (`ModelProtocol` plus `search`)
+  stays for stored and created Source shapes only. The
   structure guards that check them are updated in the same event.
 - `api.md`'s Source create and credential replace sections: the search branch (§3.1), with its outcomes in
   `api-response.schema.json`.
