@@ -1,6 +1,24 @@
 # Model Hub contracts
 
-Status: **contract_version 17**, 2026-10-19: search-service foundations
+Status: **contract_version 18**, 2026-10-20: web-search settings and dormant Tools
+read (S1b, `../web-search-services.md` §3.2/§3.5). The RC tag `gh-v3.2.2rc12`
+contains S1a and v17, so these additions open a new event rather than changing v17.
+- V2 adds `prefer_native`, partial Source-keyed `services` overrides with catalog
+  clamping, and server-owned `executor_order_kinds` saved with each web-search order.
+- The PUT merges Source/field patches and supports null override resets.
+- The Tools read adds `prefer_native`, saved `services`, read-only `service_order`,
+  model/service candidate discriminants, service settings/health/trial/cooldown
+  fields, service vendor facts, and page-text list-price extras.
+- Service candidates and `service_vendors` remain absent behind the single internal
+  activation gate until S2. There is no new UI, service execution, placement rule,
+  turn freeze or native-preference routing change in S1b.
+- The versioned mirrors advance together; persisted TurnProvenance retains v5–v17
+  and adds v18. The rc12 hosted-tools loader ignores new optional config fields
+  and retains the whole-tool switch and both orders, not per-Source service
+  opt-outs. An rc12 config write drops those overrides; re-upgrading then uses
+  service defaults, so DeepSeek's opt-out must be reapplied before execution.
+
+It builds on v17 (2026-10-19): search-service foundations
 (`../web-search-services.md`). Tool-only Sources use `protocol: search`; the catalog,
 credential custody, free checks, re-enable response and service-order persistence
 ship before search execution. S1b, S2 and S3 extend this same version event only
@@ -273,7 +291,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 17 must coexist in all registered version locations on the same tested head:
+`contract_version` 18 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`

@@ -3131,6 +3131,94 @@ class ModelHubImageModelChoice:
         return {"source_id": self.source_id, "model_id": self.model_id}
 
 
+def model_hub_search_service(source: ModelHubSourceConfig) -> Optional[dict[str, Any]]:
+    """Catalog capability, independent of health and opt-in; never a relay or subscription."""
+
+    from vibe.model_hub_runtime.api_key_vendors import search_service
+
+    if source.kind != "api_key" or source.supply_channel != "hub" or not source.credential_ref:
+        return None
+    return search_service(source.vendor, source.protocol, source.base_url)
+
+
+@dataclass(frozen=True)
+class ModelHubSearchServiceSettings:
+    """Partial saved overrides, not resolved defaults (web-search-services.md §3.2)."""
+
+    results: Optional[int] = None
+    content: Optional[bool] = None
+    enabled: Optional[bool] = None
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "ModelHubSearchServiceSettings":
+        if not isinstance(payload, dict):
+            raise ValueError("Config 'model_hub.hosted_tools.web_search.services' entries must be objects")
+        unknown = set(payload) - {"results", "content", "enabled"}
+        if unknown:
+            logger.warning("Config 'model_hub.hosted_tools.web_search.services' ignores unknown fields %s", sorted(unknown))
+        if "results" in payload and (type(payload["results"]) is not int or payload["results"] < 1):
+            raise ValueError("Config search service results must be a positive integer")
+        for key in ("content", "enabled"):
+            if key in payload and not isinstance(payload[key], bool):
+                raise ValueError(f"Config search service {key} must be a boolean")
+        return cls(**{key: payload[key] for key in ("results", "content", "enabled") if key in payload})
+
+    def clamped(self, service: Mapping[str, Any]) -> "ModelHubSearchServiceSettings":
+        """Read an obsolete override safely; disk is unchanged until an authorized write."""
+
+        return replace(
+            self,
+            results=min(self.results, service["limits"]["results_max"]) if self.results is not None else None,
+            content=False if self.content and not service["result"].get("content") else self.content,
+        )
+
+    def effective(self, service: Mapping[str, Any]) -> dict[str, Any]:
+        saved = self.clamped(service)
+        return {
+            "results": saved.results if saved.results is not None else min(5, service["limits"]["results_max"]),
+            "content": saved.content if saved.content is not None else False,
+            "enabled": saved.enabled if saved.enabled is not None else bool(service["tool_only"] or service.get("auto_enroll")),
+        }
+
+    def to_payload(self) -> dict[str, Any]:
+        return {key: value for key in ("results", "content", "enabled") if (value := getattr(self, key)) is not None}
+
+
+def _search_service_settings_from_payload(
+    payload: object, sources: Optional[list[ModelHubSourceConfig]]
+) -> dict[str, ModelHubSearchServiceSettings]:
+    if not isinstance(payload, dict) or any(not is_model_hub_source_id(key) for key in payload):
+        raise ValueError("Config 'model_hub.hosted_tools.web_search.services' must map Source ids to settings")
+    live = {source.id: source for source in sources} if sources is not None else None
+    settings = {}
+    for source_id, raw in payload.items():
+        # Removed Sources have no settings. Keep an extant but retargeted/retired Source's choices:
+        # forgetting an opt-out would silently re-enrol it if its search capability returns later.
+        if live is not None and source_id not in live:
+            continue
+        service = model_hub_search_service(live[source_id]) if live is not None else None
+        saved = ModelHubSearchServiceSettings.from_payload(raw)
+        # Only the in-memory parse is normalized. V2Config.load never writes it back; an authorized
+        # writer later serializes these clamped overrides without freezing any absent default.
+        settings[source_id] = saved.clamped(service) if service is not None else saved
+    return settings
+
+
+def _executor_order_kinds_from_payload(
+    payload: object, order: Optional[tuple[str, ...]], sources: Optional[list[ModelHubSourceConfig]]
+) -> Optional[dict[str, str]]:
+    # This derived snapshot affects placement, not consent. Damage follows the released missing-map rule;
+    # discarding the whole tool entry would erase service opt-outs on the next unrelated config write.
+    if isinstance(payload, dict):
+        live = {source.id for source in sources} if sources is not None else None
+        named = {key: value for key, value in payload.items()
+                 if key in (order or ()) and (live is None or key in live)}
+        if all(isinstance(value, str) and value in {"service", "model"} for value in named.values()):
+            return named
+    logger.warning("Config 'model_hub.hosted_tools.web_search.executor_order_kinds': ignoring damaged role map")
+    return None
+
+
 @dataclass(frozen=True)
 class ModelHubHostedToolConfig:
     """One hosted tool's user settings (``vibey-hosted-tools.md`` §3.3).
@@ -3145,15 +3233,21 @@ class ModelHubHostedToolConfig:
     executor_order: Optional[tuple[str, ...]] = None
     service_order: Optional[tuple[str, ...]] = None
     default_image: Optional[ModelHubImageModelChoice] = None
+    prefer_native: bool = True
+    services: Mapping[str, ModelHubSearchServiceSettings] = field(default_factory=dict)
+    executor_order_kinds: Optional[Mapping[str, str]] = None
 
     @classmethod
-    def from_payload(cls, payload: object, *, tool: str) -> "ModelHubHostedToolConfig":
+    def from_payload(
+        cls, payload: object, *, tool: str, sources: Optional[list[ModelHubSourceConfig]] = None
+    ) -> "ModelHubHostedToolConfig":
         """Read one entry; fields it does not know are ignored with a warning, the ones it knows are kept."""
 
         if not isinstance(payload, dict):
             raise ValueError(f"Config 'model_hub.hosted_tools.{tool}' must be an object")
         known = {"enabled"} | (
-            ({"executor_order", "service_order"} if tool == "web_search" else {"executor_order"})
+            ({"executor_order", "service_order", "prefer_native", "services", "executor_order_kinds"}
+             if tool == "web_search" else {"executor_order"})
             if tool in MODEL_HUB_SEARCH_TOOLS
             else {"default_model"}
         )
@@ -3163,15 +3257,28 @@ class ModelHubHostedToolConfig:
         enabled = payload.get("enabled", True)
         if not isinstance(enabled, bool):
             raise ValueError(f"Config 'model_hub.hosted_tools.{tool}.enabled' must be a boolean")
+        prefer_native = payload.get("prefer_native", True) if tool == "web_search" else True
+        if not isinstance(prefer_native, bool):
+            raise ValueError("Config 'model_hub.hosted_tools.web_search.prefer_native' must be a boolean")
         # Only the fields this tool knows are read; another tool's field was ignored above. A field is decided by its
         # presence: the writer omits an unset one, so a present null is damage and goes through the grammar.
         has_order = "executor_order" in known and "executor_order" in payload
         has_service_order = "service_order" in known and "service_order" in payload
         has_default = "default_model" in known and "default_model" in payload
+        order = model_hub_executor_order(payload["executor_order"], tool=tool) if has_order else None
         return cls(
             enabled=enabled,
-            executor_order=model_hub_executor_order(payload["executor_order"], tool=tool) if has_order else None,
+            executor_order=order,
             service_order=model_hub_service_order(payload["service_order"], tool=tool) if has_service_order else None,
+            prefer_native=prefer_native,
+            services=(
+                _search_service_settings_from_payload(payload["services"], sources)
+                if tool == "web_search" and "services" in payload else {}
+            ),
+            executor_order_kinds=(
+                _executor_order_kinds_from_payload(payload["executor_order_kinds"], order, sources)
+                if tool == "web_search" and "executor_order_kinds" in payload else None
+            ),
             default_image=(
                 ModelHubImageModelChoice.from_payload(payload["default_model"], tool=tool) if has_default else None
             ),
@@ -3185,10 +3292,21 @@ class ModelHubHostedToolConfig:
             out["service_order"] = list(self.service_order)
         if self.default_image is not None:
             out["default_model"] = self.default_image.to_payload()
+        if not self.prefer_native:
+            out["prefer_native"] = False
+        if self.services:
+            out["services"] = {source_id: saved.to_payload() for source_id, saved in self.services.items()}
+        if self.executor_order_kinds is not None:
+            out["executor_order_kinds"] = {
+                source_id: kind for source_id, kind in self.executor_order_kinds.items()
+                if source_id in (self.executor_order or ())
+            }
         return out
 
 
-def _hosted_tools_from_payload(section: Mapping[str, Any]) -> dict[str, ModelHubHostedToolConfig]:
+def _hosted_tools_from_payload(
+    section: Mapping[str, Any], sources: list[ModelHubSourceConfig]
+) -> dict[str, ModelHubHostedToolConfig]:
     """Read ``model_hub.hosted_tools`` as an optional feature that degrades on its own.
 
     Absent means every tool takes its defaults (on). An unknown tool key, or an unknown field inside an entry, is
@@ -3210,7 +3328,7 @@ def _hosted_tools_from_payload(section: Mapping[str, Any]) -> dict[str, ModelHub
             logger.warning("Config 'model_hub.hosted_tools' ignores an unknown tool %r", tool)
             continue
         try:
-            tools[tool] = ModelHubHostedToolConfig.from_payload(raw, tool=tool)
+            tools[tool] = ModelHubHostedToolConfig.from_payload(raw, tool=tool, sources=sources)
         except ValueError as exc:
             logger.warning("%s; hosted tool %r is off", exc, tool)
             tools[tool] = ModelHubHostedToolConfig(enabled=False)
@@ -3362,7 +3480,7 @@ class ModelHubConfig:
             sources=sources,
             agents=agents,
             runtime_default_applied=runtime_default_applied,
-            hosted_tools=_hosted_tools_from_payload(payload),
+            hosted_tools=_hosted_tools_from_payload(payload, sources),
         )
         _drop_vibey_client_presets(config.agents["vibey"])
         agents = config.agents

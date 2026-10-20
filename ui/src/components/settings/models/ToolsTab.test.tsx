@@ -16,6 +16,7 @@ import { readyRegion } from './regionRead';
 import { ToolsTab } from './ToolsTab';
 import type {
   HostedExecutorCandidate,
+  HostedModelExecutorCandidate,
   HostedImageModel,
   HostedImageToolStatus,
   HostedRefusal,
@@ -63,7 +64,8 @@ const refusal = (sourceId: string, modelId: string, at: string, aspect: HostedRe
   source_id: sourceId, model_id: modelId, aspect, at, reason: '400 unsupported_tool_type',
 });
 
-const candidate = (sourceId: string, modelId: string, over: Partial<HostedExecutorCandidate> = {}): HostedExecutorCandidate => ({
+const candidate = (sourceId: string, modelId: string, over: Partial<HostedModelExecutorCandidate> = {}): HostedModelExecutorCandidate => ({
+  kind: 'model',
   source_id: sourceId,
   model_id: modelId,
   billing: SOURCES.find((entry) => entry.id === sourceId)?.billing ?? 'metered',
@@ -72,15 +74,17 @@ const candidate = (sourceId: string, modelId: string, over: Partial<HostedExecut
   ...over,
 });
 
-const search = (name: 'web_search' | 'x_search', over: Partial<HostedSearchToolStatus> = {}): HostedSearchToolStatus => ({
-  name,
-  enabled: true,
-  status: run(),
-  executor_order: null,
-  effective_order: (over.executor_candidates ?? []).map((entry) => entry.source_id),
-  executor_candidates: [],
-  ...over,
-});
+const search = (name: 'web_search' | 'x_search', over: Partial<HostedSearchToolStatus> = {}): HostedSearchToolStatus => {
+  const common = {
+    enabled: true, status: run(), executor_order: null,
+    effective_order: (over.executor_candidates ?? []).map((entry) => entry.source_id),
+    executor_candidates: [], ...over,
+  };
+  const candidates: HostedExecutorCandidate[] = common.executor_candidates;
+  return name === 'web_search'
+    ? { prefer_native: true, services: {}, service_order: [], ...common, name }
+    : { ...common, name, executor_candidates: candidates.filter((entry): entry is HostedModelExecutorCandidate => entry.kind === 'model') };
+};
 
 const image = (over: Partial<HostedImageToolStatus> = {}): HostedImageToolStatus => ({
   name: 'image_generate',

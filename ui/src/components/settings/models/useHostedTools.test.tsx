@@ -17,6 +17,7 @@ import { useHostedTools } from './useHostedTools';
 const status = (enabled: boolean): HostedToolsStatus => ({
   tools: [{
     name: 'web_search',
+    prefer_native: true, services: {}, service_order: [],
     enabled,
     status: { latest_ok: null, verified: [], refused: [] },
     executor_order: null,

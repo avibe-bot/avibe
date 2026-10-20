@@ -70,7 +70,7 @@ describe('hosted-tool status projection', () => {
     const replayed = run({ verified: [ok(RELAY, 'gpt-6-astra', '2026-10-15T08:00:00Z')], refused: [refused(RELAY, 'gpt-6-astra', '2026-10-14T09:00:00Z', 'replay')] });
     const refusedToo = { ...replayed, refused: [...replayed.refused, refused(RELAY, 'gpt-6-astra', '2026-10-14T10:00:00Z')] };
     const kinds = (runStatus: HostedToolRunStatus) => modelCapabilities(
-      { tools: [{ name: 'web_search', enabled: true, status: runStatus, executor_order: null, effective_order: [], executor_candidates: [] }] },
+      { tools: [{ name: 'web_search', prefer_native: true, services: {}, service_order: [], enabled: true, status: runStatus, executor_order: null, effective_order: [], executor_candidates: [] }] },
       RELAY, 'gpt-6-astra',
     ).map(({ evidence }) => (evidence.kind === 'ok' ? 'ok' : evidence.refusal.aspect));
     expect(kinds(replayed)).toEqual(['ok', 'replay']);
@@ -80,7 +80,7 @@ describe('hosted-tool status projection', () => {
   it('MH-HOSTED-UI-006: gives a Source model one capability per tool with a record, in catalog order', () => {
     const status: HostedToolsStatus = {
       tools: [
-        { name: 'web_search', enabled: true, status: run({ verified: [ok(RELAY, 'gpt-6-astra', '2026-10-15T08:00:00Z')] }), executor_order: null, effective_order: [], executor_candidates: [] },
+        { name: 'web_search', prefer_native: true, services: {}, service_order: [], enabled: true, status: run({ verified: [ok(RELAY, 'gpt-6-astra', '2026-10-15T08:00:00Z')] }), executor_order: null, effective_order: [], executor_candidates: [] },
         { name: 'x_search', enabled: true, status: run({ refused: [refused(RELAY, 'gpt-6-astra', '2026-10-14T09:00:00Z')] }), executor_order: null, effective_order: [], executor_candidates: [] },
         // No record draws nothing: unused is the normal state, not a problem.
         { name: 'image_generate', enabled: true, status: run({}), default_model: null, effective_default: null, models: [], image_offered_by: [] },

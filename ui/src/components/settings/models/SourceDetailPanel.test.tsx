@@ -1461,7 +1461,7 @@ describe('SourceDetailPanel hosted-tool capability chips', () => {
   const status = (): HostedToolsStatus => ({
     tools: [
       // model-b runs web search but refused a replay of its results; model-a refused nothing.
-      { name: 'web_search', enabled: true, status: run([ok('model-a'), ok('model-b')], [refused('model-b', 'replay')]), executor_order: null, effective_order: [], executor_candidates: [] },
+      { name: 'web_search', prefer_native: true, services: {}, service_order: [], enabled: true, status: run([ok('model-a'), ok('model-b')], [refused('model-b', 'replay')]), executor_order: null, effective_order: [], executor_candidates: [] },
       // A later refusal on a pair that once ran the tool: the refusal is what routes.
       { name: 'x_search', enabled: true, status: run([ok('model-a', '2026-10-10T08:00:00Z')], [refused('model-a')]), executor_order: null, effective_order: [], executor_candidates: [] },
       { name: 'image_generate', enabled: true, status: run([], []), default_model: null, effective_default: null, models: [], image_offered_by: [] },

@@ -31,17 +31,20 @@ from config.v2_config import (
     ModelHubConfig,
     ModelHubHostedToolConfig,
     ModelHubImageModelChoice,
+    ModelHubSearchServiceSettings,
     ModelHubSourceConfig,
     hosted_tool_setting,
     is_model_hub_model_id,
     is_model_hub_source_id,
     model_hub_executor_order,
+    model_hub_search_service,
 )
 from vibe.backend_model_catalog import (
     IMAGE_PROTOCOLS,
     HostedToolSpec,
     ImageModelSpec,
     bundled_provider_vendors,
+    hosted_tool_spec,
     provider_image_models,
     provider_overlay_entry,
     source_executor_models,
@@ -64,6 +67,9 @@ SpecLookup = Callable[[str, str, str, str], Optional[HostedToolSpec]]
 # never matches a real one.
 UNKNOWN_ENGINE_RELEASE = "unknown-engine"
 NATIVE_REPLAY_PROTOCOLS: frozenset[str] = frozenset({"anthropic", "openai_responses"})
+
+# S2 enables this together with the chain, after S3/S4 and disclosure ship. Never a user-facing toggle.
+SEARCH_SERVICES_ACTIVE: Final = False
 
 Assumption = Literal["assumed", "unsupported"]
 
@@ -473,7 +479,79 @@ def hop_hosted_tools(
     return entries
 
 
+def search_service_settings(
+    setting: ModelHubHostedToolConfig, source: ModelHubSourceConfig
+) -> dict[str, Any] | None:
+    """Effective per-Source settings, including catalog defaults and obsolete-value clamping."""
+
+    service = model_hub_search_service(source)
+    if service is None:
+        return None
+    return setting.services.get(source.id, ModelHubSearchServiceSettings()).effective(service)
+
+
+def search_executor_kind(source: ModelHubSourceConfig, setting: ModelHubHostedToolConfig) -> str:
+    """The role an order save records, not a chain/placement decision (S2 owns those)."""
+
+    settings = search_service_settings(setting, source)
+    if settings is None:
+        return "model"
+    if settings["enabled"] or not listed_executor_model(source, "web_search", spec_for=hosted_tool_spec):
+        return "service"
+    # Opting a model Source out of its search API preserves its existing model executor, if any.
+    return "model"
+
+
 # --- The Tools read (§3.3) ---------------------------------------------------------------------------------------
+
+
+def _service_candidate_payload(
+    source: ModelHubSourceConfig, setting: ModelHubHostedToolConfig, *, trial_pending: bool
+) -> dict[str, Any]:
+    service = model_hub_search_service(source)
+    assert service is not None
+    return {
+        "kind": "service",
+        "source_id": source.id,
+        "model_id": service["service_id"],
+        # A model Source may have monthly model billing; its separate search API is still priced per search.
+        "billing": "metered",
+        "relay": False,
+        "price": {**service["price"], "extra": [dict(part) for part in service["price"]["extra"]]},
+        "settings": search_service_settings(setting, source),
+        "state": source.state.to_payload(),
+        "trial_pending": trial_pending,
+        # S2's service-scoped cooldown owner supplies this at activation; S1b has no service attempts.
+        "cooldown_until": None,
+    }
+
+
+def _service_vendors(config: ModelHubConfig) -> list[dict[str, Any]]:
+    from vibe.model_hub_runtime.api_key_vendors import api_key_vendor_catalog
+
+    return [
+        {
+            "id": vendor.id,
+            "name": vendor.label,
+            "price": {**service["price"], "extra": [dict(part) for part in service["price"]["extra"]]},
+            # No free-tier promise has been verified in the bundled catalog. Null is unknown, never zero.
+            "free_tier": None,
+            "facts": {
+                "tool_only": service["tool_only"],
+                "auto_enroll": bool(service.get("auto_enroll")),
+                "free_check": service["free_check"] is not None,
+            },
+            "results_max": service["limits"]["results_max"],
+            "content_supported": bool(service["result"].get("content")),
+            "content_changes_price": any(part.get("when") == "content" for part in service["price"]["extra"]),
+            "source_ids": [
+                source.id for source in config.sources
+                if source.vendor == vendor.id and model_hub_search_service(source) is not None
+            ],
+        }
+        for vendor in api_key_vendor_catalog()
+        if (service := vendor.search) is not None
+    ]
 
 
 def _price_payload(price: Any) -> dict[str, Any] | None:
@@ -554,6 +632,7 @@ def hosted_tools_status(
     evidence: HostedEvidence,
     spec_for: SpecLookup,
     image_price: Callable[[ModelHubSourceConfig, ImageModelSpec], Optional[dict[str, Any]]],
+    search_trial_pending: Callable[[str], bool] = lambda _source_id: False,
 ) -> dict[str, Any]:
     """What Models → Tools reads (``hosted-tools-status.schema.json``): settings, saved and effective, and status."""
 
@@ -568,6 +647,7 @@ def hosted_tools_status(
             entry["effective_order"] = [candidate.source.id for candidate in chain]
             entry["executor_candidates"] = [
                 {
+                    "kind": "model",
                     "source_id": candidate.source.id,
                     "model_id": candidate.model_id,
                     "billing": candidate.source.billing,
@@ -576,6 +656,27 @@ def hosted_tools_status(
                 }
                 for candidate in chain
             ]
+            if tool == "web_search":
+                entry["prefer_native"] = setting.prefer_native
+                entry["services"] = {
+                    source_id: saved.clamped(service).to_payload()
+                    for source_id, saved in setting.services.items()
+                    if source_id in sources and (service := model_hub_search_service(sources[source_id])) is not None
+                }
+                entry["service_order"] = [source_id for source_id in (setting.service_order or ()) if source_id in sources]
+                # This is the only activation gate for BOTH read additions. S2 supplies the unified chain
+                # and its placement rule here when enabling it; this lane only defines the projection.
+                if SEARCH_SERVICES_ACTIVE:
+                    service_rows = [
+                        _service_candidate_payload(source, setting, trial_pending=search_trial_pending(source.id))
+                        for source in config.sources
+                        if model_hub_search_service(source) is not None and search_executor_kind(source, setting) == "service"
+                    ]
+                    service_ids = {row["source_id"] for row in service_rows}
+                    entry["executor_candidates"] = service_rows + [
+                        row for row in entry["executor_candidates"] if row["source_id"] not in service_ids
+                    ]
+                    entry["service_vendors"] = _service_vendors(config)
         else:
             choices = image_choices(config, evidence=evidence)
             saved = choices.saved_default
@@ -626,6 +727,8 @@ def apply_hosted_tool_put(config: ModelHubConfig, tool: str, payload: object) ->
     if tool not in MODEL_HUB_HOSTED_TOOLS:
         raise HostedToolSettingRefused("hosted_tool_not_found", 404)
     allowed = {"enabled"} | ({"executor_order"} if tool in MODEL_HUB_SEARCH_TOOLS else {"default_model"})
+    if tool == "web_search":
+        allowed |= {"prefer_native", "services"}
     if not isinstance(payload, dict) or not payload or set(payload) - allowed:
         raise HostedToolSettingRefused("invalid_parameter", 400)
     changes: dict[str, Any] = {}
@@ -635,6 +738,12 @@ def apply_hosted_tool_put(config: ModelHubConfig, tool: str, payload: object) ->
             if not isinstance(payload["enabled"], bool):
                 raise ValueError("enabled must be a boolean")
             changes["enabled"] = payload["enabled"]
+        if "prefer_native" in payload:
+            if not isinstance(payload["prefer_native"], bool):
+                raise ValueError("prefer_native must be a boolean")
+            changes["prefer_native"] = payload["prefer_native"]
+        if "services" in payload:
+            changes["services"] = _patch_search_services(config, payload["services"])
         if "executor_order" in payload:
             order = payload["executor_order"]
             changes["executor_order"] = None if order is None else model_hub_executor_order(order, tool=tool)
@@ -643,7 +752,48 @@ def apply_hosted_tool_put(config: ModelHubConfig, tool: str, payload: object) ->
             changes["default_image"] = None if default is None else ModelHubImageModelChoice.from_payload(default, tool=tool)
     except ValueError:
         raise HostedToolSettingRefused("invalid_parameter", 400) from None
-    return replace(hosted_tool_setting(config, tool), **changes)
+    setting = replace(hosted_tool_setting(config, tool), **changes)
+    if tool == "web_search" and "executor_order" in payload:
+        live = {source.id: source for source in config.sources}
+        setting = replace(setting, executor_order_kinds=(
+            {source_id: search_executor_kind(live[source_id], setting)
+             for source_id in setting.executor_order if source_id in live}
+            if setting.executor_order is not None else None
+        ))
+    return setting
+
+
+def _patch_search_services(config: ModelHubConfig, payload: object) -> dict[str, ModelHubSearchServiceSettings]:
+    if not isinstance(payload, dict):
+        raise ValueError("services must be a Source-keyed patch")
+    saved = dict(hosted_tool_setting(config, "web_search").services)
+    live = {source.id: source for source in config.sources}
+    for source_id, patch in payload.items():
+        if not is_model_hub_source_id(source_id):
+            raise ValueError("services keys must be Source ids")
+        if patch is None:
+            saved.pop(source_id, None)
+            continue
+        source = live.get(source_id)
+        service = model_hub_search_service(source) if source is not None else None
+        if service is None or not isinstance(patch, dict) or set(patch) - {"results", "content", "enabled"}:
+            raise ValueError("services must name a search-capable Source and known fields")
+        merged = saved.get(source_id, ModelHubSearchServiceSettings()).clamped(service).to_payload()
+        for key, value in patch.items():
+            if value is None:
+                merged.pop(key, None)
+            else:
+                merged[key] = value
+        parsed = ModelHubSearchServiceSettings.from_payload(merged)
+        if parsed.results is not None and parsed.results > service["limits"]["results_max"]:
+            raise ValueError("results exceeds the catalog maximum")
+        if parsed.content and not service["result"].get("content"):
+            raise ValueError("the service does not return page text")
+        if parsed.to_payload():
+            saved[source_id] = parsed
+        else:
+            saved.pop(source_id, None)
+    return saved
 
 
 def clear_request(tool: str, payload: object) -> Callable[[EvidenceRecord], bool]:
