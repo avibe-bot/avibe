@@ -484,6 +484,46 @@ def computer_script_close_sync(
     )
 
 
+def computer_js_eval_sync(
+    *,
+    caller_session_id: str,
+    code: str,
+    timeout_ms: int,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Run one call in the caller Session's persistent JavaScript kernel.
+
+    The Controller bounds the call (timeout, cancel grace, kernel start, and a
+    serialized predecessor), so the client only needs a generous backstop.
+    """
+
+    return _computer_script_post_sync(
+        _resolve_endpoint(socket_path),
+        "/internal/computer-js/eval",
+        {
+            "caller_session_id": caller_session_id,
+            "code": code,
+            "timeout_ms": timeout_ms,
+        },
+        timeout=timeout_ms / 1000 + 360.0,
+    )
+
+
+def computer_js_reset_sync(
+    *,
+    caller_session_id: str,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Discard the caller Session's JavaScript kernel and its bindings."""
+
+    return _computer_script_post_sync(
+        _resolve_endpoint(socket_path),
+        "/internal/computer-js/reset",
+        {"caller_session_id": caller_session_id},
+        timeout=10.0,
+    )
+
+
 async def dispatch_async(
     payload: dict[str, Any],
     *,

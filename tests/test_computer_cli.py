@@ -59,6 +59,8 @@ def _bind_socket(path: Path) -> socket.socket:
 def test_parser_covers_the_allowlisted_driver_operations_without_session_id() -> None:
     commands = [
         (["computer", "run", "./script.mjs"], ("run",)),
+        (["computer", "js", "--code", "1"], ("js",)),
+        (["computer", "js-reset"], ("js-reset",)),
         (["computer", "observe", "apps"], ("observe", "apps")),
         (["computer", "observe", "windows"], ("observe", "windows")),
         (["computer", "observe", "window"], ("observe", "window")),
@@ -86,7 +88,7 @@ def test_parser_covers_the_allowlisted_driver_operations_without_session_id() ->
         else:
             command_path = (args.computer_command,)
         assert command_path == path
-        if path != ("run",):
+        if path not in {("run",), ("js",), ("js-reset",)}:
             assert tool_for_command(path)
 
     with pytest.raises(SystemExit):
@@ -122,6 +124,11 @@ def test_packaged_skill_examples_parse_and_match_the_pinned_driver_schema() -> N
         if args.computer_command == "run":
             assert args.file.endswith(".mjs")
             continue
+        if args.computer_command == "js":
+            assert args.code.strip() and 1 <= args.timeout_ms <= 300000
+            continue
+        if args.computer_command == "js-reset":
+            continue
         if args.computer_command == "observe":
             path = ("observe", args.computer_observe_command)
         elif args.computer_command == "clipboard":
@@ -148,9 +155,15 @@ def test_packaged_skill_examples_parse_and_match_the_pinned_driver_schema() -> N
     assert documented_flags == {
         "--arg",
         "--args-json",
+        "--code",
         "--json",
         "--output",
+        "--timeout-ms",
     }
+    documented_js = {
+        command.split()[2] for command in commands if command.split()[2].startswith("js")
+    }
+    assert documented_js == {"js", "js-reset"}
     parser.parse_args(
         [
             "computer",
@@ -382,6 +395,9 @@ def test_computer_cli_error_translations_exist_in_all_supported_languages() -> N
         "computer.cli.error.scriptRuntimeInvalid",
         "computer.cli.error.scriptTimedOut",
         "computer.cli.error.scriptFailed",
+        "computer.cli.error.jsFailed",
+        "computer.cli.error.jsCodeFile",
+        "computer.cli.error.jsTimeoutRange",
     }
     for catalog_path in sorted(Path("vibe/i18n").glob("*.json")):
         catalog = json.loads(catalog_path.read_text(encoding="utf-8"))

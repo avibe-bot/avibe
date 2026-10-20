@@ -109,6 +109,16 @@ class ComputerScriptSessionManager:
             "timeout_ms": int(float(timeout_seconds) * 1000),
         }
 
+    def check_caller(self, caller_session_id: str) -> str:
+        """Return the caller's Session when it has a live active Turn."""
+
+        admission, admission_error = self._turn_manager.begin_computer_use_request(
+            caller_session_id
+        )
+        if admission is None:
+            raise ComputerScriptSessionError(admission_error)
+        return admission.session_id
+
     def admit(self, token: str) -> _ScriptBinding:
         binding = self._bindings.get(token)
         if binding is None:
