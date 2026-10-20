@@ -26,14 +26,14 @@ Out of scope: OAuth, SSE (explicit `unsupported_transport_sse` error), project s
   current.json             # pointer to the published revision
   revisions/<revision>/    # <revision> = generation timestamp + random suffix
     definition.json        # immutable snapshot of the definition used to generate and to connect
-    manifest.json          # description, generatedAt, serverInfo.version (shown in UI)
+    manifest.json          # formatVersion, description, generatedAt, serverInfo.version (shown in UI)
     tools.json             # original tool descriptors
     commands.json          # generated flags and help
 ```
 
 - `definition.json` and `state.json` are the only authorities; nothing is duplicated into V2 config or another registry.
 - `commands.json` is declarative data interpreted by the shared `vibe mcp` runner, not code. Tool implementations stay on the server/executable.
-- Invalid or future-format files disable that package with a warning; startup never fails and bad files are not overwritten.
+- Revisions are derived data: a revision whose `formatVersion` this release does not read is shown as "needs regeneration" (definition kept, nothing deleted) instead of being migrated. Invalid or future-format definition files disable that package with a warning; startup never fails and bad files are not overwritten.
 
 ## 3. Prompt injection
 
@@ -88,7 +88,7 @@ vibe mcp docs search --args-json '{"query":"async Python","limit":5}'   # also -
 - Calls go to the owner, print one JSON document to stdout, diagnostics to stderr.
 - Errors point to the next useful command (root list, service list or tool help).
 
-Exit codes: `0` success, `2` usage/argument error, `1` any other failure (including command-admission denial). The JSON `error.type` carries the category (`not_found`, `disabled`, `connection`, `tool_error`, `timeout`, `capacity`, `input_required_unsupported`, …). `unknown_outcome` marks any failure after `tools/call` was sent other than a returned tool error or a known pre-dispatch rejection; it must not be retried.
+Exit codes: `0` success, `2` usage/argument error, `1` any other failure (including command-admission denial). The JSON `error.type` carries the category (`not_found`, `disabled`, `connection`, `tool_error`, `timeout`, `capacity`, `input_required_unsupported`, …). `unknown_outcome` marks any failure after `tools/call` was sent other than a returned tool error or a known pre-dispatch rejection; it must not be retried. An IPC timeout or disconnect after the CLI submitted the call to the owner is also `unknown_outcome`, following the existing IPC acceptance-ambiguity handling in `vibe/internal_client.py`.
 
 ### 4.2 Schema to flags
 
@@ -136,6 +136,7 @@ Flow: paste → **Parse and preview** → **Save** → **Generate** (later **Reg
 
 - Accept the common provider shape: `command/args/env/cwd` → stdio; `url` with absent/`http`/`streamable_http` type → Streamable HTTP. Reject conflicting or unsupported fields with a field-specific message. Provider `enabled` is ignored.
 - Env and header values are stored as given, in plaintext, like Claude Code's own MCP config. No Vault integration in MVP. `<avibe-home>/mcp/` is created with the existing owner-private helpers (`core/private_fs.py`: `ensure_private_directory`, `make_private_file`; POSIX modes, Windows DACL); UI/API mask env/header values using the existing config-secret pattern (`has_<field>` metadata; an empty submitted value means "unchanged", see `_strip_preserved_config_secrets` in `vibe/api.py`); Avibe's own logs never print them. A server's own stderr is the server's output (as in Claude Code) and is not scrubbed.
+- URLs with embedded credentials (`user:pass@`) are rejected; put them in an `Authorization` header.
 - `${VAR}` / `${VAR:-default}` placeholders are not expanded; parse rejects them with a field-specific message asking for the literal value.
 - `cwd` must be absolute; absent means the sanitized Agent default.
 - Existing names require explicit replace; omitted services are untouched.
