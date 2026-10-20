@@ -1,11 +1,11 @@
 """One presentation decision per agent output (docs/plans/reply-and-turn-end.md, PR 3).
 
 What an output *is* comes from the backend (``core.agent_output``); how Avibe *shows*
-it is decided here, once, by a ``PresentationPolicy``: whether it leaves a record,
-whether that record is a transcript row and renders muted, whether it is a Web Push,
-whether it goes out at all, and in what IM form. The dispatcher builds a
-``PresentationInput`` for each output, asks the policy, and executes the decision; it
-records the decision on the message (``metadata["presentation"]``).
+it is decided here, once, by a ``PresentationPolicy``: whether it is a transcript row
+and renders muted, whether it is a Web Push, whether it goes out at all, and in what
+IM form. The dispatcher builds a ``PresentationInput`` for each output with content,
+asks the policy, and executes the decision; the output's record, where its type has
+one, stores the decision (``metadata["presentation"]``).
 
 ``DefaultPresentationPolicy`` holds the rules Avibe has always applied, unchanged:
 the ``level`` grades, background (``suppress_delivery``) visibility, the Web interim
@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Mapping, Optional, Protocol
 
-#: The ``metadata`` key a persisted message records its decision under.
+#: The ``metadata`` key an output's record stores its decision under.
 PRESENTATION_METADATA_KEY = "presentation"
 
 #: A Web narration bubble is kept as a transcript-visible ``interim`` copy once it
@@ -67,6 +67,11 @@ class PresentationInput:
     channel's hidden types and the turn's progress style are read only when a policy
     asks, as the dispatcher has always read them. ``log_editable`` says whether the
     channel can edit a message, which a consolidated log and a status line need.
+
+    ``content_free`` is a fact of the output, not a decision: an output with
+    ``level="silent"``, or with nothing left once silent directives are removed, is
+    never shown and never asked about. The dispatcher runs only its lifecycle (the
+    Turn end and its IM boundary row, Run settlement, releasing the stream).
     """
 
     message_type: str
@@ -83,24 +88,33 @@ class PresentationInput:
     hidden: Callable[[], bool] = lambda: False
     progress_style: Callable[[], str] = lambda: "verbose"
 
+    @property
+    def content_free(self) -> bool:
+        return self.level == "silent" or not self.body.strip()
+
 
 @dataclass(frozen=True)
 class PresentationDecision:
-    """How one output is shown; ``reason`` names why it does not go out, when it does not.
+    """How one output with content is shown; ``reason`` names why it does not go out,
+    when it does not.
+
+    Whether an output has a record is not a decision but a fixed fact of its type,
+    kept best effort (none when its Session or scope row is not visible): an answer,
+    notice or narration (``result``, ``output``, ``error``, ``notify``, ``assistant``)
+    a ``messages`` row, a tool call an ``agent_events`` trace event, a ``system`` line
+    none. The record stores the decision under ``metadata["presentation"]``.
 
     Every field the dispatcher accepts, it executes in full. A decision outside the
     envelope it can execute raises ``ValueError`` (``validate_decision``) rather than
     being half-executed; a later policy that needs more extends the executor. The
     envelope:
 
-    * not ``persisted`` is nothing at all: no record, not ``outward``, no push, ``im``
-      ``none``, no transcript row;
     * not ``outward`` is local history only: ``im`` ``none``, no push, no Web
-      publication (no ``message.new``, no Inbox update), the row marked
+      publication (no ``message.new``, no Inbox update), the record marked
       ``delivery_suppressed``;
     * an answer or notice (``result``, ``output``, ``error``, ``notify``) that is
-      persisted and outward goes out as a message (``im`` ``message``), as a
-      transcript row, muted exactly when its type renders muted (``output``);
+      outward goes out as a message (``im`` ``message``); it is always a transcript
+      row, muted exactly when its type renders muted (``output``);
     * process-log outputs (``assistant``, ``toolcall``, ``system``) go out as
       ``none``, ``status``, or ``log``, never a message; a ``log`` line needs a body,
       and a tool call the target cannot deliver goes out as ``none``;
@@ -111,7 +125,6 @@ class PresentationDecision:
     """
 
     policy: str
-    persisted: bool
     transcript: bool
     muted: bool
     web_push: bool
@@ -120,11 +133,10 @@ class PresentationDecision:
     reason: str = ""
 
     def to_metadata(self) -> dict[str, Any]:
-        """The record a persisted message keeps of its decision."""
+        """What an output's record stores of its decision."""
 
         return {
             "policy": self.policy,
-            "persisted": self.persisted,
             "outward": self.outward,
             "transcript": self.transcript,
             "muted": self.muted,
@@ -166,7 +178,6 @@ class DefaultPresentationPolicy:
     def decide(self, presentation: PresentationInput) -> PresentationDecision:
         def decision(**fields: Any) -> PresentationDecision:
             values = {
-                "persisted": True,
                 "transcript": False,
                 "muted": False,
                 "web_push": False,
@@ -177,9 +188,6 @@ class DefaultPresentationPolicy:
             return PresentationDecision(policy=self.id, **values)
 
         kind = presentation.message_type
-        # ``level="silent"``, or nothing left to show: no record, no delivery.
-        if presentation.level == "silent" or not presentation.body.strip():
-            return decision(persisted=False, outward=False, reason="content_free")
         if kind in _MESSAGE_TYPES:
             transcript = {"transcript": True, "muted": presentation.row_type in _MUTED_TYPES}
             if presentation.background:
@@ -229,12 +237,6 @@ def validate_decision(presentation: PresentationInput, decision: PresentationDec
         raise ValueError(f"presentation policy {decision.policy!r}: {why} ({decision!r})")
 
     kind = presentation.message_type
-    if not decision.persisted:
-        if decision.outward or decision.transcript or decision.muted or decision.web_push:
-            return reject("an output that is not persisted is nothing at all")
-        if decision.im is not ImDelivery.NONE:
-            return reject("an output that is not persisted goes nowhere")
-        return decision
     if not decision.outward and (decision.im is not ImDelivery.NONE or decision.web_push):
         return reject("local history goes out nowhere")
     if decision.web_push and not (

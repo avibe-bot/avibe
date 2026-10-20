@@ -54,7 +54,7 @@ from tests.test_message_dispatcher_status_bubble import (
 SESSION = "ses_turn_end"
 NOW = "2026-10-19T03:00:00Z"
 FIRST = "The cache is shared; two writers race. Fixed in #12."
-SHOWN = {"policy": "default/1", "persisted": True, "outward": True}
+SHOWN = {"policy": "default/1", "outward": True}
 SECOND = "Yes, the fix also covers the CLI path."
 REPLY = MessageOutput(completes_turn=False, completes_run=False)
 
@@ -594,7 +594,8 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
         decision, inside the executable envelope, changes exactly that behavior and nothing
         else, with the real dispatcher and store: the reply's push, whether the reply goes
         out at all (no Web publication, no send, its row local-only), narration's muted
-        copy in both directions, and the process line's form."""
+        copy in both directions, and the process line's form. An output without content
+        is never asked about."""
 
         def flip(**fields):
             class _Flip:
@@ -672,6 +673,19 @@ class ReplyAndTurnEndTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     {key for key in default if default[key] != flipped[key]}, changed, (default, flipped)
                 )
+
+        class _NeverAsked:
+            id = "never/1"
+
+            def decide(self, presentation):
+                raise AssertionError(f"a policy was asked about an output without content: {presentation!r}")
+
+        with self.subTest("an output without content is never asked about"), self.state():
+            controller = _Controller("avibe")
+            controller.dispatcher.presentation_policy = _NeverAsked()
+            await controller.emit_agent_message(self.context(), "assistant", "  ")
+            await controller.emit_agent_message(self.context(), "result", FIRST, output=REPLY, level="silent")
+            self.assertEqual((self.agent_rows(), self.pushed_texts(), controller.im_client.sent), ([], [], []))
 
         with self.subTest("outside the envelope"), self.state():
             controller = _Controller("avibe")

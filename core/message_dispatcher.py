@@ -3115,9 +3115,9 @@ class ConsolidatedMessageDispatcher:
                         "output_provenance": output_semantics.provenance(context),
                     },
                 )
-        # How this output is shown is decided once, by the presentation policy
-        # (``core.presentation``); every branch below executes that decision, and a
-        # decision outside what they can execute is refused rather than half-run.
+        # How an output with content is shown is decided once, by the presentation
+        # policy (``core.presentation``); every branch below executes that decision,
+        # and a decision outside what they can execute is refused rather than half-run.
         presentation, narration = self._presentation_input(
             context,
             im_client=im_client,
@@ -3132,14 +3132,12 @@ class ConsolidatedMessageDispatcher:
             output_semantics=output_semantics,
             background=bool((context.platform_specific or {}).get("suppress_delivery")),
         )
-        decision = validate_decision(presentation, self.presentation_policy.decide(presentation))
-        # Not outward: local history only, for any context, as a background Session's.
-        suppresses_outward_delivery = not decision.outward
         # Nothing to show (``level="silent"``, or a body that is empty once silent
-        # directives are stripped): the message already settled the dot above (for
-        # a terminal result), so release the SSE waiter and return BEFORE any
-        # delivery, persistence, or streaming.
-        if not decision.persisted:
+        # directives are stripped) is a fact of the output, not a decision: no policy
+        # is asked, nothing is recorded or delivered, and only its lifecycle runs. The
+        # message already settled the dot above (for a terminal result), so release
+        # the SSE waiter and return BEFORE any delivery, persistence, or streaming.
+        if presentation.content_free:
             async with self._terminal_emit(
                 context,
                 output_semantics,
@@ -3232,6 +3230,10 @@ class ConsolidatedMessageDispatcher:
                 else:
                     settle_invisible_output()
                 return None
+
+        decision = validate_decision(presentation, self.presentation_policy.decide(presentation))
+        # Not outward: local history only, for any context, as a background Session's.
+        suppresses_outward_delivery = not decision.outward
 
         # Resolve the delivery target once. Routed / post_to / thread replies
         # land in a different channel than the source context, and the persisted

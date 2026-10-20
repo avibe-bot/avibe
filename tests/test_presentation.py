@@ -49,7 +49,6 @@ def _input(message_type="result", **fields):
 def _decision(**fields):
     values = {
         "policy": "default/1",
-        "persisted": True,
         "transcript": False,
         "muted": False,
         "web_push": False,
@@ -68,17 +67,6 @@ def _style(value):
 @pytest.mark.parametrize(
     ("presentation", "expected"),
     [
-        # level and an empty body
-        pytest.param(
-            _input("result", level="silent"),
-            _decision(persisted=False, outward=False, reason="content_free"),
-            id="silent-level-shows-nothing",
-        ),
-        pytest.param(
-            _input("assistant", body="  "),
-            _decision(persisted=False, outward=False, reason="content_free"),
-            id="empty-body-shows-nothing",
-        ),
         # answers and notices
         pytest.param(
             _input("result", platform="avibe"),
@@ -205,10 +193,6 @@ EMPTY_LOG = _input("system", log_chunk="")
 @pytest.mark.parametrize(
     ("presentation", "decision", "accepted"),
     [
-        pytest.param(WEB_REPLY, _decision(persisted=False, outward=False), True, id="nothing-at-all"),
-        pytest.param(WEB_REPLY, _decision(persisted=False), False, id="no-record-but-outward"),
-        pytest.param(WEB_REPLY, _decision(persisted=False, outward=False, im=ImDelivery.MESSAGE), False,
-                     id="no-record-but-sent"),
         pytest.param(WEB_REPLY, _decision(transcript=True, outward=False), True, id="local-history"),
         pytest.param(WEB_REPLY, _decision(transcript=True, outward=False, im=ImDelivery.MESSAGE), False,
                      id="local-history-sent"),
@@ -265,7 +249,6 @@ def test_a_decision_is_recorded_as_stable_metadata():
     decision = _decision(transcript=True, web_push=True, im=ImDelivery.MESSAGE)
     assert decision.to_metadata() == {
         "policy": "default/1",
-        "persisted": True,
         "outward": True,
         "transcript": True,
         "muted": False,

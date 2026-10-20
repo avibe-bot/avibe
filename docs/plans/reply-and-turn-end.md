@@ -334,12 +334,17 @@ Approved by the owner, in this order:
    dispatcher builds a `PresentationInput` per output (its type, `level`,
    target platform, background, body, and, read only when the policy asks,
    the channel's hidden types and the turn's progress style), asks its
-   `presentation_policy`, and executes the `PresentationDecision` (`persisted`,
-   `transcript`, `muted`, `web_push`, `outward`, `im`: none, status, log or
-   message). `DefaultPresentationPolicy` (`default/1`) is the only policy; a
-   later one (a decision model, or one that wraps the default) replaces it
-   through the same protocol. Each message records the decision under
-   `metadata["presentation"]` (additive; released readers ignore it). Vibey's
+   `presentation_policy`, and executes the `PresentationDecision` (`transcript`,
+   `muted`, `web_push`, `outward`, `im`: none, status, log or message) in full,
+   refusing one outside its documented envelope. An output without content
+   (`level="silent"` or an empty body) is a fact of the input, not a decision:
+   no policy is asked, and only its lifecycle runs. Whether an output has a
+   record is a fixed, best-effort fact of its type (a `messages` row, a tool
+   call's `agent_events` trace event, none for `system`), not a decision.
+   `DefaultPresentationPolicy` (`default/1`) is the only policy; a later one (a
+   decision model, or one that wraps the default) replaces it through the same
+   protocol. Each record stores the decision under `metadata["presentation"]`
+   (additive; released readers ignore it). Vibey's
    generated-images fallback goes through it with its released `output` type.
 3. PR 4, structural only with no behavior change. One admission entry for
    every input source: Web composer, IM, Harness, Show annotation, failure
