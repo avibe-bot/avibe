@@ -13,7 +13,7 @@
     {"method": "POST", "path": "/api/models/sources/<id>/reauth", "response_schema": "OAuthFlowResponse", "exercise": {"path": "/api/models/sources/src_subscribe01/reauth", "status": 200, "json": {"acknowledge_irreversible": true}}},
     {"method": "DELETE", "path": "/api/models/sources/<id>?force=<bool>", "response_schema": "SourceDeleteResponse", "exercise": {"path": "/api/models/sources/src_delete0001?force=false", "status": 200, "json": {}}},
     {"method": "POST", "path": "/api/models/sources/<id>/refresh", "response_schema": "SourceMutationResponse", "exercise": {"path": "/api/models/sources/src_conform001/refresh", "status": 200, "json": {}}},
-    {"method": "POST", "path": "/api/models/sources/<id>/reenable", "response_schema": "SourceMutationResponse", "exercise": {"path": "/api/models/sources/src_searchbalance/reenable", "status": 200, "json": {}}},
+    {"method": "POST", "path": "/api/models/sources/<id>/reenable", "response_schema": "SourceReenableResponse", "exercise": {"path": "/api/models/sources/src_searchbalance/reenable", "status": 200, "json": {}}},
     {"method": "POST", "path": "/api/models/sources/<id>/probe", "response_schema": "SourceProbeResponse", "exercise": {"path": "/api/models/sources/src_conform001/probe", "status": 200, "json": {"model": "claude-opus-4-6"}}},
     {"method": "POST", "path": "/api/models/sources/<source_id>/models", "response_schema": "SourceResponse", "exercise": {"path": "/api/models/sources/src_conform001/models", "status": 201, "json": {"model_id": "manual-contract-model", "reasoning_efforts": []}}},
     {"method": "PATCH", "path": "/api/models/sources/<source_id>/models/<model_id>", "response_schema": "SourceResponse", "exercise": {"path": "/api/models/sources/src_conform001/models/retire-model", "status": 200, "json": {"reasoning_efforts": ["high"]}}},
@@ -214,7 +214,24 @@
         "contract_version": {"const": 17},
         "source": {"$ref": "#/definitions/SourceApi"},
         "removed_hops": {"type": "array", "items": {"$ref": "#/definitions/RouteHopRef"}},
-        "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}},
+        "interrupted": {"type": "array", "items": {"$ref": "#/definitions/SupplyGap"}}
+      }
+    },
+    "SourceReenableResponse": {
+      "type": "object",
+      "required": ["ok", "contract_version", "source", "removed_hops", "interrupted"],
+      "additionalProperties": false,
+      "properties": {
+        "ok": {"const": true},
+        "contract_version": {"const": 17},
+        "source": {
+          "allOf": [
+            {"$ref": "#/definitions/SourceApi"},
+            {"properties": {"protocol": {"const": "search"}}}
+          ]
+        },
+        "removed_hops": {"type": "array", "maxItems": 0},
+        "interrupted": {"type": "array", "maxItems": 0},
         "trial_armed": {"type": "boolean"}
       }
     },

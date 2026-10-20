@@ -4675,7 +4675,14 @@ class ModelHubService:
                     )
                     old_revocation_recorded = True
                 if search_balance:
-                    removed_hops, interrupted = [], []
+                    removed_hops, interrupted = self._guard_inventory_mutation(
+                        previous,
+                        config,
+                        source.id,
+                        force=force,
+                        confirmed_remove_hops=payload.get("would_remove_hops"),
+                        confirmed_interruptions=payload.get("would_interrupt"),
+                    )
                     await self._commit_synced(previous, config)
                 else:
                     removed_hops, interrupted = await self._finalize_successful_discovery(

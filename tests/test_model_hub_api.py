@@ -933,6 +933,14 @@ def test_every_model_hub_endpoint_returns_its_contract_response(
     if errors:
         error = _response_validation_error(errors)
         pytest.fail(f"{endpoint}: response field {_response_error_path(error)}: {error.message}")
+    if route_contract["path"].endswith("/reenable"):
+        for trial_armed in (False, True):
+            assert validator.is_valid({**body, "trial_armed": trial_armed})
+    elif route_contract["response_schema"] == "SourceMutationResponse":
+        for trial_armed in (False, True):
+            assert not validator.is_valid({**body, "trial_armed": trial_armed}), (
+                f"{endpoint}: trial_armed is exclusive to search re-enable responses"
+            )
     agent_payloads = []
     if isinstance(body.get("agent"), dict):
         agent_payloads.append(body["agent"])
@@ -6243,6 +6251,102 @@ def test_search_source_create_uses_only_the_free_check_transaction(tmp_path, out
         assert source["verification_pending"] is not None
     else:
         assert source.get("verification_pending") is None
+
+
+@pytest.mark.parametrize("outcome", ["balance", "limit"])
+@pytest.mark.parametrize("supply", ["sole", "backup", "already_blocked"])
+def test_deepseek_replacement_guards_new_supply_gaps(monkeypatch, tmp_path, outcome, supply):
+    save_config(tmp_path / "home")
+    service, store, adapter = _service(tmp_path)
+    adapter.search_check_outcome = outcome
+    model_id = "deepseek-v4"
+    source = ModelHubSourceConfig(
+        id="src_deepseekguard",
+        kind="api_key",
+        vendor="deepseek",
+        display_name="DeepSeek",
+        protocol="openai_chat",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model_id, provenance="manual")],
+        credential_ref="cred_original_deepseek",
+        masked_credential="sk-old…test",
+        last_discovered_at="2026-07-22T03:00:00+00:00",
+    )
+    if supply == "already_blocked":
+        source.state = ModelHubSourceStateConfig(
+            status="needs_action", detail_key="models.source.needs_action.balance_exhausted",
+        )
+    store.config.sources = [source]
+    if supply == "backup":
+        backup = copy.deepcopy(source)
+        backup.id = "src_deepseekbackup"
+        backup.credential_ref = "cred_backup_deepseek"
+        store.config.sources.append(backup)
+    agent = store.config.agents["codex"]
+    agent.models = [ModelHubBackendModelConfig(id=model_id)]
+    agent.sources.order = [item.id for item in store.config.sources]
+    agent.routes = {model_id: ModelHubRouteConfig(hops=tuple(
+        ModelHubRouteHopConfig(item.id, model_id) for item in store.config.sources
+    ))}
+    service.named_agents_override = lambda backend: [("assistant", model_id)] if backend == "codex" else []
+    monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
+    client = app.test_client()
+    origin = "http://127.0.0.1:15131"
+    headers = csrf_headers(client, origin)
+    endpoint = f"/api/models/sources/{source.id}/credential"
+    before = copy.deepcopy(store.config.to_payload())
+    expected_plan = {
+        "would_remove_hops": [],
+        "would_interrupt": [{"backend": "codex", "model_id": model_id, "agents": ["assistant"]}],
+    }
+    if supply == "sole":
+        assert service.agent_chain("codex", model_id)["current"] == {
+            "source_id": source.id, "model_id": model_id,
+        }
+        for confirmation in (
+            {},
+            {"force": False, **expected_plan},
+            {"force": True},
+            {"force": True, "would_remove_hops": [], "would_interrupt": []},
+        ):
+            response = client.put(endpoint, json={"key": "sk-new-test", **confirmation}, headers=headers, base_url=origin)
+            assert response.status_code == 409
+            refusal = response.get_json()
+            _assert_valid("guard-refusal.schema.json", refusal)
+            assert refusal["error"] == "source_last_supplier"
+            assert {key: refusal[key] for key in expected_plan} == expected_plan
+            assert store.config.to_payload() == before
+            assert adapter.revoked[-1] == f"cred_test{adapter.credential_count:03d}"
+            assert source.credential_ref not in adapter.revoked
+            assert service.revocations.list() == []
+    # A stale nonempty echo is inert when the mutation introduces no supply gap.
+    response = client.put(
+        endpoint, json={"key": "sk-new-test", "force": True, **expected_plan},
+        headers=headers, base_url=origin,
+    )
+    assert response.status_code == 200
+    committed = response.get_json()
+    assert committed["removed_hops"] == []
+    assert committed["interrupted"] == (expected_plan["would_interrupt"] if supply == "sole" else [])
+    assert committed["source"]["state"]["status"] == "needs_action"
+    assert committed["source"]["state"]["detail_key"] == (
+        "models.source.needs_action.balance_exhausted" if outcome == "balance"
+        else "models.source.needs_action.spend_limit_reached"
+    )
+    assert committed["source"].get("verification_pending") is None
+    assert committed["source"]["credential_ref"] == f"cred_test{adapter.credential_count:03d}"
+    assert committed["source"]["credential_generation"]
+    assert store.config.sources[0].to_payload()["models"] == before["sources"][0]["models"]
+    assert committed["source"]["last_discovered_at"] == source.last_discovered_at
+    assert store.config.agents["codex"].to_payload()["routes"] == before["agents"]["codex"]["routes"]
+    assert adapter.discovery_credential_refs == []
+    assert adapter.revoked[-1] == source.credential_ref
+    assert committed["source"]["credential_ref"] not in adapter.revoked
+    assert service.revocations.list() == []
+    current = service.agent_chain("codex", model_id)["current"]
+    assert current == ({"source_id": "src_deepseekbackup", "model_id": model_id} if supply == "backup" else None)
 
 
 def test_search_source_replacement_unknown_keeps_old_key_and_revokes_new_ref(tmp_path):

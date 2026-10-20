@@ -526,7 +526,8 @@
           "base_url": { "type": "null" },
           "models": { "maxItems": 0 }
         }
-      }
+      },
+      "else": { "not": { "required": ["trial_pending"] } }
     },
     {
       "if": { "properties": { "protocol": { "const": "google" } } },

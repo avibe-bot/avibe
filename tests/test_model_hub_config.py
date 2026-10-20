@@ -682,6 +682,26 @@ def test_source_create_applies_search_constraints_to_inferred_catalog_protocols(
         validator.validate({"vendor": vendor, "key": "search-secret"})
 
 
+@pytest.mark.parametrize("protocol", SOURCE_PROTOCOLS)
+@pytest.mark.parametrize("trial_pending", [False, True])
+def test_source_contract_limits_trial_pending_to_search(protocol, trial_pending):
+    validator = Draft7Validator(_schema("source.schema.json"))
+    source = ModelHubSourceConfig(
+        id="src_trialcontract",
+        kind="api_key",
+        vendor="tavily" if protocol == "search" else "custom",
+        display_name="Trial contract",
+        protocol=protocol,
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        credential_ref="cred_trialcontract",
+        models=[],
+    ).to_payload()
+    validator.validate(source)
+    assert validator.is_valid({**source, "trial_pending": trial_pending}) is (protocol == "search")
+
+
 def test_sparse_override_contract_has_one_default_order_owner():
     contract = (CONTRACTS.parent / "model-hub-routing-modes.md").read_text(encoding="utf-8")
     assert "sources.order` is the sole backend-default" in contract
