@@ -146,7 +146,8 @@ Flow: paste → **Parse and preview** → **Save** → **Generate** (later **Reg
 ```
 
 - Accept the common provider shape: `command/args/env/cwd` → stdio; `url` with absent/`http`/`streamable_http` type → Streamable HTTP. Reject conflicting or unsupported fields with a field-specific message. Provider `enabled` is ignored.
-- Env and header values are stored as given, in plaintext, like Claude Code's own MCP config. No Vault integration in MVP. `<avibe-home>/mcp/` is created with the existing owner-private helpers (`core/private_fs.py`: `ensure_private_directory`, `make_private_file`; POSIX modes, Windows DACL); UI/API mask env/header values using the existing config-secret pattern (`has_<field>` metadata; an empty submitted value means "unchanged", see `_strip_preserved_config_secrets` in `vibe/api.py`); logs never print them.
+- Env and header values are stored as given, in plaintext, like Claude Code's own MCP config. No Vault integration in MVP. `<avibe-home>/mcp/` is created with the existing owner-private helpers (`core/private_fs.py`: `ensure_private_directory`, `make_private_file`; POSIX modes, Windows DACL); UI/API mask env/header values using the existing config-secret pattern (`has_<field>` metadata; an empty submitted value means "unchanged", see `_strip_preserved_config_secrets` in `vibe/api.py`); Avibe's own logs never print them. A server's own stderr is the server's output (as in Claude Code) and is not scrubbed.
+- `${VAR}` / `${VAR:-default}` placeholders are not expanded; parse rejects them with a field-specific message asking for the literal value.
 - `cwd` must be absolute; absent means the sanitized Agent default.
 - Existing names require explicit replace; omitted services are untouched.
 
@@ -171,7 +172,7 @@ Persisted `definition.json`:
 - Publish = write the full revision directory, then atomically replace `current.json`. Any failure leaves the previous revision active.
 - The owner serializes save/generate/enable/disable/remove per package, so these never race.
 - Initial generate enables the package on success: it writes `state.json` (enabled) before switching `current.json`, so a crash in between leaves an enabled draft that simply regenerates; no transaction needed. Regenerate never changes `state.json`.
-- Keep the current and previous revision; delete older ones after publish.
+- Keep the current and previous revision; delete older ones after publish. An offline list/help reader that finds a revision file missing rereads `current.json` once and retries.
 - `revision` = sha256 of the canonical manifest inputs (definition, versions, tools, commands), excluding timestamps. An identical rebuild reports "no change".
 - Manifest records `protocolVersion`, `serverInfo`, `generatorVersion`, `generatedAt` as provenance only; nothing compares them or detects updates. `tools/list_changed` is ignored.
 - Regenerate does not upgrade server software. A stale schema surfaces as a call error suggesting regeneration; calls are never replayed.
@@ -231,7 +232,7 @@ Lifecycle follows mcporter `generate-cli` (inspected at [`5362d60`](https://gith
 
 Acceptance:
 
-1. Page and `vibe mcp add` produce identical definitions; Claude-style syntax is parser-tested; add never connects; env/header values live only in owner-private `definition.json` and revision manifests, and are masked in UI/API and absent from logs.
+1. Page and `vibe mcp add` produce identical definitions; Claude-style syntax is parser-tested; add never connects; env/header values live only in owner-private `definition.json` and revision manifests, and are masked in UI/API and never printed by Avibe's own logs.
 2. Help/list work with the server and owner down; schema-to-flag contracts hold; injected prompt examples are parser-tested.
 3. Generation never publishes partial tool lists; readers never see mixed revisions; identical rebuilds keep the revision; initial generate enables, regenerate preserves state.
 4. Calls use `tools/call` only, against the admitted revision; process cap, idle close and timeouts hold; unknown outcomes are not retried.
