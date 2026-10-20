@@ -1117,6 +1117,14 @@ def _search_service_for_source(source: ModelHubSourceConfig) -> dict[str, Any] |
     return search_capability_for_source(source)
 
 
+def _require_search_service_for_source(source: ModelHubSourceConfig) -> dict[str, Any]:
+    """A retained Source may be readable without still supporting mutations."""
+    service = _search_service_for_source(source)
+    if service is None:
+        raise ModelHubError("discovery_failed")
+    return service
+
+
 def _maintain_search_service_order(config: ModelHubConfig, source_id: str, *, add: bool) -> None:
     setting = config.hosted_tools.get("web_search")
     existing = tuple(setting.service_order or ()) if setting is not None else ()
@@ -4514,9 +4522,11 @@ class ModelHubService:
         source: ModelHubSourceConfig,
         key: str,
     ) -> dict:
+        service = _require_search_service_for_source(source)
         old_credential_ref = source.credential_ref
         if not old_credential_ref:
             raise ModelHubError("discovery_failed")
+        await self._require_api_key_cleanup_locked(previous)
         committed = False
         old_revocation_recorded = False
         replacement_ref = await _acquire_credential_ref_with_cancellation_ownership(
@@ -4534,8 +4544,7 @@ class ModelHubService:
             source.credential_ref = replacement_ref
             source.masked_credential = _mask_credential(key)
             self._mark_source_unverified(source)
-            service = _search_service_for_source(source)
-            has_free_check = isinstance(service, Mapping) and isinstance(service.get("free_check"), Mapping)
+            has_free_check = isinstance(service.get("free_check"), Mapping)
             outcome = await self._search_free_check(source)
             if has_free_check and outcome == "unknown":
                 raise ModelHubError(
@@ -4631,7 +4640,6 @@ class ModelHubService:
             ):
                 raise ModelHubError("discovery_failed")
             if source.protocol == "search":
-                await self._require_api_key_cleanup_locked(previous)
                 return await self._replace_search_credential_locked(
                     previous,
                     config,
@@ -4785,6 +4793,8 @@ class ModelHubService:
             previous = self.store.load()
             config = self._clone_config(previous)
             source = self._source(config, source_id)
+            if source.protocol == "search":
+                _require_search_service_for_source(source)
             removed_hops: list[dict] = []
             interrupted: list[dict] = []
             if "display_name" in payload:
@@ -4883,6 +4893,7 @@ class ModelHubService:
             source = self._source(config, source_id)
             if source.protocol != "search" or source.kind != "api_key":
                 raise ModelHubError("discovery_failed")
+            service = _require_search_service_for_source(source)
             if source.state.status != "needs_action" or source.state.detail_key not in {
                 "models.source.needs_action.balance_exhausted",
                 "models.source.needs_action.spend_limit_reached",
@@ -4896,8 +4907,7 @@ class ModelHubService:
                     "trial_armed": True,
                 }
             trial_armed = False
-            service = _search_service_for_source(source)
-            has_free_check = isinstance(service, Mapping) and isinstance(service.get("free_check"), Mapping)
+            has_free_check = isinstance(service.get("free_check"), Mapping)
             if not has_free_check:
                 self._search_reenable_trials.add(source.id)
                 trial_armed = True

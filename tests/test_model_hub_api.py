@@ -6485,20 +6485,28 @@ def test_search_source_reenable_arms_without_clearing_limit(tmp_path):
     assert adapter.search_check_outcome == "unknown"
 
 
-def test_preserved_search_vendor_list_response_matches_contract(monkeypatch, tmp_path):
+@pytest.mark.parametrize(("method", "suffix", "payload"), [
+    ("PUT", "/credential", {"key": "test-replacement-key"}),
+    ("POST", "/reenable", {}),
+    ("PATCH", "", {"display_name": "Renamed retired service"}),
+])
+def test_preserved_search_vendor_is_readable_but_remove_only(monkeypatch, tmp_path, method, suffix, payload):
     save_config(tmp_path / "home")
     service, store, adapter = _service(tmp_path)
     source = ModelHubSourceConfig(
         id="src_retiredsearch", kind="api_key", vendor="retired-search-vendor",
         display_name="Retired search vendor", protocol="search", supply_channel="hub",
-        billing="metered", state=ModelHubSourceStateConfig(status="standby"),
+        billing="metered", state=ModelHubSourceStateConfig(
+            status="needs_action", detail_key="models.source.needs_action.spend_limit_reached",
+        ),
         models=[], credential_ref="cred_retiredsearch",
     )
     saved = store.config.to_payload()
     saved["sources"] = [source.to_payload()]
     store.config = ModelHubConfig.from_payload(saved)
     monkeypatch.setattr(ui_server, "_model_hub_service", lambda: service)
-    response = app.test_client().get("/api/models/sources")
+    client = app.test_client()
+    response = client.get("/api/models/sources")
     assert response.status_code == 200
     body = response.get_json()
     assert body["sources"][0]["vendor"] == "retired-search-vendor"
@@ -6512,6 +6520,21 @@ def test_preserved_search_vendor_list_response_matches_contract(monkeypatch, tmp
         }))
     assert adapter.credential_count == 0
     assert store.load().sources[0].vendor == source.vendor
+    before = store.load().to_payload()
+    headers = csrf_headers(client, "http://127.0.0.1:15131")
+    rejected = getattr(client, method.lower())(
+        f"/api/models/sources/{source.id}{suffix}", json=payload, headers=headers,
+    )
+    assert rejected.status_code == 400
+    assert rejected.get_json()["error"] == "discovery_failed"
+    assert store.load().to_payload() == before
+    assert adapter.credential_count == 0
+    assert adapter.revoked == []
+    assert not service.search_reenable_trial_pending(source.id)
+    assert client.delete(f"/api/models/sources/{source.id}", headers=headers).status_code == 200
+    assert store.load().sources == []
+    assert adapter.revoked == [source.credential_ref]
+    assert adapter.synced == []
 
 
 def test_create_source_rejects_wrong_protocol_for_a_catalog_vendor(tmp_path):
