@@ -47,10 +47,12 @@ class _Driver:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.image: bytes | None = None
+        self.delay = 0.0
 
     async def call_tool(self, name: str, arguments: dict, *, handle_descriptor=None) -> dict:
         del handle_descriptor
         self.calls.append((name, arguments))
+        await asyncio.sleep(self.delay)
         payload = {"apps": [{"pid": 41, "bundle_id": "com.apple.mail", "name": "Mail"}]}
         content = []
         if self.image is not None:
@@ -261,21 +263,67 @@ def test_computer_use_off_kills_the_kernel_and_refuses_calls() -> None:
     assert refused["error"]["code"] == "computer_use_unavailable"
 
 
-def test_leftover_timer_cannot_reach_the_controller() -> None:
+def test_leftover_timer_of_an_ended_call_never_fires() -> None:
     async def scenario(h: _Harness) -> tuple[dict, list]:
         await h.js(
-            "globalThis.late = new Promise((resolve) => setTimeout(() =>"
-            " computer.app({ bundleId: 'com.apple.mail' })"
-            ".then(() => resolve('reached'), (error) => resolve(error.code)), 100));"
-            # Without this the completion value is the promise, which the call awaits.
-            " null"
+            "globalThis.fired = false; setTimeout(() => { fired = true;"
+            " computer.app({ bundleId: 'com.apple.mail' }) }, 100); null"
         )
-        # The timer fires while this later call is executing.
-        later = await h.js("await new Promise((r) => setTimeout(r, 300)); await late")
+        # The timer is due while this later call is executing.
+        later = await h.js("await new Promise((r) => setTimeout(r, 300)); fired")
         return later, h.driver.calls
 
     later, calls = _run(scenario)
-    assert later["result"] == "js_call_inactive"
+    assert later["result"] is False
+    assert calls == []
+
+
+def test_cancelled_continuation_cannot_overwrite_a_later_binding() -> None:
+    async def scenario(h: _Harness) -> tuple[dict, dict]:
+        cancelled = await h.js(
+            "var x = 0; await new Promise((r) => setTimeout(r, 300)); x = 1",
+            timeout_ms=100,
+        )
+        await h.js("x = 2")
+        await asyncio.sleep(0.5)
+        return cancelled, await h.js("x")
+
+    cancelled, after = _run(scenario)
+    assert cancelled["error"]["code"] == "js_timeout"
+    assert after["result"] == 2 and after["kernel_fresh"] is False
+
+
+def test_sdk_request_of_a_cancelled_call_never_settles() -> None:
+    async def scenario(h: _Harness) -> tuple[dict, dict]:
+        h.driver.delay = 0.4
+        cancelled = await h.js(
+            "globalThis.outcome = 'pending'; await computer.app({ bundleId: 'com.apple.mail' })"
+            ".then(() => { outcome = 'resolved' }, (error) => { outcome = error.code })",
+            timeout_ms=150,
+        )
+        await asyncio.sleep(0.8)
+        return cancelled, await h.js("outcome")
+
+    cancelled, after = _run(scenario)
+    assert cancelled["error"]["code"] == "js_timeout"
+    assert after["result"] == "pending"
+
+
+def test_a_continuation_resumed_by_a_later_call_cannot_reach_the_controller() -> None:
+    """Known-by-design residual: the model can wake a cancelled continuation
+    itself, which may change bindings but never reaches the Controller."""
+
+    async def scenario(h: _Harness) -> tuple[dict, list]:
+        await h.js(
+            "globalThis.after = 'waiting'; await new Promise((r) => { globalThis.release = r });"
+            " after = 'resumed'; await computer.app({ bundleId: 'com.apple.mail' })",
+            timeout_ms=150,
+        )
+        later = await h.js("release(); await new Promise((r) => setTimeout(r, 200)); after")
+        return later, h.driver.calls
+
+    later, calls = _run(scenario)
+    assert later["result"] == "resumed"
     assert calls == []
 
 

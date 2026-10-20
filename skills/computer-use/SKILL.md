@@ -98,8 +98,13 @@ minutes), archived Sessions, Computer Use turning off, and service restarts
 also discard the kernel. Whenever a call reports `kernel_fresh: true`, earlier
 bindings are gone; rebuild them instead of assuming they exist.
 
-Every call is bound to the current Turn. Timers or promises left over from an
-earlier call get `js_call_inactive` and never reach the desktop. Handles and
+Every call is bound to the current Turn. Timers and Computer Use requests
+belong to the call that started them: once that call ends, completes, times
+out, or loses its Turn, its timers never fire and its requests never settle, so
+leftover code stays frozen. Code you wire to wake it yourself (for example
+`fetch`, or a promise a later call resolves) can still change bindings but can
+never reach the Controller or the desktop. Run `vibe computer js-reset` when you
+need a guaranteed clean state. Handles and
 element references stored in variables can go stale between calls (driver idle
 TTL, or a person changing the app); that surfaces as the usual stale-handle or
 `observe_first` error, so observe again instead of retrying blindly.

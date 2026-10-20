@@ -51,6 +51,38 @@ Object.defineProperty(globalThis, captureKey, {
 Object.defineProperty(globalThis, "computer", { value: computer, enumerable: true });
 Object.defineProperty(globalThis, "avibe", { value: avibe, enumerable: true });
 
+// Timers belong to the call that scheduled them. Once that call ends (it
+// completed, timed out, or its Turn ended) its callbacks are dropped, so a
+// cancelled continuation waiting on a timer never resumes to touch bindings.
+function owned(callback, onDropped) {
+  const owner = runtime.kernelCalls.getStore();
+  if (typeof callback !== "function" || owner === undefined) {
+    return callback;
+  }
+  return function ownedCallback(...args) {
+    if (owner.active === true) {
+      return Reflect.apply(callback, this, args);
+    }
+    onDropped?.();
+    return undefined;
+  };
+}
+for (const name of ["setTimeout", "setImmediate", "queueMicrotask"]) {
+  const original = globalThis[name];
+  globalThis[name] = function (callback, ...rest) {
+    return Reflect.apply(original, this, [owned(callback), ...rest]);
+  };
+}
+const originalSetInterval = globalThis.setInterval;
+globalThis.setInterval = function (callback, ...rest) {
+  let handle;
+  handle = Reflect.apply(originalSetInterval, this, [
+    owned(callback, () => clearInterval(handle)),
+    ...rest,
+  ]);
+  return handle;
+};
+
 function send(message) {
   let line;
   try {

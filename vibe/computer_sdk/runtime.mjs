@@ -53,6 +53,12 @@ function activeKernelCall() {
   return call && call.active === true ? call : undefined;
 }
 
+// A request owned by a call that has ended never settles: neither a result nor
+// an error can resume that call's code after the next call has started.
+export function frozenKernelCall(call = kernelCalls.getStore()) {
+  return state?.kernel === true && call !== undefined && call.active !== true;
+}
+
 function progress() {
   if (!state?.kernel) {
     return scriptProgress;
@@ -360,6 +366,9 @@ function requestBinding() {
 }
 
 async function postJson(requestPath, requestPayload, requestOptions = {}) {
+  if (frozenKernelCall()) {
+    return new Promise(() => {});
+  }
   const binding = requestBinding();
   const payload = {
     connection_token: binding.connectionToken,
@@ -403,7 +412,7 @@ async function postJson(requestPath, requestPayload, requestOptions = {}) {
     let timer;
     const requestState = { sent: false };
     const settle = (callback, value) => {
-      if (settled) {
+      if (settled || frozenKernelCall(binding)) {
         return;
       }
       settled = true;
