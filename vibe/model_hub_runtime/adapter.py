@@ -184,9 +184,11 @@ def _search_check_matches(body: object, rule: Mapping[str, Any]) -> bool:
 
 
 def _search_limit_outcome(body: object, rule: Mapping[str, Any]) -> Literal["pass", "limit", "unknown"]:
-    """Classify a complete Tavily quota report without treating absent data as proof."""
+    """Classify complete Tavily usage/limit pairs; the account section is optional."""
     pairs = rule.get("pairs")
     if not isinstance(pairs, list) or not isinstance(body, Mapping):
+        return "unknown"
+    if any(name in body and not isinstance(body[name], Mapping) for name in ("key", "account")):
         return "unknown"
     missing = object()
     values: dict[str, tuple[float, float | None] | None] = {
@@ -257,7 +259,9 @@ def _search_limit_outcome(body: object, rule: Mapping[str, Any]) -> Literal["pas
     if key is not None and key[1] is not None and key[0] >= key[1]:
         return "limit"
     if plan is None and paygo is None:
-        return "unknown"
+        # A valid key pair with headroom authenticates the key even when
+        # account usage is absent; the first search confirms payment.
+        return "pass"
     key_has_headroom = key is None or key[1] is None or key[0] < key[1]
     account_has_headroom = (
         (plan is not None and plan[0] < plan[1])

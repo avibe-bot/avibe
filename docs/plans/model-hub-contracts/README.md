@@ -19,6 +19,12 @@ Catalog metadata verified on **2026-10-20**:
   invented `content_results_max`. The adapter's hard 8 MiB response cap remains;
   an over-cap body is unreadable, not a guarantee that every legitimate page fits.
   S2 applies the design's billing, cooldown and failover rules to that outcome.
+- Tavily's usage response may omit account pairs. A valid key pair with headroom
+  (including `limit: null`) then passes the free credential check; it proves key
+  authentication, while the first search confirms payment. A key at its limit
+  still reports `limit`; malformed or half-present pairs report `unknown`.
+- The query bound is 128 characters for DeepSeek only. Tavily and Exa document no
+  query-length maximum, so their catalog `query_max_chars` remains null.
 
 It builds on v16 (2026-10-16): two non-self-healing Source causes,
 `plan_excludes_product` (`models.source.needs_action.plan_excludes_product`), for a plan that does not include the

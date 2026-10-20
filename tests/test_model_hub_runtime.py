@@ -2527,15 +2527,18 @@ def test_tavily_free_check_classifies_reported_usage_limit(monkeypatch):
 @pytest.mark.parametrize(
     ("body", "expected"),
     [
-        ({"key": {"usage": 1, "limit": 10}}, "unknown"),
-        ({"key": {"usage": 1, "limit": None}}, "unknown"),
+        ({"key": {"usage": 1, "limit": 10}}, "pass"),
+        ({"key": {"usage": 1, "limit": None}}, "pass"),
+        ({"key": {"usage": 1, "limit": 10}, "account": {}}, "pass"),
+        ({"key": {"usage": 10, "limit": 10}}, "limit"),
+        ({"key": {"usage": 11, "limit": 10}}, "limit"),
         ({"key": {"usage": 1, "limit": None}, "account": {"plan_usage": 1, "plan_limit": 10}}, "pass"),
         ({"account": {"plan_usage": 1, "plan_limit": 10}}, "pass"),
         ({"account": {"plan_usage": 10, "plan_limit": 10, "paygo_usage": 1, "paygo_limit": 10}}, "pass"),
         ({"key": {"usage": 1, "limit": 10}, "account": {"plan_usage": 10, "plan_limit": 10}}, "limit"),
     ],
 )
-def test_tavily_free_check_requires_account_headroom(monkeypatch, body, expected):
+def test_tavily_free_check_accepts_valid_pairs_with_optional_account(monkeypatch, body, expected):
     adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=object())  # type: ignore[arg-type]
     service = search_service("tavily", "search")
     assert service is not None
@@ -2555,7 +2558,22 @@ def test_tavily_free_check_requires_account_headroom(monkeypatch, body, expected
 @pytest.mark.parametrize(
     "body",
     [
+        {},
+        {"key": {}, "account": {}},
         {"key": {"usage": "10", "limit": 20}},
+        {"key": {"usage": 1}},
+        {"key": {"limit": 10}},
+        {"key": {"limit": None}},
+        {"key": {"usage": True, "limit": 10}},
+        {"key": {"usage": 1, "limit": False}},
+        {"key": {"usage": float("nan"), "limit": 10}},
+        {"key": {"usage": 1, "limit": float("inf")}},
+        {"key": {"usage": 1, "limit": 10}, "account": {"plan_usage": 1}},
+        {"key": {"usage": 1, "limit": None}, "account": {"paygo_limit": 10}},
+        {"key": {"usage": 1, "limit": 10}, "account": None},
+        {"key": {"usage": 1, "limit": 10}, "account": []},
+        {"key": {"usage": 1, "limit": 10}, "account": "invalid"},
+        {"key": None, "account": {"plan_usage": 1, "plan_limit": 10}},
         {"account": {"plan_usage": 10, "plan_limit": 20, "paygo_usage": "10"}},
     ],
 )
@@ -2786,6 +2804,13 @@ def test_vendor_catalog_keeps_absent_or_null_search_metadata_valid(has_null) -> 
     schema = json.loads(Path("vibe/data/api_key_vendors.schema.json").read_text(encoding="utf-8"))
     Draft7Validator(schema).validate([row])
     assert _validate_search_catalog(row.get("search"), protocol=row["protocol"]) is None
+
+
+def test_search_query_limits_use_only_documented_vendor_bounds() -> None:
+    assert {
+        entry.id: entry.search["limits"]["query_max_chars"]
+        for entry in api_key_vendor_catalog() if entry.search is not None
+    } == {"deepseek": 128, "tavily": None, "exa": None}
 
 
 def test_only_deepseek_search_auto_enrolls_model_sources() -> None:
