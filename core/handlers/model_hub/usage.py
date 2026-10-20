@@ -2492,6 +2492,21 @@ class ServiceUsageCall:
         )
 
 
+def _flag_count(flag: object) -> Optional[int]:
+    """One request's count for a billing flag; None for an answer that is not a flag.
+
+    Anything but a bool, an int included, is refused rather than coerced: `int()`
+    would read 2 as two requests and fail on text. A refused count keeps the call
+    out of the fold, and the ledger repairs it into a floor that keeps the request.
+    """
+
+    if flag is True:
+        return 1
+    if flag is False:
+        return 0
+    return None
+
+
 def _service_call_is_foldable(call: ServiceUsageCall) -> bool:
     """Only fold service calls whose own counters already satisfy the relations.
 
@@ -2660,8 +2675,8 @@ class UsageWriter:
                 source_id=source_id,
                 service_id=service_id,
                 at=at,
-                billable_requests=int(billable),
-                uncertain_requests=int(uncertain),
+                billable_requests=_flag_count(billable),
+                uncertain_requests=_flag_count(uncertain),
                 reported_requests=int(reported_usd is not None),
                 reported_usd=reported_usd if reported_usd is not None else 0.0,
             )

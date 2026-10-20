@@ -501,7 +501,15 @@ def test_the_writer_folds_service_requests_exactly_and_apart_from_a_same_named_m
     ({"billable": True, "reported_usd": 1.5}, (2, 1, 0.25)),
     ({"billable": False, "reported_usd": 0.5}, (1, 1, 0.25)),
     ({"billable": True, "reported_usd": -0.1}, (2, 1, 0.25)),
-    ({"billable": True, "reported_usd": "bad"}, (2, 1, 0.25)),
+    ({"billable": True, "reported_usd": True}, (2, 1, 0.25)),
+    ({"billable": True, "reported_usd": float("nan")}, (2, 1, 0.25)),
+    ({"billable": True, "reported_usd": float("inf")}, (2, 1, 0.25)),
+    ({"billable": True, "uncertain": True}, (2, 1, 0.25)),
+    ({"billable": 1, "reported_usd": 0.5}, (1, 1, 0.25)),
+    ({"billable": 1.5}, (1, 1, 0.25)),
+    ({"billable": "yes"}, (1, 1, 0.25)),
+    ({"billable": None}, (1, 1, 0.25)),
+    ({"billable": True, "uncertain": "x"}, (2, 1, 0.25)),
 ])
 def test_writer_repairs_each_request_before_a_fold_can_hide_its_corruption(tmp_path, first, expected):
     """Queue folding must equal separate writes: valid later calls cannot legitimize an invalid earlier report."""
