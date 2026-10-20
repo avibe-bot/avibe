@@ -21,3 +21,18 @@ observations:
     required_updates:
       - update the Claude auth-failure detector
       - keep a regression test in the runtime-specific suite
+  - id: OBS-AUTH-003
+    source: manual_regression
+    related_scenarios:
+      - AUTH-SETUP-912
+      - AUTH-SETUP-913
+    summary: A Claude CLI killed by the OOM killer or a service stop told the user to log in again.
+    previous_assumption: A Claude process failure whose diagnostic mentions the login is an auth failure.
+    observed_behavior: >-
+      With an API key or another auth source beside a claude.ai login, the CLI writes a
+      connectors notice naming that login to stderr at every start. The stderr tail joins
+      every failure diagnostic, so exit -9 and 143 matched the auth classifier, posted the
+      re-login prompt and retired the runtime as an auth failure while the login was fine.
+    required_updates:
+      - let a signal exit outrank auth words in the diagnostic
+      - keep the prompt for an auth failure the CLI reports itself

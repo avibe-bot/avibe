@@ -4442,6 +4442,16 @@ scenarios:
     # owner. The detached record takes that phase's text, even when the Result body
     # is empty, so it never replays later; text another phase set is untouched.
     test: tests/test_claude_result_provenance.py::test_injected_turn_result_retires_its_unbuffered_assistant_text
+  - id: HFR-489
+    name: an idle Claude runtime that dies posts nothing to its conversation
+    status: covered
+    kind: failure
+    layer: contract
+    backend: claude
+    # Its last Turn already settled and no agent-initiated Turn holds the FIFO, so
+    # nobody waits on it: the runtime retires quietly, as an idle EOF does, with no
+    # notice, re-login prompt, Turn settlement or Model Hub failure record.
+    test: tests/test_claude_agent_sessions.py::ClaudeRuntimeFailureAuthClassificationTests::test_idle_runtime_death_posts_nothing_to_its_conversation
 manual_evidence:
   - local Incus backend process death after prompt acceptance
   - local Incus controller restart with persisted queued successor

@@ -78,6 +78,22 @@ def get_claude_client_returncode(client: object | None) -> int | None:
     return _process_returncode(get_claude_client_process(client))
 
 
+def claude_process_exit_signal(returncode: int | None) -> int | None:
+    """The signal that ended a Claude CLI, or None when it exited on its own.
+
+    Python reports a process a signal killed as ``-N``. A CLI that catches the
+    signal and exits itself follows the shell convention ``128 + N``, which is
+    how the Claude CLI ends on SIGTERM (exit code 143).
+    """
+    if returncode is None or isinstance(returncode, bool):
+        return None
+    if returncode < 0:
+        return -returncode
+    if 128 < returncode < 128 + signal.NSIG:
+        return returncode - 128
+    return None
+
+
 def claude_process_exit_reason(returncode: int) -> str:
     """Format a subprocess exit code for logs and user-facing diagnostics."""
     if returncode < 0:

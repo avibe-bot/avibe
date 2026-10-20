@@ -337,3 +337,13 @@ observations:
       Vault expiry. Runtime restart sanitization alone cannot supply the binding;
       command execution must replace provenance from its own definition, preserving
       remote authority without borrowing the creator's transient proof.
+  - id: HFR-OBS-028
+    date: 2026-10-20
+    source: local Incus regression after an OOM kill and a service restart
+    result: confirmed
+    detail: >-
+      A receiver failure posted its notice whether or not a Turn was in flight. When the
+      OOM killer ended many idle Claude runtimes at once, each conversation whose last Turn
+      had already settled got a failure notice, a Lark channel included. The EOF path
+      already retired an idle runtime quietly; HFR-489 holds the receiver-error path to
+      the same rule, keyed on the Claude FIFO that every in-flight Turn occupies.
