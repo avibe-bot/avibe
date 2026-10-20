@@ -660,9 +660,9 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 | **S1b** Settings and Tools read | foundation | the existing Tools tab rendering a `kind: "service"` candidate as a plain service row (name and order, no model controls) until S4 replaces it; `prefer_native`, `services` (the patch semantics and load-time clamping) and `executor_order_kinds` (loaded, written with each order save, and kept across a restart); the Tools read (`executor_candidates` with `kind`, `service_vendors`, `trial_pending`) and PUT; their v17 entries | S1a |
 | **S2** Chain and records | gateway | candidates, automatic order and the saved-order placement rule, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1a, S1b, S3 |
 | **S3** Model text | Vibey | C-1's optional `HostedSource.content` and the model-facing text that renders it, with its bounds; the card's executor label (read from `attempts[]` when present) | S1a's open v17 event |
-| **S4** Tools, dialog, Sources | UI | §6 with en and zh copy | S1b's read; S2 (the add dialog and service rows land with or after S2) |
-| **S5** Frames | design | §6 frames in `design.pen` through Pencil | — |
-| **S6** Public docs | docs | Models → Tools: services, order, defaults, privacy and cost, in English and Chinese | S4 |
+| **S4** Tools, dialog, Sources | UI | §6 with en and zh copy | S1b's read; S2 (the add dialog and service rows land with or after S2); S5's frames |
+| **S5** Frames | design | §6 frames in `design.pen` through Pencil (done: avibe-docs#73) | — |
+| **S6** Public docs | docs | Models → Tools: services, order, defaults, privacy and cost, in English and Chinese. The disclosure part (an official DeepSeek Source joins the search order automatically, which data goes to each service, what it costs, and how to turn it off) publishes no later than the release that ships S2; the UI walkthrough follows S4 | S2 for the disclosure, S4 for the walkthrough |
 
 The version event follows the v15 precedent in `model-hub-contracts/README.md`: S1a opens v17 and publishes the
 Source side, and S1b, S2 and S3 edit the same v17 section before it ships, with no second bump. Because release
@@ -670,8 +670,10 @@ candidates are cut from the default branch at any time, every lane is safe on it
 before S2, a `search` Source is never requested and never affects model routing, discovery or engine config, and
 the shapes S1a and S1b write are final, so later lanes read them without migration. S3 lands before or with S2: the chain
 never requests page text (billed for Exa) that the model-facing text cannot yet show, since S3 reads an optional
-field that can exist before any producer. No user-facing surface offers a
-service before the gateway can run it: the add dialog and service rows (S4) land with or after S2, so before then
+field that can exist before any producer. No release turns on a new third-party data flow before
+it is disclosed: S2's release carries S6's disclosure and a release note naming DeepSeek's automatic enrolment and
+how to turn it off (the `services.<id>.enabled` switch, available through S1b's PUT). No user-facing surface
+offers a service before the gateway can run it: the add dialog and service rows (S4) land with or after S2, so before then
 a `search` Source can only be created through the API.
 
 ## 10. Acceptance properties
