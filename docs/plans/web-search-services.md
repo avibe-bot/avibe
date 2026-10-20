@@ -127,7 +127,7 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
 | --- | --- |
 | `prefer_native` | boolean; absent means `true` (decision 3) |
 | `service_order` | the automatic order of tool-only `search` Sources: the server appends a Source's id when it is created and drops it when the Source is removed; the user never edits it directly (a reorder saves `executor_order`). Ids that no longer name a Source are skipped. |
-| `executor_order_kinds` | written by the server with every `executor_order` save: each named Source id mapped to `service` or `model`, its role at that save. Absent (a released order) means every entry was saved as `model`; an id the order does not name is ignored. The client never writes it. |
+| `executor_order_kinds` | written by the server with every `executor_order` save: each named Source id mapped to `service` or `model`, its role at that save. Absent (a released order) means every entry was saved as `model`; an id the order does not name is ignored. An id the order names but that names no Source at the save (a stale client's removed Source) gets no entry and is skipped at read, as `executor_order` already skips it; an entry with no kind is read as `model`. The client never writes it. |
 | `services` | per search-capable Source: `results` (1 to the vendor's maximum, default 5), `content` (page text, default `false`, only where the vendor returns page text) and `enabled` (default `true`; `false` takes the Source out of the search order without removing it, which is how a DeepSeek Source keeps its models but stops searching). Absent means defaults. An entry for a Source that no longer exists is ignored. The catalog limits are enforced on write; on load a saved value the current catalog no longer allows is read as the nearest allowed one (`results` clamped to the maximum, `content: true` read as `false` where the vendor no longer returns page text) and kept as saved until the next write, so a catalog change never fails loading. |
 
 - `executor_order` keeps its rule (hosted tools §3.3) and now lists search-capable Sources beside model executors.
@@ -347,7 +347,8 @@ Hosted tools §6 holds, with these changes:
   status keeps it: a received non-200 follows its outcome row (health, cooldown, $0), and a received 200 is billed
   by its vendor's rule (Tavily and Exa: the request at list price, with the page part a lower bound when it
   applies; DeepSeek: billing unknown, since it depends on a non-empty `results` array). The catalog row's declared unbilled
-  outcomes apply before the fallback below (a DeepSeek timeout is $0 whenever it happens). Only another failure
+  outcomes apply before the fallback below (a DeepSeek timeout before any status arrives is $0; once a 200 status arrived, the received-200 rule above
+  applies instead). Only another failure
   after sending and before any status (a read timeout, a lost connection, a stop) may still have been billed without a
   known outcome (a stop before sending costs $0), so it is handled like an unreadable 200 whose billing is
   unknown: no cost, `uncertain_requests` in the ledger, and the lower-bound flag.
