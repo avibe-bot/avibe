@@ -281,7 +281,8 @@ Hosted tools §6 holds, with these changes:
   removing the Source also clears its cooldowns and retires any armed or reserved re-enable trial, so a trial authorized for the old key is
   never spent on the new one.
 - **"重新启用" advances the Source's settlement generation** without interrupting anything, as an attempt start
-  does. A search that was already in flight when the user pressed it cannot put the Source back in `needs_action`;
+  does, and clears the Source's service cooldown (advancing its generation), so a check or trial is never skipped
+  as `cooling` behind a deadline an earlier concurrent failure installed. A search that was already in flight when the user pressed it cannot put the Source back in `needs_action`;
   only a search started after the action can.
 - A search service writes no hosted-tool refusal evidence: its failures are Source health, not tool support.
 - A completed attempt writes positive evidence with `mode: "service"`, keyed by (Source, service id, `web_search`),
@@ -567,7 +568,9 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 - `source.schema.json` and `source-create.schema.json`: `protocol: "search"` and its combination rule (§3.1).
 - The protocol vocabulary's authorities: `model-hub-contracts/README.md` (the "exactly" list) and
   `adapter-interface.py`, which splits it in two. `MODEL_PROTOCOLS` keeps the four invocable wire protocols that
-  observation, probes, discovery and the hop schemas (`hop-resolution`, `served-hop`, `hop-origin`) use, unchanged.
+  observation, probes, discovery, the hop schemas (`hop-resolution`, `served-hop`, `hop-origin`) and
+  `provider-overlay.schema.json`'s `hosted_tools.propertyNames` (which today references the Source protocol enum
+  and moves to the four-value model vocabulary) use, unchanged.
   `SOURCE_PROTOCOLS` is `MODEL_PROTOCOLS` plus `search`, used only where a Source is stored or created. The adapter's
   search and free-check operations are also added to `adapter-interface.py`. The
   structure guards that check them are updated in the same event.
@@ -632,9 +635,17 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 | **S1** Catalog, Sources, settings | foundation | search vendors in the catalog; `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the create and replace branch with free checks; `prefer_native`, `services`, `service_order` and `executor_order_kinds` (loaded, written with each order save, and kept across a restart); the adapter's search call and free-check operation with custody and transport rules; the Tools read and PUT; the version event | — |
 | **S2** Chain and records | gateway | candidates, automatic order and the saved-order placement rule, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1 |
 | **S3** Model text | Vibey | `content` in the model-facing text and its bounds; the card's executor label | S2's record |
-| **S4** Tools, dialog, Sources | UI | §6 with en and zh copy | S1's read; S2 for live states |
+| **S4** Tools, dialog, Sources | UI | §6 with en and zh copy | S1's read; S2 (the add dialog and service rows land with or after S2) |
 | **S5** Frames | design | §6 frames in `design.pen` through Pencil | — |
 | **S6** Public docs | docs | Models → Tools: services, order, defaults, privacy and cost, in English and Chinese | S4 |
+
+The version event follows the v15 precedent in `model-hub-contracts/README.md`: S1 opens v17 and publishes the
+Source side, and S1b, S2 and S3 edit the same v17 section before it ships, with no second bump. Because release
+candidates are cut from the default branch at any time, every lane is safe on its own until the event closes:
+before S2, a `search` Source is never requested and never affects model routing, discovery or engine config, and
+the shapes S1 writes are final, so later lanes read them without migration. No user-facing surface offers a
+service before the gateway can run it: the add dialog and service rows (S4) land with or after S2, so before then
+a `search` Source can only be created through the API.
 
 ## 10. Acceptance properties
 
@@ -648,8 +659,8 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 5. Invalid-key, balance and limit failures put the Source in `needs_action` and skip it until the key is replaced
    or a re-enable check or trial succeeds; transient failures change no state; an empty answer ends the chain.
 6. Each call that finishes yields one canonical record; a call the user stops writes none (the turn abort rule
-   stands, as for every hosted call), and only the usage ledger keeps its sent requests, a post-send stop as
-   uncertain. The card and the IM line name the service and, from `attempts[]`, say
+   stands, as for every hosted call), and only the usage ledger keeps its sent requests, by the §4.3 rules (a stop
+   before any status is uncertain; one after a received status keeps that status's accounting). The card and the IM line name the service and, from `attempts[]`, say
    which services failed or were blocked before it, and how to repair a blocked one.
 7. A `search` Source never appears as a model route candidate, in discovery, in a model probe or in engine config.
 8. A DeepSeek API-key Source on the official endpoint is a candidate with no extra setup; on a relay it is not.
@@ -666,20 +677,23 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 | Config | `protocol: "search"` accepted only in its combination; `prefer_native`, `services` and `executor_order_kinds` round-trip and default, and a mixed service/model order keeps its placement across a restart; a release-before loader ignores the new `hosted_tools` fields |
 | Custody | the adapter call attaches the key, refuses redirects and non-catalog hosts, caps the body, and returns no key material; nothing outside the adapter reads the key |
 | Chain | automatic and saved order, and the read-time placement of unnamed search-capable Sources before the first model executor (including one qualified by a catalog upgrade, with no config write) and a named entry whose role changed (a catalog upgrade, a retarget, a released order naming an official DeepSeek Source) re-placed through `executor_order_kinds`; service cooldown from `Retry-After` (a longer deadline is not shortened) and doubling backoff, scoped to (Source, service), with a DeepSeek model route unaffected, and not written by an attempt that started before a key replacement; the terminal reason for every mix of skips (a disabled Source decides it only when every candidate is disabled), with `record.attempts[]` present when nothing executed and a blocked model executor showing its own remedy; `services.<id>.enabled: false` takes a DeepSeek Source out of the order and keeps its models; query-length skip; each outcome row of §4.2; one deadline; metering, `failed_attempts` and `attempts`; DeepSeek official versus relay; settings changed mid-turn do not apply until the next turn; re-enable with and without a free check, a second press joining the in-flight check, only one request admitted while a re-enable trial is pending, and a restart before the trial leaves the Source blocked; a long cooldown is shown with `cooldown_until` and cleared by "立即重试"; a reported cost above the ceiling falls back to the list price; a Tavily `key.limit: null` is unlimited |
-| Usage | service rows add known costs to the totals without the lower-bound flag; only sent requests are metered; DeepSeek's empty results, non-200 responses, timeouts and failures before sending cost nothing, while an unreadable 200, or a lost connection or stop after sending (and a timeout for a vendor that does not declare it unbilled) records no cost, adds to `uncertain_requests` and sets the lower bound; a default Exa call is listed at the search price alone (highlights included); a tool-only Source appears only in `services[]` and validates against the closed schema; an Exa content call without a reported cost keeps its page surcharge across a restart; a non-200 attempt records $0, and so does a received non-200 whose body read then failed; a pre-send failure is a `failed` attempt with $0 and no metering; a superseded failure, from any fence or from a repair after it settled, shows no repair; the skip classification order; a service no longer in the catalog stays in `services[]` unpriced, with the lower-bound flag, and its saved Source still loads and is no candidate; `service_order` survives a reload and decides the automatic order; a reported cost survives a restart through the ledger; a price change revalues list-priced quantities under the new table date; a released ledger row without the new fields loads; an impossible counter set is repaired, orphaned pages or reported dollars included; a pre-send failure on the only service projects as that service with $0, and after a billable model attempt the total keeps that attempt's cost; a removed page-text price leaves old page quantities unpriced with the lower-bound flag; a saved `results` above a lowered maximum loads clamped |
+| Usage | service rows add known costs to the totals without the lower-bound flag; only sent requests are metered; DeepSeek's empty results, non-200 responses, timeouts before any status and failures before sending cost nothing; after sending, the pre-header and post-header cases differ: before any status, a lost connection, a stop, or a timeout for a vendor that does not declare it unbilled records no cost, adds to `uncertain_requests` and sets the lower bound, while after a received status a non-200 costs $0, a Tavily or Exa 200 is list-priced (its page part a lower bound) and a DeepSeek 200 (unreadable, timed out or stopped while reading) records no cost, adds to `uncertain_requests` and sets the lower bound; a default Exa call is listed at the search price alone (highlights included); a tool-only Source appears only in `services[]` and validates against the closed schema; an Exa content call without a reported cost keeps its page surcharge across a restart; a non-200 attempt records $0, and so does a received non-200 whose body read then failed; a pre-send failure is a `failed` attempt with $0 and no metering; a superseded failure, from any fence or from a repair after it settled, shows no repair; the skip classification order; a service no longer in the catalog stays in `services[]` unpriced, with the lower-bound flag, and its saved Source still loads and is no candidate; `service_order` survives a reload and decides the automatic order; a reported cost survives a restart through the ledger; a price change revalues list-priced quantities under the new table date; a released ledger row without the new fields loads; an impossible counter set is repaired, orphaned pages or reported dollars included; a pre-send failure on the only service projects as that service with $0, and after a billable model attempt the total keeps that attempt's cost; a removed page-text price leaves old page quantities unpriced with the lower-bound flag; a saved `results` above a lowered maximum loads clamped |
 | Mapping | one recorded response per vendor maps to the canonical record with bounds; an empty results array is `completed` and ends the chain; unreadable bodies; a released native `HostedSource` row longer than the new bounds still loads |
 | Hop facts | `prefer_native` off declares the function on a native-capable hop, and a native result in history replays in the synthetic form |
 | UI | the card states, add dialog, service detail, Sources rows, copy in both locales |
 
 ## 12. Known by design
 
-1. **Rolling back past this feature is not supported once it has been used.** Two things cross the boundary:
+1. **Rolling back past this feature is not supported once it has been used.** Three things cross the boundary:
    - adding a `search` Source, because a release before this feature rejects `protocol: "search"` and cannot load
      Model Hub's Sources;
    - any search chain with a search-capable candidate, including one through an auto-enrolled DeepSeek Source,
      whether or not that candidate was reached, because the persisted result
      carries C-1 values (`executor_origin` for a search API, `HostedSource.content`, `record.attempts`) that an
-     older release's strict reader rejects, so that Session no longer loads there.
+     older release's strict reader rejects, so that Session no longer loads there;
+   - any sent service request, which writes a service-shaped usage ledger row even when the call was stopped and
+     left no record. An older reader requires `model_id` and drops that row, so after a downgrade the Usage tab
+     loses that service usage; model usage is unaffected.
 
    Removing Sources does not repair a transcript. This matches the existing boundary for downgrades after an
    authorized write (`model-hub-upgrade-config-compatibility.md`); release notes say it.
