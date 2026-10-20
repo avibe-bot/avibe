@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
@@ -26,13 +27,44 @@ export const FAILURE_ENVELOPE_FIELDS = Object.freeze(
 
 let state;
 let agent;
-let currentStep = "script";
-let lastCompletedStep;
-let lastScreenshotPath;
-let lastOwnedScreenshotPath;
 let screenshotSequence = 0;
 let diagnosticTail = Buffer.alloc(0);
 let consoleDiagnosticsInstalled = false;
+const scriptProgress = newProgress();
+
+// A persistent kernel (``vibe computer js``) runs many calls in one process.
+// Each call's store carries its exact-Turn connection token, its own HTTP
+// agent, and its own diagnostics. Timers and promises created during a call
+// inherit that store, so once the call ends (``active`` becomes false) they
+// can no longer reach the Controller.
+export const kernelCalls = new AsyncLocalStorage();
+
+export function newProgress() {
+  return {
+    step: "script",
+    lastCompletedStep: undefined,
+    screenshotPath: undefined,
+    ownedScreenshotPath: undefined,
+  };
+}
+
+function activeKernelCall() {
+  const call = kernelCalls.getStore();
+  return call && call.active === true ? call : undefined;
+}
+
+// A request owned by a call that has ended never settles: neither a result nor
+// an error can resume that call's code after the next call has started.
+export function frozenKernelCall(call = kernelCalls.getStore()) {
+  return state?.kernel === true && call !== undefined && call.active !== true;
+}
+
+function progress() {
+  if (!state?.kernel) {
+    return scriptProgress;
+  }
+  return kernelCalls.getStore()?.progress ?? newProgress();
+}
 
 export class ControllerFault extends Error {
   constructor(code, message, params = {}, options = {}) {
@@ -76,6 +108,15 @@ function controllerFault(
   return new ControllerFault(code, message, params, {
     ...failureState,
   });
+}
+
+export function configureKernel(config) {
+  if (state !== undefined) {
+    throw new Error("computer SDK runtime is already configured");
+  }
+  validateEndpoint(config?.endpoint);
+  state = { endpoint: config.endpoint, kernel: true };
+  installConsoleDiagnostics();
 }
 
 export function configureRuntime(config) {
@@ -141,11 +182,12 @@ export async function sleepWithinDeadline(milliseconds) {
 }
 
 export async function runStep(label, operation) {
-  currentStep = label;
+  const current = progress();
+  current.step = label;
   persistRuntimeState();
   try {
     const result = await operation();
-    lastCompletedStep = label;
+    current.lastCompletedStep = label;
     return result;
   } catch (error) {
     if (error && typeof error === "object" && !error.step) {
@@ -153,7 +195,7 @@ export async function runStep(label, operation) {
     }
     throw error;
   } finally {
-    currentStep = "script";
+    current.step = "script";
     persistRuntimeState();
   }
 }
@@ -162,7 +204,6 @@ export async function callTool(tool, argumentsValue, options = {}) {
   const body = await postJson(
     "/internal/computer-script/request",
     {
-      connection_token: state.connectionToken,
       tool,
       arguments: argumentsValue,
       descriptor: options.descriptor ?? null,
@@ -209,7 +250,6 @@ export async function callScriptInteraction(operation, message) {
   let body;
   try {
     body = await postJson(`/internal/computer-script/${operation}`, {
-      connection_token: state.connectionToken,
       message,
     });
   } catch (error) {
@@ -274,7 +314,7 @@ function recordScreenshot(result) {
   try {
     screenshotSequence += 1;
     const target = path.join(
-      state.artifactDirectory,
+      activeKernelCall()?.artifactDirectory ?? state.artifactDirectory,
       `observation-${screenshotSequence}.png`,
     );
     fs.writeFileSync(target, Buffer.from(image.data, "base64"), { mode: 0o600 });
@@ -286,11 +326,19 @@ function recordScreenshot(result) {
 }
 
 function replaceDiagnosticScreenshot(target, options = {}) {
-  const previousOwned = lastOwnedScreenshotPath;
-  lastScreenshotPath = target;
-  lastOwnedScreenshotPath = options.owned === true ? target : undefined;
+  const current = progress();
+  const call = activeKernelCall();
+  current.screenshotPath = target;
+  if (call) {
+    // A kernel call reports every screenshot it produced; its directory is
+    // pruned by call, not by screenshot.
+    call.screenshots.push(target);
+    return;
+  }
+  const previousOwned = current.ownedScreenshotPath;
+  current.ownedScreenshotPath = options.owned === true ? target : undefined;
   persistRuntimeState();
-  if (previousOwned && previousOwned !== lastOwnedScreenshotPath) {
+  if (previousOwned && previousOwned !== current.ownedScreenshotPath) {
     try {
       fs.unlinkSync(previousOwned);
     } catch {
@@ -300,8 +348,32 @@ function replaceDiagnosticScreenshot(target, options = {}) {
   }
 }
 
-async function postJson(requestPath, payload, requestOptions = {}) {
+function requestBinding() {
   requireConfigured();
+  if (!state.kernel) {
+    return { connectionToken: state.connectionToken, agent };
+  }
+  const call = activeKernelCall();
+  if (!call) {
+    throw controllerFault(
+      "js_call_inactive",
+      "Computer Use requests are only allowed while a vibe computer js call is executing.",
+      {},
+      { controllerPayload: { dispatched: false } },
+    );
+  }
+  return call;
+}
+
+async function postJson(requestPath, requestPayload, requestOptions = {}) {
+  if (frozenKernelCall()) {
+    return new Promise(() => {});
+  }
+  const binding = requestBinding();
+  const payload = {
+    connection_token: binding.connectionToken,
+    ...requestPayload,
+  };
   const localTimeout =
     Number.isFinite(requestOptions.timeoutMs) && requestOptions.timeoutMs >= 0
       ? requestOptions.timeoutMs
@@ -324,7 +396,7 @@ async function postJson(requestPath, payload, requestOptions = {}) {
           path: requestPath,
           method: "POST",
           headers,
-          agent,
+          agent: binding.agent,
         }
       : {
           hostname: endpoint.host,
@@ -332,7 +404,7 @@ async function postJson(requestPath, payload, requestOptions = {}) {
           path: requestPath,
           method: "POST",
           headers,
-          agent,
+          agent: binding.agent,
         };
 
   return new Promise((resolve, reject) => {
@@ -340,7 +412,7 @@ async function postJson(requestPath, payload, requestOptions = {}) {
     let timer;
     const requestState = { sent: false };
     const settle = (callback, value) => {
-      if (settled) {
+      if (settled || frozenKernelCall(binding)) {
         return;
       }
       settled = true;
@@ -457,13 +529,7 @@ export async function closeScriptConnection() {
     return;
   }
   try {
-    await postJson(
-      "/internal/computer-script/close",
-      {
-        connection_token: state.connectionToken,
-      },
-      { timeoutMs: 500 },
-    );
+    await postJson("/internal/computer-script/close", {}, { timeoutMs: 500 });
   } finally {
     agent.destroy();
   }
@@ -492,6 +558,11 @@ function installConsoleDiagnostics() {
 function appendDiagnostic(args) {
   const line = args.map(formatDiagnosticValue).join(" ");
   const encoded = Buffer.from(`${line}\n`, "utf8");
+  if (state?.kernel) {
+    // Output from a finished call (or outside any call) belongs to no report.
+    activeKernelCall()?.appendConsole(encoded);
+    return;
+  }
   if (encoded.length >= DIAGNOSTIC_TAIL_MAX_BYTES) {
     diagnosticTail = Buffer.from(
       encoded.subarray(encoded.length - DIAGNOSTIC_TAIL_MAX_BYTES),
@@ -576,9 +647,9 @@ function persistRuntimeState() {
     writeCappedJsonFile(
       state.runtimeStatePath,
       {
-        step: currentStep || "script",
-        last_completed_step: lastCompletedStep ?? null,
-        screenshot_path: lastScreenshotPath ?? null,
+        step: scriptProgress.step || "script",
+        last_completed_step: scriptProgress.lastCompletedStep ?? null,
+        screenshot_path: scriptProgress.screenshotPath ?? null,
         diagnostics: diagnosticTail.toString("utf8"),
       },
       PROTOCOL_FILE_MAX_BYTES,
@@ -589,19 +660,20 @@ function persistRuntimeState() {
 }
 
 export function failureContext(error) {
+  const current = progress();
   return {
     step:
       error && typeof error === "object" && typeof error.step === "string"
         ? error.step
-        : currentStep || "script",
-    last_completed_step: lastCompletedStep ?? null,
+        : current.step || "script",
+    last_completed_step: current.lastCompletedStep ?? null,
     screenshot_path:
       error &&
       typeof error === "object" &&
       (typeof error.screenshot_path === "string" ||
         typeof error.screenshotPath === "string")
         ? error.screenshot_path || error.screenshotPath
-        : lastScreenshotPath,
+        : current.screenshotPath,
   };
 }
 
@@ -646,7 +718,7 @@ export function failureEnvelope(error, options = {}) {
 }
 
 function requireConfigured() {
-  if (!state || !agent) {
+  if (!state || (!state.kernel && !agent)) {
     throw new Error("computer SDK runtime is not configured");
   }
 }

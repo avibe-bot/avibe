@@ -38,6 +38,14 @@ OBSERVATION_TOOLS = frozenset(
 SCREENSHOT_TOOLS = frozenset({"get_window_state", "zoom"})
 
 
+# Upper bound on how long one ``vibe computer js`` call can stay admitted: the
+# Controller leases its exact-Turn connection for this long, and every path
+# (queue cap, per-call timeout, cancel grace, kernel start) settles inside it.
+# The CLI waits at least this long so it never gives up before the Controller.
+COMPUTER_JS_CONNECTION_LEASE_SECONDS = 3600.0
+COMPUTER_JS_CLIENT_MARGIN_SECONDS = 60.0
+
+
 class ComputerCliError(ValueError):
     """The CLI request cannot be translated into a driver call."""
 
@@ -194,6 +202,15 @@ _COMPUTER_ERROR_I18N_KEYS = {
     "invalid_computer_script_descriptor": "computer.cli.error.scriptInvalidDescriptor",
     "invalid_selector": "computer.cli.error.scriptInvalidSelector",
     "invalid_timeout": "computer.cli.error.scriptInvalidTimeout",
+    "invalid_computer_js_code": "computer.cli.error.jsCodeInvalid",
+    "invalid_computer_js_request": "computer.cli.error.requestRejected",
+    "computer_js_code_too_large": "computer.cli.error.jsCodeTooLarge",
+    "js_call_inactive": "computer.cli.error.jsCallInactive",
+    "js_kernel_error": "computer.cli.error.jsKernelError",
+    "js_kernel_busy": "computer.cli.error.jsKernelBusy",
+    "js_kernel_reset": "computer.cli.error.jsKernelReset",
+    "js_kernel_unavailable": "computer.cli.error.jsKernelUnavailable",
+    "js_timeout": "computer.cli.error.jsTimeout",
     "not_found": "computer.cli.error.scriptTargetNotFound",
     "observe_first": "computer.cli.error.observeFirst",
     "platform_unsupported": "computer.cli.error.platformUnsupported",

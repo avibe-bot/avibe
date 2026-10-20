@@ -267,6 +267,7 @@ class Controller:
         self.computer_use_server = None
         self.computer_script_sessions = None
         self.computer_script_interactions = None
+        self.computer_js_kernels = None
         self.runtime_ownership = RuntimeOwnershipProvider(
             self.session_turns._sqlite_engine()
         )
@@ -1704,6 +1705,9 @@ class Controller:
             raise workbench_sessions_service.ReservedSessionError(raw_session_id)
 
         async def retire_computer_use_session() -> None:
+            js_kernels = getattr(self, "computer_js_kernels", None)
+            if js_kernels is not None:
+                js_kernels.discard_session(raw_session_id)
             computer_server = getattr(self, "computer_use_server", None)
             retire_session = getattr(computer_server, "retire_session", None)
             if not callable(retire_session):
@@ -2584,6 +2588,10 @@ class Controller:
             self._internal_server_task = None
 
         async def _close_computer_use_server() -> None:
+            js_kernels = getattr(self, "computer_js_kernels", None)
+            self.computer_js_kernels = None
+            if js_kernels is not None:
+                js_kernels.close_all()
             script_interactions = getattr(
                 self,
                 "computer_script_interactions",

@@ -64,6 +64,7 @@ def _assert_members_and_metadata(members, metadata):
         "vibe/ui/dist/index.html",
         "vibe/computer_sdk/index.mjs",
         "vibe/computer_sdk/index.d.ts",
+        "vibe/computer_sdk/kernel.mjs",
         "vibe/computer_sdk/failure-envelope.json",
         "vibe/computer_sdk/loader.mjs",
         "vibe/computer_sdk/package.json",

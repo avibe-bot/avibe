@@ -484,6 +484,57 @@ def computer_script_close_sync(
     )
 
 
+def computer_js_client_timeout_seconds() -> float:
+    """How long the CLI waits for one js call: never less than the Controller lease."""
+
+    from core.computer_cli import (
+        COMPUTER_JS_CLIENT_MARGIN_SECONDS,
+        COMPUTER_JS_CONNECTION_LEASE_SECONDS,
+    )
+
+    return COMPUTER_JS_CONNECTION_LEASE_SECONDS + COMPUTER_JS_CLIENT_MARGIN_SECONDS
+
+
+def computer_js_eval_sync(
+    *,
+    caller_session_id: str,
+    code: str,
+    timeout_ms: int,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Run one call in the caller Session's persistent JavaScript kernel.
+
+    The Controller settles every admitted call inside its connection lease, so
+    the client waits for that lease plus a margin.
+    """
+
+    return _computer_script_post_sync(
+        _resolve_endpoint(socket_path),
+        "/internal/computer-js/eval",
+        {
+            "caller_session_id": caller_session_id,
+            "code": code,
+            "timeout_ms": timeout_ms,
+        },
+        timeout=computer_js_client_timeout_seconds(),
+    )
+
+
+def computer_js_reset_sync(
+    *,
+    caller_session_id: str,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Discard the caller Session's JavaScript kernel and its bindings."""
+
+    return _computer_script_post_sync(
+        _resolve_endpoint(socket_path),
+        "/internal/computer-js/reset",
+        {"caller_session_id": caller_session_id},
+        timeout=10.0,
+    )
+
+
 async def dispatch_async(
     payload: dict[str, Any],
     *,

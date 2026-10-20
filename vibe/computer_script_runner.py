@@ -344,7 +344,10 @@ def _retain_only_screenshot(
                 shutil.rmtree(candidate, ignore_errors=True)
 
 
-def _prune_retained_artifact_runs(parent: Path) -> None:
+def _prune_retained_artifact_runs(
+    parent: Path,
+    prefix: str = _ARTIFACT_DIRECTORY_PREFIX,
+) -> None:
     candidates: list[tuple[float, Path]] = []
     try:
         entries = list(parent.iterdir())
@@ -352,7 +355,7 @@ def _prune_retained_artifact_runs(parent: Path) -> None:
         return
     for candidate in entries:
         if (
-            not candidate.name.startswith(_ARTIFACT_DIRECTORY_PREFIX)
+            not candidate.name.startswith(prefix)
             or candidate.name.startswith(_SUPERVISOR_DIRECTORY_PREFIX)
             or not candidate.is_dir()
             or candidate.is_symlink()

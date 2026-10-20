@@ -724,6 +724,85 @@ def cmd_skill(args) -> int:
     return 1
 
 
+def _cmd_computer_js(args, caller_session_id: str, translate) -> int:
+    """Evaluate in, or reset, the caller Session's persistent JavaScript kernel."""
+
+    from core.computer_cli import translate_computer_error
+    from vibe.internal_client import (
+        InternalServerTimeout,
+        InternalServerUnavailable,
+        computer_js_eval_sync,
+        computer_js_reset_sync,
+    )
+
+    help_command = f"vibe computer {args.computer_command} --help"
+    try:
+        if args.computer_command == "js-reset":
+            response = computer_js_reset_sync(caller_session_id=caller_session_id)
+        else:
+            code = args.code
+            if code.startswith("@"):
+                source = Path(code[1:]).expanduser()
+                try:
+                    code = source.read_text(encoding="utf-8")
+                except (OSError, UnicodeError) as exc:
+                    raise TaskCliError(
+                        translate("computer.cli.error.jsCodeFile", path=str(source), error=str(exc)),
+                        code="computer_js_code_unreadable",
+                        help_command=help_command,
+                    ) from exc
+            if not 1 <= args.timeout_ms <= 300000:
+                raise TaskCliError(
+                    translate("computer.cli.error.jsTimeoutRange"),
+                    code="invalid_timeout",
+                    help_command=help_command,
+                )
+            response = computer_js_eval_sync(
+                caller_session_id=caller_session_id,
+                code=code,
+                timeout_ms=args.timeout_ms,
+            )
+    except InternalServerUnavailable as exc:
+        raise TaskCliError(
+            translate("computer.cli.error.serviceUnavailable", error=str(exc)),
+            code="controller_unavailable",
+            hint=translate("computer.cli.hint.serviceUnavailable"),
+        ) from exc
+    except InternalServerTimeout as exc:
+        raise TaskCliError(
+            translate("computer.cli.error.requestTimedOut", error=str(exc)),
+            code="computer_use_timeout",
+            hint=translate("computer.cli.hint.requestTimedOut"),
+        ) from exc
+
+    body = response.get("body")
+    if not isinstance(body, dict) or not isinstance(body.get("ok"), bool):
+        raise TaskCliError(
+            translate("computer.cli.error.invalidResponse"),
+            code="invalid_computer_use_response",
+        )
+    report = {key: value for key, value in body.items() if key not in {"ok", "error"}}
+    if body["ok"]:
+        kind = "computer_js_reset" if args.computer_command == "js-reset" else "computer_js"
+        print(json.dumps(_cli_payload(kind, **report), ensure_ascii=False, indent=2))
+        return 0
+    error = body.get("error")
+    if not isinstance(error, dict):
+        error = {"code": "invalid_computer_use_response", "params": {}}
+    code = str(error.get("code") or "computer_use_error")
+    message = translate_computer_error(
+        error,
+        translate=translate,
+        fallback=f"{error.get('name') or 'Error'}: {error.get('message') or code}",
+    )
+    raise TaskCliError(
+        translate("computer.cli.error.jsFailed", error=message),
+        code=code,
+        details={"error": error, **report},
+        help_command=help_command,
+    )
+
+
 def cmd_computer(args) -> int:
     """Run one Controller-owned Computer Use operation for the active Turn."""
 
@@ -784,6 +863,8 @@ def cmd_computer(args) -> int:
             ) from exc
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
+    if args.computer_command in {"js", "js-reset"}:
+        return _cmd_computer_js(args, caller_session_id, translate)
     if args.computer_command == "observe":
         command_path = ("observe", args.computer_observe_command)
     elif args.computer_command == "clipboard":
@@ -17535,7 +17616,7 @@ def build_parser():
     )
     computer_subparsers = computer_parser.add_subparsers(
         dest="computer_command",
-        metavar="{run,observe,zoom,click,type,key,hotkey,scroll,drag,set-value,clipboard,launch,force-quit}",
+        metavar="{run,js,js-reset,observe,zoom,click,type,key,hotkey,scroll,drag,set-value,clipboard,launch,force-quit}",
     )
     computer_subparsers.required = True
 
@@ -17560,6 +17641,34 @@ def build_parser():
         default=[],
         metavar="NAME=VALUE",
         help=i18n_t("computer.cli.help.scriptArg", computer_help_language),
+    )
+
+    computer_js_parser = computer_subparsers.add_parser(
+        "js",
+        help=i18n_t("computer.cli.help.js", computer_help_language),
+        description=i18n_t("computer.cli.help.jsDescription", computer_help_language),
+        error_help_command="vibe computer js --help",
+        error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
+        error_i18n_key="computer.cli.error.invalidArguments",
+    )
+    computer_js_parser.add_argument(
+        "--code",
+        required=True,
+        help=i18n_t("computer.cli.help.jsCode", computer_help_language),
+    )
+    computer_js_parser.add_argument(
+        "--timeout-ms",
+        type=int,
+        default=30000,
+        help=i18n_t("computer.cli.help.jsTimeout", computer_help_language),
+    )
+    computer_subparsers.add_parser(
+        "js-reset",
+        help=i18n_t("computer.cli.help.jsReset", computer_help_language),
+        description=i18n_t("computer.cli.help.jsReset", computer_help_language),
+        error_help_command="vibe computer js-reset --help",
+        error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
+        error_i18n_key="computer.cli.error.invalidArguments",
     )
 
     def _add_computer_options(command_parser) -> None:
@@ -19564,6 +19673,8 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("computer", "observe", "windows"): "member",
     ("computer", "observe", "window"): "member",
     ("computer", "run"): "member",
+    ("computer", "js"): "member",
+    ("computer", "js-reset"): "member",
     ("computer", "zoom"): "member",
     ("computer", "click"): "member",
     ("computer", "type"): "member",

@@ -226,6 +226,16 @@ def create_app(
     computer_script_sessions.add_invalidation_listener(
         computer_script_interactions.invalidate_token,
     )
+    from core.computer_js_kernels import MAX_CODE_BYTES, ComputerJsKernelManager
+
+    computer_js_kernels = getattr(controller, "computer_js_kernels", None)
+    if not isinstance(computer_js_kernels, ComputerJsKernelManager):
+        computer_js_kernels = ComputerJsKernelManager(computer_script_sessions)
+        controller.computer_js_kernels = computer_js_kernels
+    # A Turn that ends mid-call cancels that call; the kernel keeps its bindings.
+    computer_script_sessions.add_invalidation_listener(
+        computer_js_kernels.on_token_invalidated,
+    )
 
     # The turn registry (``session_id -> Turn``) is owned by the manager and tests
     # inspect it via ``app.state``. Flush intents live on each ``Turn`` (set by
@@ -1090,6 +1100,60 @@ def create_app(
             "ok": True,
             "closed": computer_script_sessions.close(connection_token),
         }
+
+    def _computer_js_request_error(code: str, status_code: int) -> JSONResponse:
+        from vibe.computer_script_runner import _failure_envelope
+
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "ok": False,
+                "error": _failure_envelope(
+                    name="ControllerError",
+                    code=code,
+                    message=code,
+                    params={"limit_bytes": MAX_CODE_BYTES} if status_code == 413 else {},
+                    step="script",
+                    last_completed_step=None,
+                    screenshot_path=None,
+                    ambiguous=False,
+                ),
+            },
+        )
+
+    @app.post("/internal/computer-js/eval")
+    async def _computer_js_eval(request: Request) -> Any:
+        try:
+            payload = await _bounded_json_object(
+                request,
+                limit=MAX_CODE_BYTES * 2 + 4096,
+            )
+        except _RequestBodyTooLarge:
+            return _computer_js_request_error("computer_js_code_too_large", 413)
+        caller_session_id = payload.get("caller_session_id")
+        if set(payload) != {
+            "caller_session_id",
+            "code",
+            "timeout_ms",
+        } or not isinstance(caller_session_id, str) or not caller_session_id.strip():
+            return _computer_js_request_error("invalid_computer_js_request", 400)
+        return await computer_js_kernels.evaluate(
+            caller_session_id.strip(),
+            payload.get("code"),
+            payload.get("timeout_ms"),
+        )
+
+    @app.post("/internal/computer-js/reset")
+    async def _computer_js_reset(request: Request) -> Any:
+        payload = await _safe_json(request)
+        caller_session_id = payload.get("caller_session_id")
+        if (
+            set(payload) != {"caller_session_id"}
+            or not isinstance(caller_session_id, str)
+            or not caller_session_id.strip()
+        ):
+            return _computer_js_request_error("invalid_computer_js_request", 400)
+        return computer_js_kernels.reset(caller_session_id.strip())
 
     @app.post("/internal/show-access/settings-read")
     async def _show_access_settings_read(request: Request) -> Any:

@@ -74,6 +74,41 @@ await draft.expect({ role: "textbox", label: "To" }).toHaveValue(to);
 await send.click();
 ```
 
+## Persistent JavaScript kernel
+
+Use `run` for a complete reusable flow saved as a file. Use `js` for
+step-by-step exploration that keeps variables between calls:
+
+```text
+vibe computer js --code 'const mail = await computer.app({ bundleId: "com.apple.mail" })'
+vibe computer js --code 'const inbox = await mail.waitFor({ role: "AXWindow", labelContains: "Inbox" }); inbox'
+vibe computer js --code @/tmp/next-step.js --timeout-ms 60000
+vibe computer js-reset
+```
+
+Each Avibe Session has one kernel with `computer` and `avibe` preloaded and
+top-level `await` supported. Top-level bindings persist until
+`vibe computer js-reset`, which discards them without closing any app. The JSON
+output adds `result`, a capped `console` tail, `screenshots`, and
+`kernel_fresh`. Each call has a 30-second default timeout (`--timeout-ms`, at
+most 300000); a timed-out call is cancelled and the kernel keeps its bindings.
+A call that does not settle after cancellation fails with `js_kernel_reset`:
+the kernel was killed and all bindings were discarded. Idle kernels (about 15
+minutes), archived Sessions, Computer Use turning off, and service restarts
+also discard the kernel. Whenever a call reports `kernel_fresh: true`, earlier
+bindings are gone; rebuild them instead of assuming they exist.
+
+Every call is bound to the current Turn. Timers and Computer Use requests
+belong to the call that started them: once that call ends, completes, times
+out, or loses its Turn, its timers never fire and its requests never settle, so
+leftover code stays frozen. Code you wire to wake it yourself (for example
+`fetch`, or a promise a later call resolves) can still change bindings but can
+never reach the Controller or the desktop. Run `vibe computer js-reset` when you
+need a guaranteed clean state. Handles and
+element references stored in variables can go stale between calls (driver idle
+TTL, or a person changing the app); that surfaces as the usual stale-handle or
+`observe_first` error, so observe again instead of retrying blindly.
+
 Every single-operation leaf accepts `--args-json OBJECT`, `--args-json @FILE`,
 repeatable `--arg NAME=VALUE`, and `--json`. The two screenshot operations also
 accept `--output PATH`; the CLI writes or confirms the caller-selected PNG and
