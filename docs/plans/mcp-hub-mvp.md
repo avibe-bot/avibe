@@ -31,7 +31,7 @@ Out of scope: OAuth, SSE (explicit `unsupported_transport_sse` error), project s
     commands.json          # generated flags and help
 ```
 
-- `definition.json` and `state.json` are the only authorities; nothing is duplicated into V2 config or another registry.
+- `definition.json` and `state.json` are the only authorities; nothing is duplicated into V2 config or another registry. Every file is written with the existing `config/atomic_io.py` `write_atomic`.
 - `commands.json` is declarative data interpreted by the shared `vibe mcp` runner, not code. Tool implementations stay on the server/executable.
 - Revisions are derived data: a revision whose `formatVersion` this release does not read is shown as "needs regeneration" (definition kept, nothing deleted) instead of being migrated. Invalid or future-format definition files disable that package with a warning; startup never fails and bad files are not overwritten.
 
@@ -178,8 +178,8 @@ Persisted `definition.json`:
 - Servers that lock a shared resource (e.g. Playwright's default persistent profile) need their own isolation flag in the provider config (`--isolated`); Avibe does not rewrite server argv.
 - **Schemas at call time:** the CLI parses and validates against the published revision only. The SDK may list tools on a new connection as its protocol handling requires; that never changes the published package.
 - **Calls:** the owner checks enabled state, connects or reuses, sends `tools/call` and returns the result with the revision used. Elicitation/sampling/roots are out of scope: the client's callbacks for them reject, and the resulting error is reported as `input_required_unsupported`, not as an unknown outcome. The owner fixes the revision at admission and validates arguments against it.
-- **Disable/remove:** blocks new calls and closes connections; in-flight work may finish or report unknown outcome.
-- **Event loop:** all MCP SDK sessions run on one dedicated runtime thread with its own event loop, owned by the Controller; the SDK's synchronous result validation therefore never blocks the Controller loop. Generation's serialization, hashing, artifact reads/writes and schema compilation also run off the Controller loop (worker thread), per the repo's controller-loop rules.
+- **Disable/remove/regenerate:** disable/remove block new calls; all three close the package's superseded idle connections at once (busy ones close when their call settles); in-flight work may finish or report unknown outcome.
+- **Event loop:** all MCP SDK sessions run on one dedicated runtime thread with its own event loop, owned by the Controller; the SDK's synchronous result validation therefore never blocks the Controller loop. All other MCP work — argument validation, generation, artifact I/O, result envelope serialization and sizing — also runs off the Controller loop; the Controller loop only hands IPC requests over, per the repo's controller-loop rules.
 
 Result envelope:
 
@@ -207,7 +207,7 @@ POST   /api/mcp/{name}/disable
 DELETE /api/mcp/{name}
 ```
 
-Native async FastAPI routes calling the owner over IPC. Management routes use the existing Web route authorization (`vibe/authorization.py`) at the same role as other config-changing routes, and forward the validated Web user context to the owner like existing config APIs do.
+Native async FastAPI routes calling the owner over IPC. Routes are classified in the existing Web route authorization (`vibe/authorization.py`): read routes (`GET /api/mcp`, `GET /api/mcp/{name}`, `GET /api/mcp/{name}/tools`) at Editor like Skills, management routes at the same role as other config-changing routes; and forward the validated Web user context to the owner like existing config APIs do.
 
 ## 9. Prior art
 
