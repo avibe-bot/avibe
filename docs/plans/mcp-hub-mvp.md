@@ -95,10 +95,10 @@ Exit codes (the JSON error `type` is authoritative; command-admission denials ke
 | 2 | syntax / argument validation |
 | 3 | package or artifact missing/invalid, or `package_changed` |
 | 4 | package disabled |
-| 5 | connection / unsupported transport |
+| 5 | connection / unsupported transport, or a server-side pre-dispatch rejection such as `HEADER_MISMATCH` |
 | 6 | tool not found or tool error |
 | 7 | timeout or cancelled before `tools/call` was sent |
-| 8 | any failure after `tools/call` was sent other than a returned tool error — timeout, cancel, disconnect, protocol/decoding or client-side output validation (unknown outcome; do not retry) |
+| 8 | any failure after `tools/call` was sent other than a returned tool error or a known pre-dispatch rejection — timeout, cancel, disconnect, protocol/decoding or client-side output validation (unknown outcome; do not retry) |
 | 9 | owner unavailable or at capacity |
 
 ### 4.2 Schema to flags
@@ -187,10 +187,10 @@ Persisted `definition.json`:
 - **Connections:** one client connection per (revision, caller session) for every transport — a stdio process, or an HTTP client holding its own `Mcp-Session-Id` (closed with the connection). This matches Claude Code and Codex (one client per session). Context-free calls are one-shot. Calls within one session are serialized on its connection. A connection whose call ends with an unknown outcome (exit 8) is closed, never reused.
 - **Limits** (constants): at most 8 stdio processes in total, including generation. At the cap, close the longest-idle process (no in-flight call) to make room; fail with exit 9 only if all are busy. Idle close 10 min; call timeout 120 s; generation 5 min. HTTP is not capped.
 - Servers that lock a shared resource (e.g. Playwright's default persistent profile) need their own isolation flag in the provider config (`--isolated`); Avibe does not rewrite server argv.
-- **Schemas at call time:** the CLI parses and validates against the published revision only. The runtime SDK client may run its own `tools/list` when the protocol needs it (e.g. `x-mcp-header` → `Mcp-Param-*` headers); that never changes the published package.
-- **Calls:** the owner checks enabled state, connects or reuses, sends `tools/call` and returns the result with the revision used. The client registers no elicitation/sampling/roots callbacks (out of scope); an input-required result is returned as `input_required_unsupported` (exit 6). If `current.json` changed between CLI parse and admission, it returns `package_changed`.
+- **Schemas at call time:** the CLI parses and validates against the published revision only. Each new runtime connection runs one ordinary `tools/list` through the SDK, which is how the SDK learns output schemas and `x-mcp-header` annotations; that list is never written back and never changes the published package.
+- **Calls:** the owner checks enabled state, connects or reuses, sends `tools/call` and returns the result with the revision used. Elicitation/sampling/roots are out of scope: the client's callbacks for them reject, and the resulting error is reported as `input_required_unsupported` (exit 6), not as an unknown outcome. If `current.json` changed between CLI parse and admission, it returns `package_changed`.
 - **Disable/remove:** blocks new calls and closes connections; in-flight work may finish or report unknown outcome.
-- **Event loop:** all MCP SDK sessions run on one dedicated runtime thread with its own event loop, owned by the Controller; the SDK's synchronous result validation therefore never blocks the Controller loop.
+- **Event loop:** all MCP SDK sessions run on one dedicated runtime thread with its own event loop, owned by the Controller; the SDK's synchronous result validation therefore never blocks the Controller loop. Generation's serialization, hashing, artifact reads/writes and schema compilation also run off the Controller loop (worker thread), per the repo's controller-loop rules.
 
 Result envelope:
 
@@ -199,7 +199,7 @@ Result envelope:
  "result": {"content": [], "isError": false}}
 ```
 
-Preserve typed content, `structuredContent`, `isError` and explicit null/false/empty values. Results above a fixed byte cap (set in C0; no shared IPC cap exists) are not returned: the call still completed, so the envelope reports `status: "ok"` with `resultOmitted: "too_large"` and exit 0, so Agents never retry a committed call.
+Preserve typed content, `structuredContent`, `isError` and explicit null/false/empty values. Results above a fixed byte cap (set in C0; no shared IPC cap exists) are not returned: the call still completed, so the envelope keeps `isError` and reports `resultOmitted: "too_large"` — `status: "ok"`/exit 0, or the normal tool-error status/exit 6 when `isError` is true — so Agents never retry a committed call.
 
 ## 8. UI / API
 
