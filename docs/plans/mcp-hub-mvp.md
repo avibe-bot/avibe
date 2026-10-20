@@ -10,7 +10,7 @@
 Add MCP Hub to the Skills page. A user pastes a provider `mcpServers` JSON block (or runs `vibe mcp add`), saves it, and generates a package. Every backend calls tools through `vibe mcp <server> <tool>`; no backend-native MCP config, no Skill loader.
 
 ```text
-paste / vibe mcp add → save definition → generate (connect, initialize, tools/list all pages) → publish static revision
+paste / vibe mcp add → save definition → generate (connect, SDK protocol negotiation, tools/list all pages) → publish static revision
 ```
 
 In scope: stdio and Streamable HTTP, tool discovery and calling, plaintext env/header configuration, generate/regenerate, static help/list, shared runtime, structured/multimodal results.
@@ -183,8 +183,8 @@ Persisted `definition.json`:
 
 - **Owner:** the Controller, over existing control IPC. UI and CLI hold no runtimes.
 - **Identity:** existing caller context (`core/caller_context.py`, `AVIBE_SESSION_ID`, …) as used by `vibe task/watch/agent`. No MCP-specific token.
-- **Permission:** instance-global. The local OS user has full rights. Management commands go through the same existing CLI command admission (role floor) as other config-changing `vibe` commands, so remote-context callers get exactly the permissions they have elsewhere. No MCP-specific policy.
-- **Connections:** one client connection per (revision, caller session) for every transport — a stdio process, or an HTTP client holding its own `Mcp-Session-Id` (closed with the connection). This matches Claude Code and Codex (one client per session). Context-free calls are one-shot. Calls within one session are serialized on its connection.
+- **Permission:** instance-global. The local OS user has full rights. Management commands go through the same existing CLI command admission (role floor) as other config-changing `vibe` commands; list/help and tool calls use the same floor as using Skills (Editor), matching who sees the prompt index. Remote-context callers thus get exactly the permissions they have elsewhere. No MCP-specific policy.
+- **Connections:** one client connection per (revision, caller session) for every transport — a stdio process, or an HTTP client holding its own `Mcp-Session-Id` (closed with the connection). This matches Claude Code and Codex (one client per session). Context-free calls are one-shot. Calls within one session are serialized on its connection. A connection whose call ends with an unknown outcome (exit 8) is closed, never reused.
 - **Limits** (constants): at most 8 stdio processes in total, including generation. At the cap, close the longest-idle process (no in-flight call) to make room; fail with exit 9 only if all are busy. Idle close 10 min; call timeout 120 s; generation 5 min. HTTP is not capped.
 - Servers that lock a shared resource (e.g. Playwright's default persistent profile) need their own isolation flag in the provider config (`--isolated`); Avibe does not rewrite server argv.
 - **Schemas at call time:** the CLI parses and validates against the published revision only. The runtime SDK client may run its own `tools/list` when the protocol needs it (e.g. `x-mcp-header` → `Mcp-Param-*` headers); that never changes the published package.
@@ -235,7 +235,7 @@ Acceptance:
 1. Page and `vibe mcp add` produce identical definitions; Claude-style syntax is parser-tested; add never connects; env/header values live only in owner-private `definition.json` and revision manifests, and are masked in UI/API and never printed by Avibe's own logs.
 2. Help/list work with the server and owner down; schema-to-flag contracts hold; injected prompt examples are parser-tested.
 3. Generation never publishes partial tool lists; readers never see mixed revisions; identical rebuilds keep the revision; initial generate enables, regenerate preserves state.
-4. Calls use `tools/call` only, against the admitted revision; process cap, idle close and timeouts hold; unknown outcomes are not retried.
+4. Tool execution uses `tools/call` against the admitted revision (SDK-required auxiliary requests such as runtime `tools/list` are allowed); unknown-outcome connections are closed; process cap, idle close and timeouts hold; unknown outcomes are not retried.
 5. Results keep structured/multimodal/error content; disabled packages reject calls; tests cannot touch real user state.
 
 ## 11. Next action
