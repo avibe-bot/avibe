@@ -223,7 +223,7 @@ Hosted tools §6 holds, with these changes:
   `disabled`, `blocked`, `cooling`, `query_too_long`, so `query_too_long` names only a Source a shorter query would
   reach. A candidate can be skipped without a request, for one of five reasons: `blocked` (its Source is in
   `needs_action` or in a persistent `error`, the states admission already suppresses), `cooling` (a service cooldown, §4.2, or, for a model Source with a search API, its existing Source-global
-  `cooldown` that admission already treats as non-runnable; the skip carries the deadline, `cooldown_until` or the
+  `cooldown` that admission already treats as non-runnable; the skip carries the later of the unexpired deadlines when both apply, since both must pass, `cooldown_until` or the
   Source's `retry_at`), `query_too_long` (the query exceeds what the service
   accepts: the catalog row's query limit, DeepSeek 128 characters and Tavily 400) or `unavailable` (the Source was removed, re-identified or refused by final
   admission after the turn froze its candidates, hosted tools §6) or `disabled` (a search-capable Source with
@@ -336,7 +336,9 @@ Hosted tools §6 holds, with these changes:
   the response reports its own cost as a finite non-negative number at the catalog's cost path (Exa:
   `costDollars.total`), no larger than the catalog's per-request ceiling (100 times the row's list price for the
   request; the bound the xAI tick parser applies for the same reason), the cost is that figure with
-  `basis: "reported"`. Any other value is ignored and the list price applies.
+  `basis: "reported"`, plus `estimate: true` when the catalog row says the vendor's figure is an estimate (Exa
+  documents `costDollars` as an estimated cost), which renders with "≈" like a list price while still counting
+  as a reported cost in Usage. Any other value is ignored and the list price applies.
   Otherwise it is the catalog's list price for the request plus its per-returned-page parts (Exa: $1 / 1k pages of
   `contents.text` when content is on; the always-requested highlights are included in the search price), with
   `basis: "list"`. The page count is the number of rows, among the first `results` rows of a readable array, that carry
@@ -542,7 +544,9 @@ states interactively.
 ### 6.2 Add a search service
 
 - A grid of `service_vendors[]`: name, one line, list price, free tier and facts. A vendor the user already has is
-  shown as "已添加"; DeepSeek, when an official-endpoint DeepSeek Source qualifies, as "已在搜索顺序中". A user whose
+  shown as "已添加"; DeepSeek, when an official-endpoint DeepSeek Source qualifies, as "已在搜索顺序中" while its effective
+  `services.<id>.enabled` is on, and as "已添加 · 未用于搜索" with a link to that Source's detail (where the switch is)
+  while it is off. A user whose
 only DeepSeek Source is a relay gets the create flow, which adds an official DeepSeek Source.
 - Choosing a tool-only vendor asks for the key. Choosing DeepSeek without a DeepSeek Source asks for a key and creates
   an ordinary DeepSeek Source (models and search), and says so.
@@ -637,7 +641,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   a longer value to the bound rather than rejecting the row, and a new optional field rejects no released row; the
   released `HostedSource` fields gain no new limits);
   `HostedRecord.attempts[]` with `source_id`, `label`, `kind`, `outcome`, `error_code`, `skipped`, `retry_at`, `needs_action`, `cost` and
-  `superseded`; `HostedCost.lower_bound` with its `core/hosted_activity` projection ("至少"), and a cost of exactly 0 rendered as
+  `superseded`; `HostedCost.lower_bound` with its `core/hosted_activity` projection ("至少") and `HostedCost.estimate` ("≈" on a reported figure), and a cost of exactly 0 rendered as
   "$0" without "≈" by that projection, `HostedToolRow` and the IM line, since a zero is never an estimate; and
   their reader and writer types, and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; and a
   service executor origin. `Protocol` and the assistant-message `Origin` stay unchanged (four model protocols); a
@@ -664,10 +668,10 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 | PR | Lane | Work | Depends on |
 | --- | --- | --- | --- |
 | **S1a** Catalog and Sources | foundation | search vendors in the catalog; the Source UI guards for a `search` Source (no model refresh, test or add-model controls; its row says "搜索服务"); `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the protocol vocabulary split; the create and replace branch with free checks; "重新启用" (`reenable_search_source`, its free check and the armed-trial state); `service_order` maintenance on create and remove; the adapter's search call and free-check operation with custody and transport rules; opening the v17 version event | — |
-| **S1b** Settings and Tools read | foundation | no service candidate in the read until S2 (S2 turns their listing on with the chain, so an intermediate release shows no row the gateway cannot run, and the existing Tools tab never meets a `kind: "service"` candidate); `prefer_native`, `services` (the patch semantics and load-time clamping) and `executor_order_kinds` (loaded, written with each order save, and kept across a restart); the Tools read (`executor_candidates` with `kind`, `service_vendors`, `trial_pending`) and PUT; their v17 entries | S1a |
-| **S2** Chain and records | gateway | candidates, automatic order and the saved-order placement rule, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1a, S1b, S3 |
+| **S1b** Settings and Tools read | foundation | no service candidate and no `service_vendors` in the read until S2 activates them; `prefer_native`, `services` (the patch semantics and load-time clamping) and `executor_order_kinds` (loaded, written with each order save, and kept across a restart); the Tools read (`executor_candidates` with `kind`, `service_vendors`, `trial_pending`) and PUT; their v17 entries | S1a |
+| **S2** Chain and records | gateway | candidates, automatic order and the saved-order placement rule, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection | S1a, S1b, S3, S4 |
 | **S3** Model text | Vibey | C-1's optional `HostedSource.content` and the model-facing text that renders it, with its bounds; the card's executor label (read from `attempts[]` when present) | S1a's open v17 event |
-| **S4** Tools, dialog, Sources | UI | §6 with en and zh copy | S1b's read; S2 (the add dialog and service rows land with or after S2); S5's frames |
+| **S4** Tools, dialog, Sources | UI | §6 with en and zh copy, built against the read shape with fixtures; it shows service rows and the add dialog's services only when the read lists them | S1b's read shape; S5's frames |
 | **S5** Frames | design | §6 frames in `design.pen` through Pencil (done: avibe-docs#73) | — |
 | **S6** Public docs | docs | Models → Tools: services, order, defaults, privacy and cost, in English and Chinese. The disclosure part (an official DeepSeek Source joins the search order automatically, which data goes to each service, what it costs, and how to turn it off) publishes no later than the release that ships S2; the UI walkthrough follows S4 | S2 for the disclosure, S4 for the walkthrough |
 
@@ -679,9 +683,11 @@ the shapes S1a and S1b write are final, so later lanes read them without migrati
 never requests page text (billed for Exa) that the model-facing text cannot yet show, since S3 reads an optional
 field that can exist before any producer. No release turns on a new third-party data flow before
 it is disclosed: S2's release carries S6's disclosure and a release note naming DeepSeek's automatic enrolment and
-how to turn it off (the `services.<id>.enabled` switch, available through S1b's PUT). No user-facing surface
-offers a service before the gateway can run it: the add dialog and service rows (S4) land with or after S2, so before then
-a `search` Source can only be created through the API.
+how to turn it off (the `services.<id>.enabled` switch, available through S1b's PUT). S2 is the activation lane: on its head the
+read starts listing service candidates and `service_vendors` and the chain starts calling services, and S3 and S4
+land before it, so the release that turns services on has the renderer, the service rows, the add dialog and the
+disclosure. Before S2, no surface shows a service the gateway cannot run, and a `search` Source can only be created
+through the API.
 
 ## 10. Acceptance properties
 
@@ -720,7 +726,7 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 
 ## 12. Known by design
 
-1. **Rolling back past this feature is not supported once it has been used.** Three things cross the boundary:
+1. **Rolling back past this feature is not supported once it has been used.** Four things cross the boundary:
    - adding a `search` Source, because a release before this feature rejects `protocol: "search"` and cannot load
      Model Hub's Sources;
    - any search chain with a search-capable candidate, including one through an auto-enrolled DeepSeek Source,
@@ -729,7 +735,9 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
      older release's strict reader rejects, so that Session no longer loads there;
    - any sent service request, which writes a service-shaped usage ledger row even when the call was stopped and
      left no record. An older reader requires `model_id` and drops that row, so after a downgrade the Usage tab
-     loses that service usage; model usage is unaffected.
+     loses that service usage; model usage is unaffected;
+   - a completed service attempt's capability evidence (`mode: "service"`), which an older reader skips and its next
+     evidence write prunes, so after a downgrade the Tools status loses its latest successful service.
 
    Removing Sources does not repair a transcript. This matches the existing boundary for downgrades after an
    authorized write (`model-hub-upgrade-config-compatibility.md`); release notes say it.
