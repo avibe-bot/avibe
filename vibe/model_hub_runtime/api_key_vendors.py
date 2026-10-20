@@ -172,6 +172,17 @@ def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] |
         raise ValueError("api-key vendor search catalog service id is invalid")
     if item.get("auth") not in {"bearer", "x-api-key"} or not isinstance(item.get("request"), dict) or not isinstance(item.get("result"), dict) or not isinstance(item.get("limits"), dict):
         raise ValueError("api-key vendor search catalog mapping is invalid")
+    if "content_max_chars" in item["request"]:
+        content_max_chars = item["request"]["content_max_chars"]
+        if (
+            not isinstance(content_max_chars, dict)
+            or set(content_max_chars) != {"path", "value"}
+            or not isinstance(content_max_chars.get("path"), str)
+            or not content_max_chars["path"]
+            or type(content_max_chars.get("value")) is not int
+            or not 1 <= content_max_chars["value"] <= 4000
+        ):
+            raise ValueError("api-key vendor search catalog content maximum is invalid")
     if "reported_cost" in item["result"]:
         reported_cost = item["result"]["reported_cost"]
         if (

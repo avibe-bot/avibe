@@ -31,7 +31,21 @@
           "service_id": {"type": "string", "minLength": 1},
           "endpoint": {"type": "string", "format": "uri", "pattern": "^https://"},
           "auth": {"enum": ["bearer", "x-api-key"]},
-          "request": {"type": "object"},
+          "request": {
+            "type": "object",
+            "properties": {
+              "content_max_chars": {
+                "type": "object",
+                "description": "Vendor text-length request parameter applied only when page content is requested; no larger than the per-source content bound.",
+                "required": ["path", "value"],
+                "additionalProperties": false,
+                "properties": {
+                  "path": {"type": "string", "minLength": 1},
+                  "value": {"type": "integer", "minimum": 1, "maximum": 4000}
+                }
+              }
+            }
+          },
           "result": {
             "type": "object",
             "properties": {

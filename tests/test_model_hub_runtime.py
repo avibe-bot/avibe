@@ -2707,10 +2707,45 @@ def test_shipped_api_key_vendor_catalog_matches_its_schema() -> None:
     Draft7Validator(schema).validate(catalog)
 
 
-def test_exa_reported_cost_path_is_explicitly_an_estimate() -> None:
-    assert search_service("exa", "search")["result"]["reported_cost"] == {
+def test_exa_catalog_bounds_content_and_marks_reported_cost_as_estimate() -> None:
+    service = search_service("exa", "search")
+    assert service["result"]["reported_cost"] == {
         "path": "costDollars.total", "estimate": True,
     }
+    assert service["request"]["content_max_chars"] == {
+        "path": "contents.text.maxCharacters", "value": 4000,
+    }
+
+
+@pytest.mark.parametrize(("mapping", "valid"), [
+    ({"path": "contents.text.maxCharacters", "value": 4000}, True),
+    ({"path": "contents.text.maxCharacters", "value": 1}, True),
+    ("contents.text.maxCharacters", False),
+    (None, False),
+    ({}, False),
+    ({"path": "contents.text.maxCharacters"}, False),
+    ({"value": 4000}, False),
+    ({"path": "", "value": 4000}, False),
+    ({"path": 1, "value": 4000}, False),
+    ({"path": "contents.text.maxCharacters", "value": True}, False),
+    ({"path": "contents.text.maxCharacters", "value": "4000"}, False),
+    ({"path": "contents.text.maxCharacters", "value": 0}, False),
+    ({"path": "contents.text.maxCharacters", "value": -1}, False),
+    ({"path": "contents.text.maxCharacters", "value": 1.5}, False),
+    ({"path": "contents.text.maxCharacters", "value": 4001}, False),
+    ({"path": "contents.text.maxCharacters", "value": 4000, "unknown": 1}, False),
+])
+def test_search_content_limit_metadata_matches_schema_and_runtime(mapping, valid) -> None:
+    catalog = json.loads(Path("vibe/data/api_key_vendors.json").read_text(encoding="utf-8"))
+    row = next(row for row in catalog if row["id"] == "exa")
+    row["search"]["request"]["content_max_chars"] = mapping
+    schema = json.loads(Path("vibe/data/api_key_vendors.schema.json").read_text(encoding="utf-8"))
+    assert Draft7Validator(schema).is_valid([row]) is valid
+    if valid:
+        assert _validate_search_catalog(row["search"], protocol="search")["request"]["content_max_chars"] == mapping
+    else:
+        with pytest.raises(ValueError, match="content maximum"):
+            _validate_search_catalog(row["search"], protocol="search")
 
 
 @pytest.mark.parametrize(("mapping", "valid"), [

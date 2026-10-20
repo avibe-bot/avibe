@@ -1,6 +1,26 @@
 # Model Hub contracts
 
-Status: **contract_version 17**, 2026-10-16: two non-self-healing Source causes,
+Status: **contract_version 17**, 2026-10-19: search-service foundations
+(`../web-search-services.md`). Tool-only Sources use `protocol: search`; the catalog,
+credential custody, free checks, re-enable response and service-order persistence
+ship before search execution. S1b, S2 and S3 extend this same version event before
+release; S2 activates the service reads and search chain.
+
+Catalog metadata verified on **2026-10-20**:
+- `search.auto_enroll` is explicit for model vendors with search; only DeepSeek is
+  enabled automatically. S1b and S2 own the resulting settings defaults.
+- Exa's `search.result.reported_cost` names `costDollars.total` with `estimate: true`.
+  Its `search.request.content_max_chars` names `contents.text.maxCharacters` with
+  `value: 4000`, applied only when page content is requested. Both follow the
+  [Exa Search reference](https://exa.ai/docs/reference/search).
+- The [DeepSeek Search reference](https://api-docs.deepseek.com/api/search) and
+  [Tavily Search OpenAPI](https://docs.tavily.com/documentation/api-reference/openapi.json)
+  publish no hard per-page text bound. They retain the content setting with no
+  invented `content_results_max`. The adapter's hard 8 MiB response cap remains;
+  an over-cap body is unreadable, not a guarantee that every legitimate page fits.
+  S2 applies the design's billing, cooldown and failover rules to that outcome.
+
+It builds on v16 (2026-10-16): two non-self-healing Source causes,
 `plan_excludes_product` (`models.source.needs_action.plan_excludes_product`), for a plan that does not include the
 product, and `spend_limit_reached` (`models.source.needs_action.spend_limit_reached`), for an account past a spend or
 usage limit only raising it lifts, join the resolution-event, provenance, Source, agent-chain and probe vocabularies,

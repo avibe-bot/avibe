@@ -195,6 +195,7 @@
         "query": "query",
         "results": "numResults",
         "content": "contents.text",
+        "content_max_chars": {"path": "contents.text.maxCharacters", "value": 4000},
         "highlights": "contents.highlights"
       },
       "result": {
