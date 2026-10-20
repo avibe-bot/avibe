@@ -727,10 +727,23 @@ enum QuitChoice {
     Cancel,
 }
 
+/// The quit question's buttons, in display order. The first is the default
+/// action (Return on macOS), so it is the one that interrupts nothing: keeping
+/// the Runtime lets Agent turns, Watches, scheduled Tasks, IM and remote access
+/// carry on after the window closes. Stopping stays one explicit click away.
+/// [`quit_choice`] maps positional results by this same order.
+fn quit_dialog_buttons(catalog: &NativeTrayCatalog) -> MessageDialogButtons {
+    MessageDialogButtons::YesNoCancelCustom(
+        catalog.quit_keep.clone(),
+        catalog.quit_stop.clone(),
+        catalog.cancel.clone(),
+    )
+}
+
 fn quit_choice(result: MessageDialogResult, catalog: &NativeTrayCatalog) -> QuitChoice {
     match result {
-        MessageDialogResult::Yes => QuitChoice::Stop,
-        MessageDialogResult::No => QuitChoice::Keep,
+        MessageDialogResult::Yes => QuitChoice::Keep,
+        MessageDialogResult::No => QuitChoice::Stop,
         MessageDialogResult::Custom(label) if label == catalog.quit_stop => QuitChoice::Stop,
         MessageDialogResult::Custom(label) if label == catalog.quit_keep => QuitChoice::Keep,
         _ => QuitChoice::Cancel,
@@ -857,11 +870,7 @@ fn request_runtime_lifecycle(app: AppHandle, quit: bool) {
         app.dialog()
             .message(catalog.quit_message.clone())
             .title(catalog.quit_title.clone())
-            .buttons(MessageDialogButtons::YesNoCancelCustom(
-                catalog.quit_stop.clone(),
-                catalog.quit_keep.clone(),
-                catalog.cancel.clone(),
-            ))
+            .buttons(quit_dialog_buttons(&catalog))
             .show_with_result(move |result| {
                 match quit_choice(result, &catalog) {
                     QuitChoice::Stop => stop_runtime(callback_app.clone(), true),
@@ -2276,6 +2285,28 @@ mod tests {
                 MessageDialogResult::Custom("unknown".to_owned()),
             ] {
                 assert_eq!(quit_choice(result, &catalog), QuitChoice::Cancel);
+            }
+        }
+    }
+
+    #[test]
+    fn quit_dialog_defaults_to_keeping_the_runtime_and_maps_positions_by_label() {
+        for locale in ["en-US", "zh-CN"] {
+            let catalog = native_catalog_for_locales([locale.to_owned()]).tray;
+            let MessageDialogButtons::YesNoCancelCustom(first, second, third) = quit_dialog_buttons(&catalog) else {
+                panic!("the quit question offers three custom buttons");
+            };
+            assert_eq!(first, catalog.quit_keep, "the default button keeps the Runtime");
+            // A platform may answer by position or by label; both must agree.
+            for (position, label) in [
+                (MessageDialogResult::Yes, first),
+                (MessageDialogResult::No, second),
+                (MessageDialogResult::Cancel, third),
+            ] {
+                assert_eq!(
+                    quit_choice(position, &catalog),
+                    quit_choice(MessageDialogResult::Custom(label), &catalog)
+                );
             }
         }
     }
