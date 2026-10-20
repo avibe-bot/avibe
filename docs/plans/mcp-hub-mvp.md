@@ -146,7 +146,7 @@ Flow: paste → **Parse and preview** → **Save** → **Generate** (later **Reg
 ```
 
 - Accept the common provider shape: `command/args/env/cwd` → stdio; `url` with absent/`http`/`streamable_http` type → Streamable HTTP. Reject conflicting or unsupported fields with a field-specific message. Provider `enabled` is ignored.
-- Env and header values are stored as given, in plaintext, like Claude Code's own MCP config. No Vault integration in MVP. `definition.json` is written owner-only (0600); UI masks env/header values; logs never print them.
+- Env and header values are stored as given, in plaintext, like Claude Code's own MCP config. No Vault integration in MVP. `<avibe-home>/mcp/` is created with the existing owner-private helpers (`core/private_fs.py`: `ensure_private_directory`, `make_private_file`; POSIX modes, Windows DACL); UI masks env/header values; logs never print them.
 - `cwd` must be absolute; absent means the sanitized Agent default.
 - Existing names require explicit replace; omitted services are untouched.
 
@@ -175,7 +175,7 @@ Persisted `definition.json`:
 - `revision` = sha256 of the canonical manifest inputs (definition, versions, tools, commands), excluding timestamps. An identical rebuild reports "no change".
 - Manifest records `protocolVersion`, `serverInfo`, `generatorVersion`, `generatedAt` as provenance only; nothing compares them or detects updates. `tools/list_changed` is ignored.
 - Regenerate does not upgrade server software. A stale schema surfaces as a call error suggesting regeneration; calls are never replayed.
-- The manifest embeds the complete effective definition (including env/header values; written 0600, masked in UI). Calls always connect with the admitted revision's own definition, never the edited `definition.json`, so a pending edit cannot mix an old URL with a new header. Changing a value is a definition change and needs regeneration.
+- The manifest embeds the complete effective definition (including env/header values; owner-private via the same helpers, masked in UI). Calls always connect with the admitted revision's own definition, never the edited `definition.json`, so a pending edit cannot mix an old URL with a new header. Changing a value is a definition change and needs regeneration.
 - Tools with `execution.taskSupport: "required"` are skipped with a generation diagnostic (tasks are out of scope).
 
 ## 7. Runtime
@@ -231,7 +231,7 @@ Lifecycle follows mcporter `generate-cli` (inspected at [`5362d60`](https://gith
 
 Acceptance:
 
-1. Page and `vibe mcp add` produce identical definitions; Claude-style syntax is parser-tested; add never connects; env/header values are masked in UI and absent from manifests and logs.
+1. Page and `vibe mcp add` produce identical definitions; Claude-style syntax is parser-tested; add never connects; env/header values live only in owner-private `definition.json` and revision manifests, and are masked in UI/API and absent from logs.
 2. Help/list work with the server and owner down; schema-to-flag contracts hold; injected prompt examples are parser-tested.
 3. Generation never publishes partial tool lists; readers never see mixed revisions; identical rebuilds keep the revision; initial generate enables, regenerate preserves state.
 4. Calls use `tools/call` only, against the admitted revision; process cap, idle close and timeouts hold; unknown outcomes are not retried.
