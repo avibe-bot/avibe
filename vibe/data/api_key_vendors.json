@@ -204,7 +204,7 @@
         "snippet": "highlights",
         "content": "text",
         "page_age": "publishedDate",
-        "reported_cost": "costDollars.total"
+        "reported_cost": {"path": "costDollars.total", "estimate": true}
       },
       "limits": {
         "results_min": 1,

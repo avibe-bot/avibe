@@ -18,11 +18,11 @@
         "required": ["service_id", "endpoint", "auth", "request", "result", "limits", "price", "free_check", "service_refused_statuses", "tool_only"],
         "allOf": [
           {
-            "if": {"properties": {"tool_only": {"const": false}}},
+            "if": {"type": "object", "required": ["tool_only"], "properties": {"tool_only": {"const": false}}},
             "then": {"required": ["auto_enroll"]}
           },
           {
-            "if": {"properties": {"tool_only": {"const": true}}},
+            "if": {"type": "object", "required": ["tool_only"], "properties": {"tool_only": {"const": true}}},
             "then": {"not": {"required": ["auto_enroll"]}}
           }
         ],
@@ -32,7 +32,20 @@
           "endpoint": {"type": "string", "format": "uri", "pattern": "^https://"},
           "auth": {"enum": ["bearer", "x-api-key"]},
           "request": {"type": "object"},
-          "result": {"type": "object"},
+          "result": {
+            "type": "object",
+            "properties": {
+              "reported_cost": {
+                "type": "object",
+                "required": ["path", "estimate"],
+                "additionalProperties": false,
+                "properties": {
+                  "path": {"type": "string", "minLength": 1},
+                  "estimate": {"type": "boolean"}
+                }
+              }
+            }
+          },
           "limits": {
             "type": "object",
             "required": ["results_max"],

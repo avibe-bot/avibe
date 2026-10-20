@@ -2707,6 +2707,52 @@ def test_shipped_api_key_vendor_catalog_matches_its_schema() -> None:
     Draft7Validator(schema).validate(catalog)
 
 
+def test_exa_reported_cost_path_is_explicitly_an_estimate() -> None:
+    assert search_service("exa", "search")["result"]["reported_cost"] == {
+        "path": "costDollars.total", "estimate": True,
+    }
+
+
+@pytest.mark.parametrize(("mapping", "valid"), [
+    ({"path": "costDollars.total", "estimate": True}, True),
+    ({"path": "costDollars.total", "estimate": False}, True),
+    ("costDollars.total", False),
+    (None, False),
+    ({}, False),
+    ({"path": "costDollars.total"}, False),
+    ({"estimate": True}, False),
+    ({"path": "", "estimate": True}, False),
+    ({"path": 1, "estimate": True}, False),
+    ({"path": "costDollars.total", "estimate": "true"}, False),
+    ({"path": "costDollars.total", "estimate": 1}, False),
+    ({"path": "costDollars.total", "estimate": True, "unknown": 1}, False),
+])
+def test_search_reported_cost_metadata_matches_schema_and_runtime(mapping, valid) -> None:
+    catalog = json.loads(Path("vibe/data/api_key_vendors.json").read_text(encoding="utf-8"))
+    row = next(row for row in catalog if row["id"] == "exa")
+    row["search"]["result"]["reported_cost"] = mapping
+    schema = json.loads(Path("vibe/data/api_key_vendors.schema.json").read_text(encoding="utf-8"))
+    assert Draft7Validator(schema).is_valid([row]) is valid
+    if valid:
+        assert _validate_search_catalog(row["search"], protocol="search")["result"]["reported_cost"] == mapping
+    else:
+        with pytest.raises(ValueError, match="reported cost"):
+            _validate_search_catalog(row["search"], protocol="search")
+
+
+@pytest.mark.parametrize("has_null", [False, True])
+def test_vendor_catalog_keeps_absent_or_null_search_metadata_valid(has_null) -> None:
+    catalog = json.loads(Path("vibe/data/api_key_vendors.json").read_text(encoding="utf-8"))
+    row = next(row for row in catalog if row["id"] == "openai")
+    if has_null:
+        row["search"] = None
+    else:
+        row.pop("search", None)
+    schema = json.loads(Path("vibe/data/api_key_vendors.schema.json").read_text(encoding="utf-8"))
+    Draft7Validator(schema).validate([row])
+    assert _validate_search_catalog(row.get("search"), protocol=row["protocol"]) is None
+
+
 def test_only_deepseek_search_auto_enrolls_model_sources() -> None:
     enrolled = [entry.id for entry in api_key_vendor_catalog() if entry.search and entry.search.get("auto_enroll")]
     assert enrolled == ["deepseek"]
