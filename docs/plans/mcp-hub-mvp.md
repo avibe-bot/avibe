@@ -134,11 +134,11 @@ Flow: paste → **Parse and preview** → **Save** → **Generate** (later **Reg
 }
 ```
 
-- Accept the common provider shape: `command/args/env/cwd` → stdio; `url` with absent/`http`/`streamable_http` type → Streamable HTTP. Reject conflicting or unsupported fields with a field-specific message. Provider `enabled` is ignored.
-- Env and header values are stored as given, in plaintext, like Claude Code's own MCP config. No Vault integration in MVP. `<avibe-home>/mcp/` is created with the existing owner-private helpers (`core/private_fs.py`: `ensure_private_directory`, `make_private_file`; POSIX modes, Windows DACL); UI/API mask env/header values using the existing config-secret pattern (`has_<field>` metadata; an empty submitted value means "unchanged", see `_strip_preserved_config_secrets` in `vibe/api.py`); Avibe's own logs never print them. A server's own stderr is the server's output (as in Claude Code) and is not scrubbed.
+- Accept the common provider shape: `command/args/env/cwd` with absent or `stdio` type → stdio; `url` with absent/`http`/`streamable-http`/`streamable_http` type → Streamable HTTP. Reject conflicting or unsupported fields with a field-specific message. Provider `enabled` is ignored.
+- Env and header values are stored as given, in plaintext, like Claude Code's own MCP config. No Vault integration in MVP. `<avibe-home>/mcp/` is created with the existing owner-private helpers (`core/private_fs.py`: `ensure_private_directory`, `make_private_file`; POSIX modes, Windows DACL); UI/API mask env/header values using the existing config-secret pattern (`has_<field>` metadata; an empty submitted value means "unchanged", see `_strip_preserved_config_secrets` in `vibe/api.py`; env/header maps are submitted whole, so a key left out is deleted); Avibe's own logs never print them. A server's own stderr is the server's output (as in Claude Code) and is not scrubbed.
 - URLs with embedded credentials (`user:pass@`) are rejected; put them in an `Authorization` header.
 - `${VAR}` / `${VAR:-default}` placeholders are not expanded; parse rejects them with a field-specific message asking for the literal value.
-- `cwd` must be absolute; absent means the sanitized Agent default.
+- `cwd` must be absolute; absent means the sanitized Agent default, resolved at generation and frozen into the revision snapshot.
 - Existing names require explicit replace; omitted services are untouched.
 
 Persisted `definition.json`:
@@ -217,7 +217,7 @@ Lifecycle follows mcporter `generate-cli` (inspected at [`5362d60`](https://gith
 
 - **C0** (after authorization): pin SDK, confirm caller-context/IPC fit, SDK protocol negotiation, and the result byte cap. Hermetic temp `AVIBE_HOME` and loopback fixtures.
 - **C1:** repository + parser, generator/publisher, runtime, CLI, prompt index.
-- **C2:** UI/API, i18n, Ruff and UI build; Incus regression on request.
+- **C2:** UI/API, i18n, user documentation (adding servers, plaintext credential behavior, regeneration, tool invocation), Ruff and UI build; Incus regression on request.
 
 Acceptance:
 
