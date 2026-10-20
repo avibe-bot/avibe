@@ -96,9 +96,12 @@ DELETE restores automatic and POST preview evaluates the draft without a write.
 ### Web-search settings and dormant service read (S1b)
 
 `web_search` additionally reads `prefer_native` (true when absent), `services`
-(the saved partial per-Source overrides, not resolved defaults), and `service_order`
+(saved partial overrides for currently search-capable Sources, not resolved defaults), and `service_order`
 (the server-owned tool-only Source creation order, `[]` when absent). Every search
 executor now has a discriminant `kind: "model" | "service"`; `x_search` remains model-only.
+Extant retargeted or retired Sources are omitted from `services` while they cannot
+search, but their overrides (especially opt-out) stay in config for when capability
+returns. Removed Sources' overrides are ignored.
 
 Until S2 activates execution, **the read contains no service candidates and omits
 `service_vendors` entirely**. One internal `SEARCH_SERVICES_ACTIVE` switch gates
@@ -138,9 +141,18 @@ Every `web_search.executor_order` save also writes `executor_order_kinds` from
 the resulting per-Source settings: each extant named Source's `service` or
 `model` role. Removed ids remain in the saved order but have no map entry. Reset
 to automatic removes both fields. A missing map/entry reads as `model`; map ids
-not named by the order are ignored. Neither `executor_order_kinds` nor
-`service_order` is client-writable. S2 owns the read-time placement rule; S1b
-preserves the saved order and kinds across restart without changing execution.
+not named by the order are ignored. A damaged map is treated as absent with a
+warning, retaining the tool switch, service opt-outs and other saved choices.
+Neither `executor_order_kinds` nor `service_order` is client-writable. S2 owns the
+read-time placement rule; S1b preserves the saved order and kinds across restart
+without changing execution.
+
+Downgrade boundary: rc12 ignores `prefer_native`, `services` and
+`executor_order_kinds`. Its next config write drops those fields, including
+per-Source search opt-outs, while preserving the whole-tool switch and both
+orders. Re-upgrading then uses service defaults; reapply DeepSeek's opt-out
+before enabling service execution. This is not a promise to retain new choices
+through an older release's write.
 
 ### Usage report windows
 

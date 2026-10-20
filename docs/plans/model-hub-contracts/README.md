@@ -13,8 +13,10 @@ contains S1a and v17, so these additions open a new event rather than changing v
   activation gate until S2. There is no new UI, service execution, placement rule,
   turn freeze or native-preference routing change in S1b.
 - The versioned mirrors advance together; persisted TurnProvenance retains v5–v17
-  and adds v18. A release-before hosted-tools loader ignores the optional config
-  fields and retains the user's opt-out/order.
+  and adds v18. The rc12 hosted-tools loader ignores new optional config fields
+  and retains the whole-tool switch and both orders, not per-Source service
+  opt-outs. An rc12 config write drops those overrides; re-upgrading then uses
+  service defaults, so DeepSeek's opt-out must be reapplied before execution.
 
 It builds on v17 (2026-10-19): search-service foundations
 (`../web-search-services.md`). Tool-only Sources use `protocol: search`; the catalog,

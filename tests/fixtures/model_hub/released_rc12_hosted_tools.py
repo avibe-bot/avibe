@@ -1,8 +1,8 @@
-"""Unchanged hosted-tool loader from gh-v3.2.2rc11:config/v2_config.py.
+"""Unchanged hosted-tool loader from gh-v3.2.2rc12:config/v2_config.py.
 
-Only its imports are supplied here; the unchanged Source-id/model-choice
-helpers remain shared. The snapshot tests downgrade of optional settings,
-not downgrade of protocol:search Sources (which older releases cannot load).
+Only its imports are supplied here; the unchanged Source-id/model-choice/order
+helpers remain shared. This snapshot tests downgrade of optional settings:
+rc12 retains tool switches and both orders, but not the new service opt-outs.
 """
 
 import logging
@@ -14,6 +14,7 @@ from config.v2_config import (
     MODEL_HUB_SEARCH_TOOLS,
     ModelHubImageModelChoice,
     model_hub_executor_order,
+    model_hub_service_order,
 )
 
 logger = logging.getLogger(__name__)
@@ -24,12 +25,14 @@ class ModelHubHostedToolConfig:
     """One hosted tool's user settings (``vibey-hosted-tools.md`` §3.3).
 
     ``enabled`` defaults to on. ``executor_order`` (search tools) is the Source order the user wants executors
-    tried in, None for automatic; ``default_image`` (``image_generate``, persisted as ``default_model``) is the
+    tried in, None for automatic; ``service_order`` (``web_search``) is the server-owned automatic order of
+    tool-only search Sources; ``default_image`` (``image_generate``, persisted as ``default_model``) is the
     chosen default image model, None for the catalog default. Both are saved values, never resolved ones.
     """
 
     enabled: bool = True
     executor_order: Optional[tuple[str, ...]] = None
+    service_order: Optional[tuple[str, ...]] = None
     default_image: Optional[ModelHubImageModelChoice] = None
 
     @classmethod
@@ -38,7 +41,11 @@ class ModelHubHostedToolConfig:
 
         if not isinstance(payload, dict):
             raise ValueError(f"Config 'model_hub.hosted_tools.{tool}' must be an object")
-        known = {"enabled"} | ({"executor_order"} if tool in MODEL_HUB_SEARCH_TOOLS else {"default_model"})
+        known = {"enabled"} | (
+            ({"executor_order", "service_order"} if tool == "web_search" else {"executor_order"})
+            if tool in MODEL_HUB_SEARCH_TOOLS
+            else {"default_model"}
+        )
         unknown = set(payload) - known
         if unknown:
             logger.warning("Config 'model_hub.hosted_tools.%s' ignores unknown fields %s", tool, sorted(unknown))
@@ -48,10 +55,12 @@ class ModelHubHostedToolConfig:
         # Only the fields this tool knows are read; another tool's field was ignored above. A field is decided by its
         # presence: the writer omits an unset one, so a present null is damage and goes through the grammar.
         has_order = "executor_order" in known and "executor_order" in payload
+        has_service_order = "service_order" in known and "service_order" in payload
         has_default = "default_model" in known and "default_model" in payload
         return cls(
             enabled=enabled,
             executor_order=model_hub_executor_order(payload["executor_order"], tool=tool) if has_order else None,
+            service_order=model_hub_service_order(payload["service_order"], tool=tool) if has_service_order else None,
             default_image=(
                 ModelHubImageModelChoice.from_payload(payload["default_model"], tool=tool) if has_default else None
             ),
@@ -61,6 +70,8 @@ class ModelHubHostedToolConfig:
         out: dict[str, Any] = {"enabled": self.enabled}
         if self.executor_order is not None:
             out["executor_order"] = list(self.executor_order)
+        if self.service_order is not None:
+            out["service_order"] = list(self.service_order)
         if self.default_image is not None:
             out["default_model"] = self.default_image.to_payload()
         return out

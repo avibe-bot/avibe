@@ -3,6 +3,7 @@
 The pre-service hosted-tools tests cannot exercise catalog-dependent defaults,
 clamping, role snapshots or Source-keyed patches. These tests use the real V2
 store/mutation owner; no provider, credential or live runtime is contacted.
+Scenarios: MH-HOSTED-002 (compatibility), MH-HOSTED-004 (Tools read/patch).
 """
 
 from __future__ import annotations
@@ -119,17 +120,15 @@ async def test_mixed_order_and_role_snapshot_survive_real_v2_restart(tmp_path):
     assert reset["service_order"] == [TAVILY, EXA]
 
 
-def test_released_order_and_missing_kind_read_as_model():
+def test_released_order_keeps_missing_kinds_absent_and_ignores_unnamed_entries():
+    """MH-HOSTED-002: persistence does not invent roles; S2 owns interpreting absent roles as model."""
     setting = _config({"executor_order": [DEEPSEEK, MODEL]}).hosted_tools["web_search"]
-    assert [setting.saved_executor_kind(key) for key in setting.executor_order] == ["model", "model"]
-    assert "executor_order_kinds" not in setting.to_payload()
+    assert setting.executor_order == (DEEPSEEK, MODEL)
+    assert setting.executor_order_kinds is None and "executor_order_kinds" not in setting.to_payload()
     setting = replace(setting, executor_order_kinds={DEEPSEEK: "service", EXA: "service"})
-    assert setting.saved_executor_kind(DEEPSEEK) == "service"
-    assert setting.saved_executor_kind(MODEL) == "model"
-    assert setting.saved_executor_kind(EXA) == "model"
     assert setting.to_payload()["executor_order_kinds"] == {DEEPSEEK: "service"}
     loaded = _config({"executor_order": [MODEL], "executor_order_kinds": {EXA: []}}).hosted_tools["web_search"]
-    assert loaded.enabled and loaded.saved_executor_kind(MODEL) == "model"
+    assert loaded.enabled and loaded.executor_order == (MODEL,) and loaded.executor_order_kinds == {}
 
 
 @pytest.mark.asyncio
@@ -150,16 +149,20 @@ async def test_order_save_uses_the_resulting_service_opt_in_and_preserves_model_
     assert V2ModelHubConfigStore().load().hosted_tools["web_search"].executor_order_kinds == {MODEL: "model"}
 
 
-def test_retargeted_source_keeps_its_opt_out_until_search_capability_returns():
-    """Ignoring a currently ineligible service must not erase consent on an unrelated config save."""
+def test_retargeted_source_keeps_its_opt_out_until_search_capability_returns(tmp_path):
+    """MH-HOSTED-004: the read hides ineligible overrides, but a real V2 save must keep consent."""
     config = _config({"services": {DEEPSEEK: {"enabled": False}}})
     config.sources[-1].base_url = "https://relay.invalid/v1"
-    loaded = ModelHubConfig.from_payload(config.to_payload())
+    service, _, _ = _disk_service(tmp_path, config)
+    loaded = service.store.load()
     assert hosted_tools.search_service_settings(loaded.hosted_tools["web_search"], loaded.sources[-1]) is None
     assert loaded.hosted_tools["web_search"].services[DEEPSEEK].enabled is False
+    assert _web(service)["services"] == {}
     loaded.sources[-1].base_url = None
-    restored = ModelHubConfig.from_payload(loaded.to_payload())
+    service.store.save(loaded)
+    restored = V2ModelHubConfigStore().load()
     assert hosted_tools.search_service_settings(restored.hosted_tools["web_search"], restored.sources[-1])["enabled"] is False
+    assert _web(service)["services"] == {DEEPSEEK: {"enabled": False}}
 
 
 @pytest.mark.asyncio
@@ -183,7 +186,7 @@ async def test_catalog_downgrade_clamps_on_load_without_rewriting_until_next_sav
 
 @pytest.mark.asyncio
 async def test_put_merges_absent_sources_fields_and_null_resets(tmp_path):
-    """Partial clients cannot echo defaults over other clients' saved choices."""
+    """MH-HOSTED-004: partial clients cannot echo defaults over other clients' saved choices."""
     service, path, _ = _disk_service(tmp_path, _config({"services": {
         TAVILY: {"results": 8, "content": True, "enabled": False}, EXA: {"content": True},
     }}))
@@ -263,13 +266,37 @@ def test_removed_source_settings_are_ignored_before_validation():
 
 
 @pytest.mark.parametrize("field,value", [("prefer_native", None), ("services", None),
-                                        ("services", {TAVILY: {"content": None}}),
-                                        ("executor_order_kinds", {TAVILY: []})])
+                                        ("services", {TAVILY: {"content": None}})])
 def test_damaged_optional_settings_disable_only_web_search(field, value):
     config = _config({"executor_order": [TAVILY], field: value})
     assert not config.hosted_tools["web_search"].enabled
     assert len(config.sources) == 4
     assert hosted_tool_setting(config, "x_search").enabled
+
+
+@pytest.mark.parametrize("damaged", [None, [], {DEEPSEEK: []}, {DEEPSEEK: "future"}])
+@pytest.mark.parametrize("enabled", [True, False])
+@pytest.mark.asyncio
+async def test_damaged_role_map_keeps_opt_out_across_load_write_and_reenable(tmp_path, caplog, damaged, enabled):
+    """MH-HOSTED-002: damaged derived metadata must not erase consent on the next real V2 write."""
+    expected = {"enabled": enabled, "prefer_native": False, "executor_order": [DEEPSEEK, MODEL],
+                "service_order": [TAVILY], "services": {DEEPSEEK: {"enabled": False}}}
+    service, path, _ = _disk_service(tmp_path, _config(expected))
+    payload = json.loads(path.read_text())
+    payload["model_hub"]["hosted_tools"]["web_search"]["executor_order_kinds"] = damaged
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    before = path.read_bytes()
+    loaded = V2ModelHubConfigStore().load().hosted_tools["web_search"]
+    assert loaded.to_payload() == expected
+    assert "executor_order_kinds" in caplog.text and "ignoring damaged" in caplog.text
+    assert path.read_bytes() == before
+    await service.set_hosted_tool("x_search", {"enabled": False})
+    assert V2ModelHubConfigStore().load().hosted_tools["web_search"].to_payload() == expected
+    await service.set_hosted_tool("web_search", {"enabled": True})
+    restarted = V2ModelHubConfigStore().load()
+    setting = restarted.hosted_tools["web_search"]
+    assert setting.to_payload() == {**expected, "enabled": True}
+    assert hosted_tools.search_service_settings(setting, restarted.sources[-1])["enabled"] is False
 
 
 @pytest.mark.asyncio
@@ -312,7 +339,7 @@ async def test_dormant_read_and_future_service_variant_validate_without_paid_cal
 
 
 def test_http_tools_put_and_read_preserve_patch_and_dormant_contract(tmp_path, monkeypatch):
-    """The public route accepts the new fields and returns a valid dormant envelope, not only the pure helper."""
+    """MH-HOSTED-004: the public route accepts new fields and returns a valid dormant envelope."""
     from tests.test_model_hub_api import _as_ui_client
     from tests.ui_server_test_helpers import csrf_headers, save_config
     from vibe import ui_server
@@ -338,12 +365,19 @@ def test_http_tools_put_and_read_preserve_patch_and_dormant_contract(tmp_path, m
     assert "service_vendors" not in web and all(row["kind"] == "model" for row in web["executor_candidates"])
 
 
-def test_release_before_loader_ignores_new_fields_but_keeps_opt_out_and_order(caplog):
-    """The released loader, not a reimplementation, must safely ignore new optional settings."""
-    released = runpy.run_path(str(Path(__file__).parent / "fixtures/model_hub/released_rc11_hosted_tools.py"))
+def test_rc12_loader_preserves_tool_switch_and_orders_but_drops_service_overrides(caplog):
+    """MH-HOSTED-002: rc12 keeps its known choices, but a downgrade write cannot retain new service opt-outs."""
+    released = runpy.run_path(str(Path(__file__).parent / "fixtures/model_hub/released_rc12_hosted_tools.py"))
     section = _config({"enabled": False, "prefer_native": False, "executor_order": [MODEL, DEEPSEEK],
                        "executor_order_kinds": {MODEL: "model", DEEPSEEK: "service"},
                        "services": {DEEPSEEK: {"enabled": False}}, "service_order": [TAVILY]}).to_payload()
     loaded = released["_hosted_tools_from_payload"](section)
-    assert loaded["web_search"].to_payload() == {"enabled": False, "executor_order": [MODEL, DEEPSEEK]}
-    assert all(field in caplog.text for field in ("prefer_native", "services", "service_order", "executor_order_kinds"))
+    written = loaded["web_search"].to_payload()
+    assert written == {"enabled": False, "executor_order": [MODEL, DEEPSEEK], "service_order": [TAVILY]}
+    assert all(field in caplog.text for field in ("prefer_native", "services", "executor_order_kinds"))
+    assert "service_order" not in caplog.text
+    section["hosted_tools"]["web_search"] = written
+    upgraded = ModelHubConfig.from_payload(section)
+    setting = upgraded.hosted_tools["web_search"]
+    assert not setting.enabled and setting.services == {}
+    assert hosted_tools.search_service_settings(setting, upgraded.sources[-1])["enabled"] is True

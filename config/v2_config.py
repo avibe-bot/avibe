@@ -3204,13 +3204,15 @@ def _search_service_settings_from_payload(
     return settings
 
 
-def _executor_order_kinds_from_payload(payload: object, order: Optional[tuple[str, ...]]) -> dict[str, str]:
-    if not isinstance(payload, dict):
-        raise ValueError("Config 'model_hub.hosted_tools.web_search.executor_order_kinds' must be an object")
-    named = {key: value for key, value in payload.items() if key in (order or ())}
-    if any(not isinstance(value, str) or value not in {"service", "model"} for value in named.values()):
-        raise ValueError("Config 'model_hub.hosted_tools.web_search.executor_order_kinds' is invalid")
-    return named
+def _executor_order_kinds_from_payload(payload: object, order: Optional[tuple[str, ...]]) -> Optional[dict[str, str]]:
+    # This derived snapshot affects placement, not consent. Damage follows the released missing-map rule;
+    # discarding the whole tool entry would erase service opt-outs on the next unrelated config write.
+    if isinstance(payload, dict):
+        named = {key: value for key, value in payload.items() if key in (order or ())}
+        if all(isinstance(value, str) and value in {"service", "model"} for value in named.values()):
+            return named
+    logger.warning("Config 'model_hub.hosted_tools.web_search.executor_order_kinds': ignoring damaged role map")
+    return None
 
 
 @dataclass(frozen=True)
@@ -3230,10 +3232,6 @@ class ModelHubHostedToolConfig:
     prefer_native: bool = True
     services: Mapping[str, ModelHubSearchServiceSettings] = field(default_factory=dict)
     executor_order_kinds: Optional[Mapping[str, str]] = None
-
-    def saved_executor_kind(self, source_id: str) -> str:
-        """Released orders and absent kind entries were saved as model executors."""
-        return (self.executor_order_kinds or {}).get(source_id, "model") if source_id in (self.executor_order or ()) else "model"
 
     @classmethod
     def from_payload(

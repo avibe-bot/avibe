@@ -134,7 +134,10 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
   Each save also writes `executor_order_kinds`, a map from each named Source id to the role it had when the order
   was saved (`service` or `model`); a released order has no map, so its entries were all saved as `model`. The
   map is what lets a read tell a deliberate placement from a stale one (§4.1).
-- Releases before this feature ignore both fields with a warning: the existing loader rule for unknown fields.
+- A damaged server-written `executor_order_kinds` map warns and loads as absent, without discarding the
+  tool switch, service opt-outs or other saved choices. S2 interprets absent roles as `model` as above.
+- Releases before these settings ignore unknown fields with a warning. An older release's config write drops
+  those fields, including per-Source opt-outs; see §12. rc12 retains `service_order` but not the three S1b fields.
 - A settings change applies from the next turn. The turn's first resolution freezes `prefer_native`, the effective
   candidate list (Sources with `services.<id>.enabled: false` kept, last, as `disabled` entries) and each candidate's `results` and `content` in the turn
   trace's `hosted_tools`, beside the tool set and the executor order (hosted tools §6). Later hop resolutions and every call of the turn read the frozen values.
@@ -177,6 +180,9 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
 `GET /api/models/hosted-tools` (hosted tools §3.3), for `web_search`:
 
 - `prefer_native` (saved, `true` when absent);
+- `services`: saved partial overrides for currently search-capable Sources, not effective defaults. Extant
+  retargeted or retired Sources are omitted while incapable, but retain their overrides in config for when
+  capability returns; removed Sources' overrides are ignored;
 - `executor_candidates[]` entries gain `kind: "service" | "model"`. A service entry carries `model_id` = the
   catalog's service id (for example `tavily/search`), `price` in the existing unit form with unit `search` (its
   `extra[]` gains the unit `page` and an optional `when: "content"`, so Exa shows "$7 / 千次，正文另加 $1 / 千页": one
@@ -761,6 +767,11 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
 
    Removing Sources does not repair a transcript. This matches the existing boundary for downgrades after an
    authorized write (`model-hub-upgrade-config-compatibility.md`); release notes say it.
+
+   Settings alone also have a lossy boundary: rc12 loads S1b's unknown settings with warnings, and its next config
+   write drops `prefer_native`, `services` and `executor_order_kinds`. The whole-tool switch and both orders
+   survive, but a per-Source DeepSeek opt-out does not. Re-upgrading restores service defaults, so that opt-out
+   must be reapplied before service execution is enabled. S2/S6's activation and opt-out guidance must state this.
 2. **No custom endpoints in phase 1.** Search services use the catalog endpoint only, so relays and self-hosted
    SearXNG wait for a custom-endpoint rule.
 3. **Settings are per service, not per call.** The model cannot ask for more results or for page content.

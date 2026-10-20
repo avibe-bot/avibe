@@ -15,6 +15,7 @@ import zh from '../../../i18n/zh.json';
 import { readyRegion } from './regionRead';
 import { ToolsTab } from './ToolsTab';
 import type {
+  HostedExecutorCandidate,
   HostedModelExecutorCandidate,
   HostedImageModel,
   HostedImageToolStatus,
@@ -79,9 +80,10 @@ const search = (name: 'web_search' | 'x_search', over: Partial<HostedSearchToolS
     effective_order: (over.executor_candidates ?? []).map((entry) => entry.source_id),
     executor_candidates: [], ...over,
   };
+  const candidates: HostedExecutorCandidate[] = common.executor_candidates;
   return name === 'web_search'
     ? { prefer_native: true, services: {}, service_order: [], ...common, name }
-    : { ...common, name, executor_candidates: common.executor_candidates.filter((entry) => entry.kind === 'model') };
+    : { ...common, name, executor_candidates: candidates.filter((entry): entry is HostedModelExecutorCandidate => entry.kind === 'model') };
 };
 
 const image = (over: Partial<HostedImageToolStatus> = {}): HostedImageToolStatus => ({

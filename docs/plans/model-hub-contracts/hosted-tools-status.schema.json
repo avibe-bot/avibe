@@ -200,7 +200,7 @@
         "prefer_native": { "type": "boolean", "description": "Saved preference, true when absent. S2 activates its effect on hop facts." },
         "services": {
           "type": "object",
-          "description": "Saved partial per-Source overrides, not resolved defaults. Removed Sources are ignored and obsolete catalog bounds read clamped.",
+          "description": "Saved partial overrides for currently search-capable Sources, not resolved defaults. Extant retargeted/retired Sources are omitted while incapable, but their overrides remain in config for when capability returns. Removed Sources are ignored and obsolete catalog bounds read clamped.",
           "propertyNames": { "$ref": "#/definitions/SourceId" },
           "additionalProperties": { "$ref": "#/definitions/SavedServiceSettings" }
         },

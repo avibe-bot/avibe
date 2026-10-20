@@ -16,7 +16,9 @@ Source of truth: `web-search-services.md` §3.2, §3.5, §8–9; S1a is merged a
 - PUT merges only supplied Sources/fields under the existing mutation lock;
   null removes an override. Reject invalid current-catalog values atomically.
   Every web-search order save snapshots the resulting settings' Source roles;
-  missing Sources have no map entry, missing roles read as model.
+  missing Sources have no map entry, missing roles read as model. A damaged
+  derived role map warns and loads as absent without discarding consent settings;
+  S2 owns interpreting roles at read time, with no dormant test-only helper here.
 - Define service candidate/vendor shapes and add model candidates' `kind`.
   One explicit internal activation switch suppresses both service candidates
   and service vendors until S2. No new UI, user toggle, chain or placement rule.
@@ -27,13 +29,17 @@ Source of truth: `web-search-services.md` §3.2, §3.5, §8–9; S1a is merged a
 
 ## Validation
 
+Scenarios: **MH-HOSTED-002** (compatibility) and **MH-HOSTED-004** (Tools read/patch).
 Existing hosted-tools tests cover the old settings only. Extend their owner
 coverage for defaults/partial values and mixed-order restart persistence,
 catalog downgrades without load-time writes, field/source patch isolation and
 concurrent edits, atomic validation, order-role snapshots and stale ids. Validate
 both the dormant public read and the defined future service variants against
-the closed schema. Exercise a pinned release-before loader against new fields.
-Run focused tests through `~/.local/bin/hd1-test`, changed-file Ruff, and UI build.
+the closed schema. Exercise the pinned rc12 loader against new fields and its
+lossy downgrade write. The damaged-map regression fails before the fix and checks
+real V2 load, unrelated write, re-enable and restart without losing an opt-out.
+Run focused tests through `~/.local/bin/hd1-test`, changed-file Ruff, UI test
+typechecking (`npm run typecheck:tests`) and UI build.
 No paid search, live runtime restart or regression update is part of this lane.
 
 ## Delivery
@@ -52,4 +58,11 @@ there is no service renderer or new copy. Free-tier metadata remains null becaus
 the bundled catalog makes no verified free-tier promise. Vendor facts are
 structured booleans, so S4 can localize its own copy without backend prose.
 Retargeted/retired but extant Sources retain their overrides (especially opt-out)
-for when capability returns; only removed Sources are forgotten.
+for when capability returns; the Tools read hides them while incapable, and only
+removed Sources are forgotten.
+
+Downgrade through rc12 preserves the whole-tool switch and both orders, but its
+next config write drops new fields, including `services.<id>.enabled: false`.
+Re-upgrading uses service defaults again: DeepSeek's opt-out must be reapplied
+before service execution is enabled. The rc12 fixture records this limitation,
+not a cross-version consent guarantee; S2/S6 must carry it into their guidance.
