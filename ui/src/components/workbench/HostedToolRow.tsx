@@ -25,8 +25,15 @@ const RAN_KEY: Record<HostedActivity['mode'], 'ranNative' | 'ranProxy' | 'ranDir
   direct: 'ranDirect',
 };
 
-const vendorLabel = (provider: string | undefined): string | null =>
-  provider ? apiKeyVendorPreset(provider)?.label ?? provider : null;
+/** The catalog label of the vendor that ran a call; none for an id the catalog does not name, such as `custom`. */
+const presetLabel = (provider: string | undefined): string | null =>
+  provider ? apiKeyVendorPreset(provider)?.label ?? null : null;
+
+/** Who ran a call: its vendor's catalog label, else the Source's own name. A compatible endpoint's
+ *  vendor id is `custom`, which names no vendor, so its name is the only thing that says where the
+ *  call ran. A vendor id with neither stays as it is, as for a row stored without a Source. */
+const runnerLabel = (card: HostedActivity): string | null =>
+  presetLabel(card.provider) ?? card.source_name ?? card.provider ?? null;
 
 // Small per-call figures keep their first significant digits: $0.006, not $0.01.
 const formatUsd = (usd: number): string => {
@@ -94,7 +101,7 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
       </span>
     );
   }
-  const vendor = vendorLabel(card.provider);
+  const vendor = runnerLabel(card);
   if (card.mode === 'direct') {
     // An image call names the model it picked and where it ran, not a vendor: the model is the choice.
     const where = card.source_name ?? vendor;
@@ -159,7 +166,7 @@ export const HostedImageFigure: React.FC<{ card: HostedActivity; image: HostedAc
                     <ImageIcon className="size-3" aria-hidden="true" />
                     {image.width && image.height ? `${card.model} · ${image.width}×${image.height}` : card.model}
                   </span>
-                  {(card.source_name ?? vendorLabel(card.provider)) && <span>{card.source_name ?? vendorLabel(card.provider)}</span>}
+                  {(card.source_name ?? runnerLabel(card)) && <span>{card.source_name ?? runnerLabel(card)}</span>}
                 </>
               )
             : <HostedModeChip card={card} />}
@@ -191,7 +198,7 @@ const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
   const { t } = useTranslation();
   const cost = useHostedCost(card);
   const completed = hostedCompleted(card);
-  const where = completed ? [card.source_name ?? vendorLabel(card.provider), card.model].filter(Boolean).join(' · ') : '';
+  const where = completed ? [card.source_name ?? runnerLabel(card), card.model].filter(Boolean).join(' · ') : '';
   const facts = [
     where && t(`chat.agentActivity.hosted.${RAN_KEY[card.mode]}`, { where }),
     completed && card.duration_ms !== undefined && t('chat.agentActivity.hosted.duration', { seconds: Math.max(1, Math.round(card.duration_ms / 1000)) }),
@@ -260,16 +267,18 @@ const FallbackNote: React.FC<{ card: HostedActivity }> = ({ card }) => {
   // Only an instance manager reaches Models › Tools; anyone else is told who can clear it.
   const { capabilities } = useInstanceAuthorization();
   const from = card.fallback_from;
-  const vendor = vendorLabel(card.provider);
+  const vendor = runnerLabel(card);
   if (!from || !hostedCompleted(card) || !vendor) return null;
   const refusedBy = from.source_name ?? from.source_id;
   const toolInline = t(`settings.models.tools.tool.${card.tool}.inline`);
+  // The Source in parentheses only beside a vendor's label: a Source named in its vendor's place is not repeated.
+  const besideVendor = presetLabel(card.provider) ? card.source_name : undefined;
   return (
     <p className="mx-1.5 mb-1 mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-0.5 rounded-md border border-gold/40 bg-gold/10 px-2.5 py-1.5 text-[11px]" data-hosted-fallback={card.call_id}>
       <span className="inline-flex min-w-0 items-center gap-1.5 text-foreground">
         <TriangleAlert className="size-3 shrink-0 text-gold-ink" aria-hidden="true" />
-        {card.source_name
-          ? t('chat.agentActivity.hosted.fallback.ranOn', { from: refusedBy, toolInline, provider: vendor, source: card.source_name })
+        {besideVendor
+          ? t('chat.agentActivity.hosted.fallback.ranOn', { from: refusedBy, toolInline, provider: vendor, source: besideVendor })
           : t('chat.agentActivity.hosted.fallback.ran', { from: refusedBy, toolInline, provider: vendor })}
       </span>
       <span className="ml-auto text-muted">{t(capabilities.can_manage_instance ? 'chat.agentActivity.hosted.fallback.kept' : 'chat.agentActivity.hosted.fallback.keptManager')}</span>

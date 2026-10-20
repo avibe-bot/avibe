@@ -149,6 +149,21 @@ describe('hosted tool cards', () => {
     expect(document.querySelector('[data-hosted-fallback]')).toBeNull();
   });
 
+  it('MH-HOSTED-UI-008: names a compatible endpoint by its Source, not by the vendor id custom', () => {
+    // A Source added as a compatible endpoint has the vendor id `custom`, which names no vendor (#2873).
+    const relay = { provider: 'custom', source_id: 'src_myrelay01', source_name: 'My relay' };
+    renderGroup([
+      { ...fixture.native_web_search, ...relay },
+      { ...fixture.proxy_fallback, ...relay, model: 'gpt-6-luna' },
+    ]);
+    within(row('srvtoolu_01')).getByText('Native · My relay');
+    const proxy = row('call_w7');
+    within(proxy).getByText('Via My relay proxy · gpt-6-luna');
+    // Named in its vendor's place, the Source is not repeated in parentheses.
+    within(proxy).getByText("relay-gpt doesn't support web search, so My relay ran it");
+    expect(document.body.textContent).not.toMatch(/\bcustom\b/);
+  });
+
   it.each([
     ['pending', undefined, 'Cut off'],
     ['failed', 'upstream timeout', 'Failed'],

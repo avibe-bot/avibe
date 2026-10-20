@@ -322,12 +322,22 @@ def _chain_cost(execution: Optional[ProxyExecution]) -> tuple[Optional[HostedCos
     return HostedCost(basis=basis, usd=round(sum(cost.usd or 0.0 for cost in priced), 6)), unpriced
 
 
-def _vendor_label(provider: Optional[str]) -> Optional[str]:
-    if not provider:
+def _runner_label(activity: HostedActivity, escape: Callable[[str], str]) -> Optional[str]:
+    """Who ran a call, as the IM line names it: its vendor's catalog label, else the Source's own name.
+
+    A Source added as a compatible endpoint has the vendor id ``custom``, which names no vendor, so its name is the
+    only thing that tells the reader where the call ran. A Source name is the user's text, so it is made inert. A
+    vendor id with neither stays as it is, as for a row stored without a Source.
+    """
+
+    if not activity.provider:
         return None
     from vibe.model_hub_runtime.api_key_vendors import catalog_api_key_vendor_label
 
-    return catalog_api_key_vendor_label(provider) or provider
+    label = catalog_api_key_vendor_label(activity.provider)
+    if label:
+        return label
+    return _untrusted(activity.source_name, escape) if activity.source_name else activity.provider
 
 
 def _usd(value: float) -> str:
@@ -362,7 +372,7 @@ def _ran(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> l
         size = f"{first.width}×{first.height}" if first is not None and first.width and first.height else None
         more = _count(activity, lang) if len(activity.images) > 1 else None
         return [_untrusted(activity.model, escape) if activity.model else None, size, more]
-    vendor = _vendor_label(activity.provider)
+    vendor = _runner_label(activity, escape)
     if not vendor:
         mode = None
     elif activity.mode == "proxy" and activity.fallback_source_id is not None:
