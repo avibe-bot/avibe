@@ -335,8 +335,9 @@ Hosted tools §6 holds, with these changes:
   `basis: "reported"`. Any other value is ignored and the list price applies.
   Otherwise it is the catalog's list price for the request plus its per-returned-page parts (Exa: $1 / 1k pages of
   `contents.text` when content is on; the always-requested highlights are included in the search price), with
-  `basis: "list"`. The page count is the length of a readable `results` array before the local bounds drop entries,
-  so a response whose every row was rejected locally is still priced from it. When a per-page part applies but
+  `basis: "list"`. The page count is the number of rows, among the first `results` rows of a readable array, that carry
+  the charged content field (Exa: a `text` value), counted before the local URL bounds drop entries, since the
+  vendor billed those pages either way; rows beyond the requested count or without the field are not counted. When a per-page part applies but
   the array is missing or unreadable, the ledger row always carries `lower_bound: true` into the Usage aggregate,
   since its list valuation lacks the pages even when a reported cost exists; and with no valid reported cost, the
   call's cost is the search part marked as a lower bound ("至少 $0.007") through the new `HostedCost.lower_bound`. When the vendor bills only
@@ -627,8 +628,10 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   `content` (§3.2).
 - `core/hosted_activity`'s payload: the projected `attempts` with Source names, codes, skips and remedies, and the
   executor kind (§4.3).
-- C-1 (`agent-core-contracts/message.schema.json`): the optional `HostedSource.content` (§4.3; the read shape
-  gains no new limits);
+- C-1 (`agent-core-contracts/message.schema.json`): the optional `HostedSource.content` with its bounds in the
+  schema and the reader (at most 4,000 characters per source and 20,000 across a record's sources; a reader clips
+  a longer value to the bound rather than rejecting the row, and a new optional field rejects no released row; the
+  released `HostedSource` fields gain no new limits);
   `HostedRecord.attempts[]` with `source_id`, `label`, `kind`, `outcome`, `error_code`, `skipped`, `retry_at`, `needs_action`, `cost` and
   `superseded`; `HostedCost.lower_bound` with its `core/hosted_activity` projection ("至少"), and a cost of exactly 0 rendered as
   "$0" without "≈" by that projection, `HostedToolRow` and the IM line, since a zero is never an estimate; and
