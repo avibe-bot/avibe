@@ -209,10 +209,11 @@ Hosted tools §6 holds, with these changes:
   immediately before the saved order's first model executor (at the end when it names none), in automatic order
   among themselves, and unnamed model executors follow at the end in automatic order. A named entry whose current role
   differs from its `executor_order_kinds` role (§3.2) is read as unnamed, so the same rule places it in its new
-  role. A Source therefore runs before every model executor however it became search-capable (added, an existing
+  role. An unnamed or role-changed Source therefore lands before every model executor however it became search-capable (added, an existing
   official DeepSeek Source named as a model executor in a released order, a relay retargeted to the official
   endpoint, or a later catalog that gives its vendor a search API), with no migration or insertion write; an entry
-  the user placed in its current role keeps its place, and the order never names a Source twice.
+  the user placed in its current role keeps its place, even after a model executor (service-first is the default
+  placement, not a constraint on a deliberate order), and the order never names a Source twice.
 - **Argument check.** Before any candidate, the gateway rejects a query that is empty or only whitespace with the
   canonical tool's argument error, which the model can correct; no Source is tried or recorded.
 - **Skips.** A candidate is classified once, by the first reason that applies in the order `unavailable`,
@@ -435,7 +436,9 @@ Hosted tools §6 holds, with these changes:
   the uncertainty is visible. Released ledger rows without these fields load as zero. The counters keep their
   relations on write and on read, as the model counters do (a corrupt or hand-edited row is repaired, not
   published): `billable_requests + uncertain_requests ≤ requests`, `reported_requests ≤ billable_requests`, `list_pages` per
-  content type at most `billable_requests` times the catalog's maximum `results` (a page is a returned result),
+  content type at most `billable_requests` times 100, a fixed ceiling every catalog version honors (the catalog
+  schema caps a row's maximum `results` at 100, and a page is a returned result), so a row written under an older
+  catalog is never judged by a newer, lower maximum,
   and no `reported_usd` without a reported request. A row that breaks any relation keeps
   `requests`, has its counts reduced to the bounds, drops the quantities that depended on a reduced count
   (`list_pages`, `reported_usd`, `reported_requests`), and is marked `lower_bound`; `lower_bound` is also forced
@@ -578,9 +581,10 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 
 - `source.schema.json` and `source-create.schema.json`: `protocol: "search"` and its combination rule (§3.1).
 - The verification invariant in `model-hub-contracts/README.md` and `source.schema.json`'s `verification_pending`
-  description: for a `search` Source, which never makes a model call, the marker clears on an authenticated search
-  outcome with the matching credential (any 200, a 402 or a catalog-named limit, §3.1) or a free-check `pass`,
-  `balance` or `limit`; model Sources keep the matching-credential model-call rule. The structure guards check it.
+  description: for every search-capable Source (a tool-only `search` Source, which never makes a model call, and a
+  model Source with a search API, such as a DeepSeek Source saved unverified), the marker clears on an
+  authenticated search outcome with the matching credential (any 200, a 402 or a catalog-named limit, §3.1) or a
+  free-check `pass`, `balance` or `limit`; a model Source also keeps the matching-credential model-call rule. The structure guards check it.
 - The protocol vocabulary's authorities: `model-hub-contracts/README.md` (the "exactly" list) and
   `adapter-interface.py`, which splits it in two. `MODEL_PROTOCOLS` keeps the four invocable wire protocols that
   observation, probes, discovery, the hop schemas (`hop-resolution`, `served-hop`, `hop-origin`) and
