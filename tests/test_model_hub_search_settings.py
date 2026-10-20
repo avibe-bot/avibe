@@ -282,6 +282,7 @@ async def test_dormant_read_and_future_service_variant_validate_without_paid_cal
     assert {row["kind"] for row in dormant["executor_candidates"]} == {"model"}
     # Check the prepared projection only. S2's ordering/chain/cooldown semantics are intentionally not exercised.
     config = service.store.load()
+    config.sources[-1].billing = "monthly"  # Model billing does not make the separate search API included.
     config.sources[2].state = ModelHubSourceStateConfig(
         status="needs_action", detail_key="models.source.needs_action.balance_exhausted")
     service.store.save(config)
@@ -297,6 +298,9 @@ async def test_dormant_read_and_future_service_variant_validate_without_paid_cal
         "state": {"status": "needs_action", "retry_at": None, "detail_key": "models.source.needs_action.balance_exhausted"},
         "trial_pending": True, "cooldown_until": None,
     }
+    deepseek_candidate = next(row for row in visible["executor_candidates"] if row["source_id"] == DEEPSEEK)
+    assert deepseek_candidate["billing"] == "metered" and not deepseek_candidate["settings"]["enabled"]
+    assert service.store.load().sources[-1].billing == "monthly"
     deepseek = next(vendor for vendor in visible["service_vendors"] if vendor["id"] == "deepseek")
     assert deepseek["source_ids"] == [DEEPSEEK] and deepseek["facts"]["auto_enroll"] is True
     assert deepseek["free_tier"] is None

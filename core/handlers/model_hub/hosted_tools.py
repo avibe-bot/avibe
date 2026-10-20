@@ -514,7 +514,8 @@ def _service_candidate_payload(
         "kind": "service",
         "source_id": source.id,
         "model_id": service["service_id"],
-        "billing": source.billing,
+        # A model Source may have monthly model billing; its separate search API is still priced per search.
+        "billing": "metered",
         "relay": False,
         "price": {**service["price"], "extra": [dict(part) for part in service["price"]["extra"]]},
         "settings": search_service_settings(setting, source),
