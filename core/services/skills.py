@@ -712,6 +712,7 @@ def _installed_skill_targets_from_listing(
     project_dir: Optional[str],
     project_id: Optional[str],
     backends: Optional[list[str]],
+    allow_unknown_agents: bool = False,
 ) -> tuple[list[str], list[str]]:
     if not listing.get("ok") or not isinstance(listing.get("skills"), list):
         raise SkillAccessError()
@@ -734,6 +735,8 @@ def _installed_skill_targets_from_listing(
             if agent_id not in agent_ids:
                 agent_ids.append(agent_id)
         entries = _skill_backend_entries(skill, backends) if backends else _skill_backend_entries(skill, None)
+        if not entries and not allow_unknown_agents:
+            raise SkillAccessError()
         for backend, _agent_index in entries:
             resource_ids.append(
                 skill_resource_id(
@@ -755,6 +758,7 @@ async def _installed_skill_targets(
     project_dir: Optional[str],
     project_id: Optional[str],
     backends: Optional[list[str]],
+    allow_unknown_agents: bool = False,
 ) -> tuple[list[str], list[str]]:
     listing = await _run_askill(
         askill_path,
@@ -768,6 +772,7 @@ async def _installed_skill_targets(
         project_dir=project_dir,
         project_id=project_id,
         backends=backends,
+        allow_unknown_agents=allow_unknown_agents,
     )
 
 
@@ -998,6 +1003,7 @@ async def remove_skill(
             project_dir=project_dir,
             project_id=project_id,
             backends=None,
+            allow_unknown_agents=True,
         )
     # Askill defaults to detected agents, which can omit an installed link when
     # that agent is not currently detectable. Use the exact links from `list`
