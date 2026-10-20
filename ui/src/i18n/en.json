@@ -37,7 +37,7 @@
       "stopMessage": "Stop the Runtime started by this app? Active work will be interrupted. The desktop app stays open and your data is preserved.",
       "stopAction": "Stop Runtime",
       "quitTitle": "Quit Avibe",
-      "quitMessage": "This app started the Runtime. Stop it when quitting, or keep it running so active work can continue?",
+      "quitMessage": "This app started the Runtime. Keep it running so active work can continue, or stop it when quitting?",
       "quitStop": "Quit and stop Runtime",
       "quitKeep": "Keep Runtime running",
       "cancel": "Cancel",

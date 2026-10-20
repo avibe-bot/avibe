@@ -13,8 +13,9 @@ three-failure recovery threshold remains unchanged.
 Stop is offered only for this app's own Runtime. Confirmation stops it without
 exiting the shell. The bootstrap then shows a localized stopped notice and an
 explicit Retry action; automatic recovery must not undo a user's Stop.
-Quit while this app's Runtime serves offers stop-and-quit, keep-running-and-quit,
-or cancel. Quit otherwise leaves the adopted Runtime alone. Startup and
+Quit while this app's Runtime serves offers keep-running-and-quit (the default
+button, since it interrupts nothing), stop-and-quit, or cancel. Quit otherwise
+leaves the adopted Runtime alone. Startup and
 uninstall serialize against lifecycle actions; no stop may race a launch.
 
 Start at Login is a native checkable menu item backed by
