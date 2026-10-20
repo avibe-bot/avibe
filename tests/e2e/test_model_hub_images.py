@@ -138,7 +138,10 @@ async def test_only_an_upstream_refusal_teaches_that_a_source_lacks_an_image_mod
         grok = backend_model_catalog.ImageModelSpec(
             "grok-imagine-image", "Grok Imagine", ("size",), ("ratio",), kinds=("api_key",),
         )
-        monkeypatch.setattr(hosted_tools_module, "provider_image_models", lambda vendor: (grok,) if vendor == "xai" else ())
+        monkeypatch.setattr(
+            hosted_tools_module, "source_image_models",
+            lambda vendor, protocol, listed: (grok,) if vendor == "xai" else (),
+        )
         vendor, chat_model, model = "xai", "grok-4.6", "grok-imagine-image"
     else:
         vendor, chat_model, model = "openai", "gpt-6-astra", "gpt-image-2"

@@ -113,7 +113,9 @@ _EXECUTOR_MODELS: dict[str, tuple[str, ...]] = {}
 @pytest.fixture(autouse=True)
 def _executor_models(monkeypatch):
     _EXECUTOR_MODELS.clear()
-    monkeypatch.setattr(hosted_tools_module, "provider_executor_models", lambda vendor: _EXECUTOR_MODELS.get(vendor, ()))
+    monkeypatch.setattr(
+        hosted_tools_module, "source_executor_models", lambda vendor, protocol: _EXECUTOR_MODELS.get(vendor, ()),
+    )
 
 
 def _bind(service, tool, executor):
@@ -832,6 +834,27 @@ async def test_a_call_reports_the_source_as_its_final_admission_saw_it(tmp_path)
     status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}})
     assert status == 200 and answer["record"]["status"] == "completed"
     assert (answer["execution"]["executor_billing"], answer["execution"]["cost"]) == ("monthly", {"basis": "included"})
+
+
+@pytest.mark.asyncio
+async def test_a_call_whose_executors_refused_the_tool_names_them_instead_of_asking_for_a_key(tmp_path):
+    """MH-HOSTED-GATEWAY-005: an upstream refusal is not a missing credential (#2873): the record names the Sources
+    that refused the tool and points at clearing that refusal, and nothing runs."""
+
+    service = _vibey_service(tmp_path, _sources())
+    _bind(service, "web_search", (XAI, "grok-4.6"))
+    xai = next(item for item in service.store.config.sources if item.id == XAI)
+    await service.record_hosted_refusals(
+        xai, [("grok-4.6", EvidenceFeature.hosted("web_search", "call"), "400 invalid_request_error")],
+    )
+    status, answer = await _call(service, "web_search", {"arguments": {"query": "q"}})
+    assert status == 200
+    assert answer == {"record": {
+        "status": "failed", "sources": [],
+        "error": "xAI key refused web search, so no Source can run it right now. "
+                 "Clear the refusal in Models › Tools to try again.",
+    }}
+    assert service.adapter.invocations == []
 
 
 @pytest.mark.asyncio

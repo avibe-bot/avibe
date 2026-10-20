@@ -16,7 +16,7 @@ from dataclasses import replace
 import aiohttp
 import pytest
 
-from config.v2_config import ModelHubHostedToolConfig
+from config.v2_config import ModelHubHostedToolConfig, ModelHubModelConfig
 from core.handlers.model_hub import hosted_images as images_module
 from core.handlers.model_hub import hosted_tools as hosted_tools_module
 from core.handlers.model_hub.adapter import RawOutcomeKind
@@ -242,6 +242,22 @@ async def test_only_an_upstream_refusal_of_the_model_or_endpoint_is_learned(tmp_
     assert offered[1] == [model for model in offered[0] if model not in refused]
 
 
+async def test_a_custom_relay_offers_the_image_models_it_lists_until_its_endpoint_refuses_them(tmp_path):
+    """MH-HOSTED-GATEWAY-007: a custom relay that lists an image model of the vendor whose protocol it speaks offers
+    it (#2873); a relay without the images endpoint refuses once, and the next turn no longer offers it."""
+
+    relay = _source("src_relayimg1", "OpenAI relay", vendor="custom", protocol="openai_responses", model_id="gpt-6-luna")
+    relay.models.append(ModelHubModelConfig(id="gpt-image-2", provenance="discovered"))
+    not_served = _outcome(RawOutcomeKind.HTTP_ERROR, status=404, code="not_found_error", source_id=relay.id)
+    service = _vibey_service(tmp_path, [relay], handles=[InvokeHandle(not_served)])
+    (status, answer), offered = await _call(service, {"model": "gpt-image-2", "prompt": "a cat"}, turns=2)
+    assert offered == [["gpt-image-2"], []]
+    assert service.adapter.invocations == [(relay.id, "gpt-image-2", "vibey")]
+    assert status == 200 and answer["record"]["status"] == "failed"
+    live = next(item for item in service.store.config.sources if item.id == relay.id)
+    assert service.hosted_evidence().unsupported(live, "gpt-image-2", FEATURE)
+
+
 @pytest.mark.parametrize("arguments", [
     {"model": "gpt-image-2", "prompt": "a cat", "style": "vivid"},
     {"model": "gpt-image-2", "prompt": " "},
@@ -289,7 +305,7 @@ async def test_an_image_call_costs_its_delivered_images_at_their_list_price(tmp_
     """MH-HOSTED-GATEWAY-007: the price that applies to what was delivered, times the images delivered."""
 
     monkeypatch.setattr(
-        hosted_tools_module, "provider_image_models", lambda vendor: (PRICED,) if vendor == "openai" else (),
+        hosted_tools_module, "source_image_models", lambda vendor, protocol, listed: (PRICED,) if vendor == "openai" else (),
     )
     service = _vibey_service(tmp_path, [replace(_sources()[0])], handles=[_served(PNG, PNG, size=size)])
     (status, answer), _ = await _call(service, {"model": "gpt-image-2", "prompt": "a cat", "n": 2})

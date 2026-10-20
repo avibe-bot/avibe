@@ -1843,7 +1843,8 @@ def test_engine_config_declares_text_only_input_only_on_openai_compatibility_mod
 
 def test_an_api_key_engine_entry_registers_its_vendors_image_models(tmp_path: Path) -> None:
     """MH-HOSTED-GATEWAY-007: image_generate routes only models the engine registered; an OpenAI-compatible entry
-    serves the images endpoints only for a model it flags, and reload verification expects them all."""
+    serves the images endpoints only for a model it flags, and reload verification expects them all. A custom
+    relay registers and flags only the image models it lists, of the vendor whose protocol it speaks."""
 
     store = EngineStateStore(tmp_path / "state")
     instance_dir, runtime_secrets = store.prepare_instance("install-1")
@@ -1857,7 +1858,9 @@ def test_an_api_key_engine_entry_registers_its_vendors_image_models(tmp_path: Pa
                  base_url=None, model_ids=("gpt-6-astra",)),
         _binding(refs["gemini"], source_id="src_gemini0001", vendor="gemini", protocol="openai_chat",
                  base_url=None, model_ids=("gemini-3-flash", "gemini-2.5-flash-image")),
-        _binding(refs["custom"], source_id="src_custom0001", model_ids=("model-a",)),
+        _binding(
+            refs["custom"], source_id="src_custom0001", model_ids=("model-a", "gemini-2.5-flash-image", "gpt-image-2"),
+        ),
     ])
     config_path = instance_dir / "config.yaml"
     write_engine_config(
@@ -1876,7 +1879,8 @@ def test_an_api_key_engine_entry_registers_its_vendors_image_models(tmp_path: Pa
     assert models(gemini) == {
         "gemini-3-flash": None, "gemini-2.5-flash-image": True, "gemini-3-pro-image-preview": True,
     }
-    assert models(custom) == {"model-a": None}
+    # Gemini's image models are Chat Completions ones; GPT Image's vendor speaks Responses, so it stays a chat row.
+    assert models(custom) == {"model-a": None, "gemini-2.5-flash-image": True, "gpt-image-2": None}
     sources = {source.source_id: source for source in store.list_sources()}
     expected = expected_model_names(store.list_sources(), store, "0")
     assert f'{sources["src_openai0001"].prefix}/gpt-image-2' in expected

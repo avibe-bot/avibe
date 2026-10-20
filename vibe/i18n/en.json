@@ -1170,8 +1170,8 @@
     },
     "hostedTools": {
       "noExecutor": {
-        "web_search": {"one": "No Source can run web search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "several": "No Source can run web search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this."},
-        "x_search": {"one": "No Source can run X search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "several": "No Source can run X search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this."}
+        "web_search": {"one": "No Source can run web search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "several": "No Source can run web search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "refused": "{sources} refused web search, so no Source can run it right now. Clear the refusal in Models › Tools to try again."},
+        "x_search": {"one": "No Source can run X search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "several": "No Source can run X search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "refused": "{sources} refused X search, so no Source can run it right now. Clear the refusal in Models › Tools to try again."}
       },
       "listSeparator": ", ",
       "providerRefused": "The executor's provider refused the call ({detail}).",
