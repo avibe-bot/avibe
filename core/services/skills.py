@@ -689,7 +689,22 @@ def _delete_skill_policies(resource_ids: list[str]) -> None:
             resource_access_service.delete_resource_policy(connection, "skill", resource_id)
 
 
-def _installed_skill_resource_ids_from_listing(
+def _skill_agent_ids(skill: dict[str, Any]) -> list[str]:
+    """Return the askill agent ids that actually contain a Skill."""
+
+    raw_agents = skill.get("agents")
+    if not isinstance(raw_agents, list):
+        return []
+    agent_ids: list[str] = []
+    for agent in raw_agents:
+        value = agent.get("id") if isinstance(agent, dict) else agent
+        agent_id = str(value or "").strip()
+        if agent_id and agent_id not in agent_ids:
+            agent_ids.append(agent_id)
+    return agent_ids
+
+
+def _installed_skill_targets_from_listing(
     listing: dict[str, Any],
     name: str,
     *,
@@ -697,11 +712,24 @@ def _installed_skill_resource_ids_from_listing(
     project_dir: Optional[str],
     project_id: Optional[str],
     backends: Optional[list[str]],
-) -> list[str]:
-    if not listing.get("ok") or not isinstance(listing.get("skills"), list):
-        raise SkillAccessError()
+    allow_unknown_agents: bool = False,
+) -> tuple[list[str], list[str]]:
+    if not listing.get("ok"):
+        error = listing.get("error")
+        if isinstance(error, dict):
+            code = str(error.get("code") or "askill_error")
+            message = str(error.get("message") or "askill listing failed")
+            details = error.get("details")
+        else:
+            code = "askill_error"
+            message = str(listing.get("message") or error or "askill listing failed")
+            details = None
+        raise SkillsError(code, message, details=details)
+    if not isinstance(listing.get("skills"), list):
+        raise SkillsError("askill_bad_response", "askill list returned no skills array")
     target_name = _normalize_skill_name(name)
     resource_ids: list[str] = []
+    agent_ids: list[str] = []
     for skill in listing["skills"]:
         if not isinstance(skill, dict):
             continue
@@ -714,10 +742,12 @@ def _installed_skill_resource_ids_from_listing(
         row_scope = _skill_scope(skill, scope)
         if row_scope is None:
             continue
-        all_entries = _skill_backend_entries(skill, None)
-        if not all_entries:
+        for agent_id in _skill_agent_ids(skill):
+            if agent_id not in agent_ids:
+                agent_ids.append(agent_id)
+        entries = _skill_backend_entries(skill, backends) if backends else _skill_backend_entries(skill, None)
+        if not entries and not allow_unknown_agents:
             raise SkillAccessError()
-        entries = _skill_backend_entries(skill, backends) if backends else all_entries
         for backend, _agent_index in entries:
             resource_ids.append(
                 skill_resource_id(
@@ -728,10 +758,10 @@ def _installed_skill_resource_ids_from_listing(
                     name=str(skill["name"]),
                 )
             )
-    return list(dict.fromkeys(resource_ids))
+    return list(dict.fromkeys(resource_ids)), agent_ids
 
 
-async def _installed_skill_resource_ids(
+async def _installed_skill_targets(
     askill_path: str,
     name: str,
     *,
@@ -739,23 +769,22 @@ async def _installed_skill_resource_ids(
     project_dir: Optional[str],
     project_id: Optional[str],
     backends: Optional[list[str]],
-) -> list[str]:
+    allow_unknown_agents: bool = False,
+) -> tuple[list[str], list[str]]:
     listing = await _run_askill(
         askill_path,
         ["list", *_list_scope_flag(scope), *_agent_flags(backends)],
         cwd=_cwd_for(scope, project_dir),
     )
-    resource_ids = _installed_skill_resource_ids_from_listing(
+    return _installed_skill_targets_from_listing(
         listing,
         name,
         scope=scope,
         project_dir=project_dir,
         project_id=project_id,
         backends=backends,
+        allow_unknown_agents=allow_unknown_agents,
     )
-    if not resource_ids:
-        raise SkillAccessError()
-    return resource_ids
 
 
 # --- public API -----------------------------------------------------------
@@ -872,7 +901,7 @@ async def add_skill(
             cwd=_cwd_for(scope, project_dir),
         )
         for target_name in target_names:
-            installed_resource_ids = _installed_skill_resource_ids_from_listing(
+            installed_resource_ids, _installed_agent_ids = _installed_skill_targets_from_listing(
                 listing,
                 target_name,
                 scope=scope,
@@ -945,7 +974,7 @@ async def remove_skill(
     backends: Optional[list[str]] = None,
     user_context: Any = None,
 ) -> dict[str, Any]:
-    """Remove one logical Skill installation from every managed backend link.
+    """Remove one logical Skill installation from every askill agent link.
 
     The optional legacy ``backends`` field is validated but no longer narrows removal.
     """
@@ -962,7 +991,7 @@ async def remove_skill(
         or context.has_role("editor")
     ):
         _require_skill_create_access(context)
-        resource_ids = await _installed_skill_resource_ids(
+        resource_ids, agent_ids = await _installed_skill_targets(
             askill_path,
             name,
             scope=scope,
@@ -970,17 +999,35 @@ async def remove_skill(
             project_id=project_id,
             backends=None,
         )
+        if not resource_ids:
+            raise SkillAccessError()
         _require_skill_management_access(
             resource_ids,
             user_context=context,
             allow_missing_policy=False,
         )
+    else:
+        _resource_ids, agent_ids = await _installed_skill_targets(
+            askill_path,
+            name,
+            scope=scope,
+            project_dir=project_dir,
+            project_id=project_id,
+            backends=None,
+            allow_unknown_agents=True,
+        )
+    # Askill defaults to detected agents, which can omit an installed link when
+    # that agent is not currently detectable. Use the exact links from `list`
+    # instead, including third-party agents such as Trae. If the Skill is an
+    # orphan with no links (or the list did not find it), leave `-a` out so
+    # askill can perform its canonical-directory cleanup or report not-found.
     args = [
         "remove",
         name,
         *_target_scope_flag(scope),
-        *_agent_flags(list(BACKEND_TO_AGENT)),
     ]
+    if agent_ids:
+        args.extend(["-a", *agent_ids])
     result = await _run_askill(askill_path, args, cwd=_cwd_for(scope, project_dir))
     if result.get("ok"):
         _delete_skill_policies(
@@ -1074,7 +1121,7 @@ async def update(
         or context.has_role("editor")
     ):
         _require_skill_create_access(context)
-        resource_ids = await _installed_skill_resource_ids(
+        resource_ids, _installed_agent_ids = await _installed_skill_targets(
             askill_path,
             name,
             scope=scope,
