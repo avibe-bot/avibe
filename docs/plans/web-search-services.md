@@ -349,7 +349,8 @@ Hosted tools §6 holds, with these changes:
   applies; DeepSeek: billing unknown, since it depends on a non-empty `results` array). The catalog row's declared unbilled
   outcomes apply before the fallback below (a DeepSeek timeout before any status arrives is $0; once a 200 status arrived, the received-200 rule above
   applies instead). Only another failure
-  after sending and before any status (a read timeout, a lost connection, a stop) may still have been billed without a
+  after sending and before any status (a read timeout, a lost connection, or a stop, which writes no record and
+  reaches only the ledger) may still have been billed without a
   known outcome (a stop before sending costs $0), so it is handled like an unreadable 200 whose billing is
   unknown: no cost, `uncertain_requests` in the ledger, and the lower-bound flag.
 - A chain with no search-capable candidate (model executors only) writes the released record shape, without
@@ -646,7 +647,9 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
    every hop declares the function.
 5. Invalid-key, balance and limit failures put the Source in `needs_action` and skip it until the key is replaced
    or a re-enable check or trial succeeds; transient failures change no state; an empty answer ends the chain.
-6. Each call yields one canonical record; the card and the IM line name the service and, from `attempts[]`, say
+6. Each call that finishes yields one canonical record; a call the user stops writes none (the turn abort rule
+   stands, as for every hosted call), and only the usage ledger keeps its sent requests, a post-send stop as
+   uncertain. The card and the IM line name the service and, from `attempts[]`, say
    which services failed or were blocked before it, and how to repair a blocked one.
 7. A `search` Source never appears as a model route candidate, in discovery, in a model probe or in engine config.
 8. A DeepSeek API-key Source on the official endpoint is a candidate with no extra setup; on a relay it is not.
