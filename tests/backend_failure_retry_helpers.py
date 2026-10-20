@@ -95,17 +95,19 @@ def seed_failed_notice(
 
 def reserve_failure_retry(conn, notice):
     from core.backend_failure_retry import reserve_retry
+    from core.input_admission import InputEnvelope, InputProvenance, InputSender
 
     return reserve_retry(
         conn,
         session_id=notice["session_id"],
         notice_id=notice["id"],
-        snapshot=deliveries.message_snapshot(
-            scope_id=notice["scope_id"],
+        envelope=InputEnvelope(
             session_id=notice["session_id"],
-            platform="avibe",
-            author="user",
-            source="user",
+            scope_id=notice["scope_id"],
+            sender=InputSender("user"),
+            kind="user",
+            provenance=InputProvenance(source="failure_retry"),
+            dispatch_text="continue",
             text="continue",
             message_kind="quick_reply",
         ),

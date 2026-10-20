@@ -370,48 +370,45 @@ class ShowSessionEventStore:
                     # leaves the metadata byte-identical to before.
                     metadata = metadata_with_resource_user_context(metadata, access_context)
                     if requests_dispatch:
-                        from core.message_priority import (
-                            delivery_intent_for_trigger,
-                            priority_for_delivery_intent,
+                        from core.input_admission import (
+                            InputEnvelope,
+                            InputProvenance,
+                            InputSender,
+                            admit_input,
                         )
 
-                        priority = priority_for_delivery_intent(
-                            delivery_intent_for_trigger("show_annotation")
-                        )
                         delivery_id = message_deliveries.new_delivery_id()
-                        delivery_row = message_deliveries.insert_delivery(
+                        admitted = admit_input(
                             conn,
-                            delivery_id=delivery_id,
-                            session_id=session_id,
-                            priority=priority,
-                            state="reserved",
-                            snapshot=message_deliveries.message_snapshot(
-                                scope_id=session["scope_id"],
+                            InputEnvelope(
                                 session_id=session_id,
-                                platform="avibe",
-                                author=messages_service.HARNESS_TYPE,
-                                source=messages_service.HARNESS_TYPE,
-                                message_type=(
+                                scope_id=session["scope_id"],
+                                sender=InputSender(
+                                    messages_service.HARNESS_TYPE,
+                                    event_id,
+                                    SHOW_TRIGGER_KIND[event_type],
+                                ),
+                                kind=(
                                     messages_service.ANNOTATION_TYPE
                                     if writes_annotation
                                     else messages_service.HARNESS_TYPE
                                 ),
+                                provenance=InputProvenance(
+                                    source="show_annotation",
+                                    origin=messages_service.HARNESS_TYPE,
+                                    native_message_id=f"show:{event_id}",
+                                ),
+                                dispatch_text=dispatch_text,
                                 text=transcript_text,
                                 content=content,
                                 metadata=metadata,
-                                author_name=SHOW_TRIGGER_KIND[event_type],
-                                author_id=event_id,
-                                native_message_id=f"show:{event_id}",
                             ),
-                            dispatch_text=dispatch_text,
+                            delivery_id=delivery_id,
                             dedupe_key=f"show:{event_id}",
-                            history_event={
-                                "kind": "admission",
-                                "priority": priority,
-                                "state": "reserved",
-                            },
                         )
-                        delivery = message_deliveries.public_delivery_payload(delivery_row)
+                        delivery = message_deliveries.public_delivery_payload(
+                            admitted.delivery
+                        )
                         conn.execute(
                             update(show_session_events)
                             .where(show_session_events.c.id == event_id)

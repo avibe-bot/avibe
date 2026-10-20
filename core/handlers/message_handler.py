@@ -621,19 +621,13 @@ class MessageHandler(BaseHandler):
                     spec["routing_subagent"] = routing_agent
                     context.platform_specific = spec
 
-            from core.message_priority import delivery_intent_for_trigger
-
-            delivery_intent = delivery_intent_for_trigger("im")
-            if (
-                restored_route is None
-                and agent_name == "opencode"
-                and subagent_name
-                and subagent_message is not None
-            ):
-                # OpenCode subagents share the main Session anchor. They need a
-                # fresh Turn so the persisted route can select the requested
-                # native subagent instead of text-steering the active main Turn.
-                delivery_intent = "queue"
+            # The subagent an explicit prefix named; the admission policy decides
+            # what it means for this input's priority.
+            explicit_subagent = (
+                subagent_name
+                if restored_route is None and subagent_message is not None
+                else None
+            )
 
             if agent_name in {"claude", "codex"} and subagent_name:
                 spec = dict(context.platform_specific or {})
@@ -691,7 +685,7 @@ class MessageHandler(BaseHandler):
                     session_anchor=base_session_id,
                     working_path=working_path,
                     vibe_agent=vibe_agent,
-                    delivery_intent=delivery_intent,
+                    explicit_subagent=explicit_subagent,
                     downloaded_attachment_paths=downloaded_attachment_paths,
                     attachment_lease=attachment_lease,
                     admission_context={
@@ -949,7 +943,7 @@ class MessageHandler(BaseHandler):
         session_anchor: str,
         working_path: str,
         vibe_agent: Any,
-        delivery_intent: str,
+        explicit_subagent: Optional[str],
         downloaded_attachment_paths: List[str],
         admission_context: dict[str, Any],
         attachment_lease: Any = None,
@@ -968,13 +962,17 @@ class MessageHandler(BaseHandler):
         if not session_id:
             raise RuntimeError("Could not reserve the Agent Session before delivery")
 
-        from core.message_priority import priority_for_delivery_intent
+        from core.input_admission import (
+            InputEnvelope,
+            InputProvenance,
+            InputSender,
+            admit_input,
+        )
         from core.session_turns import SCRIPT_CONFIRM_ANSWER_REASON, DeliveryRequest
         from storage import message_deliveries, media_service, messages_service
         from storage.agent_session_rows import reserve_write_lock
         from storage.db import get_cached_sqlite_engine
 
-        priority = priority_for_delivery_intent(delivery_intent)
         author_name = await self._input_user_name(context)
         scope_id = None
         request = None
@@ -1045,38 +1043,74 @@ class MessageHandler(BaseHandler):
                     content = {"text": display_text}
                     if attachment_refs:
                         content["attachments"] = attachment_refs
-                    request = DeliveryRequest(
+                    envelope = InputEnvelope(
                         session_id=session_id,
-                        priority=priority,
-                        content=dispatch_text,
-                        has_content=True,
-                        delivery_id=message_deliveries.new_delivery_id(),
                         scope_id=scope_id,
-                        platform=platform,
-                        source="user",
-                        author="user",
-                        message_type="user",
-                        author_id=str(context.user_id or "").strip() or None,
-                        author_name=author_name,
-                        display_text=display_text,
-                        content_json=content,
-                        admission_context=admission_context,
-                        native_message_id=native_message_id or None,
-                        parent_native_message_id=(
-                            str(context.thread_id or "").strip() or None
+                        sender=InputSender(
+                            "user",
+                            str(context.user_id or "").strip() or None,
+                            author_name,
                         ),
+                        kind="user",
+                        provenance=InputProvenance(
+                            source="im",
+                            platform=platform,
+                            native_message_id=native_message_id or None,
+                            parent_native_message_id=(
+                                str(context.thread_id or "").strip() or None
+                            ),
+                        ),
+                        dispatch_text=dispatch_text,
+                        text=display_text,
+                        content=content,
                         message_kind=(
                             "original"
                             if context.is_original_human_text is True
                             or context.is_original_human_attachment is True
                             else context.message_kind
                         ),
+                        backend=agent_name,
+                        subagent=explicit_subagent,
                     )
-                    reserved = manager.reserve_delivery(conn, request)
-                    if str(reserved["id"]) != request.delivery_id:
+                    delivery_id = message_deliveries.new_delivery_id()
+                    admitted = admit_input(
+                        conn,
+                        envelope,
+                        delivery_id=delivery_id,
+                        dedupe_key=message_deliveries.native_dedupe_key(
+                            platform,
+                            envelope.provenance.native_message_id,
+                            scope_id=scope_id,
+                        ),
+                        admission_context=admission_context,
+                        reuse_existing=True,
+                    )
+                    if str(admitted.delivery["id"]) != delivery_id:
                         raise RuntimeError(
                             "native Delivery appeared after writer reservation"
                         )
+                    request = DeliveryRequest(
+                        session_id=session_id,
+                        priority=admitted.decision.priority,
+                        content=dispatch_text,
+                        has_content=True,
+                        delivery_id=delivery_id,
+                        scope_id=scope_id,
+                        platform=platform,
+                        source=envelope.provenance.origin,
+                        author=envelope.sender.kind,
+                        message_type=envelope.kind,
+                        author_id=envelope.sender.id,
+                        author_name=envelope.sender.name,
+                        display_text=display_text,
+                        content_json=content,
+                        admission_context=admission_context,
+                        native_message_id=envelope.provenance.native_message_id,
+                        parent_native_message_id=(
+                            envelope.provenance.parent_native_message_id
+                        ),
+                        message_kind=envelope.message_kind,
+                    )
         except Exception:
             if attachment_lease is not None:
                 attachment_lease.release()

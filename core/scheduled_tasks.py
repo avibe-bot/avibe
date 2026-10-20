@@ -8646,7 +8646,8 @@ class ScheduledTaskService:
                     prompt=request.prompt,
                     execution_id=request.id,
                     task_id=task_id,
-                    # ``delivery_intent_for_trigger`` has a CLOSED vocabulary, and an
+                    # The admission policy's trigger vocabulary
+                    # (``delivery_intent_for_trigger``) is CLOSED, and an
                     # escalation IS a hook send -- an out-of-band turn a definition
                     # queued -- so it takes the hook intent rather than a new one no
                     # mapping knows. Provenance is not lost: the run row still carries
@@ -11154,22 +11155,17 @@ class ScheduledTaskService:
         # ``_build_context``). No dot bookkeeping here.
         #
         # Route every persisted Session target through the durable owner. The
-        # source policy decides whether this input queues or steers; the platform
-        # only controls native routing and outward delivery.
+        # admission policy decides from the context's trigger kind whether this
+        # input queues or steers; the platform only controls native routing and
+        # outward delivery.
         # Returning ``None`` keeps ``ok = not error`` true (the run's own outcome
         # surfaces via the outbound terminal result + sidebar dot, exactly as the
         # interactive Chat turn does).
         gate = getattr(self.controller, "session_turn_gate", None)
         if session_id and gate is not None:
-            from core.message_priority import delivery_intent_for_trigger
             from core.session_turns import TurnSubmissionResult
 
-            submission = await gate.submit_scheduled(
-                session_id,
-                context,
-                prompt,
-                delivery_intent=delivery_intent_for_trigger(trigger_kind),
-            )
+            submission = await gate.submit_scheduled(session_id, context, prompt)
             if isinstance(submission, TurnSubmissionResult):
                 result = TaskDispatchResult(
                     error=None,
