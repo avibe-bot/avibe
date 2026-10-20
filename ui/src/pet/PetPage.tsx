@@ -277,7 +277,7 @@ const PetSurface: React.FC = () => {
     if (cardsListed) { void setPanel(false); return; }
     if (historyOpen) { setDetailOpen(false); void setPanel(false); return; }
     // Typing and dictation keep the speech slot, and the draft, as they are.
-    if (composing || voice.listening) return;
+    if (composing || voice.busy) return;
     if (!binding || resolvingMain || (data.messages.length === 0 && !optimisticTitle)) return;
     openHistory();
   };
@@ -573,7 +573,7 @@ const PetSurface: React.FC = () => {
     if (intent === 'release') {
       hotkeyHeld.current = false;
       voice.stop(true);
-      if (!voice.listening && !composing) {
+      if (!voice.busy && !composing) {
         void setPanel(true);
         petComposer.requestListen();
       }
@@ -585,7 +585,7 @@ const PetSurface: React.FC = () => {
       hotkeyHeld.current = true;
       petComposer.requestListen();
     }
-  }, [setPanel, openCards, voice.stop, voice.listening, composing]);
+  }, [setPanel, openCards, voice.stop, voice.busy, composing]);
   useOnSummon(onSummon);
   useEffect(() => {
     if (!listenPending || !binding || !canChat || !expanded) return;
@@ -595,15 +595,15 @@ const PetSurface: React.FC = () => {
     else openComposer(draft);
   }, [listenPending, binding, canChat, expanded, voice.available, voice.start, openComposer, draft, uncertain]);
   useEffect(() => {
-    const onBlur = () => { if (!voice.listening && !draft.trim()) void setPanel(false); };
+    const onBlur = () => { if (!voice.busy && !draft.trim()) void setPanel(false); };
     window.addEventListener('blur', onBlur);
     return () => window.removeEventListener('blur', onBlur);
-  }, [voice.listening, draft, setPanel]);
+  }, [voice.busy, draft, setPanel]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       // Escape also dismisses an IME candidate list; that one is not ours.
       if (event.key !== 'Escape' || isComposingKey(event)) return;
-      if (voice.listening) voice.cancel();
+      if (voice.busy) voice.cancel();
       else if (composing) closeComposer();
       else if (detailOpen) { setDetailOpen(false); void setPanel(false); }
       else void setPanel(false);
@@ -701,7 +701,7 @@ const PetSurface: React.FC = () => {
   // The bubble is drawn: the speech slot shows it rather than the input or the
   // dictation marquee. Every input to the linger (time, pointer) means
   // something only while this holds.
-  const bubbleDrawn = hasBubbleContent && Boolean(binding) && !voice.listening && !(composing && canChat && !uncertain);
+  const bubbleDrawn = hasBubbleContent && Boolean(binding) && !voice.busy && !(composing && canChat && !uncertain);
   // The reply is on screen: the bubble is drawn and its summary row is the
   // reply (not "thinking" while the turn still runs, nor a failure notice).
   // Only then does the linger spend its time.
@@ -818,9 +818,10 @@ const PetSurface: React.FC = () => {
       <MiniDock
         enabled={canChat && Boolean(binding)}
         listening={voice.listening}
+        finishing={voice.finishing}
         typing={composing}
         // Availability gates starting a capture; an active one always keeps its stop control.
-        showMic={voice.available || voice.listening}
+        showMic={voice.available || voice.busy}
         onMic={() => (voice.listening ? voice.stop(true) : voice.start())}
         onKeyboard={() => {
           if (uncertain) { void setPanel(true); setDetailOpen(true); return; }
@@ -834,8 +835,8 @@ const PetSurface: React.FC = () => {
 
   return (
     <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state}>
-      <div className={clsx('pet-mini-column', voice.listening && 'is-voice-active')} style={{ '--pet-collapsed-height': `${collapsedHeight}px` } as CSSProperties}>
-        <div className={clsx('pet-mini-cards', voice.listening && 'is-hidden')} inert={voice.listening || undefined} aria-label={cardsExpanded ? t('pet.panel') : undefined} style={{ height: cardsListed ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}>
+      <div className={clsx('pet-mini-column', voice.busy && 'is-voice-active')} style={{ '--pet-collapsed-height': `${collapsedHeight}px` } as CSSProperties}>
+        <div className={clsx('pet-mini-cards', voice.busy && 'is-hidden')} inert={voice.busy || undefined} aria-label={cardsExpanded ? t('pet.panel') : undefined} style={{ height: cardsListed ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}>
           <div ref={collapsedRef} key={singleCard ? 'single' : cardsExpanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>
           {visibleCards.length > 0 && (
             cardsFull ? (
@@ -855,8 +856,8 @@ const PetSurface: React.FC = () => {
           )}
           </div>
         </div>
-        <SpeechSlot open={voice.listening || composing || showReplyBubble || resolvingMain || !binding}>
-          {voice.listening ? <Marquee text={voice.preview} listeningLabel={t('pet.voice.listening')} /> : composing && canChat && !uncertain ? (
+        <SpeechSlot open={voice.busy || composing || showReplyBubble || resolvingMain || !binding}>
+          {voice.busy ? <Marquee text={voice.finishing ? '' : voice.preview} listeningLabel={t(voice.finishing ? 'pet.voice.finishing' : 'pet.voice.listening')} /> : composing && canChat && !uncertain ? (
           <>
           {voice.error && <p className="pet-mini-input-note" role="status">{t(`pet.voice.${voice.error}`)}</p>}
           <form className="pet-mini-input" data-pet-hit onSubmit={(event) => { event.preventDefault(); void submit(); }}>
@@ -1017,6 +1018,8 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
   const [asr, setAsr] = useState<{ epoch: PetSurfaceEpoch; enabled: boolean; available: boolean; checked: boolean; maxFileBytes?: number }>({ epoch, enabled, available: false, checked: false });
   const [preview, setPreview] = useState('');
   const [listening, setListening] = useState(false);
+  // Stop has been requested; capture and cleanup still run until `done`.
+  const [finishing, setFinishing] = useState(false);
   // A failed capture or transcription falls back to text with this note.
   const [error, setError] = useState<VoiceFailure | null>(null);
   type Capture = { dictation: ShowPageVoiceDictation; ending: boolean; cancelled: boolean };
@@ -1040,16 +1043,20 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
   }, [enabled, epoch]);
   const stop = useCallback((commit: boolean) => {
     const capture = captureRef.current;
-    if (!capture) return;
+    if (!capture || capture.ending) return;
     capture.ending = true;
-    if (commit) capture.dictation.finish();
-    else {
-      capture.cancelled = true;
-      captureRef.current = null;
-      capture.dictation.abort();
+    if (commit) {
       setListening(false);
-      setPreview('');
+      setFinishing(true);
+      capture.dictation.finish();
+      return;
     }
+    capture.cancelled = true;
+    captureRef.current = null;
+    capture.dictation.abort();
+    setListening(false);
+    setFinishing(false);
+    setPreview('');
   }, []);
   const start = useCallback(() => {
     if (!epoch.isCurrent() || !available || captureRef.current) return;
@@ -1061,11 +1068,13 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
     };
     captureRef.current = capture;
     setListening(true);
+    setFinishing(false);
     setError(null);
     const settle = () => {
       if (captureRef.current !== capture || !epoch.isCurrent()) return false;
       captureRef.current = null;
       setListening(false);
+      setFinishing(false);
       setPreview('');
       return !capture.cancelled;
     };
@@ -1091,7 +1100,19 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
   const clearError = useCallback(() => setError(null), []);
   useEffect(() => cancel, [epoch, enabled, cancel]);
   useEffect(() => () => setError(null), [epoch, enabled]);
-  return { available, cloudRequired: asrForEpoch.checked && !asrForEpoch.available, listening, preview, error, clearError, start, stop, cancel };
+  return {
+    available,
+    cloudRequired: asrForEpoch.checked && !asrForEpoch.available,
+    listening,
+    finishing,
+    busy: listening || finishing,
+    preview,
+    error,
+    clearError,
+    start,
+    stop,
+    cancel,
+  };
 }
 
 type VoiceFailure = 'startFailed' | 'empty' | 'failed';
@@ -1129,9 +1150,9 @@ const Marquee: React.FC<{ text: string; listeningLabel: string }> = ({ text, lis
   );
 };
 
-const MiniDock: React.FC<{ enabled: boolean; listening: boolean; typing: boolean; showMic: boolean; onMic: () => void; onKeyboard: () => void; t: (key: string) => string }> = ({ enabled, listening, typing, showMic, onMic, onKeyboard, t }) => (
-  <div className={clsx('pet-mini-dock', (listening || typing) && 'is-active')} data-pet-hit>
-    {showMic && <button type="button" className={clsx(listening && 'is-listening')} onClick={onMic} aria-pressed={listening} aria-label={listening ? t('pet.voice.stop') : t('pet.voice.open')}>{listening ? <StopIcon /> : <MicIcon />}</button>}
+const MiniDock: React.FC<{ enabled: boolean; listening: boolean; finishing?: boolean; typing: boolean; showMic: boolean; onMic: () => void; onKeyboard: () => void; t: (key: string) => string }> = ({ enabled, listening, finishing, typing, showMic, onMic, onKeyboard, t }) => (
+  <div className={clsx('pet-mini-dock', (listening || finishing || typing) && 'is-active')} data-pet-hit>
+    {showMic && <button type="button" className={clsx(listening && 'is-listening')} disabled={finishing} onClick={onMic} aria-pressed={listening} aria-label={listening ? t('pet.voice.stop') : t('pet.voice.open')}>{listening ? <StopIcon /> : <MicIcon />}</button>}
     {showMic && <span className="pet-mini-dock-divider" aria-hidden />}
     <button type="button" className={clsx(typing && 'is-typing')} disabled={!enabled} onClick={onKeyboard} aria-pressed={typing} aria-label={typing ? t('pet.keyboard.close') : t('pet.keyboard.open')}><KeyboardIcon /></button>
   </div>

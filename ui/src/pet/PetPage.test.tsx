@@ -1662,6 +1662,38 @@ describe('desktop mini v2 interaction contract', () => {
     }
   });
 
+  it('leaves listening as soon as stop is pressed, before the transcript arrives', async () => {
+    const done = deferred<string>();
+    const finish = vi.fn();
+    let preview!: (text: string) => void;
+    class Dictation {
+      done = done.promise;
+      constructor(options: { onPreview: (text: string) => void }) { preview = options.onPreview; }
+      start = async () => {};
+      finish = finish;
+      abort = () => {};
+    }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      mainSession('S'); render(<PetPage />); tapHotkey();
+      await userEvent.click(await screen.findByLabelText('pet.voice.open'));
+      expect(pose()).toBe('listening');
+      await act(async () => { preview('live words'); });
+      expect(screen.getByText('live words')).toBeTruthy();
+      await userEvent.click(screen.getByLabelText('pet.voice.stop'));
+      expect(finish).toHaveBeenCalled();
+      expect(pose()).not.toBe('listening');
+      expect(screen.queryByLabelText('pet.voice.stop')).toBeNull();
+      expect(screen.getByLabelText('pet.voice.open').hasAttribute('disabled')).toBe(true);
+      expect(screen.getByText('pet.voice.finishing')).toBeTruthy();
+      expect(screen.queryByText('live words')).toBeNull();
+      expect(screen.queryByRole('textbox')).toBeNull();
+      await act(async () => done.resolve('cleaned words'));
+      expect(await screen.findByRole('textbox')).toBeTruthy();
+      expect((screen.getByRole('textbox') as HTMLTextAreaElement).value).toBe('cleaned words');
+      expect(screen.queryByText('pet.voice.finishing')).toBeNull();
+    });
+  });
+
   it('does not let a queued old animation report replace the new epochs hit regions', async () => {
     const frames: FrameRequestCallback[] = [];
     vi.stubGlobal('requestAnimationFrame', vi.fn((callback: FrameRequestCallback) => frames.push(callback)));

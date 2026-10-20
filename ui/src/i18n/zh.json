@@ -5947,6 +5947,7 @@
     "voice": {
       "cloudRequired": "语音输入需要 Avibe Cloud，暂时可以打字发送。",
       "listening": "正在听…",
+      "finishing": "正在整理…",
       "open": "语音输入",
       "stop": "停止语音输入",
       "startFailed": "无法使用麦克风。请在系统设置里检查麦克风权限，或直接打字。",
