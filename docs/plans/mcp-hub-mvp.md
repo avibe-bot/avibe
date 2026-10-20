@@ -13,7 +13,7 @@ Add MCP Hub to the Skills page. A user pastes a provider `mcpServers` JSON block
 paste / vibe mcp add → save definition → generate (connect, initialize, tools/list all pages) → publish static revision
 ```
 
-In scope: stdio and Streamable HTTP, tool discovery and calling, credential references, generate/regenerate, static help/list, shared runtime, structured/multimodal results.
+In scope: stdio and Streamable HTTP, tool discovery and calling, plaintext env/header configuration, generate/regenerate, static help/list, shared runtime, structured/multimodal results.
 
 Out of scope: OAuth, SSE (explicit `unsupported_transport_sse` error), project scope, Skill generation, resources/prompts, sampling, update detection, auto-install/upgrade of server software, package sharing/import.
 
@@ -96,7 +96,7 @@ Exit codes (the JSON error `type` is authoritative; command-admission denials ke
 | 3 | package or artifact missing/invalid, or `package_changed` |
 | 4 | package disabled |
 | 5 | connection / unsupported transport |
-| 6 | tool not found, tool error, or `result_too_large` |
+| 6 | tool not found or tool error |
 | 7 | timeout or cancelled before `tools/call` was sent |
 | 8 | timeout, cancel or disconnect after `tools/call` was sent (unknown outcome) |
 | 9 | owner unavailable or at capacity |
@@ -199,7 +199,7 @@ Result envelope:
  "result": {"content": [], "isError": false}}
 ```
 
-Preserve typed content, `structuredContent`, `isError` and explicit null/false/empty values. Results above a fixed byte cap (set in C0; no shared IPC cap exists) fail with `result_too_large` instead of being truncated.
+Preserve typed content, `structuredContent`, `isError` and explicit null/false/empty values. Results above a fixed byte cap (set in C0; no shared IPC cap exists) are not returned: the call still completed, so the envelope reports `status: "ok"` with `resultOmitted: "too_large"` and exit 0, so Agents never retry a committed call.
 
 ## 8. UI / API
 
@@ -218,7 +218,7 @@ POST   /api/mcp/{name}/disable
 DELETE /api/mcp/{name}
 ```
 
-Native async FastAPI routes calling the owner over IPC.
+Native async FastAPI routes calling the owner over IPC. Management routes use the existing Web route authorization (`vibe/authorization.py`) at the same role as other config-changing routes, and forward the validated Web user context to the owner like existing config APIs do.
 
 ## 9. Prior art
 
