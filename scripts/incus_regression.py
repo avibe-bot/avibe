@@ -3084,7 +3084,11 @@ def cmd_delete(args: argparse.Namespace) -> int:
         target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False, slug=slug)
         runner = Runner(dry_run=args.dry_run)
         if not getattr(args, "ignore_hold", False):
-            hold = describe_instance_hold(instance_record(runner, args.remote, target.project, target.instance))
+            # A dry run still needs a real, read-only daemon listing to prove
+            # that a hold is absent; the mutation runner intentionally reports
+            # no records in dry-run mode.
+            hold_runner = Runner(dry_run=False) if args.dry_run else runner
+            hold = describe_instance_hold(instance_record(hold_runner, args.remote, target.project, target.instance))
             if hold:
                 raise RegressionError(
                     f"Refusing to delete {target.slug}: {hold}. "

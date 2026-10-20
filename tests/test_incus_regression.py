@@ -2569,9 +2569,11 @@ def hold_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str = 
     project, instance = ("avr-master", "avibe-master") if target == "master" else ("avr-wt-eval", "avibe-wt-eval")
     config = {"user.avibe-regression.seed": "regression"}
     commands = []
+    _, listing = daemon_listing(project, instance, config=config)
 
     class RecordingRunner(incus_regression.Runner):
-        names, records = daemon_listing(project, instance, config=config)
+        def records(self, command, *, what):
+            return [] if self.dry_run else listing(self, command, what=what)
 
         def run(self, command, **kwargs):
             if self.dry_run:
@@ -2630,10 +2632,11 @@ def test_hold_then_status_and_release_preserve_unrelated_config(
 
 
 @pytest.mark.parametrize("target", ["worktree", "master"])
+@pytest.mark.parametrize("dry_run", [False, True], ids=["apply", "dry-run"])
 def test_delete_held_environment_refuses_before_mutation_unless_explicitly_overridden(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], target: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], target: str, dry_run: bool
 ) -> None:
-    """A persistent hold (not the existing build lock) must protect a running evaluation."""
+    """A persistent hold protects running work, including previews that must not offer its deletion."""
     config, commands = hold_fixture(tmp_path, monkeypatch, target)
     config.update({
         "user.avibe-regression.hold.owner": "session-one",
@@ -2641,11 +2644,12 @@ def test_delete_held_environment_refuses_before_mutation_unless_explicitly_overr
         "user.avibe-regression.hold.since": "2026-10-20T12:00:00+00:00",
     })
     original = dict(config)
-    flags = ["delete", "--target", target, "--slug", "eval", "--yes"]
+    flags = ["delete", "--target", target, "--slug", "eval", "--yes"] + (["--dry-run"] if dry_run else [])
     assert incus_regression.main(flags) == 1
-    err = capsys.readouterr().err
-    assert "session-one" in err and "Evaluation in progress" in err
-    assert "--ignore-hold" in err
+    captured = capsys.readouterr()
+    assert "session-one" in captured.err and "Evaluation in progress" in captured.err
+    assert "--ignore-hold" in captured.err
+    assert "+ incus" not in captured.out
     assert commands == []
     assert config == original
     if target == "worktree":
@@ -2653,10 +2657,17 @@ def test_delete_held_environment_refuses_before_mutation_unless_explicitly_overr
     flags.append("--ignore-hold")
     assert incus_regression.main(flags) == 0
     project, instance = ("avr-master", "avibe-master") if target == "master" else ("avr-wt-eval", "avibe-wt-eval")
-    assert commands == [
+    expected = [
         ["incus", "--project", project, "delete", instance, "--force"],
         ["incus", "project", "delete", project],
     ]
+    if dry_run:
+        out = capsys.readouterr().out
+        assert all("+ " + shlex.join(command) in out for command in expected)
+        assert commands == []
+        assert config == original
+    else:
+        assert commands == expected
 
 
 def test_reconcile_reports_holds_on_every_observed_instance_without_an_override(
