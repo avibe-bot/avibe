@@ -113,6 +113,7 @@ Exit codes (the JSON error `type` is authoritative):
 
 - Exact property keys; no aliases, case conversion or inserted defaults.
 - One input mode per call; no input means `{}`.
+- A tool whose name starts with `-` is selected after `--`: `vibe mcp docs -- --list --args-json '{}'`.
 - Validate with a standard JSON Schema library (no remote refs). A tool whose schema it cannot handle is published as JSON-input-only with unvalidated help, not a failed generation.
 
 ### 4.3 Management
@@ -174,7 +175,8 @@ Persisted `definition.json`:
 - `revision` = sha256 of the canonical manifest inputs (definition, versions, tools, commands), excluding timestamps. An identical rebuild reports "no change".
 - Manifest records `protocolVersion`, `serverInfo`, `generatorVersion`, `generatedAt` as provenance only; nothing compares them or detects updates. `tools/list_changed` is ignored.
 - Regenerate does not upgrade server software. A stale schema surfaces as a call error suggesting regeneration; calls are never replayed.
-- The manifest embeds the definition with env/header values omitted. Changing a value is a definition change and needs regeneration.
+- The manifest embeds the complete effective definition (including env/header values; written 0600, masked in UI). Calls always connect with the admitted revision's own definition, never the edited `definition.json`, so a pending edit cannot mix an old URL with a new header. Changing a value is a definition change and needs regeneration.
+- Tools with `execution.taskSupport: "required"` are skipped with a generation diagnostic (tasks are out of scope).
 
 ## 7. Runtime
 
@@ -187,7 +189,7 @@ Persisted `definition.json`:
 - **Schemas at call time:** the CLI parses and validates against the published revision only. The runtime SDK client may run its own `tools/list` when the protocol needs it (e.g. `x-mcp-header` → `Mcp-Param-*` headers); that never changes the published package.
 - **Calls:** the owner checks enabled state, connects or reuses, sends `tools/call` and returns the result with the revision used. If `current.json` changed between CLI parse and admission, it returns `package_changed`.
 - **Disable/remove:** blocks new calls and closes connections; in-flight work may finish or report unknown outcome.
-- **Event loop:** async I/O on the Controller loop, file and schema work off-loop, per the repo's controller-loop rules.
+- **Event loop:** all MCP SDK sessions run on one dedicated runtime thread with its own event loop, owned by the Controller; the SDK's synchronous result validation therefore never blocks the Controller loop.
 
 Result envelope:
 
