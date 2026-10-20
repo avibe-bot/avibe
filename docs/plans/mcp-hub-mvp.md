@@ -26,7 +26,7 @@ Out of scope: OAuth, SSE (explicit `unsupported_transport_sse` error), project s
   current.json             # pointer to the published revision
   revisions/<revision>/    # <revision> = generation timestamp + random suffix
     definition.json        # immutable snapshot of the definition used to generate and to connect
-    manifest.json          # formatVersion, description, generatedAt, serverInfo.version (shown in UI)
+    manifest.json          # formatVersion, description, generatedAt, serverInfo.version if the server provides it (optional; shown in UI)
     tools.json             # original tool descriptors
     commands.json          # generated flags and help
 ```
