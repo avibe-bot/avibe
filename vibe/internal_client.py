@@ -384,6 +384,68 @@ def computer_use_sync(
     return {"status_code": response.status_code, "body": body}
 
 
+def mcp_request_sync(
+    operation: str,
+    payload: dict[str, Any],
+    *,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Run one Controller-owned MCP Hub operation (``core/mcp_hub/runtime.py``).
+
+    The owner bounds every operation itself (connect, call and generation
+    timeouts), so the read waits for its definitive answer. Once IPC connected,
+    a transport failure is acceptance-ambiguous and raises
+    ``InternalServerTimeout``.
+    """
+
+    endpoint = _resolve_endpoint(socket_path)
+    try:
+        with httpx.Client(
+            transport=_sync_transport(endpoint),
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
+            timeout=httpx.Timeout(None, connect=5.0),
+        ) as client:
+            response = client.post("/internal/mcp", json={"operation": operation, "payload": payload})
+            _validate_response(response, endpoint)
+            body = response.json() if response.content else {}
+    except _SOCKET_CONNECT_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    except httpx.TransportError as exc:
+        raise InternalServerTimeout(str(exc)) from exc
+    if not isinstance(body, dict):
+        raise InternalServerUnavailable("mcp endpoint returned invalid JSON")
+    return body
+
+
+async def mcp_request(
+    operation: str,
+    payload: dict[str, Any],
+    *,
+    socket_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    """Async twin of :func:`mcp_request_sync` for the Web UI process."""
+
+    endpoint = await _resolve_endpoint_async(socket_path)
+    try:
+        async with httpx.AsyncClient(
+            transport=_async_transport(endpoint),
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
+            timeout=httpx.Timeout(None, connect=5.0),
+        ) as client:
+            response = await client.post("/internal/mcp", json={"operation": operation, "payload": payload})
+            _validate_response(response, endpoint)
+    except _SOCKET_CONNECT_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    except httpx.TransportError as exc:
+        raise InternalServerTimeout(str(exc)) from exc
+    body = response.json() if response.content else {}
+    if not isinstance(body, dict):
+        raise InternalServerUnavailable("mcp endpoint returned invalid JSON")
+    return body
+
+
 def resolve_computer_script_endpoint(
     socket_path: Optional[Path] = None,
 ) -> control_ipc.ControlIpcClientEndpoint:

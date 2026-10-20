@@ -287,6 +287,10 @@ class Controller:
         self._delivery_recovery_complete = asyncio.Event()
 
         self._init_model_hub()
+        from core.mcp_hub.runtime import McpRuntime
+
+        # Started lazily on the first MCP request; owns its own thread and loop.
+        self.mcp_runtime = McpRuntime()
 
         # Initialize core modules
         self._init_modules()
@@ -2512,6 +2516,10 @@ class Controller:
                 loop.run_until_complete(coro)
             except Exception as e:
                 logger.debug(f"{label} cleanup skipped: {e}")
+
+        mcp_runtime = getattr(self, "mcp_runtime", None)
+        if mcp_runtime is not None:
+            mcp_runtime.stop()
 
         # Stop update checker
         try:
