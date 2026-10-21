@@ -19,13 +19,8 @@ SCHEMA_VERSION = 1
 STDIO = "stdio"
 HTTP = "streamable_http"
 
-_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
-_RESERVED_NAMES = frozenset(
-    {"add", "generate", "regenerate", "enable", "disable", "remove"}
-    | {"con", "prn", "aux", "nul"}
-    | {f"com{index}" for index in range(1, 10)}
-    | {f"lpt{index}" for index in range(1, 10)}
-)
+# CLI grammar (`vibe mcp add|generate|...`) cannot select these as a server name.
+_RESERVED_NAMES = frozenset({"add", "generate", "regenerate", "enable", "disable", "remove"})
 _STDIO_TYPES = {None, "stdio"}
 _HTTP_TYPES = {"http", "streamable-http", "streamable_http"}
 _PROVIDER_FIELDS = {"type", "command", "args", "env", "cwd", "url", "headers", "enabled", "description"}
@@ -36,11 +31,19 @@ DESCRIPTION_MAX = 160
 
 
 def validate_name(name: object) -> str:
-    if not isinstance(name, str) or not _NAME_PATTERN.match(name) or name in _RESERVED_NAMES:
+    """Accept any native/user name that can be a directory and a `vibe mcp` token."""
+
+    if not isinstance(name, str) or not name or "\x00" in name or "/" in name or "\\" in name or name in {".", ".."}:
         raise McpHubError(
             "invalid_name",
-            "Server names must match [a-z][a-z0-9-]{0,62} and not be a reserved word "
-            "(add, generate, regenerate, enable, disable, remove, or a Windows device name).",
+            "Server names cannot be empty, `.`/`..`, or contain `/`, `\\`, or NUL.",
+            field="name",
+            usage=True,
+        )
+    if name in _RESERVED_NAMES:
+        raise McpHubError(
+            "invalid_name",
+            f"{name!r} is a vibe mcp management command; choose a different server name.",
             field="name",
             usage=True,
         )

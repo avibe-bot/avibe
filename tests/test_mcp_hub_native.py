@@ -110,6 +110,82 @@ def test_unparseable_native_file_is_skipped_and_never_rewritten(native_files, ru
     assert codex.read_text() == "[mcp_servers.local\nbroken"
 
 
+def test_underscore_names_and_natively_disabled_relative_cwd(native_files):
+    _claude, codex, _opencode = native_files
+    codex.write_text(
+        CODEX
+        + """
+[mcp_servers.iphone_use]
+command = "python3"
+args = ["iphone_use.py"]
+
+[mcp_servers.computer-use]
+command = "./Codex Computer Use.app/bin"
+args = ["mcp"]
+cwd = "."
+enabled = false
+"""
+    )
+    summaries = {item["name"]: item for item in repository.list_packages()}
+    assert summaries["iphone_use"]["status"] == "draft"
+    assert "error" not in summaries["iphone_use"]
+    assert summaries["computer-use"]["status"] == "draft"
+    assert summaries["computer-use"].get("nativeEnabled") is False
+    assert "error" not in summaries["computer-use"]
+
+
+def test_enabled_relative_cwd_is_a_field_error(native_files):
+    _claude, codex, _opencode = native_files
+    codex.write_text(
+        CODEX
+        + """
+[mcp_servers.computer-use]
+command = "./app"
+args = ["mcp"]
+cwd = "."
+"""
+    )
+    summary = {item["name"]: item for item in repository.list_packages()}["computer-use"]
+    assert summary["status"] == "error"
+    assert summary["error"]["field"] == "cwd"
+    assert "absolute" in summary["error"]["message"]
+
+
+def test_generated_package_survives_native_delete(native_files):
+    from core.mcp_hub.commands import build_command
+
+    claude, _codex, _opencode = native_files
+    definition = {
+        "schemaVersion": 1,
+        "name": "docs",
+        "description": "Search",
+        "transport": {"type": "streamable_http", "url": "https://example.invalid/mcp", "headers": {}},
+    }
+    tool = {"name": "search", "description": "", "inputSchema": {"type": "object", "properties": {}}}
+    repository.publish(
+        "docs",
+        definition=definition,
+        manifest={"description": "Search", "generatedAt": "2026-01-01T00:00:00+00:00"},
+        tools=[tool],
+        commands=[build_command(tool)],
+    )
+    repository.write_enabled("docs", True)
+    repository.remember_source("docs", "claude")
+    data = json.loads(claude.read_text())
+    del data["mcpServers"]["docs"]
+    claude.write_text(json.dumps(data))
+    summary = {item["name"]: item for item in repository.list_packages()}["docs"]
+    assert summary["nativeDeleted"] is True
+    assert summary["source"] == "claude"
+    assert summary["status"] == "generated" and summary["enabled"] is True
+    assert repository.read_published("docs")["definition"]["name"] == "docs"
+    data["mcpServers"]["docs"] = {"type": "http", "url": "https://example.invalid/other"}
+    claude.write_text(json.dumps(data))
+    restored = {item["name"]: item for item in repository.list_packages()}["docs"]
+    assert restored.get("nativeDeleted") is not True
+    assert restored["pendingChanges"] is True
+
+
 def test_native_entries_needing_env_expansion_are_marked_not_dropped(native_files):
     claude, _codex, _opencode = native_files
     data = json.loads(claude.read_text())

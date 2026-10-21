@@ -76,6 +76,7 @@ def _state(name: str) -> dict[str, Any]:
         not isinstance(value, dict)
         or not isinstance(value.get("enabled", False), bool)
         or not isinstance(value.get("description", ""), str)
+        or not isinstance(value.get("source", ""), str)
     ):
         raise McpHubError("invalid_package", f"{name}: state.json has an unsupported shape.")
     return value
@@ -120,12 +121,16 @@ def write_definition(definition: dict[str, Any]) -> str:
     """Write the connection fields to the native file; the description stays Avibe-side."""
 
     source = native.write(definition)
-    _write_state(definition["name"], description=definition.get("description") or "")
+    _write_state(definition["name"], description=definition.get("description") or "", source=source)
     return source
 
 
 def write_enabled(name: str, enabled: bool) -> None:
     _write_state(name, enabled=enabled)
+
+
+def remember_source(name: str, source: str) -> None:
+    _write_state(name, source=source)
 
 
 def remove_package(name: str) -> None:
@@ -138,7 +143,26 @@ def remove_package(name: str) -> None:
 
 
 def list_names() -> list[str]:
-    return sorted(_native_servers())
+    return sorted({*_native_servers(), *_generated_names()})
+
+
+def _generated_names() -> list[str]:
+    """Package directories that still have a published revision."""
+
+    root = mcp_root()
+    if not root.is_dir():
+        return []
+    names: list[str] = []
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        try:
+            validate_name(entry.name)
+        except McpHubError:
+            continue
+        if (entry / "current.json").is_file():
+            names.append(entry.name)
+    return names
 
 
 # ---------------------------------------------------------------------------
@@ -287,13 +311,28 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
     summary: dict[str, Any] = {"name": name, "enabled": False, "status": "error", "revision": None}
     try:
         servers = _native_servers() if servers is None else servers
-        if name in servers:
-            summary["source"] = servers[name].source
-        definition = read_definition(name, servers)
-        enabled = read_enabled(name)
-        summary["description"] = definition.get("description") or ""
-        summary["transport"] = definition["transport"]["type"]
+        native_server = servers.get(name)
+        source = native_server.source if native_server is not None else _state(name).get("source")
+        if source in native.SOURCES:
+            summary["source"] = source
         published = read_published(name)
+        if native_server is None:
+            if published is None:
+                raise _not_found(name)
+            definition = published["definition"]
+            summary["nativeDeleted"] = True
+        elif not native_server.native_enabled:
+            if published is None:
+                summary.update(status="draft", enabled=False, nativeEnabled=False)
+                return summary
+            definition = published["definition"]
+            summary["nativeEnabled"] = False
+        else:
+            definition = read_definition(name, servers)
+        enabled = read_enabled(name)
+        summary["description"] = (definition.get("description") if isinstance(definition, dict) else "") or ""
+        if isinstance(definition, dict) and isinstance(definition.get("transport"), dict):
+            summary["transport"] = definition["transport"]["type"]
     except McpHubError as exc:
         if exc.type != "needs_regeneration":
             logger.warning("MCP package %s disabled: %s", name, exc.message)
@@ -306,15 +345,17 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
         return summary
     manifest = published["manifest"]
     top_has_cwd = "cwd" in (definition.get("transport") or {})
+    live = native_server is not None and native_server.native_enabled
     summary.update(
         status="generated",
         enabled=enabled,
         revision=published["revision"],
-        description=manifest.get("description") or "",
+        description=manifest.get("description") or summary.get("description") or "",
         generatedAt=manifest.get("generatedAt"),
         serverVersion=(manifest.get("serverInfo") or {}).get("version"),
         toolCount=len(published["commands"]),
-        pendingChanges=_comparable(definition, without_cwd=not top_has_cwd)
+        pendingChanges=live
+        and _comparable(definition, without_cwd=not top_has_cwd)
         != _comparable(published["definition"], without_cwd=not top_has_cwd),
     )
     if manifest.get("diagnostics"):
@@ -324,7 +365,9 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
 
 def list_packages() -> list[dict[str, Any]]:
     servers = _native_servers()
-    return [summarize(name, servers) for name in sorted(servers)]
+    names = set(servers)
+    names.update(_generated_names())
+    return [summarize(name, servers) for name in sorted(names)]
 
 
 def enabled_generated() -> list[dict[str, Any]]:

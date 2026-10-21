@@ -101,7 +101,15 @@ export const McpHubSection: React.FC = () => {
             <div key={server.name} className="flex flex-wrap items-center gap-2.5 rounded-xl border border-border bg-surface px-4 py-3">
               <span className="font-mono text-[12.5px] font-semibold text-foreground">{server.name}</span>
               <Badge variant="secondary">{t(`mcpHub.status.${server.status}`)}</Badge>
-              {server.source ? <Badge variant="secondary">{t(`mcpHub.source.${server.source}`)}</Badge> : null}
+              {server.source ? (
+                <Badge variant="secondary">
+                  {server.nativeDeleted
+                    ? t(`mcpHub.sourceDeleted.${server.source}`, { defaultValue: t('mcpHub.sourceDeleted.unknown') })
+                    : t(`mcpHub.source.${server.source}`)}
+                </Badge>
+              ) : server.nativeDeleted ? (
+                <Badge variant="secondary">{t('mcpHub.sourceDeleted.unknown')}</Badge>
+              ) : null}
               {server.pendingChanges ? <Badge variant="secondary">{t('mcpHub.pendingChanges')}</Badge> : null}
               <span className="min-w-0 flex-1 truncate text-[12px] text-muted">
                 {server.description || server.error?.message || ''}

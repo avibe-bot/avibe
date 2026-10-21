@@ -127,7 +127,7 @@ vibe mcp generate|regenerate|enable|disable|remove <name>
 - Avibe extensions: `--description`, `--cwd`, `--replace`, `--json-stdin`.
 - `--scope`, SSE and OAuth options fail explicitly.
 - Add only saves. An existing name needs `--replace`, which keeps state and the active revision until regeneration.
-- Names: `[a-z][a-z0-9-]{0,62}`, excluding `add`, `generate`, `regenerate`, `enable`, `disable`, `remove` and Windows reserved device names (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`), since names are directory names on every platform. Immutable in MVP.
+- Names: whatever the native config or user provides. Reject only empty names, `.`/`..`, NUL, or `/`/`\\` (names become directory names). `add`/`generate`/`regenerate`/`enable`/`disable`/`remove` stay reserved because `vibe mcp <verb>` would otherwise be ambiguous. Immutable in MVP.
 
 ## 5. Page configuration
 
@@ -146,7 +146,8 @@ Flow: paste → **Parse and preview** → **Save** → **Generate** (later **Reg
 - Env and header values are stored as given, in plaintext, like Claude Code's own MCP config. No Vault integration in MVP. `<avibe-home>/mcp/` is created with the existing owner-private helpers (`core/private_fs.py`: `ensure_private_directory`, `make_private_file`; POSIX modes, Windows DACL); UI/API mask env/header values using the existing config-secret pattern (`has_<field>` metadata; an empty submitted value means "unchanged", see `_strip_preserved_config_secrets` in `vibe/api.py`; env/header maps are submitted whole, so a key left out is deleted); Avibe's own logs never print them. A server's own stderr is the server's output (as in Claude Code) and is not scrubbed.
 - URLs with embedded credentials (`user:pass@`) are rejected; put them in an `Authorization` header.
 - `${VAR}` / `${VAR:-default}` placeholders are not expanded; parse rejects them with a field-specific message asking for the literal value.
-- `cwd` must be absolute; absent means the sanitized Agent default, resolved at generation and frozen into the revision snapshot.
+- Hub `cwd` must be absolute on save/generate. Native Codex `cwd` that is relative is a field-level `cwd` error: Codex does not document a stable resolution base (project vs app-server daemon workdir). A natively `enabled=false` entry is listed as disabled/not loaded, never as a config error. Provider `enabled` is still ignored on Hub save.
+- If a generated name disappears from its native file, Hub keeps the package (revision snapshot, enabled state, calls). Lists/API/UI mark it `nativeDeleted` ("deleted in Claude/Codex/OpenCode"). Drafts with no revision vanish. Re-adding the name natively clears the flag; definition drift is pending regenerate. Explicit `vibe mcp remove` / UI delete is how artifacts go away.
 - Existing names require explicit replace; omitted services are untouched.
 
 Persisted `definition.json`:

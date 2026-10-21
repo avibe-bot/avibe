@@ -37,7 +37,10 @@ vibe mcp add --json-stdin < servers.json
 - A new server is written to `~/.claude.json`, or to `~/.codex/config.toml` when it sets `cwd` (only Codex supports `cwd`).
 - To change an existing server, save it again with **Replace existing servers** (or `--replace`). The server is updated in the file it already lives in.
 - `vibe mcp remove <name>` deletes the server from every one of these files.
-- `cwd` must be an absolute path. Without one, the server runs in the Agent default directory.
+- Hub writes `cwd` as an absolute path. Without one, the server runs in the Agent default directory. A relative `cwd` already in a Codex file is reported on that field, not as a package-wide error.
+- Native names are kept as written (underscores and mixed case included). `vibe mcp add` cannot use the management verbs as a server name.
+- A Codex/OpenCode server with `enabled = false` is listed as natively disabled, not as an error.
+- If you delete a generated server from the native file, Hub keeps the published package and marks it deleted in that backend until you run `vibe mcp remove`.
 - `${VAR}` placeholders are not expanded. Enter the literal value; an existing entry that uses one is listed with an error.
 
 Saving never runs or connects to the server.

@@ -6042,6 +6042,12 @@
       "codex": "Codex config",
       "opencode": "OpenCode config"
     },
+    "sourceDeleted": {
+      "claude": "deleted in Claude",
+      "codex": "deleted in Codex",
+      "opencode": "deleted in OpenCode",
+      "unknown": "deleted in native config"
+    },
     "status": {
       "draft": "Draft",
       "generated": "Generated",

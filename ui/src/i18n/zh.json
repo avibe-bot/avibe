@@ -6042,6 +6042,12 @@
       "codex": "Codex 配置",
       "opencode": "OpenCode 配置"
     },
+    "sourceDeleted": {
+      "claude": "已从 Claude 删除",
+      "codex": "已从 Codex 删除",
+      "opencode": "已从 OpenCode 删除",
+      "unknown": "已从原生配置删除"
+    },
     "status": {
       "draft": "草稿",
       "generated": "已生成",

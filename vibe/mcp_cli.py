@@ -118,7 +118,16 @@ def _root_list(argv: list[str]) -> int:
         print("No MCP servers." if "--all" in argv else "No enabled MCP servers. (vibe mcp --list --all)")
         return 0
     for item in packages:
-        state = "" if "--all" not in argv else f"  [{item['status']}{', enabled' if item['enabled'] else ''}]"
+        extras = [item["status"]]
+        if item.get("enabled"):
+            extras.append("enabled")
+        if item.get("nativeDeleted"):
+            extras.append(f"deleted in {item.get('source') or 'native config'}")
+        elif item.get("source"):
+            extras.append(f"from {item['source']}")
+        if item.get("nativeEnabled") is False:
+            extras.append("natively disabled")
+        state = "" if "--all" not in argv else f"  [{', '.join(extras)}]"
         print(f"{item['name']}  {escape(item.get('description') or '')}{state}".rstrip())
     print("\nNext: vibe mcp <server> --list")
     return 0

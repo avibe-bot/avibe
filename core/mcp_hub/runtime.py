@@ -23,7 +23,7 @@ from typing import Any, Optional
 import anyio
 
 from core.mcp_hub import commands as mcp_commands
-from core.mcp_hub import repository
+from core.mcp_hub import native, repository
 from core.mcp_hub.definition import HTTP, STDIO, definition_from_provider, merge_preserved_secrets
 from core.mcp_hub.errors import McpHubError
 
@@ -384,14 +384,17 @@ class McpRuntime:
         )
         if initial:
             repository.write_enabled(name, True)
+        held = native.read_all().get(name)
+        if held is not None:
+            repository.remember_source(name, held.source)
         return revision
 
     async def _enable(self, payload: dict[str, Any]) -> bytes:
         name = payload.get("name")
         async with self._lock(name):
             def _apply() -> None:
-                repository.read_definition(name)
                 if repository.read_published(name) is None:
+                    repository.read_definition(name)
                     raise McpHubError("not_generated", f"Generate {name!r} before enabling it.", hint=f"vibe mcp generate {name}")
                 repository.write_enabled(name, True)
 
@@ -401,7 +404,8 @@ class McpRuntime:
     async def _disable(self, payload: dict[str, Any]) -> bytes:
         name = payload.get("name")
         async with self._lock(name):
-            await asyncio.to_thread(repository.read_definition, name)
+            if repository.read_published(name) is None:
+                await asyncio.to_thread(repository.read_definition, name)
             await asyncio.to_thread(repository.write_enabled, name, False)
             await self._retire_package(name)
         return _dumps({"ok": True, "name": name, "enabled": False})
@@ -417,12 +421,12 @@ class McpRuntime:
 
     @staticmethod
     def _admit(name: str, tool: str, arguments: Any) -> dict[str, Any]:
-        if not repository.read_enabled(name):
-            repository.read_definition(name)
-            raise McpHubError("disabled", f"MCP server {name!r} is disabled.", hint="vibe mcp --list")
         published = repository.read_published(name)
         if published is None:
+            repository.read_definition(name)
             raise McpHubError("not_generated", f"MCP server {name!r} has not been generated.", hint="vibe mcp --list")
+        if not repository.read_enabled(name):
+            raise McpHubError("disabled", f"MCP server {name!r} is disabled.", hint="vibe mcp --list")
         descriptor = next((item for item in published["tools"] if item.get("name") == tool), None)
         if descriptor is None:
             raise McpHubError("not_found", f"{name} has no tool {tool!r}.", hint=f"vibe mcp {name} --list")

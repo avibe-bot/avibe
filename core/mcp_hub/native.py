@@ -199,12 +199,37 @@ class NativeServer:
     path: Path
     definition: Optional[dict[str, Any]]
     error: Optional[McpHubError]
+    native_enabled: bool = True
+
+
+def _native_enabled(source: str, entry: dict[str, Any]) -> bool:
+    """The backend's own off switch. Claude has none; Codex/OpenCode use ``enabled``."""
+
+    if source == CLAUDE:
+        return True
+    return entry.get("enabled") is not False
+
+
+def _from_native(source: str, name: str, entry: dict[str, Any], description: Optional[str]) -> dict[str, Any]:
+    server = _READERS[source](entry)
+    cwd = server.get("cwd")
+    if isinstance(cwd, str) and cwd and not os.path.isabs(cwd):
+        # Codex docs do not pin a relative-cwd base (project vs daemon workdir).
+        # Keep the field-level error; do not rewrite the native value.
+        raise McpHubError(
+            "invalid_definition",
+            "cwd must be an absolute path (relative cwd is not well-defined across Codex versions).",
+            field="cwd",
+            usage=True,
+        )
+    return definition_from_provider(name, server, description=description)
 
 
 def read_all(descriptions: Optional[dict[str, str]] = None) -> dict[str, NativeServer]:
     """The union of native servers; the first source holding a name is canonical.
 
     A file that cannot be parsed is skipped; one bad entry only marks that server.
+    A natively disabled entry is listed without running definition validation.
     """
 
     descriptions = descriptions or {}
@@ -222,10 +247,14 @@ def read_all(descriptions: Optional[dict[str, str]] = None) -> dict[str, NativeS
             try:
                 if not isinstance(entry, dict):
                     raise McpHubError("invalid_definition", f"{source} entry {name!r} is not an object.")
-                definition = definition_from_provider(name, _READERS[source](entry), description=descriptions.get(name))
-                servers[name] = NativeServer(name, source, path, definition, None)
+                enabled = _native_enabled(source, entry)
+                if not enabled:
+                    servers[name] = NativeServer(str(name), source, path, None, None, native_enabled=False)
+                    continue
+                definition = _from_native(source, str(name), entry, descriptions.get(str(name)))
+                servers[str(name)] = NativeServer(str(name), source, path, definition, None)
             except McpHubError as exc:
-                servers[name] = NativeServer(name, source, path, None, exc)
+                servers[str(name)] = NativeServer(str(name), source, path, None, exc)
     return servers
 
 
