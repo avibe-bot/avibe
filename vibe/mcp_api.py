@@ -67,7 +67,12 @@ async def parse(body: dict[str, Any]) -> dict[str, Any]:
 
 async def save(body: dict[str, Any]) -> dict[str, Any]:
     definitions = parse_provider_json(str(body.get("text") or ""))
-    payload = {"replace": body.get("replace") is True, "servers": _servers_payload(definitions)}
+    # Same rule as PATCH: a blank env/header value keeps the stored one.
+    payload = {
+        "replace": body.get("replace") is True,
+        "preserveSecrets": True,
+        "servers": _servers_payload(definitions),
+    }
     return await _owner("save", payload)
 
 

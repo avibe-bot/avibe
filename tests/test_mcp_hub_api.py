@@ -94,3 +94,16 @@ def test_parse_save_generate_tools_and_state_through_the_api(owner):
 )
 def test_route_roles(method, path, role):
     assert http_authorization_policy(method, path).minimum_role == role
+
+
+def test_replace_save_keeps_blank_secrets_and_drops_omitted_keys(owner):
+    client = app.test_client()
+    headers = csrf_headers(client)
+    first = {"mcpServers": {"docs": {"url": "https://example.invalid/mcp",
+                                     "headers": {"Authorization": "Bearer real", "X-Old": "o"}}}}
+    assert client.post("/api/mcp/save", json={"text": json.dumps(first)}, headers=headers).status_code == 200
+    again = {"mcpServers": {"docs": {"url": "https://example.invalid/mcp",
+                                     "headers": {"Authorization": "", "X-New": "n"}}}}
+    saved = client.post("/api/mcp/save", json={"text": json.dumps(again), "replace": True}, headers=headers)
+    assert saved.status_code == 200
+    assert repository.read_definition("docs")["transport"]["headers"] == {"Authorization": "Bearer real", "X-New": "n"}
