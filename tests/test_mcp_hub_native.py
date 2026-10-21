@@ -173,6 +173,14 @@ def test_relative_native_cwd_resolves_against_its_file_and_generates(native_file
         result = _run(runtime, "generate", {"name": name})
         assert result["ok"] and result["toolCount"] == 6, (name, result)
 
+    # A replace save keeps each file's own relative spelling (Claude/OpenCode included).
+    servers = [{"name": name, "server": {"command": sys.executable, "args": ["rel_echo.py", "-v"], "cwd": str(path.parent)}}
+               for name, path in (("rel-claude", claude), ("rel-codex", codex), ("rel-opencode", opencode))]
+    assert _run(runtime, "save", {"servers": servers, "replace": True})["ok"]
+    assert json.loads(claude.read_text())["mcpServers"]["rel-claude"]["cwd"] == "."
+    assert tomllib.loads(codex.read_text())["mcp_servers"]["rel-codex"]["cwd"] == "."
+    assert json.loads(opencode.read_text())["mcp"]["rel-opencode"]["cwd"] == "."
+
 
 def test_generated_package_survives_native_delete(native_files):
     from core.mcp_hub.commands import build_command

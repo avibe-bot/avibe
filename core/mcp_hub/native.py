@@ -143,9 +143,25 @@ def _from_opencode(entry: dict[str, Any]) -> dict[str, Any]:
     return server
 
 
-def _to_native(source: str, definition: dict[str, Any], previous: Any) -> dict[str, Any]:
+def _resolve_cwd(path: Path, cwd: str) -> str:
+    """A native cwd, made absolute: relative values anchor at the holding file's directory."""
+
+    expanded = os.path.expanduser(cwd)
+    return expanded if os.path.isabs(expanded) else os.path.normpath(os.path.join(path.parent, expanded))
+
+
+def _native_cwd(path: Path, cwd: str, kept: dict[str, Any]) -> str:
+    """The value to write back: the user's own spelling while it still means the same directory."""
+
+    raw = kept.get("cwd")
+    return raw if isinstance(raw, str) and raw.strip() and _resolve_cwd(path, raw) == cwd else cwd
+
+
+def _to_native(source: str, definition: dict[str, Any], previous: Any, path: Path) -> dict[str, Any]:
     transport = definition["transport"]
     kept = previous if isinstance(previous, dict) else {}
+    # Claude/OpenCode keep a cwd only where the user already wrote one (see write()).
+    cwd = _native_cwd(path, transport["cwd"], kept) if transport.get("cwd") else None
     if source == CLAUDE:
         if transport["type"] == HTTP:
             entry: dict[str, Any] = {"type": "http", "url": transport["url"]}
@@ -155,6 +171,8 @@ def _to_native(source: str, definition: dict[str, Any], previous: Any) -> dict[s
         entry = {"type": "stdio", "command": transport["command"], "args": list(transport.get("args") or [])}
         if transport.get("env"):
             entry["env"] = transport["env"]
+        if cwd:
+            entry["cwd"] = cwd
         return entry
     if source == CODEX:
         entry = {key: value for key, value in kept.items() if key in _CODEX_KEPT}
@@ -164,9 +182,10 @@ def _to_native(source: str, definition: dict[str, Any], previous: Any) -> dict[s
                 entry["http_headers"] = transport["headers"]
             return entry
         entry.update(command=transport["command"], args=list(transport.get("args") or []))
-        for field in ("env", "cwd"):
-            if transport.get(field):
-                entry[field] = transport[field]
+        if transport.get("env"):
+            entry["env"] = transport["env"]
+        if cwd:
+            entry["cwd"] = cwd
         return entry
     entry = {key: value for key, value in kept.items() if key in _OPENCODE_KEPT}
     if transport["type"] == HTTP:
@@ -177,6 +196,8 @@ def _to_native(source: str, definition: dict[str, Any], previous: Any) -> dict[s
     entry.update(type="local", command=[transport["command"], *(transport.get("args") or [])])
     if transport.get("env"):
         entry["environment"] = transport["env"]
+    if cwd:
+        entry["cwd"] = cwd
     return entry
 
 
@@ -213,12 +234,8 @@ def _native_enabled(source: str, entry: dict[str, Any]) -> bool:
 def _from_native(source: str, name: str, entry: dict[str, Any], path: Path, description: Optional[str]) -> dict[str, Any]:
     server = _READERS[source](entry)
     cwd = server.get("cwd")
-    if isinstance(cwd, str) and cwd.strip() and not os.path.isabs(os.path.expanduser(cwd)):
-        # Native files are hand- and app-written; a relative cwd is anchored at the
-        # directory of the file that holds it (e.g. ~/.codex for config.toml).
-        server["cwd"] = os.path.normpath(os.path.join(path.parent, cwd))
-    elif isinstance(cwd, str) and cwd.startswith("~"):
-        server["cwd"] = os.path.expanduser(cwd)
+    if isinstance(cwd, str) and cwd.strip():
+        server["cwd"] = _resolve_cwd(path, cwd)
     return definition_from_provider(name, server, description=description)
 
 
@@ -264,16 +281,18 @@ def write(definition: dict[str, Any]) -> str:
         source = existing.source
     else:
         source = CODEX if definition["transport"]["type"] == STDIO and definition["transport"].get("cwd") else CLAUDE
-    if source != CODEX and definition["transport"].get("cwd"):
+    path, data = _load(source)
+    servers = _servers_for_write(source, data)
+    previous = servers.get(name)
+    has_cwd = isinstance(previous, dict) and "cwd" in previous
+    if source != CODEX and definition["transport"].get("cwd") and not has_cwd:
         raise McpHubError(
             "invalid_definition",
             f"{name} lives in the {source} config, which has no cwd field.",
             field="cwd",
             usage=True,
         )
-    path, data = _load(source)
-    servers = _servers_for_write(source, data)
-    servers[name] = _to_native(source, definition, servers.get(name))
+    servers[name] = _to_native(source, definition, previous, path)
     _store(source, path, data)
     return source
 
