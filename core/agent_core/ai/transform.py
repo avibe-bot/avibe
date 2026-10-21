@@ -171,14 +171,12 @@ def transform_messages(
                 continue
             split()
             if isinstance(block, ThinkingBlock):
-                if block.redacted:
-                    if same_origin:
-                        content.append(block)
+                # Thinking is a model's private reasoning, not something the assistant said, so it never goes to a
+                # different origin in any form: as text it would be attributed to the target model, and providers
+                # refuse requests that carry another model's reasoning as text (cross-provider.md).
+                if not same_origin:
                     continue
-                if block.signature is None:
-                    if block.text:
-                        content.append(TextBlock(text=block.text))
-                elif same_origin:
+                if block.redacted or block.signature is not None:
                     content.append(block)
                 elif block.text:
                     content.append(TextBlock(text=block.text))
@@ -218,7 +216,9 @@ def transform_messages(
             pending_tool_ids.setdefault(source_id, []).extend(wire_ids)
         split()
         transformed.extend(parts)
-        if content or not parts:
+        # A response left with nothing to send (its only content was another origin's thinking) is skipped, as an
+        # aborted one is, rather than sent as an empty assistant message, which not every protocol accepts.
+        if content:
             transformed.append(_assistant_part(message, content, stop_reason=message.stop_reason))
 
     transformed = _insert_synthetic_results(transformed)
