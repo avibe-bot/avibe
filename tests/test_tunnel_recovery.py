@@ -898,15 +898,56 @@ def test_optimize_route_does_not_start_without_fresh_active_sample(monkeypatch) 
     assert result["error"] == "route_optimization_unavailable"
 
 
-def test_candidate_readiness_requires_four_ha_connections(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    ("ready_body", "expected"),
+    [
+        # cloudflared raises the HA gauge to 4 once the fourth connection starts
+        # dialing, while the edge has registered only the first one.
+        ({"status": 200, "readyConnections": 1}, False),
+        ({"status": 200, "readyConnections": 3}, False),
+        ({"status": 200, "readyConnections": 4}, True),
+        # A /ready body without the count falls back to the HA gauge.
+        ("OK", True),
+    ],
+)
+def test_ra_tq_035_connector_readiness_counts_edge_registered_connections(
+    monkeypatch,
+    ready_body: dict | str,
+    expected: bool,
+) -> None:
+    """RA-TQ-035: A Connector is ready only after the edge registers all four connections."""
+
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class CloudflaredMetrics(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - http.server API
+            if self.path == "/ready":
+                body = json.dumps(ready_body) if isinstance(ready_body, dict) else ready_body
+            elif self.path == "/metrics":
+                body = "# TYPE cloudflared_tunnel_ha_connections gauge\ncloudflared_tunnel_ha_connections 4\n"
+            else:
+                self.send_error(404)
+                return
+            payload = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), CloudflaredMetrics)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
     monkeypatch.setattr(remote_access, "_is_cloudflared_pid", lambda pid: True)
-    monkeypatch.setattr(remote_access.tunnel_quality, "scrape_metrics", lambda url: _metrics_sample(connections=3))
-
-    assert remote_access._connector_ready_now(222, "http://127.0.0.1:29002") is False
-
-    monkeypatch.setattr(remote_access.tunnel_quality, "scrape_metrics", lambda url: _metrics_sample(connections=4))
-
-    assert remote_access._connector_ready_now(222, "http://127.0.0.1:29002") is True
+    try:
+        metrics_url = f"http://127.0.0.1:{server.server_address[1]}"
+        assert remote_access._connector_ready_now(222, metrics_url) is expected
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_ra_tq_022_public_probe_session_honors_host_network_environment(
