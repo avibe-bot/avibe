@@ -134,6 +134,15 @@ enabled = false
     assert "error" not in summaries["computer-use"]
 
 
+def test_generating_a_natively_disabled_entry_fails_cleanly(native_files, runtime):
+    _claude, codex, _opencode = native_files
+    codex.write_text(CODEX + '\n[mcp_servers.computer-use]\ncommand = "./app"\ncwd = "."\nenabled = false\n')
+    result = _run(runtime, "generate", {"name": "computer-use"})
+    assert result["ok"] is False
+    assert result["error"]["type"] == "disabled_natively"
+    assert "Codex config" in result["error"]["message"] and "usage" not in result["error"]  # CLI exit 1
+
+
 def test_enabled_relative_cwd_is_a_field_error(native_files):
     _claude, codex, _opencode = native_files
     codex.write_text(

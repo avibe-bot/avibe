@@ -131,7 +131,7 @@ export const McpHubSection: React.FC = () => {
                     type="button"
                     variant="outline"
                     size="xs"
-                    disabled={busy !== null}
+                    disabled={busy !== null || server.status === 'error' || server.nativeEnabled === false || server.nativeDeleted === true}
                     onClick={() => void act(
                       `generate:${server.name}`,
                       () => api.runMcpOperation(server.name, 'generate'),

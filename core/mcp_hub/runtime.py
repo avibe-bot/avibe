@@ -58,7 +58,7 @@ def _http_session_lost(exc: Exception) -> bool:
     return message == "Session terminated" or "session not found" in message.lower()
 
 
-def _client_for(definition: dict[str, Any], stack: contextlib.AsyncExitStack):
+def _client_for(definition: dict[str, Any], stack: contextlib.AsyncExitStack, mode: str = "auto"):
     """Build an SDK client for a revision snapshot (never the edited top-level file)."""
 
     from mcp import Client, StdioServerParameters
@@ -75,10 +75,35 @@ def _client_for(definition: dict[str, Any], stack: contextlib.AsyncExitStack):
             env=dict(transport.get("env") or {}) or None,
             cwd=transport.get("cwd"),
         )
-        return Client(params, client_info=info)
+        return Client(params, client_info=info, mode=mode)
     http_client = create_mcp_http_client(headers=dict(transport.get("headers") or {}))
     stack.push_async_callback(http_client.aclose)
-    return Client(streamable_http_client(transport["url"], http_client=http_client), client_info=info)
+    return Client(streamable_http_client(transport["url"], http_client=http_client), client_info=info, mode=mode)
+
+
+def _closed_during_handshake(exc: BaseException) -> bool:
+    from mcp import MCPError
+    from mcp.types import CONNECTION_CLOSED
+
+    if isinstance(exc, MCPError):
+        return exc.error.code == CONNECTION_CLOSED
+    # Exception groups from the SDK's task groups (no builtin name before 3.11).
+    return any(_closed_during_handshake(item) for item in getattr(exc, "exceptions", ()))
+
+
+async def _enter_client(definition: dict[str, Any], stack: contextlib.AsyncExitStack):
+    """Enter a client; retry once with the initialize handshake for strict pre-2026 servers.
+
+    The default probe sends ``server/discover`` first, and strict legacy servers
+    (e.g. rmcp) exit on it. The retry happens before any request is dispatched.
+    """
+
+    try:
+        return await stack.enter_async_context(_client_for(definition, stack))
+    except Exception as exc:
+        if not _closed_during_handshake(exc):
+            raise
+    return await stack.enter_async_context(_client_for(definition, stack, mode="legacy"))
 
 
 async def _list_all_tools(client) -> list:
@@ -129,7 +154,7 @@ class _Connection:
     async def _run(self) -> None:
         try:
             async with contextlib.AsyncExitStack() as stack:
-                client = await stack.enter_async_context(_client_for(self.definition, stack))
+                client = await _enter_client(self.definition, stack)
                 # The SDK learns every tool's output schema before the first call.
                 await _list_all_tools(client)
                 self._ready.set_result(client)
@@ -348,7 +373,7 @@ class McpRuntime:
     @staticmethod
     async def _discover(snapshot: dict[str, Any]) -> tuple[list, Any]:
         async with contextlib.AsyncExitStack() as stack:
-            client = await stack.enter_async_context(_client_for(snapshot, stack))
+            client = await _enter_client(snapshot, stack)
             return await _list_all_tools(client), client.server_info
 
     @staticmethod

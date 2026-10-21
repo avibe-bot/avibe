@@ -31,6 +31,7 @@ from core.private_fs import ensure_private_directory
 logger = logging.getLogger(__name__)
 
 FORMAT_VERSION = 1
+_SOURCE_LABELS = {"claude": "Claude", "codex": "Codex", "opencode": "OpenCode"}
 
 
 def mcp_root() -> Path:
@@ -103,6 +104,12 @@ def read_definition(name: str, servers: Optional[dict[str, native.NativeServer]]
         raise _not_found(name)
     if server.error is not None:
         raise server.error
+    if not server.native_enabled:
+        raise McpHubError(
+            "disabled_natively",
+            f"{name} is disabled in the {_SOURCE_LABELS[server.source]} config ({server.path}); enable it there first.",
+            field="enabled",
+        )
     return server.definition
 
 

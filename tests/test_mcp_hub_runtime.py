@@ -256,3 +256,13 @@ def test_malformed_revision_file_disables_only_that_package(generated, capsys, f
     assert mcp_cli.main(["echo", "--list"]) == 1
     call = _run(generated, "call", {"name": "echo", "tool": "echo", "arguments": {"text": "x"}})
     assert call["error"]["type"] == "invalid_package"
+
+
+def test_strict_legacy_server_that_exits_on_discover_still_generates(runtime):
+    strict = str(Path(__file__).parent / "fixtures" / "mcp_strict_legacy_server.py")
+    _run(runtime, "save", {"servers": [{"name": "strict", "server": {"command": sys.executable, "args": [strict]}}]})
+    result = _run(runtime, "generate", {"name": "strict"})
+    assert result["ok"], result
+    assert result["toolCount"] == 6
+    call = _run(runtime, "call", {"name": "strict", "tool": "echo", "arguments": {"text": "hi"}})
+    assert call["status"] == "ok", call
