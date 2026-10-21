@@ -96,14 +96,17 @@ pub struct Updater {
 }
 /// What `update-status.json` records for a phase. In-flight phases leave the last
 /// completed check on disk, so a recheck never makes the web forget a known update.
+///
+/// `Installed` only means the installer took over. On Windows it runs after the
+/// shell exits and can still fail and restore this version, so the file keeps
+/// `Available` and the new app's startup check publishes `Current`.
 fn persisted(phase: Phase) -> Option<UpdateStatusPhase> {
     match phase {
         Phase::Current => Some(UpdateStatusPhase::Current),
         Phase::Available => Some(UpdateStatusPhase::Available),
-        Phase::Installed => Some(UpdateStatusPhase::Installed),
         Phase::Disabled => Some(UpdateStatusPhase::Disabled),
         Phase::Error => Some(UpdateStatusPhase::Error),
-        Phase::Idle | Phase::Checking | Phase::Downloading | Phase::Installing => None,
+        Phase::Idle | Phase::Checking | Phase::Downloading | Phase::Installing | Phase::Installed => None,
     }
 }
 fn label(phase: Phase, c: &Catalog) -> &str {
@@ -553,7 +556,7 @@ mod tests {
     }
 
     #[test]
-    fn only_completed_checks_are_published_and_only_available_claims_an_update() {
+    fn only_check_results_are_published_and_only_available_claims_an_update() {
         let phases = [
             Phase::Idle,
             Phase::Checking,
@@ -566,15 +569,17 @@ mod tests {
             Phase::Error,
         ];
         for phase in phases {
-            let in_flight = matches!(
+            // The install handoff keeps the last result too: the installer may
+            // still fail and restore this version.
+            let keeps_last_result = matches!(
                 phase,
-                Phase::Idle | Phase::Checking | Phase::Downloading | Phase::Installing
+                Phase::Idle | Phase::Checking | Phase::Downloading | Phase::Installing | Phase::Installed
             );
             let Some(persisted) = persisted(phase) else {
-                assert!(in_flight, "{phase:?} is a completed check and must be published");
+                assert!(keeps_last_result, "{phase:?} is a check result and must be published");
                 continue;
             };
-            assert!(!in_flight, "{phase:?} is in flight and must keep the last result");
+            assert!(!keeps_last_result, "{phase:?} must keep the last result on disk");
             let record = UpdateStatusRecord::new(
                 persisted,
                 "3.2.2",

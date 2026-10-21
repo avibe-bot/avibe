@@ -26,7 +26,8 @@ pub const UPDATE_STATUS_FILE: &str = "update-status.json";
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// A completed check. In-flight phases (checking, downloading, installing) are
-/// never persisted, so a recheck cannot make the web forget a known update.
+/// never persisted, so a recheck cannot make the web forget a known update. The
+/// install handoff is not a result either: the next launch's check publishes it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateStatusPhase {
@@ -34,7 +35,6 @@ pub enum UpdateStatusPhase {
     Available,
     Disabled,
     Error,
-    Installed,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -217,7 +217,6 @@ mod tests {
         for (phase, has_update, keeps_latest) in [
             (UpdateStatusPhase::Available, true, true),
             (UpdateStatusPhase::Current, false, true),
-            (UpdateStatusPhase::Installed, false, true),
             (UpdateStatusPhase::Disabled, false, false),
             (UpdateStatusPhase::Error, false, false),
         ] {
@@ -241,7 +240,7 @@ mod tests {
         let mut blank_latest = base.clone();
         blank_latest["latest"] = " ".into();
         let mut unknown_phase = base.clone();
-        unknown_phase["phase"] = "checking".into();
+        unknown_phase["phase"] = "installed".into();
         for (label, bytes) in [
             ("future schema", serde_json::to_vec(&future).expect("json")),
             ("update without latest", serde_json::to_vec(&no_latest).expect("json")),
