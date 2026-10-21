@@ -129,6 +129,11 @@ def test_spawns_disable_every_native_server(native_files):
 
     command = SubprocessCLITransport(prompt="x", options=ClaudeAgentOptions(cli_path="/bin/claude", **CLAUDE_NATIVE_MCP_DISABLED))._build_command()
     assert "--strict-mcp-config" in command and "--mcp-config" not in command
+    from config.v2_compat import ClaudeCompatConfig
+    from modules.claude_client import ClaudeClient
+
+    client = ClaudeClient(ClaudeCompatConfig(enabled=True, permission_mode="default", cwd="/tmp"))
+    assert client.options.strict_mcp_config and client.options.mcp_servers == {}
 
     assert _native_mcp_disabled_args() == [
         "-c", "mcp_servers.local.enabled=false", "-c", "mcp_servers.shared.enabled=false"]
