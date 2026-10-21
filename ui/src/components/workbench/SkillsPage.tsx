@@ -15,6 +15,7 @@ import { SkillDetailPanel } from './skills/SkillDetailPanel';
 import { ProjectPicker } from './skills/ProjectPicker';
 import { AddSkillDialog } from './skills/AddSkillDialog';
 import { BrowseRegistryDialog } from './skills/BrowseRegistryDialog';
+import { McpHubSection } from './skills/McpHubSection';
 import { errorMessage } from '@/lib/errorMessage';
 import { Badge } from '../ui/badge';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
@@ -389,6 +390,8 @@ export const SkillsPage: React.FC = () => {
           ) : null}
         </div>
       )}
+
+      {scope === 'global' ? <McpHubSection /> : null}
 
       {projectCanManage && showAdd ? (
         <AddSkillDialog

@@ -6014,5 +6014,44 @@
       "unknown": "IM"
     },
     "removeReference": "移除对 {{title}} 的引用"
+  },
+  "mcpHub": {
+    "title": "MCP Hub",
+    "subtitle": "把 MCP 服务器变成所有 Agent 可用的 vibe mcp 命令",
+    "empty": "还没有 MCP 服务器。在下方粘贴 mcpServers 配置，或运行 vibe mcp add。",
+    "pasteHint": "粘贴 mcpServers JSON。环境变量和请求头的值会以明文保存在本机。",
+    "parse": "解析并预览",
+    "save": "保存",
+    "replace": "替换已有服务器",
+    "exists": "已存在",
+    "saved": "已保存。生成后即可发布其工具。",
+    "generate": "生成",
+    "regenerate": "重新生成",
+    "generated": "已生成 {{name}}",
+    "enabled": "启用",
+    "remove": "删除",
+    "removeConfirm": "删除 MCP 服务器 {{name}}？",
+    "tools": "工具",
+    "toolsOf": "{{name}} 的工具",
+    "pendingChanges": "有未生成的修改",
+    "revision_one": "{{revision}} · {{count}} 个工具",
+    "revision_other": "{{revision}} · {{count}} 个工具",
+    "failed": "MCP 操作失败。",
+    "status": {
+      "draft": "草稿",
+      "generated": "已生成",
+      "error": "错误",
+      "needs_regeneration": "需要重新生成"
+    },
+    "errors": {
+      "invalid_definition": "配置无效：{{message}}",
+      "exists": "同名服务器已存在；请勾选“替换已有服务器”。",
+      "unavailable": "Avibe 服务未运行。",
+      "connection": "无法连接 MCP 服务器。",
+      "timeout": "MCP 服务器超时。",
+      "capacity": "运行中的 MCP 服务器进程过多，请稍后重试。",
+      "not_generated": "请先生成此服务器。",
+      "unsupported_transport_sse": "不支持 SSE；请使用 Streamable HTTP 地址。"
+    }
   }
 }

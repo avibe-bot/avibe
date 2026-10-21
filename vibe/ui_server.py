@@ -9246,6 +9246,80 @@ def global_prompts_save():
     return jsonify({"ok": True, "backends": result})
 
 
+# MCP Hub (docs/plans/mcp-hub-mvp.md §8): reads come from published artifacts,
+# mutations are the Controller-owned operations the CLI uses. Read routes are
+# Editor and management routes Owner in vibe/authorization.py.
+def _mcp_body() -> dict:
+    payload = request.json
+    return payload if isinstance(payload, dict) else {}
+
+
+async def _mcp_route(starlette_request: FastAPIRequest, handler, *args):
+    async def run():
+        from vibe import mcp_api
+
+        body, status = await mcp_api.run(handler, *args)
+        return jsonify(body), status
+
+    return await _dispatch_native_ui_request(starlette_request, run)
+
+
+@app.get("/api/mcp", include_in_schema=False)
+async def mcp_list(starlette_request: FastAPIRequest):
+    from vibe import mcp_api
+
+    return await _mcp_route(starlette_request, mcp_api.list_servers)
+
+
+@app.post("/api/mcp/parse", include_in_schema=False)
+async def mcp_parse(starlette_request: FastAPIRequest):
+    from vibe import mcp_api
+
+    return await _mcp_route(starlette_request, lambda: mcp_api.parse(_mcp_body()))
+
+
+@app.post("/api/mcp/save", include_in_schema=False)
+async def mcp_save(starlette_request: FastAPIRequest):
+    from vibe import mcp_api
+
+    return await _mcp_route(starlette_request, lambda: mcp_api.save(_mcp_body()))
+
+
+@app.get("/api/mcp/{name}", include_in_schema=False)
+async def mcp_detail(name: str, starlette_request: FastAPIRequest):
+    from vibe import mcp_api
+
+    return await _mcp_route(starlette_request, mcp_api.detail, name)
+
+
+@app.patch("/api/mcp/{name}", include_in_schema=False)
+async def mcp_update(name: str, starlette_request: FastAPIRequest):
+    from vibe import mcp_api
+
+    return await _mcp_route(starlette_request, lambda: mcp_api.update(name, _mcp_body()))
+
+
+@app.get("/api/mcp/{name}/tools", include_in_schema=False)
+async def mcp_tools(name: str, starlette_request: FastAPIRequest):
+    from vibe import mcp_api
+
+    return await _mcp_route(starlette_request, mcp_api.tools, name)
+
+
+@app.post("/api/mcp/{name}/{operation}", include_in_schema=False)
+async def mcp_operate(name: str, operation: str, starlette_request: FastAPIRequest):
+    from vibe import mcp_api
+
+    return await _mcp_route(starlette_request, mcp_api.operate, operation, name)
+
+
+@app.delete("/api/mcp/{name}", include_in_schema=False)
+async def mcp_remove(name: str, starlette_request: FastAPIRequest):
+    from vibe import mcp_api
+
+    return await _mcp_route(starlette_request, mcp_api.operate, "remove", name)
+
+
 # Agent Skills — thin shells over api.* (which wraps the askill CLI). Pure
 # data CRUD, so it stays in the UI-server process via core/services (no
 # dispatch-socket round-trip). See docs/plans/workbench-skills-page.md.

@@ -6014,5 +6014,44 @@
       "unknown": "IM"
     },
     "removeReference": "Remove reference to {{title}}"
+  },
+  "mcpHub": {
+    "title": "MCP Hub",
+    "subtitle": "MCP servers as vibe mcp commands for every Agent",
+    "empty": "No MCP servers yet. Paste an mcpServers block below or run vibe mcp add.",
+    "pasteHint": "Paste an mcpServers JSON block. Env and header values are stored in plaintext on this machine.",
+    "parse": "Parse and preview",
+    "save": "Save",
+    "replace": "Replace existing servers",
+    "exists": "exists",
+    "saved": "Saved. Generate it to publish its tools.",
+    "generate": "Generate",
+    "regenerate": "Regenerate",
+    "generated": "Generated {{name}}",
+    "enabled": "Enabled",
+    "remove": "Delete",
+    "removeConfirm": "Delete MCP server {{name}}?",
+    "tools": "Tools",
+    "toolsOf": "Tools of {{name}}",
+    "pendingChanges": "Pending changes",
+    "revision_one": "{{revision}} · {{count}} tool",
+    "revision_other": "{{revision}} · {{count}} tools",
+    "failed": "MCP operation failed.",
+    "status": {
+      "draft": "Draft",
+      "generated": "Generated",
+      "error": "Error",
+      "needs_regeneration": "Needs regeneration"
+    },
+    "errors": {
+      "invalid_definition": "Invalid definition: {{message}}",
+      "exists": "A server with this name exists; check Replace existing servers.",
+      "unavailable": "The Avibe service is not running.",
+      "connection": "Could not connect to the MCP server.",
+      "timeout": "The MCP server timed out.",
+      "capacity": "Too many MCP server processes are running; try again later.",
+      "not_generated": "Generate this server first.",
+      "unsupported_transport_sse": "SSE is not supported; use a Streamable HTTP URL."
+    }
   }
 }

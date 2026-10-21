@@ -538,6 +538,26 @@ export type TunnelConnectivityDiagnostics = {
   error?: string;
 };
 
+// MCP Hub (/api/mcp*): static packages generated from MCP servers.
+export interface McpServerSummary {
+  name: string;
+  enabled: boolean;
+  status: 'draft' | 'generated' | 'error' | 'needs_regeneration';
+  revision: string | null;
+  description?: string;
+  transport?: string;
+  generatedAt?: string;
+  serverVersion?: string;
+  toolCount?: number;
+  pendingChanges?: boolean;
+  diagnostics?: string[];
+  error?: { type: string; message: string };
+}
+export interface McpError { type: string; message: string; field?: string; hint?: string }
+export interface McpResult { ok: boolean; error?: McpError }
+export interface McpParsedServer { name: string; exists: boolean; transport?: { type: string } }
+export interface McpTool { name: string; description?: string; inputSchema?: unknown; flags: { flag: string; kind: string; required: boolean }[] }
+
 export type ApiContextType = {
   /** `cache: false` reads past the 30-second config cache, for a surface (the
    *  desktop pet) that must see a setup another window just finished. */
@@ -875,6 +895,12 @@ export type ApiContextType = {
   importVibeAgents: (payload: { from?: NativeCliBackend; name?: string; all?: boolean; file?: string; backend?: string }) => Promise<{ ok: boolean; imported?: any[]; skipped?: any[]; error?: string; code?: string; message?: string }>;
   // Agent Skills — thin shells over the askill CLI (see /api/skills*).
   listSkills: (params?: { scope?: SkillScope | 'all'; projectId?: string; backends?: string[] }) => Promise<SkillsListResult>;
+  listMcpServers: () => Promise<McpResult & { servers?: McpServerSummary[] }>;
+  parseMcp: (text: string) => Promise<McpResult & { servers?: McpParsedServer[] }>;
+  saveMcp: (text: string, replace: boolean) => Promise<McpResult>;
+  getMcpTools: (name: string) => Promise<McpResult & { tools?: McpTool[]; revision?: string }>;
+  runMcpOperation: (name: string, operation: 'generate' | 'enable' | 'disable') => Promise<McpResult>;
+  removeMcp: (name: string) => Promise<McpResult>;
   previewSkillSource: (source: string, params?: { projectId?: string }) => Promise<SkillsPreviewResult>;
   addSkill: (payload: { source: string; scope: SkillScope; projectId?: string; backends?: string[]; all?: boolean; skill?: string; copy?: boolean }) => Promise<SkillsMutationResult>;
   removeSkill: (name: string, params?: { scope?: SkillScope; projectId?: string; backends?: string[] }) => Promise<SkillsMutationResult>;
@@ -4121,6 +4147,13 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const qs = search.toString();
       return getCachedJson(qs ? `/api/skills?${qs}` : '/api/skills', 5_000);
     },
+    listMcpServers: () => getJson('/api/mcp', { handleError: false }),
+    parseMcp: (text) => postJson('/api/mcp/parse', { text }, { handleError: false }),
+    saveMcp: (text, replace) => postJson('/api/mcp/save', { text, replace }, { handleError: false }),
+    getMcpTools: (name) => getJson(`/api/mcp/${encodeURIComponent(name)}/tools`, { handleError: false }),
+    runMcpOperation: (name, operation) =>
+      postJson(`/api/mcp/${encodeURIComponent(name)}/${operation}`, {}, { handleError: false }),
+    removeMcp: (name) => deleteJson(`/api/mcp/${encodeURIComponent(name)}`, undefined, { handleError: false }),
     previewSkillSource: (source, params) =>
       postJson('/api/skills/preview', { source, project_id: params?.projectId }),
     addSkill: (payload) =>

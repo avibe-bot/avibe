@@ -118,7 +118,7 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 290
+    assert len(endpoints) == 298  # +8 MCP Hub routes, classified in tests/test_mcp_hub_api.py
     assert ("GET", "/api/sessions/main") in endpoints
     assert http_authorization_policy("POST", "/api/vault/requests/{request_id}/approve-delete").minimum_role == "editor"
     # Approvers still read policy and remember duration; protection fields add a service check.
