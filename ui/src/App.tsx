@@ -37,6 +37,7 @@ import { SettingsPlatformsPage } from './components/settings/SettingsPlatformsPa
 import { SettingsServicePage } from './components/settings/SettingsServicePage';
 import { SettingsGeneralPage } from './components/settings/SettingsGeneralPage';
 import { SettingsShortcutsPage } from './components/settings/SettingsShortcutsPage';
+import { SettingsComputerUsePage } from './components/settings/SettingsComputerUsePage';
 import { SettingsLayout } from './components/settings/SettingsLayout';
 import { SettingsOverlayRouteSurface } from './components/settings/SettingsOverlayRouteSurface';
 import { StatusProvider } from './context/StatusProvider';
@@ -728,6 +729,7 @@ const settingsRoute = () => (
     <Route path="appearance" element={<Navigate to="/settings/general" replace />} />
     <Route path="account" element={<Navigate to="/settings/replies" replace />} />
     <Route path="shortcuts" element={<SettingsShortcutsPage />} />
+    <Route path="computer-use" element={<SettingsComputerUsePage />} />
     <Route path="service" element={<SettingsServicePage />} />
     <Route path="platforms" element={<SettingsPlatformsPage />} />
     <Route path="platforms/groups" element={<ChannelList isPage />} />

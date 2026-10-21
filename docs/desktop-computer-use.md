@@ -22,6 +22,21 @@ Avibe desktop shell is running.
    missing permission, quit and reopen that exact installed app without
    replacing or updating it, then turn **Computer Use** on.
 
+### Settings guide
+
+In the desktop app, **Settings → System → Computer Use** walks through the same
+setup as four numbered steps: turn on Computer Use, allow Accessibility, allow
+Screen & System Audio Recording, then come back and recheck. Each step is
+marked done, current, or not yet done from the live Computer Use status, so the
+page shows which permission is still missing. The page refreshes every five
+seconds, when the window becomes visible or focused, and when you click
+**Recheck**. Accessibility comes first because the managed driver checks it
+before Screen Recording.
+
+The Settings entry appears only in the Avibe desktop app. A browser tab or phone
+that opens `/settings/computer-use` directly sees a short notice that the page
+is available in the desktop app, without the steps.
+
 Avibe requests permissions only when you turn the feature on. It does not keep
 showing permission prompts in the background. If the menu still reports that a
 permission is needed, open **System Settings → Privacy & Security**, confirm
@@ -56,8 +71,9 @@ The Workbench shows one read-only Computer Use status line. It refreshes without
 browser caching when the page opens, every five seconds, and when the window
 becomes visible or focused. It reflects the native state and gives localized
 guidance for a missing permission, a driver failure, damaged state, or an
-unavailable desktop shell. It does not expose internal reason codes, turn the
-feature on, or issue permission changes. The line appears only in the
+unavailable desktop shell. Until Computer Use is ready, the desktop app adds a
+**Finish in Settings** link to the Settings guide above. The line does not
+expose internal reason codes, turn the feature on, or issue permission changes. The line appears only in the
 desktop-managed macOS Runtime; a terminal-installed Avibe Runtime does not show
 a native desktop control it cannot own.
 

@@ -11,6 +11,7 @@ import {
   Hash,
   Keyboard,
   Layers,
+  MonitorCog,
   MessageCircle,
   MessageSquare,
   Package,
@@ -48,6 +49,8 @@ type SettingsItem = {
   icon: React.ComponentType<{ className?: string }>;
   ownerOnly?: boolean;
   feature?: 'channels';
+  /** Listed only inside the Avibe desktop shell (the host, not the viewport). */
+  desktopShellOnly?: boolean;
   children?: SettingsItem[];
   defaultOpen?: boolean;
   exact?: boolean;
@@ -105,6 +108,12 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     labelKey: 'settings.groups.system',
     items: [
       { path: '/settings/shortcuts', labelKey: 'settings.sections.shortcuts', icon: Keyboard },
+      {
+        path: '/settings/computer-use',
+        labelKey: 'settings.sections.computerUse',
+        icon: MonitorCog,
+        desktopShellOnly: true,
+      },
       { path: '/settings/service', labelKey: 'settings.sections.service', icon: Layers, ownerOnly: true },
       { path: '/settings/dependencies', labelKey: 'settings.sections.dependencies', icon: Package, ownerOnly: true },
       { path: '/settings/diagnostics', labelKey: 'settings.sections.diagnostics', icon: Stethoscope, ownerOnly: true },
@@ -291,6 +300,7 @@ export const SettingsLayout: React.FC = () => {
         // row would leave the setup and lose the step it is on.
         if (setupOrigin && !SETUP_VISIT_SETTINGS_PATHS.has(item.path)) return [];
         if (item.ownerOnly && !capabilities.can_manage_instance) return [];
+        if (item.desktopShellOnly && !desktopShell) return [];
         return [{
           ...item,
           children: item.children?.filter((child) =>
@@ -298,7 +308,7 @@ export const SettingsLayout: React.FC = () => {
         }];
       }),
     })).filter((group) => group.items.length > 0),
-    [capabilities.can_manage_instance, channelSettingsVisible, setupOrigin],
+    [capabilities.can_manage_instance, channelSettingsVisible, desktopShell, setupOrigin],
   );
 
   const activeTrail = (() => {
