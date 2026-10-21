@@ -43,6 +43,15 @@ the shell and replace the app (macOS) or run the replacement installer (Windows)
 Either path keeps user data under `~/.avibe`; the replacement app verifies and
 activates its private Runtime when it opens.
 
+A browser or phone connected to a Runtime that the desktop app manages shows the
+app's last completed check in the version badge: the newer version it found, or
+that it is up to date. The app owns that result and records it in
+`update-status.json` in its application data directory; the browser only
+displays it, offers no Upgrade button, and refreshing the badge rereads the
+result without starting a new check. Install from the desktop app on the
+computer running Avibe. Desktop apps that do not yet record the result keep
+showing the general guidance to update from the desktop app.
+
 To remove the private Runtime and Avibe-managed backend installations, choose
 **Uninstall Avibe…** in the application's first menu and confirm, then remove
 the macOS app or use the Windows system uninstaller. Removing only the app does

@@ -2,6 +2,7 @@
 use avibe_runtime_host::{
     download::{self, Length},
     update::{self, Channel, Manifest, Release, REPOSITORY},
+    update_status::{UpdateStatusPhase, UpdateStatusRecord, UpdateStatusStore, UPDATE_STATUS_FILE},
 };
 use serde::Deserialize;
 use std::{
@@ -10,7 +11,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Mutex,
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tauri::{
     menu::{CheckMenuItem, MenuItem},
@@ -88,8 +89,28 @@ pub struct Updater {
     source: AtomicUsize,
     channel_path: PathBuf,
     skipped_path: PathBuf,
+    /// The last completed check, published for the Runtime to relay to browsers.
+    status: UpdateStatusStore,
     pub menu: MenuItem<tauri::Wry>,
     pub channel_menu: CheckMenuItem<tauri::Wry>,
+}
+/// The record a finished check publishes, or None while no check result is in
+/// memory. `Error` here means the check failed: only `check()` publishes.
+fn check_record(state: &State, current: &str, checked_at: SystemTime) -> Option<UpdateStatusRecord> {
+    let phase = match state.phase {
+        Phase::Current => UpdateStatusPhase::Current,
+        Phase::Available => UpdateStatusPhase::Available,
+        Phase::Disabled => UpdateStatusPhase::Disabled,
+        Phase::Error => UpdateStatusPhase::Error,
+        Phase::Idle | Phase::Checking | Phase::Downloading | Phase::Installing | Phase::Installed => return None,
+    };
+    Some(UpdateStatusRecord::new(
+        phase,
+        current,
+        state.latest.clone(),
+        state.channel,
+        checked_at,
+    ))
 }
 fn label(phase: Phase, c: &Catalog) -> &str {
     match phase {
@@ -111,6 +132,11 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_else(|| Channel::for_version(&app.package_info().version));
+    // Beside `computer-use.json`, where the Runtime already finds desktop state.
+    #[cfg(target_os = "macos")]
+    let status_dir = super::computer_use::state_dir(app)?;
+    #[cfg(not(target_os = "macos"))]
+    let status_dir = app.path().app_data_dir()?;
     app.manage(Updater {
         state: Mutex::new(State {
             phase: Phase::Idle,
@@ -121,6 +147,7 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
         source: AtomicUsize::new(0),
         channel_path,
         skipped_path: app.path().app_local_data_dir()?.join("update-skipped.json"),
+        status: UpdateStatusStore::new(status_dir.join(UPDATE_STATUS_FILE)),
         menu: MenuItem::with_id(app, MENU_ID, &c.menu, true, None::<&str>)?,
         channel_menu: CheckMenuItem::with_id(
             app,
@@ -348,6 +375,23 @@ async fn find_update(app: &AppHandle, channel: Channel) -> Result<Option<Manifes
 }
 
 pub fn check(app: AppHandle, interactive: bool) {
+    // Publishes the finished check in `update-status.json` for the Runtime to
+    // relay. It is nested here so nothing but `check()` can publish. Install
+    // progress and outcomes stay in memory: a failed install keeps the last
+    // `Available` (the next check offers it again), and `Installed` only means
+    // the installer took over — on Windows it runs after the shell exits and can
+    // still restore this version — so the new app's startup check publishes
+    // `Current`.
+    fn publish(app: &AppHandle) {
+        let updater = app.state::<Updater>();
+        let state = updater.state.lock().expect("updater state");
+        let Some(record) = check_record(&state, &app.package_info().version.to_string(), SystemTime::now()) else {
+            return;
+        };
+        if let Err(error) = updater.status.write(&record) {
+            eprintln!("desktop update status: {error}");
+        }
+    }
     let updater = app.state::<Updater>();
     if updater.busy.swap(true, Ordering::SeqCst) {
         if interactive {
@@ -359,6 +403,7 @@ pub fn check(app: AppHandle, interactive: bool) {
     if KEY.trim().is_empty() || TARGET == "unsupported" {
         updater.busy.store(false, Ordering::SeqCst);
         set_state(&app, Phase::Disabled, None);
+        publish(&app);
         if interactive {
             show(&app, &catalog().disabled_detail, None);
         }
@@ -370,6 +415,7 @@ pub fn check(app: AppHandle, interactive: bool) {
         match find_update(&app, channel).await {
             Ok(Some(manifest)) => {
                 set_state(&app, Phase::Available, Some(manifest.version.clone()));
+                publish(&app);
                 let skipped = skipped_version(&app.state::<Updater>());
                 if !should_prompt(interactive, skipped.as_deref(), &manifest.version) {
                     finish(&app);
@@ -406,6 +452,7 @@ pub fn check(app: AppHandle, interactive: bool) {
             Ok(None) => {
                 finish(&app);
                 set_state(&app, Phase::Current, None);
+                publish(&app);
                 if interactive {
                     let latest = app
                         .state::<Updater>()
@@ -421,6 +468,7 @@ pub fn check(app: AppHandle, interactive: bool) {
                 eprintln!("desktop update check: {error}");
                 finish(&app);
                 set_state(&app, Phase::Error, None);
+                publish(&app);
                 if interactive {
                     show(&app, &catalog().check_failed, None);
                 }
@@ -517,6 +565,39 @@ mod tests {
         assert!(should_prompt(false, Some("1.2.3"), "1.2.4"));
         assert!(should_prompt(false, None, "1.2.3"));
         assert!(should_prompt(true, Some("1.2.3"), "1.2.3"));
+    }
+
+    #[test]
+    fn check_results_produce_their_record_and_other_phases_publish_nothing() {
+        for phase in [
+            Phase::Idle,
+            Phase::Checking,
+            Phase::Current,
+            Phase::Available,
+            Phase::Downloading,
+            Phase::Installing,
+            Phase::Installed,
+            Phase::Disabled,
+            Phase::Error,
+        ] {
+            let state = State {
+                phase,
+                latest: Some("3.2.3".to_owned()),
+                channel: Channel::Test,
+            };
+            let expected = match phase {
+                Phase::Current => Some(UpdateStatusPhase::Current),
+                Phase::Available => Some(UpdateStatusPhase::Available),
+                Phase::Disabled => Some(UpdateStatusPhase::Disabled),
+                Phase::Error => Some(UpdateStatusPhase::Error),
+                Phase::Idle | Phase::Checking | Phase::Downloading | Phase::Installing | Phase::Installed => None,
+            };
+            assert_eq!(
+                check_record(&state, "3.2.2", SystemTime::now()).map(|record| record.phase),
+                expected,
+                "{phase:?}"
+            );
+        }
     }
 
     #[test]
