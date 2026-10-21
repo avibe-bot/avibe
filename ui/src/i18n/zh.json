@@ -4032,7 +4032,7 @@
     "restarting": "正在重启...",
     "autoUpdate": "自动更新",
     "autoUpdateHint": "空闲时自动安装",
-    "desktopManagedUpdateAvailable": "有新版本 {{to}}，请在运行 Avibe 的那台电脑上通过 Avibe 桌面应用更新。",
+    "desktopManagedUpdate": "更新由运行 Avibe 的那台电脑上的桌面应用提供，请在那里检查更新。",
     "runtimeVersionSkew": "本应用为 v{{app}}，但连接的 Avibe 运行时为 v{{runtime}}"
   },
   "doctor": {

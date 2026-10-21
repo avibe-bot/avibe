@@ -95,7 +95,6 @@ from vibe.upgrade import (
     discard_atomic_uv_install_generation,
     execute_upgrade_plan,
     format_deferred_activation_log,
-    get_desktop_latest_version_info,
     get_latest_version_info,
     get_running_vibe_path,
     get_safe_cwd,
@@ -6885,13 +6884,11 @@ def get_version_info() -> dict:
     from vibe import __version__
 
     build = get_build_identity()
-    # ``managed_by`` names who applies the update; it never hides one. The
-    # desktop app installs only its own releases, and ``do_upgrade`` refuses.
     managed_by = "desktop" if is_desktop_managed_runtime() else None
-    if build.kind == "source":
+    if managed_by:
         result = {"current": __version__, "latest": None, "has_update": False, "error": None}
-    elif managed_by:
-        result = get_desktop_latest_version_info(__version__)
+    elif build.kind == "source":
+        result = {"current": __version__, "latest": None, "has_update": False, "error": None}
     else:
         result = get_latest_version_info(__version__)
     result["build"] = build.as_dict()
