@@ -112,7 +112,8 @@ TOOL_TRUNCATED = (
 MAX_ROLLS = 2
 MAX_OVERFLOWS = 4
 #: Unproductive checkpoint attempts (failed, or normal with a result still at least ``INEFFECTIVE_RATIO * T``) a run
-#: makes before it stops compacting for the rest of the run; held in memory, never persisted (section 10).
+#: makes before it takes no more checkpoints for the rest of the run; the drop, which calls no model, still makes room.
+#: Held in memory, never persisted (section 10).
 UNPRODUCTIVE_CHECKPOINTS = 2
 INEFFECTIVE_RATIO = 0.75
 
