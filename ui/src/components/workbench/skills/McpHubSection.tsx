@@ -37,9 +37,6 @@ export const McpHubSection: React.FC = () => {
   const generateBlocked = (server: McpServerSummary): string | null => {
     if (server.status === 'error') return server.error?.message ?? t('mcpHub.configError');
     if (server.nativeDeleted) return t('mcpHub.deletedHint');
-    if (server.nativeEnabled === false) {
-      return t('mcpHub.enableFirst', { path: server.sourcePath ?? t(`mcpHub.source.${server.source ?? 'claude'}`) });
-    }
     return null;
   };
 

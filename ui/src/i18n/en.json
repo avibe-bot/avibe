@@ -6069,7 +6069,6 @@
     "revisionId": "Revision {{revision}}",
     "configError": "Config error",
     "deletedHint": "Deleted from its native config; re-add it there to regenerate.",
-    "enableFirst": "Enable it in {{path}} to generate.",
     "disabledIn": {
       "claude": "Disabled in Claude",
       "codex": "Disabled in Codex",

@@ -229,7 +229,8 @@ def read_all(descriptions: Optional[dict[str, str]] = None) -> dict[str, NativeS
     """The union of native servers; the first source holding a name is canonical.
 
     A file that cannot be parsed is skipped; one bad entry only marks that server.
-    A natively disabled entry is listed without running definition validation.
+    The native ``enabled`` switch only governs the backend's own loading; Hub
+    records it as ``native_enabled`` and otherwise treats the entry normally.
     """
 
     descriptions = descriptions or {}
@@ -248,13 +249,12 @@ def read_all(descriptions: Optional[dict[str, str]] = None) -> dict[str, NativeS
                 if not isinstance(entry, dict):
                     raise McpHubError("invalid_definition", f"{source} entry {name!r} is not an object.")
                 enabled = _native_enabled(source, entry)
-                if not enabled:
-                    servers[name] = NativeServer(str(name), source, path, None, None, native_enabled=False)
-                    continue
                 definition = _from_native(source, str(name), entry, descriptions.get(str(name)))
-                servers[str(name)] = NativeServer(str(name), source, path, definition, None)
+                servers[str(name)] = NativeServer(str(name), source, path, definition, None, native_enabled=enabled)
             except McpHubError as exc:
-                servers[str(name)] = NativeServer(str(name), source, path, None, exc)
+                servers[str(name)] = NativeServer(
+                    str(name), source, path, None, exc, native_enabled=isinstance(entry, dict) and _native_enabled(source, entry)
+                )
     return servers
 
 

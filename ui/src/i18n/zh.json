@@ -6069,7 +6069,6 @@
     "revisionId": "版本 {{revision}}",
     "configError": "配置错误",
     "deletedHint": "已从原生配置中删除；在原配置中重新添加后才能重新生成。",
-    "enableFirst": "在 {{path}} 中启用后才能生成",
     "disabledIn": {
       "claude": "已在 Claude 中禁用",
       "codex": "已在 Codex 中禁用",

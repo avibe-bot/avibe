@@ -31,7 +31,6 @@ from core.private_fs import ensure_private_directory
 logger = logging.getLogger(__name__)
 
 FORMAT_VERSION = 1
-_SOURCE_LABELS = {"claude": "Claude", "codex": "Codex", "opencode": "OpenCode"}
 
 
 def mcp_root() -> Path:
@@ -104,12 +103,6 @@ def read_definition(name: str, servers: Optional[dict[str, native.NativeServer]]
         raise _not_found(name)
     if server.error is not None:
         raise server.error
-    if not server.native_enabled:
-        raise McpHubError(
-            "disabled_natively",
-            f"{name} is disabled in the {_SOURCE_LABELS[server.source]} config ({server.path}); enable it there first.",
-            field="enabled",
-        )
     return server.definition
 
 
@@ -322,6 +315,8 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
         source = native_server.source if native_server is not None else _state(name).get("source")
         if native_server is not None:
             summary["sourcePath"] = str(native_server.path)
+            if not native_server.native_enabled:
+                summary["nativeEnabled"] = False
         if source in native.SOURCES:
             summary["source"] = source
         published = read_published(name)
@@ -330,12 +325,6 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
                 raise _not_found(name)
             definition = published["definition"]
             summary["nativeDeleted"] = True
-        elif not native_server.native_enabled:
-            if published is None:
-                summary.update(status="draft", enabled=False, nativeEnabled=False)
-                return summary
-            definition = published["definition"]
-            summary["nativeEnabled"] = False
         else:
             definition = read_definition(name, servers)
         enabled = read_enabled(name)
@@ -354,7 +343,6 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
         return summary
     manifest = published["manifest"]
     top_has_cwd = "cwd" in (definition.get("transport") or {})
-    live = native_server is not None and native_server.native_enabled
     summary.update(
         status="generated",
         enabled=enabled,
@@ -363,7 +351,7 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
         generatedAt=manifest.get("generatedAt"),
         serverVersion=(manifest.get("serverInfo") or {}).get("version"),
         toolCount=len(published["commands"]),
-        pendingChanges=live
+        pendingChanges=native_server is not None
         and _comparable(definition, without_cwd=not top_has_cwd)
         != _comparable(published["definition"], without_cwd=not top_has_cwd),
     )

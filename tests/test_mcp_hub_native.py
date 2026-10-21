@@ -129,18 +129,25 @@ enabled = false
     summaries = {item["name"]: item for item in repository.list_packages()}
     assert summaries["iphone_use"]["status"] == "draft"
     assert "error" not in summaries["iphone_use"]
-    assert summaries["computer-use"]["status"] == "draft"
-    assert summaries["computer-use"].get("nativeEnabled") is False
-    assert "error" not in summaries["computer-use"]
+    # Native enabled=false is informational; the relative cwd is still a field error.
+    assert summaries["computer-use"]["nativeEnabled"] is False
+    assert summaries["computer-use"]["status"] == "error"
+    assert summaries["computer-use"]["error"]["field"] == "cwd"
 
 
-def test_generating_a_natively_disabled_entry_fails_cleanly(native_files, runtime):
+def test_natively_disabled_entry_generates_like_any_draft(native_files, runtime):
+    import sys
+    from pathlib import Path
+
     _claude, codex, _opencode = native_files
-    codex.write_text(CODEX + '\n[mcp_servers.computer-use]\ncommand = "./app"\ncwd = "."\nenabled = false\n')
-    result = _run(runtime, "generate", {"name": "computer-use"})
-    assert result["ok"] is False
-    assert result["error"]["type"] == "disabled_natively"
-    assert "Codex config" in result["error"]["message"] and "usage" not in result["error"]  # CLI exit 1
+    fixture = str(Path(__file__).parent / "fixtures" / "mcp_echo_server.py")
+    codex.write_text(CODEX + f'\n[mcp_servers.off]\ncommand = {json.dumps(sys.executable)}\nargs = [{json.dumps(fixture)}]\nenabled = false\n')
+    draft = {item["name"]: item for item in repository.list_packages()}["off"]
+    assert draft["status"] == "draft" and draft["nativeEnabled"] is False and "error" not in draft
+    assert _run(runtime, "generate", {"name": "off"})["ok"]
+    call = _run(runtime, "call", {"name": "off", "tool": "echo", "arguments": {"text": "hi"}})
+    assert call["status"] == "ok", call
+    assert tomllib.loads(codex.read_text())["mcp_servers"]["off"]["enabled"] is False  # native switch untouched
 
 
 def test_enabled_relative_cwd_is_a_field_error(native_files):
