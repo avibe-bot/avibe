@@ -1,17 +1,21 @@
 import { useEffect, useSyncExternalStore } from 'react';
 import type { FC } from 'react';
 import { CircleAlert, CircleCheck, LoaderCircle, ShieldAlert } from 'lucide-react';
+import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 
-import { apiFetch } from '../../lib/apiFetch';
+import { isDesktopShell } from '../../lib/desktopShell';
+import {
+  COMPUTER_USE_REFRESH_INTERVAL_MS,
+  COMPUTER_USE_SETTINGS_PATH,
+  computerUseToneClass,
+  readComputerUseStatus,
+} from './computerUseStatus';
 import {
   computerUseStatusCopy,
   type ComputerUseCopyKey,
   type ComputerUseStatus,
-  type StatusTone,
 } from './computerUseStatusCopy';
-
-const REFRESH_INTERVAL_MS = 5_000;
 
 let statusSnapshot: ComputerUseStatus | null = null;
 const listeners = new Set<() => void>();
@@ -38,33 +42,14 @@ const publishStatus = (next: ComputerUseStatus | null) => {
 };
 
 const refreshComputerUseStatus = async () => {
-  try {
-    const response = await apiFetch('/api/desktop/computer-use/status', { cache: 'no-store' });
-    if (!response.ok) return;
-    const payload = await response.json() as Partial<ComputerUseStatus> & { supported?: boolean };
-    if (payload.supported === false) {
-      publishStatus(null);
-      return;
-    }
-    if (typeof payload.status !== 'string') return;
-    publishStatus({
-      status: payload.status,
-      reason: typeof payload.reason === 'string' ? payload.reason : null,
-    });
-  } catch {
-    // A transient UI response is not a Computer Use state. Keep the last
-    // observed line until the next no-store refresh.
-  }
+  const read = await readComputerUseStatus();
+  // A transient UI response is not a Computer Use state. Keep the last
+  // observed line until the next no-store refresh.
+  if (!read) return;
+  publishStatus(read.kind === 'status' ? read.status : null);
 };
 
-const toneClass: Record<StatusTone, string> = {
-  muted: 'border-border bg-surface text-muted',
-  mint: 'border-mint/30 bg-mint-soft text-mint-ink',
-  gold: 'border-gold/35 bg-gold/[0.08] text-gold-ink',
-  destructive: 'border-destructive/35 bg-destructive/[0.06] text-destructive-ink',
-};
-
-const StatusIcon: FC<{ status: string }> = ({ status }) => {
+export const ComputerUseStatusIcon: FC<{ status: string }> = ({ status }) => {
   if (status === 'ready') return <CircleCheck className="size-4 shrink-0" aria-hidden="true" />;
   if (status === 'needs_permission' || status === 'needs_runtime') {
     return <ShieldAlert className="size-4 shrink-0" aria-hidden="true" />;
@@ -82,7 +67,7 @@ export const ComputerUseStatusLine: FC = () => {
 
   useEffect(() => {
     void refreshComputerUseStatus();
-    const interval = window.setInterval(() => void refreshComputerUseStatus(), REFRESH_INTERVAL_MS);
+    const interval = window.setInterval(() => void refreshComputerUseStatus(), COMPUTER_USE_REFRESH_INTERVAL_MS);
     const onVisibilityChange = () => {
       if (document.visibilityState === 'visible') void refreshComputerUseStatus();
     };
@@ -100,18 +85,29 @@ export const ComputerUseStatusLine: FC = () => {
 
   if (!status) return null;
   const copy = computerUseStatusCopy(status, (key: ComputerUseCopyKey) => t(key));
+  const setupLink = status.status !== 'ready' && isDesktopShell();
   return (
     <div
       aria-label={copy.label}
-      className={`flex w-full items-start gap-2.5 rounded-[10px] border px-4 py-2.5 text-[12px] ${toneClass[copy.tone]}`}
+      className={`flex w-full items-start gap-2.5 rounded-[10px] border px-4 py-2.5 text-[12px] ${computerUseToneClass[copy.tone]}`}
       data-computer-use-status={status.status}
       data-testid="computer-use-status"
     >
-      <StatusIcon status={status.status} />
-      <div className="min-w-0">
+      <ComputerUseStatusIcon status={status.status} />
+      <div className="min-w-0 flex-1">
         <p className="font-semibold">{copy.label}</p>
         <p className="mt-0.5 text-[11px] opacity-80">{copy.detail}</p>
       </div>
+      {/* The step-by-step guide lives in Settings, which only the desktop
+          shell shows; a browser tab keeps the line as status alone. */}
+      {setupLink && (
+        <Link
+          to={COMPUTER_USE_SETTINGS_PATH}
+          className="shrink-0 self-center rounded-md px-2 py-1 text-[11px] font-semibold underline-offset-2 hover:underline"
+        >
+          {t('workbench.home.computerUse.finishInSettings')}
+        </Link>
+      )}
     </div>
   );
 };

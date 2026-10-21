@@ -437,6 +437,7 @@
       "platformConnections": "平台接入",
       "remoteAccess": "远程访问",
       "shortcuts": "快捷键",
+      "computerUse": "电脑操作",
       "service": "服务",
       "dependencies": "依赖",
       "diagnostics": "诊断与日志",
@@ -516,6 +517,39 @@
         "tab": "Tab"
       },
       "reset": "恢复默认"
+    },
+    "computerUse": {
+      "title": "电脑操作",
+      "subtitle": "让 Avibe Agent 查看并操作这台 Mac。请按顺序完成以下步骤，每完成一步本页都会自动更新。",
+      "recheck": "重新检查",
+      "checking": "检查中…",
+      "loading": "正在检查电脑操作状态…",
+      "stepsTitle": "设置步骤",
+      "unsupportedTitle": "仅桌面端可用",
+      "unsupportedDetail": "电脑操作需要在 Mac 上的 Avibe 桌面应用中设置。请打开桌面应用继续。",
+      "stepState": {
+        "complete": "已完成",
+        "current": "当前步骤",
+        "pending": "待完成"
+      },
+      "steps": {
+        "enable": {
+          "title": "开启电脑操作",
+          "detail": "在菜单栏的 Avibe 桌面应用菜单（托盘）中开启“电脑操作”。"
+        },
+        "accessibility": {
+          "title": "允许辅助功能",
+          "detail": "在“系统设置 → 隐私与安全性 → 辅助功能”中开启 Avibe。Avibe 通常会自动打开这个页面；如果列表里没有 Avibe，请点击 + 添加。"
+        },
+        "screenRecording": {
+          "title": "允许屏幕与系统音频录制",
+          "detail": "在“系统设置 → 隐私与安全性 → 屏幕与系统音频录制”中授权正在运行的 Avibe 桌面应用：点击 +，或将 Avibe 拖入列表，然后启用它。"
+        },
+        "recheck": {
+          "title": "返回这里重新检查",
+          "detail": "授权“屏幕录制”后，macOS 可能会退出并重新打开 Avibe。应用重新打开后，请回到本页点击“重新检查”。"
+        }
+      }
     },
     "diagnosticsTab": "诊断",
     "logsTab": "日志",
@@ -3214,7 +3248,8 @@
         "shellNotRunningDetail": "请打开或重新打开 Avibe 桌面应用，以使用电脑操作。",
         "daemonUnreachableDetail": "桌面驱动当前无法连接。请关闭并重新开启电脑操作；如果问题重复出现，请重新打开 Avibe。",
         "controllerUnavailableDetail": "当前无法连接 Avibe Controller。请等待服务恢复后再使用电脑操作 CLI。",
-        "socketPathTooLongDetail": "macOS 无法创建受管理的驱动端点。请更新或重新安装 Avibe 桌面应用。"
+        "socketPathTooLongDetail": "macOS 无法创建受管理的驱动端点。请更新或重新安装 Avibe 桌面应用。",
+        "finishInSettings": "在设置中完成"
       },
       "continueOnPhone": "在手机 APP 上继续",
       "connectChatApps": "聊天应用可在<settings>设置</settings>中连接"

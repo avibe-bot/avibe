@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { cleanup, render, screen, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import en from '../../i18n/en.json';
@@ -18,7 +19,10 @@ vi.mock('react-i18next', () => ({
 afterEach(() => {
   cleanup();
   apiFetch.mockReset();
+  Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
 });
+
+const renderLine = () => render(<MemoryRouter><ComputerUseStatusLine /></MemoryRouter>);
 
 describe('computerUseStatusCopy', () => {
   it('maps permission reasons to localized copy without exposing raw reason codes', () => {
@@ -118,7 +122,7 @@ describe('ComputerUseStatusLine', () => {
       json: async () => ({ status: 'needs_permission', reason: 'screen_recording' }),
     });
 
-    render(<ComputerUseStatusLine />);
+    renderLine();
 
     await waitFor(() => {
       expect(screen.getByTestId('computer-use-status')).toBeTruthy();
@@ -141,7 +145,7 @@ describe('ComputerUseStatusLine', () => {
       json: async () => ({ supported: false, status: 'unavailable', reason: 'unsupported_host' }),
     });
 
-    render(<ComputerUseStatusLine />);
+    renderLine();
 
     await waitFor(() => {
       expect(apiFetch).toHaveBeenCalled();
@@ -159,7 +163,7 @@ describe('ComputerUseStatusLine', () => {
       }),
     });
 
-    render(<ComputerUseStatusLine />);
+    renderLine();
 
     await waitFor(() => {
       expect(screen.getByTestId('computer-use-status')).toBeTruthy();
@@ -169,5 +173,34 @@ describe('ComputerUseStatusLine', () => {
     );
     expect(screen.getByText('workbench.home.computerUse.controllerUnavailableDetail')).toBeTruthy();
     expect(screen.queryByText('workbench.home.computerUse.readyDetail')).toBeNull();
+  });
+
+  it('links to the Settings guide only inside the desktop shell and only until ready', async () => {
+    const link = () => screen.queryByRole('link', { name: 'workbench.home.computerUse.finishInSettings' });
+    apiFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ supported: true, status: 'needs_permission', reason: 'accessibility' }),
+    });
+
+    renderLine();
+    await waitFor(() => expect(screen.getByTestId('computer-use-status')).toBeTruthy());
+    expect(link()).toBeNull();
+    cleanup();
+
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    renderLine();
+    await waitFor(() => expect(link()).toBeTruthy());
+    expect(link()?.getAttribute('href')).toBe('/settings/computer-use');
+    cleanup();
+
+    apiFetch.mockResolvedValue({
+      ok: true,
+      json: async () => ({ supported: true, status: 'ready', reason: null }),
+    });
+    renderLine();
+    await waitFor(() => {
+      expect(screen.getByTestId('computer-use-status').getAttribute('data-computer-use-status')).toBe('ready');
+    });
+    expect(link()).toBeNull();
   });
 });

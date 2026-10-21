@@ -437,6 +437,7 @@
       "platformConnections": "Platform Connections",
       "remoteAccess": "Remote Access",
       "shortcuts": "Shortcuts",
+      "computerUse": "Computer Use",
       "service": "Service",
       "dependencies": "Dependencies",
       "diagnostics": "Diagnostics & Logs",
@@ -516,6 +517,39 @@
         "tab": "Tab"
       },
       "reset": "Restore defaults"
+    },
+    "computerUse": {
+      "title": "Computer Use",
+      "subtitle": "Let Avibe agents see and operate this Mac. Follow the steps in order; this page updates as each one is done.",
+      "recheck": "Recheck",
+      "checking": "Checking…",
+      "loading": "Checking Computer Use status…",
+      "stepsTitle": "Setup steps",
+      "unsupportedTitle": "Available in the Avibe desktop app",
+      "unsupportedDetail": "Computer Use is set up from Avibe Desktop on a Mac. Open the desktop app to continue.",
+      "stepState": {
+        "complete": "done",
+        "current": "current step",
+        "pending": "not done yet"
+      },
+      "steps": {
+        "enable": {
+          "title": "Turn on Computer Use",
+          "detail": "In the Avibe Desktop menu bar (tray) menu, turn on Computer Use."
+        },
+        "accessibility": {
+          "title": "Allow Accessibility",
+          "detail": "In System Settings → Privacy & Security → Accessibility, turn on Avibe. Avibe usually opens this pane for you; if Avibe is not listed, click + and add it."
+        },
+        "screenRecording": {
+          "title": "Allow Screen & System Audio Recording",
+          "detail": "In System Settings → Privacy & Security → Screen & System Audio Recording, authorize the running Avibe Desktop app: click +, or drag Avibe into the list, then turn it on."
+        },
+        "recheck": {
+          "title": "Come back and recheck",
+          "detail": "After you grant Screen Recording, macOS may quit and reopen Avibe. When it reopens, come back here and click Recheck."
+        }
+      }
     },
     "diagnosticsTab": "Diagnostics",
     "logsTab": "Logs",
@@ -3214,7 +3248,8 @@
         "shellNotRunningDetail": "Open or reopen the Avibe desktop app to make Computer Use available.",
         "daemonUnreachableDetail": "The desktop driver is not reachable. Turn Computer Use off and on; reopen Avibe if it repeats.",
         "controllerUnavailableDetail": "The Avibe Controller is not reachable. Wait for the service to recover before using the Computer Use CLI.",
-        "socketPathTooLongDetail": "macOS could not create the managed driver socket. Update or reinstall the Avibe desktop app."
+        "socketPathTooLongDetail": "macOS could not create the managed driver socket. Update or reinstall the Avibe desktop app.",
+        "finishInSettings": "Finish in Settings"
       },
       "continueOnPhone": "Continue on your phone",
       "connectChatApps": "Connect chat apps in <settings>Settings</settings>"
