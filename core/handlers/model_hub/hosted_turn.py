@@ -25,6 +25,10 @@ class ExecutorSlot:
     source_id: str
     model_id: str
     identity: str
+    kind: str = "model"
+    results: int | None = None
+    enabled: bool = True
+    label: str = ""
 
 
 @dataclass(frozen=True)
@@ -34,3 +38,5 @@ class TurnHostedTools:
     executors: Mapping[str, tuple[ExecutorSlot, ...]]
     # The image_generate enum, default first; empty when the turn has no image tool.
     images: tuple[ImageChoice, ...] = ()
+    # None denotes the released, activation-off turn shape.
+    prefer_native: bool | None = None

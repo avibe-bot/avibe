@@ -68,7 +68,7 @@ SpecLookup = Callable[[str, str, str, str], Optional[HostedToolSpec]]
 UNKNOWN_ENGINE_RELEASE = "unknown-engine"
 NATIVE_REPLAY_PROTOCOLS: frozenset[str] = frozenset({"anthropic", "openai_responses"})
 
-# S2 enables this together with the chain, after S3/S4 and disclosure ship. Never a user-facing toggle.
+# S2b-2 enables this after the S6 disclosure ships. Never a user-facing toggle.
 SEARCH_SERVICES_ACTIVE: Final = False
 
 Assumption = Literal["assumed", "unsupported"]
@@ -224,6 +224,8 @@ class ExecutorCandidate:
     declaration: Mapping[str, Any]
     include: tuple[str, ...]
     price: Any = None
+    kind: str = "model"
+    settings: Mapping[str, Any] | None = None
 
 
 def executor_candidates(
@@ -244,9 +246,49 @@ def executor_candidates(
         candidate = executor_candidate(source, model_id, tool, evidence=evidence, spec_for=spec_for) if model_id else None
         if candidate is not None:
             candidates[source.id] = candidate
-    order = hosted_tool_setting(config, tool).executor_order or ()
+    setting = hosted_tool_setting(config, tool)
+    if tool == "web_search" and SEARCH_SERVICES_ACTIVE:
+        return _search_chain(config, setting, candidates)
+    order = setting.executor_order or ()
     first = [candidates[source_id] for source_id in order if source_id in candidates]
     return tuple(first + [candidate for source_id, candidate in candidates.items() if source_id not in order])
+
+
+def _search_chain(
+    config: ModelHubConfig, setting: ModelHubHostedToolConfig, models: Mapping[str, ExecutorCandidate],
+) -> tuple[ExecutorCandidate, ...]:
+    """One role per Source; stale/unnamed service roles precede the first model, without a config write."""
+
+    services: dict[str, ExecutorCandidate] = {}
+    remaining = dict(models)
+    disabled: list[ExecutorCandidate] = []
+    ordered = _vibey_order(config)
+    by_id = {source.id: source for source in ordered}
+    first = [by_id[sid] for sid in (setting.service_order or ()) if sid in by_id and by_id[sid].protocol == "search"]
+    sources = first + [s for s in ordered if s.protocol == "search" and s not in first]
+    sources += [s for s in ordered if s.protocol != "search"]
+    for source in sources:
+        service = model_hub_search_service(source)
+        settings = search_service_settings(setting, source)
+        if service is None or settings is None:
+            continue
+        candidate = ExecutorCandidate(source, service["service_id"], {}, (), kind="service", settings=settings)
+        if settings["enabled"]:
+            services[source.id] = candidate
+            remaining.pop(source.id, None)
+        elif source.id not in remaining:
+            disabled.append(candidate)
+    automatic = {**services, **remaining}
+    kinds = setting.executor_order_kinds or {}
+    named = [
+        automatic[sid] for sid in (setting.executor_order or ())
+        if sid in automatic and automatic[sid].kind == kinds.get(sid, "model")
+    ]
+    named_ids = {candidate.source.id for candidate in named}
+    additions = [c for sid, c in services.items() if sid not in named_ids]
+    position = next((i for i, c in enumerate(named) if c.kind == "model"), len(named))
+    return tuple(named[:position] + additions + named[position:]
+                 + [c for sid, c in remaining.items() if sid not in named_ids] + disabled)
 
 
 def listed_executor_model(source: ModelHubSourceConfig, tool: str, *, spec_for: SpecLookup) -> Optional[str]:
@@ -428,13 +470,22 @@ def freeze_turn_tools(config: ModelHubConfig, *, evidence: HostedEvidence, spec_
     tools = frozenset(tool for tool in enabled if tool != IMAGE_TOOL or images)
     executors = {
         tool: tuple(
-            ExecutorSlot(candidate.source.id, candidate.model_id, identity_digest(candidate.source))
+            ExecutorSlot(
+                candidate.source.id, candidate.model_id, identity_digest(candidate.source),
+                kind=candidate.kind,
+                results=candidate.settings["results"] if candidate.settings else None,
+                enabled=candidate.settings["enabled"] if candidate.settings else True,
+                label=candidate.source.display_name[:64] if SEARCH_SERVICES_ACTIVE and tool == "web_search" else "",
+            )
             for candidate in executor_candidates(config, tool, evidence=evidence, spec_for=spec_for)
         )
         for tool in tools
         if tool != IMAGE_TOOL
     }
-    return TurnHostedTools(tools, executors, images)
+    return TurnHostedTools(
+        tools, executors, images,
+        prefer_native=hosted_tool_setting(config, "web_search").prefer_native if SEARCH_SERVICES_ACTIVE else None,
+    )
 
 
 def hop_hosted_tools(
@@ -454,7 +505,11 @@ def hop_hosted_tools(
 
     entries: dict[str, dict[str, Any]] = {}
     for tool in sorted(turn.tools - {IMAGE_TOOL}):
-        facts = hosted_tool_facts(source, model_id, tool, evidence=evidence, spec_for=spec_for)
+        facts = (
+            HostedToolFacts(native="unsupported", replay="unsupported")
+            if tool == "web_search" and turn.prefer_native is False
+            else hosted_tool_facts(source, model_id, tool, evidence=evidence, spec_for=spec_for)
+        )
         entry: dict[str, Any] = {"native": facts.native, "replay": facts.replay}
         if facts.native == "assumed":
             entry["declaration"] = dict(facts.declaration or {})
@@ -506,7 +561,8 @@ def search_executor_kind(source: ModelHubSourceConfig, setting: ModelHubHostedTo
 
 
 def _service_candidate_payload(
-    source: ModelHubSourceConfig, setting: ModelHubHostedToolConfig, *, trial_pending: bool
+    source: ModelHubSourceConfig, setting: ModelHubHostedToolConfig, *, trial_pending: bool,
+    cooldown_until: str | None,
 ) -> dict[str, Any]:
     service = model_hub_search_service(source)
     assert service is not None
@@ -521,8 +577,7 @@ def _service_candidate_payload(
         "settings": search_service_settings(setting, source),
         "state": source.state.to_payload(),
         "trial_pending": trial_pending,
-        # S2's service-scoped cooldown owner supplies this at activation; S1b has no service attempts.
-        "cooldown_until": None,
+        "cooldown_until": cooldown_until,
     }
 
 
@@ -631,6 +686,7 @@ def hosted_tools_status(
     spec_for: SpecLookup,
     image_price: Callable[[ModelHubSourceConfig, ImageModelSpec], Optional[dict[str, Any]]],
     search_trial_pending: Callable[[str], bool] = lambda _source_id: False,
+    search_cooldown_until: Callable[[str, str], str | None] = lambda _sid, _service: None,
 ) -> dict[str, Any]:
     """What Models → Tools reads (``hosted-tools-status.schema.json``): settings, saved and effective, and status."""
 
@@ -652,6 +708,11 @@ def hosted_tools_status(
                     "relay": is_relay(candidate.source),
                     "price": _price_payload(candidate.price),
                 }
+                if candidate.kind == "model" else _service_candidate_payload(
+                    candidate.source, setting,
+                    trial_pending=search_trial_pending(candidate.source.id),
+                    cooldown_until=search_cooldown_until(candidate.source.id, candidate.model_id),
+                )
                 for candidate in chain
             ]
             if tool == "web_search":
@@ -662,18 +723,7 @@ def hosted_tools_status(
                     if source_id in sources and (service := model_hub_search_service(sources[source_id])) is not None
                 }
                 entry["service_order"] = [source_id for source_id in (setting.service_order or ()) if source_id in sources]
-                # This is the only activation gate for BOTH read additions. S2 supplies the unified chain
-                # and its placement rule here when enabling it; this lane only defines the projection.
                 if SEARCH_SERVICES_ACTIVE:
-                    service_rows = [
-                        _service_candidate_payload(source, setting, trial_pending=search_trial_pending(source.id))
-                        for source in config.sources
-                        if model_hub_search_service(source) is not None and search_executor_kind(source, setting) == "service"
-                    ]
-                    service_ids = {row["source_id"] for row in service_rows}
-                    entry["executor_candidates"] = service_rows + [
-                        row for row in entry["executor_candidates"] if row["source_id"] not in service_ids
-                    ]
                     entry["service_vendors"] = _service_vendors(config)
         else:
             choices = image_choices(config, evidence=evidence)

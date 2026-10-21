@@ -106,6 +106,7 @@ capabilities:
       - tests/test_model_hub_migration_bearer.py
       - tests/test_model_hub_transport_leases.py
       - tests/test_model_hub_hosted_executor.py
+      - tests/test_model_hub_search_chain.py
       - tests/test_model_hub_hosted_evidence.py
       - tests/test_model_hub_hosted_images.py
       - tests/test_model_hub_usage.py

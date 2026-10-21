@@ -160,7 +160,7 @@ def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] |
         return None
     if not isinstance(item, dict):
         raise ValueError("api-key vendor search catalog is invalid")
-    required = {"service_id", "endpoint", "auth", "request", "result", "limits", "price", "free_check", "service_refused_statuses", "tool_only"}
+    required = {"service_id", "endpoint", "auth", "request", "result", "limits", "price", "free_check", "service_refused_statuses", "outcomes", "billing", "tool_only"}
     if protocol != "search":
         required.add("auto_enroll")
     if set(item) != required:
@@ -202,6 +202,28 @@ def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] |
         for status in item["service_refused_statuses"]
     ) or len(set(item["service_refused_statuses"])) != len(item["service_refused_statuses"]):
         raise ValueError("api-key vendor search catalog refusal statuses are invalid")
+    outcomes, billing = item.get("outcomes"), item.get("billing")
+    if not isinstance(outcomes, dict) or set(outcomes) - {"credential", "balance", "limit", "tag_overrides"} or any(
+        not isinstance(statuses, list) or any(type(status) is not int or not 400 <= status < 500 for status in statuses)
+        or len(set(statuses)) != len(statuses) for statuses in (outcomes.get(key) for key in ("credential", "balance", "limit"))
+    ):
+        raise ValueError("api-key vendor search outcome statuses are invalid")
+    overrides = outcomes.get("tag_overrides", [])
+    if not isinstance(overrides, list) or any(
+        not isinstance(rule, dict) or set(rule) != {"status", "tag", "code"}
+        or type(rule["status"]) is not int or not 400 <= rule["status"] < 500
+        or not isinstance(rule["tag"], str) or not rule["tag"]
+        or rule["code"] not in {"service_limit", "service_refused"} for rule in overrides
+    ):
+        raise ValueError("api-key vendor search outcome tag overrides are invalid")
+    if (
+        not isinstance(billing, dict) or set(billing) != {"nonempty_only", "unbilled_errors"}
+        or not isinstance(billing["nonempty_only"], bool)
+        or not isinstance(billing["unbilled_errors"], list)
+        or any(error != "timeout" for error in billing["unbilled_errors"])
+        or len(set(billing["unbilled_errors"])) != len(billing["unbilled_errors"])
+    ):
+        raise ValueError("api-key vendor search billing rule is invalid")
     free_check = item.get("free_check")
     if free_check is not None:
         if not isinstance(free_check, dict):

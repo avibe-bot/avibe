@@ -17,7 +17,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, AsyncIterator, Callable, Final, Literal, Mapping, Protocol, Sequence
+from typing import Any, AsyncIterator, Awaitable, Callable, Final, Literal, Mapping, Protocol, Sequence
 
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
 
@@ -578,13 +578,15 @@ class EngineAdapter(Protocol):
         credential_ref: str,
         request: Mapping[str, Any],
         *,
-        on_sent: Callable[[], None] | None = None,
+        on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
         """Make exactly one catalog-host search request from Model Hub custody.
 
         ``on_sent`` fires once after the connection (including TLS) is ready and
         immediately before aiohttp writes this request. A callback failure stops
-        the request before any request bytes are sent.
+        the request before any request bytes are sent. An async callback is
+        awaited for final controller admission without holding a mutation lock
+        during DNS/TCP/TLS; existing synchronous callbacks remain supported.
         """
         ...
 

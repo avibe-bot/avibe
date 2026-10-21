@@ -310,6 +310,9 @@ class ModelHubRemoteService:
     async def clear_hosted_refusals(self, tool: str, target: object) -> dict:
         return await _rpc("clear_hosted_refusals", {"tool": tool, "target": target})
 
+    async def clear_service_cooldown(self, source_id: str, service_id: str | None = None) -> dict:
+        return await _rpc("clear_service_cooldown", {"source_id": source_id, "service_id": service_id})
+
     async def clear_source_evidence(self, source_id: str, target: object) -> dict:
         return await _rpc("clear_source_evidence", {"source_id": source_id, "target": target})
 

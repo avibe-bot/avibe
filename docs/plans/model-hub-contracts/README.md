@@ -1,7 +1,7 @@
 # Model Hub contracts
 
-Status: **contract_version 19**, 2026-10-21: dormant web-search-service readers
-(S2a, `../web-search-services.md` §4.3, §6.5, §8). The RC tag `gh-v3.2.2rc13`
+Status: **contract_version 19**, 2026-10-21: dormant web-search-service readers and producer
+(S2a/S2b-1, `../web-search-services.md` §3–5, §6.5, §8). The RC tag `gh-v3.2.2rc13`
 carries v18, so these additions open a new event rather than changing v18.
 - C-1 (`../agent-core-contracts/message.schema.json`) accepts `HostedRecord.attempts[]`
   (`HostedAttempt`), `HostedCost.estimate`, and a `ServiceExecutorOrigin`
@@ -18,11 +18,17 @@ carries v18, so these additions open a new event rather than changing v18.
   `kind: "service"` bucket rows, `service_reported_usd` and `excluded_service_requests`
   on totals and days, and `pricing.service_price_date`. Model counts never include
   service requests.
-- These are readers only. No search runs, no service request is metered, no service
-  evidence is written, and `SEARCH_SERVICES_ACTIVE` stays off; service candidates and
-  `service_vendors` remain absent from the Tools read. S2b owns the producers and
-  activation, and the downgrade boundary of `../web-search-services.md` §12 begins
-  when it writes these shapes.
+- S2b-1 adds the producer behind `SEARCH_SERVICES_ACTIVE = False`: unified service/model
+  order, per-turn frozen preference/settings, bounded mapping, independently fenced service
+  cooldowns and Source health, re-enable trials, sent-request metering and positive evidence.
+  The flag-off runtime/read remain unchanged. S2b-2 activates only with S6 disclosure;
+  the downgrade boundary of `../web-search-services.md` §12 begins when these shapes are written.
+- `POST /api/models/hosted-tools/web_search/services/<source_id>/retry` clears the controller's
+  service cooldown and advances its generation, with a plain success response. It is available
+  regardless of activation and follows the existing Member management boundary.
+- C-6's search-call contract and the turn's `hosted_tools` add the mixed chain, skip/terminal
+  rules, native preference, service billing and classified-only Source health writes.
+  Re-enable is the one non-attempt action advancing Source settlement generation.
 - The versioned mirrors advance together; persisted TurnProvenance retains v5–v18
   and adds v19.
 
@@ -61,7 +67,15 @@ withdrawn by v18 as recorded above. Later lanes extend the current version event
 only while it is unshipped; an RC freezes its meaning. S2 activates the service
 reads and snippet-only search chain.
 
-Catalog metadata verified on **2026-10-20**:
+Catalog metadata verified on **2026-10-21**:
+- DeepSeek maps the model-facing `summary` and bills only non-empty 200 results; its
+  declared unbilled timeouts follow the design's §4.3 rule. The official reference is
+  [Search](https://api-docs.deepseek.com/api/search) and the [guide](https://api-docs.deepseek.com/guides/search).
+- The catalog pins Tavily basic search and Exa Auto with highlights only. Exact status/tag
+  overrides distinguish Exa key/team budgets from balance and moderation refusals from
+  unavailable endpoints; Tavily 422 is query-specific. See
+  [Exa errors](https://exa.ai/docs/admin/error-codes) and
+  [Tavily OpenAPI](https://docs.tavily.com/documentation/api-reference/openapi.json).
 - `search.auto_enroll` is explicit for model vendors with search; only DeepSeek is
   enabled automatically. S1b and S2 own the resulting settings defaults.
 - Exa's `search.result.reported_cost` names `costDollars.total` with `estimate: true`,

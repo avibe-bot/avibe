@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import email.utils
+import inspect
 import json
 import logging
 import math
@@ -13,7 +14,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Callable, Literal, Mapping, Sequence, TypeVar
+from typing import Any, Awaitable, Callable, Literal, Mapping, Sequence, TypeVar
 
 import aiohttp
 
@@ -2061,7 +2062,7 @@ class CLIProxyEngineAdapter:
         payload: Mapping[str, Any] | None = None,
         timeout_total: float = _SEARCH_TIMEOUT_SECONDS,
         connect_timeout: float | None = None,
-        on_sent: Callable[[], None] | None = None,
+        on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
         """Call only the immutable catalog endpoint for one search operation."""
         vendor, service = self._search_catalog_parts(catalog)
@@ -2110,8 +2111,13 @@ class CLIProxyEngineAdapter:
             nonlocal callback_called
             if callback_called or on_sent is None:
                 return
+            # Async final admission may wait for the short controller mutation
+            # section. Connect/TLS never owns that lock. Mark sent only after
+            # the callback accepts; a refused/cancelled callback sent nothing.
+            admission = on_sent()
+            if inspect.isawaitable(admission):
+                await admission
             callback_called = True
-            on_sent()
 
         trace.on_connection_create_end.append(request_connection_ready)
         trace.on_connection_reuseconn.append(request_connection_ready)
@@ -2217,26 +2223,30 @@ class CLIProxyEngineAdapter:
             return SearchCredentialCheck("unknown")
         if response.http_status != 200 or response.body is None:
             return SearchCredentialCheck("unknown")
-        try:
-            body = json.loads(response.body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return SearchCredentialCheck("unknown")
-        limit_rule = check.get("limit")
-        if isinstance(limit_rule, Mapping):
-            limit_outcome = _search_limit_outcome(body, limit_rule)
-            if limit_outcome == "limit":
-                return SearchCredentialCheck("limit")
-            if limit_outcome == "unknown":
+        def decode() -> SearchCredentialCheck:
+            # The free check shares search's 8 MiB body bound, not the event loop.
+            try:
+                body = json.loads(response.body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
                 return SearchCredentialCheck("unknown")
-        passed = check.get("pass")
-        balance = check.get("balance")
-        if isinstance(passed, Mapping) and _search_check_matches(body, passed):
-            return SearchCredentialCheck("pass")
-        if isinstance(balance, Mapping) and _search_check_matches(body, balance):
-            return SearchCredentialCheck("balance")
-        if balance is None and isinstance(passed, Mapping) and passed.get("status") == 200:
-            return SearchCredentialCheck("pass")
-        return SearchCredentialCheck("unknown")
+            limit_rule = check.get("limit")
+            if isinstance(limit_rule, Mapping):
+                limit_outcome = _search_limit_outcome(body, limit_rule)
+                if limit_outcome == "limit":
+                    return SearchCredentialCheck("limit")
+                if limit_outcome == "unknown":
+                    return SearchCredentialCheck("unknown")
+            passed = check.get("pass")
+            balance = check.get("balance")
+            if isinstance(passed, Mapping) and _search_check_matches(body, passed):
+                return SearchCredentialCheck("pass")
+            if isinstance(balance, Mapping) and _search_check_matches(body, balance):
+                return SearchCredentialCheck("balance")
+            if balance is None and isinstance(passed, Mapping) and passed.get("status") == 200:
+                return SearchCredentialCheck("pass")
+            return SearchCredentialCheck("unknown")
+
+        return await asyncio.to_thread(decode)
 
     async def search(
         self,
@@ -2246,7 +2256,7 @@ class CLIProxyEngineAdapter:
         credential_ref: str,
         request: Mapping[str, Any],
         *,
-        on_sent: Callable[[], None] | None = None,
+        on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
         service = search_service(vendor, "search" if vendor in {"tavily", "exa"} else "openai_chat")
         if service is None or service.get("service_id") != service_id:

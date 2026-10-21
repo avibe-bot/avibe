@@ -155,7 +155,8 @@ The user has an Anthropic API key and a DeepSeek API key, adds Tavily, and chang
   outcome: status, a bounded header subset, `response_received_at` (the instant the headers arrived, which the retry
   coordinator anchors `Retry-After` to, as `model-hub-retry-experience.md` requires) and the body, the status and
   receipt time surviving a later body-read failure. Like the invocation contract's `on_admitted`, it takes an `on_sent`
-  callback that it calls exactly once just before writing the request, after connect and TLS succeed; a failure or
+  callback (sync or awaitable) that it calls exactly once just before writing the request, after connect and TLS
+  succeed; final admission and trial reservation hold a short controller lock, never during connection setup. A failure or
   cancellation before that call is pre-send ($0); one after it and before any status is billing-unknown; and one
   after a status arrived is settled by that status (§4.3). It reads the key from the state store (`read_api_key`, as credential
   retargeting does today) only for the duration of the request.
@@ -238,7 +239,8 @@ Hosted tools §6 holds, with these changes:
   `services.<id>.enabled: false`; the frozen list carries such Sources last, so they are reached only after every
   other candidate, and never sent a request). A skip costs nothing, writes no state, and is recorded in `attempts[]` (§4.3).
 - **One attempt** sends the catalog's request for the canonical query, the turn's frozen `results`, and
-  waits at most 30 s, inside the chain's single 180 s deadline.
+  waits at most 30 s, inside the chain's single 180 s deadline. This attempt bound applies only to services;
+  model executors retain hosted tools §6's remaining chain budget.
 
 ### 4.2 Outcomes
 
@@ -254,6 +256,11 @@ Hosted tools §6 holds, with these changes:
 | a 4xx the catalog row names as query-specific (for example a malformed query) | next candidate, `service_refused` | none |
 | any other 4xx (404, 405, 410 and the like: the endpoint or protocol, which a different query cannot fix) | next candidate, `service_unavailable` | none; a service cooldown |
 | a body the mapping cannot read (`service_unreadable`) | next candidate | none; a service cooldown, because a 200 may be billed |
+
+A catalog row may refine a status with an exact vendor tag before applying this table. The first batch uses Exa's
+`402 API_KEY_BUDGET_EXCEEDED` and `TEAM_BUDGET_EXCEEDED` as `service_limit`, Exa's `403 PROHIBITED_CONTENT`
+and `CONTENT_FILTER_ERROR` as `service_refused`, and Tavily's `422` validation response as `service_refused`;
+unrecognized tags keep the status-only fallback (including `403 FEATURE_DISABLED` as unavailable).
 
 - **A model Source with a search API (DeepSeek)** shares its key and balance with its models, so a search 401 or 402
   writes the Source's health exactly as a model call would. DeepSeek documents no 403 for Search (its security-policy
@@ -286,7 +293,9 @@ Hosted tools §6 holds, with these changes:
   query-specific `service_refused` is unbilled and says nothing about the account, so it releases the reservation
   and leaves the trial armed: the model's corrected query uses it. Every other outcome ends the reservation, so the user can arm a new trial; a cancelled turn (the user
   stops it while the trial request is in flight) releases the reservation and, if no status had arrived, keeps the
-  blocker like a transient failure; a status that arrived before the stop settles the trial by the outcome table. A restart
+  blocker like a transient failure; Stop itself creates no cooldown or failure class: no status settles only billing,
+  a received 200 also authenticates and clears the trial blocker without inferring an unreadable body, and an observed
+  failure status settles its own outcome row, including health or cooldown. A restart
   drops an unused trial, so the Source stays blocked and the user can press again. This fails closed. While a
   trial is armed or in flight, "重新启用" is disabled (the read reports `trial_pending`), and a repeated request is
   answered with the current trial without arming another or advancing the generation. Nothing retries on its own. A model Source with
@@ -398,7 +407,7 @@ Hosted tools §6 holds, with these changes:
     remedy is turning "用于网页搜索" back on;
   - a skipped entry's remedy is checked against the Source's current state when the record is projected: a Source
     since repaired, re-enabled or removed shows no remedy (the entry still says it was skipped);
-  - `superseded: true` marks a failed entry whose settlement any fence dropped (a newer attempt, a key replacement,
+  - `superseded: true` marks a failed entry whose actual health or cooldown write its owning fence dropped (a newer attempt, a key replacement,
     a removal or "重新启用"). The projection also treats an entry as superseded when the Source's current health no
     longer matches it, for example a key replaced after the failure settled but before the call ended. The surfaces
     say "这次请求失败，状态已由之后的操作更新" for it and show no repair, since the Source's current state is not
@@ -494,7 +503,7 @@ includes, so the recorded list price stays exact.
 | --- | --- | --- | --- | --- | --- | --- |
 | DeepSeek | `POST https://api.deepseek.com/v1/tools/search` `{query, count}` | Bearer | 1–50 | `summary` | $0.75 / 1k successful requests; empty results, failures and timeouts not billed | `GET /user/balance`: 200 with `is_available: true` is `pass`, with `false` is `balance`; 401 is `invalid` |
 | Tavily | `POST https://api.tavily.com/search` | Bearer | 1–20 | `content` (a query-relevant snippet; `include_raw_content` is never sent) | $8 / 1k basic searches | `GET https://api.tavily.com/usage`: a 200 needs at least one numeric usage/limit pair (`key.usage`/`key.limit`, `account.plan_usage`/`account.plan_limit`, `account.paygo_usage`/`account.paygo_limit`), and each recognized pair must be wholly absent or have both members as valid numbers, otherwise the result is `unknown`; a `key.limit` of null is Tavily's unlimited key ([OpenAPI](https://docs.tavily.com/documentation/api-reference/openapi.json), 2026-10-20) and counts as a key pair with headroom. A present key pair at its limit is `limit`. Otherwise, with no account pair (Tavily's schema makes `account` optional) the answer still authenticates the key and is `pass`, payment being confirmed by the first search as for a vendor without a free check; with one, it is `pass` when the plan pair or the pay-as-you-go pair has headroom (pay-as-you-go continues after the plan allowance) and `limit` when none does; 401 is `invalid` |
-| Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | always `contents.highlights` (the `snippet` source, since a base result has no excerpt), included in the search price since Exa 3.0 ([announcement](https://exa.ai/blog/exa-3), 2026-10-19); `contents.text` is never requested | $7 / 1k (Exa Auto); the response's `costDollars` is used when present | none known |
+| Exa | `POST https://api.exa.ai/search` | `x-api-key` | 1–10 (the base price includes 10) | always `contents.highlights` (the `snippet` source, since a base result has no excerpt), included in the search price since Exa 3.0 ([announcement](https://exa.ai/blog/exa-3), 2026-10-19); `contents.text` is never requested | $7 / 1k (Exa Auto); the response's `costDollars` is used when present | none known; status/tag mappings use the [error-codes page](https://exa.ai/docs/admin/error-codes) (2026-10-21) |
 
 - DeepSeek facts that shape the UI (DeepSeek's Search & Fetch guide, 2026-10-19): the query is 1–128 characters and
   supports operators (`site:`, `lang:`, `after:`, quoted phrases). The catalog records the list price only. Any

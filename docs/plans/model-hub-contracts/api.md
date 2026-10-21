@@ -73,6 +73,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | GET `/api/models/quota` | → `{quota: QuotaSummary}` | Rate-limit windows of every hub-held subscription Source, from the vendor's own usage report, plus each Source's API-price `value` (see Subscription quota). Served from the server cache; a Source older than five minutes is re-read before answering, bounded by a short deadline, and a Source still being read is listed in `pending`. Never starts the engine. |
 | POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. |
 | GET `/api/models/hosted-tools` | → `{hosted_tools: HostedToolsStatus}` | Models → Tools (`hosted-tools-status.schema.json`): every catalog tool with its switch (absent setting = on), its passive status from real use (`latest_ok`, current `refused[]`, per-pair `verified[]`), for a search tool the saved and effective executor order with every eligible executor candidate and its unit rates, and for `image_generate` the saved and effective default and the available image models. Memory only; nothing is probed. |
+| POST `/api/models/hosted-tools/web_search/services/<source_id>/retry` | `{}` → `{}` | Clears the controller's `(Source, service)` cooldown, advances its generation, and leaves Source health unchanged. It is valid even while search services are dormant; the Tools read is the follow-up source of truth. Member management role. |
 | PUT `/api/models/hosted-tools/<tool>` | `{enabled?: boolean, executor_order?: null \| [source_id], default_model?: null \| {source_id, model_id}, prefer_native?: boolean, services?: {source_id: null \| {results?: integer \| null, enabled?: boolean \| null}}}` → `{hosted_tools: HostedToolsStatus}` | Changes one tool's settings field by field: an absent field is unchanged, `null` resets `executor_order` to automatic or `default_model` to the default. `executor_order` is for search tools and `default_model` for `image_generate`; values are saved as given, never resolved. It applies from the next turn and interrupts nothing. An unknown tool returns `404 hosted_tool_not_found`; an empty or malformed body `400 invalid_parameter`, including a null `enabled`, an id that is not a Source id (`src_…`), or a model id with surrounding whitespace. |
 | POST `/api/models/hosted-tools/<tool>/clear` | `{source_id?, model_id?}` → `{hosted_tools: HostedToolsStatus}` | Clears the tool's refusals (`call` and `replay`): on one Source and model, on one Source (every model), or with `{}` on every Source. `model_id` requires `source_id`; neither is nullable, so a malformed body is refused rather than widened into a broader clear. A Source or model with nothing to clear is a no-op that answers the read. The file is written first: a failed write returns `500 state_write_failed` and changes nothing. A cleared Source is assumed again from its next request. An unknown tool returns `404 hosted_tool_not_found`; any other body `400 invalid_parameter`. |
 | POST `/api/models/sources/<source_id>/evidence/clear` | `{model_id, feature: {kind: "effort", name}}` → `{source: Source}` | Clears one effort refusal of a Source's model, so the next request at that effort may reach it. A missing record is a no-op. An unknown Source returns `404 source_not_found`; a hosted-tool feature or any other body `400 invalid_parameter` (hosted refusals clear through the Tools clear); a failed write `500 state_write_failed` with nothing changed. |
@@ -103,10 +104,10 @@ Extant retargeted or retired Sources are omitted from `services` while they cann
 search, but their overrides (especially opt-out) stay in config for when capability
 returns. Removed Sources' overrides are ignored.
 
-Until S2 activates execution, **the read contains no service candidates and omits
+Until S2b-2 activates execution with S6 disclosure, **the read contains no service candidates and omits
 `service_vendors` entirely**. One internal `SEARCH_SERVICES_ACTIVE` switch gates
 both. Settings load and save now, but `prefer_native` does not change hop facts
-and service settings do not change the model executor chain in S1b. No user-facing
+and service settings do not change the model executor chain while the flag is off. No user-facing
 activation toggle exists.
 
 The service variant is frozen for S4/S2 in `hosted-tools-status.schema.json`:
@@ -114,7 +115,9 @@ The service variant is frozen for S4/S2 in `hosted-tools-status.schema.json`:
 `price` is the catalog list price per search, with no page-text surcharge.
 `settings` holds effective `{results, enabled}`;
 `state` is the Source's health, `trial_pending` covers both armed and in-flight
-one-shot trials, and `cooldown_until` is nullable (S2 owns service cooldowns).
+one-shot trials, and `cooldown_until` is non-null only while a service cooldown has more than 60 seconds
+remaining. Retry advances that cooldown's independent generation, so an older in-flight failure cannot restore it;
+it neither clears a Source blocker nor sends a request.
 `service_vendors` contains `{id, name, price, free_tier, facts, results_max,
 source_ids}`. Facts are the catalog's
 `{tool_only, auto_enroll, free_check}` booleans. A free tier not verified in the
@@ -147,9 +150,12 @@ not named by the order or no longer naming an extant Source are ignored on load,
 including before role validation, and the next authorized write drops them. An
 extant retargeted/retired Source keeps its saved role. A damaged map is treated as absent with a
 warning, retaining the tool switch, service opt-outs and other saved choices.
-Neither `executor_order_kinds` nor `service_order` is client-writable. S2 owns the
-read-time placement rule; S1b preserves the saved order and kinds across restart
-without changing execution.
+Neither `executor_order_kinds` nor `service_order` is client-writable. When active, the read and the gateway use
+one chain: tool-only services in `service_order`, model Sources' enabled search APIs in Vibey order, then model
+executors. Saved-role entries keep their deliberate positions. Unnamed or role-changed service entries are
+inserted before the first named model executor; remaining model entries follow. Disabled entries are last.
+No placement writes config. A turn freezes this chain, result counts and `prefer_native`; final admission can
+only skip a changed identity, never substitute a newly added Source.
 
 Downgrade boundary: rc12 ignores `prefer_native`, `services` and
 `executor_order_kinds`. Its next config write drops those fields, including
