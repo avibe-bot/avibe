@@ -181,7 +181,8 @@ def test_thinking_goes_back_only_to_the_origin_that_thought_it(target: Origin) -
     """cross-provider.md: thinking is a model's private reasoning, not something the assistant said. Another origin
     gets none of it, signed, unsigned or redacted, and never as assistant text (Anthropic refuses such requests as
     reasoning extraction); everything the assistant said or did still goes. A response whose only content was that
-    thinking is left out, not sent as an empty assistant message. Its own origin gets it back as before."""
+    thinking is left out, not sent as an empty assistant message, while one that was empty as served (a refusal) still
+    goes. Its own origin gets it back as before."""
 
     signed = ThinkingBlock("signed plan", '{"id": "rs_1", "encrypted_content": "enc"}')
     redacted = ThinkingBlock("", "redacted-opaque", redacted=True)
@@ -193,6 +194,8 @@ def test_thinking_goes_back_only_to_the_origin_that_thought_it(target: Origin) -
         result,
         AssistantMessage((ThinkingBlock("only thought", "sig-only"), ThinkingBlock("more thought")), _THINKER, "stop"),
         UserMessage((TextBlock("and then?"),)),
+        AssistantMessage((), _THINKER, "refusal"),
+        UserMessage((TextBlock("please"),)),
     )
 
     sent = transform_messages(history, target).messages
@@ -205,14 +208,14 @@ def test_thinking_goes_back_only_to_the_origin_that_thought_it(target: Origin) -
             ),
             result,
             AssistantMessage((ThinkingBlock("only thought", "sig-only"), TextBlock("more thought")), _THINKER, "stop"),
-            history[4],
+            *history[4:],
         )
         return
     assert sent == (
         history[0],
         AssistantMessage((TextBlock("reading"), call), _THINKER, "tool_use"),
         result,
-        history[4],
+        *history[4:],
     )
 
 

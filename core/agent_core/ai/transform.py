@@ -137,6 +137,7 @@ def transform_messages(
         # The synthetic results of the current run of hosted calls, and the assistant parts they split off.
         results: list[ToolResultMessage] = []
         parts: list[Message] = []
+        foreign_thinking = False
 
         def split() -> None:
             nonlocal content, results
@@ -175,6 +176,7 @@ def transform_messages(
                 # different origin in any form: as text it would be attributed to the target model, and providers
                 # refuse requests that carry another model's reasoning as text (cross-provider.md).
                 if not same_origin:
+                    foreign_thinking = True
                     continue
                 if block.redacted or block.signature is not None:
                     content.append(block)
@@ -216,9 +218,9 @@ def transform_messages(
             pending_tool_ids.setdefault(source_id, []).extend(wire_ids)
         split()
         transformed.extend(parts)
-        # A response left with nothing to send (its only content was another origin's thinking) is skipped, as an
-        # aborted one is, rather than sent as an empty assistant message, which not every protocol accepts.
-        if content:
+        # A response whose only content was another origin's thinking is skipped, as an aborted one is, rather than
+        # sent as an empty assistant message; one that was empty as served (a refusal) still goes, as before.
+        if content or not (parts or foreign_thinking):
             transformed.append(_assistant_part(message, content, stop_reason=message.stop_reason))
 
     transformed = _insert_synthetic_results(transformed)
