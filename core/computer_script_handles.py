@@ -49,6 +49,10 @@ _GLOBAL_SCRIPT_TOOLS = frozenset(
         "clipboard_write",
     }
 )
+# Window observations whose driver refuses a window_id that is closed or not
+# owned by the requested pid (``window_id_not_found`` /
+# ``window_owner_pid_mismatch``).
+_DRIVER_VALIDATED_TOOLS = frozenset({"get_window_state"})
 _APP_HANDLE_TOOLS = frozenset(
     {
         "launch_app",
@@ -159,17 +163,57 @@ def bind_handle_to_request(
         raise ComputerScriptHandleError("invalid_computer_script_descriptor")
 
 
+def handle_validated_by_driver(
+    descriptor: HandleDescriptor | None,
+    tool: str,
+) -> bool:
+    """Whether the driver itself refuses this call for a stale window handle.
+
+    ``get_window_state`` refuses unless ``window_id`` is live and owned by
+    ``pid``. macOS does not reuse window ids within a login session, so the
+    exact pair cannot name a different window. The Controller therefore
+    forwards this read-only observation without a discovery round trip and
+    classifies a refusal afterwards with ``validate_handle_is_current``.
+    """
+
+    return isinstance(descriptor, WindowHandleDescriptor) and tool in _DRIVER_VALIDATED_TOOLS
+
+
 async def validate_handle_is_current(
     descriptor: HandleDescriptor | None,
     tool: str,
     discover: DiscoveryCall,
 ) -> dict[str, Any] | None:
-    """Validate one descriptor against current Controller discovery state."""
+    """Validate one descriptor against current Controller discovery state.
+
+    An app handle is checked against ``list_apps``. A window handle is checked
+    with one pid-scoped ``list_windows``: the exact ``(pid, window_id)`` pair
+    identifies the window for the whole login session, so the app list adds
+    no identity and costs a full application scan.
+    """
 
     if descriptor is None:
         return None
-    app = descriptor.app if isinstance(descriptor, WindowHandleDescriptor) else descriptor
-    if app.pid is None:
+    if isinstance(descriptor, WindowHandleDescriptor):
+        windows_result = await discover("list_windows", {"pid": descriptor.pid})
+        if windows_result.get("isError") is True:
+            return windows_result
+        windows = _structured_list(windows_result, "windows")
+        if not any(
+            record.get("pid") == descriptor.pid
+            and record.get("window_id") == descriptor.window_id
+            for record in windows
+        ):
+            raise ComputerScriptHandleError(
+                "stale_window_handle",
+                params={
+                    "pid": descriptor.pid,
+                    "window_id": descriptor.window_id,
+                },
+            )
+        return None
+
+    if descriptor.pid is None:
         if tool == "launch_app":
             return None
         raise ComputerScriptHandleError("stale_app_handle")
@@ -178,29 +222,10 @@ async def validate_handle_is_current(
     if apps_result.get("isError") is True:
         return apps_result
     apps = _structured_list(apps_result, "apps")
-    if not any(app.matches(record) for record in apps):
+    if not any(descriptor.matches(record) for record in apps):
         raise ComputerScriptHandleError(
             "stale_app_handle",
-            params={"pid": app.pid},
-        )
-
-    if not isinstance(descriptor, WindowHandleDescriptor):
-        return None
-    windows_result = await discover("list_windows", {"pid": descriptor.pid})
-    if windows_result.get("isError") is True:
-        return windows_result
-    windows = _structured_list(windows_result, "windows")
-    if not any(
-        record.get("pid") == descriptor.pid
-        and record.get("window_id") == descriptor.window_id
-        for record in windows
-    ):
-        raise ComputerScriptHandleError(
-            "stale_window_handle",
-            params={
-                "pid": descriptor.pid,
-                "window_id": descriptor.window_id,
-            },
+            params={"pid": descriptor.pid},
         )
     return None
 

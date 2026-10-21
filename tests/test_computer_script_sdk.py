@@ -332,7 +332,7 @@ def _fake_controller(
                                 "route": "accessibility",
                             }
                         )
-                elif tool == "double_click":
+                elif tool in {"double_click", "press_key", "drag"}:
                     body = _result(
                         {
                             "effect": "confirmed",
@@ -2606,4 +2606,84 @@ def test_python_runner_uses_the_verified_controller_endpoint_for_open_and_close(
             "/internal/computer-script/close",
             {"connection_token": "token"},
         ),
+    ]
+
+
+def _tool_requests(requests: list[dict]) -> list[tuple[str, dict]]:
+    return [
+        (request["payload"]["tool"], request["payload"]["arguments"])
+        for request in requests
+        if request["path"].endswith("/request")
+    ]
+
+
+def test_sdk_element_resolution_reads_the_tree_without_a_screenshot(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ label: "New Message" });
+  await window.element({ role: "button", label: "Send", index: 0 }).doubleClick();
+  await window.expect({ role: "textbox", label: "Subject" }).toExist();
+  await window.observe();
+};
+""",
+    )
+
+    assert payload == {"ok": True, "result": None}
+    observations = [
+        arguments
+        for tool, arguments in _tool_requests(requests)
+        if tool == "get_window_state"
+    ]
+    assert len(observations) == 3
+    # Element resolution (the action and the expectation) skips the capture.
+    assert [arguments.get("include_screenshot") for arguments in observations[:2]] == [
+        False,
+        False,
+    ]
+    # An explicit observation keeps the driver default, which includes it.
+    assert "include_screenshot" not in observations[2]
+
+
+def test_sdk_pixel_window_input_after_element_resolution_recaptures(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ label: "New Message" });
+  await window.element({ role: "button", label: "Send", index: 0 }).doubleClick();
+  await window.press("Return");
+  await window.drag({ from_x: 10, from_y: 20, to_x: 30, to_y: 40 });
+  await window.drag({ from_x: 11, from_y: 21, to_x: 31, to_y: 41 });
+};
+""",
+    )
+
+    assert payload == {"ok": True, "result": None}
+    sequence = [
+        (tool, arguments.get("include_screenshot"))
+        for tool, arguments in _tool_requests(requests)
+        if tool in {"get_window_state", "double_click", "press_key", "drag"}
+    ]
+    assert sequence == [
+        # Resolution leaves a tree-only snapshot ...
+        ("get_window_state", False),
+        ("double_click", None),
+        # ... which keyboard input can use as it is ...
+        ("press_key", None),
+        # ... while pixel input first recaptures once, then reuses it.
+        ("get_window_state", None),
+        ("drag", None),
+        ("drag", None),
     ]
