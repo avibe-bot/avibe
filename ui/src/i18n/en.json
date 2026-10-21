@@ -6037,6 +6037,11 @@
     "revision_one": "{{revision}} · {{count}} tool",
     "revision_other": "{{revision}} · {{count}} tools",
     "failed": "MCP operation failed.",
+    "source": {
+      "claude": "Claude config",
+      "codex": "Codex config",
+      "opencode": "OpenCode config"
+    },
     "status": {
       "draft": "Draft",
       "generated": "Generated",

@@ -30,6 +30,7 @@ import psutil
 from config import paths
 from config.atomic_io import write_atomic
 from core.handlers.model_hub.identifiers import OPENCODE_PROVIDER_BY_NATIVE_PROTOCOL
+from core.mcp_hub.native import opencode_disabled_mcp
 from core.process_isolation import isolated_subprocess_kwargs
 from modules.agents.opencode.caller_context import ensure_plugin_installed, server_environment
 from vibe import runtime
@@ -1777,6 +1778,7 @@ def _launch_environment(spec: OpenCodeLaunchSpec, overlay_path: Optional[Path]) 
     # removes OpenCode's independently assembled native Catalog.
     env["OPENCODE_CONFIG_CONTENT"] = _managed_runtime_config_content(
         env.get("OPENCODE_CONFIG_CONTENT"),
+        opencode_disabled_mcp(),
     )
     return env
 

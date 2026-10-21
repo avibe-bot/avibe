@@ -6037,6 +6037,11 @@
     "revision_one": "{{revision}} · {{count}} 个工具",
     "revision_other": "{{revision}} · {{count}} 个工具",
     "failed": "MCP 操作失败。",
+    "source": {
+      "claude": "Claude 配置",
+      "codex": "Codex 配置",
+      "opencode": "OpenCode 配置"
+    },
     "status": {
       "draft": "草稿",
       "generated": "已生成",

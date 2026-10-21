@@ -1720,6 +1720,7 @@ class SessionHandler(BaseHandler):
         # away from this site's auth_mode handling.
         from vibe.claude_config import (
             CLAUDE_MEMORY_DISABLED_SETTINGS,
+            CLAUDE_NATIVE_MCP_DISABLED,
             CLAUDE_SETTING_SOURCES,
             build_claude_subprocess_env,
         )
@@ -1757,6 +1758,7 @@ class SessionHandler(BaseHandler):
             "extra_args": extra_args,
             "settings": claude_settings_for_launch(CLAUDE_MEMORY_DISABLED_SETTINGS, model_hub_launch),
             "setting_sources": CLAUDE_SETTING_SOURCES,
+            **CLAUDE_NATIVE_MCP_DISABLED,
             "skills": [],
             "sandbox": CLAUDE_REMOTE_SANDBOX,
             # Disable interactive-only Claude Code tools that remote IM sessions

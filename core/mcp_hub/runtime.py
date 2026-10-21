@@ -44,6 +44,8 @@ ENVELOPE_SCHEMA_VERSION = 1
 # Codes the SDK synthesizes locally when no server answer arrived (the
 # connection closed or its own timeout fired): the tool may have acted.
 _CLIENT_SIDE_CODES = {-32000, -32001}  # CONNECTION_CLOSED, REQUEST_TIMEOUT
+# Saves and removes rewrite whole native config files shared by every package.
+_NATIVE_FILES = ""
 _CALLBACK_REJECTIONS = {"Sampling not supported", "Elicitation not supported", "List roots not supported"}
 
 
@@ -293,14 +295,14 @@ class McpRuntime:
         saved = []
         for definition in definitions:
             name = definition["name"]
-            async with self._lock(name):
+            async with self._lock(name), self._lock(_NATIVE_FILES):
                 saved.append(await asyncio.to_thread(self._save_one, definition, replace, preserve))
         return _dumps({"ok": True, "saved": saved})
 
     @staticmethod
     def _save_one(definition: dict[str, Any], replace: bool, preserve: bool) -> str:
         name = definition["name"]
-        exists = (repository.package_dir(name) / "definition.json").exists()
+        exists = name in repository.list_names()
         if exists and not replace:
             raise McpHubError(
                 "exists",
@@ -314,8 +316,6 @@ class McpRuntime:
             except McpHubError:
                 pass
         repository.write_definition(definition)
-        if not (repository.package_dir(name) / "state.json").exists():
-            repository.write_enabled(name, False)
         return name
 
     async def _generate(self, payload: dict[str, Any]) -> bytes:
@@ -408,7 +408,7 @@ class McpRuntime:
 
     async def _remove(self, payload: dict[str, Any]) -> bytes:
         name = payload.get("name")
-        async with self._lock(name):
+        async with self._lock(name), self._lock(_NATIVE_FILES):
             await asyncio.to_thread(repository.remove_package, name)
             await self._retire_package(name)
         return _dumps({"ok": True, "name": name, "removed": True})

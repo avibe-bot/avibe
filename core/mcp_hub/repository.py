@@ -1,6 +1,8 @@
 """On-disk MCP packages under ``<avibe-home>/mcp/<name>/``.
 
-``definition.json`` and ``state.json`` are the only authorities. Revisions are
+Connection definitions live in the backends' native MCP config files
+(``core/mcp_hub/native.py``); ``state.json`` (enabled, description) is the only
+Avibe-side authority. Revisions are
 derived data published by writing the full revision directory and then atomically
 replacing ``current.json``. Every file is written with ``write_atomic``.
 
@@ -21,7 +23,8 @@ from typing import Any, Optional
 
 from config import paths
 from config.atomic_io import write_atomic
-from core.mcp_hub.definition import SCHEMA_VERSION, validate_name
+from core.mcp_hub import native
+from core.mcp_hub.definition import validate_name
 from core.mcp_hub.errors import McpHubError
 from core.private_fs import ensure_private_directory
 
@@ -61,63 +64,81 @@ def _not_found(name: str) -> McpHubError:
 # ---------------------------------------------------------------------------
 
 
-def read_definition(name: str) -> dict[str, Any]:
-    path = package_dir(name) / "definition.json"
-    try:
-        value = _read_json(path)
-    except FileNotFoundError:
-        raise _not_found(name) from None
-    except (OSError, ValueError) as exc:
-        raise McpHubError("invalid_package", f"{name}: definition.json is unreadable: {exc}") from None
-    if not isinstance(value, dict) or value.get("schemaVersion") != SCHEMA_VERSION or value.get("name") != name:
-        raise McpHubError("invalid_package", f"{name}: definition.json has an unsupported shape or version.")
-    return value
-
-
-def read_enabled(name: str) -> bool:
+def _state(name: str) -> dict[str, Any]:
     path = package_dir(name) / "state.json"
     try:
         value = _read_json(path)
     except FileNotFoundError:
-        return False
+        return {}
     except (OSError, ValueError) as exc:
         raise McpHubError("invalid_package", f"{name}: state.json is unreadable: {exc}") from None
-    if not isinstance(value, dict) or not isinstance(value.get("enabled"), bool):
+    if (
+        not isinstance(value, dict)
+        or not isinstance(value.get("enabled", False), bool)
+        or not isinstance(value.get("description", ""), str)
+    ):
         raise McpHubError("invalid_package", f"{name}: state.json has an unsupported shape.")
-    return value["enabled"]
+    return value
 
 
-def write_definition(definition: dict[str, Any]) -> None:
+def _native_servers() -> dict[str, native.NativeServer]:
+    """Native servers, each valid definition carrying its Avibe-side description."""
+
+    servers = native.read_all()
+    for server in servers.values():
+        if server.definition is not None:
+            try:
+                server.definition["description"] = _state(server.name).get("description", "")
+            except McpHubError:
+                pass
+    return servers
+
+
+def read_definition(name: str, servers: Optional[dict[str, native.NativeServer]] = None) -> dict[str, Any]:
+    """The connection definition, read from the backend's native config file."""
+
+    server = (_native_servers() if servers is None else servers).get(name)
+    if server is None:
+        raise _not_found(name)
+    if server.error is not None:
+        raise server.error
+    return server.definition
+
+
+def read_enabled(name: str) -> bool:
+    return _state(name).get("enabled", False)
+
+
+def _write_state(name: str, **changes: Any) -> None:
     _ensure_root()
-    directory = package_dir(definition["name"])
+    directory = package_dir(name)
     ensure_private_directory(directory)
-    _write_json(directory / "definition.json", definition)
+    _write_json(directory / "state.json", {**_state(name), **changes})
+
+
+def write_definition(definition: dict[str, Any]) -> str:
+    """Write the connection fields to the native file; the description stays Avibe-side."""
+
+    source = native.write(definition)
+    _write_state(definition["name"], description=definition.get("description") or "")
+    return source
 
 
 def write_enabled(name: str, enabled: bool) -> None:
-    _write_json(package_dir(name) / "state.json", {"enabled": enabled})
+    _write_state(name, enabled=enabled)
 
 
 def remove_package(name: str) -> None:
     directory = package_dir(name)
-    if not directory.exists():
+    removed = native.remove(name)
+    if directory.exists():
+        shutil.rmtree(directory)
+    elif not removed:
         raise _not_found(name)
-    shutil.rmtree(directory)
 
 
 def list_names() -> list[str]:
-    root = mcp_root()
-    try:
-        entries = sorted(entry.name for entry in root.iterdir() if entry.is_dir())
-    except FileNotFoundError:
-        return []
-    names = []
-    for entry in entries:
-        try:
-            names.append(validate_name(entry))
-        except McpHubError:
-            continue
-    return names
+    return sorted(_native_servers())
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +249,9 @@ def new_revision_id() -> str:
 def publish(name: str, *, definition: dict[str, Any], manifest: dict[str, Any], tools: list, commands: list) -> str:
     """Write a full revision, then switch ``current.json``; keep current + previous."""
 
+    _ensure_root()
     directory = package_dir(name)
+    ensure_private_directory(directory)
     previous = _current_revision(name)
     revision = new_revision_id()
     target = directory / "revisions" / revision
@@ -258,12 +281,15 @@ def _comparable(definition: dict[str, Any], *, without_cwd: bool) -> dict[str, A
     return {**definition, "transport": transport}
 
 
-def summarize(name: str) -> dict[str, Any]:
+def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = None) -> dict[str, Any]:
     """One package's status. Bad files disable only this package and are not rewritten."""
 
     summary: dict[str, Any] = {"name": name, "enabled": False, "status": "error", "revision": None}
     try:
-        definition = read_definition(name)
+        servers = _native_servers() if servers is None else servers
+        if name in servers:
+            summary["source"] = servers[name].source
+        definition = read_definition(name, servers)
         enabled = read_enabled(name)
         summary["description"] = definition.get("description") or ""
         summary["transport"] = definition["transport"]["type"]
@@ -297,7 +323,8 @@ def summarize(name: str) -> dict[str, Any]:
 
 
 def list_packages() -> list[dict[str, Any]]:
-    return [summarize(name) for name in list_names()]
+    servers = _native_servers()
+    return [summarize(name, servers) for name in sorted(servers)]
 
 
 def enabled_generated() -> list[dict[str, Any]]:

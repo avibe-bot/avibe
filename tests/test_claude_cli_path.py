@@ -257,7 +257,7 @@ def test_selected_agent_launch_uses_cli_skill_path_without_computer_use_mcp(
     assert all("Injected owner policy." in prompt for prompt in rendered_prompts)
     assert all("Computer use" not in prompt for prompt in rendered_prompts)
     assert getattr(first.options, "allowed_tools", None) == allowed_tools
-    assert getattr(first.options, "mcp_servers", None) is None
+    assert first.options.mcp_servers == {}  # no server at all, native ones included
 
 
 class _StubClaudeAgentOptions:
@@ -957,6 +957,8 @@ def test_session_handler_preserves_explicit_limits_and_passes_alias_planning_met
         assert options.env.get(key) == expected
         assert key not in json.loads(options.settings).get("env", {})
     assert options.setting_sources == ["user", "project", "local"]
+    # Native MCP is off: agents call MCP through `vibe mcp`.
+    assert (options.strict_mcp_config, options.mcp_servers) == (True, {})
 
 
 def test_session_handler_pins_hub_connection_in_launch_settings(monkeypatch, tmp_path: Path) -> None:
@@ -995,6 +997,8 @@ def test_session_handler_pins_hub_connection_in_launch_settings(monkeypatch, tmp
     assert settings["env"]["ANTHROPIC_API_KEY"] == ""
     assert settings["autoMemoryEnabled"] is False
     assert options.setting_sources == ["user", "project", "local"]
+    # Native MCP is off: agents call MCP through `vibe mcp`.
+    assert (options.strict_mcp_config, options.mcp_servers) == (True, {})
     assert options.extra_args["model"] == "claude-opus-5"
 
 

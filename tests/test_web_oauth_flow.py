@@ -1915,6 +1915,7 @@ def test_test_web_auth_claude_oauth_env_removes_stale_anthropic_vars(
     assert options.cli_path == "/usr/bin/echo"
     assert options.permission_mode == "bypassPermissions"
     assert options.setting_sources == ["user", "project", "local"]
+    assert (options.strict_mcp_config, options.mcp_servers) == (True, {})
     assert options.tools == []
     assert options.env["ANTHROPIC_API_KEY"] == ""
     assert options.env["ANTHROPIC_AUTH_TOKEN"] == ""

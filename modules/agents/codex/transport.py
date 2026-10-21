@@ -87,6 +87,14 @@ def _avibe_app_server_config_args() -> list[str]:
     ]
 
 
+def _native_mcp_disabled_args() -> list[str]:
+    """Native MCP is off in Avibe sessions; agents call MCP through ``vibe mcp``."""
+
+    from core.mcp_hub.native import codex_disable_overrides
+
+    return [arg for override in codex_disable_overrides() for arg in ("-c", override)]
+
+
 class CodexRPCError(RuntimeError):
     """A structured server error, distinct from an ambiguous transport failure."""
 
@@ -182,6 +190,7 @@ class CodexTransport:
             + self._runtime_args
             + self._extra_args
             + _avibe_app_server_config_args()
+            + await asyncio.to_thread(_native_mcp_disabled_args)
         )
         if self._model_hub_catalog is not None:
             # The path actually consumed must be the one we pin, even if a

@@ -1,6 +1,16 @@
 # MCP Hub
 
-MCP Hub turns an MCP server into `vibe mcp` commands that every Agent backend can call. No backend-native MCP configuration is involved.
+MCP Hub turns an MCP server into `vibe mcp` commands that every Agent backend can call.
+
+Hub uses the MCP servers you already configured for your coding agents, and keeps them in those same files:
+
+| Backend | File | Key |
+|---|---|---|
+| Claude Code | `~/.claude.json` | `mcpServers` |
+| Codex | `~/.codex/config.toml` | `[mcp_servers.<name>]` |
+| OpenCode | `~/.config/opencode/opencode.json` | `mcp` |
+
+If a name appears in more than one file, the first file in this table is the one Hub reads and edits. Avibe sessions do not load these servers natively: Claude, Codex and OpenCode started by Avibe call MCP tools only through `vibe mcp`. Your files are not changed for this, and the agents behave as before when you run them yourself.
 
 ## Add a server
 
@@ -24,15 +34,17 @@ vibe mcp add --json-stdin < servers.json
 ```
 
 - Supported transports are stdio and Streamable HTTP. SSE and OAuth are not supported.
-- To change an existing server, save it again with **Replace existing servers** (or `--replace`).
+- A new server is written to `~/.claude.json`, or to `~/.codex/config.toml` when it sets `cwd` (only Codex supports `cwd`).
+- To change an existing server, save it again with **Replace existing servers** (or `--replace`). The server is updated in the file it already lives in.
+- `vibe mcp remove <name>` deletes the server from every one of these files.
 - `cwd` must be an absolute path. Without one, the server runs in the Agent default directory.
-- `${VAR}` placeholders are not expanded; enter the literal value.
+- `${VAR}` placeholders are not expanded. Enter the literal value; an existing entry that uses one is listed with an error.
 
 Saving never runs or connects to the server.
 
 ## Credentials are plaintext
 
-Env and header values are stored as given, in owner-private files under `~/.avibe/mcp/<name>/`. This matches Claude Code's own MCP configuration. The Web UI and API never return these values; when you edit a server, leaving a value blank keeps the stored one. URLs with `user:pass@` are rejected; put credentials in an `Authorization` header instead.
+Env and header values are stored as given in the backend config file, exactly as each coding agent stores them. The Web UI and API never return these values; when you edit a server, leaving a value blank keeps the stored one. URLs with `user:pass@` are rejected; put credentials in an `Authorization` header instead.
 
 ## Generate and regenerate
 

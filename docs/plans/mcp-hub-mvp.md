@@ -7,7 +7,15 @@
 
 ## 1. Change contract
 
-Add MCP Hub to the Skills page. A user pastes a provider `mcpServers` JSON block (or runs `vibe mcp add`), saves it, and generates a package. Every backend calls tools through `vibe mcp <server> <tool>`; no backend-native MCP config, no Skill loader.
+Add MCP Hub to the Skills page. A user pastes a provider `mcpServers` JSON block (or runs `vibe mcp add`), saves it, and generates a package. Every backend calls tools through `vibe mcp <server> <tool>`; no Skill loader.
+
+**Native MCP is off; Hub owns the same files.** Claude, Codex and OpenCode must not load their own MCP servers in Avibe sessions. Hub does not copy configs into `~/.avibe/mcp` as a second store of connection definitions. It reads and writes the backends' existing files:
+
+- Claude: `~/.claude.json` `mcpServers` (and project `.mcp.json` when present)
+- Codex: `~/.codex/config.toml` `[mcp_servers.<name>]`
+- OpenCode: `~/.config/opencode/opencode.json` `mcp`
+
+Avibe-only runtime artifacts (generated CLI revision, enabled flag, current pointer) still live under `<avibe-home>/mcp/<name>/`. Connection fields (command, url, env, headers) are edited in the native file. Disable native loading with `strict_mcp_config=True` + empty `mcp_servers` for Claude, an overlay Codex config without `[mcp_servers]`, and OpenCode `mcp.*.enabled=false` / empty overlay at spawn — never delete the user's files.
 
 ```text
 paste / vibe mcp add → save definition → generate (connect, SDK protocol negotiation, tools/list all pages) → publish static revision
@@ -218,6 +226,7 @@ Lifecycle follows mcporter `generate-cli` (inspected at [`5362d60`](https://gith
 - **C0** (after authorization): pin SDK, confirm caller-context/IPC fit, SDK protocol negotiation, and the result byte cap. Hermetic temp `AVIBE_HOME` and loopback fixtures.
 - **C1:** repository + parser, generator/publisher, runtime, CLI, prompt index.
 - **C2:** UI/API, i18n, user documentation (adding servers, plaintext credential behavior, regeneration, tool invocation), Ruff and UI build; Incus regression on request.
+- **C3:** Disable Claude/Codex/OpenCode native MCP in Avibe sessions. Hub reads/writes those backends' config files as the connection store (no copy-import). Generated CLI artifacts remain under `<avibe-home>/mcp/`.
 
 Acceptance:
 
@@ -226,6 +235,7 @@ Acceptance:
 3. Generation never publishes partial tool lists; readers never see mixed revisions; initial generate enables, regenerate preserves state.
 4. Tool execution uses `tools/call` against the admitted revision (SDK-internal auxiliary requests allowed); unknown-outcome connections are closed; process cap, idle close and timeouts hold; unknown outcomes are not retried.
 5. Results keep structured/multimodal/error content; disabled packages reject calls; tests cannot touch real user state.
+6. Avibe-spawned Claude/Codex/OpenCode sessions do not load native MCP servers; Hub add/save updates the corresponding native config; `vibe mcp generate` still publishes Avibe artifacts.
 
 ## 11. Next action
 

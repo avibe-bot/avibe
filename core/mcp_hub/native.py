@@ -1,0 +1,309 @@
+"""The backends' own MCP config files are the Hub's connection store.
+
+Hub reads the union of:
+
+- Claude ``~/.claude.json`` (or ``$CLAUDE_CONFIG_DIR/.claude.json``) ``mcpServers``
+- Codex ``$CODEX_HOME/config.toml`` (default ``~/.codex``) ``[mcp_servers.<name>]``
+- OpenCode ``~/.config/opencode/opencode.json`` ``mcp``
+
+and writes add/save/remove back to them. Nothing is copied into
+``<avibe-home>/mcp``. For a name present in several files the first source in
+that order is canonical. New servers go to Claude, except ``cwd`` (which only
+Codex can express) sends them to Codex. Avibe sessions never load these servers
+natively; see :func:`codex_disable_overrides` and :func:`opencode_disabled_mcp`.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Optional
+
+from config.atomic_io import write_atomic
+from core.mcp_hub.definition import HTTP, STDIO, definition_from_provider
+from core.mcp_hub.errors import McpHubError
+
+logger = logging.getLogger(__name__)
+
+CLAUDE, CODEX, OPENCODE = "claude", "codex", "opencode"
+SOURCES = (CLAUDE, CODEX, OPENCODE)
+
+# Native keys that carry no connection meaning for the Hub; kept on rewrite.
+_CODEX_KEPT = {"enabled", "startup_timeout_sec", "startup_timeout_ms", "tool_timeout_sec", "enabled_tools", "disabled_tools"}
+_OPENCODE_KEPT = {"enabled", "timeout"}
+
+
+def claude_path() -> Path:
+    base = os.environ.get("CLAUDE_CONFIG_DIR")
+    return (Path(base).expanduser() if base else Path.home()) / ".claude.json"
+
+
+def codex_path() -> Path:
+    from vibe.codex_config import get_codex_config_paths
+
+    return get_codex_config_paths()[0]
+
+
+def opencode_path() -> Path:
+    from vibe.opencode_config import get_opencode_config_paths
+
+    candidates = get_opencode_config_paths()
+    return next((path for path in candidates if path.exists()), candidates[0])
+
+
+# ---------------------------------------------------------------------------
+# File I/O (a file that cannot be parsed is never rewritten)
+# ---------------------------------------------------------------------------
+
+
+def _unreadable(source: str, path: Path, exc: Exception) -> McpHubError:
+    return McpHubError("invalid_native_config", f"{source} config {path} could not be parsed: {type(exc).__name__}")
+
+
+def _load(source: str) -> tuple[Path, dict[str, Any]]:
+    path = {CLAUDE: claude_path, CODEX: codex_path, OPENCODE: opencode_path}[source]()
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return path, {}
+    try:
+        if source == CODEX:
+            try:
+                import tomllib  # type: ignore[attr-defined]
+            except ImportError:  # pragma: no cover - py<3.11
+                import tomli as tomllib  # type: ignore[no-redef]
+            data = tomllib.loads(text)
+        elif source == OPENCODE:
+            from vibe.opencode_config import parse_jsonc_object
+
+            data = parse_jsonc_object(text)
+        else:
+            data = json.loads(text)
+    except Exception as exc:
+        raise _unreadable(source, path, exc) from None
+    if not isinstance(data, dict):
+        raise _unreadable(source, path, TypeError("not an object"))
+    return path, data
+
+
+def _store(source: str, path: Path, data: dict[str, Any]) -> None:
+    if source == CODEX:
+        from vibe.codex_config import _dump_toml
+
+        text = _dump_toml(data)
+    else:
+        text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    mode = (path.stat().st_mode & 0o777) if path.exists() else 0o600
+    write_atomic(path, text, follow_symlinks=True, mode=mode)
+
+
+def _servers(source: str, data: dict[str, Any]) -> dict[str, Any]:
+    key = {CLAUDE: "mcpServers", CODEX: "mcp_servers", OPENCODE: "mcp"}[source]
+    value = data.get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def _servers_for_write(source: str, data: dict[str, Any]) -> dict[str, Any]:
+    key = {CLAUDE: "mcpServers", CODEX: "mcp_servers", OPENCODE: "mcp"}[source]
+    value = data.setdefault(key, {})
+    if not isinstance(value, dict):
+        raise McpHubError("invalid_native_config", f"{source} config field {key} is not an object.")
+    return value
+
+
+# ---------------------------------------------------------------------------
+# Native entry <-> provider shape
+# ---------------------------------------------------------------------------
+
+
+def _from_codex(entry: dict[str, Any]) -> dict[str, Any]:
+    server = {key: value for key, value in entry.items() if key not in _CODEX_KEPT}
+    if "http_headers" in server:
+        server["headers"] = server.pop("http_headers")
+    return server
+
+
+def _from_opencode(entry: dict[str, Any]) -> dict[str, Any]:
+    server = {key: value for key, value in entry.items() if key not in _OPENCODE_KEPT}
+    kind = server.pop("type", None)
+    if kind == "local":
+        command = server.pop("command", None)
+        if not isinstance(command, list) or not command:
+            raise McpHubError("invalid_definition", "OpenCode local servers need a command array.", field="command")
+        server["command"], server["args"] = command[0], command[1:]
+        if "environment" in server:
+            server["env"] = server.pop("environment")
+    elif kind == "remote":
+        server["type"] = "http"
+    else:
+        raise McpHubError("invalid_definition", f"Unsupported OpenCode MCP type {kind!r}.", field="type")
+    return server
+
+
+def _to_native(source: str, definition: dict[str, Any], previous: Any) -> dict[str, Any]:
+    transport = definition["transport"]
+    kept = previous if isinstance(previous, dict) else {}
+    if source == CLAUDE:
+        if transport["type"] == HTTP:
+            entry: dict[str, Any] = {"type": "http", "url": transport["url"]}
+            if transport.get("headers"):
+                entry["headers"] = transport["headers"]
+            return entry
+        entry = {"type": "stdio", "command": transport["command"], "args": list(transport.get("args") or [])}
+        if transport.get("env"):
+            entry["env"] = transport["env"]
+        return entry
+    if source == CODEX:
+        entry = {key: value for key, value in kept.items() if key in _CODEX_KEPT}
+        if transport["type"] == HTTP:
+            entry["url"] = transport["url"]
+            if transport.get("headers"):
+                entry["http_headers"] = transport["headers"]
+            return entry
+        entry.update(command=transport["command"], args=list(transport.get("args") or []))
+        for field in ("env", "cwd"):
+            if transport.get(field):
+                entry[field] = transport[field]
+        return entry
+    entry = {key: value for key, value in kept.items() if key in _OPENCODE_KEPT}
+    if transport["type"] == HTTP:
+        entry.update(type="remote", url=transport["url"])
+        if transport.get("headers"):
+            entry["headers"] = transport["headers"]
+        return entry
+    entry.update(type="local", command=[transport["command"], *(transport.get("args") or [])])
+    if transport.get("env"):
+        entry["environment"] = transport["env"]
+    return entry
+
+
+_READERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
+    CLAUDE: lambda entry: dict(entry),
+    CODEX: _from_codex,
+    OPENCODE: _from_opencode,
+}
+
+
+# ---------------------------------------------------------------------------
+# Public store
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NativeServer:
+    name: str
+    source: str
+    path: Path
+    definition: Optional[dict[str, Any]]
+    error: Optional[McpHubError]
+
+
+def read_all(descriptions: Optional[dict[str, str]] = None) -> dict[str, NativeServer]:
+    """The union of native servers; the first source holding a name is canonical.
+
+    A file that cannot be parsed is skipped; one bad entry only marks that server.
+    """
+
+    descriptions = descriptions or {}
+    servers: dict[str, NativeServer] = {}
+    for source in SOURCES:
+        try:
+            path, data = _load(source)
+        except McpHubError as exc:
+            # An unparseable file hides only its own servers and is never rewritten.
+            logger.warning("%s", exc.message)
+            continue
+        for name, entry in _servers(source, data).items():
+            if name in servers:
+                continue
+            try:
+                if not isinstance(entry, dict):
+                    raise McpHubError("invalid_definition", f"{source} entry {name!r} is not an object.")
+                definition = definition_from_provider(name, _READERS[source](entry), description=descriptions.get(name))
+                servers[name] = NativeServer(name, source, path, definition, None)
+            except McpHubError as exc:
+                servers[name] = NativeServer(name, source, path, None, exc)
+    return servers
+
+
+def write(definition: dict[str, Any]) -> str:
+    """Write one definition to its canonical native file; returns the source."""
+
+    name = definition["name"]
+    existing = read_all().get(name)
+    if existing is not None:
+        source = existing.source
+    else:
+        source = CODEX if definition["transport"]["type"] == STDIO and definition["transport"].get("cwd") else CLAUDE
+    if source != CODEX and definition["transport"].get("cwd"):
+        raise McpHubError(
+            "invalid_definition",
+            f"{name} lives in the {source} config, which has no cwd field.",
+            field="cwd",
+            usage=True,
+        )
+    path, data = _load(source)
+    servers = _servers_for_write(source, data)
+    servers[name] = _to_native(source, definition, servers.get(name))
+    _store(source, path, data)
+    return source
+
+
+def remove(name: str) -> list[str]:
+    """Remove ``name`` from every native file holding it (else the union keeps it)."""
+
+    removed = []
+    for source in SOURCES:
+        path, data = _load(source)
+        servers = _servers(source, data)
+        if name in servers:
+            del servers[name]
+            _store(source, path, data)
+            removed.append(source)
+    return removed
+
+
+# ---------------------------------------------------------------------------
+# Spawn isolation: Avibe sessions never load native MCP servers
+# ---------------------------------------------------------------------------
+
+
+def _names(source: str) -> list[str]:
+    try:
+        _path, data = _load(source)
+    except McpHubError:
+        return []
+    return sorted(str(name) for name in _servers(source, data))
+
+
+def codex_disable_overrides() -> list[str]:
+    """``-c`` overrides that disable every user ``[mcp_servers]`` entry.
+
+    Codex merges ``-c`` values into its tables, so an empty table cannot remove
+    them; ``enabled=false`` per server does, without touching the user file.
+    """
+
+    from vibe.codex_config import _format_toml_key
+
+    return [f"mcp_servers.{_format_toml_key(name)}.enabled=false" for name in _names(CODEX)]
+
+
+def opencode_disabled_mcp() -> dict[str, Any]:
+    """Runtime-override ``mcp`` entries that disable every user OpenCode server.
+
+    Each entry is the full native entry with ``enabled: false`` so the override
+    stays schema-valid on its own.
+    """
+
+    try:
+        _path, data = _load(OPENCODE)
+    except McpHubError:
+        return {}
+    return {
+        name: {**entry, "enabled": False}
+        for name, entry in _servers(OPENCODE, data).items()
+        if isinstance(entry, dict)
+    }

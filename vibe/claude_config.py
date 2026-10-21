@@ -50,6 +50,11 @@ CLAUDE_MEMORY_DISABLED_SETTINGS = '{"autoMemoryEnabled":false}'
 # override, which outranks each of these sources.
 CLAUDE_SETTING_SOURCES = ["user", "project", "local"]
 
+# Native MCP is off in Avibe sessions: agents call MCP through ``vibe mcp``.
+# ``--strict-mcp-config`` with no ``--mcp-config`` loads no server from any
+# settings source, without touching the user's files.
+CLAUDE_NATIVE_MCP_DISABLED = {"strict_mcp_config": True, "mcp_servers": {}}
+
 # Keys we recognise inside ``~/.claude/settings.json``'s ``env`` block.
 # Claude Code assigns header semantics from the selected variable, independently
 # from ``ANTHROPIC_BASE_URL``. Avibe preserves that native distinction instead
