@@ -48,6 +48,7 @@ from core.agent_core.agent.events import (
     NAMED_ERROR_KINDS,
     AgentError,
     AgentEvent,
+    CompactionFailed,
     CompactionFinished,
     MessageCommitted,
     RunEnded,
@@ -902,6 +903,15 @@ class VibeyAgent(BaseAgent):
         elif isinstance(event, CompactionFinished):
             # Silent (C-9 section 10); the session's occupancy snapshot drops with the context.
             self._note_total(run, event.tokens_after_estimate)
+        elif isinstance(event, CompactionFailed):
+            # Silent to the user too (C-9 section 10); the log keeps why, a refusal's category included.
+            logger.warning(
+                "Vibey compaction failed: session=%s turn=%s reason=%s error=%s",
+                run.session_id,
+                run.turn_id,
+                event.reason,
+                _loggable(event.error),
+            )
 
     async def _settle(self, run: _Run) -> None:
         """Settle the Turn from the run's outcome (loop-control.md section 6).

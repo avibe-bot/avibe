@@ -29,6 +29,7 @@ from core.agent_core.ai._common import (
     dispatch_wire_event,
     endpoint_origin,
     hosted_pin,
+    PARTIAL_ERROR_MESSAGE_CHARS,
     PAUSE_TURN,
     PIN_SOURCE_HEADER,
     PinUnavailable,
@@ -263,6 +264,8 @@ class AnthropicAdapter(ProviderAdapter):
                 yield terminal
             return
         stop_reason: str | None = None
+        # Why the provider refused, from ``message_delta.delta.stop_details``: the response's ``error_message``.
+        refusal_detail: str | None = None
         message_started = False
         message_stopped = False
         # The hosted tools this request declared natively; ``server_tool_use`` blocks of other tools stay unparsed.
@@ -285,7 +288,7 @@ class AnthropicAdapter(ProviderAdapter):
         try:
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal message_started, message_stopped, stop_reason, paused, next_index, response_usage
-                nonlocal response_counts
+                nonlocal response_counts, refusal_detail
                 async for event in events:
                     if cancel.cancelled:
                         terminal = assembler.terminal(assembler.aborted(cancel.reason))
@@ -766,6 +769,9 @@ class AnthropicAdapter(ProviderAdapter):
                                     return
                                 paused = delta.get("stop_reason") == "pause_turn"
                                 stop_reason = _normalize_stop_reason(delta.get("stop_reason"))
+                                refusal_detail = (
+                                    _refusal_detail(delta.get("stop_details")) if stop_reason == "refusal" else None
+                                )
                         response_usage = _anthropic_usage(usage, current=response_usage)
                         assembler.set_usage(response_usage)
                         if isinstance(usage, Mapping) and "server_tool_use" in usage:
@@ -804,7 +810,8 @@ class AnthropicAdapter(ProviderAdapter):
                             yield PAUSE_TURN
                             return
                         final = assembler.finalize(
-                            stop_reason or ("tool_use" if assembler.has_tools() else "stop")
+                            stop_reason or ("tool_use" if assembler.has_tools() else "stop"),
+                            error_message=refusal_detail,
                         )
                         terminal = assembler.terminal(final if isinstance(final, ProviderError) else Done(final))
                         if terminal is not None:
@@ -826,7 +833,7 @@ class AnthropicAdapter(ProviderAdapter):
                     if paused:
                         yield PAUSE_TURN
                         return
-                    final = assembler.finalize(stop_reason)
+                    final = assembler.finalize(stop_reason, error_message=refusal_detail)
                     terminal = assembler.terminal(
                         final if isinstance(final, ProviderError) else Done(final)
                     )
@@ -859,7 +866,7 @@ class AnthropicAdapter(ProviderAdapter):
                 )
                 rejected = continued = paused = message_started = message_stopped = False
                 unavailable: PinUnavailable | None = None
-                stop_reason = None
+                stop_reason = refusal_detail = None
                 try:
                     async for event in driver:
                         if isinstance(event, PinUnavailable):
@@ -1288,6 +1295,21 @@ def _normalize_stop_reason(value: Any) -> str:
         "safety": "safety",
     }.get(str(value))
     return normalized or "error"
+
+
+def _refusal_detail(details: Any) -> str | None:
+    """A refusal's ``stop_details`` as the response's ``error_message``: the category of the safeguard that stopped it
+    and Anthropic's explanation, each when given as a non-empty string, bounded like a partial's error. A diagnostic
+    never fails the response, so any other shape is ignored."""
+
+    if not isinstance(details, Mapping):
+        return None
+    category, explanation = _string(details.get("category")).strip(), _string(details.get("explanation")).strip()
+    fields = (("category", category), ("explanation", explanation))
+    detail = "; ".join(f"{name}: {value}" for name, value in fields if value)
+    if not detail:
+        return None
+    return detail if len(detail) <= PARTIAL_ERROR_MESSAGE_CHARS else detail[: PARTIAL_ERROR_MESSAGE_CHARS - 1] + "…"
 
 
 def sent_effort(model_id: str, effort: str) -> str | None:

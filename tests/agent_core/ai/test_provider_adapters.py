@@ -1013,6 +1013,39 @@ async def test_anthropic_ignores_unknown_delta_variants_like_pi() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop", "details", "error_message"),
+    [
+        (
+            "refusal",
+            {"type": "refusal", "category": "reasoning_extraction", "explanation": "Claude can't help with this."},
+            "category: reasoning_extraction; explanation: Claude can't help with this.",
+        ),
+        ("refusal", {"category": "cyber", "explanation": None}, "category: cyber"),
+        # A diagnostic never fails the response: a shape it cannot read is left out.
+        ("refusal", [], None),
+        ("refusal", {"category": 7}, None),
+        ("end_turn", {"category": "cyber"}, None),
+    ],
+)
+async def test_anthropic_refusal_keeps_its_stop_details_as_the_error_message(
+    stop: str, details: Any, error_message: str | None
+) -> None:
+    delta = json.dumps({"type": "message_delta", "delta": {"stop_reason": stop, "stop_details": details}})
+    body = f'data: {delta}\n\ndata: {{"type":"message_stop"}}\n\n'
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(AnthropicAdapter(client), _request("anthropic"))
+
+    assert isinstance(events[-1], Done)
+    assert events[-1].message.stop_reason == ("refusal" if stop == "refusal" else "stop")
+    assert events[-1].message.error_message == error_message
+
+
+@pytest.mark.asyncio
 async def test_anthropic_empty_block_end_does_not_count_as_streamed_output() -> None:
     body = (
         'data: {"type":"content_block_start","index":0,"content_block":{"type":"text"}}\n\n'
