@@ -6073,6 +6073,25 @@
       "claude": "Disabled in Claude",
       "codex": "Disabled in Codex",
       "opencode": "Disabled in OpenCode"
+    },
+    "savedEdit": "Saved {{name}}. Regenerate to apply the changes.",
+    "edit": {
+      "open": "Open definition",
+      "hint": "Edit the connection definition.",
+      "storedIn": "Stored in {{path}}",
+      "description": "Description",
+      "command": "Command",
+      "args": "Arguments (one per line)",
+      "cwd": "Working directory",
+      "cwdPlaceholder": "Absolute path; empty uses the Agent default",
+      "url": "URL",
+      "env": "Environment variables",
+      "headers": "Headers",
+      "key": "Name",
+      "value": "Value",
+      "keepValue": "Stored — leave blank to keep",
+      "addKey": "Add",
+      "removeKey": "Remove"
     }
   }
 }

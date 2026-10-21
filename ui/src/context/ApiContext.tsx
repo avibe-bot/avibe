@@ -558,6 +558,22 @@ export interface McpServerSummary {
   error?: { type: string; message: string };
 }
 export interface McpError { type: string; message: string; field?: string; hint?: string }
+/** Masked definition from GET /api/mcp/{name}: env/header values are always blank. */
+export interface McpDefinition {
+  name: string;
+  description?: string;
+  transport: {
+    type: 'stdio' | 'streamable_http';
+    command?: string;
+    args?: string[];
+    cwd?: string;
+    url?: string;
+    env?: Record<string, string>;
+    headers?: Record<string, string>;
+    has_env?: Record<string, boolean>;
+    has_headers?: Record<string, boolean>;
+  };
+}
 export interface McpResult { ok: boolean; error?: McpError }
 export interface McpParsedServer { name: string; exists: boolean; transport?: { type: string } }
 export interface McpTool { name: string; description?: string; inputSchema?: unknown; flags: { flag: string; kind: string; required: boolean }[] }
@@ -905,6 +921,8 @@ export type ApiContextType = {
   getMcpTools: (name: string) => Promise<McpResult & { tools?: McpTool[]; revision?: string }>;
   runMcpOperation: (name: string, operation: 'generate' | 'enable' | 'disable') => Promise<McpResult>;
   removeMcp: (name: string) => Promise<McpResult>;
+  getMcpServer: (name: string) => Promise<McpResult & { server?: McpServerSummary; definition?: McpDefinition }>;
+  updateMcp: (name: string, body: { server: Record<string, unknown>; description: string }) => Promise<McpResult>;
   previewSkillSource: (source: string, params?: { projectId?: string }) => Promise<SkillsPreviewResult>;
   addSkill: (payload: { source: string; scope: SkillScope; projectId?: string; backends?: string[]; all?: boolean; skill?: string; copy?: boolean }) => Promise<SkillsMutationResult>;
   removeSkill: (name: string, params?: { scope?: SkillScope; projectId?: string; backends?: string[] }) => Promise<SkillsMutationResult>;
@@ -4158,6 +4176,8 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     runMcpOperation: (name, operation) =>
       postJson(`/api/mcp/${encodeURIComponent(name)}/${operation}`, {}, { handleError: false }),
     removeMcp: (name) => deleteJson(`/api/mcp/${encodeURIComponent(name)}`, undefined, { handleError: false }),
+    getMcpServer: (name) => getJson(`/api/mcp/${encodeURIComponent(name)}`, { handleError: false }),
+    updateMcp: (name, body) => patchJson(`/api/mcp/${encodeURIComponent(name)}`, body, { handleError: false }),
     previewSkillSource: (source, params) =>
       postJson('/api/skills/preview', { source, project_id: params?.projectId }),
     addSkill: (payload) =>

@@ -6073,6 +6073,25 @@
       "claude": "已在 Claude 中禁用",
       "codex": "已在 Codex 中禁用",
       "opencode": "已在 OpenCode 中禁用"
+    },
+    "savedEdit": "已保存 {{name}}。重新生成后生效。",
+    "edit": {
+      "open": "打开配置",
+      "hint": "编辑连接配置。",
+      "storedIn": "保存在 {{path}}",
+      "description": "描述",
+      "command": "命令",
+      "args": "参数（每行一个）",
+      "cwd": "工作目录",
+      "cwdPlaceholder": "绝对路径；留空使用 Agent 默认目录",
+      "url": "URL",
+      "env": "环境变量",
+      "headers": "请求头",
+      "key": "名称",
+      "value": "值",
+      "keepValue": "已保存 — 留空保持不变",
+      "addKey": "添加",
+      "removeKey": "移除"
     }
   }
 }

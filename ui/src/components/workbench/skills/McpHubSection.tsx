@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Loader2, Plug, RefreshCw, Trash2 } from 'lucide-react';
+import { Loader2, Pencil, Plug, RefreshCw, Trash2 } from 'lucide-react';
 
 import { useApi } from '../../../context/ApiContext';
 import type { McpError, McpParsedServer, McpResult, McpServerSummary, McpTool } from '../../../context/ApiContext';
@@ -10,6 +10,7 @@ import { Badge } from '../../ui/badge';
 import { Button } from '../../ui/button';
 import { Switch } from '../../ui/switch';
 import { Textarea } from '../../ui/textarea';
+import { McpServerDialog } from './McpServerDialog';
 
 const PLACEHOLDER = '{\n  "mcpServers": {\n    "docs": { "type": "http", "url": "https://example.invalid/mcp" }\n  }\n}';
 
@@ -27,6 +28,7 @@ export const McpHubSection: React.FC = () => {
   const [preview, setPreview] = useState<McpParsedServer[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [tools, setTools] = useState<{ name: string; items: McpTool[] } | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
 
   const describe = useCallback(
     (error?: McpError) => (error ? t(`mcpHub.errors.${error.type}`, { defaultValue: error.message, message: error.message }) : t('mcpHub.failed')),
@@ -119,7 +121,13 @@ export const McpHubSection: React.FC = () => {
         <div className="flex flex-col gap-2">
           {servers.map((server) => (
             <div key={server.name} className="flex flex-wrap items-center gap-2.5 rounded-xl border border-border bg-surface px-4 py-3">
-              <span className="font-mono text-[12.5px] font-semibold text-foreground">{server.name}</span>
+              <button
+                type="button"
+                className="font-mono text-[12.5px] font-semibold text-foreground hover:underline"
+                onClick={() => setEditing(server.name)}
+              >
+                {server.name}
+              </button>
               <Badge variant="secondary">{t(`mcpHub.status.${server.status}`)}</Badge>
               {server.source ? (
                 <Badge variant="secondary">
@@ -152,6 +160,9 @@ export const McpHubSection: React.FC = () => {
                   {t('mcpHub.tools')}
                 </Button>
               ) : null}
+              <Button type="button" variant="ghost" size="xs" aria-label={t('mcpHub.edit.open')} onClick={() => setEditing(server.name)}>
+                <Pencil className="size-3.5" />
+              </Button>
               {canManage ? (
                 <>
                   <span title={generateBlocked(server) ?? undefined}>
@@ -252,6 +263,16 @@ export const McpHubSection: React.FC = () => {
           </div>
         </div>
       ) : null}
+
+      <McpServerDialog
+        key={editing ?? ''}
+        name={editing}
+        canManage={canManage}
+        onClose={() => setEditing(null)}
+        onChanged={refresh}
+        describe={describe}
+        showToast={showToast}
+      />
     </div>
   );
 };
