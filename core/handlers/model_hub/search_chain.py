@@ -224,6 +224,7 @@ class SearchChain:
                     return None
                 source = current
                 waiting_trial = source.state.status in {"needs_action", "error"}
+                waiting_epoch = owner._search_trial_epochs.get(source.id, 0)
                 if waiting_trial:
                     # Connecting contenders have not yet won the one request.
                     # They share the re-enable fence; a skipped contender must
@@ -231,7 +232,7 @@ class SearchChain:
                     health_generation = owner._latest_source_attempt_generation.get(source.id)
                     cooldown_generation = owner._service_cooldowns.generation(source, slot.model_id)
                 else:
-                    health_generation = owner._reserve_settlement_generation(source.id)
+                    health_generation = owner._reserve_settlement_generation(source.id, source=source)
                     cooldown_generation = owner._service_cooldowns.advance(source, slot.model_id)
 
             async def on_sent():
@@ -243,16 +244,21 @@ class SearchChain:
                     if skip is not None:
                         raise _NotAdmitted
                     source = current
-                    if source.state.status in {"needs_action", "error"}:
-                        if (not owner._settlement_current(source, health_generation)
-                                or not owner._service_cooldowns.current(source, slot.model_id, cooldown_generation)):
-                            skip = {"source_id": slot.source_id, "label": source.display_name[:64], "kind": "service",
-                                    "outcome": "skipped", "skipped": "unavailable"}
-                            raise _NotAdmitted
+                    blocked = source.state.status in {"needs_action", "error"}
+                    if ((waiting_trial and owner._search_trial_epochs.get(source.id, 0) != waiting_epoch)
+                            or (blocked and not waiting_trial)):
+                        skip = {"source_id": slot.source_id, "label": source.display_name[:64], "kind": "service",
+                                "outcome": "skipped", "skipped": "unavailable"}
+                        raise _NotAdmitted
+                    if blocked:
                         if not owner.reserve_search_reenable_trial(source.id):
                             raise _NotAdmitted
-                        trial_epoch = owner._search_trial_epochs.get(source.id, 0)
-                        health_generation = owner._reserve_settlement_generation(source.id)
+                        trial_epoch = waiting_epoch
+                    if waiting_trial:
+                        # A slower contender may now see a repaired Source, or
+                        # an armed trial released by a query refusal. In either
+                        # case its newly admitted request owns fresh fences.
+                        health_generation = owner._reserve_settlement_generation(source.id, source=source)
                         cooldown_generation = owner._service_cooldowns.advance(source, slot.model_id)
                     sent = True
 
@@ -277,17 +283,26 @@ class SearchChain:
             response = SearchResponse(None, {}, None, "connection")
         finally:
             if not task.done():
+                async def drain():
+                    # Convert only the child transport's cancellation to a
+                    # normal completion. Cancellation of our shield is then
+                    # unambiguously the caller's Stop, including on Python 3.10.
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+
+                draining = asyncio.create_task(drain())
                 try:
-                    await await_owned_task(task)
+                    try:
+                        await asyncio.shield(draining)
+                    except asyncio.CancelledError:
+                        stopped = True
+                        await await_owned_task(draining)
                 except _NotAdmitted:
-                    pass
-                except asyncio.CancelledError:
                     pass
                 except Exception:
                     response = SearchResponse(None, {}, None, "connection")
-        # await_owned_task deliberately drains through cancellation. Preserve a
-        # Stop received during timeout teardown instead of paying the next Source.
-        stopped = stopped or bool(asyncio.current_task().cancelling())
         if skip is not None and not sent:
             if stopped:
                 raise asyncio.CancelledError
@@ -298,7 +313,11 @@ class SearchChain:
         stopped = stopped or response.error == "cancelled"
         ended_at = ended_at or owner.now()
 
-        async def settle():
+        result = None
+        write = None
+
+        async def settle_result():
+            nonlocal result, write
             result = await asyncio.to_thread(map_response, catalog, response, sent=sent, results=slot.results, say=self.say)
             if stopped and response.http_status in {None, 200}:
                 # Stop is not a vendor failure. Keep billing/authentication facts
@@ -336,18 +355,27 @@ class SearchChain:
                         if result.authenticated:
                             updated.verification_pending = None
                         await owner._save_runtime_config(previous, config)
-                if trial_epoch is not None and identity_current and owner._search_trial_epochs.get(source.id, 0) == trial_epoch:
-                    owner.settle_search_reenable_trial(source.id)
-                    if result.record.get("error_code") == "service_refused":
-                        owner._search_reenable_trials.add(source.id)
             if result.record["status"] == "completed":
                 await owner.record_hosted_success(source, slot.model_id, "web_search", "service")
-            if write is not None:
-                await owner.usage_writer.wait_recorded(write)
             return _ExecutorAttempt(
                 source, slot.model_id, result.record, result.cost, result.billable or result.uncertain,
                 result.record["status"] != "completed", kind="service", superseded=superseded,
             )
+
+        async def settle():
+            try:
+                return await settle_result()
+            finally:
+                # These resources outlive any local mapping/evidence/config
+                # error: never strand a trial or lose an already queued charge.
+                if trial_epoch is not None:
+                    async with owner._mutation_lock:
+                        if owner._search_trial_epochs.get(source.id, 0) == trial_epoch:
+                            owner.settle_search_reenable_trial(source.id)
+                            if result is not None and result.record.get("error_code") == "service_refused":
+                                owner._search_reenable_trials.add(source.id)
+                if write is not None:
+                    await owner.usage_writer.wait_recorded(write)
 
         settlement = asyncio.create_task(settle())
         try:

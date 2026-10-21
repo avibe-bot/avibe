@@ -2383,23 +2383,25 @@ def test_search_response_retains_wire_facts_after_body_read_failure(
         headers = {"Content-Type": "application/json", "Retry-After": "2"}
         content = ResponseContent()
 
+    async def write(_request, _connection):
+        calls.append("write")
+        return Response()
+
+    monkeypatch.setattr(runtime_adapter_module.aiohttp.ClientRequest, "send", write)
+
     class Request:
-        def __init__(self, traces):
-            self.traces = traces
+        def __init__(self, request_class):
+            self.request_class = request_class
 
         async def __aenter__(self):
-            for trace in self.traces:
-                for callback in trace.on_connection_create_end:
-                    await callback(None, None, None)
-            calls.append("write")
-            return Response()
+            return await self.request_class.send(object.__new__(self.request_class), None)
 
         async def __aexit__(self, *_args):
             return None
 
     class Session:
-        def __init__(self, *, trace_configs, **_kwargs):
-            self.traces = trace_configs
+        def __init__(self, *, request_class, **_kwargs):
+            self.request_class = request_class
 
         async def __aenter__(self):
             return self
@@ -2408,7 +2410,7 @@ def test_search_response_retains_wire_facts_after_body_read_failure(
             return None
 
         def request(self, _method, _endpoint, **_kwargs):
-            return Request(self.traces)
+            return Request(self.request_class)
 
     monkeypatch.setattr(runtime_adapter_module.aiohttp, "ClientSession", Session)
     adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=Store())  # type: ignore[arg-type]
@@ -2452,25 +2454,25 @@ def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypat
         headers = {}
         content = ResponseContent()
 
+    async def write(_request, _connection):
+        calls.append("write")
+        return Response()
+
+    monkeypatch.setattr(runtime_adapter_module.aiohttp.ClientRequest, "send", write)
+
     class Request:
-        def __init__(self, traces):
-            self.traces = traces
+        def __init__(self, request_class):
+            self.request_class = request_class
 
         async def __aenter__(self):
-            for trace in self.traces:
-                for callback in trace.on_connection_create_end:
-                    await callback(None, None, None)
-                for callback in trace.on_connection_reuseconn:
-                    await callback(None, None, None)
-            calls.append("write")
-            return Response()
+            return await self.request_class.send(object.__new__(self.request_class), None)
 
         async def __aexit__(self, *_args):
             return None
 
     class Session:
-        def __init__(self, *, trace_configs, **_kwargs):
-            self.traces = trace_configs
+        def __init__(self, *, request_class, **_kwargs):
+            self.request_class = request_class
 
         async def __aenter__(self):
             return self
@@ -2479,7 +2481,7 @@ def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypat
             return None
 
         def request(self, _method, _endpoint, **_kwargs):
-            return Request(self.traces)
+            return Request(self.request_class)
 
     monkeypatch.setattr(runtime_adapter_module.aiohttp, "ClientSession", Session)
     adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=Store())  # type: ignore[arg-type]

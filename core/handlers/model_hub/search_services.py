@@ -138,6 +138,8 @@ def map_response(
             message = message if isinstance(message, str) else body.get("message") if isinstance(body, dict) else None
             if not isinstance(message, str) and isinstance(body, dict):
                 message = body.get("detail")
+                if isinstance(message, dict):
+                    message = message.get("error")
                 if isinstance(message, list):
                     # Tavily's validation errors: retain vendor messages, never
                     # the echoed request input or arbitrary diagnostic fields.

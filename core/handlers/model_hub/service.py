@@ -2007,10 +2007,12 @@ class ModelHubService:
         self._next_settlement_generation += 1
         return self._next_settlement_generation
 
-    def _reserve_settlement_generation(self, source_id: str) -> int:
+    def _reserve_settlement_generation(self, source_id: str, *, source: ModelHubSourceConfig | None = None) -> int:
+        """Reserve on the loop; an already-admitted snapshot avoids a second config read."""
         generation = self._mint_settlement_generation()
         self._latest_source_attempt_generation[source_id] = generation
-        source = next((item for item in self.store.load().sources if item.id == source_id), None)
+        if source is None:
+            source = next((item for item in self.store.load().sources if item.id == source_id), None)
         if source is not None:
             self._source_attempt_identities[source_id] = source_identity(source)
         return generation
@@ -4932,7 +4934,7 @@ class ModelHubService:
                     raise ModelHubError("discovery_failed")
                 if self.search_reenable_trial_pending(source_id):
                     return {"source": await asyncio.to_thread(self._source_payload, source), "removed_hops": [], "interrupted": [], "trial_armed": True}
-                generation = self._reserve_settlement_generation(source_id)
+                generation = self._reserve_settlement_generation(source_id, source=source)
                 self._service_cooldowns.advance(source, catalog["service_id"], clear=True)
                 check = catalog.get("free_check")
                 needed = "balance" if source.state.detail_key.endswith("balance_exhausted") else "limit"

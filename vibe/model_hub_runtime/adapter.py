@@ -2101,31 +2101,28 @@ class CLIProxyEngineAdapter:
         else:
             headers["Authorization"] = f"Bearer {key}"
         timeout = aiohttp.ClientTimeout(total=timeout_total, connect=connect_timeout)
-        trace = aiohttp.TraceConfig()
         callback_called = False
         response_status: int | None = None
         response_headers: dict[str, str] = {}
         response_received_at: datetime | None = None
 
-        async def request_connection_ready(*_args: Any, **_kwargs: Any) -> None:
-            nonlocal callback_called
-            if callback_called or on_sent is None:
-                return
-            # Async final admission may wait for the short controller mutation
-            # section. Connect/TLS never owns that lock. Mark sent only after
-            # the callback accepts; a refused/cancelled callback sent nothing.
-            admission = on_sent()
-            if inspect.isawaitable(admission):
-                await admission
-            callback_called = True
-
-        trace.on_connection_create_end.append(request_connection_ready)
-        trace.on_connection_reuseconn.append(request_connection_ready)
+        class SearchRequest(aiohttp.ClientRequest):
+            async def send(self, conn):
+                nonlocal callback_called
+                # At send(), aiohttp owns the Connection and closes it if
+                # admission fails. Raising from connection-create trace hooks
+                # can instead orphan the not-yet-owned transport.
+                if not callback_called and on_sent is not None:
+                    admission = on_sent()
+                    if inspect.isawaitable(admission):
+                        await admission
+                    callback_called = True
+                return await super().send(conn)
         try:
             async with aiohttp.ClientSession(
                 timeout=timeout,
                 trust_env=False,
-                trace_configs=[trace],
+                request_class=SearchRequest,
             ) as session:
                 async with session.request(
                     method,

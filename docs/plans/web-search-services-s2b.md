@@ -26,7 +26,10 @@ Invariants and primary regression coverage:
   never change model-route health. Source and service generations fence independent state.
 - Exactly one trial reserves immediately before sending. Connecting contenders share the
   re-enable fence until the admitted winner starts its request; a skipped loser cannot invalidate
-  that winner. Async final admission holds a short lock after connection, never during DNS/TLS.
+  that winner. A slow contender admitted after recovery or re-arming takes fresh fences, using the
+  trial epoch rather than another request's generation to validate its authorization. Async final admission
+  holds a short lock after connection, never during DNS/TLS, and runs only after the HTTP client owns the
+  connection so rejection closes it. Trial release and queued usage drain survive persistence failures.
   Identity changes retire trials; stopped calls leave no record and settle observed status/billing.
   Stop alone creates no failure/cooldown; a received failure status still settles its outcome.
 - The chain has one 180 s budget. Only service attempts have a 30 s limit; model executors
@@ -38,7 +41,8 @@ Invariants and primary regression coverage:
 - Retry is available regardless of activation and obeys Model Hub Member authorization.
 
 Tests use synthetic vendor bytes and a fake adapter search boundary, never paid traffic or
-real keys. Focused tests run through `~/.local/bin/hd1-test`; full repository checks run in CI.
+real keys. A local TCP/real-aiohttp test additionally owns transport-closure coverage that fake sessions
+cannot provide; it never contacts a vendor. Focused tests run through `~/.local/bin/hd1-test`; full repository checks run in CI.
 Existing released-chain tests are the flag-off control; new tables target each owner boundary.
 Scenario: `MH-SEARCH-SERVICES-001` in `tests/scenarios/model_hub/catalog.yaml`.
 
@@ -48,6 +52,12 @@ Local validation (2026-10-21):
   the scenario registry's new canonical-test entry was corrected and checked separately.
 - Baseline S2a `01fc7b0`: all nine selected vendor producer/order cases fail for missing
   requests or service ordering; the exact same flag-off control passes. No paid calls.
+- First-head review regressions: six owner-boundary cases fail on `9f25a9162` (slow trial contenders,
+  vendor error text, persistence cleanup, and hidden config reads); three real-connector cases fail
+  because rejected/cancelled admission leaks the connected socket. All pass with the fixes.
+- Review-fix runtime/structure/producer/transport suite: 873 passed. CI-failure parity/structure/mirror
+  checks and real transport tests: 200 passed. Python 3.10.19 isolated producer/transport run: 132 passed,
+  including Stop during timeout teardown; cancellation does not rely on Python 3.11 Task APIs.
 - Changed Python files pass Ruff. CI owns the full suite; no runtime restart/deployment or
   live-vendor/manual UI acceptance is included in this dormant change.
 

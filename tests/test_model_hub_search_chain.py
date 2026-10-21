@@ -768,7 +768,8 @@ def test_read_time_role_changes_never_duplicate_sources_or_rewrite_config(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_connect_holds_no_mutation_lock_and_only_the_first_ready_trial_sends(tmp_path, monkeypatch):
+@pytest.mark.parametrize("phase", ["concurrent", "recovered", "rearmed"])
+async def test_connect_holds_no_mutation_lock_and_only_the_first_ready_trial_sends(tmp_path, monkeypatch, phase):
     """Connection latency cannot stall other sessions or let a losing contender fence the winner."""
     service = owner(tmp_path)
     source = service.store.load().sources[0]
@@ -788,7 +789,7 @@ async def test_connect_holds_no_mutation_lock_and_only_the_first_ready_trial_sen
         sends.append(index)
         sent.set()
         await finish.wait()
-        return wire()
+        return wire(400 if phase == "rearmed" and index == 0 else 401 if phase == "recovered" and index == 1 else 200)
 
     async def another_session():
         async with service._mutation_lock:
@@ -802,13 +803,21 @@ async def test_connect_holds_no_mutation_lock_and_only_the_first_ready_trial_sen
     await asyncio.wait_for(connecting[1].wait(), timeout=.2)
     connect[0].set()
     await sent.wait()
+    if phase != "concurrent":
+        finish.set()
+        await first
     connect[1].set()
     loser = await asyncio.wait_for(second, timeout=.2)
-    assert loser["record"]["attempts"][0]["skipped"] == "blocked"
+    if phase == "concurrent":
+        assert loser["record"]["attempts"][0]["skipped"] == "blocked"
+    else:
+        assert loser["record"]["attempts"][0]["outcome"] == ("failed" if phase == "recovered" else "completed")
+        assert not loser["record"]["attempts"][0].get("superseded")
     finish.set()
-    assert (await first)["record"]["status"] == "completed"
-    assert sends == [0] and summary(service)["services"][0]["requests"] == 1
-    assert service.store.load().sources[0].state.status == "standby"
+    assert (await first)["record"]["status"] == ("failed" if phase == "rearmed" else "completed")
+    assert sends == ([0] if phase == "concurrent" else [0, 1])
+    assert summary(service)["services"][0]["requests"] == len(sends)
+    assert service.store.load().sources[0].state.status == ("needs_action" if phase == "recovered" else "standby")
 
 
 @pytest.mark.asyncio
@@ -882,13 +891,13 @@ async def test_model_executor_retains_the_chain_budget_not_the_service_attempt_l
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("detail", ["Query is invalid", [{"msg": "Field required", "input": "do not echo me"}]])
+@pytest.mark.parametrize("detail", ["Query is invalid", {"error": "Query is invalid"}, [{"msg": "Field required", "input": "do not echo me"}]])
 async def test_tavily_validation_error_keeps_bounded_vendor_text_but_not_echoed_inputs(tmp_path, monkeypatch, detail):
     service = owner(tmp_path, ("tavily",))
     answers(monkeypatch, service, wire(422, {"detail": detail}))
     result = await run(service)
     assert result["record"]["error_code"] == "service_refused"
-    assert ("Query is invalid" if isinstance(detail, str) else "Field required") in result["record"]["error"]
+    assert ("Field required" if isinstance(detail, list) else "Query is invalid") in result["record"]["error"]
     assert "do not echo me" not in result["record"]["error"]
 
 
@@ -939,3 +948,47 @@ async def test_blocked_model_executor_keeps_its_own_remedy_beside_a_disabled_ser
     ]
     assert "execution" not in result
     _hosted_result("web_search", result)
+
+
+@pytest.mark.asyncio
+async def test_trial_reservation_is_released_even_when_health_persistence_fails(tmp_path, monkeypatch):
+    """A failed local write keeps the persisted blocker, not an unreleasable in-flight trial."""
+    service = owner(tmp_path)
+    source = service.store.load().sources[0]
+    source.state = ModelHubSourceStateConfig(status="needs_action", detail_key="models.source.needs_action.balance_exhausted")
+    await service.reenable_search_source(source.id)
+    answers(monkeypatch, service, wire())
+
+    async def disk_unavailable(*args, **kwargs):
+        raise OSError("test-owned persistence failure")
+
+    monkeypatch.setattr(service, "_save_runtime_config", disk_unavailable)
+    with pytest.raises(OSError, match="test-owned persistence failure"):
+        await run(service)
+    assert not service.search_reenable_trial_pending(source.id)
+    assert service.store.load().sources[0].state.status == "needs_action"
+    assert summary(service)["services"][0]["requests"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trial", [False, True])
+async def test_service_admission_and_settlement_never_reload_config_on_the_controller_loop(tmp_path, monkeypatch, trial):
+    """A generation helper's hidden store read must not bypass the off-loop snapshots."""
+    service = owner(tmp_path)
+    source = service.store.load().sources[0]
+    if trial:
+        source.state = ModelHubSourceStateConfig(status="needs_action", detail_key="models.source.needs_action.balance_exhausted")
+    turn = service.freeze_turn_hosted_tools(service.store.load())
+    load = service.store.load
+    threads = []
+
+    def observed():
+        threads.append(threading.get_ident())
+        return load()
+
+    monkeypatch.setattr(service.store, "load", observed)
+    answers(monkeypatch, service, wire())
+    if trial:
+        await service.reenable_search_source(source.id)
+    assert (await run(service, turn=turn))["record"]["status"] == "completed"
+    assert threads and threading.get_ident() not in threads

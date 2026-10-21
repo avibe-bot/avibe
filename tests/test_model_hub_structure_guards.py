@@ -539,9 +539,11 @@ def test_g3_settlement_returns_are_consumed() -> None:
 
 
 def test_settlement_generations_are_reserved_only_at_attempt_start() -> None:
+    """Search re-enable is the one explicit non-attempt exception (model-hub.md settlement freshness)."""
     allowed_owners = {
-        SERVICE: {"_invoke_admitted"},
+        SERVICE: {"_invoke_admitted", "_reenable_search_service"},
         ROUTER: {"resolve"},
+        ROOT / "core/handlers/model_hub/search_chain.py": {"invoke", "on_sent"},
     }
     for path, expected in allowed_owners.items():
         tree = _tree(path)
