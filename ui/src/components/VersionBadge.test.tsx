@@ -20,11 +20,25 @@ afterEach(() => {
   delete (window as { __AVIBE_DESKTOP_VERSION__?: string }).__AVIBE_DESKTOP_VERSION__;
 });
 
-function renderInShell(appVersion: string, runtimeVersion: string) {
+function renderInShell(appVersion: string, runtimeVersion: string, latest: string | null = null) {
   Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
   Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', { value: appVersion, configurable: true });
-  api.getVersion.mockResolvedValueOnce({ current: runtimeVersion, latest: null, has_update: false, managed_by: 'desktop' });
+  api.getVersion.mockResolvedValueOnce({ current: runtimeVersion, latest, has_update: latest !== null, managed_by: 'desktop' });
   render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+}
+
+async function openBrowserPopup(title: string) {
+  render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+  const entry = await screen.findByTitle(title);
+  fireEvent.click(entry);
+  expect(await screen.findByRole('dialog')).toBeTruthy();
+  return entry;
+}
+
+function expectNoUpdateControls() {
+  expect(screen.queryByRole('button', { name: i18n.t('dashboard.upgradeNow') })).toBeNull();
+  expect(screen.queryByText(i18n.t('dashboard.autoUpdate'))).toBeNull();
+  expect(screen.queryByText(i18n.t('dashboard.checkFailed'))).toBeNull();
 }
 
 describe('desktop version ownership', () => {
@@ -34,6 +48,15 @@ describe('desktop version ownership', () => {
     const entry = screen.getByTitle('v3.1.2-rc.15');
     expect(entry.className).not.toContain('text-gold-ink');
     expect(api.getConfig).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('leaves the desktop window to its own menu even when the app reported an update', async () => {
+    renderInShell('3.2.2-rc.13', '3.2.2rc13', '3.2.3');
+    await vi.waitFor(() => expect(api.getVersion).toHaveBeenCalledOnce());
+    const entry = screen.getByTitle('v3.2.2-rc.13');
+    expect(entry.className).not.toContain('text-gold-ink');
+    expect(entry.querySelector('.animate-pulse')).toBeNull();
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
@@ -47,15 +70,33 @@ describe('desktop version ownership', () => {
     expect(api.getConfig).not.toHaveBeenCalled();
   });
 
-  it('points a browser on a desktop Runtime to the desktop app without update controls', async () => {
-    render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
-    const entry = await screen.findByTitle('v9.9.9');
-    fireEvent.click(entry);
-    expect(await screen.findByRole('dialog')).toBeTruthy();
-    expect(await screen.findByText(i18n.t('dashboard.desktopManagedUpdate'))).toBeTruthy();
-    expect(screen.queryByRole('button', { name: i18n.t('dashboard.upgradeNow') })).toBeNull();
-    expect(screen.queryByText(i18n.t('dashboard.autoUpdate'))).toBeNull();
+  it('points a browser on a desktop Runtime to the update the desktop app found', async () => {
+    api.getVersion.mockResolvedValueOnce({ current: '3.2.2rc13', latest: '3.2.3-rc.1', has_update: true, managed_by: 'desktop' });
+    const entry = await openBrowserPopup('v3.2.2rc13');
+    expect(await screen.findByText(i18n.t('dashboard.desktopManagedUpdateAvailable', { to: '3.2.3rc1' }))).toBeTruthy();
+    expect(screen.getByText('3.2.3rc1')).toBeTruthy();
+    expect(screen.queryByText(i18n.t('dashboard.desktopManagedUpdate'))).toBeNull();
+    expectNoUpdateControls();
     expect(api.getVersion).toHaveBeenCalledOnce();
+    expect(entry.querySelector('.animate-pulse')).toBeTruthy();
+  });
+
+  it('keeps neutral desktop guidance while the desktop app has published no conclusion', async () => {
+    api.getVersion.mockResolvedValueOnce({ current: '3.2.2rc13', latest: null, has_update: false, error: null, managed_by: 'desktop' });
+    const entry = await openBrowserPopup('v3.2.2rc13');
+    expect(await screen.findByText(i18n.t('dashboard.desktopManagedUpdate'))).toBeTruthy();
+    expect(screen.queryByText(i18n.t('dashboard.latestVersion'))).toBeNull();
+    expect(screen.queryByText(i18n.t('dashboard.upToDate'))).toBeNull();
+    expectNoUpdateControls();
+    expect(entry.querySelector('.animate-pulse')).toBeNull();
+  });
+
+  it('relays an up-to-date desktop app without update controls', async () => {
+    api.getVersion.mockResolvedValueOnce({ current: '3.2.2rc13', latest: '3.2.2-rc.13', has_update: false, error: null, managed_by: 'desktop' });
+    const entry = await openBrowserPopup('v3.2.2rc13');
+    expect(await screen.findByText(i18n.t('dashboard.upToDate'))).toBeTruthy();
+    expect(screen.queryByText(i18n.t('dashboard.desktopManagedUpdate'))).toBeNull();
+    expectNoUpdateControls();
     expect(entry.querySelector('.animate-pulse')).toBeNull();
   });
 

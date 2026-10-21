@@ -211,9 +211,15 @@ struct Paths {
     snapshot: PathBuf,
 }
 
+/// The directory the Runtime reads desktop state from (`desktop_computer_use_dir()`
+/// in `core/computer_use.py`). The updater publishes `update-status.json` here too.
+pub(crate) fn state_dir(app: &AppHandle) -> tauri::Result<PathBuf> {
+    Ok(configured_path(app.path().app_data_dir()?, STATE_DIR_ENV))
+}
+
 impl Paths {
     fn resolve(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
-        let state_dir = configured_path(app.path().app_data_dir()?, STATE_DIR_ENV);
+        let state_dir = state_dir(app)?;
         std::fs::create_dir_all(&state_dir)?;
         let owner_uid = std::fs::metadata(&state_dir)?.uid();
         let socket = short_socket_path(&state_dir, owner_uid);

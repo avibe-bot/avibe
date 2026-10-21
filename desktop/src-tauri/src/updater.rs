@@ -2,6 +2,7 @@
 use avibe_runtime_host::{
     download::{self, Length},
     update::{self, Channel, Manifest, Release, REPOSITORY},
+    update_status::{UpdateStatusPhase, UpdateStatusRecord, UpdateStatusStore, UPDATE_STATUS_FILE},
 };
 use serde::Deserialize;
 use std::{
@@ -10,7 +11,7 @@ use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Mutex,
     },
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 use tauri::{
     menu::{CheckMenuItem, MenuItem},
@@ -88,8 +89,22 @@ pub struct Updater {
     source: AtomicUsize,
     channel_path: PathBuf,
     skipped_path: PathBuf,
+    /// The last completed check, published for the Runtime to relay to browsers.
+    status: UpdateStatusStore,
     pub menu: MenuItem<tauri::Wry>,
     pub channel_menu: CheckMenuItem<tauri::Wry>,
+}
+/// What `update-status.json` records for a phase. In-flight phases leave the last
+/// completed check on disk, so a recheck never makes the web forget a known update.
+fn persisted(phase: Phase) -> Option<UpdateStatusPhase> {
+    match phase {
+        Phase::Current => Some(UpdateStatusPhase::Current),
+        Phase::Available => Some(UpdateStatusPhase::Available),
+        Phase::Installed => Some(UpdateStatusPhase::Installed),
+        Phase::Disabled => Some(UpdateStatusPhase::Disabled),
+        Phase::Error => Some(UpdateStatusPhase::Error),
+        Phase::Idle | Phase::Checking | Phase::Downloading | Phase::Installing => None,
+    }
 }
 fn label(phase: Phase, c: &Catalog) -> &str {
     match phase {
@@ -111,6 +126,11 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_else(|| Channel::for_version(&app.package_info().version));
+    // Beside `computer-use.json`, where the Runtime already finds desktop state.
+    #[cfg(target_os = "macos")]
+    let status_dir = super::computer_use::state_dir(app)?;
+    #[cfg(not(target_os = "macos"))]
+    let status_dir = app.path().app_data_dir()?;
     app.manage(Updater {
         state: Mutex::new(State {
             phase: Phase::Idle,
@@ -121,6 +141,7 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
         source: AtomicUsize::new(0),
         channel_path,
         skipped_path: app.path().app_local_data_dir()?.join("update-skipped.json"),
+        status: UpdateStatusStore::new(status_dir.join(UPDATE_STATUS_FILE)),
         menu: MenuItem::with_id(app, MENU_ID, &c.menu, true, None::<&str>)?,
         channel_menu: CheckMenuItem::with_id(
             app,
@@ -139,6 +160,18 @@ fn set_state(app: &AppHandle, phase: Phase, latest: Option<String>) {
     state.phase = phase;
     if latest.is_some() || phase == Phase::Checking {
         state.latest = latest;
+    }
+    if let Some(persisted) = persisted(phase) {
+        let record = UpdateStatusRecord::new(
+            persisted,
+            app.package_info().version.to_string(),
+            state.latest.clone(),
+            state.channel,
+            SystemTime::now(),
+        );
+        if let Err(error) = updater.status.write(&record) {
+            eprintln!("desktop update status: {error}");
+        }
     }
     let _ = updater
         .menu
@@ -517,6 +550,40 @@ mod tests {
         assert!(should_prompt(false, Some("1.2.3"), "1.2.4"));
         assert!(should_prompt(false, None, "1.2.3"));
         assert!(should_prompt(true, Some("1.2.3"), "1.2.3"));
+    }
+
+    #[test]
+    fn only_completed_checks_are_published_and_only_available_claims_an_update() {
+        let phases = [
+            Phase::Idle,
+            Phase::Checking,
+            Phase::Current,
+            Phase::Available,
+            Phase::Downloading,
+            Phase::Installing,
+            Phase::Installed,
+            Phase::Disabled,
+            Phase::Error,
+        ];
+        for phase in phases {
+            let in_flight = matches!(
+                phase,
+                Phase::Idle | Phase::Checking | Phase::Downloading | Phase::Installing
+            );
+            let Some(persisted) = persisted(phase) else {
+                assert!(in_flight, "{phase:?} is a completed check and must be published");
+                continue;
+            };
+            assert!(!in_flight, "{phase:?} is in flight and must keep the last result");
+            let record = UpdateStatusRecord::new(
+                persisted,
+                "3.2.2",
+                Some("3.2.3".to_owned()),
+                Channel::Stable,
+                SystemTime::now(),
+            );
+            assert_eq!(record.has_update, phase == Phase::Available, "{phase:?}");
+        }
     }
 
     #[test]

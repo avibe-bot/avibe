@@ -71,6 +71,7 @@ from vibe.desktop_backends import (
     is_desktop_backend_path,
 )
 from vibe.desktop_runtime import is_private_desktop_runtime_path
+from vibe.desktop_update_status import read_desktop_update_status
 from vibe.cli_health import CliHealth, probe_cli, probe_cli_sync
 from vibe.cli_repair import REPAIR_PATH_CONFLICT, identify_repair_source, native_bootstrap_env
 from vibe.cli_paths import (
@@ -6880,13 +6881,24 @@ def get_version_info() -> dict:
             "build": {"kind": "package" | "source", ...},
             "managed_by": "desktop" | None
         }
+
+    A desktop-managed Runtime reports the desktop app's last completed check
+    (``vibe/desktop_update_status.py``) and never queries PyPI.
     """
     from vibe import __version__
 
     build = get_build_identity()
     managed_by = "desktop" if is_desktop_managed_runtime() else None
     if managed_by:
-        result = {"current": __version__, "latest": None, "has_update": False, "error": None}
+        # The desktop app alone decides what this computer can install; relay
+        # its last conclusion, never PyPI's.
+        status = read_desktop_update_status()
+        result = {
+            "current": __version__,
+            "latest": status["latest"] if status else None,
+            "has_update": status["has_update"] if status else False,
+            "error": None,
+        }
     elif build.kind == "source":
         result = {"current": __version__, "latest": None, "has_update": False, "error": None}
     else:

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "phase": "available",
+  "current": "3.2.2-rc.13",
+  "latest": "3.2.3",
+  "channel": "test",
+  "has_update": true,
+  "checked_at": "2026-10-21T02:36:00Z"
+}
