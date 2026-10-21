@@ -53,7 +53,7 @@ def test_save_only_saves_and_initial_generate_publishes_then_enables(runtime):
     first = _run(runtime, "generate", {"name": "echo"})
     published = repository.read_published("echo")
     assert published["revision"] == first["revision"]
-    assert [tool["name"] for tool in published["tools"]] == ["add", "echo", "fail"]
+    assert [tool["name"] for tool in published["tools"]] == ["add", "crash", "echo", "fail", "nap", "reject"]
     assert published["definition"]["transport"]["cwd"]  # frozen at generation
     assert published["manifest"]["serverInfo"] == {"version": "0.1.0"}
     assert repository.read_enabled("echo") is True
@@ -179,3 +179,73 @@ def test_editor_discovers_but_cannot_manage(generated, argv, allowed, capsys):
     assert (code == 0) is allowed
     if not allowed:
         assert "owner" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments", "error_type"),
+    [
+        ("reject", {}, "tool_error"),  # a JSON-RPC error the server returned
+        ("crash", {}, "unknown_outcome"),  # transport died after tools/call was sent
+        ("nap", {"seconds": 5}, "unknown_outcome"),  # call timeout
+    ],
+)
+def test_call_failure_classification_and_reconnect(generated, monkeypatch, tool, arguments, error_type):
+    monkeypatch.setattr(mcp_runtime, "CALL_TIMEOUT_SECONDS", 1)
+    payload = {"name": "echo", "tool": tool, "arguments": arguments, "sessionId": "ses-1"}
+    assert _run(generated, "call", payload)["error"]["type"] == error_type
+    # An unknown-outcome connection is closed, so the session's next call reconnects.
+    again = _run(generated, "call", {"name": "echo", "tool": "echo", "arguments": {"text": "x"}, "sessionId": "ses-1"})
+    assert again["status"] == "ok"
+
+
+def test_streamable_http_generate_and_call(runtime):
+    import socket
+    import subprocess
+    import time
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    server = subprocess.Popen([sys.executable, FIXTURE, "http", str(port)],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            with socket.socket() as attempt:
+                if attempt.connect_ex(("127.0.0.1", port)) == 0:
+                    break
+            time.sleep(0.1)
+        _run(runtime, "save", {"servers": [{"name": "web", "server": {
+            "type": "http", "url": f"http://127.0.0.1:{port}/mcp", "headers": {"X-Test": "v"}}}]})
+        assert _run(runtime, "generate", {"name": "web"})["toolCount"] == 6
+        for text in ("one", "two"):
+            result = _run(runtime, "call", {"name": "web", "tool": "echo", "arguments": {"text": text},
+                                            "sessionId": "ses-http"})
+            assert result["result"]["content"] == [{"type": "text", "text": text}]
+        assert _run(runtime, "call", {"name": "web", "tool": "reject", "arguments": {}})["error"]["type"] == "tool_error"
+    finally:
+        server.terminate()
+        server.wait(timeout=10)
+
+
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("tools.json", {"not": "a list"}),
+        ("commands.json", [{"name": "add"}]),
+        ("definition.json", {"transport": {"type": "stdio"}}),
+    ],
+)
+def test_malformed_revision_file_disables_only_that_package(generated, capsys, filename, content):
+    from vibe import mcp_cli
+
+    _run(generated, "save", {"servers": [{**_server(), "name": "other"}]})
+    revision = repository.read_published("echo")["revision"]
+    (repository.package_dir("echo") / "revisions" / revision / filename).write_text(json.dumps(content))
+    summaries = {item["name"]: item for item in repository.list_packages()}
+    assert summaries["echo"]["status"] == "error" and summaries["echo"]["error"]["type"] == "invalid_package"
+    assert summaries["other"]["status"] == "draft"
+    assert mcp_cli.main(["--list", "--all"]) == 0
+    assert mcp_cli.main(["echo", "--list"]) == 1
+    call = _run(generated, "call", {"name": "echo", "tool": "echo", "arguments": {"text": "x"}})
+    assert call["error"]["type"] == "invalid_package"

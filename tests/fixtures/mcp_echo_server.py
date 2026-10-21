@@ -1,6 +1,8 @@
 """Loopback MCP test server: ``python mcp_echo_server.py [stdio|http PORT]``."""
 
+import os
 import sys
+import time
 
 from mcp.server.mcpserver import MCPServer
 
@@ -20,6 +22,24 @@ def add(a: float, b: float) -> dict:
 @server.tool(description="Always fails.")
 def fail(reason: str) -> str:
     raise ValueError(reason)
+
+
+@server.tool(description="Reject with a JSON-RPC error.")
+def reject() -> str:
+    from mcp import MCPError
+
+    raise MCPError(-32602, "rejected by server")
+
+
+@server.tool(description="Exit the server process mid-call.")
+def crash() -> str:
+    os._exit(1)
+
+
+@server.tool(description="Sleep for some seconds.")
+def nap(seconds: float) -> str:
+    time.sleep(seconds)
+    return "awake"
 
 
 if __name__ == "__main__":

@@ -41,6 +41,9 @@ ENVELOPE_SCHEMA_VERSION = 1
 
 # The SDK's default client callbacks reject with these messages. A call that
 # fails through one may already have acted, so it is an unknown outcome.
+# Codes the SDK synthesizes locally when no server answer arrived (the
+# connection closed or its own timeout fired): the tool may have acted.
+_CLIENT_SIDE_CODES = {-32000, -32001}  # CONNECTION_CLOSED, REQUEST_TIMEOUT
 _CALLBACK_REJECTIONS = {"Sampling not supported", "Elicitation not supported", "List roots not supported"}
 
 
@@ -479,7 +482,11 @@ class McpRuntime:
                 except Exception as exc:
                     from mcp import MCPError
 
-                    if isinstance(exc, MCPError) and str(exc.error.message) not in _CALLBACK_REJECTIONS:
+                    if (
+                        isinstance(exc, MCPError)
+                        and exc.error.code not in _CLIENT_SIDE_CODES
+                        and str(exc.error.message) not in _CALLBACK_REJECTIONS
+                    ):
                         outcome_unknown = False
                         if definition["transport"]["type"] == HTTP and _http_session_lost(exc):
                             connection.retired = True

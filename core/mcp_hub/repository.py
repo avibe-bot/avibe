@@ -148,13 +148,50 @@ def _load_revision(name: str, revision: str) -> dict[str, Any]:
             f"{name}: the published package was written by another Avibe version.",
             hint=f"vibe mcp regenerate {name}",
         )
-    return {
+    published = {
         "revision": revision,
         "manifest": manifest,
         "definition": _read_json(directory / "definition.json"),
         "tools": _read_json(directory / "tools.json"),
         "commands": _read_json(directory / "commands.json"),
     }
+    if not _well_formed(published):
+        raise McpHubError("invalid_package", f"{name}: revision {revision} has an unsupported shape.")
+    return published
+
+
+_FLAG_FIELDS = {"flag": str, "key": str, "kind": str, "required": bool, "description": str}
+
+
+def _well_formed(published: dict[str, Any]) -> bool:
+    """The fields every reader dereferences, so a bad revision isolates its package."""
+
+    manifest, definition = published["manifest"], published["definition"]
+    tools, commands = published["tools"], published["commands"]
+    if not isinstance(manifest.get("serverInfo", {}), dict) or not isinstance(definition, dict):
+        return False
+    transport = definition.get("transport")
+    if not isinstance(transport, dict):
+        return False
+    if transport.get("type") == "stdio":
+        if not isinstance(transport.get("command"), str) or not isinstance(transport.get("args", []), list):
+            return False
+    elif transport.get("type") != "streamable_http" or not isinstance(transport.get("url"), str):
+        return False
+    if not isinstance(tools, list) or not isinstance(commands, list) or len(tools) != len(commands):
+        return False
+    for tool, command in zip(tools, commands):
+        if not isinstance(tool, dict) or not isinstance(command, dict) or not isinstance(tool.get("name"), str):
+            return False
+        if command.get("name") != tool["name"] or not isinstance(command.get("validated"), bool):
+            return False
+        flags = command.get("flags")
+        if not isinstance(flags, list) or not all(
+            isinstance(flag, dict) and all(isinstance(flag.get(k), t) for k, t in _FLAG_FIELDS.items())
+            for flag in flags
+        ):
+            return False
+    return True
 
 
 def read_published(name: str) -> Optional[dict[str, Any]]:
