@@ -7,20 +7,20 @@
 //! Runtime relays `latest` and `has_update` from that file to browsers
 //! (`vibe/desktop_update_status.py`) without deciding anything itself.
 //!
-//! Both readers ignore unknown fields, so a newer shell never breaks an older
+//! The Runtime ignores unknown fields, so a newer shell never breaks an older
 //! Runtime. This module knows nothing about Tauri.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::update::Channel;
 
-pub const UPDATE_STATUS_SCHEMA_VERSION: u32 = 1;
+const UPDATE_STATUS_SCHEMA_VERSION: u32 = 1;
 pub const UPDATE_STATUS_FILE: &str = "update-status.json";
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -28,7 +28,7 @@ static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 /// A completed check. In-flight phases (checking, downloading, installing) are
 /// never persisted, so a recheck cannot make the web forget a known update. The
 /// install handoff is not a result either: the next launch's check publishes it.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateStatusPhase {
     Current,
@@ -37,7 +37,7 @@ pub enum UpdateStatusPhase {
     Error,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct UpdateStatusRecord {
     pub schema_version: u32,
     pub phase: UpdateStatusPhase,
@@ -79,7 +79,8 @@ impl UpdateStatusRecord {
         }
     }
 
-    pub fn validate(&self) -> Result<(), String> {
+    /// What the Runtime rejects (`vibe/desktop_update_status.py`), refused before writing.
+    fn validate(&self) -> Result<(), String> {
         if self.schema_version != UPDATE_STATUS_SCHEMA_VERSION {
             return Err(format!("unsupported schema_version: {}", self.schema_version));
         }
@@ -97,13 +98,6 @@ fn rfc3339(moment: SystemTime) -> String {
         .unwrap_or_default()
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum StoredUpdateStatus {
-    Missing,
-    Current(UpdateStatusRecord),
-    Invalid(String),
-}
-
 #[derive(Clone, Debug)]
 pub struct UpdateStatusStore {
     path: PathBuf,
@@ -112,26 +106,6 @@ pub struct UpdateStatusStore {
 impl UpdateStatusStore {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn read(&self) -> StoredUpdateStatus {
-        let bytes = match fs::read(&self.path) {
-            Ok(bytes) => bytes,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return StoredUpdateStatus::Missing,
-            Err(error) => return StoredUpdateStatus::Invalid(format!("status file is unreadable: {error}")),
-        };
-        let record = match serde_json::from_slice::<UpdateStatusRecord>(&bytes) {
-            Ok(record) => record,
-            Err(error) => return StoredUpdateStatus::Invalid(format!("status file is malformed: {error}")),
-        };
-        match record.validate() {
-            Ok(()) => StoredUpdateStatus::Current(record),
-            Err(error) => StoredUpdateStatus::Invalid(error),
-        }
     }
 
     /// Replaces the file atomically: a reader sees the previous record or this
@@ -195,20 +169,19 @@ mod tests {
         )
     }
 
-    #[test]
-    fn an_available_record_round_trips_in_the_runtime_shape() {
-        let dir = scratch_dir("round-trip");
-        let store = UpdateStatusStore::new(dir.join(UPDATE_STATUS_FILE));
-        assert_eq!(store.read(), StoredUpdateStatus::Missing);
+    fn written(store_dir: &std::path::Path) -> serde_json::Value {
+        serde_json::from_slice(&fs::read(store_dir.join(UPDATE_STATUS_FILE)).expect("read")).expect("json")
+    }
 
-        let record = available("3.2.3");
-        store.write(&record).expect("write");
-        assert_eq!(store.read(), StoredUpdateStatus::Current(record));
+    #[test]
+    fn an_available_record_is_written_in_the_runtime_shape() {
+        let dir = scratch_dir("shape");
+        let store = UpdateStatusStore::new(dir.join(UPDATE_STATUS_FILE));
+        store.write(&available("3.2.3")).expect("write");
 
         // The document the Runtime relays in `tests/test_version_identity.py`.
-        let written: serde_json::Value = serde_json::from_slice(&fs::read(store.path()).expect("read")).expect("json");
         let shared: serde_json::Value = serde_json::from_str(AVAILABLE_FIXTURE).expect("fixture");
-        assert_eq!(written, shared);
+        assert_eq!(written(&dir), shared);
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -223,47 +196,32 @@ mod tests {
             let record = UpdateStatusRecord::new(phase, "3.2.2", Some("3.2.3".to_owned()), Channel::Stable, at(0));
             assert_eq!(record.has_update, has_update, "{phase:?}");
             assert_eq!(record.latest.is_some(), keeps_latest, "{phase:?}");
-            record.validate().expect("every constructed record is valid");
         }
     }
 
     #[test]
-    fn unusable_files_read_as_invalid_and_extra_fields_are_ignored() {
-        let dir = scratch_dir("invalid");
+    fn a_record_the_runtime_would_reject_is_never_written() {
+        let dir = scratch_dir("reject");
         let store = UpdateStatusStore::new(dir.join(UPDATE_STATUS_FILE));
-        let mut base = serde_json::to_value(available("3.2.3")).expect("serialize");
-
-        let mut future = base.clone();
-        future["schema_version"] = 2.into();
-        let mut no_latest = base.clone();
-        no_latest["latest"] = serde_json::Value::Null;
-        let mut blank_latest = base.clone();
-        blank_latest["latest"] = " ".into();
-        let mut unknown_phase = base.clone();
-        unknown_phase["phase"] = "installed".into();
-        for (label, bytes) in [
-            ("future schema", serde_json::to_vec(&future).expect("json")),
-            ("update without latest", serde_json::to_vec(&no_latest).expect("json")),
-            (
-                "update with blank latest",
-                serde_json::to_vec(&blank_latest).expect("json"),
-            ),
-            ("unpersisted phase", serde_json::to_vec(&unknown_phase).expect("json")),
-            ("truncated", br#"{"schema_version":1,"phase":"avail"#.to_vec()),
-        ] {
-            fs::write(store.path(), bytes).expect("write");
-            assert!(matches!(store.read(), StoredUpdateStatus::Invalid(_)), "{label}");
-        }
-        assert!(store
-            .write(&UpdateStatusRecord {
+        store.write(&available("3.2.3")).expect("write");
+        let before = written(&dir);
+        for record in [
+            UpdateStatusRecord {
+                schema_version: 2,
+                ..available("3.2.3")
+            },
+            UpdateStatusRecord {
                 latest: None,
                 ..available("3.2.3")
-            })
-            .is_err());
-
-        base["shell_hint"] = "newer shells may add fields".into();
-        fs::write(store.path(), serde_json::to_vec(&base).expect("json")).expect("write");
-        assert_eq!(store.read(), StoredUpdateStatus::Current(available("3.2.3")));
+            },
+            UpdateStatusRecord {
+                latest: Some(" ".to_owned()),
+                ..available("3.2.3")
+            },
+        ] {
+            assert!(store.write(&record).is_err(), "{record:?}");
+            assert_eq!(written(&dir), before, "a refused record leaves the last one");
+        }
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -277,15 +235,15 @@ mod tests {
 
         let done = Arc::new(AtomicBool::new(false));
         let reader = {
-            let store = store.clone();
+            let path = dir.join(UPDATE_STATUS_FILE);
+            let versions = versions.clone();
             let done = Arc::clone(&done);
             std::thread::spawn(move || {
                 let mut reads = 0;
                 while !done.load(Ordering::SeqCst) || reads == 0 {
-                    match store.read() {
-                        StoredUpdateStatus::Current(record) => assert!(record.has_update),
-                        other => panic!("reader saw {other:?}"),
-                    }
+                    let bytes = fs::read(&path).expect("the file is always present");
+                    let value: serde_json::Value = serde_json::from_slice(&bytes).expect("a complete record");
+                    assert!(versions.iter().any(|version| value["latest"] == version.as_str()));
                     reads += 1;
                 }
             })

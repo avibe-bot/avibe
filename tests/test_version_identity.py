@@ -134,7 +134,8 @@ def test_desktop_managed_runtime_relays_the_desktop_update_status(monkeypatch, t
 def test_desktop_managed_runtime_relays_an_up_to_date_desktop(monkeypatch, tmp_path) -> None:
     _desktop_managed(monkeypatch, tmp_path)
     status = json.loads(DESKTOP_UPDATE_STATUS_FIXTURE.read_text(encoding="utf-8"))
-    status.update(phase="current", latest="3.2.2-rc.13", has_update=False)
+    # A newer desktop app may add fields this Runtime does not know.
+    status.update(phase="current", latest="3.2.2-rc.13", has_update=False, written_by_a_newer_app=True)
     (tmp_path / "update-status.json").write_text(json.dumps(status), encoding="utf-8")
 
     assert api.get_version_info() == {**DESKTOP_NO_CONCLUSION, "latest": "3.2.2-rc.13"}

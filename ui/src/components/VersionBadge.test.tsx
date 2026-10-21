@@ -91,6 +91,16 @@ describe('desktop version ownership', () => {
     expect(entry.querySelector('.animate-pulse')).toBeNull();
   });
 
+  it('rereads the version without the shared cache when the user refreshes', async () => {
+    api.getVersion.mockResolvedValueOnce({ current: '3.2.2rc13', latest: null, has_update: false, error: null, managed_by: 'desktop' });
+    api.getVersion.mockResolvedValueOnce({ current: '3.2.2rc13', latest: '3.2.3', has_update: true, error: null, managed_by: 'desktop' });
+    await openBrowserPopup('v3.2.2rc13');
+    expect(api.getVersion).toHaveBeenLastCalledWith(undefined);
+    fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.checkUpdate') }));
+    expect(await screen.findByText(i18n.t('dashboard.desktopManagedUpdateAvailable', { to: '3.2.3' }))).toBeTruthy();
+    expect(api.getVersion).toHaveBeenLastCalledWith({ cache: false });
+  });
+
   it('relays an up-to-date desktop app without update controls', async () => {
     api.getVersion.mockResolvedValueOnce({ current: '3.2.2rc13', latest: '3.2.2-rc.13', has_update: false, error: null, managed_by: 'desktop' });
     const entry = await openBrowserPopup('v3.2.2rc13');

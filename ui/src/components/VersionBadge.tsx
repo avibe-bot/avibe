@@ -103,10 +103,12 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     }
   };
 
-  const checkVersion = async () => {
+  // An explicit refresh skips the shared read cache, so a check the desktop app
+  // just finished shows at once.
+  const checkVersion = async (fresh = false) => {
     setChecking(true);
     try {
-      const info = await api.getVersion();
+      const info = await api.getVersion(fresh ? { cache: false } : undefined);
       setVersionInfo(info);
     } catch (e) {
       console.error('Failed to check version:', e);
@@ -224,7 +226,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 text-muted hover:text-foreground"
-                  onClick={checkVersion}
+                  onClick={() => checkVersion(true)}
                   disabled={checking || restarting}
                   aria-label={refreshLabel}
                   title={refreshLabel}

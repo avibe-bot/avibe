@@ -172,23 +172,6 @@ fn set_state(app: &AppHandle, phase: Phase, latest: Option<String>) {
         .set_text(format!("{} — {}", label(phase, &catalog()), app.package_info().version));
     let _ = updater.channel_menu.set_enabled(!updater.busy.load(Ordering::SeqCst));
 }
-/// Publishes the finished check in `update-status.json` for the Runtime to relay.
-///
-/// Only `check()` calls this. Install progress and outcomes stay in memory: a
-/// failed install keeps the last `Available` (the next check offers it again),
-/// and `Installed` only means the installer took over — on Windows it runs after
-/// the shell exits and can still restore this version — so the new app's
-/// startup check publishes `Current`.
-fn publish(app: &AppHandle) {
-    let updater = app.state::<Updater>();
-    let state = updater.state.lock().expect("updater state");
-    let Some(record) = check_record(&state, &app.package_info().version.to_string(), SystemTime::now()) else {
-        return;
-    };
-    if let Err(error) = updater.status.write(&record) {
-        eprintln!("desktop update status: {error}");
-    }
-}
 pub fn toggle_channel(app: &AppHandle) {
     let updater = app.state::<Updater>();
     if updater.busy.load(Ordering::SeqCst) {
@@ -392,6 +375,23 @@ async fn find_update(app: &AppHandle, channel: Channel) -> Result<Option<Manifes
 }
 
 pub fn check(app: AppHandle, interactive: bool) {
+    // Publishes the finished check in `update-status.json` for the Runtime to
+    // relay. It is nested here so nothing but `check()` can publish. Install
+    // progress and outcomes stay in memory: a failed install keeps the last
+    // `Available` (the next check offers it again), and `Installed` only means
+    // the installer took over — on Windows it runs after the shell exits and can
+    // still restore this version — so the new app's startup check publishes
+    // `Current`.
+    fn publish(app: &AppHandle) {
+        let updater = app.state::<Updater>();
+        let state = updater.state.lock().expect("updater state");
+        let Some(record) = check_record(&state, &app.package_info().version.to_string(), SystemTime::now()) else {
+            return;
+        };
+        if let Err(error) = updater.status.write(&record) {
+            eprintln!("desktop update status: {error}");
+        }
+    }
     let updater = app.state::<Updater>();
     if updater.busy.swap(true, Ordering::SeqCst) {
         if interactive {
@@ -585,16 +585,15 @@ mod tests {
                 latest: Some("3.2.3".to_owned()),
                 channel: Channel::Test,
             };
-            let record = check_record(&state, "3.2.2", SystemTime::now());
             let expected = match phase {
-                Phase::Current => Some((UpdateStatusPhase::Current, false, true)),
-                Phase::Available => Some((UpdateStatusPhase::Available, true, true)),
-                Phase::Disabled => Some((UpdateStatusPhase::Disabled, false, false)),
-                Phase::Error => Some((UpdateStatusPhase::Error, false, false)),
-                _ => None,
+                Phase::Current => Some(UpdateStatusPhase::Current),
+                Phase::Available => Some(UpdateStatusPhase::Available),
+                Phase::Disabled => Some(UpdateStatusPhase::Disabled),
+                Phase::Error => Some(UpdateStatusPhase::Error),
+                Phase::Idle | Phase::Checking | Phase::Downloading | Phase::Installing | Phase::Installed => None,
             };
             assert_eq!(
-                record.map(|record| (record.phase, record.has_update, record.latest.is_some())),
+                check_record(&state, "3.2.2", SystemTime::now()).map(|record| record.phase),
                 expected,
                 "{phase:?}"
             );
