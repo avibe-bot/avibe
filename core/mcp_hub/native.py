@@ -210,18 +210,15 @@ def _native_enabled(source: str, entry: dict[str, Any]) -> bool:
     return entry.get("enabled") is not False
 
 
-def _from_native(source: str, name: str, entry: dict[str, Any], description: Optional[str]) -> dict[str, Any]:
+def _from_native(source: str, name: str, entry: dict[str, Any], path: Path, description: Optional[str]) -> dict[str, Any]:
     server = _READERS[source](entry)
     cwd = server.get("cwd")
-    if isinstance(cwd, str) and cwd and not os.path.isabs(cwd):
-        # Codex docs do not pin a relative-cwd base (project vs daemon workdir).
-        # Keep the field-level error; do not rewrite the native value.
-        raise McpHubError(
-            "invalid_definition",
-            "cwd must be an absolute path (relative cwd is not well-defined across Codex versions).",
-            field="cwd",
-            usage=True,
-        )
+    if isinstance(cwd, str) and cwd.strip() and not os.path.isabs(os.path.expanduser(cwd)):
+        # Native files are hand- and app-written; a relative cwd is anchored at the
+        # directory of the file that holds it (e.g. ~/.codex for config.toml).
+        server["cwd"] = os.path.normpath(os.path.join(path.parent, cwd))
+    elif isinstance(cwd, str) and cwd.startswith("~"):
+        server["cwd"] = os.path.expanduser(cwd)
     return definition_from_provider(name, server, description=description)
 
 
@@ -249,7 +246,7 @@ def read_all(descriptions: Optional[dict[str, str]] = None) -> dict[str, NativeS
                 if not isinstance(entry, dict):
                     raise McpHubError("invalid_definition", f"{source} entry {name!r} is not an object.")
                 enabled = _native_enabled(source, entry)
-                definition = _from_native(source, str(name), entry, descriptions.get(str(name)))
+                definition = _from_native(source, str(name), entry, path, descriptions.get(str(name)))
                 servers[str(name)] = NativeServer(str(name), source, path, definition, None, native_enabled=enabled)
             except McpHubError as exc:
                 servers[str(name)] = NativeServer(

@@ -129,10 +129,10 @@ enabled = false
     summaries = {item["name"]: item for item in repository.list_packages()}
     assert summaries["iphone_use"]["status"] == "draft"
     assert "error" not in summaries["iphone_use"]
-    # Native enabled=false is informational; the relative cwd is still a field error.
+    # Native enabled=false is informational; the relative cwd anchors at the file's directory.
     assert summaries["computer-use"]["nativeEnabled"] is False
-    assert summaries["computer-use"]["status"] == "error"
-    assert summaries["computer-use"]["error"]["field"] == "cwd"
+    assert summaries["computer-use"]["status"] == "draft" and "error" not in summaries["computer-use"]
+    assert repository.read_definition("computer-use")["transport"]["cwd"] == str(codex.parent)
 
 
 def test_natively_disabled_entry_generates_like_any_draft(native_files, runtime):
@@ -151,21 +151,27 @@ def test_natively_disabled_entry_generates_like_any_draft(native_files, runtime)
     assert codex.read_bytes() == before  # generate and call never rewrite the native file
 
 
-def test_enabled_relative_cwd_is_a_field_error(native_files):
-    _claude, codex, _opencode = native_files
-    codex.write_text(
-        CODEX
-        + """
-[mcp_servers.computer-use]
-command = "./app"
-args = ["mcp"]
-cwd = "."
-"""
-    )
-    summary = {item["name"]: item for item in repository.list_packages()}["computer-use"]
-    assert summary["status"] == "error"
-    assert summary["error"]["field"] == "cwd"
-    assert "absolute" in summary["error"]["message"]
+def test_relative_native_cwd_resolves_against_its_file_and_generates(native_files, runtime):
+    import shutil
+    import sys
+    from pathlib import Path
+
+    claude, codex, opencode = native_files
+    fixture = Path(__file__).parent / "fixtures" / "mcp_echo_server.py"
+    for path in native_files:
+        shutil.copy(fixture, path.parent / "rel_echo.py")  # found only if cwd is the file's dir
+    data = json.loads(claude.read_text())
+    data["mcpServers"]["rel-claude"] = {"command": sys.executable, "args": ["rel_echo.py"], "cwd": "."}
+    claude.write_text(json.dumps(data))
+    codex.write_text(CODEX + f'\n[mcp_servers.rel-codex]\ncommand = {json.dumps(sys.executable)}\nargs = ["rel_echo.py"]\ncwd = "."\n')
+    data = json.loads(opencode.read_text())
+    data["mcp"]["rel-opencode"] = {"type": "local", "command": [sys.executable, "rel_echo.py"], "cwd": "."}
+    opencode.write_text(json.dumps(data))
+
+    for name, path in (("rel-claude", claude), ("rel-codex", codex), ("rel-opencode", opencode)):
+        assert repository.read_definition(name)["transport"]["cwd"] == str(path.parent)
+        result = _run(runtime, "generate", {"name": name})
+        assert result["ok"] and result["toolCount"] == 6, (name, result)
 
 
 def test_generated_package_survives_native_delete(native_files):
