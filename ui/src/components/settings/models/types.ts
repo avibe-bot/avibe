@@ -10,8 +10,8 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 18 as const;
-export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18] as const;
+export const CONTRACT_VERSION = 19 as const;
+export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19] as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
@@ -884,6 +884,63 @@ export type UsagePricing = {
   /** No price table yet and a first fetch is running; re-read soon, and say
    *  prices are being fetched rather than that there are none. */
   pending?: true;
+  /** When the oldest catalog price that valued `services` was verified; absent
+   *  when no service was valued. */
+  service_price_date?: string;
+};
+
+/** What a model total adds for search services (`web-search-services.md` §4.3):
+ *  `totals` and `days` keep counting model calls, and only their `api_cost_usd`
+ *  includes the services' list valuation. Present exactly when the report is priced. */
+export type ServiceCostTotals = {
+  /** The vendors' own reported search costs, beside `api_cost_usd` and never added to it. */
+  service_reported_usd: number;
+  /** Billable search requests the current catalog no longer prices, left out of `api_cost_usd`. */
+  excluded_service_requests: number;
+};
+
+export type UsageTotals = UsageCounters & Partial<ServiceCostTotals>;
+
+/** Sent search-service requests. A request reaches no model, so no model
+ *  counter ever includes one. */
+export type ServiceCounters = {
+  requests: number;
+  /** The subset the catalog's billing rule charges, each valued at its list price. */
+  billable_requests: number;
+  /** The subset whose billing is unknown: never billable, and a floor on the cost. */
+  uncertain_requests: number;
+  /** The subset of `billable_requests` the vendor priced itself. */
+  reported_requests: number;
+} & Partial<ServicePricedUsage>;
+
+/** Present exactly when the report is priced. */
+export type ServicePricedUsage = {
+  /** `billable_requests` at the current catalog's list price. */
+  api_cost_usd: number;
+  /** The vendors' figures for `reported_requests`, never added to `api_cost_usd`. */
+  reported_usd: number;
+  /** The valuation is only a floor: billing unknown, a repaired row, or a price
+   *  the catalog no longer has. */
+  api_cost_lower_bound: boolean;
+};
+
+/** One Source's search service over the window. A tool-only Source appears
+ *  only here, never in `sources`. */
+export type ServiceUsage = ServiceCounters & {
+  source_id: string;
+  /** The catalog's service ID, such as `tavily/search`. */
+  service_id: string;
+  /** Joined from current Source config; null exactly when config no longer
+   *  holds the Source, which then folds into the removed-Sources identity. */
+  label: string | null;
+  /** The current catalog's name for the service; null once the catalog no
+   *  longer lists it, and views show `service_id`. */
+  service_label: string | null;
+  last_metered_at: string | null;
+  /** False when the current catalog no longer prices the service, so its
+   *  billable requests are left out of `api_cost_usd`. Present exactly when
+   *  the report is priced. */
+  priced?: boolean;
 };
 
 export type UsageByModel = UsageCounters & {
@@ -912,7 +969,7 @@ export type UsageBySource = UsageCounters & {
   models: UsageByModel[];
 };
 
-export type UsageByDay = UsageCounters & { day: string };
+export type UsageByDay = UsageTotals & { day: string };
 
 export type UsageSummary = {
   /** The window the server actually served, after clamping to retention. Views
@@ -922,9 +979,11 @@ export type UsageSummary = {
   from_day: string;
   /** Last local day of the window, which is the host's today. */
   to_day: string;
-  totals: UsageCounters;
+  totals: UsageTotals;
   /** One entry per Source with at least one metered turn, busiest first. */
   sources: UsageBySource[];
+  /** One entry per Source and search service with a sent request, busiest first. */
+  services: ServiceUsage[];
   /** One entry per local day carrying a metered turn, oldest first — a trend
    *  series, so a day with no turn is ABSENT rather than reported as zero. */
   days: UsageByDay[];
@@ -934,17 +993,28 @@ export type UsageSummary = {
 
 export type UsageWindowKey = '24h' | '7d' | '30d' | '60d';
 
+/** A model row, the released shape, which never carries `kind`. */
 export type UsageBucketRow = UsageCounters & {
+  kind?: never;
   source_id: string;
   model_id: string;
 };
+
+/** A search-service row: its own counters, never dressed as a model. */
+export type UsageServiceBucketRow = ServiceCounters & {
+  kind: 'service';
+  source_id: string;
+  service_id: string;
+};
+
+export type UsageBucketEntry = UsageBucketRow | UsageServiceBucketRow;
 
 export type UsageBucket = {
   key: string;
   start_at: string;
   end_at: string;
   history_complete: boolean;
-  rows: UsageBucketRow[];
+  rows: UsageBucketEntry[];
 };
 
 /** The modern temporal report consumed by the Model Hub analytics surface. */
@@ -1039,7 +1109,7 @@ export type HostedToolName = (typeof HOSTED_TOOL_NAMES)[number];
 export type HostedSearchToolName = Exclude<HostedToolName, 'image_generate'>;
 
 /** How a call ran: natively in the model's request, through a search executor, or on an image endpoint. */
-export type HostedExecutionMode = 'native' | 'executor' | 'direct';
+export type HostedExecutionMode = 'native' | 'executor' | 'service' | 'direct';
 
 /** A positive record: a real response ran the tool on this (Source, model). Display only. */
 export type HostedSuccess = { source_id: string; model_id: string; mode: HostedExecutionMode; at: string };

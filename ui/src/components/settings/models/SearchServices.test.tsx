@@ -20,7 +20,7 @@ import { ACTIVE_SEARCH, INACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourcesCard } from './SourcesCard';
 import { ToolsTab } from './ToolsTab';
-import type { HostedServiceExecutorCandidate, HostedWebSearchToolStatus, Source } from './types';
+import type { HostedServiceExecutorCandidate, HostedWebSearchToolStatus, Source, UsageReport } from './types';
 
 const wrap = (element: React.ReactElement, lng = 'en') => <I18nextProvider i18n={i18n.cloneInstance({ lng })}><ToastProvider>{element}</ToastProvider></I18nextProvider>;
 const tab = (tool = ACTIVE_SEARCH) => {
@@ -31,16 +31,32 @@ const tab = (tool = ACTIVE_SEARCH) => {
   const view = render(wrap(<ToolsTab read={readyRegion({ tools: [tool] })} sources={SEARCH_SOURCES} pending={new Set()} onSave={onSave} onClear={vi.fn()} onRetry={vi.fn()} onOpenService={onOpenService} onAddService={onAddService} onRetryService={onRetryService} />));
   return { ...view, onSave, onOpenService, onRetryService, onAddService };
 };
+// A daily report whose host month (`to_day`) holds one Exa day; the previous month's last day stays out.
+const MONTH_REPORT: UsageReport = {
+  window_days: 60, from_day: '2026-08-23', to_day: '2026-10-21', window_key: '60d', granularity: 'day',
+  from_at: '2026-08-23T00:00:00+08:00', to_at: '2026-10-21T12:00:00+08:00',
+  totals: { requests: 0, token_reports: 0, input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 },
+  sources: [], services: [], days: [], pricing: { currency: 'USD', price_table_date: '2026-10-19', service_price_date: '2026-10-19' },
+  buckets: ['2026-09-30', '2026-10-05'].map((key) => ({
+    key, start_at: `${key}T00:00:00+08:00`, end_at: `${key}T23:59:59+08:00`, history_complete: true,
+    rows: [{
+      kind: 'service', source_id: 'src_exa000001', service_id: 'exa/search', requests: 3, billable_requests: 2, uncertain_requests: 1,
+      reported_requests: 2, reported_usd: 0.0135, api_cost_usd: 0.014, api_cost_lower_bound: true,
+    }],
+  })),
+};
 const detail = (source: Source, tool = ACTIVE_SEARCH, serviceView = true) => {
   const onSaveSearch = vi.fn();
   const onRetryService = vi.fn();
+  const onOpenUsage = vi.fn();
+  const readUsage = vi.spyOn(modelsApi, 'getUsageSummary').mockResolvedValue(MONTH_REPORT);
   const settle: SourceMutationSettlement = {
     source: vi.fn().mockResolvedValue(null), gone: vi.fn().mockResolvedValue(null), unread: vi.fn().mockResolvedValue(null), release: vi.fn(),
     readInventory: vi.fn().mockResolvedValue({ snapshot: 1, sources: [source] }),
   };
   const trackMutation: TrackSourceMutation = (work) => work(source, settle);
-  const view = render(wrap(<SourceDetailPanel source={source} hostedTools={readyRegion({ tools: [tool] })} onSaveSearch={onSaveSearch} onRetryService={onRetryService} serviceView={serviceView} onManageSource={vi.fn()} trackMutation={trackMutation} onReauth={vi.fn()} onMutationCommitted={async (commit) => { await commit.settle(); }} />));
-  return { ...view, onSaveSearch, onRetryService, settle };
+  const view = render(wrap(<SourceDetailPanel source={source} hostedTools={readyRegion({ tools: [tool] })} onSaveSearch={onSaveSearch} onRetryService={onRetryService} serviceView={serviceView} onManageSource={vi.fn()} onOpenUsage={onOpenUsage} trackMutation={trackMutation} onReauth={vi.fn()} onMutationCommitted={async (commit) => { await commit.settle(); }} />));
+  return { ...view, onSaveSearch, onRetryService, onOpenUsage, readUsage, settle };
 };
 const addDialog = (tool = ACTIVE_SEARCH) => {
   const onAdded = vi.fn();
@@ -161,7 +177,7 @@ describe('search Source detail', () => {
     detail(SEARCH_SOURCES[0]);
     expect(screen.getByText('Search service · does not provide models')).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Refetch|Test|Add model|Re-enable/ })).toBeNull();
-    expect(screen.queryByText(/this month|page content|full page/i)).toBeNull();
+    expect(screen.queryByText(/page content|full page/i)).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: 'Replace key' }));
     expect(screen.getByRole('dialog', { name: 'Replace the API key for “Tavily”' })).toBeTruthy();
     await userEvent.click(within(screen.getByRole('dialog')).getAllByRole('button', { name: 'Cancel' }).at(-1)!);
@@ -169,6 +185,26 @@ describe('search Source detail', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Remove' }));
     await userEvent.click(screen.getByRole('button', { name: 'Remove source' }));
     await waitFor(() => expect(remove).toHaveBeenCalledWith('src_tavily001', undefined));
+  });
+
+  it.each([
+    ['listed', ACTIVE_SEARCH, true],
+    ['dormant', INACTIVE_SEARCH, false],
+    ['unlisted', { ...ACTIVE_SEARCH, executor_candidates: ACTIVE_SEARCH.executor_candidates.filter((row) => row.source_id !== 'src_exa000001') }, false],
+  ] as const)('MH-USAGE-038: reads this month only for a %s search service, apart from the Usage tab', async (_, tool, listed) => {
+    const { readUsage, onOpenUsage } = detail(SEARCH_SOURCES[1], tool);
+    if (!listed) {
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Exa' })).toBeTruthy());
+      expect(readUsage).not.toHaveBeenCalled();
+      expect(screen.queryByText('This month')).toBeNull();
+      return;
+    }
+    // Its own daily read, never the tab's window; the vendors' figure stands beside the list estimate.
+    expect(readUsage.mock.calls).toEqual([['60d']]);
+    const line = (await screen.findByText('This month')).closest('p')!;
+    expect(line.textContent).toBe('This month3 requests · API list-price estimate ≥ $0.01 · vendor-reported $0.01View usage');
+    await userEvent.click(within(line).getByRole('button', { name: 'View usage' }));
+    expect(onOpenUsage).toHaveBeenCalledOnce();
   });
 
   it.each([null, '2026-12-01T10:00:00Z'])('offers retry exactly when cooldown_until=%s on both row and detail', async (cooldown_until) => {

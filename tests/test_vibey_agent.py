@@ -43,6 +43,7 @@ from core.agent_core.messages import (
     AssistantMessage,
     Citation,
     HostedAction,
+    HostedAttempt,
     HostedCost,
     HostedImage,
     HostedNative,
@@ -4991,6 +4992,63 @@ async def test_a_proxied_hosted_result_shows_once_its_result_is_committed(engine
     await harness.agent._on_event(run, ToolFinished("turn", 1, call.id, entry.row_id, False))
 
     assert harness.controller.im_client.sent[-1:] == ["🔎 X search “from:OpenAI” · via xAI proxy (grok-4.6) · 1 post · $0.11"]
+
+
+async def test_a_search_chain_shows_its_sources_as_model_hub_holds_them_now(
+    engine, session, tmp_path, published
+) -> None:
+    """MH-HOSTED-UI-010 (web-search-services.md §4.3): each Source a search chain reached is shown as Model Hub holds
+    it now, read with its health and its search switch: renamed since, it shows its new name; still blocked or
+    turned off, its repair; a failure whose key was replaced since, no repair at all."""
+    from modules.agents.vibey.agent import _Run
+    from tests.test_model_hub_hosted_tools_config import SOURCE
+
+    tavily, deepseek, exa = "src_tavily01", "src_deepseek1", "src_exa00001"
+    revoked = "models.source.needs_action.credential_revoked"
+
+    def source(source_id: str, vendor: str, name: str, protocol: str = "search", **state: Any) -> dict:
+        health = {"status": "standby", "retry_at": None, "detail_key": None, **state}
+        return {**SOURCE, "id": source_id, "vendor": vendor, "display_name": name, "protocol": protocol,
+                "models": [], "credential_ref": f"cred_{source_id}", "state": health}
+
+    hub = ModelHubConfig.from_payload({
+        "sources": [
+            source(tavily, "tavily", "My Tavily", status="needs_action", detail_key=revoked),
+            source(deepseek, "deepseek", "DeepSeek", protocol="openai_chat"),
+            source(exa, "exa", "Exa"),
+        ],
+        "hosted_tools": {"web_search": {"services": {exa: {"enabled": False}}}},
+    })
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("ok"))]])
+    # A tool result answers a Turn, so the Session has consumed an input first.
+    await harness.agent.handle_message(harness.request("hello"))
+    harness.controller.model_hub_runtime.snapshot = lambda: hub
+    call = ToolCallBlock(id="call_ws1", name="web_search", arguments={"query": "DeepSeek search API pricing"})
+    record = HostedRecord(
+        status="failed",
+        error="every search source is blocked or turned off",
+        error_code="search_sources_blocked",
+        attempts=(
+            HostedAttempt(tavily, "Tavily", "service", "skipped", skipped="blocked", needs_action=revoked),
+            HostedAttempt(deepseek, "DeepSeek", "service", "failed", error_code="service_key_invalid",
+                          cost=HostedCost(basis="list", usd=0.0)),
+            HostedAttempt(exa, "Exa", "service", "skipped", skipped="disabled"),
+        ),
+    )
+    result = ToolResultMessage(
+        "call_ws1", "web_search", (text("no results"),), is_error=True, hosted=HostedResult(record)
+    )
+    entry = await harness.agent.store.append_tool_result(SESSION, result, details={})
+    run = _Run(request=harness.request("search it"), session_id=SESSION, turn_id="turn", instance="test")
+    run.tool_calls[call.id] = call
+
+    await harness.agent._on_event(run, ToolFinished("turn", 1, call.id, entry.row_id, True))
+
+    assert harness.controller.im_client.sent[-1:] == [
+        "🔎 Web search “DeepSeek search API pricing” · failed: all search sources are blocked or disabled"
+        " · My Tavily needs a replacement key; DeepSeek failed on this request; a later action has since updated"
+        " its state; Exa needs web search enabled in Models › Tools · $0"
+    ]
 
 
 def test_an_image_is_attached_unless_the_reply_already_links_it(tmp_path) -> None:

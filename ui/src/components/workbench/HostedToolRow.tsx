@@ -31,9 +31,13 @@ const presetLabel = (provider: string | undefined): string | null =>
 
 /** Who ran a call: its vendor's catalog label, else the Source's own name. A compatible endpoint's
  *  vendor id is `custom`, which names no vendor, so its name is the only thing that says where the
- *  call ran. A vendor id with neither stays as it is, as for a row stored without a Source. */
-const runnerLabel = (card: HostedActivity): string | null =>
-  presetLabel(card.provider) ?? card.source_name ?? card.provider ?? null;
+ *  call ran. A search service is named by its Source first, as the user named it. A vendor id with
+ *  neither stays as it is, as for a row stored without a Source. The IM line reads the same rule. */
+const runnerLabel = (card: HostedActivity): string | null => {
+  const vendor = presetLabel(card.provider);
+  if (vendor && card.executor_kind !== 'service') return vendor;
+  return card.source_name ?? vendor ?? card.provider ?? null;
+};
 
 // Small per-call figures keep their first significant digits: $0.006, not $0.01.
 const formatUsd = (usd: number): string => {
@@ -78,7 +82,7 @@ const useHostedCost = (card: HostedActivity): string | null => {
     ? t('chat.agentActivity.hosted.cost.included') as string
     : cost.usd === undefined
       ? null
-      : t(cost.basis === 'list' ? 'chat.agentActivity.hosted.cost.list' : 'chat.agentActivity.hosted.cost.reported', { usd: formatUsd(cost.usd) }) as string;
+      : t(cost.usd === 0 || (cost.basis !== 'list' && !cost.estimate) ? 'chat.agentActivity.hosted.cost.reported' : 'chat.agentActivity.hosted.cost.list', { usd: formatUsd(cost.usd) }) as string;
   if (figure === null) return null;
   const bounded = cost.at_least ? t('chat.agentActivity.hosted.cost.atLeast', { cost: figure }) as string : figure;
   return cost.calls > 1 ? t('chat.agentActivity.hosted.cost.calls', { cost: bounded, count: cost.calls }) as string : bounded;
@@ -117,6 +121,14 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
     );
   }
   if (!vendor) return null;
+  if (card.executor_kind === 'service') {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-cyan/40 bg-cyan-soft px-2 py-px text-[11px] font-medium text-cyan-ink">
+        <Waypoints className="size-3" aria-hidden="true" />
+        {t('chat.agentActivity.hosted.mode.service', { provider: vendor })}
+      </span>
+    );
+  }
   return card.mode === 'native' ? (
     <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-mint/40 bg-mint-soft px-2 py-px text-[11px] font-medium text-mint-ink">
       <Check className="size-3" aria-hidden="true" />
@@ -194,13 +206,46 @@ export const HostedImageFigure: React.FC<{ card: HostedActivity; image: HostedAc
   );
 };
 
+/**
+ * What a search chain's Sources did, in the words the producer chose for them (`core/hosted_activity.py`): for a
+ * completed call, the Sources it moved past before the one that answered; for one that did not complete, every
+ * Source it reached, each with what it needs now, else what happened to it. Both stay in view, collapsed or
+ * expanded, as the IM line carries them.
+ */
+const HostedAttemptNotes: React.FC<{ card: HostedActivity }> = ({ card }) => {
+  const { t } = useTranslation();
+  // A key the producer chose; one this client does not know yet reads as a plain failure.
+  const say = (key: string | undefined) => serverText(t, key && `chat.agentActivity.hosted.${key}`, 'chat.agentActivity.hosted.reason.failed');
+  if (hostedCompleted(card)) {
+    const note = card.switch;
+    if (!note) return null;
+    const failed = `${note.sources.join(t('chat.agentActivity.hosted.listSeparator'))} ${say(note.reason_key)}`;
+    return (
+      <p className="mx-1.5 mb-1 mt-0.5 flex items-center gap-1.5 rounded-md border border-gold/40 bg-gold/10 px-2.5 py-1.5 text-[11px] text-foreground" data-hosted-switch={card.call_id}>
+        <TriangleAlert className="size-3 shrink-0 text-gold-ink" aria-hidden="true" />
+        {t('chat.agentActivity.hosted.switch', { failed, provider: note.to })}
+      </p>
+    );
+  }
+  const items = (card.attempts ?? [])
+    .filter((attempt) => attempt.remedy_key || attempt.reason_key)
+    .map((attempt) => `${attempt.label} ${say(attempt.remedy_key ?? attempt.reason_key)}`);
+  if (items.length === 0) return null;
+  return (
+    <p className="mx-1.5 mb-1 mt-0.5 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-[11px] text-destructive-ink" data-hosted-attempts={card.call_id}>
+      {items.join(t('chat.agentActivity.hosted.itemSeparator'))}
+    </p>
+  );
+};
+
 const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
   const { t } = useTranslation();
   const cost = useHostedCost(card);
   const completed = hostedCompleted(card);
   const where = completed ? [card.source_name ?? runnerLabel(card), card.model].filter(Boolean).join(' · ') : '';
+  const ran = card.executor_kind === 'service' ? 'ranService' : RAN_KEY[card.mode];
   const facts = [
-    where && t(`chat.agentActivity.hosted.${RAN_KEY[card.mode]}`, { where }),
+    where && t(`chat.agentActivity.hosted.${ran}`, { where }),
     completed && card.duration_ms !== undefined && t('chat.agentActivity.hosted.duration', { seconds: Math.max(1, Math.round(card.duration_ms / 1000)) }),
     cost,
   ].filter(Boolean);
@@ -311,6 +356,7 @@ export const HostedToolRow: React.FC<{ card: HostedActivity }> = ({ card }) => {
         {count && <span className="hidden shrink-0 text-[11px] text-muted sm:inline">{count}</span>}
         <ChevronRight className={clsx('size-3.5 shrink-0 text-muted transition-transform', open && 'rotate-90')} aria-hidden="true" />
       </button>
+      <HostedAttemptNotes card={card} />
       <FallbackNote card={card} />
       {open && <HostedDetail card={card} />}
     </div>

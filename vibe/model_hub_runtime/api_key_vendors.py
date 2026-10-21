@@ -226,6 +226,7 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
 
     entries: list[APIKeyVendorCatalogEntry] = []
     seen_ids: set[str] = set()
+    seen_service_ids: set[str] = set()
     for item in payload:
         if not isinstance(item, dict):
             raise ValueError("api-key vendor catalog is invalid")
@@ -248,6 +249,9 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
             )
         ):
             raise ValueError("api-key vendor catalog is invalid")
+        search = _validate_search_catalog(item.get("search"), protocol=protocol)
+        if search is not None and search["service_id"] in seen_service_ids:
+            raise ValueError("api-key vendor catalog is invalid")
         entries.append(
             APIKeyVendorCatalogEntry(
                 id=vendor_id,
@@ -255,10 +259,12 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
                 official_base_url=official_base_url,
                 protocol=protocol,
                 models_dev_provider=models_dev_provider.strip() if models_dev_provider else None,
-                search=_validate_search_catalog(item.get("search"), protocol=protocol),
+                search=search,
             )
         )
         seen_ids.add(vendor_id)
+        if search is not None:
+            seen_service_ids.add(search["service_id"])
     return tuple(entries)
 
 

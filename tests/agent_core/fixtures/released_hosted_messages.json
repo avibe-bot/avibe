@@ -1,0 +1,16 @@
+[
+  {
+    "role": "assistant",
+    "content": [{"type": "hosted_tool", "id": "search_1", "tool": "web_search", "action": {"type": "search", "queries": ["Avibe"]}, "record": {"status": "completed", "sources": [{"url": "https://avibe.bot", "title": "Avibe", "snippet": "A local-first Agent OS", "page_age": "yesterday"}]}, "native": {"source_id": "src_released01", "payload": [{"type": "web_search_call", "status": "completed"}]}}],
+    "origin": {"provider": "openai", "api": "openai_responses", "model": "gpt-5.5"},
+    "stop_reason": "stop",
+    "hosted_summary": {"counts": {"web_search_calls": 1}, "cited_sources": [], "cost": {"basis": "list", "usd": 0.01}}
+  },
+  {
+    "role": "tool_result", "tool_call_id": "call_1", "tool_name": "web_search", "content": [{"type": "text", "text": "1. Avibe — https://avibe.bot"}], "is_error": false,
+    "hosted": {
+      "record": {"status": "completed", "sources": [{"url": "https://avibe.bot"}]},
+      "execution": {"mode": "proxy", "executor_origin": {"provider": "anthropic", "api": "anthropic", "model": "claude-haiku-5-5"}, "executor_source_id": "src_released01", "executor_billing": "metered", "cost": {"basis": "reported", "usd": 0.008}, "failed_attempts": [{"source_id": "src_released02", "billing": "metered"}]}
+    }
+  }
+]

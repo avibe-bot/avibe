@@ -1768,6 +1768,7 @@ export const SettingsModelsPage: React.FC = () => {
                 source={selectedSource}
                 serviceView={serviceDetailView}
                 onManageSource={() => setServiceDetailView(false)}
+                onOpenUsage={() => { selectSource(null); setTab('usage'); }}
                 onSaveSearch={(body) => void hostedTools.save('web_search', body)}
                 onRetryService={(sourceId) => void hostedTools.retryService(sourceId)}
                 hostedTools={hostedTools.read}

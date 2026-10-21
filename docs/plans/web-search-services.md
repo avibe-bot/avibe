@@ -667,28 +667,15 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 | --- | --- | --- | --- |
 | **S1a** Catalog and Sources | foundation | search vendors in the catalog; the Source UI guards for a `search` Source (no model refresh, test or add-model controls; its row says "搜索服务"); `protocol: "search"` Sources and their exclusions (the credential store accepts the protocol, the engine config renderer skips it); the protocol vocabulary split; the create and replace branch with free checks; "重新启用" (`reenable_search_source`, its free check and the armed-trial state); `service_order` maintenance on create and remove; the adapter's search call and free-check operation with custody and transport rules; opening the v17 version event | — |
 | **S1b** Settings and Tools read | foundation | no service candidate and no `service_vendors` in the read until S2 activates them; `prefer_native`, `services` (the patch semantics and load-time clamping) and `executor_order_kinds` (loaded, written with each order save, and kept across a restart); the Tools read (`executor_candidates` with `kind`, `service_vendors`, `trial_pending`) and PUT; their v17 entries | S1a |
-| **S2** Chain and records | gateway | candidates, automatic order and the saved-order placement rule, limits, per-vendor request and result mapping with field bounds, outcome classes into fenced Source health, positive evidence, record with `attempts[]`, cost and metering, `prefer_native` in hop facts, the no-candidate reason, the `hosted_activity` projection and the card's executor label ("通过 Tavily", read from `attempts[]`) | S1a, S1b, S1c, S4, S6's disclosure |
+| **S2a** Chain readers and usage | readers | C-1 `attempts[]`, service executor origin, estimated cost and service error-code readers/writers; attempts-only hosted-activity projection and Web/IM rendering; service ledger and usage-summary readers plus the service-row write API; `mode: "service"` readers; released-shape fixtures and tests. Dormant: no chain, producer, metering call or activation. | S1a, S1b, S1c, S4 |
+| **S2b** Chain producer and activation | gateway | Candidate chain and order placement; adapter search calls and mapping; outcomes into health/cooldowns, trial gate, positive evidence and metering writes; hop facts and turn freeze; retry route; flips `SEARCH_SERVICES_ACTIVE`. | S2a, S6's disclosure |
 | ~~S3~~ | — | cancelled 2026-10-20 with page content; the card's executor label ("通过 Tavily") moves to S2 with the projection | — |
 | **S1c** Content removal | foundation | removes what S1a and S1b landed for page content: the catalog's content request mapping, `content_max_chars` and `page` price extras; S1b's `services.<id>.content` (a saved key is ignored on load), the read's `settings.content` and the vendor page-text flags, with `hosted-tools-status.schema.json`, `api.md`, the UI types and the v18 entries (v19 if a release has carried v18) | S1b |
 | **S4** Tools, dialog, Sources | UI | §6 with en and zh copy, built against the read shape with fixtures; it shows service rows and the add dialog's services only when the read lists them | S1b's read shape as S1c leaves it; S5's frames |
 | **S5** Frames | design | §6 frames in `design.pen` through Pencil (done: avibe-docs#73) | — |
 | **S6** Public docs | docs | Models → Tools: services, order, defaults, privacy and cost, in English and Chinese. The disclosure part (an official DeepSeek Source joins the search order automatically, which data goes to each service, what it costs, and how to turn it off) publishes no later than the release that ships S2; the UI walkthrough follows S4 | the disclosure lands before or with S2 (S2 depends on it); the walkthrough follows S4 |
 
-The version event follows the v15 precedent in `model-hub-contracts/README.md`: S1a opens v17 and publishes the
-Source side, and S1b and S2 edit the same v17 section only while it is unshipped, as the hosted-tools
-freeze rule says (`vibey-hosted-tools.md` §12). A lane that lands after a release has carried v17 opens v18 for
-its additions instead, so a shipped version number never changes meaning. Because release
-candidates are cut from the default branch at any time, every lane is safe on its own until the event closes:
-before S2, a `search` Source is never requested and never affects model routing, discovery or engine config, and
-the shapes S1a and S1b write are final except for what S1c removes. S1c drops the page-content fields, and its
-loader ignores a `services.<id>.content` key that a pre-S1c build saved, so no migration write is needed. S4 and S2
-build on the post-S1c shape, so they read it without migration. No release turns on a new third-party data flow before
-it is disclosed: S2's release carries S6's disclosure and a release note naming DeepSeek's automatic enrolment and
-how to turn it off (the `services.<id>.enabled` switch, available through S1b's PUT). S2 is the activation lane: on its head the
-read starts listing service candidates and `service_vendors` and the chain starts calling services, and S4
-lands before it, so the release that turns services on has the service rows, the add dialog and the
-disclosure. Before S2, no surface shows a service the gateway cannot run, and a `search` Source can only be created
-through the API.
+The version event follows the v15 precedent in `model-hub-contracts/README.md`: S1a opened v17, S1b/S1c completed v18, and RC tag `gh-v3.2.2rc13` carries v18. S2a therefore opens v19 for reader and usage shapes; S2b may share v19 while it is unshipped, otherwise it opens v20. Before S2b, S2a is dormant and safe to release: it adds no producer, third-party request or activation. S1c's compatibility rule for removed page-content fields remains in force. S2b's activation release carries S6's disclosure, and the freeze rule means a shipped version never changes meaning.
 
 ## 10. Acceptance properties
 
@@ -736,7 +723,8 @@ Hermetic, against stub vendor servers; no live upstream and no real keys.
      older release's strict reader rejects, so that Session no longer loads there;
    - any sent service request, which writes a service-shaped usage ledger row even when the call was stopped and
      left no record. An older reader requires `model_id` and drops that row, so after a downgrade the Usage tab
-     loses that service usage; model usage is unaffected;
+     loses that service usage; model rows remain, but the lost service rows mark the surviving usage history as
+     degraded or lower-bound, and hourly history is incomplete until the affected evidence ages out;
    - a completed service attempt's capability evidence (`mode: "service"`), which an older reader skips and its next
      evidence write prunes, so after a downgrade the Tools status loses its latest successful service.
 

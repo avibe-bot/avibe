@@ -8,11 +8,11 @@ credential redaction and supply-impact confirmation rules still apply; unknown
 API siblings retain the Owner default.
 
 
-Status: **Normative, `contract_version` 18** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
+Status: **Normative, `contract_version` 19** — Model Hub implementations must conform, and the response conformance guard enumerates this route table and validates one real server response for every route.
 
-Success envelope: `{ok: true, contract_version: 18, ...}`.
+Success envelope: `{ok: true, contract_version: 19, ...}`.
 Failure envelope:
-`{ok: false, contract_version: 18, error: <machine_code>, detail?: <i18n_key>}`.
+`{ok: false, contract_version: 19, error: <machine_code>, detail?: <i18n_key>}`.
 `detail` is always a string. Structured error data lives in a named sibling.
 Guarded mutation refusals specialize that envelope through
 `guard-refusal.schema.json`; both report arrays are required and together form the plan
@@ -24,7 +24,7 @@ table. The contract guard requires the two endpoint sets to be identical, requir
 exercised HTTP response for every registry entry, and validates that response against
 the route's named schema.
 
-The shared envelope and every versioned nested contract carry `contract_version` 18, the
+The shared envelope and every versioned nested contract carry `contract_version` 19, the
 terminal value. Supported persisted config shapes and historical TurnProvenance
 remain readable; ephemeral envelopes use only the terminal version.
 
@@ -69,7 +69,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
 | GET `/api/models/agents/<backend>/provenance?model=<id>` | → `{provenance: TurnProvenance \| null}` | On-demand read of the most recently persisted retained record for this exact backend and canonical catalog model, regardless of outcome. Validates backend/model; absent history is null. Uses only the existing bounded store and never starts or syncs the engine. No history field is added to AgentChain. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
-| GET `/api/models/usage?days=<n>` | → `{usage: UsageSummary \| UsageReport}` | The released `days` selector remains supported and is clamped to the retained window; a Source with no metered call is absent rather than reported as zero. The exclusive modern `window=24h\|7d\|30d\|60d` selector returns the dense temporal report; sending both selectors or an invalid `window` returns `400 invalid_parameter`. |
+| GET `/api/models/usage?days=<n>` | → `{usage: UsageSummary \| UsageReport}` | The released `days` selector remains supported and is clamped to the retained window; a Source with no metered call is absent rather than reported as zero. Search-service requests are reported in `services[]`, never in `sources[]` (see Search-service usage). The exclusive modern `window=24h\|7d\|30d\|60d` selector returns the dense temporal report; sending both selectors or an invalid `window` returns `400 invalid_parameter`. |
 | GET `/api/models/quota` | → `{quota: QuotaSummary}` | Rate-limit windows of every hub-held subscription Source, from the vendor's own usage report, plus each Source's API-price `value` (see Subscription quota). Served from the server cache; a Source older than five minutes is re-read before answering, bounded by a short deadline, and a Source still being read is listed in `pending`. Never starts the engine. |
 | POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. |
 | GET `/api/models/hosted-tools` | → `{hosted_tools: HostedToolsStatus}` | Models → Tools (`hosted-tools-status.schema.json`): every catalog tool with its switch (absent setting = on), its passive status from real use (`latest_ok`, current `refused[]`, per-pair `verified[]`), for a search tool the saved and effective executor order with every eligible executor candidate and its unit rates, and for `image_generate` the saved and effective default and the available image models. Memory only; nothing is probed. |
@@ -83,7 +83,7 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | POST `/api/models/migration/scan` | → `{scan: MigrationScan}` | Read-only. |
 | POST `/api/models/migration/apply` | `{item_ids: string[], clean_api_keys?: boolean}` → `{applied, sources, added_to}` | Applies one grouped, server-owned custody transaction. It checks saved configuration and custody locally, copies API keys without upstream validation, upgrades an existing native subscription Source in place when present, and commits Source/Routes/backend mode atomically. API-key originals are kept unless cleanup was selected. Pre-exposure failure is reversible; post-exposure recovery is forward-only and keeps the backend blocked until terminalized. |
 | GET `/api/models/turns/<turn_id>/provenance` | → `{provenance: TurnProvenance}` or documented absence error | Debug read for exactly attributed Hub turns. |
-| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 18 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
+| GET `/api/models/runtime/status` | → `{runtime: RuntimeDependency}` | Read-only managed engine status. The nested object carries `contract_version` 19 and persisted user intent in `enabled`; `not_started` is installed lazy-start idleness, not an alarm. |
 | POST `/api/models/runtime/install` | → `{runtime: RuntimeDependency}` | Idempotently starts server-owned installation. It returns and persists `installing`; reload reads the same state. Uses the existing mutation authentication and CSRF guards. |
 | POST `/api/models/runtime/start` | → `{runtime: RuntimeDependency}` | Persists `enabled: true` and explicitly starts the managed engine. Service startup restores this intent; runtime availability has no separate enable-confirmation step. Uses the existing mutation authentication and CSRF guards; status reads never start it. |
 | POST `/api/models/runtime/stop` | → `{runtime: RuntimeDependency}` | Explicitly stops the managed engine, persists `enabled: false`, and returns it to `not_started`. The mutation is rejected with `runtime_in_use` while any native backend is configured for Hub mode or Avibe has catalog models, so disabling the shared runtime cannot strand a configured route. An empty Avibe catalog does not keep the runtime open. |
@@ -186,8 +186,9 @@ current date; around a DST transition the 24-hour view can touch three dates.
 Each bucket carries `history_complete` independently of `token_reports`. A legacy
 daily-only ledger can therefore contribute to daily reports while leaving affected
 hourly buckets incomplete; its daily count is never assigned to an hour using
-`last_metered_at`. Bucket rows are sparse `(source_id, model_id)` pairs, and the
-`totals`, `sources`, and `days` fields aggregate those same measured bucket rows.
+`last_metered_at`. Bucket rows are sparse `(source_id, model_id)` pairs, followed by
+sparse `(source_id, service_id)` rows with `kind: "service"`, and the `totals`,
+`sources`, `services`, and `days` fields aggregate those same measured bucket rows.
 
 ### Native API-key migration
 
@@ -714,7 +715,7 @@ The terminal result of both ordinary API-key creation and OAuth creation is:
 ```json
 {
   "ok": true,
-  "contract_version": 18,
+  "contract_version": 19,
   "source": {
     "id": "src_anthkey01",
     "kind": "api_key",
@@ -824,7 +825,7 @@ Every guarded Source/inventory mutation uses the §4.5 envelope matrix and the c
 ```json
 {
   "ok": false,
-  "contract_version": 18,
+  "contract_version": 19,
   "error": "source_last_supplier",
   "would_remove_hops": [],
   "would_interrupt": [
@@ -963,7 +964,7 @@ API-key success:
 ```json
 {
   "ok": true,
-  "contract_version": 18,
+  "contract_version": 19,
   "source": {
     "id": "src_relay9c1x",
     "kind": "api_key",
@@ -1058,7 +1059,7 @@ Status and submit return the same terminal shape:
 ```json
 {
   "ok": true,
-  "contract_version": 18,
+  "contract_version": 19,
   "flow": {
     "flow_id": "oaf_claude01",
     "client_nonce": "ofn_01j5w8z7p4n6q2rt",
@@ -1131,9 +1132,9 @@ a valid `interrupted` chain.
 ```json
 {
   "ok": true,
-  "contract_version": 18,
+  "contract_version": 19,
   "chain": {
-    "contract_version": 18,
+    "contract_version": 19,
     "backend": "codex",
     "model_id": "gpt-5.6",
     "manual_override": null,
@@ -1160,7 +1161,7 @@ In Direct mode both chain and probe refuse with:
 ```json
 {
   "ok": false,
-  "contract_version": 18,
+  "contract_version": 19,
   "error": "direct_mode",
   "detail": "models.hub.direct_mode"
 }
@@ -1174,9 +1175,9 @@ A successful probe nests its result:
 ```json
 {
   "ok": true,
-  "contract_version": 18,
+  "contract_version": 19,
   "probe": {
-    "contract_version": 18,
+    "contract_version": 19,
     "backend": "claude",
     "channel": "hub",
     "reachable": false,
@@ -1199,7 +1200,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 18,
+  "contract_version": 19,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": true,
@@ -1212,7 +1213,7 @@ not-ready carries the closed i18n key `models.probe.native_cli_unavailable`.
 
 ```json
 {
-  "contract_version": 18,
+  "contract_version": 19,
   "backend": "codex",
   "channel": "native_cli",
   "reachable": false,
@@ -1228,7 +1229,7 @@ No candidate is an API error with a typed model-scoped state:
 ```json
 {
   "ok": false,
-  "contract_version": 18,
+  "contract_version": 19,
   "error": "probe_no_candidate",
   "detail": "models.probe.no_candidate.waiting",
   "supply": {
@@ -1419,7 +1420,7 @@ The store retains at most 500 exactly attributed settled turns with its existing
 writes. Ambiguous attribution remains excluded; this is not a log of every upstream
 request. Null means no matching retained record, including eviction. A newer served,
 canceled or other record without a terminal error supersedes older error display.
-Success uses exactly `{ok: true, contract_version: 18, provenance: TurnProvenance | null}`;
+Success uses exactly `{ok: true, contract_version: 19, provenance: TurnProvenance | null}`;
 there is no `success` field or envelope exception.
 
 Local `engine_down` records may also contain `local_error_detail`, an OS-generated
@@ -1513,7 +1514,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 18,
+  "contract_version": 19,
   "error": "provenance_unavailable",
   "detail": "models.provenance.direct_mode"
 }
@@ -1522,7 +1523,7 @@ ambiguous absence are explicit and distinguishable from an unknown turn:
 ```json
 {
   "ok": false,
-  "contract_version": 18,
+  "contract_version": 19,
   "error": "provenance_unavailable",
   "detail": "models.provenance.attribution_ambiguous"
 }
@@ -1743,6 +1744,45 @@ requested window even when no turn fell inside it; `days[]` contains only days t
 carry a metered turn (grouped by bucket start date for hourly reports, as described
 under usage report windows). `label` is joined from current Source config, so it is `null`
 for a Source that has since been removed and follows a rename immediately.
+
+### Search-service usage
+
+A sent search-service request reaches no model, so it is metered in its own ledger row
+per Source and catalog `service_id` (`../web-search-services.md` §4.3), with the same
+daily and hourly retention, row capacity and ceilings as a model row. A request that
+failed before it was sent is not metered. The row counts `requests` (sent),
+`billable_requests` (those the catalog's billing rule charges), `uncertain_requests`
+(sent, billing unknown), and `reported_requests` with `reported_usd`, the vendor's own
+figures for billable requests. The service-row write API exists, but nothing calls it
+before search execution is activated (`../web-search-services.md` §9).
+
+The counts keep `billable_requests + uncertain_requests ≤ requests` and
+`reported_requests ≤ billable_requests`, and `reported_usd` is a finite, non-negative
+amount no larger than `reported_requests` × $1, zero without a reported request. They
+are repaired on write and on read: a row that breaks a relation keeps `requests`,
+reduces its counts to their bounds, drops the reported quantities a reduced count no
+longer covers or that break their own bound, and becomes a lower bound, as does every
+row with an uncertain request. A repaired row's hourly history is incomplete. A ledger
+row without the additive fields reads them as zero. A row is told apart by its
+`service_id`; one naming both a model and a service is dropped as unreadable.
+
+Model counts in `totals`, `sources[]`, `days[]` and model bucket rows never include
+service requests. `services[]` has one entry per (Source, `service_id`) with a sent
+request in the window, busiest first: the counts, `last_metered_at`, the Source's
+`label` (`null` once the Source is removed) and the catalog's `service_label` (`null`
+once the catalog no longer lists the service). A tool-only Source appears only there;
+a Source that also supplies models keeps its model usage in `sources[]`.
+
+When `pricing` is present, each `services[]` entry and service bucket row also carries
+`reported_usd`, `api_cost_usd` and `api_cost_lower_bound`, and each `services[]` entry
+carries `priced`. `api_cost_usd` values every billable request at the current catalog's
+per-request list price; reported figures never replace or add to it. `totals` and
+`days[]` add the services' list valuation to their `api_cost_usd` and carry the reported
+figures apart in `service_reported_usd`. Their `excluded_service_requests` counts the
+billable requests of services the current catalog no longer prices, which, like an
+unpriced model's tokens, make the figure a lower bound. `pricing.service_price_date` is
+the oldest catalog price verification date among the priced services, absent when none
+is priced. Without a price table the service fields carry counts only.
 
 ## Runtime installation and host support
 

@@ -363,6 +363,45 @@ def test_a_generate_action_names_a_prompt_only_when_the_endpoint_revised_it(payl
     assert message_from_dict(payload).hosted.action.prompt is None
 
 
+@pytest.mark.parametrize(
+    "payload",
+    json.loads((Path(__file__).parent / "fixtures/released_hosted_messages.json").read_text()),
+    ids=["released-native", "released-model-executor"],
+)
+def test_released_hosted_rows_load_unchanged_without_service_fields(payload):
+    """S2a: optional service fields cannot make a released transcript unreadable."""
+    VALIDATOR.validate(payload)
+    assert message_to_dict(message_from_dict(payload)) == payload
+    # Service result-mapping limits must not narrow the released C-1 source shape.
+    long_source = {"url": "https://a.test/" + "u" * 2048, "title": "t" * 301,
+                   "snippet": "s" * 1001, "page_age": "p" * 65}
+    expanded = copy.deepcopy(payload)
+    record = expanded["content"][0]["record"] if payload["role"] == "assistant" else expanded["hosted"]["record"]
+    record["sources"] = [long_source]
+    VALIDATOR.validate(expanded)
+    assert message_to_dict(message_from_dict(expanded)) == expanded
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "skipped"])
+def test_service_attempts_and_origin_load_and_round_trip(outcome):
+    """S2a: the new writer shape is accepted by both strict persisted readers."""
+    payload = copy.deepcopy(PROXIED)
+    payload["tool_name"] = "web_search"
+    payload["hosted"]["execution"]["executor_origin"] = {
+        "provider": "exa", "api": "search_api", "model": "exa/search",
+    }
+    attempt = {"source_id": SOURCE, "label": "Exa", "kind": "service", "outcome": outcome}
+    if outcome == "skipped":
+        attempt.update(skipped="cooling", retry_at="2026-10-20T12:00:00Z")
+    else:
+        attempt["cost"] = {"basis": "reported", "usd": 0.007, "estimate": True}
+        if outcome == "failed":
+            attempt.update(error_code="service_unreadable", superseded=True)
+    payload["hosted"]["record"]["attempts"] = [attempt]
+    VALIDATOR.validate(payload)
+    assert message_to_dict(message_from_dict(payload)) == payload
+
+
 def test_a_citation_range_must_lie_within_its_text():
     # The schema cannot compare a range with the text length; the producer and reader own it.
     with pytest.raises(ValueError):

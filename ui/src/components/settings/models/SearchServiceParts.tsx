@@ -7,9 +7,11 @@ import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { ToggleSwitch } from '../SettingsPrimitives';
 import { Field } from './dialogFields';
-import { formatMonthDay, formatSmallUsd } from './format';
+import { atLeast, formatCost, formatCount, formatMonthDay, formatSmallUsd, formatUsd } from './format';
+import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import { serviceSettings } from './searchServices';
 import { sourceStatePresentation } from './sourceStatePresentation';
+import { usageHasNoPrice, type ServiceMonth } from './usageProjection';
 import { VendorGlyph } from './vendorGlyph';
 import type { HostedExecutorCandidate, HostedSearchServiceVendor, HostedServiceListPrice, HostedToolPut, HostedWebSearchToolStatus, Source } from './types';
 
@@ -84,6 +86,35 @@ export const SearchVendorFacts: React.FC<{ vendor: HostedSearchServiceVendor }> 
   </>;
 };
 
+/** This month's requests and their list valuation, with the vendors' own figure beside it, never in it. */
+const ServiceMonthLine: React.FC<{ month: RegionRead<ServiceMonth>; onOpenUsage?: () => void }> = ({ month, onOpenUsage }) => {
+  const { t, i18n } = useTranslation();
+  const usage = foldRegionRead<ServiceMonth, ServiceMonth | null>(month, {
+    loading: () => null, ready: (data) => data, unread: () => null, degraded: (data) => data,
+  });
+  if (usage === null && !regionFailed(month)) return null;
+  const parts = usage === null ? [t('settings.models.usage.failure')] : [
+    t('settings.models.searchServices.monthRequests', {
+      count: usage.totals.requests,
+      requests: atLeast(formatCount(usage.totals.requests, i18n.language), usage.partial),
+    }),
+    // Without a price table the report carries counts only.
+    ...(usage.priced ? [usageHasNoPrice(usage.totals)
+      ? t('settings.models.usage.cost.noPrice')
+      : t('settings.models.searchServices.monthEstimate', {
+        usd: formatCost(usage.totals.api_cost_usd ?? 0, usage.totals.api_cost_lower_bound || usage.partial, i18n.language),
+      })] : []),
+    ...(usage.priced && usage.totals.reported_requests > 0
+      ? [t('settings.models.searchServices.monthReported', { usd: formatUsd(usage.totals.reported_usd ?? 0, i18n.language) })]
+      : []),
+  ];
+  return <p className="model-hub-tool-note flex flex-wrap items-center gap-x-2 gap-y-1" data-service-month={usage?.month}>
+    <span className="font-semibold text-foreground">{t('settings.models.searchServices.month')}</span>
+    <span>{parts.join(' · ')}</span>
+    {onOpenUsage && <button type="button" onClick={onOpenUsage} className="model-hub-action-mint shrink-0 font-semibold">{t('settings.models.searchServices.openUsage')}</button>}
+  </p>;
+};
+
 /** Only per-field patches leave this section; effective defaults are never echoed into saved overrides. */
 export const SearchServiceSettings: React.FC<{
   source: Source;
@@ -92,7 +123,10 @@ export const SearchServiceSettings: React.FC<{
   pending: boolean;
   onSave: (body: HostedToolPut) => void;
   onRetry: (sourceId: string) => void;
-}> = ({ source, tool, vendor, pending, onSave, onRetry }) => {
+  /** Present only while the Tools read lists this Source as a search service. */
+  month?: RegionRead<ServiceMonth>;
+  onOpenUsage?: () => void;
+}> = ({ source, tool, vendor, pending, onSave, onRetry, month, onOpenUsage }) => {
   const { t } = useTranslation();
   const settings = serviceSettings(tool, vendor, source.id);
   const candidate = tool.executor_candidates.find((row) => row.source_id === source.id);
@@ -112,5 +146,6 @@ export const SearchServiceSettings: React.FC<{
     </Field>
     <p className="model-hub-tool-note">{t('settings.models.searchServices.settingsNote')}</p>
     <SearchServicePrice price={vendor.price} />
+    {month && <ServiceMonthLine month={month} onOpenUsage={onOpenUsage} />}
   </section>;
 };

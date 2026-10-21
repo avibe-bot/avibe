@@ -351,13 +351,18 @@ def test_a_write_reads_the_sources_as_they_are_when_it_runs(tmp_path):
     }
 
 
-def test_persisted_records_match_the_schema_and_rc_era_ones_are_pruned(tmp_path):
-    """MH-HOSTED-003: an rc build's probe records (version 1) do not load; nothing migrates them."""
+@pytest.mark.parametrize("mode", ["native", "executor", "direct", "service"])
+def test_persisted_records_match_the_schema_and_rc_era_ones_are_pruned(tmp_path, mode):
+    """MH-HOSTED-003: every execution mode survives a restart; rc probe records still do not load.
+
+    S2a adds service-mode reader acceptance without writing it from any live path.
+    """
     path = tmp_path / "model_hub_capability_evidence.json"
     store = CapabilityEvidenceStore(path)
     source = _source()
     store.write_refusal(_refusal(source, ULTRA), live=lambda: [source], wire_for=WIRE_FOR)
-    store.note_success(_success(source, CALL), live=lambda: [source], now=NOW)
+    store.note_success(_success(source, CALL, mode=mode), live=lambda: [source], now=NOW)
+    assert CapabilityEvidenceStore(path).get(source.id, "grok-4.6", CALL, "verified").mode == mode
     schema = json.loads((CONTRACTS / "capability-evidence.schema.json").read_text())
     validator = Draft7Validator(schema, registry=Registry().with_resources([(schema["$id"], Resource.from_contents(schema))]))
     written = json.loads(path.read_text())

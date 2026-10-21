@@ -1763,6 +1763,16 @@
           "outputTokens": "Output tokens",
           "totalTokens": "Total tokens"
         },
+        "services": {
+          "title": "Search services",
+          "identity": "Source / service",
+          "billable": "Billable",
+          "uncertain_one": "+{{requests}} with unknown billing",
+          "uncertain_other": "+{{requests}} with unknown billing",
+          "reported": "Vendor-reported",
+          "accounting": "Search requests are not model calls: they stay out of the token and request figures above, and only their value at API price joins the total.",
+          "priceDate": "Search prices from {{date}}."
+        },
         "failure": "The usage report could not be read.",
         "retry": "Retry",
         "cost": {
@@ -1771,6 +1781,9 @@
           "fetching": "Fetching prices…",
           "excluded_one": "{{tokens}} token has no price and is left out",
           "excluded_other": "{{tokens}} tokens have no price and are left out",
+          "reported": "Vendors reported {{usd}}",
+          "excludedServices_one": "{{requests}} search request has no price and is left out",
+          "excludedServices_other": "{{requests}} search requests have no price and are left out",
           "tableDate": "Price table from {{date}}",
           "tableDateUnknown": "Price table date unknown",
           "tableFetching": "Fetching the price table…"
@@ -2560,6 +2573,12 @@
         "removeNote": "Removing this service stops using it for search. Other providers are unaffected.",
         "addProvider": "Add provider",
         "menu": "Search services (Tavily, Exa…)",
+        "month": "This month",
+        "monthRequests_one": "{{requests}} request",
+        "monthRequests_other": "{{requests}} requests",
+        "monthEstimate": "API list-price estimate {{usd}}",
+        "monthReported": "vendor-reported {{usd}}",
+        "openUsage": "View usage",
         "vendor": {
           "deepseek": "Search through the official DeepSeek provider. Only searches with results are billed; empty results, failures and timeouts are not.",
           "tavily": "Basic web search with query-relevant snippets, designed for AI agents.",
@@ -2578,6 +2597,7 @@
           "native": "A real request ran {{toolInline}} natively on this model. Display only; it doesn't change routing.",
           "executor": "This model ran {{toolInline}} for other models as the executor. Display only; it doesn't change routing.",
           "direct": "This model generated images on its image endpoint. Display only; it doesn't change routing.",
+          "service": "This search service ran {{toolInline}} in a real request. Display only; it doesn't change routing.",
           "refused": "This Source refused {{toolInline}} in a real request on this model. Until you clear it, Vibey does it another way.",
           "replay": "This model runs {{toolInline}} on this Source but refused earlier results sent back to it, so they go back as plain text."
         },
@@ -5069,15 +5089,57 @@
           "provider_image_unusable": "The provider returned an image that couldn't be used.",
           "search_not_run": "The model answered without searching.",
           "search_failed": "The provider's search failed.",
-          "response_ended_early": "The response ended early."
+          "response_ended_early": "The response ended early.",
+          "service_key_invalid": "The search service key is invalid.",
+          "service_balance": "The search service account has no balance.",
+          "service_limit": "The search service limit has been reached.",
+          "service_unavailable": "The search service is unavailable.",
+          "service_refused": "The search service refused this query.",
+          "service_unreadable": "The search service returned an unreadable response.",
+          "search_query_too_long": "The search query is too long; shorten it and try again.",
+          "search_sources_blocked": "All search sources are blocked or disabled."
         },
         "mode": {
           "native": "Native · {{provider}}",
           "proxy": "Via {{provider}} proxy",
+          "service": "Through {{provider}}",
           "direct": "Direct · {{provider}}",
           "directModel": "{{model}} · {{source}}",
           "proxyModel": "Via {{provider}} proxy · {{model}}"
         },
+        "repair": {
+          "disabled": "needs web search enabled in Models › Tools",
+          "key": "needs a replacement key",
+          "reauthorize": "needs a new sign-in",
+          "balance": "needs an account top-up",
+          "balanceReenable": "needs an account top-up, then re-enabling in Models › Tools",
+          "limit": "needs a higher spending or usage limit",
+          "limitReenable": "needs a higher spending or usage limit, then re-enabling in Models › Tools",
+          "tavilyLimit": "needs a plan upgrade or a higher key usage limit (432), or a higher pay-as-you-go limit (433) in Tavily, then re-enabling in Models › Tools",
+          "plan": "needs a plan that includes this product",
+          "account": "needs the account restored by the provider",
+          "error": "needs attention in Models › Providers"
+        },
+        "reason": {
+          "failed": "failed",
+          "superseded": "failed on this request; a later action has since updated its state",
+          "service_key_invalid": "has an invalid key",
+          "service_balance": "is out of balance",
+          "service_limit": "reached its usage limit",
+          "service_unavailable": "was unavailable",
+          "service_refused": "refused this query",
+          "service_unreadable": "returned an unreadable response"
+        },
+        "skip": {
+          "blocked": "was blocked",
+          "disabled": "was not enabled for search",
+          "cooling": "was waiting to retry",
+          "query_too_long": "can't take a query this long",
+          "unavailable": "was unavailable"
+        },
+        "listSeparator": ", ",
+        "itemSeparator": "; ",
+        "switch": "{{failed}}; switched to {{provider}}",
         "status": {
           "failed": "Failed",
           "incomplete": "Incomplete",
@@ -5102,6 +5164,7 @@
         "ranNative": "Ran natively on {{where}}",
         "ranProxy": "Run by proxy executor {{where}}",
         "ranDirect": "Ran directly on {{where}}",
+        "ranService": "Run by search service {{where}}",
         "fallback": {
           "ranOn": "{{from}} doesn't support {{toolInline}}, so {{provider}} ({{source}}) ran it",
           "ran": "{{from}} doesn't support {{toolInline}}, so {{provider}} ran it",

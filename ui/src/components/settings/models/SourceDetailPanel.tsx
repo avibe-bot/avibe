@@ -19,7 +19,7 @@ import { GuardDialog } from './GuardDialog';
 import { GuardImpact } from './GuardImpact';
 import { HostedCapabilityChips } from './HostedCapabilityChips';
 import { modelCapabilities } from './hostedTools';
-import { serviceVendorForSource, webSearchTool } from './searchServices';
+import { searchServicesActive, serviceVendorForSource, webSearchTool } from './searchServices';
 import { SearchServiceSettings, SearchVendorGlyph } from './SearchServiceParts';
 import { confirmGuardPlan, sendAgreed, unansweredRefusal } from './guardedWrite';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
@@ -56,7 +56,8 @@ import {
   type TrackSourceMutation,
 } from './mutationSettlement';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
-import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
+import { foldRegionRead, loadingRegion, readRegion, regionFailed, type RegionRead } from './regionRead';
+import { serviceMonthUsage, type ServiceMonth } from './usageProjection';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction, wasBlocked } from './repair';
 import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
@@ -151,6 +152,25 @@ const committedPlan = (hops: RouteHopRef[], gaps: SupplyGap[]): ManageGuardPlan 
 
 const NO_TOOLS: ReadonlySet<HostedToolName> = new Set();
 
+/** A candidate service's host-local month, read in the keyed detail child only while it is visible. */
+function useServiceMonth(sourceId: string): RegionRead<ServiceMonth> {
+  const [month, setMonth] = React.useState<RegionRead<ServiceMonth>>(loadingRegion);
+  React.useEffect(() => {
+    let current = true;
+    void readRegion(async () => serviceMonthUsage(await modelsApi.getUsageSummary('60d'), sourceId))
+      .then((read) => { if (current) setMonth(read); });
+    return () => { current = false; };
+  }, [sourceId]);
+  return month;
+}
+
+type SearchSettingsProps = React.ComponentProps<typeof SearchServiceSettings>;
+
+const ServiceMonthSearchSettings: React.FC<Omit<SearchSettingsProps, 'month'>> = (props) => {
+  const month = useServiceMonth(props.source.id);
+  return <SearchServiceSettings {...props} month={month} />;
+};
+
 type SourceReconciliation =
   | { kind: 'source'; source: Source }
   | { kind: 'gone'; sources: Source[]; snapshot: number };
@@ -188,7 +208,9 @@ export const SourceDetailPanel: React.FC<{
   /** A model Source reached from Tools shows its search detail, without model removal. */
   serviceView?: boolean;
   onManageSource?: () => void;
-}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools, onRetryHostedTools, hostedPending, onClearHostedRefusal, onSaveSearch, onRetryService, serviceView, onManageSource }) => {
+  /** Leave the detail for the Usage tab, from a search service's monthly line. */
+  onOpenUsage?: () => void;
+}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools, onRetryHostedTools, hostedPending, onClearHostedRefusal, onSaveSearch, onRetryService, serviceView, onManageSource, onOpenUsage }) => {
   const { t, i18n } = useTranslation();
   const { showToast } = useToast();
   const detailsHidden = useSourceDetailsHidden();
@@ -226,7 +248,24 @@ export const SourceDetailPanel: React.FC<{
   const searchTool = webSearchTool(capabilityStatus);
   const serviceVendor = serviceVendorForSource(searchTool, source.id);
   const serviceDetail = Boolean(serviceVendor && (source.protocol === 'search' || serviceView));
-  const searchSettings = searchTool && serviceVendor && onSaveSearch && onRetryService ? <SearchServiceSettings source={source} tool={searchTool} vendor={serviceVendor} pending={busy || (hostedPending?.has('web_search') ?? false)} onSave={onSaveSearch} onRetry={onRetryService} /> : null;
+  // Usage, like the Tools rows, waits for the read to list this Source as a search service.
+  const serviceCandidate = searchServicesActive(searchTool)
+    && Boolean(searchTool?.executor_candidates.some((row) => row.kind === 'service' && row.source_id === source.id));
+  let searchSettings: React.ReactNode = null;
+  if (searchTool && serviceVendor && onSaveSearch && onRetryService) {
+    const settingsProps = {
+      source,
+      tool: searchTool,
+      vendor: serviceVendor,
+      pending: busy || (hostedPending?.has('web_search') ?? false),
+      onSave: onSaveSearch,
+      onRetry: onRetryService,
+      onOpenUsage,
+    };
+    searchSettings = serviceCandidate
+      ? <ServiceMonthSearchSettings key={source.id} {...settingsProps} />
+      : <SearchServiceSettings {...settingsProps} month={undefined} />;
+  }
   const capabilities = new Map(models.map((model) => [
     model.id,
     capabilityStatus ? modelCapabilities(capabilityStatus, source.id, model.id) : [],
