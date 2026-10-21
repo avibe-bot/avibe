@@ -917,7 +917,9 @@ neither changes historical provenance or authorizes an extra notification surfac
 **Settlement freshness is owned by the attempt that started (round-7 audit, fixed
 round-8).** Because health is source-global and every turn re-runs the algorithm, a
 failure only describes the Source *as the failing attempt used it*. Each attempt
-therefore takes a monotonic settlement generation **at attempt start and nowhere else**,
+therefore takes a monotonic settlement generation **at attempt start**, with one explicit exception:
+search-service **re-enable** also advances it, without interrupting work, so an older in-flight search cannot
+restore the blocker that the user is recovering (`web-search-services.md` §4.2). No settlement mints one,
 and a settlement whose generation is older than the newest attempt on that Source writes
 no health. Two consequences are normative. A settlement that carries no generation cannot
 prove it was not superseded, so it also writes no health — minting one at settlement time

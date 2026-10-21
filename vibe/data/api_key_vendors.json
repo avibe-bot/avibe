@@ -43,7 +43,7 @@
         "results": "results",
         "url": "url",
         "title": "title",
-        "snippet": "snippet",
+        "snippet": "summary",
         "page_age": "date"
       },
       "limits": {
@@ -56,7 +56,7 @@
         "usd_per_1k": 0.75,
         "extra": [],
         "as_of": "2026-10-19",
-        "url": "https://api-docs.deepseek.com/guides/search-tool"
+        "url": "https://api-docs.deepseek.com/guides/search"
       },
       "free_check": {
         "method": "GET",
@@ -66,6 +66,8 @@
         "invalid_statuses": [401]
       },
       "service_refused_statuses": [400],
+      "outcomes": {"credential": [401], "balance": [402], "limit": []},
+      "billing": {"nonempty_only": true, "unbilled_errors": ["timeout"]},
       "auto_enroll": true,
       "tool_only": false
     }
@@ -138,7 +140,8 @@
       "request": {
         "method": "POST",
         "query": "query",
-        "results": "max_results"
+        "results": "max_results",
+        "defaults": {"search_depth": "basic", "include_answer": false}
       },
       "result": {
         "results": "results",
@@ -173,7 +176,9 @@
         "balance": null,
         "invalid_statuses": [401]
       },
-      "service_refused_statuses": [400],
+      "service_refused_statuses": [400, 422],
+      "outcomes": {"credential": [401], "balance": [402], "limit": [432, 433]},
+      "billing": {"nonempty_only": false, "unbilled_errors": []},
       "tool_only": true
     }
   },
@@ -190,7 +195,8 @@
         "method": "POST",
         "query": "query",
         "results": "numResults",
-        "highlights": "contents.highlights"
+        "highlights": "contents.highlights",
+        "defaults": {"type": "auto"}
       },
       "result": {
         "results": "results",
@@ -214,6 +220,16 @@
       },
       "free_check": null,
       "service_refused_statuses": [400],
+      "outcomes": {
+        "credential": [401], "balance": [402], "limit": [],
+        "tag_overrides": [
+          {"status": 402, "tag": "API_KEY_BUDGET_EXCEEDED", "code": "service_limit"},
+          {"status": 402, "tag": "TEAM_BUDGET_EXCEEDED", "code": "service_limit"},
+          {"status": 403, "tag": "PROHIBITED_CONTENT", "code": "service_refused"},
+          {"status": 403, "tag": "CONTENT_FILTER_ERROR", "code": "service_refused"}
+        ]
+      },
+      "billing": {"nonempty_only": false, "unbilled_errors": []},
       "tool_only": true
     }
   }

@@ -1190,6 +1190,8 @@
         "web_search": {"one": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "several": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "refused": "{sources} 拒绝了网页搜索，当前没有能运行它的供应商。在 模型 › 工具 中清除拒绝记录后会再试。"},
         "x_search": {"one": "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "several": "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "refused": "{sources} 拒绝了 X 搜索，当前没有能运行它的供应商。在 模型 › 工具 中清除拒绝记录后会再试。"}
       },
+      "noSearchSource": "目前没有供应商可以执行网页搜索。请在 模型 › 工具 中添加搜索服务，或在 模型 › 供应商 中添加提供网页搜索的厂商 API Key。",
+      "queryLimit": "搜索词超过 {limit} 个字符，请缩短后重试。",
       "listSeparator": "、",
       "providerRefused": "执行方的供应商拒绝了此次调用（{detail}）。",
       "providerUnavailable": "执行方的供应商暂时不可用（{detail}），请稍后重试。",

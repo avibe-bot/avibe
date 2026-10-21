@@ -513,6 +513,7 @@ def test_all_registered_model_hub_routes_follow_instance_management_roles() -> N
     }
     assert len(endpoints) >= 40
     assert ("POST", "/api/models/sources/sample-1/reenable") in endpoints
+    assert ("POST", "/api/models/hosted-tools/web_search/services/sample-1/retry") in endpoints
     for method, path in endpoints:
         picker = method == "GET" and re.fullmatch(r"/api/models/agents/[^/]+/models", path)
         minimum_role = http_authorization_policy(method, path).minimum_role
@@ -545,6 +546,7 @@ def test_model_hub_unknown_siblings_remain_owner_only(method: str) -> None:
         assert http_authorization_policy(method, path).minimum_role == "owner"
     if method != "POST":
         assert http_authorization_policy(method, "/api/models/sources/src-1/reenable").minimum_role == "owner"
+        assert http_authorization_policy(method, "/api/models/hosted-tools/web_search/services/src-1/retry").minimum_role == "owner"
 
 
 @pytest.mark.parametrize("method", ["PATCH", "DELETE"])

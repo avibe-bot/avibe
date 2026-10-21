@@ -2328,8 +2328,16 @@ def test_search_free_check_uses_bounded_catalog_transport(monkeypatch):
         },
     }
 
+    matches = runtime_adapter_module._search_check_matches
+
+    def checked_off_loop(*args):
+        calls["mapping_thread"] = threading.current_thread().name
+        return matches(*args)
+
+    monkeypatch.setattr(runtime_adapter_module, "_search_check_matches", checked_off_loop)
     outcome = asyncio.run(adapter.check_search_credential("cred_search", catalog))
 
+    assert calls["mapping_thread"] != caller_thread
     assert outcome.outcome == "pass"
     timeout = calls["session_kwargs"]["timeout"]
     assert timeout.total == 10.0
@@ -2375,23 +2383,25 @@ def test_search_response_retains_wire_facts_after_body_read_failure(
         headers = {"Content-Type": "application/json", "Retry-After": "2"}
         content = ResponseContent()
 
+    async def write(_request, _connection):
+        calls.append("write")
+        return Response()
+
+    monkeypatch.setattr(runtime_adapter_module.aiohttp.ClientRequest, "send", write)
+
     class Request:
-        def __init__(self, traces):
-            self.traces = traces
+        def __init__(self, request_class):
+            self.request_class = request_class
 
         async def __aenter__(self):
-            for trace in self.traces:
-                for callback in trace.on_connection_create_end:
-                    await callback(None, None, None)
-            calls.append("write")
-            return Response()
+            return await self.request_class.send(object.__new__(self.request_class), None)
 
         async def __aexit__(self, *_args):
             return None
 
     class Session:
-        def __init__(self, *, trace_configs, **_kwargs):
-            self.traces = trace_configs
+        def __init__(self, *, request_class, **_kwargs):
+            self.request_class = request_class
 
         async def __aenter__(self):
             return self
@@ -2400,7 +2410,7 @@ def test_search_response_retains_wire_facts_after_body_read_failure(
             return None
 
         def request(self, _method, _endpoint, **_kwargs):
-            return Request(self.traces)
+            return Request(self.request_class)
 
     monkeypatch.setattr(runtime_adapter_module.aiohttp, "ClientSession", Session)
     adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=Store())  # type: ignore[arg-type]
@@ -2424,7 +2434,8 @@ def test_search_response_retains_wire_facts_after_body_read_failure(
     assert calls == ["sent", "write"]
 
 
-def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypatch):
+@pytest.mark.parametrize("admission", ["sync", "async", "refused", "cancelled"])
+def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypatch, admission):
     calls: list[str] = []
 
     class Store:
@@ -2443,25 +2454,25 @@ def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypat
         headers = {}
         content = ResponseContent()
 
+    async def write(_request, _connection):
+        calls.append("write")
+        return Response()
+
+    monkeypatch.setattr(runtime_adapter_module.aiohttp.ClientRequest, "send", write)
+
     class Request:
-        def __init__(self, traces):
-            self.traces = traces
+        def __init__(self, request_class):
+            self.request_class = request_class
 
         async def __aenter__(self):
-            for trace in self.traces:
-                for callback in trace.on_connection_create_end:
-                    await callback(None, None, None)
-                for callback in trace.on_connection_reuseconn:
-                    await callback(None, None, None)
-            calls.append("write")
-            return Response()
+            return await self.request_class.send(object.__new__(self.request_class), None)
 
         async def __aexit__(self, *_args):
             return None
 
     class Session:
-        def __init__(self, *, trace_configs, **_kwargs):
-            self.traces = trace_configs
+        def __init__(self, *, request_class, **_kwargs):
+            self.request_class = request_class
 
         async def __aenter__(self):
             return self
@@ -2470,10 +2481,18 @@ def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypat
             return None
 
         def request(self, _method, _endpoint, **_kwargs):
-            return Request(self.traces)
+            return Request(self.request_class)
 
     monkeypatch.setattr(runtime_adapter_module.aiohttp, "ClientSession", Session)
     adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=Store())  # type: ignore[arg-type]
+
+    async def final_admission():
+        await asyncio.sleep(0)
+        if admission == "refused":
+            raise ValueError("not admitted")
+        if admission == "cancelled":
+            raise asyncio.CancelledError
+        calls.append("sent")
 
     response = asyncio.run(
         adapter.search(
@@ -2482,10 +2501,14 @@ def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypat
             "tavily/search",
             "cred_search",
             {"query": "hello", "max_results": 1},
-            on_sent=lambda: calls.append("sent"),
+            on_sent=(lambda: calls.append("sent")) if admission == "sync" else final_admission,
         )
     )
 
+    if admission in {"refused", "cancelled"}:
+        assert calls == [] and response.on_sent_fired is False and response.http_status is None
+        assert response.error == ("connection" if admission == "refused" else "cancelled")
+        return
     assert response.http_status == 200
     assert response.on_sent_fired is True
     assert calls == ["sent", "write"]
@@ -2730,7 +2753,7 @@ def test_shipped_api_key_vendor_catalog_matches_its_schema() -> None:
 
 
 @pytest.mark.parametrize("vendor,protocol,snippet", [
-    ("deepseek", "openai_chat", "snippet"), ("tavily", "search", "content"), ("exa", "search", "highlights"),
+    ("deepseek", "openai_chat", "summary"), ("tavily", "search", "content"), ("exa", "search", "highlights"),
 ])
 def test_search_catalog_maps_only_snippets_without_page_text_or_surcharges(vendor, protocol, snippet) -> None:
     """The bundled wire mapping is the owner of what S2 may request: no paid page text.
@@ -2739,7 +2762,10 @@ def test_search_catalog_maps_only_snippets_without_page_text_or_surcharges(vendo
     the snippet-only shape while keeping Exa's included highlights and reported cost.
     """
     service = search_service(vendor, protocol)
-    assert set(service["request"]) == {"method", "query", "results"} | ({"highlights"} if vendor == "exa" else set())
+    assert set(service["request"]) == (
+        {"method", "query", "results"} | ({"highlights"} if vendor == "exa" else set())
+        | ({"defaults"} if vendor in {"exa", "tavily"} else set())
+    )
     assert set(service["result"]) == {"results", "url", "title", "snippet", "page_age"} | (
         {"reported_cost"} if vendor == "exa" else set()
     )
