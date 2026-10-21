@@ -142,12 +142,13 @@ def test_natively_disabled_entry_generates_like_any_draft(native_files, runtime)
     _claude, codex, _opencode = native_files
     fixture = str(Path(__file__).parent / "fixtures" / "mcp_echo_server.py")
     codex.write_text(CODEX + f'\n[mcp_servers.off]\ncommand = {json.dumps(sys.executable)}\nargs = [{json.dumps(fixture)}]\nenabled = false\n')
+    before = codex.read_bytes()
     draft = {item["name"]: item for item in repository.list_packages()}["off"]
     assert draft["status"] == "draft" and draft["nativeEnabled"] is False and "error" not in draft
     assert _run(runtime, "generate", {"name": "off"})["ok"]
     call = _run(runtime, "call", {"name": "off", "tool": "echo", "arguments": {"text": "hi"}})
     assert call["status"] == "ok", call
-    assert tomllib.loads(codex.read_text())["mcp_servers"]["off"]["enabled"] is False  # native switch untouched
+    assert codex.read_bytes() == before  # generate and call never rewrite the native file
 
 
 def test_enabled_relative_cwd_is_a_field_error(native_files):
