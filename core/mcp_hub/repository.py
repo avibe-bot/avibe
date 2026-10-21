@@ -320,6 +320,8 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
         servers = _native_servers() if servers is None else servers
         native_server = servers.get(name)
         source = native_server.source if native_server is not None else _state(name).get("source")
+        if native_server is not None:
+            summary["sourcePath"] = str(native_server.path)
         if source in native.SOURCES:
             summary["source"] = source
         published = read_published(name)

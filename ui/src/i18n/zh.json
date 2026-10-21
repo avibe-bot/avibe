@@ -5088,8 +5088,8 @@
       "errorKind": "失败类型",
       "blockers": "当时不可用的供应商",
       "upstreamNote": "以上内容均由上游供应商的 API 返回。Avibe 会保留状态码、错误码，以及去除凭据后的上游报错信息（最多 400 字）。",
-        "upstreamDetail": "上游返回",
-        "connectionDetail": "连接错误",
+      "upstreamDetail": "上游返回",
+      "connectionDetail": "连接错误",
       "backendDetail": "Agent 后端报告",
       "copyRecord": "复制记录",
       "reason": {
@@ -6034,8 +6034,6 @@
     "tools": "工具",
     "toolsOf": "{{name}} 的工具",
     "pendingChanges": "有未生成的修改",
-    "revision_one": "{{revision}} · {{count}} 个工具",
-    "revision_other": "{{revision}} · {{count}} 个工具",
     "failed": "MCP 操作失败。",
     "source": {
       "claude": "Claude 配置",
@@ -6063,6 +6061,19 @@
       "capacity": "运行中的 MCP 服务器进程过多，请稍后重试。",
       "not_generated": "请先生成此服务器。",
       "unsupported_transport_sse": "不支持 SSE；请使用 Streamable HTTP 地址。"
+    },
+    "toolCount_one": "{{count}} 个工具",
+    "toolCount_other": "{{count}} 个工具",
+    "serverVersion": "服务端 v{{version}}",
+    "generatedAt": "生成于 {{time}}",
+    "revisionId": "版本 {{revision}}",
+    "configError": "配置错误",
+    "deletedHint": "已从原生配置中删除；在原配置中重新添加后才能重新生成。",
+    "enableFirst": "在 {{path}} 中启用后才能生成",
+    "disabledIn": {
+      "claude": "已在 Claude 中禁用",
+      "codex": "已在 Codex 中禁用",
+      "opencode": "已在 OpenCode 中禁用"
     }
   }
 }

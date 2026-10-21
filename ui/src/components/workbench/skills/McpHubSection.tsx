@@ -33,6 +33,29 @@ export const McpHubSection: React.FC = () => {
     [t],
   );
 
+  // Why Generate is unavailable, in the user's words; null when it is available.
+  const generateBlocked = (server: McpServerSummary): string | null => {
+    if (server.status === 'error') return server.error?.message ?? t('mcpHub.configError');
+    if (server.nativeDeleted) return t('mcpHub.deletedHint');
+    if (server.nativeEnabled === false) {
+      return t('mcpHub.enableFirst', { path: server.sourcePath ?? t(`mcpHub.source.${server.source ?? 'claude'}`) });
+    }
+    return null;
+  };
+
+  // Local "MM-DD HH:mm" from manifest generatedAt, else the revision's UTC stamp.
+  const generatedLabel = (server: McpServerSummary): string | null => {
+    let date = server.generatedAt ? new Date(server.generatedAt) : null;
+    const stamp = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z/.exec(server.revision ?? '');
+    if ((!date || Number.isNaN(date.getTime())) && stamp) {
+      const [, y, mo, d, h, mi, se] = stamp.map(Number);
+      date = new Date(Date.UTC(y, mo - 1, d, h, mi, se));
+    }
+    if (!date || Number.isNaN(date.getTime())) return null;
+    const pad = (value: number) => String(value).padStart(2, '0');
+    return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  };
+
   const refresh = useCallback(async () => {
     const res = await api.listMcpServers();
     if (res.ok) setServers(res.servers ?? []);
@@ -110,14 +133,21 @@ export const McpHubSection: React.FC = () => {
               ) : server.nativeDeleted ? (
                 <Badge variant="secondary">{t('mcpHub.sourceDeleted.unknown')}</Badge>
               ) : null}
+              {server.nativeEnabled === false && server.source ? (
+                <Badge variant="warning">{t(`mcpHub.disabledIn.${server.source}`)}</Badge>
+              ) : null}
+              {server.status === 'error' ? <Badge variant="destructive">{t('mcpHub.configError')}</Badge> : null}
               {server.pendingChanges ? <Badge variant="secondary">{t('mcpHub.pendingChanges')}</Badge> : null}
               <span className="min-w-0 flex-1 truncate text-[12px] text-muted">
-                {server.description || server.error?.message || ''}
+                {server.error?.message || generateBlocked(server) || server.description || ''}
               </span>
               {server.revision ? (
-                <span className="font-mono text-[10.5px] text-muted">
-                  {t('mcpHub.revision', { revision: server.revision, count: server.toolCount ?? 0 })}
-                  {server.serverVersion ? ` · v${server.serverVersion}` : ''}
+                <span className="text-[11px] text-muted" title={t('mcpHub.revisionId', { revision: server.revision })}>
+                  {[
+                    t('mcpHub.toolCount', { count: server.toolCount ?? 0 }),
+                    server.serverVersion ? t('mcpHub.serverVersion', { version: server.serverVersion }) : null,
+                    generatedLabel(server) ? t('mcpHub.generatedAt', { time: generatedLabel(server) }) : null,
+                  ].filter(Boolean).join(' · ')}
                 </span>
               ) : null}
               {server.status === 'generated' ? (
@@ -127,11 +157,12 @@ export const McpHubSection: React.FC = () => {
               ) : null}
               {canManage ? (
                 <>
+                  <span title={generateBlocked(server) ?? undefined}>
                   <Button
                     type="button"
                     variant="outline"
                     size="xs"
-                    disabled={busy !== null || server.status === 'error' || server.nativeEnabled === false || server.nativeDeleted === true}
+                    disabled={busy !== null || generateBlocked(server) !== null}
                     onClick={() => void act(
                       `generate:${server.name}`,
                       () => api.runMcpOperation(server.name, 'generate'),
@@ -141,6 +172,7 @@ export const McpHubSection: React.FC = () => {
                     {busy === `generate:${server.name}` ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
                     {server.revision ? t('mcpHub.regenerate') : t('mcpHub.generate')}
                   </Button>
+                  </span>
                   <Switch
                     checked={server.enabled}
                     disabled={busy !== null || server.status !== 'generated'}

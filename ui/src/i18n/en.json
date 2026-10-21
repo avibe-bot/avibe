@@ -5088,8 +5088,8 @@
       "errorKind": "Failure kind",
       "blockers": "Sources that were unavailable",
       "upstreamNote": "These come from the upstream provider's API. Avibe keeps the status, error code, and the provider's error message with credentials removed, up to 400 characters.",
-        "upstreamDetail": "Upstream said",
-        "connectionDetail": "Connection error",
+      "upstreamDetail": "Upstream said",
+      "connectionDetail": "Connection error",
       "backendDetail": "Agent backend reported",
       "copyRecord": "Copy record",
       "reason": {
@@ -6034,8 +6034,6 @@
     "tools": "Tools",
     "toolsOf": "Tools of {{name}}",
     "pendingChanges": "Pending changes",
-    "revision_one": "{{revision}} · {{count}} tool",
-    "revision_other": "{{revision}} · {{count}} tools",
     "failed": "MCP operation failed.",
     "source": {
       "claude": "Claude config",
@@ -6063,6 +6061,19 @@
       "capacity": "Too many MCP server processes are running; try again later.",
       "not_generated": "Generate this server first.",
       "unsupported_transport_sse": "SSE is not supported; use a Streamable HTTP URL."
+    },
+    "toolCount_one": "{{count}} tool",
+    "toolCount_other": "{{count}} tools",
+    "serverVersion": "server v{{version}}",
+    "generatedAt": "generated {{time}}",
+    "revisionId": "Revision {{revision}}",
+    "configError": "Config error",
+    "deletedHint": "Deleted from its native config; re-add it there to regenerate.",
+    "enableFirst": "Enable it in {{path}} to generate.",
+    "disabledIn": {
+      "claude": "Disabled in Claude",
+      "codex": "Disabled in Codex",
+      "opencode": "Disabled in OpenCode"
     }
   }
 }

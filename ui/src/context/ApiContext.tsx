@@ -547,6 +547,7 @@ export interface McpServerSummary {
   description?: string;
   transport?: string;
   source?: 'claude' | 'codex' | 'opencode';
+  sourcePath?: string;
   nativeDeleted?: boolean;
   nativeEnabled?: boolean;
   generatedAt?: string;
