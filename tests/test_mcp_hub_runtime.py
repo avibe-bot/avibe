@@ -233,6 +233,7 @@ def test_streamable_http_generate_and_call(runtime):
     [
         ("tools.json", {"not": "a list"}),
         ("commands.json", [{"name": "add"}]),
+        *[("commands.json", field) for field in ("description", "jsonOnlyKeys", "requiredJsonOnly")],
         ("definition.json", {"transport": {"type": "stdio"}}),
     ],
 )
@@ -241,7 +242,13 @@ def test_malformed_revision_file_disables_only_that_package(generated, capsys, f
 
     _run(generated, "save", {"servers": [{**_server(), "name": "other"}]})
     revision = repository.read_published("echo")["revision"]
-    (repository.package_dir("echo") / "revisions" / revision / filename).write_text(json.dumps(content))
+    path = repository.package_dir("echo") / "revisions" / revision / filename
+    if isinstance(content, str):  # drop one field from every published command
+        commands = json.loads(path.read_text())
+        for command in commands:
+            del command[content]
+        content = commands
+    path.write_text(json.dumps(content))
     summaries = {item["name"]: item for item in repository.list_packages()}
     assert summaries["echo"]["status"] == "error" and summaries["echo"]["error"]["type"] == "invalid_package"
     assert summaries["other"]["status"] == "draft"

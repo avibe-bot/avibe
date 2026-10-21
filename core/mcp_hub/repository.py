@@ -185,6 +185,11 @@ def _well_formed(published: dict[str, Any]) -> bool:
             return False
         if command.get("name") != tool["name"] or not isinstance(command.get("validated"), bool):
             return False
+        if not isinstance(command.get("description"), str) or not all(
+            isinstance(command.get(field), list) and all(isinstance(key, str) for key in command[field])
+            for field in ("jsonOnlyKeys", "requiredJsonOnly")
+        ):
+            return False
         flags = command.get("flags")
         if not isinstance(flags, list) or not all(
             isinstance(flag, dict) and all(isinstance(flag.get(k), t) for k, t in _FLAG_FIELDS.items())
