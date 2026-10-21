@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-// S4's owning UI boundaries: activation must not leak dormant settings; mixed
+// Search service UI boundaries: active reads expose the service controls; mixed
 // order and Source settings must write only the intended field; the shared add
 // dialog must use read membership (not a vendor-name guess) and Source create
 // settlement. Released Tools/Source tests only cover model executors.
@@ -16,7 +16,7 @@ import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { ApiCallError, modelsApi } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { readyRegion } from './regionRead';
-import { ACTIVE_SEARCH, INACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
+import { ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourcesCard } from './SourcesCard';
 import { ToolsTab } from './ToolsTab';
@@ -72,25 +72,20 @@ const newVendors = (): HostedWebSearchToolStatus => ({
 afterEach(() => { cleanup(); vi.restoreAllMocks(); localStorage.clear(); });
 
 describe('search service activation and mixed order', () => {
-  it.each(['en', 'zh'])('keeps the inactive Tools, Sources entry points and detail unchanged in %s', async (lng) => {
+  it.each(['en', 'zh'])('exposes service order, native preference and add entry points on the active read in %s', async (lng) => {
     const locale = i18n.cloneInstance({ lng });
     const view = render(wrap(<>
-      <ToolsTab read={readyRegion({ tools: [INACTIVE_SEARCH] })} sources={SEARCH_SOURCES} pending={new Set()} onSave={vi.fn()} onClear={vi.fn()} onRetry={vi.fn()} />
-      <SourcesCard read={readyRegion(SEARCH_SOURCES)} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} searchTool={INACTIVE_SEARCH} onAddSearchService={vi.fn()} />
+      <ToolsTab read={readyRegion({ tools: [ACTIVE_SEARCH] })} sources={SEARCH_SOURCES} pending={new Set()} onSave={vi.fn()} onClear={vi.fn()} onRetry={vi.fn()} />
+      <SourcesCard read={readyRegion(SEARCH_SOURCES)} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} searchTool={ACTIVE_SEARCH} onAddSearchService={vi.fn()} />
     </>, lng));
-    expect(screen.getByText(locale.t('settings.models.tools.subtitle'))).toBeTruthy();
-    expect(screen.getAllByRole('switch')).toHaveLength(1);
-    expect(screen.queryByText(locale.t('settings.models.searchServices.order'))).toBeNull();
-    expect(screen.queryByText(locale.t('settings.models.searchServices.addProvider'))).toBeNull();
-    expect(screen.queryByText(locale.t('settings.models.searchServices.add'))).toBeNull();
+    expect(screen.getByText(locale.t('settings.models.searchServices.subtitle'))).toBeTruthy();
+    expect(screen.getAllByRole('switch')).toHaveLength(2);
+    expect(screen.getByRole('heading', { name: locale.t('settings.models.searchServices.order') })).toBeTruthy();
+    expect(screen.getByRole('button', { name: locale.t('settings.models.searchServices.addProvider') })).toBeTruthy();
+    expect(screen.getByRole('button', { name: locale.t('settings.models.searchServices.add') })).toBeTruthy();
     await userEvent.click(screen.getByRole('button', { name: new RegExp(`^${locale.t('settings.models.tools.advanced.label')}`) }));
-    expect(screen.getByText(locale.t('settings.models.tools.order.title'))).toBeTruthy();
-    expect(view.container.querySelectorAll('[data-executor]')).toHaveLength(1);
-    view.unmount();
-    detail(SEARCH_SOURCES[3], INACTIVE_SEARCH);
-    expect(screen.queryByRole('switch')).toBeNull();
-    expect(screen.getByText('deepseek-chat')).toBeTruthy();
-    expect(screen.getByRole('button', { name: 'Manage DeepSeek' })).toBeTruthy();
+    expect(screen.getAllByRole('list', { name: locale.t('settings.models.searchServices.order') })).toHaveLength(1);
+    expect(view.container.querySelectorAll('[data-executor]')).toHaveLength(4);
   });
 
   it('shows mixed rows above Advanced, disables opted-out reordering, and saves preference/order independently', async () => {
@@ -189,7 +184,6 @@ describe('search Source detail', () => {
 
   it.each([
     ['listed', ACTIVE_SEARCH, true],
-    ['dormant', INACTIVE_SEARCH, false],
     ['unlisted', { ...ACTIVE_SEARCH, executor_candidates: ACTIVE_SEARCH.executor_candidates.filter((row) => row.source_id !== 'src_exa000001') }, false],
   ] as const)('MH-USAGE-038: reads this month only for a %s search service, apart from the Usage tab', async (_, tool, listed) => {
     const { readUsage, onOpenUsage } = detail(SEARCH_SOURCES[1], tool);

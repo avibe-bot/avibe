@@ -68,8 +68,8 @@ SpecLookup = Callable[[str, str, str, str], Optional[HostedToolSpec]]
 UNKNOWN_ENGINE_RELEASE = "unknown-engine"
 NATIVE_REPLAY_PROTOCOLS: frozenset[str] = frozenset({"anthropic", "openai_responses"})
 
-# S2b-2 enables this after the S6 disclosure ships. Never a user-facing toggle.
-SEARCH_SERVICES_ACTIVE: Final = False
+# S2b-2 activates the read and chain together; release with S6 disclosure. Not a user toggle.
+SEARCH_SERVICES_ACTIVE: Final = True
 
 Assumption = Literal["assumed", "unsupported"]
 

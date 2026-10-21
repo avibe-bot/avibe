@@ -1,4 +1,7 @@
-# Web search services S2a: readers before writers
+# Web search services S2a: readers before writers (historical)
+
+This records S2a's reader-only delivery. S2b-2 now activates the producer and service read
+together; see `web-search-services.md` §9 for current release ordering.
 
 Source of truth: [web-search-services.md](web-search-services.md), especially §4.3,
 §6.5, §8 and §12. S2a is dormant: it accepts and renders the final service shapes

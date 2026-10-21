@@ -5910,8 +5910,6 @@ def test_final_model_hub_route_surface_has_observe_refresh_and_no_saved_test_rou
 
 
 def test_models_live_api_calls_only_registered_server_routes():
-    from core.handlers.model_hub.hosted_tools import SEARCH_SERVICES_ACTIVE
-
     source = Path("ui/src/components/settings/models/modelsApi.ts").read_text(encoding="utf-8")
     live_api = source.split("export const modelsApi: ModelsApi = {", 1)[1]
     path_pattern = re.compile(r"'(?P<single>/api/models/[^']*)'|`(?P<template>/api/models/[^`]*)`")
@@ -5945,15 +5943,8 @@ def test_models_live_api_calls_only_registered_server_routes():
     }
 
     assert client_routes
-    # S4 prepares this one S2-owned action before the service read is activated.
-    # Active reads must have the route; dormant reads have no service candidates
-    # or cooldowns, so the UI cannot offer it (SearchServices.test.tsx).
-    dormant_routes = (
-        set()
-        if SEARCH_SERVICES_ACTIVE
-        else {("POST", "/api/models/hosted-tools/web_search/services/{param}/retry")}
-    )
-    assert client_routes <= server_routes | dormant_routes
+    assert ("POST", "/api/models/hosted-tools/web_search/services/{param}/retry") in client_routes
+    assert client_routes <= server_routes
 
 
 def test_unsaved_observation_route_returns_valid_result_and_revokes_transient_ref(
@@ -6405,7 +6396,7 @@ def test_search_source_replacement_unknown_keeps_old_key_and_revokes_new_ref(tmp
         ("pass", None, False),
         ("balance", "models.source.needs_action.balance_exhausted", False),
         ("limit", "models.source.needs_action.spend_limit_reached", False),
-        ("unknown", "models.source.needs_action.balance_exhausted", True),
+        ("unknown", "models.source.needs_action.spend_limit_reached", True),
         ("invalid", "models.source.needs_action.credential_revoked", True),
     ],
 )
@@ -6418,6 +6409,7 @@ def test_search_source_reenable_free_check_keeps_or_reclassifies_state(
     service, store, adapter = _service(tmp_path)
     adapter.search_check_outcome = outcome
     marker = "vp_" + "a" * 32
+    # Tavily's free usage check distinguishes limits, not a balance blocker.
     source = ModelHubSourceConfig(
         id="src_searchbalance",
         kind="api_key",
@@ -6428,7 +6420,7 @@ def test_search_source_reenable_free_check_keeps_or_reclassifies_state(
         billing="metered",
         state=ModelHubSourceStateConfig(
             status="needs_action",
-            detail_key="models.source.needs_action.balance_exhausted",
+            detail_key="models.source.needs_action.spend_limit_reached",
         ),
         models=[],
         credential_ref="cred_searchbalance",
@@ -6453,19 +6445,28 @@ def test_search_source_reenable_free_check_keeps_or_reclassifies_state(
 
 
 
-def test_search_source_reenable_arms_without_clearing_limit(tmp_path):
+@pytest.mark.parametrize(("vendor", "blocker"), [
+    ("exa", "spend_limit_reached"),  # No free check.
+    ("tavily", "balance_exhausted"),  # Its free check cannot classify this blocker.
+])
+def test_search_source_reenable_arms_without_clearing_blocker(tmp_path, vendor, blocker):
+    from unittest.mock import AsyncMock
+
     service, store, adapter = _service(tmp_path)
+    check = AsyncMock(return_value=SearchCredentialCheck("pass"))
+    adapter.check_search_credential = check
+    detail_key = f"models.source.needs_action.{blocker}"
     source = ModelHubSourceConfig(
         id="src_searchtrial",
         kind="api_key",
-        vendor="exa",
-        display_name="Exa",
+        vendor=vendor,
+        display_name=vendor,
         protocol="search",
         supply_channel="hub",
         billing="metered",
         state=ModelHubSourceStateConfig(
             status="needs_action",
-            detail_key="models.source.needs_action.spend_limit_reached",
+            detail_key=detail_key,
         ),
         models=[],
         credential_ref="cred_searchtrial",
@@ -6474,7 +6475,8 @@ def test_search_source_reenable_arms_without_clearing_limit(tmp_path):
     result = asyncio.run(service.reenable_search_source(source.id, {}))
 
     assert result["trial_armed"] is True
-    assert result["source"]["state"]["detail_key"] == "models.source.needs_action.spend_limit_reached"
+    assert result["source"]["state"]["detail_key"] == detail_key
+    assert result["source"]["state"]["status"] == "needs_action"
     assert result["source"]["trial_pending"] is True
     assert service.search_reenable_trial_armed(source.id)
     assert service.search_reenable_trial_pending(source.id)
@@ -6491,8 +6493,8 @@ def test_search_source_reenable_arms_without_clearing_limit(tmp_path):
     service.settle_search_reenable_trial(source.id)
     assert not service.search_reenable_trial_pending(source.id)
     assert service.list_sources()[0]["trial_pending"] is False
-    assert store.load().sources[0].state.detail_key == "models.source.needs_action.spend_limit_reached"
-    assert adapter.search_check_outcome == "unknown"
+    assert store.load().sources[0].state.detail_key == detail_key
+    check.assert_not_awaited()
 
 
 @pytest.mark.parametrize(("method", "suffix", "payload"), [

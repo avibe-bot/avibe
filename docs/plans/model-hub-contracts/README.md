@@ -1,7 +1,7 @@
 # Model Hub contracts
 
-Status: **contract_version 19**, 2026-10-21: dormant web-search-service readers and producer
-(S2a/S2b-1, `../web-search-services.md` §3–5, §6.5, §8). The RC tag `gh-v3.2.2rc13`
+Status: **contract_version 19**, 2026-10-21: active web-search services
+(S2a/S2b-1/S2b-2, `../web-search-services.md` §3–5, §6.5, §8). The RC tag `gh-v3.2.2rc13`
 carries v18, so these additions open a new event rather than changing v18.
 - C-1 (`../agent-core-contracts/message.schema.json`) accepts `HostedRecord.attempts[]`
   (`HostedAttempt`), `HostedCost.estimate`, and a `ServiceExecutorOrigin`
@@ -18,11 +18,12 @@ carries v18, so these additions open a new event rather than changing v18.
   `kind: "service"` bucket rows, `service_reported_usd` and `excluded_service_requests`
   on totals and days, and `pricing.service_price_date`. Model counts never include
   service requests.
-- S2b-1 adds the producer behind `SEARCH_SERVICES_ACTIVE = False`: unified service/model
-  order, per-turn frozen preference/settings, bounded mapping, independently fenced service
-  cooldowns and Source health, re-enable trials, sent-request metering and positive evidence.
-  The flag-off runtime/read remain unchanged. S2b-2 activates only with S6 disclosure;
-  the downgrade boundary of `../web-search-services.md` §12 begins when these shapes are written.
+- S2b-1 added the producer; S2b-2 sets `SEARCH_SERVICES_ACTIVE = True`, activating the read and
+  unified service/model chain together: frozen preference/settings, bounded mapping, independently
+  fenced service cooldowns and Source health, re-enable trials, sent-request metering and positive evidence.
+  The activation release must include S6 disclosure and the downgrade warning in
+  `../web-search-services.md` §12. No tag contains S2b-1 (`424b3fd`) at activation preparation,
+  so activation extends the still-unshipped v19.
 - `POST /api/models/hosted-tools/web_search/services/<source_id>/retry` clears the controller's
   service cooldown and advances its generation, with a plain success response. It is available
   regardless of activation and follows the existing Member management boundary.
@@ -43,9 +44,9 @@ than changing v17.
 - The Tools read adds `prefer_native`, saved `services`, read-only `service_order`,
   model/service candidate discriminants, service settings/health/trial/cooldown
   fields, and service vendor facts.
-- Service candidates and `service_vendors` remain absent behind the single internal
-  activation gate until S2. There is no new UI, service execution, placement rule,
-  turn freeze or native-preference routing change in S1b.
+- S1b kept service candidates and `service_vendors` absent behind the single internal
+  activation gate, with no UI, service execution, placement rule, turn freeze or native-preference
+  routing change. S2b-2 activates them together in v19.
 - The 2026-10-20 owner decision makes phase-1 web search snippet-only. This event
   withdraws v17's bundled page-content request/result mappings, `content_max_chars`
   and per-page price extras; Exa's included `contents.highlights`, reported-cost
@@ -64,8 +65,8 @@ It builds on v17 (2026-10-19): search-service foundations
 credential custody, free checks, re-enable response and service-order persistence
 shipped before search execution in `gh-v3.2.2rc12`. Its page-content metadata is
 withdrawn by v18 as recorded above. Later lanes extend the current version event
-only while it is unshipped; an RC freezes its meaning. S2 activates the service
-reads and snippet-only search chain.
+only while it is unshipped; an RC freezes its meaning. S2b-2 activates the service
+read and snippet-only search chain.
 
 Catalog metadata verified on **2026-10-21**:
 - DeepSeek maps the model-facing `summary` and bills only non-empty 200 results; its

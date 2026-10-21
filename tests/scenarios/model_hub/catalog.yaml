@@ -236,7 +236,7 @@ scenarios:
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_tools_read_states_saved_and_effective_values_and_what_real_use_showed
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_put_changes_only_the_fields_it_names
       - tests/test_model_hub_search_settings.py::test_put_merges_absent_sources_fields_and_null_resets
-      - tests/test_model_hub_search_settings.py::test_http_tools_put_and_read_preserve_patch_and_dormant_contract
+      - tests/test_model_hub_search_settings.py::test_http_tools_put_and_read_preserve_patch_and_active_contract
       - tests/test_model_hub_search_settings.py::test_service_order_read_skips_removed_sources_without_rewriting_saved_order
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_put_refuses_what_the_contract_forbids
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_latest_success_is_the_newest_in_time_not_in_text
@@ -2586,7 +2586,7 @@ scenarios:
       - tests/test_model_hub_service_acceptance_helpers.py::test_an_ignored_override_that_installs_the_packaged_engine_fails_the_run
       - tests/test_model_hub_service_acceptance_helpers.py::test_a_selected_manifest_without_a_usable_version_fails_the_run
   - id: MH-SEARCH-SERVICES-001
-    name: The dormant search-service producer freezes a one-role service and model chain, bounds excerpts, fences health and cooldown independently, admits one recovery trial, and meters every sent request by observed billing facts without changing flag-off behavior
+    name: The active search-service read and producer share a one-role service and model chain, freeze turn settings, bound excerpts, fence health and cooldown independently, admit one recovery trial, and meter every sent request by observed billing facts
     status: covered
     kind: contract
     layer: contract
@@ -2601,7 +2601,7 @@ scenarios:
       - tests/test_model_hub_search_chain.py::test_health_and_cooldown_fences_each_protect_only_their_own_state
       - tests/test_model_hub_search_chain.py::test_prefer_native_off_flows_through_the_hop_to_function_declaration_and_synthetic_history
       - tests/test_model_hub_search_chain.py::test_retry_http_client_rpc_clears_only_the_service_fence_with_plain_success
-      - tests/test_model_hub_search_chain.py::test_flag_off_retains_the_released_frozen_read_and_chain
+      - tests/test_model_hub_search_chain.py::test_search_read_and_chain_activate_together
   - id: MH-HOSTED-GATEWAY-004
     name: A proxied search runs one native request on the turn's first admitted executor, without an effort, and answers its canonical record and execution with the pricing module's cost and the same positive evidence a native call writes
     status: covered

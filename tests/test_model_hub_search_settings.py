@@ -1,4 +1,4 @@
-"""S1b owner coverage: persistent settings/patches and the dormant Tools read.
+"""Search settings owner coverage: persistent settings/patches and the active Tools read.
 
 The pre-service hosted-tools tests cannot exercise catalog-dependent defaults,
 clamping, role snapshots or Source-keyed patches. These tests use the real V2
@@ -112,8 +112,8 @@ async def test_mixed_order_and_role_snapshot_survive_real_v2_restart(tmp_path):
     assert restarted.hosted_tools["web_search"].service_order == (TAVILY, EXA)
     assert not restarted.hosted_tools["web_search"].prefer_native
     assert _web(service)["executor_order"] == order
-    # Dormancy keeps actual model execution unchanged, despite the saved future role map/order.
-    assert _web(service)["effective_order"] == [MODEL]
+    # Active search placement keeps the deliberate model first, then named service EXA, then disabled entries.
+    assert _web(service)["effective_order"] == [MODEL, EXA, TAVILY, DEEPSEEK]
     await service.set_hosted_tool("web_search", {"executor_order": None})
     reset = V2ModelHubConfigStore().load().hosted_tools["web_search"].to_payload()
     assert "executor_order" not in reset and "executor_order_kinds" not in reset
@@ -351,21 +351,18 @@ async def test_damaged_role_map_keeps_opt_out_across_load_write_and_reenable(tmp
 
 
 @pytest.mark.asyncio
-async def test_dormant_read_and_future_service_variant_validate_without_paid_calls(tmp_path, monkeypatch):
-    """One switch gates both read additions; defined service payloads do not require execution/UI activation."""
+async def test_active_service_read_validates_without_paid_calls(tmp_path):
+    """The shipped read projects service health/settings and vendor membership without a search."""
     service, _, _ = _disk_service(tmp_path, _config({"services": {DEEPSEEK: {"enabled": False}}}))
-    dormant = _web(service)
-    assert dormant["prefer_native"] is True
-    assert "service_vendors" not in dormant
-    assert {row["kind"] for row in dormant["executor_candidates"]} == {"model"}
-    # Check the prepared projection only. S2's ordering/chain/cooldown semantics are intentionally not exercised.
+    visible = _web(service)
+    assert visible["prefer_native"] is True
+    assert {row["kind"] for row in visible["executor_candidates"]} == {"service", "model"}
     config = service.store.load()
     config.sources[-1].billing = "monthly"  # Model billing does not make the separate search API included.
     config.sources[2].state = ModelHubSourceStateConfig(
         status="needs_action", detail_key="models.source.needs_action.balance_exhausted")
     service.store.save(config)
     service._search_reenable_trials.add(EXA)
-    monkeypatch.setattr(hosted_tools, "SEARCH_SERVICES_ACTIVE", True)
     visible = _web(service)
     exa = next(row for row in visible["executor_candidates"] if row["source_id"] == EXA)
     assert exa == {
@@ -396,8 +393,8 @@ async def test_dormant_read_and_future_service_variant_validate_without_paid_cal
             validator.validate({**exa, **changed})
 
 
-def test_http_tools_put_and_read_preserve_patch_and_dormant_contract(tmp_path, monkeypatch):
-    """MH-HOSTED-004: the public route accepts new fields and returns a valid dormant envelope."""
+def test_http_tools_put_and_read_preserve_patch_and_active_contract(tmp_path, monkeypatch):
+    """MH-HOSTED-004: the public route accepts patches and returns the active service read."""
     from tests.test_model_hub_api import _as_ui_client
     from tests.ui_server_test_helpers import csrf_headers, save_config
     from vibe import ui_server
@@ -420,7 +417,11 @@ def test_http_tools_put_and_read_preserve_patch_and_dormant_contract(tmp_path, m
                     registry=_api_response_registry()).validate(written)
     web = written["hosted_tools"]["tools"][0]
     assert web["prefer_native"] is False and web["services"] == {TAVILY: {"results": 7, "enabled": False}}
-    assert "service_vendors" not in web and all(row["kind"] == "model" for row in web["executor_candidates"])
+    assert {vendor["id"] for vendor in web["service_vendors"]} == {"deepseek", "tavily", "exa"}
+    assert [(row["source_id"], row["kind"]) for row in web["executor_candidates"]] == [
+        (EXA, "service"), (DEEPSEEK, "service"), (MODEL, "model"), (TAVILY, "service"),
+    ]
+    assert web["executor_candidates"][-1]["settings"] == {"results": 7, "enabled": False}
 
 
 def test_rc12_loader_preserves_tool_switch_and_orders_but_drops_service_overrides(caplog):

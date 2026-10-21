@@ -1,4 +1,4 @@
-"""Controller-owned mixed search chain; the dormant producer of service attempts.
+"""Controller-owned mixed search chain and producer of service attempts.
 
 The turn freezes choices, not runtime health. Every slot is classified on the
 current snapshot; a service rechecks that snapshot immediately before writing

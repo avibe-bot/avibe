@@ -303,8 +303,8 @@ def test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_i
     assert turn.tools == {"web_search", "x_search", "image_generate"}
     assert turn.executors == {
         "web_search": (
-            ExecutorSlot("src_xai00001", "grok-fast", identity_digest(XAI)),
-            ExecutorSlot("src_oai00001", "gpt-mini", identity_digest(OPENAI)),
+            ExecutorSlot("src_xai00001", "grok-fast", identity_digest(XAI), label="src_xai00001"),
+            ExecutorSlot("src_oai00001", "gpt-mini", identity_digest(OPENAI), label="src_oai00001"),
         ),
         "x_search": (ExecutorSlot("src_xai00001", "grok-fast", identity_digest(XAI)),),
     }

@@ -1160,7 +1160,7 @@ export type HostedServiceListPrice = HostedToolListPrice & { unit: 'search' };
 /** Effective settings. Saved settings and PUT patches keep omitted fields absent instead. */
 export type HostedSearchServiceSettings = { results: number; enabled: boolean };
 
-/** Defined now, but the server lists no service candidate until S2 activates the chain. */
+/** A search-service candidate in the active mixed search chain. */
 export type HostedServiceExecutorCandidate = {
   kind: 'service';
   source_id: string;
@@ -1213,7 +1213,7 @@ export type HostedWebSearchToolStatus = HostedSearchToolBase & {
   /** Server-owned creation order; clients never write this back. */
   service_order: string[];
   executor_candidates: HostedExecutorCandidate[];
-  /** Absent until S2 activates service reads and the search chain together. */
+  /** Present on the active web-search read; older server reads may omit it. */
   service_vendors?: HostedSearchServiceVendor[];
 };
 
