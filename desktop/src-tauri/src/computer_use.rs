@@ -56,6 +56,13 @@ const DARWIN_SOCKET_PATH_MAX_BYTES: usize = 103;
 const SOCKET_DIRECTORY_MODE: u32 = 0o700;
 const SOCKET_FLAVOR_HEX_BYTES: usize = 12;
 const DAEMON_STDERR_TAIL_BYTES: usize = 8 * 1024;
+/// Upper bound, in milliseconds, of the driver's post-action window-change
+/// watch and the focus-steal lease it holds. The driver default is 1000 ms;
+/// see the Latency section of `docs/plans/desktop-computer-use.md`.
+const DAEMON_WINDOW_CHANGE_TIMEOUT_MS: &str = "500";
+/// Fixed virtual-cursor glide duration, in milliseconds. The driver default
+/// is speed-based and takes 0.45 to 1.5 s per position change.
+const DAEMON_CURSOR_GLIDE_MS: &str = "200";
 
 fn driver_command(driver: &Path) -> Command {
     let mut command = Command::new(driver);
@@ -1044,7 +1051,7 @@ async fn stop_daemon_process(mut daemon: Daemon, socket: &Path, diagnostics: &Bo
     let _ = std::fs::remove_file(socket);
 }
 
-fn spawn_daemon(driver: &Path, socket: &Path, host_bundle_id: &str, policy: &Path) -> io::Result<Daemon> {
+fn daemon_command(driver: &Path, socket: &Path, host_bundle_id: &str, policy: &Path) -> Command {
     let mut command = driver_command(driver);
     command
         .args([
@@ -1056,8 +1063,16 @@ fn spawn_daemon(driver: &Path, socket: &Path, host_bundle_id: &str, policy: &Pat
         ])
         .arg(socket)
         .args(["--host-bundle-id", host_bundle_id, "--permission-mode", "standard"])
+        .args(["--glide-ms", DAEMON_CURSOR_GLIDE_MS])
         .env("CUA_DRIVER_EMBEDDED_HOST_PID", std::process::id().to_string())
         .env("CUA_DRIVER_MANAGED_POLICY_FILE", policy)
+        .env("CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS", DAEMON_WINDOW_CHANGE_TIMEOUT_MS);
+    command
+}
+
+fn spawn_daemon(driver: &Path, socket: &Path, host_bundle_id: &str, policy: &Path) -> io::Result<Daemon> {
+    let mut command = daemon_command(driver, socket, host_bundle_id, policy);
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -2188,6 +2203,12 @@ mod tests {
             daemon_environment.get("CUA_DRIVER_MANAGED_POLICY_FILE"),
             Some(&policy.display().to_string())
         );
+        assert_eq!(
+            daemon_environment
+                .get("CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS")
+                .map(String::as_str),
+            Some("500")
+        );
         assert!(!daemon_environment.contains_key("HOME"));
 
         let permission_root = state_dir.join("permission-probe");
@@ -2347,6 +2368,63 @@ esac
             );
         }
         (json!({"ok": true, "result": {"shutdown": true}}), true)
+    }
+
+    #[test]
+    fn daemon_command_pins_latency_tuning_and_the_whole_launch_contract() {
+        // Literal values on purpose: changing the 500 ms window-change watch or
+        // the 200 ms glide must be a visible test edit, not a silent drift.
+        // `--glide-ms` is a pinned-driver `serve` flag (cua-driver-rs v0.31.0,
+        // `CursorConfig::parse`), not listed in its `--help`.
+        let command = daemon_command(
+            Path::new("/opt/cua-driver"),
+            Path::new("/tmp/driver.sock"),
+            "bot.avibe.desktop.test",
+            Path::new("/tmp/policy.yaml"),
+        );
+        let command = command.as_std();
+        let arguments: Vec<&str> = command
+            .get_args()
+            .map(|argument| argument.to_str().expect("utf-8 argument"))
+            .collect();
+        assert_eq!(
+            arguments,
+            [
+                "serve",
+                "--embedded",
+                "--parent-liveness-stdio",
+                "--no-permissions-gate",
+                "--socket",
+                "/tmp/driver.sock",
+                "--host-bundle-id",
+                "bot.avibe.desktop.test",
+                "--permission-mode",
+                "standard",
+                "--glide-ms",
+                "200",
+            ]
+        );
+        let environment: BTreeMap<&str, Option<&str>> = command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_str().expect("utf-8 name"),
+                    value.map(|value| value.to_str().expect("utf-8 value")),
+                )
+            })
+            .collect();
+        let host_pid = std::process::id().to_string();
+        let expected: BTreeMap<&str, Option<&str>> = [
+            ("CUA_DRIVER_EMBEDDED", Some("1")),
+            ("CUA_DRIVER_EMBEDDED_HOST_PID", Some(host_pid.as_str())),
+            ("CUA_DRIVER_MANAGED_POLICY_FILE", Some("/tmp/policy.yaml")),
+            ("CUA_DRIVER_RS_TELEMETRY_ENABLED", Some("0")),
+            ("CUA_DRIVER_RS_UPDATE_CHECK", Some("0")),
+            ("CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS", Some("500")),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(environment, expected);
     }
 
     #[test]
