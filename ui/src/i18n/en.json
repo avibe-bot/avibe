@@ -4032,7 +4032,7 @@
     "restarting": "Restarting...",
     "autoUpdate": "Auto Update",
     "autoUpdateHint": "Auto-install when idle",
-    "desktopManagedUpdate": "Updates are delivered with the Avibe desktop app",
+    "desktopManagedUpdateAvailable": "Version {{to}} is available. Update it with the Avibe desktop app on the computer running Avibe.",
     "runtimeVersionSkew": "This app is v{{app}}, but it is connected to an Avibe Runtime at v{{runtime}}"
   },
   "doctor": {

@@ -138,7 +138,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     }
   };
 
-  const hasUpdate = !inDesktopShell && versionInfo?.managed_by !== 'desktop' && versionInfo?.has_update === true;
+  const hasUpdate = !inDesktopShell && versionInfo?.has_update === true;
+  // A browser can reach a Runtime the desktop app started. It may see the
+  // release, but only that app on that computer can install it.
   const isDesktopManaged = versionInfo?.managed_by === 'desktop';
   const shellVersion = inDesktopShell ? window.__AVIBE_DESKTOP_VERSION__ : undefined;
   const runtimeVersion = versionInfo?.current;
@@ -268,19 +270,16 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
               )}
 
               {/* Update Status */}
-              {!isSourceBuild && (isDesktopManaged ? (
-                <div className="flex items-center gap-2 rounded-md border border-cyan/30 bg-cyan/10 px-3 py-2 text-sm text-cyan-ink">
-                  <Check size={16} className="shrink-0" />
-                  <span>{t('dashboard.desktopManagedUpdate')}</span>
-                </div>
-              ) : hasUpdate ? (
+              {!isSourceBuild && (hasUpdate ? (
                 <div className="flex items-center gap-2 rounded-md border border-gold/30 bg-gold/10 px-3 py-2 text-sm text-gold-ink">
                   <AlertCircle size={16} className="shrink-0" />
                   <span>
-                    {t('dashboard.updateHint', {
-                      from: currentVersion,
-                      to: versionInfo?.latest,
-                    })}
+                    {isDesktopManaged
+                      ? t('dashboard.desktopManagedUpdateAvailable', { to: versionInfo?.latest })
+                      : t('dashboard.updateHint', {
+                          from: currentVersion,
+                          to: versionInfo?.latest,
+                        })}
                   </span>
                 </div>
               ) : versionInfo && !versionInfo.error ? (

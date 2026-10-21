@@ -6884,10 +6884,10 @@ def get_version_info() -> dict:
     from vibe import __version__
 
     build = get_build_identity()
+    # ``managed_by`` is a hint for where the update must be applied; it never
+    # hides an available release. Upgrading stays refused in ``do_upgrade``.
     managed_by = "desktop" if is_desktop_managed_runtime() else None
-    if managed_by:
-        result = {"current": __version__, "latest": None, "has_update": False, "error": None}
-    elif build.kind == "source":
+    if build.kind == "source":
         result = {"current": __version__, "latest": None, "has_update": False, "error": None}
     else:
         result = get_latest_version_info(__version__)

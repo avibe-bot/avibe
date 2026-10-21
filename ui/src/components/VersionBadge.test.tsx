@@ -47,13 +47,29 @@ describe('desktop version ownership', () => {
     expect(api.getConfig).not.toHaveBeenCalled();
   });
 
-  it('retains the browser version entry and its existing managed-runtime guidance', async () => {
+  it('shows a browser the desktop Runtime update but points it to the desktop app', async () => {
     render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
     const entry = await screen.findByTitle('v9.9.9');
+    expect(entry.querySelector('.animate-pulse')).toBeTruthy();
     fireEvent.click(entry);
     expect(await screen.findByRole('dialog')).toBeTruthy();
+    expect(await screen.findByText(i18n.t('dashboard.desktopManagedUpdateAvailable', { to: '10.0.0' }))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: i18n.t('dashboard.upgradeNow') })).toBeNull();
+    expect(screen.queryByText(i18n.t('dashboard.autoUpdate'))).toBeNull();
     expect(api.getVersion).toHaveBeenCalledOnce();
+    expect(api.doUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('keeps the desktop window on the app updater even when the Runtime has an update', async () => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', { value: '9.9.9', configurable: true });
+    render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+    const entry = await screen.findByTitle('v9.9.9');
+    await vi.waitFor(() => expect(api.getVersion).toHaveBeenCalledOnce());
     expect(entry.querySelector('.animate-pulse')).toBeNull();
+    fireEvent.click(entry);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.queryByRole('button', { name: i18n.t('dashboard.upgradeNow') })).toBeNull();
   });
 
   it('shows a successful upgrade warning returned in the output', async () => {

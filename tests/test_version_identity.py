@@ -88,24 +88,26 @@ def test_packaged_install_keeps_semantic_update_behavior(monkeypatch) -> None:
     assert api.get_version_info() == {**expected, "build": {"kind": "package"}}
 
 
-def test_desktop_managed_runtime_skips_package_update_check(monkeypatch) -> None:
+def test_desktop_managed_runtime_reports_available_update(monkeypatch) -> None:
+    latest = {"current": "3.0.6", "latest": "3.0.7", "has_update": True, "error": None}
     monkeypatch.delenv("VIBE_BUILD_METADATA_PATH", raising=False)
     monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
     monkeypatch.setattr("vibe.__version__", "3.0.6", raising=False)
-    monkeypatch.setattr(
-        api,
-        "get_latest_version_info",
-        lambda _current: (_ for _ in ()).throw(AssertionError("desktop Runtime must not query PyPI")),
-    )
+    monkeypatch.setattr(api, "get_latest_version_info", lambda current: dict(latest) if current == "3.0.6" else None)
 
-    assert api.get_version_info() == {
-        "current": "3.0.6",
-        "latest": None,
-        "has_update": False,
-        "error": None,
-        "build": {"kind": "package"},
-        "managed_by": "desktop",
-    }
+    assert api.get_version_info() == {**latest, "build": {"kind": "package"}, "managed_by": "desktop"}
+
+
+def test_desktop_managed_source_build_still_skips_package_update_check(monkeypatch, tmp_path) -> None:
+    metadata_path = tmp_path / "metadata.json"
+    _write_metadata(metadata_path, commit="b" * 40)
+    monkeypatch.setenv("VIBE_BUILD_METADATA_PATH", str(metadata_path))
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setattr("vibe.__version__", "3.0.6rc5", raising=False)
+    monkeypatch.setattr(api, "get_latest_version_info", lambda _current: (_ for _ in ()).throw(AssertionError("source builds must not query PyPI")))
+
+    result = api.get_version_info()
+    assert (result["latest"], result["has_update"], result["managed_by"]) == (None, False, "desktop")
 
 
 def test_configured_missing_metadata_stays_a_source_build(monkeypatch, tmp_path) -> None:
