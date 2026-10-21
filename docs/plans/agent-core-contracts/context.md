@@ -729,6 +729,7 @@ Go through what happened since the previous checkpoint, in order; at your first 
 Do the looking back in your thinking, or as text outside the <checkpoint> block; text outside the block does not enter the context.
 
 2. Revise your mind (mind.md)
+- Consolidate; do not decide anew. Record decisions and agreements as they stood when the conversation paused: this turn does not reverse or reopen them, and does not add conditions of your own to them. If something agreed troubles you, note it under Blocked or open in your now, and keep the next step tied to the user's latest request.
 - Change only what the looking back found changed; leave everything else, its wording included, as it is. Put all the changes in one edit call. At your first consolidation, replace each section's placeholder line, such as "(none yet: mission)", with its content; a section with nothing yet keeps its placeholder.
 - Make small changes for small shifts. If your understanding at some layer has changed at its root (for example, you realize the user really wants something other than what you thought), rewrite that section, and write one sentence outside the block: I used to think ..., now I think ..., because ....
 - Memory keeps condensing: fold each finished workstream into one line; merge recurring concrete lessons into a more general principle; fold overturned decisions into the decision that replaced them; let go of details you no longer need. The original conversation stays stored, so a detail you let go can be looked up again.
@@ -753,7 +754,7 @@ What the user ultimately wants from this conversation, and why it matters to the
 ## What I own
 What I am responsible for seeing through, and where that ends.
 ## Agreements
-How to report, when to ask, what I may decide on my own, and the scope of what I am authorized to do, written as principles. Do not redefine who I am: my identity and this Session's id come from the system prompt; when mentioning another Session, give its id and how it relates to this one.
+What the user has set: how to report, when to ask, what I may decide on my own, and the scope of what I am authorized to do, each as the user set it and within its scope. Record a standing rule only when the user stated it as one; a single question or a single instruction is not a standing rule. Rules from the system prompt, Skills, or tool output already reach you; do not copy them here. Do not redefine who I am: my identity and this Session's id come from the system prompt; when mentioning another Session, give its id and how it relates to this one.
 # 2. Goals
 ## Mission
 In your own words, the ultimate purpose of this conversation and its status; its scope is the user's, neither wider nor narrower.

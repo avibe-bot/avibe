@@ -552,7 +552,7 @@ async def test_a_threshold_checkpoint_may_read_while_the_window_has_room_and_nev
     # A response that leaves under 1,000 tokens of room still gets the policy's fixed text, never a cut of it:
     # a truncation note would tell the model to read again, and another call fails the turn.
     long = AssistantMessage(
-        (ThinkingBlock(tokens(5_800)), ToolCallBlock("peek", "read", {"path": "f"})), assistant().origin, "tool_use"
+        (ThinkingBlock(tokens(5_400)), ToolCallBlock("peek", "read", {"path": "f"})), assistant().origin, "tool_use"
     )
     model = Model(reads(4), [[Done(long)], [Done(assistant(CHECKPOINT))]])
     tool = sized_reader(6_000, 6_000, 6_000, 2_000)

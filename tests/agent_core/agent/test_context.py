@@ -1123,6 +1123,13 @@ def test_the_checkpoint_request_and_its_repair_are_the_contract_text_verbatim():
     request, repair = re.findall(r"```text\n(.*?)\n```", section, re.S)[:2]
     assert f"{CHECKPOINT_REQUEST}\n{CHECKPOINT_REQUEST_END}" == request
     assert repair == CHECKPOINT_REPAIR
+    # The turn consolidates without deciding anew, and Agreements holds only what the user set as a standing rule.
+    revise = CHECKPOINT_REQUEST[CHECKPOINT_REQUEST.index("2. Revise your mind") :]
+    assert revise.split("\n")[1].startswith("- Consolidate; do not decide anew.")
+    assert "does not add conditions of your own to them" in revise.split("\n")[1]
+    agreements = CHECKPOINT_REQUEST.split("## Agreements\n")[1].split("\n")[0]
+    assert "a single question or a single instruction is not a standing rule" in agreements
+    assert "Rules from the system prompt, Skills, or tool output already reach you; do not copy them here." in agreements
     problem = "it has no <checkpoint> block"
     assert checkpoint_repair(problem).content[0].text == repair.replace("{problem}", problem)
     # The fields: what mind.md holds, the section limits, the memo budget, and the memo list at the end.
