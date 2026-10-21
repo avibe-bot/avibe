@@ -1033,6 +1033,25 @@ fn updates_have_one_native_owner_and_no_remote_install_permission() {
 }
 
 #[test]
+fn only_finished_checks_publish_the_update_status() {
+    let updater = shipping_source("src/updater.rs");
+    let body = |start: &str, end: &str| {
+        let from = updater.find(start).unwrap_or_else(|| panic!("missing {start}"));
+        let to = from + updater[from..].find(end).unwrap_or_else(|| panic!("missing {end}"));
+        updater[from..to].to_owned()
+    };
+    // Disabled, Available, Current, and a failed check; nothing else writes.
+    assert_eq!(
+        body("pub fn check(", "\nfn finish(").matches("publish(&app);").count(),
+        4
+    );
+    assert_eq!(updater.matches("publish(&app);").count(), 4);
+    assert!(!body("fn install(", "\n}\n").contains("publish("));
+    assert!(!body("fn set_state(", "\n}\n").contains(".write("));
+    assert_eq!(updater.matches("status.write(").count(), 1);
+}
+
+#[test]
 fn workbench_window_permissions_are_narrow_and_match_literal_loopback_origins() {
     use tauri::utils::acl::RemoteUrlPattern;
     let grant = read_json(crate_dir().join("capabilities/window-drag.json"));

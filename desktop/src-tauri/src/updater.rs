@@ -94,20 +94,23 @@ pub struct Updater {
     pub menu: MenuItem<tauri::Wry>,
     pub channel_menu: CheckMenuItem<tauri::Wry>,
 }
-/// What `update-status.json` records for a phase. In-flight phases leave the last
-/// completed check on disk, so a recheck never makes the web forget a known update.
-///
-/// `Installed` only means the installer took over. On Windows it runs after the
-/// shell exits and can still fail and restore this version, so the file keeps
-/// `Available` and the new app's startup check publishes `Current`.
-fn persisted(phase: Phase) -> Option<UpdateStatusPhase> {
-    match phase {
-        Phase::Current => Some(UpdateStatusPhase::Current),
-        Phase::Available => Some(UpdateStatusPhase::Available),
-        Phase::Disabled => Some(UpdateStatusPhase::Disabled),
-        Phase::Error => Some(UpdateStatusPhase::Error),
-        Phase::Idle | Phase::Checking | Phase::Downloading | Phase::Installing | Phase::Installed => None,
-    }
+/// The record a finished check publishes, or None while no check result is in
+/// memory. `Error` here means the check failed: only `check()` publishes.
+fn check_record(state: &State, current: &str, checked_at: SystemTime) -> Option<UpdateStatusRecord> {
+    let phase = match state.phase {
+        Phase::Current => UpdateStatusPhase::Current,
+        Phase::Available => UpdateStatusPhase::Available,
+        Phase::Disabled => UpdateStatusPhase::Disabled,
+        Phase::Error => UpdateStatusPhase::Error,
+        Phase::Idle | Phase::Checking | Phase::Downloading | Phase::Installing | Phase::Installed => return None,
+    };
+    Some(UpdateStatusRecord::new(
+        phase,
+        current,
+        state.latest.clone(),
+        state.channel,
+        checked_at,
+    ))
 }
 fn label(phase: Phase, c: &Catalog) -> &str {
     match phase {
@@ -164,22 +167,27 @@ fn set_state(app: &AppHandle, phase: Phase, latest: Option<String>) {
     if latest.is_some() || phase == Phase::Checking {
         state.latest = latest;
     }
-    if let Some(persisted) = persisted(phase) {
-        let record = UpdateStatusRecord::new(
-            persisted,
-            app.package_info().version.to_string(),
-            state.latest.clone(),
-            state.channel,
-            SystemTime::now(),
-        );
-        if let Err(error) = updater.status.write(&record) {
-            eprintln!("desktop update status: {error}");
-        }
-    }
     let _ = updater
         .menu
         .set_text(format!("{} — {}", label(phase, &catalog()), app.package_info().version));
     let _ = updater.channel_menu.set_enabled(!updater.busy.load(Ordering::SeqCst));
+}
+/// Publishes the finished check in `update-status.json` for the Runtime to relay.
+///
+/// Only `check()` calls this. Install progress and outcomes stay in memory: a
+/// failed install keeps the last `Available` (the next check offers it again),
+/// and `Installed` only means the installer took over — on Windows it runs after
+/// the shell exits and can still restore this version — so the new app's
+/// startup check publishes `Current`.
+fn publish(app: &AppHandle) {
+    let updater = app.state::<Updater>();
+    let state = updater.state.lock().expect("updater state");
+    let Some(record) = check_record(&state, &app.package_info().version.to_string(), SystemTime::now()) else {
+        return;
+    };
+    if let Err(error) = updater.status.write(&record) {
+        eprintln!("desktop update status: {error}");
+    }
 }
 pub fn toggle_channel(app: &AppHandle) {
     let updater = app.state::<Updater>();
@@ -395,6 +403,7 @@ pub fn check(app: AppHandle, interactive: bool) {
     if KEY.trim().is_empty() || TARGET == "unsupported" {
         updater.busy.store(false, Ordering::SeqCst);
         set_state(&app, Phase::Disabled, None);
+        publish(&app);
         if interactive {
             show(&app, &catalog().disabled_detail, None);
         }
@@ -406,6 +415,7 @@ pub fn check(app: AppHandle, interactive: bool) {
         match find_update(&app, channel).await {
             Ok(Some(manifest)) => {
                 set_state(&app, Phase::Available, Some(manifest.version.clone()));
+                publish(&app);
                 let skipped = skipped_version(&app.state::<Updater>());
                 if !should_prompt(interactive, skipped.as_deref(), &manifest.version) {
                     finish(&app);
@@ -442,6 +452,7 @@ pub fn check(app: AppHandle, interactive: bool) {
             Ok(None) => {
                 finish(&app);
                 set_state(&app, Phase::Current, None);
+                publish(&app);
                 if interactive {
                     let latest = app
                         .state::<Updater>()
@@ -457,6 +468,7 @@ pub fn check(app: AppHandle, interactive: bool) {
                 eprintln!("desktop update check: {error}");
                 finish(&app);
                 set_state(&app, Phase::Error, None);
+                publish(&app);
                 if interactive {
                     show(&app, &catalog().check_failed, None);
                 }
@@ -556,8 +568,8 @@ mod tests {
     }
 
     #[test]
-    fn only_check_results_are_published_and_only_available_claims_an_update() {
-        let phases = [
+    fn check_results_produce_their_record_and_other_phases_publish_nothing() {
+        for phase in [
             Phase::Idle,
             Phase::Checking,
             Phase::Current,
@@ -567,27 +579,25 @@ mod tests {
             Phase::Installed,
             Phase::Disabled,
             Phase::Error,
-        ];
-        for phase in phases {
-            // The install handoff keeps the last result too: the installer may
-            // still fail and restore this version.
-            let keeps_last_result = matches!(
+        ] {
+            let state = State {
                 phase,
-                Phase::Idle | Phase::Checking | Phase::Downloading | Phase::Installing | Phase::Installed
-            );
-            let Some(persisted) = persisted(phase) else {
-                assert!(keeps_last_result, "{phase:?} is a check result and must be published");
-                continue;
+                latest: Some("3.2.3".to_owned()),
+                channel: Channel::Test,
             };
-            assert!(!keeps_last_result, "{phase:?} must keep the last result on disk");
-            let record = UpdateStatusRecord::new(
-                persisted,
-                "3.2.2",
-                Some("3.2.3".to_owned()),
-                Channel::Stable,
-                SystemTime::now(),
+            let record = check_record(&state, "3.2.2", SystemTime::now());
+            let expected = match phase {
+                Phase::Current => Some((UpdateStatusPhase::Current, false, true)),
+                Phase::Available => Some((UpdateStatusPhase::Available, true, true)),
+                Phase::Disabled => Some((UpdateStatusPhase::Disabled, false, false)),
+                Phase::Error => Some((UpdateStatusPhase::Error, false, false)),
+                _ => None,
+            };
+            assert_eq!(
+                record.map(|record| (record.phase, record.has_update, record.latest.is_some())),
+                expected,
+                "{phase:?}"
             );
-            assert_eq!(record.has_update, phase == Phase::Available, "{phase:?}");
         }
     }
 
