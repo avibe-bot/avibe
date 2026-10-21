@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
@@ -58,6 +58,20 @@ describe('desktop version ownership', () => {
     expect(screen.queryByText(i18n.t('dashboard.autoUpdate'))).toBeNull();
     expect(api.getVersion).toHaveBeenCalledOnce();
     expect(api.doUpgrade).not.toHaveBeenCalled();
+  });
+
+  it('withholds the auto-update toggle until the Runtime reports who manages it', async () => {
+    let resolveVersion: (info: { current: string; latest: string; has_update: boolean; managed_by?: string }) => void = () => {};
+    api.getVersion.mockImplementationOnce(() => new Promise((resolve) => { resolveVersion = resolve; }));
+    render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+    fireEvent.click(screen.getByTitle('v...'));
+    await vi.waitFor(() => expect(api.getConfig).toHaveBeenCalledOnce());
+    // Let the loaded setting render while the version request is still pending.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
+    expect(screen.queryByText(i18n.t('dashboard.autoUpdate'))).toBeNull();
+
+    resolveVersion({ current: '9.9.9', latest: '9.9.9', has_update: false });
+    expect(await screen.findByText(i18n.t('dashboard.autoUpdate'))).toBeTruthy();
   });
 
   it('keeps the desktop window on the app updater even when the Runtime has an update', async () => {
