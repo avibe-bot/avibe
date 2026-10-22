@@ -2,7 +2,7 @@
 
 ## Development toolchain
 
-Use Node.js `^20.19.0 || ^22.13.0 || >=24` (UI CI uses 22.14.0), then run
+Use Node.js `^20.19.0 || ^22.13.0 || >=24` (UI CI uses 22.23.4), then run
 `npm ci`. ESLint 10 does not support Node 22.12.x or Node 23.x.
 
 `npm run lint` checks the full TypeScript source domain against the reviewed
