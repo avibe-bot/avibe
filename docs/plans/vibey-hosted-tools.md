@@ -477,9 +477,11 @@ C-5's commit boundary, so its completion is append-only:
   pending cards owned by the resumed durable Turn, not unmatched fragments from settled Turns or fork ancestry.
   Recovery reads only that Turn's indexed response/event rows and accepted Delivery inputs, off the event loop;
   it neither loads full Session history nor looks up each response's owner separately. Accepted steers remain
-  pairing barriers. Completion ownership includes the original response row, so a reused provider call id cannot settle another
-  call. Restoration shares the surviving client-tool wait's cancellation guard; a service shutdown leaves that
-  work for the next restart, while cancellation outside shutdown stops it.
+  pairing barriers. Completion ownership includes the original response row, so a reused provider call id cannot
+  settle another call. Normal completion, Stop, route refusal, setup failure and non-shutdown cancellation all
+  enter the same card settlement path before the terminal outcome; a held card is removed before its final emit.
+  Restoration shares the surviving client-tool wait's cancellation guard. A service shutdown leaves that work
+  for the next restart, while cancellation outside shutdown stops it, including cancellation during restoration.
 
 Provider source, fetched **2026-10-22**: [Server tools — Mixing server tools and client tools in one turn](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools.md).
 

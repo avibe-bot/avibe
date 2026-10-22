@@ -3469,11 +3469,17 @@ async def test_anthropic_deferred_search_is_one_live_and_reloaded_card_and_one_i
     else:
         assert all("cut off" in line.lower() for line in lines)
 
-@pytest.mark.parametrize("owner", ["resumed_turn", "older_turn", "reused_id", "multiple_pending"])
+@pytest.mark.parametrize(
+    ("owner", "outcome"),
+    [(owner, "stop") for owner in ("resumed_turn", "older_turn", "reused_id", "multiple_pending")]
+    + [("resumed_turn", outcome) for outcome in (
+        "preflight_error", "setup_error", "cancel", "shutdown", "cancel_restoring", "shutdown_restoring",
+    )],
+)
 async def test_restart_resume_rehydrates_a_deferred_card_before_stop(
-    engine, session, tmp_path, published, monkeypatch, owner
+    engine, session, tmp_path, published, monkeypatch, owner, outcome
 ) -> None:
-    """Only this Turn's pending search is held for IM; an older Turn's fragment is not live work."""
+    """All terminal exits flush only this Turn's held cards once; a service shutdown leaves them resumable."""
     harness = _Harness(engine, tmp_path, "telegram", [])
     harness.controller.im_client.supports_message_editing = lambda context=None: False
     first = harness.request("search after restart")
@@ -3568,12 +3574,27 @@ async def test_restart_resume_rehydrates_a_deferred_card_before_stop(
             await restore(run)
 
     monkeypatch.setattr(harness.agent, "_restore_deferred_hosted", bounded_restore)
+    restoring = asyncio.Event()
+    source_display = harness.agent._source_display
+    if outcome.endswith("_restoring"):
+        async def blocked_display():
+            if not restoring.is_set():
+                restoring.set()
+                await asyncio.Event().wait()
+            return await source_display()
+        monkeypatch.setattr(harness.agent, "_source_display", blocked_display)
+    if outcome == "setup_error":
+        async def broken_sections(*_args, **_kwargs):
+            raise RuntimeError("setup failed after route resolution")
+        monkeypatch.setattr(harness.agent, "_avibe_sections", broken_sections)
     entered_preflight, release_preflight = asyncio.Event(), asyncio.Event()
     original_preflight = harness.agent._preflight
 
     async def blocked_preflight(run):
         entered_preflight.set()
         await release_preflight.wait()
+        if outcome == "preflight_error":
+            raise RuntimeError("no source serves the resumed model")
         return await original_preflight(run)
 
     monkeypatch.setattr(harness.agent, "_preflight", blocked_preflight)
@@ -3581,14 +3602,29 @@ async def test_restart_resume_rehydrates_a_deferred_card_before_stop(
     context.platform_specific.update({"vibey_resume": True, "vibey_source_turn_id": turn_id})
     resume = AgentRequest(**{**first.__dict__, "context": context, "message": "", "user_message": ""})
     running = asyncio.create_task(harness.agent.handle_message(resume))
-    await asyncio.wait_for(entered_preflight.wait(), timeout=5)
-    assert await harness.agent.handle_stop(resume)
-    release_preflight.set()
-    await asyncio.wait_for(running, timeout=10)
+    boundary = restoring if outcome.endswith("_restoring") else entered_preflight
+    await asyncio.wait_for(boundary.wait(), timeout=5)
+    if outcome.startswith(("cancel", "shutdown")):
+        harness.controller.shutdown_requested = outcome.startswith("shutdown")
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(running, timeout=10)
+    else:
+        if outcome == "stop":
+            assert await harness.agent.handle_stop(resume)
+        release_preflight.set()
+        await asyncio.wait_for(running, timeout=10)
 
     lines = [line for line in harness.controller.im_client.sent if "restart search" in line]
-    assert len(lines) == {"older_turn": 0, "multiple_pending": 2}.get(owner, 1)
+    expected_lines = 0 if outcome.startswith("shutdown") else {"older_turn": 0, "multiple_pending": 2}.get(owner, 1)
+    assert len(lines) == expected_lines
     assert all("cut off" in line.lower() for line in lines)
+    if outcome.endswith("error"):
+        assert [terminal["is_error"] for terminal in harness.controller.terminals] == [True]
+        assert harness.controller.im_client.sent.index(lines[0]) < len(harness.controller.im_client.sent) - 1
+    if outcome.startswith("shutdown"):
+        assert harness.controller.terminals == [] and harness.controller.im_client.sent == []
+    assert harness.provider.requests == []
 
 
 

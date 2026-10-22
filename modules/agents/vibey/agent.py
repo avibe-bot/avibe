@@ -315,12 +315,20 @@ class VibeyAgent(BaseAgent):
         async with self._held(session_id, run=turn) as runtime:
             try:
                 await self._run_turn(runtime, turn, input_id)
+            except asyncio.CancelledError:
+                if not turn.settled and not self._service_stopping(turn):
+                    # Cancellation outside shutdown ends this work. It may have interrupted restoration itself,
+                    # so recover the bounded held set before the shared owner handles the cancelled Turn.
+                    if payload.get("vibey_resume") is True:
+                        await self._restore_deferred_hosted(turn)
+                    await self._begin_settlement(turn)
+                raise
             except Exception as error:
                 if turn.settled:
                     # Raised during or after settlement (its emits, or a failure notice): the
                     # shared owner's fallback releases the runtime gate, so it must see it.
                     raise
-                turn.settled = True
+                await self._begin_settlement(turn)
                 self._log_failure(turn, "error", type(error).__name__, "local", f"turn failed: {error}")
                 # Where it was raised, for debugging only: the WARNING above is the failure's one line.
                 logger.debug(
@@ -377,7 +385,7 @@ class VibeyAgent(BaseAgent):
                 # Stopping the service (its Model Hub gateway first) failed the route, not
                 # the Turn: leave it open, as a run cut below is, for the restart.
                 await asyncio.Event().wait()
-            turn.settled = True
+            await self._begin_settlement(turn)
             await self._fail_preflight(request, error)
             return
         if turn.stop_requested:
@@ -920,6 +928,14 @@ class VibeyAgent(BaseAgent):
                 _loggable(event.error),
             )
 
+    async def _begin_settlement(self, run: _Run) -> None:
+        """Every terminal path releases held hosted cards before emitting its outcome; shutdown is not terminal."""
+        run.settled = True
+        activities = tuple(run.deferred_hosted.values())
+        run.deferred_hosted.clear()
+        for _message, activity in activities:
+            await self._emit_hosted(run, replace(activity, in_progress=False))
+
     async def _settle(self, run: _Run) -> None:
         """Settle the Turn from the run's outcome (loop-control.md section 6).
 
@@ -931,10 +947,7 @@ class VibeyAgent(BaseAgent):
         arrives after the final row committed loses the race, as it does for the Codex
         backend.
         """
-        run.settled = True
-        for _message, activity in tuple(run.deferred_hosted.values()):
-            await self._emit_hosted(run, replace(activity, in_progress=False))
-        run.deferred_hosted.clear()
+        await self._begin_settlement(run)
         request, context = run.request, run.request.context
         reason = run.reason or "error"
         # The failure is the error that decided the outcome, never a diagnostic, whose text is only a fallback
