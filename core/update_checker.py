@@ -934,7 +934,7 @@ class UpdateChecker:
                             "elements": [
                                 {
                                     "type": "button",
-                                    "text": {"type": "plain_text", "text": "Update Now", "emoji": True},
+                                    "text": {"type": "plain_text", "text": self._t("update.actionUpdateNow"), "emoji": True},
                                     "style": "primary",
                                     "action_id": UPDATE_BUTTON_ACTION_ID,
                                     "value": latest,
@@ -1039,12 +1039,10 @@ class UpdateChecker:
             logger.warning("Cannot send update notification: no admins and no enabled channel found")
             return False
         try:
-            from modules.im import InlineButton, InlineKeyboard, MessageContext
+            from modules.im import MessageContext
 
             text = self._format_update_notification_text(current, latest, "discord")
-            keyboard = InlineKeyboard(
-                buttons=[[InlineButton(text="Update Now", callback_data=f"vibe_update_now:{latest}")]]
-            )
+            keyboard = self._build_update_keyboard(latest)
             context = MessageContext(user_id="system", channel_id=channel_id, platform="discord")
             message_id = await self.controller.get_im_client_for_context(context).send_message_with_buttons(
                 context, text, keyboard, parse_mode="markdown"
