@@ -3348,6 +3348,9 @@ def test_agent_deliver_fetch_uses_finite_timeout(monkeypatch):
             return {"status": 200, "headers": {}, "body": "ok"}
 
     class FakeManager:
+        def serves_current_binary(self):
+            return True
+
         def client(self, *, timeout=None):
             seen_timeout.append(timeout)
             return FakeClient()
@@ -4866,3 +4869,39 @@ def test_agent_deliver_fetch_refuses_avault_without_refreshed_tls_trust(monkeypa
 
     with pytest.raises(api.AvaultPreHandoffError, match=api.AVAULT_FETCH_TLS_MIN_VERSION):
         api.avault_agent_deliver_fetch(grant_id="vgr_grant", name="GRANT_KEY", sealed=_sealed(), request=dict(_FETCH_REQUEST))
+
+
+def test_agent_deliver_fetch_refuses_a_resident_agent_started_from_another_binary(monkeypatch):
+    # The on-disk binary already reports 0.1.7, but the live agent was not started from it.
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": api.AVAULT_FETCH_TLS_MIN_VERSION})
+    fail_closed = []
+
+    class FakeManager:
+        def serves_current_binary(self):
+            return False
+
+        def client(self, *, timeout=None):
+            pytest.fail("credential handed to an unverified resident agent")
+
+    monkeypatch.setattr(api, "_avault_agent_manager", lambda: FakeManager())
+    monkeypatch.setattr(api, "_fail_closed_resident_agent_after_release_failure", lambda: fail_closed.append(True))
+
+    with pytest.raises(api.AvaultPreHandoffError, match="grant is missing or expired"):
+        api.avault_agent_deliver_fetch(grant_id="vgr_grant", name="GRANT_KEY", sealed=_sealed(), request=dict(_FETCH_REQUEST))
+
+    assert fail_closed == [True]
+
+
+@pytest.mark.parametrize(("installed_version", "has_update"), [("0.1.6", True), (None, False)])
+def test_dependencies_status_reports_avault_below_the_pin(monkeypatch, installed_version, has_update):
+    status = (
+        {"id": "avault", "installed": True, "version": installed_version, "status": "ready", "path": "/x/avault"}
+        if installed_version
+        else {"id": "avault", "installed": False, "version": None, "status": "missing", "path": None}
+    )
+    monkeypatch.setattr(api, "avault_status", lambda: status)
+
+    dep = next(d for d in api.dependencies_status(dependency_ids=["avault"])["deps"] if d["id"] == "avault")
+
+    assert dep["latest_version"] == api.AVAULT_VERSION
+    assert dep["has_update"] is has_update

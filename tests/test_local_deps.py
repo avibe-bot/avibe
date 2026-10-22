@@ -2082,7 +2082,7 @@ def test_dependencies_status_shape(monkeypatch):
     assert by["askill"]["status"] == "ready" and by["askill"]["version"] == "0.1.13" and by["askill"]["required"]
     assert by["askill"]["latest_version"] is None and by["askill"]["has_update"] is False
     assert by["avault"]["status"] == "ready" and by["avault"]["version"] == "0.0.1" and by["avault"]["required"]
-    assert by["avault"]["latest_version"] is None and by["avault"]["has_update"] is False
+    assert by["avault"]["latest_version"] == api.AVAULT_VERSION and by["avault"]["has_update"] is True
     assert by["show-runtime"]["installed"] and by["show-runtime"]["version"] == "1.4.0"
     assert by["show-runtime"]["latest_version"] == "1.4.0"
     assert by["show-runtime"]["has_update"] is False
@@ -2442,3 +2442,26 @@ def test_reconcile_startup_dependencies_moves_avault_below_the_pin_to_the_pin(
 
     assert avault_calls == [expected_force]
     assert out["avault"]["version"] == api.AVAULT_VERSION
+
+
+def test_reconcile_startup_dependencies_honors_the_avault_install_opt_out(monkeypatch):
+    monkeypatch.setenv("VIBE_RIPGREP_OFFLINE", "1")
+    monkeypatch.setenv("VIBE_INSTALL_SKIP_AVAULT", "1")
+    _stub_tmux_install(monkeypatch)
+    monkeypatch.setattr(api, "ensure_askill_installed", lambda force=False: {"ok": True, "installed": True})
+    monkeypatch.setattr(
+        api, "ensure_model_hub_engine_installed", lambda force=False: {"ok": True, "installed": True}
+    )
+    monkeypatch.setattr(
+        api,
+        "avault_status",
+        lambda: {"id": "avault", "installed": True, "version": "0.1.6", "status": "ready", "path": "/opt/avault"},
+    )
+    monkeypatch.setattr(api, "refresh_avault_if_stale", lambda: pytest.fail("opt-out must skip the pin refresh"))
+    monkeypatch.setattr(api, "ensure_avault_installed", lambda force=False: pytest.fail("opt-out must skip installs"))
+
+    out = api.reconcile_startup_dependencies()
+
+    assert out["avault"]["skipped"] is True
+    assert out["avault"]["reason"] == "VIBE_INSTALL_SKIP_AVAULT"
+    assert out["avault"]["version"] == "0.1.6"

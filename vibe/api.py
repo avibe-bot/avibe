@@ -8761,12 +8761,15 @@ def _avault_p2_release_unavailable_result(
 
 
 def _avault_ready_min_version() -> str:
-    # Managed avault readiness must satisfy both the resident grant-id delivery
-    # protocol and the protected-record v2 AAD open fix; take the higher floor so
-    # stale binaries (e.g. 0.1.5) are upgraded/blocked before protected delivery.
-    if _version_at_least(AVAULT_PROTECTED_RECORD_MIN_VERSION, AVAULT_GRANT_DELIVERY_MIN_VERSION):
-        return AVAULT_PROTECTED_RECORD_MIN_VERSION
-    return AVAULT_GRANT_DELIVERY_MIN_VERSION
+    # Managed avault readiness must satisfy the resident grant-id delivery
+    # protocol, the protected-record v2 AAD open fix and the fetch TLS trust
+    # refresh; take the highest floor so stale binaries (e.g. 0.1.6) report
+    # upgrade_required, are upgraded at startup, and are blocked before delivery.
+    floor = AVAULT_GRANT_DELIVERY_MIN_VERSION
+    for candidate in (AVAULT_PROTECTED_RECORD_MIN_VERSION, AVAULT_FETCH_TLS_MIN_VERSION):
+        if not _version_at_least(floor, candidate):
+            floor = candidate
+    return floor
 
 
 def _managed_avault_release_satisfies_ready_minimum() -> bool:
@@ -9804,8 +9807,19 @@ def avault_agent_deliver_fetch(
     from vibe.avault_agent import AvaultAgentError
 
     _require_avault_fetch_surface("resident agent deliver fetch", floor=_avault_ready_min_version())
+    manager = _avault_agent_manager()
+    if not manager.serves_current_binary():
+        # The version check above probed the executable on disk; a resident agent
+        # started from an older binary must not receive the credential. Drop it and
+        # its DEK cache (expiring the grants it held) so the request is approved
+        # again against an agent running the current binary.
+        _fail_closed_resident_agent_after_release_failure()
+        raise AvaultPreHandoffError(
+            "resident avault agent predates the installed avault binary; "
+            "the grant is missing or expired and must be approved again"
+        )
     try:
-        return _avault_agent_manager().client(timeout=_AVAULT_FETCH_TIMEOUT_SECONDS).deliver_fetch(
+        return manager.client(timeout=_AVAULT_FETCH_TIMEOUT_SECONDS).deliver_fetch(
             grant_id=grant_id,
             name=name,
             envelope=_envelope_payload(sealed),
@@ -10310,8 +10324,8 @@ def dependencies_status(*, offline: bool = False, dependency_ids: list[str] | No
             "required": True,
             "installed": av["installed"],
             "version": av.get("version"),
-            "latest_version": None,
-            "has_update": False,
+            "latest_version": AVAULT_VERSION,
+            "has_update": bool(av["installed"] and not _version_at_least(av.get("version"), AVAULT_VERSION)),
             "status": av["status"],
         }
     if requested.intersection({"show-runtime", "node"}):
@@ -10512,8 +10526,12 @@ def reconcile_startup_dependencies() -> dict:
         _set_startup_dependency_reconciling("avault", True)
         try:
             # Pin-aware: Desktop never runs `vibe runtime prepare`, so startup is
-            # where an existing install below AVAULT_VERSION moves to the pin.
-            avault = refresh_avault_if_stale()
+            # where an existing install below AVAULT_VERSION moves to the pin. The
+            # operator opt-out that `vibe runtime prepare` honors applies here too.
+            if os.environ.get("VIBE_INSTALL_SKIP_AVAULT", "").strip().lower() in _TRUTHY_ENV_VALUES:
+                avault = {**avault_status(), "ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_AVAULT"}
+            else:
+                avault = refresh_avault_if_stale()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Startup dependency reconcile failed to ensure avault: %s", exc, exc_info=True)
             avault = {"ok": False, "message": str(exc)}
