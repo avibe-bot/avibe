@@ -428,13 +428,17 @@ never dropped.
   producers and stay in `HOSTED_ERROR_CODES` for records already written.
 - **Stored history survives hosted-tool registry changes.** An unrecognized native `HostedToolBlock` loads as
   portable text with its query or URL and sources when renderable, otherwise a one-line unavailable placeholder.
+  The projection keeps a readable non-completed status and error, including an explicit no-result marker for pending
+  calls, so a failed or interrupted call is never presented as a successful result.
   This includes an rc-era `image_generation` block without restoring its removed native shape or replay path.
   A proxied result for an unrecognized tool keeps its `content` and `is_error`, with `hosted` dropped. New writes
   and known-tool rows remain strict; no migration or stored-row rewrite is performed, and each degraded row logs
   one warning without content.
   If any native block is degraded, response-wide counts, cited sources and cost are discarded: they cannot be
-  partitioned between the unknown call and the remaining calls. A known block still requires a summary; an existing
-  summary becomes empty when known blocks remain and is omitted when none remain (§15).
+  partitioned between the unknown call and the remaining calls. Calls are decoded before that aggregate, and its
+  discarded contents are not validated against this build's summary/source schema. A known block still requires a
+  summary; an existing summary becomes empty when known blocks remain and is omitted when none remain (§15).
+  The message envelope and retained known blocks remain strictly validated.
 - **Per adapter notes.** xAI's X-search `reasoning` items (`tco_…`) stay ThinkingBlocks. The `custom_tool_call`
   becomes the HostedToolBlock, never a local tool call. Anthropic's `encrypted_content` is kept only in
   `native.payload`. Hosted payloads count against the 32 MiB `StreamAssembler` budget; search events measured at

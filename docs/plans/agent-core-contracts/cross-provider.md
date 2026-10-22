@@ -17,7 +17,21 @@ cross-provider history tests (MIT).
 | Text block `citations` | not sent | not sent |
 | Tool result with `hosted` (a proxied hosted call) | kept, as any tool result | kept, as any tool result |
 
-**Reader compatibility.** Deserialization does not require the current hosted-tool registry to read stored history. A native `HostedToolBlock` whose `tool` this build does not recognize is replaced by one portable `TextBlock` that keeps any query or URL and its sources, or a one-line unavailable placeholder. Whenever any native block is degraded, the response-wide counts, cited sources and cost are discarded because they cannot be partitioned between unknown and known calls. An existing summary becomes empty if recognized hosted blocks remain, and is omitted otherwise; a missing summary for a recognized block remains invalid. A proxied `ToolResultMessage.hosted` whose `tool_name` is unknown becomes an ordinary tool result with its stored `content` and `is_error`, and `hosted` is dropped. This degradation applies only to unrecognized tool names: known tools remain strictly validated, new writes remain strict, stored rows are not rewritten, and each degraded row logs one warning without content.
+**Reader compatibility.** Deserialization does not require the current hosted-tool registry to read stored history.
+
+- A native `HostedToolBlock` whose `tool` this build does not recognize becomes one portable `TextBlock` with any
+  query or URL and its sources, or a one-line unavailable placeholder. Readable non-completed status and error are
+  kept; a pending call explicitly has no result, never an implied success.
+- Whenever any native block is degraded, response-wide counts, cited sources and cost are discarded because they
+  cannot be partitioned between unknown and known calls. Decode the calls first and do not validate the discarded
+  aggregate's contents against this build's summary/source schema. An existing summary becomes empty if recognized
+  hosted blocks remain, and is omitted otherwise; a missing summary for a recognized block remains invalid.
+- A proxied `ToolResultMessage.hosted` whose `tool_name` is unknown becomes an ordinary tool result with its stored
+  `content` and `is_error`, and `hosted` is dropped.
+
+This degradation applies only to unrecognized tool names: the message envelope and known tools remain strictly
+validated, new writes remain strict, stored rows are not rewritten, and each degraded row logs one warning without
+content.
 
 Invariants:
 

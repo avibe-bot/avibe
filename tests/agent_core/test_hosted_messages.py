@@ -290,6 +290,8 @@ VIOLATIONS = {
     "mixed-known-tool-with-invalid-action": _set(
         _set(NATIVE, ("content", 0, "tool"), "web_fetch"), ("content", 1, "action"), {"type": "fetch"}
     ),
+    "unknown-summary-field": _set(NATIVE, ("hosted_summary", "future_total"), 3),
+    "unknown-summary-source-field": _set(NATIVE, ("hosted_summary", "cited_sources", 0, "confidence"), 0.9),
     "included-with-usd": _set(NATIVE, ("hosted_summary", "cost"), {"basis": "included", "usd": 0.1}),
     "list-without-usd": _set(NATIVE, ("hosted_summary", "cost"), {"basis": "list"}),
     "negative-usd": _set(NATIVE, ("hosted_summary", "cost", "usd"), -0.01),
@@ -342,22 +344,62 @@ def test_a_stored_proxied_result_for_an_unknown_tool_loads_as_a_plain_result(cap
 
 @pytest.mark.parametrize("keep_known", [False, True], ids=["all-unknown", "mixed"])
 @pytest.mark.parametrize(
-    ("action", "record", "expected"),
+    ("action", "record", "summary_extension", "expected"),
     [
         (
             {"type": "open_page", "url": "https://example.com/docs"},
             {"status": "completed", "sources": [{"url": "https://example.com/docs", "title": "Example Docs"}]},
+            {},
             ("https://example.com/docs", "Example Docs"),
         ),
-        ({"type": "fetch"}, {"status": "completed", "sources": []}, ("result unavailable in this version",)),
+        ({"type": "fetch"}, {"status": "completed", "sources": []}, {}, ("result unavailable in this version",)),
+        (
+            {"type": "fetch", "query": "a failed query"},
+            {"status": "failed", "error": "permission denied", "sources": []},
+            {},
+            ("failed", "permission denied", "a failed query"),
+        ),
+        (
+            {"type": "open_page", "url": "https://example.com/docs"},
+            {"status": "incomplete", "error": "timed out", "sources": [{"url": "https://example.com/partial"}]},
+            {},
+            ("incomplete", "timed out", "https://example.com/docs", "https://example.com/partial"),
+        ),
+        (
+            {"type": "fetch", "queries": ["pending query"]},
+            {"status": "pending", "sources": []},
+            {},
+            ("pending", "no result", "pending query"),
+        ),
+        (
+            {"type": "fetch"},
+            {"status": "failed", "error": "fetch refused", "sources": []},
+            {},
+            ("failed", "fetch refused"),
+        ),
+        (
+            {"type": "fetch"},
+            {"status": "completed", "sources": []},
+            {"future_total": 3},
+            ("result unavailable in this version",),
+        ),
+        (
+            {"type": "fetch"},
+            {"status": "completed", "sources": []},
+            {"cited_sources": [{"url": "https://example.com/future", "confidence": 0.9}]},
+            ("result unavailable in this version",),
+        ),
     ],
-    ids=["query-and-source", "placeholder"],
+    ids=["query-and-source", "placeholder", "failed", "incomplete", "pending", "error-only", "future-summary", "future-source"],
 )
-def test_a_native_unknown_hosted_block_loads_as_portable_text(action, record, expected, keep_known, caplog):
+def test_a_native_unknown_hosted_block_loads_as_portable_text(
+    action, record, summary_extension, expected, keep_known, caplog
+):
     stored = copy.deepcopy(NATIVE)
     if not keep_known:
         stored["content"] = stored["content"][:1]
     stored["content"][0].update(tool="web_fetch", action=action, record=record)
+    stored["hosted_summary"].update(summary_extension)
     original = copy.deepcopy(stored)
 
     loaded = message_from_dict(stored)

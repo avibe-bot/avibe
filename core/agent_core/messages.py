@@ -1050,7 +1050,16 @@ def _unknown_hosted_text(data: Mapping[str, Any]) -> str:
         value = action.get(name)
         if isinstance(value, str) and value and value not in queries:
             queries.append(value)
-    lines = [f"[{tool_name}: {'; '.join(queries)}]"] if queries else []
+    lines: list[str] = []
+    status = record.get("status")
+    if isinstance(status, str) and status and status != "completed":
+        suffix = ": no result" if status == "pending" else ""
+        lines.append(f"[{tool_name} {status}{suffix}]")
+    error = record.get("error")
+    if isinstance(error, str) and error:
+        lines.append(f"Error: {error}")
+    if queries:
+        lines.append(f"[{tool_name}: {'; '.join(queries)}]")
     raw_sources = record.get("sources")
     if isinstance(raw_sources, list):
         for number, source in enumerate(raw_sources, 1):
@@ -1233,8 +1242,22 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
             {"role": str, "content": list, "origin": dict, "stop_reason": str},
             {"usage": dict, "error_message": str, "hosted_summary": dict, "source_identity": str},
         )
+        # Decode calls before their aggregate: unknown calls make response-wide facts unusable.
+        unknown_hosted_tools: list[str] = []
+        content = tuple(
+            _block_from_dict(
+                b, ("text", "thinking", "tool_call", "hosted_tool"), unknown_hosted_tools=unknown_hosted_tools
+            )
+            for b in f["content"]
+        )
         summary = None
-        if "hosted_summary" in f:
+        if unknown_hosted_tools:
+            logger.warning("stored message contains an unrecognized hosted tool; loading it portably")
+            # Do not interpret a discarded aggregate's future shape. Keep an empty envelope for known blocks,
+            # but do not invent a missing summary; retained blocks and the message envelope remain strict.
+            if "hosted_summary" in f and any(isinstance(block, HostedToolBlock) for block in content):
+                summary = HostedSummary()
+        elif "hosted_summary" in f:
             h = _read(f["hosted_summary"], "hosted summary", {"counts": dict, "cited_sources": list}, {"cost": dict})
             summary = HostedSummary(
                 # A release before the bound may have stored a count past it: that counter is dropped, not refused,
@@ -1247,19 +1270,6 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
                 cited_sources=tuple(_source_from_dict(source) for source in h["cited_sources"]),
                 cost=_cost_from_dict(h["cost"]) if "cost" in h else None,
             )
-        unknown_hosted_tools: list[str] = []
-        content = tuple(
-            _block_from_dict(
-                b, ("text", "thinking", "tool_call", "hosted_tool"), unknown_hosted_tools=unknown_hosted_tools
-            )
-            for b in f["content"]
-        )
-        if unknown_hosted_tools:
-            logger.warning("stored message contains an unrecognized hosted tool; loading it portably")
-            # These facts cover the whole response, so they cannot be assigned to just the surviving calls.
-            # Keep the required empty envelope for known blocks, but do not invent a missing summary.
-            if summary is not None:
-                summary = HostedSummary() if any(isinstance(block, HostedToolBlock) for block in content) else None
         return AssistantMessage(
             content=content,
             origin=origin_from_dict(f["origin"]),
