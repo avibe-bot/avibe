@@ -7,7 +7,8 @@ import { TransformWrapper, TransformComponent, type ReactZoomPanPinchRef } from 
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogOverlay, DialogPortal, DialogTitle } from '@/components/ui/dialog';
 import { handleMediaDownloadClick, mediaDownloadHref } from '@/lib/downloadMedia';
-import { useRouteSurfaceWindowEvent } from '@/lib/routeSurfaceActivity';
+import { useRouteSurfaceActive, useRouteSurfaceWindowEvent } from '@/lib/routeSurfaceActivity';
+import { cn } from '@/lib/utils';
 import { ImageViewerContext, type ImageViewerOpenOptions } from './image-viewer-context';
 
 // A session-scoped image lightbox. ChatPage computes the ordered list of media-
@@ -58,6 +59,7 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
     [],
   );
   const close = React.useCallback(() => setView(null), []);
+  const routeSurfaceActive = useRouteSurfaceActive();
   // Controls the zoom/pan transform (wired to the desktop +/- buttons). The
   // wrapper is keyed on ``src`` so paging to another image remounts it back to 1x.
   const transformRef = React.useRef<ReactZoomPanPinchRef>(null);
@@ -119,19 +121,35 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
   const ctx = React.useMemo(() => ({ open }), [open]);
 
   return (
-    <Dialog open={src !== null} onOpenChange={(next) => { if (!next) close(); }}>
+    <Dialog
+      open={src !== null && routeSurfaceActive}
+      onOpenChange={(next) => { if (!next) close(); }}
+    >
       <ImageViewerContext.Provider value={ctx}>
         {children}
         {src && (
-          <DialogPortal>
-            <DialogOverlay className="bg-black/80 backdrop-blur-sm" />
+          <DialogPortal forceMount>
+            {routeSurfaceActive && <DialogOverlay className="bg-black/80 backdrop-blur-sm" />}
             <DialogPrimitive.Content
+              forceMount
               aria-describedby={undefined}
-              className="fixed inset-0 z-50 flex items-center justify-center p-6 focus:outline-none"
+              aria-hidden={!routeSurfaceActive || undefined}
+              inert={!routeSurfaceActive || undefined}
+              className={cn(
+                'fixed inset-0 z-50 flex items-center justify-center p-6 focus:outline-none',
+                !routeSurfaceActive && 'pointer-events-none invisible',
+              )}
+              onEscapeKeyDown={(event) => {
+                if (!routeSurfaceActive) event.preventDefault();
+              }}
               onOpenAutoFocus={() => {
                 previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
               }}
               onCloseAutoFocus={(event) => {
+                if (!routeSurfaceActive) {
+                  event.preventDefault();
+                  return;
+                }
                 const previousFocus = previousFocusRef.current;
                 if (previousFocus?.isConnected) {
                   event.preventDefault();

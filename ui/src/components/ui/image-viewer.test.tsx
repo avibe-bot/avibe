@@ -238,6 +238,7 @@ describe('ImageViewerProvider — retained route activity owns global keys', () 
       expect(document.querySelector('img')).toBe(image);
       expect(document.querySelector('img')?.getAttribute('src')).toBe(GALLERY[0]);
       expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+      expect(document.querySelector('[role="dialog"]')?.getAttribute('aria-hidden')).toBe('true');
     } finally {
       window.removeEventListener('keydown', foreground);
     }

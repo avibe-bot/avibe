@@ -77,6 +77,29 @@ it('closes on Escape through the dialog lifecycle', async () => {
   expect(onCancel).toHaveBeenCalledOnce();
 });
 
+it('uses the first Escape to abandon an inline folder name', async () => {
+  const onCancel = vi.fn();
+  render(<FilePicker mode="open-directory" onCancel={onCancel} onConfirm={() => {}} />);
+  await waitFor(() => expect(state.listDir).toHaveBeenCalled());
+
+  fireEvent.click(screen.getByRole('button', { name: 'apps.picker.newFolder' }));
+  const input = screen.getByPlaceholderText('apps.picker.newFolderName');
+  fireEvent.keyDown(input, { key: 'Escape' });
+
+  expect(screen.queryByPlaceholderText('apps.picker.newFolderName')).toBeNull();
+  expect(onCancel).not.toHaveBeenCalled();
+});
+
+it('dismisses through Radix when clicking outside the picker', async () => {
+  const onCancel = vi.fn();
+  render(<FilePicker mode="open-directory" onCancel={onCancel} onConfirm={() => {}} />);
+  await waitFor(() => expect(state.listDir).toHaveBeenCalled());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  fireEvent.pointerDown(document.body);
+  fireEvent.click(document.body);
+  await waitFor(() => expect(onCancel).toHaveBeenCalledOnce());
+});
 it('keeps an explicit picker path ahead of project defaults', async () => {
   render(<FilePicker mode="open-directory" initialPath="/tmp/explicit" onCancel={() => {}} onConfirm={() => {}} />);
   await waitFor(() => expect(state.listDir).toHaveBeenCalledWith('/tmp/explicit', false));

@@ -172,7 +172,7 @@ export const FilePicker: React.FC<{
   return (
     // Scoped to the owning window (not a body portal) so it inherits the window's theme.
     <Dialog open onOpenChange={(next) => { if (!next) onCancel(); }}>
-      <div className="absolute inset-0 z-30 grid place-items-center bg-black/50 p-5" onClick={onCancel} role="presentation">
+      <div className="absolute inset-0 z-30 grid place-items-center bg-black/50 p-5" role="presentation">
         <DialogPrimitive.Content
           aria-describedby={undefined}
           className="relative z-10 flex h-[420px] w-[600px] max-w-full max-h-full flex-col overflow-hidden rounded-xl border border-border-strong bg-surface-2 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.7)] focus:outline-none"
@@ -186,7 +186,12 @@ export const FilePicker: React.FC<{
               previousFocus.focus();
             }
           }}
-          onPointerDownOutside={(event) => event.preventDefault()}
+          onEscapeKeyDown={(event) => {
+            if (newFolder !== null) {
+              event.preventDefault();
+              setNewFolder(null);
+            }
+          }}
           onClick={(e) => e.stopPropagation()}
         >
           {/* Title + close */}

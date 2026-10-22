@@ -74,11 +74,14 @@ export const DialogContent = React.forwardRef<
           event.preventDefault();
           const previousFocus = previousFocusRef.current;
           if (!previousFocus?.isConnected) return;
-          // A nested dialog may replace this one in the same React commit. Let
-          // that new focus scope own focus; only restore an external opener when
-          // this close leaves no other dialog mounted.
+          // A nested dialog may replace this one in the same React commit. If
+          // the replacement already owns focus, leave it alone; otherwise
+          // restore an opener that remains in the underlying dialog.
           queueMicrotask(() => {
-            if (document.querySelector('[role="dialog"][data-state="open"]')) return;
+            const focusedDialog = document.activeElement instanceof HTMLElement
+              ? document.activeElement.closest('[role="dialog"][data-state="open"]')
+              : null;
+            if (focusedDialog) return;
             if (previousFocus.isConnected) previousFocus.focus();
           });
         }}
