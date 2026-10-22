@@ -13,7 +13,6 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request as FastAPIRequest
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response as StarletteResponse
-from fastapi.testclient import TestClient
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 from starlette.datastructures import Headers, QueryParams, URL
@@ -279,6 +278,11 @@ class CompatTestResponse:
 
 class CompatTestClient:
     def __init__(self, app: "CompatApp") -> None:
+        # Imported here, not at module load: Starlette deprecates its httpx-based
+        # TestClient with a warning on import, and every service and CLI process
+        # imports this module while only tests construct a client.
+        from fastapi.testclient import TestClient
+
         self._client = TestClient(app)
         self._lock = threading.Lock()
 
