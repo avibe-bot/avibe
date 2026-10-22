@@ -168,15 +168,15 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[#05050B]/[0.72] p-10 backdrop-blur-[6px]">
-      <div className="flex w-full max-w-[560px] flex-col overflow-hidden rounded-2xl border border-border-strong bg-surface-2 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)]">
-        <div className="flex items-center gap-3 border-b border-border px-5 py-4">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[#05050B]/[0.72] p-4 backdrop-blur-[6px] sm:p-10">
+      <div className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[560px] flex-col overflow-y-auto rounded-2xl border border-border-strong bg-surface-2 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)]">
+        <div className="flex min-w-0 items-center gap-3 border-b border-border px-5 py-4">
           <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] border border-mint/40 bg-mint-soft text-mint-ink">
             <PackagePlus className="size-[17px]" />
           </span>
-          <div className="flex flex-1 flex-col">
-            <div className="text-[16px] font-bold text-foreground">{t('skills.addDialog.title')}</div>
-            <div className="text-[11px] text-muted">{t('skills.addDialog.subtitle')}</div>
+          <div className="flex min-w-0 flex-1 flex-col">
+            <div className="break-words text-[16px] font-bold text-foreground [overflow-wrap:anywhere]">{t('skills.addDialog.title')}</div>
+            <div className="break-words text-[11px] text-muted [overflow-wrap:anywhere]">{t('skills.addDialog.subtitle')}</div>
           </div>
           <button type="button" onClick={onClose} aria-label={t('common.close')} className="flex size-[26px] items-center justify-center rounded-md text-muted transition hover:bg-foreground/[0.06]">
             <X className="size-3.5" />
@@ -262,7 +262,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
                   >
                     <Checkbox checked={on} presentational />
                     <span className="flex min-w-0 flex-1 flex-col">
-                      <span className="text-[13px] font-semibold text-foreground">{skill.name}</span>
+                      <span className="break-words text-[13px] font-semibold text-foreground [overflow-wrap:anywhere]">{skill.name}</span>
                       {skill.description ? <span className="truncate text-[11px] text-muted">{skill.description}</span> : null}
                     </span>
                   </button>

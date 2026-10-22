@@ -73,15 +73,15 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[#05050B]/[0.72] p-10 backdrop-blur-[6px]">
-      <div className="flex w-full max-w-[760px] flex-col overflow-hidden rounded-2xl border border-border-strong bg-surface-2 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)]">
-        <div className="flex items-center gap-3 border-b border-border px-5 py-4">
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[#05050B]/[0.72] p-4 backdrop-blur-[6px] sm:p-10">
+      <div className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[760px] flex-col overflow-y-auto rounded-2xl border border-border-strong bg-surface-2 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)]">
+        <div className="flex min-w-0 items-center gap-3 border-b border-border px-5 py-4">
           <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] border border-cyan/40 bg-cyan-soft text-cyan-ink">
             <Compass className="size-[17px]" />
           </span>
-          <div className="flex flex-1 flex-col">
-            <div className="text-[16px] font-bold text-foreground">{t('skills.browse.title')}</div>
-            <div className="text-[11px] text-muted">{t('skills.browse.subtitle')}</div>
+          <div className="flex min-w-0 flex-1 flex-col">
+            <div className="break-words text-[16px] font-bold text-foreground [overflow-wrap:anywhere]">{t('skills.browse.title')}</div>
+            <div className="break-words text-[11px] text-muted [overflow-wrap:anywhere]">{t('skills.browse.subtitle')}</div>
           </div>
           <button type="button" onClick={onClose} aria-label={t('common.close')} className="flex size-[26px] items-center justify-center rounded-md text-muted transition hover:bg-foreground/[0.06]">
             <X className="size-3.5" />
@@ -144,10 +144,10 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
                 <div key={String(item.id)} className="flex items-center gap-3 rounded-xl border border-border bg-surface px-3.5 py-3.5">
                   <div className="flex min-w-0 flex-1 flex-col gap-1.5">
                     <div className="flex flex-wrap items-center gap-2">
-                      <span className="text-[14px] font-semibold text-foreground">{item.name}</span>
+                      <span className="min-w-0 break-words text-[14px] font-semibold text-foreground [overflow-wrap:anywhere]">{item.name}</span>
                       <AiScoreBadge score={item.aiScore} />
                       <Github className="size-3 text-muted" />
-                      <span className="font-mono text-[10px] text-muted">
+                      <span className="min-w-0 break-all font-mono text-[10px] text-muted">
                         {item.owner}
                         {item.repo ? `/${item.repo}` : ''}
                       </span>
