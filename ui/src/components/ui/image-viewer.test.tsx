@@ -122,6 +122,19 @@ describe('ImageViewerProvider — paging belongs to the gallery, not to every im
     expect(document.querySelector('img[src="/api/media/med_2"]')).toBeNull();
   });
 
+  it('restores focus to the image opener after closing', async () => {
+    mount({ isolated: true });
+    const opener = screen.getByText('open');
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = screen.getByRole('dialog');
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    fireEvent.click(screen.getByLabelText('Close'));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(document.activeElement).toBe(opener);
+  });
+
   it('closes on Escape either way', () => {
     mount({ isolated: true });
     fireEvent.click(screen.getByText('open'));

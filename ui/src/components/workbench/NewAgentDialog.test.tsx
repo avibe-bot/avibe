@@ -2,7 +2,9 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useLocation } from 'react-router-dom';
+import { useState } from 'react';
 
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
 import { RouteSurfaceActiveContext } from '../../lib/routeSurfaceActivity';
@@ -104,6 +106,30 @@ afterEach(() => {
 });
 
 describe('NewAgentDialog', () => {
+  it('uses Radix focus lifecycle for Escape and focus restoration', async () => {
+    modelCatalog = { models: [] };
+    apiRef.current = { createVibeAgent: vi.fn() };
+    const Harness = () => {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>open-agent-dialog</button>
+          <NewAgentDialog open={open} onClose={() => setOpen(false)} onCreated={vi.fn()} />
+        </>
+      );
+    };
+
+    render(<MemoryRouter><Harness /></MemoryRouter>);
+    const trigger = screen.getByRole('button', { name: 'open-agent-dialog' });
+    await userEvent.click(trigger);
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.contains(document.activeElement)).toBe(true);
+
+    await userEvent.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(document.activeElement).toBe(trigger);
+  });
+
   // The picker used a second label table, so its Claude label disagreed with
   // Settings and Model Hub. All backend choices share the catalog brands, and
   // they follow the shared display order, the built-in Vibey first.

@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, render, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 import type { WorkbenchProject } from '../../context/ApiContext';
@@ -66,6 +66,15 @@ describe.each(['browser', 'picker'] as const)('%s default folder', (surface) => 
     mount();
     await waitFor(() => expect(state.listDir).toHaveBeenCalledWith('/tmp/home', false));
   });
+});
+
+it('closes on Escape through the dialog lifecycle', async () => {
+  const onCancel = vi.fn();
+  render(<FilePicker mode="open-directory" onCancel={onCancel} onConfirm={() => {}} />);
+  await waitFor(() => expect(state.listDir).toHaveBeenCalled());
+
+  fireEvent.keyDown(screen.getByRole('dialog'), { key: 'Escape' });
+  expect(onCancel).toHaveBeenCalledOnce();
 });
 
 it('keeps an explicit picker path ahead of project defaults', async () => {

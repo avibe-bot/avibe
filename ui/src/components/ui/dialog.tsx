@@ -39,6 +39,7 @@ export const DialogContent = React.forwardRef<
 >(({ className, children, mobileSheetHeight = 'content', closeLabel = 'Close', onCloseAutoFocus, ...props }, ref) => {
   const active = useRouteSurfaceActive();
   const activeRef = useLatestRef(active);
+  const previousFocusRef = React.useRef<HTMLElement | null>(null);
   if (!active) return null;
   return (
     <DialogPortal>
@@ -57,11 +58,29 @@ export const DialogContent = React.forwardRef<
           className
         )}
         {...props}
+        onOpenAutoFocus={(event) => {
+          previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          props.onOpenAutoFocus?.(event);
+        }}
         onCloseAutoFocus={(event) => {
           // Suspension is not a user close. Do not run owner close effects or
           // return focus into the inactive surface from Radix's delayed cleanup.
-          if (!activeRef.current) event.preventDefault();
-          else onCloseAutoFocus?.(event);
+          if (!activeRef.current) {
+            event.preventDefault();
+            return;
+          }
+          onCloseAutoFocus?.(event);
+          if (event.defaultPrevented) return;
+          event.preventDefault();
+          const previousFocus = previousFocusRef.current;
+          if (!previousFocus?.isConnected) return;
+          // A nested dialog may replace this one in the same React commit. Let
+          // that new focus scope own focus; only restore an external opener when
+          // this close leaves no other dialog mounted.
+          queueMicrotask(() => {
+            if (document.querySelector('[role="dialog"][data-state="open"]')) return;
+            if (previousFocus.isConnected) previousFocus.focus();
+          });
         }}
       >
         {/* Bottom-sheet drag handle — mobile only. */}

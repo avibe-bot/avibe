@@ -1,9 +1,11 @@
 import * as React from 'react';
+import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { useTranslation } from 'react-i18next';
 import { ChevronLeft, ChevronRight, Download, X, ZoomIn, ZoomOut } from 'lucide-react';
 import { TransformWrapper, TransformComponent, type ReactZoomPanPinchRef } from 'react-zoom-pan-pinch';
 
 import { Button } from '@/components/ui/button';
+import { Dialog, DialogOverlay, DialogPortal, DialogTitle } from '@/components/ui/dialog';
 import { handleMediaDownloadClick, mediaDownloadHref } from '@/lib/downloadMedia';
 import { useRouteSurfaceWindowEvent } from '@/lib/routeSurfaceActivity';
 import { ImageViewerContext, type ImageViewerOpenOptions } from './image-viewer-context';
@@ -59,6 +61,7 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
   // Controls the zoom/pan transform (wired to the desktop +/- buttons). The
   // wrapper is keyed on ``src`` so paging to another image remounts it back to 1x.
   const transformRef = React.useRef<ReactZoomPanPinchRef>(null);
+  const previousFocusRef = React.useRef<HTMLElement | null>(null);
   // True while/after a pan in the current press, so the trailing click (which may
   // land on the dark stage after dragging a zoomed image) doesn't close the modal.
   // Reset on each pointer-down; clicking the empty stage WITHOUT panning closes.
@@ -116,37 +119,50 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
   const ctx = React.useMemo(() => ({ open }), [open]);
 
   return (
-    <ImageViewerContext.Provider value={ctx}>
-      {children}
-      {src && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-6 backdrop-blur-sm"
-          onPointerDown={() => {
-            interactedRef.current = false;
-          }}
-          onClick={(e) => {
-            // A real pan happened this press → don't treat the release as a close.
-            if (interactedRef.current) return;
-            // Keep the viewer open only when the click is on the VISIBLE image:
-            // inside the image rect AND inside the stage. (A zoomed image's rect
-            // overflows the stage; those clipped parts are dark margin → close.)
-            const inside = (rect?: DOMRect) =>
-              !!rect &&
-              e.clientX >= rect.left &&
-              e.clientX <= rect.right &&
-              e.clientY >= rect.top &&
-              e.clientY <= rect.bottom;
-            if (
-              inside(imgRef.current?.getBoundingClientRect()) &&
-              inside(stageRef.current?.getBoundingClientRect())
-            ) {
-              return;
-            }
-            close();
-          }}
-          role="dialog"
-          aria-modal="true"
-        >
+    <Dialog open={src !== null} onOpenChange={(next) => { if (!next) close(); }}>
+      <ImageViewerContext.Provider value={ctx}>
+        {children}
+        {src && (
+          <DialogPortal>
+            <DialogOverlay className="bg-black/80 backdrop-blur-sm" />
+            <DialogPrimitive.Content
+              aria-describedby={undefined}
+              className="fixed inset-0 z-50 flex items-center justify-center p-6 focus:outline-none"
+              onOpenAutoFocus={() => {
+                previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+              }}
+              onCloseAutoFocus={(event) => {
+                const previousFocus = previousFocusRef.current;
+                if (previousFocus?.isConnected) {
+                  event.preventDefault();
+                  previousFocus.focus();
+                }
+              }}
+              onPointerDown={() => {
+                interactedRef.current = false;
+              }}
+              onClick={(e) => {
+                // A real pan happened this press → don't treat the release as a close.
+                if (interactedRef.current) return;
+                // Keep the viewer open only when the click is on the VISIBLE image:
+                // inside the image rect AND inside the stage. (A zoomed image's rect
+                // overflows the stage; those clipped parts are dark margin → close.)
+                const inside = (rect?: DOMRect) =>
+                  !!rect &&
+                  e.clientX >= rect.left &&
+                  e.clientX <= rect.right &&
+                  e.clientY >= rect.top &&
+                  e.clientY <= rect.bottom;
+                if (
+                  inside(imgRef.current?.getBoundingClientRect()) &&
+                  inside(stageRef.current?.getBoundingClientRect())
+                ) {
+                  return;
+                }
+                close();
+              }}
+            >
+              <DialogTitle className="sr-only">{t('chat.media.preview')}</DialogTitle>
           <div className="absolute right-4 top-4 z-10 flex items-center gap-2">
             {/* Zoom buttons: a pointer-device affordance (touch zooms by pinch).
                 stopPropagation so clicking a control doesn't also close the viewer. */}
@@ -272,8 +288,10 @@ export const ImageViewerProvider: React.FC<{ images: string[]; children: React.R
               {index + 1} / {gallery.length}
             </span>
           )}
-        </div>
+          </DialogPrimitive.Content>
+        </DialogPortal>
       )}
-    </ImageViewerContext.Provider>
+      </ImageViewerContext.Provider>
+    </Dialog>
   );
 };

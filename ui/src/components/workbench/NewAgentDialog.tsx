@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ArrowRight, Maximize2, X } from 'lucide-react';
+import { ArrowRight, Maximize2 } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -14,9 +14,9 @@ import type { ComboboxOption } from '../ui/combobox';
 import { Input } from '../ui/input';
 import { Textarea } from '../ui/textarea';
 import { EditorDialog } from '../ui/editor-dialog';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '../ui/dialog';
 import { Button } from '../ui/button';
 import { errorMessage } from '@/lib/errorMessage';
-import { useRouteSurfaceWindowEvent } from '@/lib/routeSurfaceActivity';
 import { getBackendUiMeta, type AgentBackendId } from '@/lib/agentBackends';
 import { BackendAvatar } from '../visual';
 import { BACKEND_ORDER, BACKEND_LABEL } from '@/lib/backendAccent';
@@ -29,7 +29,7 @@ const BACKEND_OPTIONS = BACKEND_ORDER.map((id) => ({
 }));
 
 interface NewAgentDialogProps {
-  /** When false the modal renders nothing — controlled by the parent. */
+  /** When false the dialog stays closed — the parent owns its visibility. */
   open: boolean;
   onClose: () => void;
   /** Called after a successful POST /agents with the new agent. */
@@ -141,14 +141,6 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
     }
   }, [effortOptions, effort]);
 
-  useRouteSurfaceWindowEvent('keydown', (event) => {
-    // Don't let Esc close the whole create dialog when the expand editor is
-    // open on top — that Esc belongs to the editor.
-    if (event.key === 'Escape' && !editorOpen) onClose();
-  }, open);
-
-  if (!open) return null;
-
   const canSubmit = name.trim().length > 0 && !submitting && catalogAnswered;
 
   const handleSubmit = async () => {
@@ -203,27 +195,19 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
 
   return (
     <>
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 px-4 py-4"
-      role="dialog"
-      aria-modal="true"
-      onClick={onClose}
-    >
-      <div
-        className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[520px] flex-col gap-5 overflow-y-auto rounded-2xl border border-border-strong bg-surface p-7 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex min-w-0 items-start justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            <h2 className="break-words text-[18px] font-bold text-foreground [overflow-wrap:anywhere]">{t('agents.create.title')}</h2>
-            <p className="mt-1 max-w-[420px] text-[11.5px] leading-relaxed text-muted">
-              {t('agents.create.body')}
-            </p>
+      <Dialog open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
+        <DialogContent
+          closeLabel={t('common.close')}
+          className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[520px] flex-col gap-5 overflow-y-auto rounded-2xl border border-border-strong bg-surface p-7 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
+        >
+          <div className="flex min-w-0 items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <DialogTitle className="break-words text-[18px] font-bold text-foreground [overflow-wrap:anywhere]">{t('agents.create.title')}</DialogTitle>
+              <DialogDescription className="mt-1 max-w-[420px] text-[11.5px] leading-relaxed text-muted">
+                {t('agents.create.body')}
+              </DialogDescription>
+            </div>
           </div>
-          <button onClick={onClose} className="text-muted hover:text-foreground" aria-label={t('common.close')}>
-            <X className="size-4" />
-          </button>
-        </div>
 
         {/* Backend picker */}
         <div className="flex flex-col gap-2">
@@ -405,11 +389,10 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
             <ArrowRight className="size-3.5" />
           </Button>
         </div>
-      </div>
-    </div>
-      {/* Rendered outside the create-dialog wrapper so its portal clicks
-          (textarea, preview toggle, Save) don't bubble to the wrapper's
-          onClick=onClose and discard the in-progress form. */}
+        </DialogContent>
+      </Dialog>
+      {/* The editor is a nested Radix dialog, so its portal interactions stay
+          outside this form's focus scope and do not discard the draft. */}
       <EditorDialog
         open={editorOpen}
         onClose={() => setEditorOpen(false)}

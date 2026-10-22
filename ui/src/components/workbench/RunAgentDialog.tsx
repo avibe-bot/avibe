@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { ArrowRight, Loader2, Play, X } from 'lucide-react';
+import { ArrowRight, Loader2, Play } from 'lucide-react';
 
 import { useApi } from '../../context/ApiContext';
 import type { VibeAgentFull, WorkbenchProject } from '../../context/ApiContext';
 import { Button } from '../ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '../ui/dialog';
 import { Select } from '../ui/select';
 import { errorMessage } from '@/lib/errorMessage';
 
@@ -76,35 +77,21 @@ export const RunAgentDialog: React.FC<RunAgentDialogProps> = ({ agent, onClose }
   const noProjects = projects !== null && projects.length === 0;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 px-4 py-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t('agents.runDialog.title')}
-      onClick={onClose}
-    >
-      <div
+    <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
+      <DialogContent
+        closeLabel={t('common.close')}
         className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col gap-4 overflow-y-auto rounded-2xl border border-border-strong bg-surface p-5 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
-        onClick={(e) => e.stopPropagation()}
       >
         <div className="flex min-w-0 items-start gap-3">
           <div className="flex size-9 items-center justify-center rounded-lg border border-mint/30 bg-mint-soft text-mint-ink">
             <Play className="size-4" />
           </div>
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <div className="text-[14px] font-bold text-foreground">{t('agents.runDialog.title')}</div>
-            <div className="text-[11.5px] leading-relaxed text-muted">
+            <DialogTitle className="text-[14px] font-bold text-foreground">{t('agents.runDialog.title')}</DialogTitle>
+            <DialogDescription className="text-[11.5px] leading-relaxed text-muted">
               {t('agents.runDialog.description')}
-            </div>
+            </DialogDescription>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t('common.close')}
-            className="text-muted transition hover:text-foreground"
-          >
-            <X className="size-4" />
-          </button>
         </div>
 
         <div className="flex flex-col gap-1.5">
@@ -165,7 +152,7 @@ export const RunAgentDialog: React.FC<RunAgentDialogProps> = ({ agent, onClose }
             )}
           </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 };
