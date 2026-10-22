@@ -45,6 +45,10 @@ export interface AppSelector extends BaseSelector {
 export interface WindowSelector extends BaseSelector {
   title?: string;
   titleContains?: string;
+  /** Exact driver window id, as listed by `vibe computer observe windows`. */
+  windowId?: number;
+  /** Match only windows whose on-screen state equals this value. */
+  onScreen?: boolean;
 }
 
 export interface ActionOptions {
