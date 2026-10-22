@@ -494,6 +494,14 @@ queue before it opens admission. A stopped/settled Turn has no continuation barr
 A subsequent internal `pause_turn` preserves the entire linked exchange
 natively without requiring historical replay evidence.
 
+An `error` partial from an attempted continuation is not a valid provider response to replay. For the same
+Anthropic origin/account's deferred exchange, it neither closes the in-flight request nor completes a pair for
+replay eligibility. An already-authorized transcript retry therefore sends the preceding valid mixed response
+and its client results unchanged; a later successful response pairs across the failed attempts. The failed
+partials and their reported usage stay immutable in storage. This does not grant retry permission or make a
+failed stream resumable like `pause_turn`; Stop/`aborted`, a new user input, or another origin/account still closes
+the exchange.
+
 **Fallback form.** It applies when the pinned Source refuses in-flight verbatim replay, when the fresh hop no
 longer declares the tool natively, or on `pin_unavailable`. Each server block pair is replaced **in place** by one
 text block: `[web_search: <query>]` plus numbered titles and URLs.
@@ -1042,3 +1050,7 @@ and no real credentials.
     (both fetched 2026-10-22) specifies attribution across this split; the latter defines the
     `usage.server_tool_use.web_search_requests` counter. Both present and absent counters are covered by
     raw-stream-shaped fixtures; the fix never adds a second charge.
+12. **An existing authorized retry can repeat upstream work.** A failed partial is not a valid native response
+    prefix, so a retry resends the last valid continuation rather than inventing a new provider resume protocol.
+    Each attempt's reported usage stays on its own response: a partial reporting one search followed by a retry
+    reporting two records all three, without synthesizing or deduplicating real charges. No new retry layer is added.

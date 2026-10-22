@@ -160,6 +160,81 @@ async def test_a_steer_waits_until_the_deferred_result_and_never_enters_the_tool
     assert "extra user input" in json.dumps(sent[2])
 
 
+@pytest.mark.parametrize("failures", [1, 2])
+@pytest.mark.parametrize("native_history", [True, False])
+async def test_partial_deferred_failure_retries_the_open_exchange_and_pairs_only_the_valid_result(failures, native_history):
+    """A failed result fragment is not a new provider turn or evidence that its group ended.
+
+    Unlike a clean continuation, this cut previously forced every unfinished call
+    portable and prevented the next parser from recognizing any deferred result.
+    """
+    from core.agent_core.ai.provider import ProviderError
+
+    request, original = await _paused("SSC")
+    result = {**RESULT, "tool_use_id": "srvtoolu_0"}
+    partial_wire = _sse([result], stop=None, searches=1).removesuffix('data: {"type": "message_stop"}\n\n')
+    _, failed = await _stream(lambda _: httpx.Response(200, headers=_served(), text=partial_wire), request)
+    failure = failed[-1]
+    assert isinstance(failure, ProviderError) and failure.continuable
+    partial = failure.partial
+    assert partial.stop_reason == "error"
+    assert partial.hosted_summary.counts == {"web_search_requests": 1}
+    first = await build_wire_request(request, gateway=True)
+    retry = replace(request, messages=(*request.messages, *((partial,) * failures)))
+    resent = await build_wire_request(retry, gateway=True)
+    assert resent.body["messages"] == first.body["messages"]
+    assert resent.body["tools"] == first.body["tools"]
+    assert resent.headers[PIN_SOURCE_HEADER] == SOURCE and resent.headers[PIN_MODEL_HEADER] == MODEL
+
+    results = [{**RESULT, "tool_use_id": f"srvtoolu_{index}"} for index in (0, 1)]
+    _, events = await _stream(lambda _: httpx.Response(200, headers=_served(),
+        text=_sse([*results, {"type": "text", "text": "found both"}], stop="end_turn", searches=2)), retry)
+    assert isinstance(events[-1], Done)
+    completed = events[-1].message
+    assert [b.id for b in completed.content if isinstance(b, HostedToolBlock)] == ["srvtoolu_0", "srvtoolu_1"]
+    assert completed.hosted_summary.counts == {"web_search_requests": 2}
+    assert not original.hosted_summary.counts
+    assert partial.hosted_summary.counts == {"web_search_requests": 1}
+    endpoint = replace(request.endpoint, hosted_tools={
+        "web_search": replace(request.endpoint.hosted_tools["web_search"], replay=native_history),
+    })
+    history = await build_wire_request(replace(retry, endpoint=endpoint,
+        messages=(*retry.messages, completed, UserMessage((TextBlock("next"),)))), gateway=True)
+    body = history.body["messages"]
+    assert "interrupted" not in json.dumps(body)
+    blocks = [b for m in body if isinstance(m["content"], list) for b in m["content"]]
+    if native_history:
+        assert [b for b in blocks if b["type"] == "web_search_tool_result"] == results
+        assert sum(b["type"] == "server_tool_use" for b in blocks) == 2
+    else:
+        assert sum(b["type"] == "tool_use" and b["name"] == "web_search" for b in blocks) == 2
+        assert sum(b["type"] == "tool_result" for b in blocks) == 3
+
+
+@pytest.mark.parametrize("boundary", ["user", "aborted", "origin", "identity", "ordinary_tools"])
+async def test_failed_deferred_attempt_does_not_cross_a_closed_or_different_exchange(boundary):
+    from core.agent_core.ai.transform import in_flight_position
+
+    request, paused = await _paused("SSC")
+    partial = replace(_completion(paused), stop_reason="error")
+    if boundary == "aborted":
+        partial = replace(partial, stop_reason="aborted")
+    elif boundary == "origin":
+        partial = replace(partial, origin=replace(partial.origin, model="another-model"))
+    elif boundary == "identity":
+        partial = replace(partial, source_identity="sha256:another-account")
+    elif boundary == "ordinary_tools":
+        paused = replace(paused, content=paused.tool_calls, hosted_summary=None)
+    history = (request.messages[0], paused, *request.messages[2:], partial)
+    if boundary == "user":
+        history = (*history, UserMessage((TextBlock("next"),)))
+    assert in_flight_position(history) is None
+    wire = await build_wire_request(replace(request, messages=history), gateway=True)
+    assert "server_tool_use" not in json.dumps(wire.body["messages"])
+    assert "web_search_tool_result" not in json.dumps(wire.body["messages"])
+    assert PIN_MODEL_HEADER not in wire.headers
+
+
 def _completion(paused):
     blocks = []
     for call in paused.content:

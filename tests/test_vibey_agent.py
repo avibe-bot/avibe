@@ -3461,9 +3461,9 @@ async def test_anthropic_deferred_search_shows_only_its_completion_live_and_on_r
 
 
 @pytest.mark.parametrize("client_finished", [False, True])
-@pytest.mark.parametrize("case", ["continue", "stopped", "preflight_failed"])
+@pytest.mark.parametrize("case", ["continue", "stopped", "preflight_failed", "partial_failure"])
 async def test_restart_defers_accepted_steer_until_native_search_continuation(
-    engine, session, tmp_path, published, client_finished, case
+    engine, session, tmp_path, published, client_finished, case, continuation_policy
 ):
     """T3 must not insert a recovered steer into the tool-result-only continuation.
 
@@ -3478,15 +3478,21 @@ async def test_restart_defers_accepted_steer_until_native_search_continuation(
     from tests.agent_core.ai.test_anthropic_deferred import _paused, _sse, RESULT
     from tests.agent_core.fakes import ORIGIN
 
+    continuation_policy(initial_delay_s=0)
     sent = []
     def gateway(wire):
         sent.append(wire)
-        blocks = [{**RESULT, "tool_use_id": "srvtoolu_0"}, {"type": "text", "text": "found"}] if len(sent) == 1 else [
+        complete_at = 2 if case == "partial_failure" else 1
+        results = [{**RESULT, "tool_use_id": f"srvtoolu_{index}"} for index in (0, 1)]
+        blocks = [*results, {"type": "text", "text": "found"}] if len(sent) <= complete_at else [
             {"type": "text", "text": "steer answered"}
         ]
+        body = _sse(blocks, stop="end_turn", searches=2 if len(sent) == complete_at else 0)
+        if case == "partial_failure" and len(sent) == 1:
+            body = _sse(results[:1], stop=None, searches=1).removesuffix('data: {"type": "message_stop"}\n\n')
         served = {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": "src_served00001"}
         return httpx.Response(200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": json.dumps(served)},
-                              text=_sse(blocks, stop="end_turn"))
+                              text=body)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
         harness = _Harness(engine, tmp_path, "avibe", [], providers=registry_providers(media_loader=None, client=client))
@@ -3502,7 +3508,7 @@ async def test_restart_defers_accepted_steer_until_native_search_continuation(
         await harness.agent.store.consume_input(
             SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("search"),))
         )
-        paused_request, paused = await _paused()
+        paused_request, paused = await _paused("SSC")
         paused = replace(paused, origin=ORIGIN, source_identity="sha256:test-source-identity")
         original = await harness.agent.store.append_response(SESSION, paused, final=False)
         steer_id, attempt = harness.open_steer("and the docs", turn_id, harness.controller.started[-1])
@@ -3544,8 +3550,14 @@ async def test_restart_defers_accepted_steer_until_native_search_continuation(
             assert (await harness.context_rows())[-1].row_id == steer_id and not sent
             return
 
-    assert len(sent) == 2
-    continuation, answered = [json.loads(wire.content) for wire in sent]
+    assert len(sent) == (3 if case == "partial_failure" else 2)
+    continuation, answered = json.loads(sent[0].content), json.loads(sent[-1].content)
+    if case == "partial_failure":
+        retried = json.loads(sent[1].content)
+        assert retried["messages"] == continuation["messages"]
+        assert retried["tools"] == continuation["tools"]
+        assert sent[1].headers[PIN_SOURCE_HEADER] == "src_served00001"
+        assert sent[1].headers[PIN_MODEL_HEADER] == "test-model"
     assert sent[0].headers[PIN_SOURCE_HEADER] == "src_served00001"
     assert sent[0].headers[PIN_MODEL_HEADER] == "test-model"
     assert continuation["messages"][-1]["role"] == "user"
@@ -3553,9 +3565,18 @@ async def test_restart_defers_accepted_steer_until_native_search_continuation(
     assert "and the docs" not in json.dumps(continuation)
     assert "and the docs" in json.dumps(answered)
     rows = await harness.context_rows()
-    completion = next(row for row in rows if row.kind == "response" and row.row_id != original.row_id)
-    [hosted] = [block for block in completion.message.content if isinstance(block, HostedToolBlock)]
-    assert hosted.record.status == "completed"
+    completion = next(row for row in rows if row.kind == "response" and row.row_id != original.row_id
+                      and row.message.stop_reason != "error")
+    hosted = [block for block in completion.message.content if isinstance(block, HostedToolBlock)]
+    assert [(block.id, block.record.status) for block in hosted] == [
+        ("srvtoolu_0", "completed"), ("srvtoolu_1", "completed"),
+    ]
+    if case == "partial_failure":
+        [partial] = [row for row in rows if row.kind == "response" and row.message.stop_reason == "error"]
+        assert partial.message.hosted_summary.counts == {"web_search_requests": 1}
+        assert completion.message.hosted_summary.counts == {"web_search_requests": 2}
+        assert sum((row.message.hosted_summary.counts.get("web_search_requests", 0)
+                    if row.message.hosted_summary else 0) for row in rows if row.kind == "response") == 3
     [steer] = [row for row in rows if row.row_id == steer_id]
     assert completion.context_seq < steer.context_seq
     assert next(row for row in rows if row.row_id == original.row_id) == original

@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
-from core.agent_core.hosted_continuations import hosted_completions, result_fragment
+from core.agent_core.hosted_continuations import failed_deferred_attempt, hosted_completions, result_fragment
 from core.agent_core.ai.hosted import portable_hosted
 from core.agent_core.ai.provider import ModelEndpoint, OpaquePayload
 from core.agent_core.messages import (
@@ -314,15 +314,26 @@ def in_flight_position(messages: list[Message] | tuple[Message, ...]) -> int | N
 
     It is the request's last assistant message, stopped for tools, with nothing after it but tool results (a
     ``pause_turn`` continuation has none). A user message after it means its turn ended, as one may right after its
-    tool results, so a later turn never counts as continuing it.
+    tool results, so a later turn never counts as continuing it. A failed Anthropic
+    deferred attempt is not replayed and does not close its still-open exchange.
     """
 
-    last = max((i for i, m in enumerate(messages) if isinstance(m, AssistantMessage)), default=None)
-    if last is None or messages[last].stop_reason != "tool_use":  # type: ignore[union-attr]
-        return None
-    if any(not isinstance(message, ToolResultMessage) for message in messages[last + 1 :]):
-        return None
-    return last
+    failures: list[AssistantMessage] = []
+    for position in range(len(messages) - 1, -1, -1):
+        message = messages[position]
+        if isinstance(message, ToolResultMessage):
+            continue
+        if not isinstance(message, AssistantMessage):
+            return None
+        if message.stop_reason == "error":
+            failures.append(message)
+            continue
+        if message.stop_reason != "tool_use" or any(
+            not failed_deferred_attempt(message, failure) for failure in failures
+        ):
+            return None
+        return position
+    return None
 
 
 def _opaque_admitted(message: AssistantMessage, endpoint: ModelEndpoint | None, payload: OpaquePayload) -> bool:

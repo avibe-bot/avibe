@@ -454,6 +454,8 @@ scenarios:
       - tests/agent_core/ai/test_anthropic_deferred.py::test_deferred_completion_never_invents_a_charge_from_a_result_block
       - tests/agent_core/ai/test_anthropic_deferred.py::test_a_steer_waits_until_the_deferred_result_and_never_enters_the_tool_result_user_message
       - tests/agent_core/ai/test_anthropic_deferred.py::test_deferred_result_then_pause_turn_keeps_the_native_exchange_without_replay_evidence
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_partial_deferred_failure_retries_the_open_exchange_and_pairs_only_the_valid_result
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_failed_deferred_attempt_does_not_cross_a_closed_or_different_exchange
       - tests/test_vibey_agent.py::test_anthropic_deferred_search_shows_only_its_completion_live_and_on_reload
       - tests/test_vibey_agent.py::test_restart_defers_accepted_steer_until_native_search_continuation
       - tests/test_hosted_activity.py::test_deferred_search_has_no_card_or_share_of_an_earlier_search_cost

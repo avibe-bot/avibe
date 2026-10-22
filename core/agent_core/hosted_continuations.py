@@ -1,7 +1,7 @@
 """C-1 Anthropic deferred hosted calls: immutable fragments, one logical call.
 
-The first response owns the use; the immediately continued response owns its result.
-Only projections join them. Neither the stored messages nor their usage are rewritten.
+The first response owns the use; the next valid continued response owns its result.
+Only model-replay projections join them. Neither stored messages nor their usage are rewritten.
 """
 
 from dataclasses import dataclass
@@ -23,6 +23,18 @@ def pending_hosted(message: AssistantMessage) -> dict[str, HostedToolBlock]:
     }
 
 
+def failed_deferred_attempt(previous: AssistantMessage, current: AssistantMessage) -> bool:
+    """An error partial is retained for audit, not a response that closes this native exchange.
+
+    This permits reconstructing an already-authorized retry, not granting one.
+    Stop/aborted responses and another origin or account still close the exchange.
+    """
+    return (
+        current.stop_reason == "error" and bool(pending_hosted(previous))
+        and current.origin == previous.origin and current.source_identity == previous.source_identity
+    )
+
+
 def result_fragment(block: HostedToolBlock) -> bool:
     return (
         block.tool == "web_search" and block.record.status != "pending" and len(block.native.payload) == 1
@@ -42,8 +54,9 @@ class HostedCompletion:
 def hosted_completions(messages: Sequence[Message]) -> tuple[HostedCompletion, ...]:
     """Pair only a real continuation on the same origin/account/Source, across its client results.
 
-    A new user input, another assistant response, missing client result, or moved Source cannot finish an old call.
-    Call ids alone are not globally unique and never authorize cross-Source pairing.
+    A new user input, another valid assistant response, missing client result, or moved Source cannot finish an old
+    call. Failed attempts on that same deferred exchange are not valid responses. Call ids alone never authorize
+    cross-Source pairing.
     """
     pairs = []
     previous: tuple[int, AssistantMessage] | None = None
@@ -55,6 +68,8 @@ def hosted_completions(messages: Sequence[Message]) -> tuple[HostedCompletion, .
         if isinstance(message, AssistantMessage):
             if previous is not None:
                 before_position, before = previous
+                if failed_deferred_attempt(before, message):
+                    continue
                 pending = pending_hosted(before)
                 if (
                     pending and message.origin == before.origin and message.source_identity == before.source_identity
