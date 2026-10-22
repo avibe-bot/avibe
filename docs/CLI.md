@@ -622,6 +622,16 @@ install to the new version together, so no `PATH` lookup keeps an older build.
 Launchers that point anywhere else are never changed. See
 [Upgrading](UPGRADING.md#stable-launchers).
 
+When Avibe runs on a uv-managed CPython, the upgrade first moves that Python
+minor version to its newest patch release with
+`uv python install --upgrade --no-bin`, so CPython and OpenSSL security fixes
+arrive with Avibe releases. It never changes the minor version and adds no
+`python3.x` command to your `PATH`. As with `uv python upgrade`, other uv
+environments that follow this minor version's managed Python move to the new
+patch too. uv only knows patches released before its own version; with uv older
+than 0.9.10, offline, or when the download fails, the upgrade continues on the
+installed patch and logs why. Run `uv self update` to reach newer patches.
+
 ## Service Lifecycle
 
 ### Understanding "Restart" vs "Stop"
