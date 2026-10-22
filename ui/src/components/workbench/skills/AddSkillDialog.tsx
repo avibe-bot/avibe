@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from 'react';
-import { Download, Github, Loader2, PackageCheck, PackagePlus, Search, Terminal, X } from 'lucide-react';
+import { Download, Github, Loader2, PackageCheck, PackagePlus, Search, Terminal } from 'lucide-react';
 import clsx from 'clsx';
 import { useTranslation } from 'react-i18next';
 import { useApi } from '../../../context/ApiContext';
@@ -11,6 +11,7 @@ import { Checkbox } from '../../ui/checkbox';
 import { FileDropzone } from './FileDropzone';
 import { errorMessage } from '@/lib/errorMessage';
 import { AGENT_ID_TO_BACKEND } from '@/lib/backendAccent';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '../../ui/dialog';
 
 export interface AddSkillDialogProps {
   defaultScope: SkillScope;
@@ -168,19 +169,19 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
   ];
 
   return (
-    <div role="dialog" aria-modal="true" aria-labelledby="add-skill-dialog-title" className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto overflow-x-hidden bg-[#05050B]/[0.72] p-4 backdrop-blur-[6px] sm:p-10">
-      <div className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[560px] flex-col overflow-y-auto overflow-x-hidden rounded-2xl border border-border-strong bg-surface-2 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)] sm:max-h-[calc(100dvh-5rem)]">
+    <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
+      <DialogContent
+        closeLabel={t('common.close')}
+        className="max-w-[560px] gap-0 overflow-y-auto overflow-x-hidden rounded-2xl border-border-strong bg-surface-2 p-0 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)] md:top-10 md:max-h-[calc(100dvh-5rem)] md:translate-y-0 max-md:bottom-4 max-md:left-4 max-md:right-4 max-md:top-4 max-md:w-auto max-md:max-w-none max-md:max-h-[calc(100dvh-2rem)] max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-2xl max-md:p-0 max-md:pb-0"
+      >
         <div className="flex min-w-0 items-center gap-3 border-b border-border px-5 py-4">
           <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] border border-mint/40 bg-mint-soft text-mint-ink">
             <PackagePlus className="size-[17px]" />
           </span>
           <div className="flex min-w-0 flex-1 flex-col">
-            <div id="add-skill-dialog-title" className="break-words text-[16px] font-bold text-foreground [overflow-wrap:anywhere]">{t('skills.addDialog.title')}</div>
-            <div className="break-words text-[11px] text-muted [overflow-wrap:anywhere]">{t('skills.addDialog.subtitle')}</div>
+            <DialogTitle id="add-skill-dialog-title" className="break-words p-0 text-[16px] font-bold text-foreground [overflow-wrap:anywhere]">{t('skills.addDialog.title')}</DialogTitle>
+            <DialogDescription className="break-words text-[11px] text-muted [overflow-wrap:anywhere]">{t('skills.addDialog.subtitle')}</DialogDescription>
           </div>
-          <button type="button" onClick={onClose} aria-label={t('common.close')} className="flex size-[26px] items-center justify-center rounded-md text-muted transition hover:bg-foreground/[0.06]">
-            <X className="size-3.5" />
-          </button>
         </div>
 
         <div className="flex flex-col gap-4 p-5">
@@ -303,7 +304,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
             </Button>
           </div>
         </div>
-      </div>
-    </div>
+        </DialogContent>
+    </Dialog>
   );
 }

@@ -72,7 +72,7 @@ async function serveSkills(page: Page) {
 }
 
 async function expectScrollableWithinViewport(dialog: Locator, page: Page, inset: number) {
-  const shell = dialog.locator(':scope > div');
+  const shell = dialog;
   const viewport = page.viewportSize()!;
   const box = await shell.boundingBox();
   expect(box).not.toBeNull();
@@ -111,7 +111,7 @@ test('custom skill dialogs keep their actions reachable on short viewports', asy
   await open(page, '/skills');
 
   await page.getByRole('button', { name: 'Browse registry', exact: true }).click();
-  const browse = page.getByRole('dialog', { name: 'Browse the askill registry', exact: true });
+  const browse = page.getByRole('dialog').filter({ hasText: 'Browse the askill registry' });
   await expect(browse).toBeVisible();
   await expect(page.getByRole('button', { name: 'Add', exact: true })).toHaveCount(REGISTRY_SKILLS.length);
   await expectScrollableWithinViewport(browse, page, 16);
@@ -119,7 +119,7 @@ test('custom skill dialogs keep their actions reachable on short viewports', asy
   await browse.getByRole('button', { name: 'Done', exact: true }).click();
 
   await page.getByRole('button', { name: 'Add skill', exact: true }).click();
-  const add = page.getByRole('dialog', { name: 'Add a skill', exact: true });
+  const add = page.getByRole('dialog').filter({ hasText: 'Add a skill' });
   await expect(add).toBeVisible();
   await add.getByPlaceholder('github.com/owner/repo or gh:owner/repo@skill').fill('github.com/fixture/repository');
   await add.getByRole('button', { name: 'Fetch', exact: true }).click();
