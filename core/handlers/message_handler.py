@@ -991,14 +991,18 @@ class MessageHandler(BaseHandler):
         )
 
     def _builtin_vibey_available(self) -> bool:
+        """Whether a continuation on Vibey could run now: its built-in Agent exists and
+        the Model Hub supplies it a model (the same answer a Vibey turn starts from)."""
+        from modules.agents.model_hub import hub_supply_refusal
+
         store = getattr(self.controller, "vibe_agent_store", None)
         getter = getattr(store, "get_builtin_default_agent_for_backend", None)
         if not callable(getter):
             return False
         try:
-            return getter("vibey") is not None
+            return getter("vibey") is not None and hub_supply_refusal(self.controller, "vibey", self._get_lang()) is None
         except Exception:
-            logger.debug("Could not resolve the built-in Vibey Agent", exc_info=True)
+            logger.debug("Could not resolve whether Vibey can run", exc_info=True)
             return False
 
     async def _admit_human_delivery(

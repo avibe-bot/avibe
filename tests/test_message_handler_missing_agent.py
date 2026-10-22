@@ -109,7 +109,7 @@ def test_dispatched_missing_agent_preserves_primary_delivery_in_terminal_contrac
     assert controller.im_client.sent == []
 
 
-def test_an_agent_that_cannot_run_offers_to_continue_on_vibey():
+def test_an_agent_that_cannot_run_offers_to_continue_on_vibey(monkeypatch):
     """A disabled or deleted Agent ends the turn with a notice that names it and
     offers Vibey: the Workbench draws the offer as a button from data, a chat app
     is told where to switch. Without a built-in Vibey there is nothing to offer,
@@ -119,6 +119,10 @@ def test_an_agent_that_cannot_run_offers_to_continue_on_vibey():
     from core.backend_failure import CONTINUE_ON_VIBEY_NEXT_STEP
     from core.vibe_agents import AgentUnavailableError
 
+    from modules.agents.model_hub import ModelSupplyRefusal
+
+    # The Model Hub supplies Vibey a model unless a case below says otherwise.
+    monkeypatch.setattr("modules.agents.model_hub.hub_supply_refusal", lambda _controller, _backend, _lang: None)
     controller = _StubController()
     controller.im_client.formatter = SimpleNamespace(escape_special_chars=lambda text: text)
     vibey = SimpleNamespace(name="vibey")
@@ -171,6 +175,20 @@ def test_an_agent_that_cannot_run_offers_to_continue_on_vibey():
     (no_vibey,) = emitted_for((handler._emit_agent_dispatch_failure, workbench, None, disabled))
     assert no_vibey.kwargs["display_text"] == f"❌ {disabled_text}"
     assert no_vibey.kwargs["output"] is None
+
+    # Vibey exists but the Model Hub supplies it no model: the continuation would only
+    # fail again, so it is not offered either.
+    controller.vibe_agent_store = SimpleNamespace(
+        get=lambda _name: None, get_builtin_default_agent_for_backend=lambda backend: vibey
+    )
+    monkeypatch.setattr(
+        "modules.agents.model_hub.hub_supply_refusal",
+        lambda _controller, backend, _lang: ModelSupplyRefusal("no source", fixed_in_models=True),
+    )
+    (no_supply,) = emitted_for((handler._emit_agent_dispatch_failure, workbench, None, disabled))
+    assert no_supply.kwargs["display_text"] == f"❌ {disabled_text}"
+    assert no_supply.kwargs["output"] is None
+    monkeypatch.setattr("modules.agents.model_hub.hub_supply_refusal", lambda _controller, _backend, _lang: None)
 
     controller.vibe_agent_store = SimpleNamespace(
         get=lambda _name: None, get_builtin_default_agent_for_backend=lambda backend: vibey
