@@ -1,7 +1,7 @@
 # ============================================================
 # Stage 1: Build UI (React + Vite)
 # ============================================================
-FROM node:20-slim AS ui-builder
+FROM node:22.23.4-slim AS ui-builder
 
 WORKDIR /app/ui
 COPY ui/package.json ui/package-lock.json ./
