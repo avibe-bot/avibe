@@ -4905,3 +4905,13 @@ def test_dependencies_status_reports_avault_below_the_pin(monkeypatch, installed
 
     assert dep["latest_version"] == api.AVAULT_VERSION
     assert dep["has_update"] is has_update
+
+
+def test_fetch_tls_floor_does_not_gate_non_fetch_delivery(monkeypatch):
+    # An offline or opted-out host left on 0.1.6 keeps protected grant/run/inject.
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": api.AVAULT_PROTECTED_RECORD_MIN_VERSION})
+
+    assert api._avault_ready_min_version() == api.AVAULT_PROTECTED_RECORD_MIN_VERSION
+    api._require_avault_grant_delivery_surface("resident agent deliver run")
+    with pytest.raises(api.AvaultPreHandoffError, match=api.AVAULT_FETCH_TLS_MIN_VERSION):
+        api._require_avault_fetch_surface("resident agent deliver fetch", floor=api._avault_ready_min_version())

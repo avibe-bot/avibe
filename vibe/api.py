@@ -8761,15 +8761,14 @@ def _avault_p2_release_unavailable_result(
 
 
 def _avault_ready_min_version() -> str:
-    # Managed avault readiness must satisfy the resident grant-id delivery
-    # protocol, the protected-record v2 AAD open fix and the fetch TLS trust
-    # refresh; take the highest floor so stale binaries (e.g. 0.1.6) report
-    # upgrade_required, are upgraded at startup, and are blocked before delivery.
-    floor = AVAULT_GRANT_DELIVERY_MIN_VERSION
-    for candidate in (AVAULT_PROTECTED_RECORD_MIN_VERSION, AVAULT_FETCH_TLS_MIN_VERSION):
-        if not _version_at_least(floor, candidate):
-            floor = candidate
-    return floor
+    # Managed avault readiness must satisfy both the resident grant-id delivery
+    # protocol and the protected-record v2 AAD open fix; take the higher floor so
+    # stale binaries (e.g. 0.1.5) are upgraded/blocked before protected delivery.
+    # The fetch TLS floor is deliberately not part of it: only the fetch guards
+    # enforce it, so run/inject/grant keep working on an older binary.
+    if _version_at_least(AVAULT_PROTECTED_RECORD_MIN_VERSION, AVAULT_GRANT_DELIVERY_MIN_VERSION):
+        return AVAULT_PROTECTED_RECORD_MIN_VERSION
+    return AVAULT_GRANT_DELIVERY_MIN_VERSION
 
 
 def _managed_avault_release_satisfies_ready_minimum() -> bool:

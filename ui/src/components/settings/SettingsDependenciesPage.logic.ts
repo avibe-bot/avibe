@@ -23,20 +23,31 @@ export const dependencyHasInstallAction = (
 export const dependencyIsStartupManaged = (dependency: Pick<DependencyItem, 'id'>): boolean =>
   STARTUP_MANAGED_DEPENDENCIES.has(dependency.id);
 
+/**
+ * Upgrade required, or an installed avault below its managed pin. avault's
+ * readiness floor stays lower than the pin so run/inject keep working, but
+ * fetch needs the pinned release's TLS trust, and startup upgrades to it.
+ */
+export const dependencyNeedsUpgrade = (
+  dependency: Pick<DependencyItem, 'id' | 'status'> & Partial<Pick<DependencyItem, 'installed' | 'has_update'>>,
+): boolean =>
+  dependency.status === 'upgrade_required' ||
+  (dependency.id === 'avault' && dependency.status === 'ready' && dependency.installed === true && dependency.has_update === true);
+
 /** Manual repair must wait for the startup pass, even before this step starts. */
 export const dependencyNeedsStartupRepair = (
-  dependency: Pick<DependencyItem, 'id' | 'status'>,
+  dependency: Pick<DependencyItem, 'id' | 'status'> & Partial<Pick<DependencyItem, 'installed' | 'has_update'>>,
 ): boolean =>
   dependencyIsStartupManaged(dependency) &&
-  (dependency.status === 'missing' || dependency.status === 'upgrade_required' || dependency.status === 'error');
+  (dependency.status === 'missing' || dependency.status === 'error' || dependencyNeedsUpgrade(dependency));
 
 export const dependencyIsStartupRepairing = (
-  dependency: Pick<DependencyItem, 'id' | 'installed' | 'status'>,
+  dependency: Pick<DependencyItem, 'id' | 'installed' | 'status'> & Partial<Pick<DependencyItem, 'has_update'>>,
   activeIds?: ReadonlySet<string>,
 ): boolean =>
   dependencyIsStartupManaged(dependency) &&
   (activeIds === undefined || activeIds.has(dependency.id)) &&
-  (!dependency.installed || dependency.status === 'upgrade_required' || dependency.status === 'error');
+  (!dependency.installed || dependency.status === 'error' || dependencyNeedsUpgrade(dependency));
 
 export const dependenciesNeedAutomaticRefresh = (
   result: DependenciesResult,
