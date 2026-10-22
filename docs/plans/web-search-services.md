@@ -9,6 +9,9 @@ Status: **design**, 2026-10-19. Direction and the six product decisions in §0 a
   agent process.
 - The owner reviewed an interactive draft (a Show Page) on 2026-10-19. Formal frames go to `avibe-docs/design.pen`
   through Pencil (§6).
+- The built-in, keyless Exa extension is specified in [`web-search-keyless-exa.md`](web-search-keyless-exa.md).
+  It keeps this document's service, record, order and `auto_enroll` rules unless that plan names a keyless-specific
+  exception; its UI and public-disclosure details are authoritative for `Exa（免费）`.
 
 ## 0. Owner decisions
 
@@ -587,12 +590,20 @@ and an exact $0 do not; a total keeps "≈" when any non-zero figure in it does)
 
 ## 7. Defaults, cost and privacy
 
-- Nothing new turns on by itself except decision 4: a qualifying DeepSeek Source joins the search order, ahead of
-  model executors, because it is a search service. The public docs say so.
+- The current automatic order is a fact of this release: the user's own search services (Tavily, keyed Exa and
+  official DeepSeek) → the built-in keyless Exa service → model executors. Keyless Exa is on by default, needs no
+  key or setup, remains a fallback even when another service exists, and every row can be reordered or turned off.
+  The complete keyless-Exa representation, MCP execution, rate-limit handling, UI and public-disclosure facts are in
+  [`web-search-keyless-exa.md`](web-search-keyless-exa.md).
+- This design makes no general promise that nothing else will turn on automatically. Public docs state the current
+  default and where a query goes as facts, and are updated when a default changes.
 - A search sends the query to the service that runs it. DeepSeek processes queries in the People's Republic of
-  China; the add dialog states each vendor's facts.
-- Prices are list prices with date and source. Free tiers and plans are not modeled; the footnote says that actual
-  bills may differ.
+  China; keyless Exa sends the query directly from the Avibe runtime host to Exa's hosted MCP endpoint, where Exa
+  can see the connection's IP and the honest Avibe integration identity. The keyless request has no API key. The
+  Exa Terms and current upstream processing facts are recorded in the keyless-Exa plan.
+- Prices are list prices with date and source. Keyless Exa's price and recorded cost are exactly $0 and its UI label
+  is "免费"; keyed Exa's monthly free credits, if documented by Exa, apply only to the keyed REST path. Actual
+  bills and provider limits may differ from list-price or anonymous-rate-limit facts.
 
 ## 8. Contract changes
 

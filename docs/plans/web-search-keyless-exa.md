@@ -1,0 +1,765 @@
+# Keyless Exa as a default web search service
+
+Status: **design**, 2026-10-22. This document is the keyless-Exa extension to
+[`web-search-services.md`](web-search-services.md), which remains the source of
+truth for Tavily, keyed Exa, official DeepSeek, the common search record, and the
+service lifecycle. It also extends [`vibey-hosted-tools.md`](vibey-hosted-tools.md).
+Where this document names keyless Exa, it is more specific than those documents.
+It does not change the rule that a native-capable hop prefers the model's own
+search.
+
+This is a **new plan**, rather than another section of the services design,
+because keyless Exa has a different custody boundary, protocol (Streamable HTTP
+MCP rather than a keyed REST call), rate-limit signal, and built-in Source
+representation. Keeping it separate lets the original vendor catalog and its
+keyed-Exa row remain readable while this plan records the live upstream facts
+that can change. The cross-references and the services-design §7 edit keep the
+combined design unambiguous.
+
+## Owner decisions
+
+The following decisions are binding and are reproduced verbatim:
+
+1. **Keyless Exa is a built-in web search service, on by default.** It needs no key and no setup, so every user has a search service even with none configured.
+2. **Default automatic order:** the user's own search services (Tavily, keyed Exa, official DeepSeek) → **keyless Exa** → model executors. Like every row, the user can reorder it and turn it off.
+3. **It stays a fallback even when the user has services**, including a keyed Exa.
+4. **No "nothing new turns on by itself" promise.**
+   - Delete the commitment in services-design §7 ("Nothing new turns on by itself except decision 4…").
+   - Docs state the defaults and where a query goes as facts, with no general pledge about future defaults.
+   - Keep §4.1's per-vendor `auto_enroll` mechanics unless the new design needs them changed.
+5. **Terms risk is accepted.** Exa wants distribution, and we adapt quickly if it tightens. Identify our traffic honestly; don't disguise it.
+
+`Prefer the model's own search` is unchanged: a native-capable hop still
+searches natively first.
+
+## 1. Recommendation at a glance
+
+Implement keyless Exa as a **built-in Source at the search resolver boundary**:
+
+- Stable Source id: `src_exakeyless`.
+- Catalog service id: `exa/mcp`.
+- Endpoint: `https://mcp.exa.ai/mcp` with the explicit tool selection
+  `web_search_exa,web_fetch_exa`.
+- No credential, no Vault operation, no add flow, and no persisted credential
+  Source row. It is still a Source for ordering, health/cooldown, attempts,
+  usage, activity, and UI purposes.
+- Saved setting: `model_hub.hosted_tools.web_search.services.src_exakeyless`.
+  Missing means `{enabled: true, results: 5}`.
+- Default automatic order: persisted user search services in `service_order`,
+  then `src_exakeyless`, then model executors.
+- Search price and recorded cost are exactly `$0`; UI says **免费** rather than
+  displaying a zero dollar amount. Every sent search `tools/call` increments
+  usage `requests`, even though `billable_requests` stays zero.
+
+This is not a second kind of search capability. The resolver, mixed order,
+`executor_candidates`, `HostedRecord.attempts[]`, `ServiceExecutorOrigin`,
+health projection, usage, and UI all treat it as a search Source. The only
+storage exception is that a no-credential built-in is not forced into the
+user-owned `model_hub.sources[]` list: there is no key to replace, no user
+Source to remove, and no credential health to persist. That avoids creating a
+fake key row while preserving the Source contract where it matters.
+
+## 2. Official facts and dated evidence
+
+Facts below were checked on **2026-10-22** unless a source commit or document
+revision is explicitly named. URLs are included so the implementation lane can
+re-check them at push time.
+
+### 2.1 Hosted MCP and tool inventory
+
+Sources:
+
+- Exa MCP reference and quickstart: [`/docs/reference/exa-mcp`](https://exa.ai/docs/reference/exa-mcp),
+  [`/docs/get-started/exa-mcp`](https://exa.ai/docs/get-started/exa-mcp), retrieved
+  2026-10-22.
+- Exa MCP landing page: [`exa.ai/mcp`](https://exa.ai/mcp), retrieved 2026-10-22.
+- Official source: [`exa-labs/exa-mcp-server`](https://github.com/exa-labs/exa-mcp-server),
+  commit `0b499f095c4ca145eee07b09137641c037d58449`, authored 2026-10-19.
+
+The hosted endpoint is Streamable HTTP at `https://mcp.exa.ai/mcp`. Exa's docs
+say no API key is required to get started. The default hosted tools are:
+
+| Tool | Current availability | Input shape relevant to Avibe | Phase |
+| --- | --- | --- | --- |
+| `web_search_exa` | Enabled by default | `query: string`; `numResults: number` is optional. The live endpoint on 2026-10-22 also advertised a required `objective: string`; adapt to the schema returned by `tools/list` and send `objective = query` only when it is required. | 1 |
+| `web_fetch_exa` | Enabled by default | `urls: string[]`; optional `maxCharacters: number`. It calls Exa contents/crawling and returns clean text/Markdown. | 2 |
+| `web_search_advanced_exa` | Opt-in with a `tools` URL parameter | `query`, `numResults`, filters, dates, highlights, summaries, freshness, and subpage-crawl controls. | Not phase 1 |
+
+The source implementation of `web_search_exa` sends an Exa Search request with
+`type: "auto"`, a default of 10 results, and `contents.highlights: true`.
+The public Search API schema caps `numResults` at **100**. Avibe's setting is
+independent of the model's arguments: default 5, user-configurable 1–100, and
+sent as `numResults`.
+
+The source implementation of `web_search_exa` returns one MCP text content
+block. Its text is a sequence of result sections containing `Title`, `URL`,
+`Published`, `Author`, and `Highlights`; the source falls back to `Text` only
+when highlights are absent. Avibe must request and map **highlights only** and
+must ignore `Text` even if a future server includes it. This preserves the
+services-design/S1c rule that phase-1 search is summary-only and never stores
+page content.
+
+The source implementation of `web_fetch_exa` accepts one or more URLs and an
+optional per-page character cap, calls `/contents`, and formats returned page
+text as Markdown. Avibe reserves this for phase 2; see §9.
+
+The official source's `web_search_advanced_exa` schema says `numResults` is
+1–100. The live keyless `tools/list` response on 2026-10-22 matched that range.
+The advanced tool is not needed for the phase-1 canonical `{query}` contract.
+
+### 2.2 Live keyless probe
+
+The probe ran from the Avibe development machine on **2026-10-22**, without an
+API key, OAuth token, or `x-api-key`. It used seven JSON-RPC requests in total
+(two `initialize`, two `tools/list`, two successful/default protocol calls,
+and one advanced call), well below the requested limit of 20, and did not try
+to exhaust a limit.
+
+1. The default endpoint initialized with HTTP 200 and
+   `Content-Type: text/event-stream`; it returned `Mcp-Session-Id`, protocol
+   version `2025-06-18`, and server `exa-search-server` version `3.5.0`.
+2. The default `tools/list` returned `web_search_exa` and `web_fetch_exa`.
+   The live `web_search_exa` schema required `query`, `objective`, and allowed
+   optional `numResults`, even though the checked source commit's local tool
+   definition only requires `query` and optionally accepts `numResults`.
+   The client must therefore read the live schema and adapt rather than
+   hard-code one version.
+3. A keyless `web_search_exa` call with two results and an honest
+   `x-exa-source: avibe-keyless-probe` header returned HTTP 200 SSE. The JSON-RPC
+   result contained `content[0].type = "text"`, and the text contained title,
+   URL, published/author fields, and highlights. It also carried `_meta.searchTime`.
+4. A keyless `web_fetch_exa` call for the official Exa MCP documentation returned
+   HTTP 200 SSE and a text/Markdown result with the requested short character
+   limit.
+5. An opt-in `web_search_advanced_exa` `tools/list` returned the advanced schema,
+   including `numResults` 1–100 and `enableHighlights`. The subsequent keyless
+   call was rate-limited without deliberately exhausting the service: the HTTP
+   response was 200 SSE, but the JSON-RPC result contained
+   `_meta.ai.exa/rateLimited: true` and a human-readable free-MCP rate-limit
+   message. This is a live example of a JSON-RPC/application-level limit signal
+   in addition to the HTTP 429 path documented and implemented by Exa.
+
+The live probe establishes the shapes and the two rate-limit signal forms; it
+is not a CI fixture and must not be repeated in CI.
+
+### 2.3 Rate limits and headers
+
+Official facts are not one single numeric contract:
+
+- Exa's hosted-MCP documentation says anonymous use is free and rate-limited,
+  and its troubleshooting section describes a 429 free-rate-limit error, but it
+  does **not** publish a numeric anonymous MCP quota.
+- The official hosted-server source commit named above configures anonymous
+  IP-based defaults of **2 QPS** using a sliding one-second window and **50
+  requests/day** using a fixed one-day window. Both are environment-configured
+  defaults, not a public guarantee; the source returns HTTP 429 with JSON-RPC
+  error code `-32000`, `Retry-After` seconds, and `X-RateLimit-Reset` epoch
+  headers on that path.
+- Exa's general API billing documentation, retrieved 2026-10-22, documents a
+  **10 QPS** default for authenticated `/search` and other API endpoints. That
+  is not the anonymous hosted-MCP limit and must not be used as the keyless
+  service's promise.
+- Third-party claims of 3 QPS/150 per day and approximately 2 QPS/50 per day
+  are therefore not equivalent sources. The design relies on no fixed quota.
+
+The client recognizes all of these observed/officially specified signals:
+
+1. HTTP 429, honoring `Retry-After` (seconds or HTTP date) and, when present,
+   the later of the relevant reset headers;
+2. a JSON-RPC error with Exa's rate-limit code/message;
+3. a successful HTTP response whose result metadata contains
+   `_meta.ai.exa/rateLimited: true`, as observed on 2026-10-22;
+4. the hosted-MCP free-rate-limit text when a deployed version omits the
+   metadata marker.
+
+A rate-limit signal is a **cooldown**, never a credential failure. It maps to
+`service_unavailable` with a rate-limit detail and `cooldown_until`. If no
+server advice is present, reuse services-design §4.2's conservative 30-second
+cooldown, doubling on consecutive failures to 300 seconds. This is a client
+backoff, not a claim about Exa's window. A later success resets it.
+
+The hosted source accepts `x-exa-source` and passes an integration identity to
+Exa's Search API as `x-exa-integration`; it also supports client/session
+metadata headers. Avibe sends `x-exa-source: avibe` and MCP `clientInfo.name:
+"avibe"` (with the Avibe version), and does not imitate another plugin or hide
+its traffic. The adapter may additionally send the MCP session id and the
+bounded `x-exa-mcp-client` metadata that the official source supports.
+
+### 2.4 Terms and privacy facts
+
+Exa's current Terms of Service, retrieved from [`exa.ai/terms`](https://exa.ai/terms)
+on **2026-10-22**, govern API and Search Engine use. They require API use to
+follow the documentation and call-volume limits. They also say that submitted
+User Input and Output may be accessed, used, hosted, cached, stored,
+transmitted, displayed, modified, and disclosed as needed to provide, develop,
+and improve Exa products and services or meet legal obligations. The terms
+contain restrictions on misuse, overloading, unauthorized automation, resale,
+and competitive-product use. This design accepts the distribution risk under the
+owner decision and makes the integration identifiable; it does not promise
+that these terms will remain unchanged.
+
+For keyless Exa specifically:
+
+- The query, requested result count, and the MCP protocol metadata are sent
+  from the Avibe runtime host directly to `mcp.exa.ai`; they do not go through
+  `avibe.bot` and no key is sent.
+- For the normal local install, Exa sees the public source IP of the user's
+  machine/network egress. The hosted source's anonymous limiter keys on the IP
+  it receives. If the runtime is explicitly managed in an Enterprise VM, the
+  VM's egress IP is the source instead.
+- Exa returns result titles, URLs, publication/author metadata, and highlights.
+  Avibe stores only the existing bounded `HostedSource` fields; it does not
+  request or retain full page text in phase 1.
+- Exa can see the honest integration identity `avibe`, the MCP client name and
+  version, the MCP session id, and the request's normal network metadata. Avibe
+  does not send a credential or user identity unless a later authenticated
+  feature explicitly changes the service.
+
+These are facts and current upstream terms, not a general promise that future
+Avibe defaults or Exa processing practices cannot change.
+
+## 3. Representation and persisted settings
+
+### 3.1 Built-in Source and catalog row
+
+Add a built-in search-service catalog row to the service catalog consumed by
+`service_vendors[]`; do not overload the keyed REST vendor row `exa/search`.
+The row has these stable values:
+
+| Field | Value |
+| --- | --- |
+| Source id | `src_exakeyless` |
+| Catalog/service id | `exa/mcp` |
+| Display label | `Exa（免费）` in Chinese; `Exa (free)` in English |
+| Endpoint | `https://mcp.exa.ai/mcp` with `tools=web_search_exa,web_fetch_exa` |
+| Transport | Streamable HTTP MCP |
+| Auth | none |
+| Default results | 5 |
+| Maximum results | 100 |
+| Price | `usd_per_1k: 0`, unit `search`, no extras |
+| Free-tier fact | `免费（按 IP 限流）` / `Free; IP rate-limited` |
+| Free check | none |
+| Tool-only | true |
+| Built-in | true; always available in the catalog, not addable or removable |
+
+`service_vendors[]` includes this row alongside the keyed Exa `exa/search` row.
+Its `source_ids` contains `src_exakeyless`; its `facts` adds `built_in: true`
+and `requires_setup: false` (unknown fields remain ignored by older readers).
+The candidate's `model_id` is `exa/mcp`, not a model name. The candidate keeps
+the existing service-candidate shape and `billing: "metered"` for schema
+compatibility, but its zero catalog price and every record cost are exact zero;
+the UI renders **免费**, never “按量付费”. If the contract can add a
+non-breaking `free: true` display fact, use it; it must not change usage
+semantics.
+
+A built-in Source has a synthetic standby/active/cooling state in the resolver,
+not a credential health state. It can be disabled, cooling, or unavailable due
+to transport/server/malformed-output errors, but it can never be
+`needs_action: invalid_key`, `balance`, or `limit` because it has no credential.
+
+### 3.2 Config
+
+Use the existing per-service settings map. No new top-level switch is needed:
+
+```json
+{
+  "model_hub": {
+    "hosted_tools": {
+      "web_search": {
+        "services": {
+          "src_exakeyless": {"enabled": true, "results": 5}
+        }
+      }
+    }
+  }
+}
+```
+
+The effective defaults when the section, entry, or field is absent are
+`enabled: true` and `results: 5`. Writes validate `results` from 1 through 100;
+reads clamp a saved value to the current maximum without failing startup, as in
+services-design §3.2. `enabled: false` is the ordinary service opt-out and
+keeps the row in the order/read as `disabled`.
+
+The built-in Source is not appended to persisted `service_order` on creation:
+it has no creation event. Read-time automatic resolution appends it after all
+user-owned search services. If a user explicitly reorders the mixed list, the
+server saves `src_exakeyless` in `executor_order` and
+`executor_order_kinds[src_exakeyless] = "service"`.
+
+### 3.3 Older builds and saved orders
+
+A release before this design treats `src_exakeyless` as an unknown Source id.
+Its existing `executor_order` reader skips the id and continues with the named
+Sources it knows; it does not call Exa and it does not fail configuration load.
+Its next settings write may drop the unknown id and the new `services` fields,
+which is the existing lossy pre-feature write boundary. A new build re-inserts
+keyless Exa at read time when the saved order does not deliberately name it;
+there is no migration write.
+
+A deliberate saved placement is recognized only when the current entry names
+`src_exakeyless` and its role map says `service`. A released order without
+`executor_order_kinds` is treated as a model-only historical order, so keyless
+Exa is placed by the automatic read-time rule rather than accidentally freezing
+an old order.
+
+## 4. Placement and candidate read
+
+### 4.1 Automatic and saved order
+
+With no saved `executor_order`, the effective order is exactly:
+
+1. user-owned search services in `service_order` (Tavily, keyed Exa, and any
+   other enabled search services; official DeepSeek retains its existing
+   `auto_enroll` behavior);
+2. `src_exakeyless`, if enabled and not cooling/blocked/unavailable;
+3. model executors in the existing automatic order.
+
+If the user saved an order, use services-design §4.1 unchanged:
+
+- named entries in their deliberate saved positions stay there;
+- unnamed or role-changed search services, including a newly available
+  `src_exakeyless`, are inserted immediately before the first saved model
+  executor, in automatic service order;
+- unnamed model executors follow at the end;
+- a saved keyless row can therefore be placed before a user's own service or
+  after a model executor, because user reordering wins;
+- `services.src_exakeyless.enabled: false` remains a visible disabled row and
+  is never requested.
+
+A keyed Exa and keyless Exa are distinct rows and distinct attempts. The
+keyless row remains in the fallback chain even when keyed Exa exists, unless
+the user turns it off or deliberately moves it.
+
+`prefer_native` remains the first decision: a native-capable hop searches
+natively and never reaches this chain for that hop. With `prefer_native: false`,
+the function call enters the entire saved/effective order, including keyless
+Exa.
+
+### 4.2 Tools read
+
+For `GET /api/models/hosted-tools`, `web_search` returns:
+
+```json
+{
+  "services": {
+    "src_exakeyless": {"enabled": true, "results": 5}
+  },
+  "executor_order": null,
+  "effective_order": ["src_tavily001", "src_exa000001", "src_exakeyless", "src_model001"],
+  "executor_candidates": [
+    {
+      "kind": "service",
+      "source_id": "src_exakeyless",
+      "model_id": "exa/mcp",
+      "billing": "metered",
+      "relay": false,
+      "price": {"unit": "search", "usd_per_1k": 0, "extra": [], "as_of": "2026-10-22", "url": "https://exa.ai/docs/admin/billing"},
+      "settings": {"enabled": true, "results": 5},
+      "state": {"status": "active"},
+      "trial_pending": false,
+      "cooldown_until": null
+    }
+  ],
+  "service_vendors": [
+    {
+      "id": "exa-mcp",
+      "name": "Exa（免费）",
+      "price": {"unit": "search", "usd_per_1k": 0, "extra": [], "as_of": "2026-10-22", "url": "https://exa.ai/docs/admin/billing"},
+      "free_tier": "免费（按 IP 限流）",
+      "results_max": 100,
+      "source_ids": ["src_exakeyless"],
+      "facts": {"tool_only": true, "auto_enroll": false, "free_check": false, "built_in": true, "requires_setup": false}
+    }
+  ]
+}
+```
+
+The example is illustrative; it preserves the current read's field names and
+adds only the built-in facts needed for UI behavior. `effective_order` always
+shows keyless Exa when enabled, even when no user Source exists, so no empty
+search-service state is inferred from an empty `sources[]`.
+
+## 5. Execution
+
+### 5.1 MCP session lifecycle
+
+The Model Hub owns the MCP client and keeps one in-memory session per Avibe
+runtime and endpoint/tool selection. It is not written to disk and is not
+shared with another runtime. A per-session async lock permits one `tools/call`
+at a time; this avoids response association and burst surprises without adding
+a scheduler.
+
+The first call, within the one service attempt's existing 30-second cap, does:
+
+1. connect over HTTPS to the pinned `mcp.exa.ai` host;
+2. send MCP `initialize` with the supported protocol version, no capabilities
+   beyond what Avibe uses, and honest `clientInfo` (`name: "avibe"`, the
+   running Avibe version);
+3. retain the returned `Mcp-Session-Id` and send
+   `notifications/initialized`;
+4. call `tools/list`, parse the returned schema, and require
+   `web_search_exa`; then
+5. send one `tools/call` for the search.
+
+Later calls reuse the session and cached tool schema, sending only the
+`tools/call`. A missing/expired session is reinitialized once before the call
+is admitted. Once the `tools/call` request bytes begin, Avibe never retries that
+call automatically: a retry could duplicate a search and a usage request.
+
+Every exchange uses `Accept: application/json, text/event-stream`,
+`Content-Type: application/json`, `MCP-Protocol-Version`, the session header
+when present, and `x-exa-source: avibe`. The response parser accepts the
+Streamable HTTP SSE `event: message` / `data: <JSON-RPC>` shape and matches the
+response id. The 8 MiB existing response-body cap applies to the SSE response;
+notifications and unrelated events are ignored only within that cap.
+
+No API key, bearer token, Vault reference, or user credential is present in the
+MCP request. The adapter is still the custody/transport boundary and returns
+only status, bounded headers, receipt time, and bounded JSON/text data to the
+search producer.
+
+### 5.2 Request mapping and schema adaptation
+
+The canonical Avibe call remains exactly `{query}`. The frozen per-service
+`results` setting is mapped to MCP `numResults` and never exposed as a model
+argument.
+
+Build the MCP arguments from `tools/list`:
+
+```json
+{"query": "<canonical query>", "numResults": 5}
+```
+
+If the live schema marks `objective` required, add
+`"objective": "<canonical query>"`. Do not send advanced filters, `type`,
+summary, text, or crawl fields in phase 1. This handles the live 2026-10-22
+schema and the checked source implementation without changing Avibe's model
+contract.
+
+Use a single overall 30-second service deadline, including a cold-session
+initialize/list. Connection/TLS setup has the existing 5-second transport
+budget; each subsequent exchange receives only the remaining deadline. A
+reused session gives the `tools/call` the full remaining 30 seconds. The
+search chain's single 180-second budget remains authoritative.
+
+### 5.3 Response mapping
+
+`web_search_exa` returns a text content block, not a stable JSON object. Parse
+its source-defined sections conservatively:
+
+- split result sections on the source's separator;
+- read `Title`, `URL`, `Published`, `Author`, and `Highlights` prefixes;
+- join all highlight lines into the canonical `snippet`;
+- map `Published` to `page_age` under the existing bounded date/text rule;
+- accept only HTTP(S) URLs and apply the existing 2,048/300/1,000/64-character
+  bounds;
+- ignore `Author` unless a future canonical field owns it;
+- ignore `Text` entirely, even when present;
+- preserve Exa ranking order and cap to the frozen `results` count.
+
+A valid explicit no-results text is a completed record with no sources. A
+result array/section with no valid HTTP(S) URL is unreadable when non-empty;
+malformed JSON-RPC, missing content/text, an unparseable non-empty response, and
+server-generated `isError` results are `service_unavailable`. A result with a
+valid URL but no highlight is allowed with no snippet; Avibe still has not
+stored page content.
+
+## 6. Outcomes, records, and usage
+
+Apply services-design §4.2 with the following keyless-specific clarifications:
+
+| MCP/HTTP result | Chain | State |
+| --- | --- | --- |
+| Valid result, including empty results | Ends with `completed`; cost `$0` | No state change |
+| HTTP 429, rate-limit JSON-RPC error, or `ai.exa/rateLimited` result metadata | Next candidate; attempt code `service_unavailable`, rate-limit detail | Service cooldown; never credential health |
+| Timeout, connection/TLS failure, closed/expired session after the call begins | Next candidate, `service_unavailable` | Service cooldown; no credential health |
+| Any HTTP 5xx or non-rate-limit JSON-RPC/server error | Next candidate, `service_unavailable` | Service cooldown; no credential health |
+| 3xx, 401, 403, 404, 405, or other unexpected 4xx | Next candidate, `service_unavailable` | Service cooldown; never `invalid_key` |
+| Malformed text, missing expected content, invalid URL-only result, or server `isError` | Next candidate, `service_unavailable` | Service cooldown; no credential health |
+
+A rate limit is not `service_key_invalid`, `service_balance`, or
+`service_limit`. It has no key to invalidate and no account balance to infer.
+`Retry-After` is honored in full; an absolute reset header is honored when it
+extends the deadline. The generic no-advice backoff is the existing 30-second
+then doubling cooldown, capped at 300 seconds.
+
+A successful keyless attempt writes the existing positive service evidence with
+`mode: "service"`, keyed by (`src_exakeyless`, `exa/mcp`, `web_search`). The
+execution origin is the existing service variant:
+
+```json
+{"provider": "exa", "api": "search_api", "model": "exa/mcp"}
+```
+
+Every reached attempt has one `attempts[]` entry. The label is
+`Exa（免费）` / `Exa (free)`, the kind is `service`, and every sent call has an
+explicit `{ "usd": 0, "basis": "list" }` cost. A skipped cooldown or disabled
+entry has no cost because it sent nothing. The activity projection renders
+`通过 Exa（免费）`, not a model name.
+
+Usage records one request for every sent search `tools/call`; initialize,
+`tools/list`, and notifications are not search requests. Keyless Exa's
+`billable_requests` and `reported_requests` remain zero, `api_cost_usd` is
+zero, and no lower-bound flag is introduced by an interrupted free request.
+Usage still exposes the request count so the user can see how often the built-in
+fallback was used.
+
+## 7. UI specification
+
+This section is intentionally precise enough to draw in `design.pen`; this lane
+does not edit that file. The implementation uses the existing localized i18n
+keys and the existing Models → Tools card primitives.
+
+### 7.1 Tools card and search order
+
+Keep the existing Web Search card header, overall enable switch, status line,
+and native-preference switch. In the visible **搜索顺序 / Search order** list:
+
+- Always show **Exa（免费） / Exa (free)**, even when the user has no configured
+  service. It has the kind pill **搜索服务 / Search service**.
+- Its row has the free status **免费 · 无需密钥 / Free · no API key**, a second
+  line **5 个结果 · 按 IP 限流 / 5 results · IP rate-limited**, and the price
+  label **免费 / Free**.
+- The row has the same up/down reorder controls as every other row and an
+  inline switch labelled **用于网页搜索 / Use for web search**. Turning it off
+  moves it to the disabled tail in the read and shows **未用于搜索 / Not used
+  for web search**; it does not remove the row or erase its usage.
+- A cooldown row remains in place and says, for example,
+  **Exa（免费）暂时限流 · 稍后重试 / Exa (free) rate-limited · retry later**,
+  with the existing `cooldown_until` detail and **立即重试 / Retry now** action.
+  It never says “密钥无效 / invalid key”.
+- The caption explicitly says the current automatic order:
+  **已添加的搜索服务 → Exa（免费） → 模型代搜；可拖动调整。/ Your added
+  search services → Exa (free) → model executors; drag to reorder.**
+  The caption is a current behavior statement, not a promise about future
+  defaults.
+- Keep **添加搜索服务 / Add search service** below the order. The existence of
+  built-in Exa means the no-service state does not claim that no search service
+  exists.
+- Add the egress fact below the order and before the custody note:
+  **查询会从此 Avibe 运行时直接发送到 Exa（mcp.exa.ai）；Exa 可看到该连接的
+  IP。/ Queries go directly from this Avibe runtime to Exa (mcp.exa.ai); Exa
+  can see the connection's IP.**
+- Keep the custody note, amended to say that keyless Exa has no key:
+  **已添加服务的密钥由网关保管；Exa（免费）无需密钥，也不会把密钥交给模型或
+  Agent。/ Added-service keys stay in the gateway; Exa (free) needs no key, and
+  no key is given to the model or Agent.**
+
+When the overall Web Search switch is off, the card's existing off state wins;
+the per-row switch is still shown as saved configuration and does not imply a
+request will run.
+
+### 7.2 Add dialog and Source surfaces
+
+The add dialog retains the keyed Exa REST option (`exa/search`) with its API-key
+flow. Its fact line may say **Exa API key uses your Exa team plan; official Exa
+docs say new teams receive $10 in monthly Free-tier credits.** This statement
+is only for the keyed REST path; never present those credits as the keyless
+MCP quota or as a promise that keyless requests spend the user's Exa account.
+
+The built-in `exa/mcp` row is not a second addable key card. If the dialog
+shows it in the vendor grid, render it as a non-actionable **已内置 · 免费 /
+Built in · free** card with **无需密钥或设置 / No key or setup required** and
+an **查看搜索顺序 / View search order** link. Do not offer Remove or Replace.
+
+If the user opens the built-in detail from the order row, show:
+
+- status: **免费 · 无需密钥** or the current cooldown;
+- endpoint fact: `mcp.exa.ai`;
+- settings: result count 1–100;
+- this month's request count and `$0` cost rendered as **免费**;
+- the enable switch and **立即重试** only during a cooldown;
+- no key field, no credential-generation field, no free-check button, and no
+  “重新启用” credential action.
+
+The Sources list may show a non-removable **搜索服务 / Search service** row for
+this built-in Source if the existing UI needs a row to open its detail. It must
+say **不提供模型 / No models**, never appear in model route candidates, and
+must not look like a user-entered credential.
+
+### 7.3 Chat and IM
+
+Reuse the shared hosted-activity projection. A successful card/line reads:
+
+- Web: **通过 Exa（免费） · 5 个来源 · 免费 / via Exa (free) · 5 sources ·
+  Free**.
+- IM: **🔎 网页搜索 "…" · Exa（免费） · 5 个来源 · 免费 / 🔎 Web search "…" ·
+  Exa (free) · 5 sources · Free**.
+
+A fallback caused by a rate limit reads:
+
+- **Exa（免费）限流，已改用 DeepSeek / Exa (free) rate-limited; switched to
+  DeepSeek**.
+
+A fallback caused by a malformed response or server error reads
+**Exa（免费）暂时不可用，已改用下一个 / Exa (free) unavailable; tried the
+next service**. The line must not suggest that an API key is missing or
+invalid. A final all-candidates failure names the cooldown/unavailable remedy
+from `attempts[]`.
+
+## 8. Privacy and public-document copy
+
+The public English and Chinese documentation shipped with activation states
+these current facts:
+
+1. Web search normally prefers a native-capable model's own search.
+2. When the proxy chain is used, the current automatic order is the user's
+   configured search services, then built-in keyless Exa (on by default), then
+   model executors. Users can reorder or turn off every row.
+3. Keyless Exa requires no key or setup, costs `$0`, and is rate-limited by Exa.
+   Usage counts requests even though cost is free.
+4. The query is sent directly from the Avibe runtime host to Exa's hosted MCP
+   endpoint. For a local install, that is normally the user's machine and its
+   public egress IP; it is not an `avibe.bot` proxy hop.
+5. Exa receives the query, requested result count, MCP/client identification,
+   normal connection metadata, and returns titles, URLs, metadata, and
+   highlights. Phase 1 does not send page content to the model or retain full
+   page text from Exa.
+6. Exa's current Terms govern the service and permit the processing/disclosure
+   described in §2.4; users should not send information they are not permitted
+   to disclose. The docs link to Exa's Terms rather than interpreting them.
+7. Keyed Exa REST is separate: it is addable, uses the user's key/account, and
+   its official monthly free credits are not the keyless service's quota.
+
+Do not add a general statement that nothing else will turn on automatically.
+Document the current default and routing facts only.
+
+## 9. Phase 2 `web_fetch`
+
+Phase 2 reuses the same in-memory MCP session and endpoint. It calls
+`web_fetch_exa` with the model-selected known URL(s) and a bounded
+`maxCharacters` setting, maps returned Markdown into the future `web_fetch`
+record, and applies the same HTTPS pinning, SSE parsing, 30-second service cap,
+rate-limit cooldown, honest `x-exa-source`, and no-key boundary. It does not
+change phase-1 `web_search` results into page content and does not add
+`web_search_advanced_exa` to the canonical phase-1 tool.
+
+## 10. Contract version and freeze rule
+
+The Model Hub master contract is **v20**, and as of **2026-10-22** no release tag
+carries v20. The implementation lanes may append the keyless-Exa shapes to the
+unreleased v20 event. Before every push and again before close-out, the lane
+must re-check tags containing the current head and the latest RC/release tags.
+If a release carries v20 before the next lane pushes, the next coordinated
+contract event opens the next version (v21), rather than changing the meaning
+of shipped v20. The freeze rule still applies: one tested head owns all affected
+schema mirrors and consumers for a version event.
+
+The affected contract surfaces are the existing hosted-tools status/read and
+settings shapes, the built-in Source/candidate discriminator, service catalog
+facts, C-1 service execution/attempt readers, usage service rows, and the
+localized activity/UI types. No live upstream response is a contract fixture.
+
+## 11. Implementation split
+
+Use the same layering as S2: **readers first, producer behind a flag, then one
+flip plus public docs together**.
+
+| Lane | Scope | Gate |
+| --- | --- | --- |
+| KEX-1 readers and catalog | Add the built-in catalog/read shape, `src_exakeyless` defaulting and old-order reader behavior; extend status/candidate, attempts, service-origin, usage, activity, and UI readers/types/fixtures; add contract mirrors and released-shape compatibility tests. No network call. | `KEYLESS_EXA_ACTIVE = false`; all existing service behavior remains unchanged. |
+| KEX-2 producer | Add the adapter's keyless MCP session boundary, schema adaptation, SSE/JSON-RPC parser, highlights-only mapping, rate-limit detection/cooldown, service outcomes, usage writes, and UI actions behind the same flag. Use only stub MCP servers. | Flag-off control stays green; flag-on focused tests prove the new path. |
+| KEX-3 activation and public docs | Re-check contract tags, flip the producer/read predicate together, publish the English/Chinese privacy/default/UI copy, and run exact-head review/CI. | No activation before the public disclosure is present. |
+
+KEX-1 and KEX-2 must not make a live Exa call in tests or CI. KEX-3 owns the
+coordinated activation; no lane merges this design PR.
+
+## 12. Acceptance properties and test plan
+
+### 12.1 Acceptance properties
+
+1. A native-capable hop still searches natively first; keyless Exa is reached
+   only by the proxy chain.
+2. With no user search service, the read and automatic order still contain
+   enabled `src_exakeyless`; with user services, it remains after them by
+   default; a deliberate saved order can move it anywhere or disable it.
+3. `src_exakeyless` is stable across restart, has no credential material, is
+   not in model supply/discovery/engine config, and cannot produce a credential
+   failure.
+4. An old build skips the unknown saved id and loads safely; a new build
+   re-inserts the built-in candidate at read time without a migration write.
+5. Only the canonical `{query}` reaches the agent. Result count is frozen per
+   turn/service and mapped to `numResults`; an `objective` field is added only
+   when the live `tools/list` schema requires it.
+6. A reused MCP session performs one initialize/list lifecycle and one
+   `tools/call` per attempted search; an expired session can reconnect before
+   admission, but an admitted call is never automatically duplicated.
+7. All service work fits the existing 30-second service cap and 180-second
+   chain deadline; no blocking parse runs on the controller loop.
+8. Valid results are highlights-only, bounded, ordered, and become one
+   canonical completed record. Full page text is not requested or stored.
+9. HTTP 429, JSON-RPC/application rate-limit signals, malformed output, server
+   errors, and transport failures fail over as `service_unavailable`; rate
+   limits install a cooldown and never a credential blocker.
+10. A successful or failed sent call records exact `$0`; every sent search call
+    increments request usage; skips do not increment usage.
+11. The Tools card always makes the built-in service, default, egress, free
+    price, switch, and reorder behavior clear. Chat and IM name the free
+    service and distinguish rate-limit/unavailable fallback from key failure.
+12. CI has no live Exa calls and no real credentials.
+
+### 12.2 Hermetic tests
+
+Use a stub MCP Streamable HTTP server, not Exa, with deterministic SSE and
+JSON-RPC fixtures:
+
+- `initialize` returns a session id, server info, and capabilities; assert
+  `notifications/initialized`, `MCP-Protocol-Version`, honest
+  `x-exa-source`, and `clientInfo.name` are sent.
+- `tools/list` variants cover the current source shape and the live-probed
+  required `objective` shape; the request mapper adds the field only in the
+  latter case.
+- `tools/call` returns formatted highlights, empty results, a valid URL with no
+  highlights, text-only content that must be ignored, malformed sections, an
+  invalid URL, and oversized/bounded fields.
+- `web_fetch_exa` is a phase-2 parser fixture only; no phase-2 production
+  activation is implied by the test.
+- Session reuse sends one initialize/list for two searches; an expired session
+  reconnects before admission; a connection failure after the call is sent is
+  not retried.
+- HTTP 429 with `Retry-After`, HTTP 429 with reset headers, JSON-RPC `-32000`,
+  `_meta.ai.exa/rateLimited`, and free-rate-limit text all produce cooldown
+  plus `service_unavailable`, never `needs_action`.
+- 5xx, unexpected 4xx, redirects, timeouts, closed sessions, server `isError`,
+  and malformed content map to `service_unavailable` and fail over.
+- Default order, saved order, role-map insertion, explicit disable, restart,
+  older-build unknown-id reading, keyed-Exa-plus-keyless fallback, and
+  native-preference behavior are table-driven.
+- Attempts, service origin, exact-zero cost, request-only usage, no lower-bound
+  charge, and cooldown projection are asserted at their owning boundaries.
+- The Tools read/UI fixtures cover the always-present row, free label, egress
+  fact, inline switch, reorder controls, add-dialog keyed Exa distinction,
+  detail panel, Chat card, IM line, and both locales.
+
+No live call is permitted in CI. The 2026-10-22 probe facts above are evidence
+for this plan, not an automated dependency.
+
+## 13. Known by design and owner-level questions
+
+- The anonymous hosted-MCP quota is intentionally treated as an unknown,
+  provider-controlled window. The implementation honors explicit advice and
+  uses the existing bounded client cooldown when advice is absent; it does not
+  promise 2 QPS/50 per day or 10 QPS.
+- Exa's free-MCP response can be HTTP 200 with rate-limit metadata/text, even
+  though the docs and source also define HTTP 429. Both are supported.
+- Exa's deployed default schema and the checked source commit differed on the
+  required `objective` field on 2026-10-22. Runtime `tools/list` adaptation is
+  the smallest safe compatibility rule.
+- Advanced search and page fetching are not phase-1 canonical tools. Fetch is
+  reserved for phase 2; advanced search does not replace `{query}`.
+- No owner-level question remains open in this lane. The owner decisions above
+  settle default-on, ordering, fallback, terms risk, and honest identity. The
+  orchestrator still owns the final design.pen work, merge decision, and any
+  later change in Exa's terms or hosted behavior.
+
+## Sources checked
+
+- Exa MCP reference/quickstart: https://exa.ai/docs/reference/exa-mcp and https://exa.ai/docs/get-started/exa-mcp (2026-10-22).
+- Exa MCP landing page: https://exa.ai/mcp (2026-10-22).
+- Exa hosted MCP source: https://github.com/exa-labs/exa-mcp-server, commit `0b499f095c4ca145eee07b09137641c037d58449` (2026-10-19).
+- Exa Search API schema: https://exa.ai/docs/exa-spec.yaml (retrieved 2026-10-22).
+- Exa Highlights: https://exa.ai/docs/search/highlights (retrieved 2026-10-22).
+- Exa Billing and Rate Limits: https://exa.ai/docs/admin/billing (retrieved 2026-10-22).
+- Exa Terms of Service: https://exa.ai/terms (retrieved 2026-10-22).
+- Keyless live probe: `https://mcp.exa.ai/mcp`, 2026-10-22, no key, seven JSON-RPC requests, three `tools/call` attempts.
