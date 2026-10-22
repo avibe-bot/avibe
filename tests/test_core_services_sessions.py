@@ -618,6 +618,49 @@ def test_update_session_backend_is_free_until_native_bind(isolated_state):
         assert not sessions_service.get_session(conn, sid)["agent_backend"]
 
 
+@pytest.mark.parametrize("bound", [False, True])
+def test_cross_backend_change_drops_the_old_backends_model_unless_one_is_named(isolated_state, bound):
+    """A model and effort belong to one backend's catalog. A cross-backend change
+    that names none (an API caller sending only the Agent) must not carry the old
+    pair over, nor the marker that pins it, or the next turn asks the new backend
+    for a model it does not have. Named values are kept; a same-backend Agent
+    change keeps the stored pair as before."""
+
+    import json
+
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = _seed_avibe_scope(conn)
+        sid = sessions_service.create_session(
+            conn, scope_id=scope_id, agent_backend="claude", agent_name="claude"
+        )["id"]
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == sid)
+            .values(
+                model="claude-sonnet-5",
+                reasoning_effort="high",
+                metadata_json=json.dumps({"explicit_setting_overrides": ["model", "reasoning_effort"]}),
+            )
+        )
+        if bound:
+            _bind_native(conn, sid, "claude-native")
+        watermark = {"runtime_idle_through_turn": ""} if bound else {}
+
+        same_backend = sessions_service.update_session(conn, sid, agent_backend="claude", agent_name="claude-pro")
+        assert (same_backend["model"], same_backend["reasoning_effort"]) == ("claude-sonnet-5", "high")
+
+        switched = sessions_service.update_session(conn, sid, agent_backend="vibey", agent_name="vibey", **watermark)
+        assert (switched["model"], switched["reasoning_effort"]) == (None, None)
+        assert not switched["metadata"].get("explicit_setting_overrides")
+
+        if not bound:
+            named = sessions_service.update_session(
+                conn, sid, agent_backend="codex", agent_name="codex", model="gpt-5.6", reasoning_effort="low"
+            )
+            assert (named["model"], named["reasoning_effort"]) == ("gpt-5.6", "low")
+
+
 def test_update_session_pending_fork_locks_backend_until_native_bind(isolated_state):
     """A fork target has no native id yet, but its pending fork metadata points
     at a source native session owned by one backend. Cross-backend changes would

@@ -1195,6 +1195,17 @@ def update_session(
             requested_backend=agent_backend,
         )
 
+    if backend_changes:
+        # A model and effort name one backend's catalog. Moving to another
+        # backend without naming new ones must not carry the old pair across
+        # (a Claude model on Vibey fails the next turn): reset both, so the new
+        # Agent's defaults apply and their explicit-override marker is reconciled
+        # below, as the bind-time backend adoption already does.
+        if model is _UNSET:
+            model = None
+        if reasoning_effort is _UNSET:
+            reasoning_effort = None
+
     values: dict[str, Any] = {"updated_at": _utc_now_iso()}
     if bound_switch:
         full_row = conn.execute(
