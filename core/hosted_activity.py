@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from typing import Any, Callable, Literal, Mapping, Optional
 
+from core.agent_core.hosted_continuations import pending_hosted
 from core.agent_core.messages import (
     HOSTED_ERROR_CODES,
     AssistantMessage,
@@ -159,6 +160,8 @@ class HostedActivity:
     # The committed response row a native call came in. Its card is ordered just
     # before that row, as the call happened before the text that reads its result.
     response_id: Optional[str] = None
+    # A mixed Anthropic group is still awaiting its deferred result; IM holds this provisional card.
+    in_progress: bool = False
     # The Source that refused to run this search natively, so it ran by proxy instead (``hosted.fallback_from``),
     # with its current name.
     fallback_source_id: Optional[str] = None
@@ -209,6 +212,8 @@ class HostedActivity:
             "executor_kind": self.executor_kind,
         }
         payload.update({key: value for key, value in optional.items() if value is not None})
+        if self.in_progress:
+            payload["in_progress"] = True
         if self.extra_queries:
             payload["extra_queries"] = list(self.extra_queries)
         if self.attempts is not None:
@@ -291,6 +296,15 @@ def _subject(action: HostedAction) -> tuple[Optional[str], tuple[str, ...]]:
     return None, ()
 
 
+def hosted_activity_key(payload: Any) -> Optional[tuple[str, str]]:
+    """A native card's immutable owner, shared by live updates and the append-only trace projection."""
+    if isinstance(payload, dict) and payload.get("mode") == "native":
+        response, call = payload.get("response_id"), payload.get("call_id")
+        if isinstance(response, str) and response and isinstance(call, str) and call:
+            return response, call
+    return None
+
+
 def native_activities(
     message: AssistantMessage,
     *,
@@ -299,7 +313,7 @@ def native_activities(
 ) -> list[HostedActivity]:
     """Every native hosted call in a response, in content order.
 
-    The response's summary is shown once: its cost on the last hosted call, and
+    The response's summary is shown once: its cost on the last hosted call that ran (not one deferred), and
     its cited posts on the last X search that has no sources of its own (xAI
     reports X-search results only as citations on the answer).
     """
@@ -317,12 +331,17 @@ def native_activities(
         None,
     )
     activities = []
+    # Deferred calls have not run: if this response also finished searches, its cost belongs on the last of those,
+    # not a provisional card that will later carry a different response's cost.
+    deferred = pending_hosted(message)
+    billed_blocks = [index for index, block in enumerate(blocks) if block.id not in deferred]
+    cost_owner = billed_blocks[-1] if billed_blocks else len(blocks) - 1
     for index, block in enumerate(blocks):
         subject, extra = _subject(block.action)
         sources = block.record.sources
         if index == cited_owner and summary is not None:
             sources = summary.cited_sources
-        last = index == len(blocks) - 1
+        last = index == cost_owner
         activities.append(
             HostedActivity(
                 call_id=block.id,
@@ -345,7 +364,7 @@ def native_activities(
                 # A native generate action's prompt is the provider's revised prompt.
                 revised_prompt=block.action.prompt if block.action.type == "generate" else None,
                 cost=summary.cost if last and summary is not None else None,
-                cost_calls=len(blocks),
+                cost_calls=len(billed_blocks) or len(blocks),
                 response_id=response_id,
             )
         )

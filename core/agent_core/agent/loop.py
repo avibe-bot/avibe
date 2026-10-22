@@ -148,6 +148,7 @@ from core.agent_core.harness.projection import (
     validate_message_append,
 )
 from core.agent_core.harness.store import ContextEntry, EntryKind, TranscriptStore
+from core.agent_core.hosted_continuations import pending_hosted
 from core.agent_core.messages import (
     AssistantMessage,
     HostedImage,
@@ -1205,7 +1206,10 @@ class Agent:
                 return "ended_by_hook"
             if terminate:
                 return "completed"
-            await self._drain_steers(emit)
+            # Anthropic has not run these server tools yet. A steer after the client results would end its open
+            # turn (and produce a 400), so admit it after the deferred result, not inside this continuation.
+            if not pending_hosted(message):
+                await self._drain_steers(emit)
 
     async def _drain_steers(self, emit: Callable[..., Awaitable[None]]) -> None:
         applied = []

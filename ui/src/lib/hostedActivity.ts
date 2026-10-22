@@ -52,6 +52,10 @@ export type HostedActivity = {
   /** Natively in the model's response, by a search executor, or on an image endpoint directly. */
   mode: 'native' | 'proxy' | 'direct';
   status: 'completed' | 'failed' | 'incomplete' | 'pending';
+  /** Pending mixed-group call, still awaiting a result; cleared at Turn settlement. */
+  in_progress?: boolean;
+  /** Original use's committed response, also carried by its deferred completion. */
+  response_id?: string;
   /** Model-facing English, shown as is only for a provider's own reason. */
   error?: string;
   /** The stable code of a reason Avibe worded itself, shown in the reader's language. */

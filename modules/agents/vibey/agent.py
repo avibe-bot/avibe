@@ -67,6 +67,7 @@ from core.agent_core.tools.jobs import call_instance
 from core.agent_core.messages import (
     HOSTED_RESULT_TOOLS,
     HostedImage,
+    HostedToolBlock,
     IMAGE_MIME_TYPES,
     AssistantMessage,
     TextBlock,
@@ -91,6 +92,7 @@ from core.backend_failure import emit_backend_failure
 from core.agent_output import Narration, Reply, ToolActivity, TurnEnd, TurnOutcome, emit_output
 from core.citations import CitationBundle, register_text_citations
 from core.hosted_activity import HostedActivity, hosted_line, native_activities, proxy_activity
+from core.agent_core.hosted_continuations import hosted_completions, pending_hosted, result_fragment
 from core.message_output import MessageOutput, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
@@ -223,6 +225,8 @@ class _Run:
     tool_started: dict[str, float] = field(default_factory=dict)
     # Images the run's hosted calls generated, as (path, label), attached to its final reply.
     hosted_images: list[tuple[str, str]] = field(default_factory=list)
+    # Deferred searches show provisionally on Web, but reach IM once, after completion or final settlement.
+    deferred_hosted: dict[tuple[str, str], tuple[AssistantMessage, HostedActivity]] = field(default_factory=dict)
 
     @property
     def native_turn_id(self) -> str:
@@ -925,6 +929,9 @@ class VibeyAgent(BaseAgent):
         backend.
         """
         run.settled = True
+        for _message, activity in tuple(run.deferred_hosted.values()):
+            await self._emit_hosted(run, replace(activity, in_progress=False))
+        run.deferred_hosted.clear()
         request, context = run.request, run.request.context
         reason = run.reason or "error"
         # The failure is the error that decided the outcome, never a diagnostic, whose text is only a fallback
@@ -1703,7 +1710,27 @@ class VibeyAgent(BaseAgent):
         if message is None:
             return
         names, _states = await self._source_display()
+        pending = pending_hosted(message)
+        blocks = {block.id: block for block in message.content if isinstance(block, HostedToolBlock)}
         for activity in native_activities(message, source_names=names.get, response_id=row_id):
+            block = blocks[activity.call_id]
+            key = (block.native.source_id, block.id)
+            if block.id in pending:
+                activity = replace(activity, in_progress=True)
+                run.deferred_hosted[key] = (message, activity)
+            elif result_fragment(block):
+                prior = run.deferred_hosted.get(key)
+                if prior is not None and prior[0].origin == message.origin and prior[0].source_identity == message.source_identity:
+                    activity = replace(activity, response_id=prior[1].response_id)
+                    del run.deferred_hosted[key]
+                else:
+                    # A transcript-only resume has no in-memory pending card. Its immutable rows still name the owner.
+                    rows = [row for row in await self.store.load(run.session_id)
+                            if row.kind in {"input", "response", "tool_result"}]
+                    for pair in hosted_completions(tuple(row.message for row in rows)):
+                        if rows[pair.result_position].row_id == row_id and pair.result.id == block.id:
+                            activity = replace(activity, response_id=rows[pair.use_position].row_id)
+                            break
             await self._emit_hosted(run, activity)
 
     async def _emit_proxy_hosted(self, run: _Run, event: ToolFinished) -> None:

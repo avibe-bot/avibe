@@ -655,7 +655,10 @@ These rows describe the wire mapping the `ai` lane implements.
   `TextBlock.citations`, and response-level facts go to `hosted_summary`. An `image_generation_call` is no hosted item:
   it is ignored like any undeclared item.
 - **Portable history.** A finished response's hosted calls become synthetic same-named calls and results, split around
-  the assistant message. There is one call per hosted block, and nothing folds. Each result shows its status line
+  the assistant message. There is one call per hosted block, except that an Anthropic use-only pending fragment
+  and its result-only completion are one logical call (`cross-provider.md`, 2026-10-22): one synthetic call in the
+  original parallel group, its result alongside the client results, and no second call in the completing response.
+  Each result shows its status line
   first and then every line attached to it. A response its
   turn is still waiting on (the request's last assistant message, stopped for tools) keeps each call in place as text.
   So does a hosted call that follows a client tool call of the same response, because a split there would separate
@@ -668,7 +671,12 @@ These rows describe the wire mapping the `ai` lane implements.
     model that served it (`x-avibe-pin-model`, when that id is ASCII). That response is the request's last assistant
     message, stopped for tools, with only tool results after it.
   - Any earlier response needs the hop's current `replay` for every tool it called, and every one of its calls must
-    have finished.
+    have finished (a later paired completion counts). Linked fragments of the currently continuing Anthropic
+    exchange follow its in-flight admission instead, including an internal `pause_turn` after the deferred result.
+  - Anthropic mixed groups preserve response 1 → client-result-only user → response 2. The result in response 2
+    carries only its `web_search_tool_result` in `native.payload`; the prior use remains in response 1. Both halves
+    must be admitted natively together, never an orphan result after a portable use. Reported counters stay on
+    the reporting response; the completion adds no inferred usage or cost.
   - Otherwise the calls take the portable form above. A continuation whose fresh hop is another Source therefore
     goes in place as text: one hop builds and serves each request.
 - **`pin_unavailable`.** The gateway's `409` `model_hub_pin_unavailable` / `pin_unavailable` answer to a pinned

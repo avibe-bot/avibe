@@ -23,6 +23,9 @@ Conventions:
 - JSON Schema draft-07, like `../model-hub-contracts/`. Python implementations use dataclasses; the schemas describe
   the serialized form, which is what crosses a lane boundary or reaches disk.
 - Persisted shapes carry `"version": 1`. Readers accept every released version (persisted-shape rule).
+  - C-1 clarification (approved 2026-10-22): Anthropic deferred hosted calls use existing v1 use-only and result-only
+    fragments across immutable responses. Pairing/replay semantics are in `cross-provider.md`; released-reader
+    round-trips cover v3.2.2 and gh-v3.2.3rc2. No wire-shape version change.
 - Field names are `snake_case`, except the tool parameters in C-7, which keep Pi's names (`oldText`, `newText`,
   `replaceAll`).
 - Every statement about existing code names its file and was checked against `master`; fields that already exist

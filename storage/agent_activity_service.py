@@ -43,6 +43,7 @@ from typing import Any, Optional
 from sqlalchemy import select
 
 from core.backend_failure import is_backend_failure_notification
+from core.hosted_activity import hosted_activity_key
 from storage import agent_events_service, messages_service
 from storage.models import message_deliveries, session_turns
 from vibe.message_types import (
@@ -391,7 +392,18 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
     # second), so a same-second event emitted BEFORE the oldest scanned message is
     # dropped too.
     oldest_msg_sort = min((item["sort"] for item in items), default=None)
+    hosted_cards: dict[tuple[str, str], dict[str, Any]] = {}
     for event in events:
+        card = (event.get("content") or {}).get("hosted")
+        card_key = hosted_activity_key(card)
+        if card_key is not None and card_key in hosted_cards:
+            # Trace rows remain append-only. A completion updates the original logical card and its place, not its
+            # old context/trace row; summary scans use the same join so they count the call only once.
+            hosted_cards[card_key].update(
+                text=event.get("text") if include_text else None,
+                hosted=card if include_text else None,
+            )
+            continue
         event_ts = _parse_ts(event.get("created_at"))
         event_sort = _event_emit_micros(event, event_ts)
         # Window membership by the row the event belongs to, never by its sort key:
@@ -437,9 +449,11 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "text": event.get("text") if include_text else None,
                 # A hosted-tool call carries its card (``core.hosted_activity``); every
                 # other tool call is its text alone.
-                "hosted": ((event.get("content") or {}).get("hosted") if include_text else None),
+                "hosted": (card if include_text else None),
             }
         )
+        if card_key is not None:
+            hosted_cards[card_key] = items[-1]
     for turn in conn.execute(
         select(
             session_turns.c.id,
@@ -530,7 +544,10 @@ def _make_group(
                     if isinstance(item.get("citations"), list) and item["citations"]
                     else {}
                 ),
-                **({"hosted": item["hosted"]} if isinstance(item.get("hosted"), dict) else {}),
+                **({"hosted": {
+                    **item["hosted"],
+                    **({"in_progress": False} if not open_turn and item["hosted"].get("in_progress") else {}),
+                }} if isinstance(item.get("hosted"), dict) else {}),
             }
             for item in pending
         ]
