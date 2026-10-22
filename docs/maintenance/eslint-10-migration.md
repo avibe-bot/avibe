@@ -11,7 +11,7 @@ the lint gate. This replaces the incomplete ESLint-only update in #2844.
   8.71.2 (explicit ESLint 10 peer). Refresh 0.5's rule/config rewrite is not
   necessary for this migration; do not silently take it with the Hooks update.
 - UI development Node range: `^20.19.0 || ^22.13.0 || >=24`, matching ESLint 10.
-  Existing UI CI uses Node 22.14.0. This is not a change to the separately
+  UI CI uses Node 22.23.4. This is not a change to the separately
   packaged Show Runtime's Node requirement.
 - Keep all enforced rules, severities, source coverage, inline-configuration
   guards, and the per-file/per-rule debt ratchet. No peer-dependency bypass,
