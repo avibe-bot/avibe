@@ -266,6 +266,9 @@ async def test_a_stored_unknown_native_hosted_row_loads_through_the_transcript_o
     store = SQLiteTranscriptStore(engine)
     await store.consume_input("ses_hosted_history", consumed, _user("go"))
     response = await store.append_response("ses_hosted_history", _assistant("stored"), final=True)
+    tool_result = await store.append_tool_result(
+        "ses_hosted_history", _tool_result("call_unknown", "stored tool result"), details={}
+    )
 
     unknown = {
         "role": "assistant",
@@ -286,21 +289,40 @@ async def test_a_stored_unknown_native_hosted_row_loads_through_the_transcript_o
         "stop_reason": "stop",
         "hosted_summary": {"counts": {}, "cited_sources": []},
     }
+    unknown_tool_result = {
+        "role": "tool_result",
+        "tool_call_id": "call_unknown",
+        "tool_name": "web_fetch",
+        "content": [{"type": "text", "text": "stored tool result"}],
+        "is_error": True,
+        "hosted": {"record": {"status": "completed", "sources": []}},
+    }
     with engine.begin() as conn:
         row = conn.execute(select(messages.c.content_json).where(messages.c.id == response.row_id)).scalar_one()
         payload = json.loads(row)
         payload["model"]["message"] = unknown
         conn.execute(messages.update().where(messages.c.id == response.row_id).values(content_json=json.dumps(payload)))
+        event_payload = conn.execute(
+            select(agent_events.c.content_json).where(agent_events.c.id == tool_result.row_id)
+        ).scalar_one()
+        event = json.loads(event_payload)
+        event["message"] = unknown_tool_result
+        conn.execute(
+            agent_events.update().where(agent_events.c.id == tool_result.row_id).values(content_json=json.dumps(event))
+        )
 
     loaded = list(await store.load("ses_hosted_history"))
 
-    assert len(loaded) == 2
-    restored = loaded[-1].message
+    assert len(loaded) == 3
+    restored = loaded[1].message
     assert isinstance(restored, AssistantMessage)
     assert restored.hosted_summary is None
     assert isinstance(restored.content[0], TextBlock)
     assert "https://example.com/docs" in restored.content[0].text
     assert "Example Docs" in restored.content[0].text
+    result = loaded[2].message
+    assert isinstance(result, ToolResultMessage)
+    assert result.hosted is None and result.is_error is True
 
 
 async def test_rows_outside_the_context_never_load(engine) -> None:
