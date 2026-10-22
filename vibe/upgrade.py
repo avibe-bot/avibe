@@ -57,11 +57,12 @@ UPGRADE_INSTALL_TIMEOUT_SECONDS = 30 * 60
 # A slow interpreter download may finish; a hung one must not take the whole
 # install bound from the Avibe install that follows it.
 PYTHON_PATCH_UPGRADE_TIMEOUT_SECONDS = 10 * 60
+UV_PYTHON_DIR_TIMEOUT_SECONDS = 30
 RESTART_PENDING_GRACE_SECONDS = 5 * 60
 DEFERRED_ACTIVATION_TIMEOUT_SECONDS = 5 * 60
-# The directory of a uv-managed CPython, named by its uv install key: a patch
-# such as ``cpython-3.12.12-macos-aarch64-none`` or uv's minor-version link
-# ``cpython-3.12-macos-aarch64-none``. Variant builds (freethreaded, debug)
+# A CPython installation in uv's Python directory, named by its uv install key:
+# a patch such as ``cpython-3.12.12-macos-aarch64-none`` or uv's minor-version
+# link ``cpython-3.12-macos-aarch64-none``. Variant builds (freethreaded, debug)
 # carry a ``+`` and are deliberately not matched.
 _UV_MANAGED_CPYTHON_DIR_RE = re.compile(
     r"cpython-(?P<minor>\d+\.\d+)(?:\.\d+(?:(?:a|b|rc)\d+)?)?"
@@ -1666,29 +1667,55 @@ def pinned_package_spec(version: str | None, *, package_name: str) -> str:
     return f"{package_name}=={version}"
 
 
-def _uv_managed_python_minor(python_executable: str) -> str | None:
-    """The uv request for the minor version of a uv-managed tool interpreter.
+def _uv_managed_python_minor(python_executable: str, uv_binary: str, env: Mapping[str, str]) -> str | None:
+    """The uv request for the minor version of a tool interpreter uv manages.
 
     A tool environment records its base interpreter as ``home`` in
-    ``pyvenv.cfg``: the install directory on Windows, its ``bin`` on POSIX. Any
-    other interpreter, such as a system Python, is not uv's to upgrade.
+    ``pyvenv.cfg``. Only an interpreter inside uv's own Python directory is
+    uv's to upgrade; a system Python, or a standalone build another tool keeps
+    elsewhere, is left as it is.
     """
 
     try:
         config = (Path(python_executable).parent.parent / "pyvenv.cfg").read_text(encoding="utf-8")
     except (OSError, ValueError):
         return None
+    home = ""
     for line in config.splitlines():
         key, separator, value = line.partition("=")
-        if not separator or key.strip() != "home":
-            continue
-        home = Path(value.strip())
-        for directory in (home, home.parent):
-            match = _UV_MANAGED_CPYTHON_DIR_RE.fullmatch(directory.name)
-            if match is not None:
-                return f"cpython-{match['minor']}-{match['platform']}"
+        if separator and key.strip() == "home":
+            home = value.strip()
+            break
+    if not home:
         return None
-    return None
+    try:
+        located = subprocess.run(
+            [uv_binary, "python", "dir"],
+            env=dict(env),
+            capture_output=True,
+            text=True,
+            cwd=get_safe_cwd(),
+            timeout=UV_PYTHON_DIR_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("Keeping the installed Python patch: cannot locate uv's Python directory: %s", exc)
+        return None
+    if located.returncode != 0 or not located.stdout.strip():
+        logger.warning(
+            "Keeping the installed Python patch: uv python dir exited %s: %s",
+            located.returncode,
+            (located.stderr or "").strip(),
+        )
+        return None
+    try:
+        # The first component names the installation, whether ``home`` is it
+        # (Windows) or its bin (POSIX), and whether reached through uv's minor
+        # link or a patch directory.
+        installation = Path(home).resolve().relative_to(Path(located.stdout.strip()).resolve()).parts
+    except (OSError, RuntimeError, ValueError):
+        return None
+    match = _UV_MANAGED_CPYTHON_DIR_RE.fullmatch(installation[0]) if installation else None
+    return f"cpython-{match['minor']}-{match['platform']}" if match else None
 
 
 def build_upgrade_plan(
@@ -1741,7 +1768,7 @@ def build_upgrade_plan(
             # would stop it from leaving a minor version that a new release
             # no longer supports. Upgrading the current minor first only gives
             # that choice its newest patch.
-            python_minor = _uv_managed_python_minor(executable)
+            python_minor = _uv_managed_python_minor(executable, uv_binary, env)
         python_upgrade_command = (
             [uv_binary, "python", "install", "--upgrade", "--no-bin", "--no-registry", python_minor]
             if python_minor

@@ -186,10 +186,14 @@ def test_build_upgrade_plan_keeps_windows_on_arm_on_x64_python(monkeypatch, tmp_
         ("{uv}/cpython-3.14.0rc2-linux-aarch64-musl/bin", "cpython-3.14-linux-aarch64-musl"),
         # Windows records the install directory itself, not its bin.
         ("{uv}/cpython-3.13.5-windows-x86_64-none", "cpython-3.13-windows-x86_64-none"),
-        # Interpreters uv does not own, or builds a plain minor request would replace.
+        # Interpreters uv does not own, even one named like uv's, or builds a
+        # plain minor request would replace.
         ("/usr/bin", None),
         ("/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12/bin", None),
+        ("{other}/cpython-3.12-linux-x86_64-gnu/bin", None),
         ("{uv}/cpython-3.13.5+freethreaded-linux-x86_64-gnu/bin", None),
+        # uv cannot say where its Pythons are.
+        ("{uv}/cpython-3.12.12-macos-aarch64-none/bin", "uv-fails"),
     ],
 )
 def test_uv_upgrade_moves_only_a_uv_managed_interpreter_to_its_newest_patch(
@@ -201,20 +205,27 @@ def test_uv_upgrade_moves_only_a_uv_managed_interpreter_to_its_newest_patch(
     target.write_text("#!/bin/sh\n", encoding="utf-8")
     launcher.parent.mkdir(parents=True)
     launcher.symlink_to(target)
+    uv_python_dir = tmp_path / "uv" / "python"
+    uv = tmp_path / "uv-bin" / "uv"
+    uv.parent.mkdir()
+    uv.write_text(
+        "#!/bin/sh\nexit 2\n" if expected == "uv-fails"
+        else f'#!/bin/sh\n[ "$1 $2" = "python dir" ] && echo {shlex.quote(str(uv_python_dir))}\n',
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
     tool_python = tmp_path / "uv" / "tools" / "avibe-os" / "bin" / "python"
     tool_python.parent.mkdir(parents=True)
     (tool_python.parent.parent / "pyvenv.cfg").write_text(
-        f"home = {home.format(uv=tmp_path / 'uv' / 'python')}\nversion_info = 3.12.12\n",
+        f"home = {home.format(uv=uv_python_dir, other=tmp_path / 'opt')}\nversion_info = 3.12.12\n",
         encoding="utf-8",
     )
     monkeypatch.setattr("vibe.upgrade.config_paths.get_vibe_remote_dir", lambda: tmp_path / "home")
-    monkeypatch.setattr("vibe.upgrade.os.path.exists", lambda path: True)
-    monkeypatch.setattr("vibe.upgrade.os.access", lambda path, mode: True)
     monkeypatch.setattr("vibe.upgrade.windows_native_arm64", lambda: False)
 
     plan = build_upgrade_plan(
         python_executable=str(tool_python),
-        uv_path="/usr/local/bin/uv",
+        uv_path=str(uv),
         vibe_path=str(launcher),
         base_env={"PATH": "/usr/bin"},
     )
@@ -222,8 +233,8 @@ def test_uv_upgrade_moves_only_a_uv_managed_interpreter_to_its_newest_patch(
     assert plan.method == "uv"
     assert plan.python_upgrade_command == (
         None
-        if expected is None
-        else ["/usr/local/bin/uv", "python", "install", "--upgrade", "--no-bin", "--no-registry", expected]
+        if expected in (None, "uv-fails")
+        else [str(uv), "python", "install", "--upgrade", "--no-bin", "--no-registry", expected]
     )
     # uv keeps choosing the staged interpreter, so a release that drops this
     # minor version can still move the install to a supported one.
