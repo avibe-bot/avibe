@@ -38,7 +38,9 @@ _CORRELATION_ID_CREDENTIAL_PATTERN = re.compile(
     r"(?i)(?:bearer|basic)\s+|"
     r"(?:authorization|api[_ -]?key|access[_ -]?token|token|secret|password|"
     r"credential|cookie|session|signature)\s*[:=]|"
-    r"(?:sk|rk|pk|sess|token|secret|cred|key)[-_][a-z0-9_-]{8,}"
+    r"(?:sk|rk|pk|sess|token|secret|cred|key)[-_][a-z0-9_-]{8,}|"
+    r"(?:AIza[a-z0-9_-]{20,}|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9_]{20,})|"
+    r"ey[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+$"
 )
 
 
