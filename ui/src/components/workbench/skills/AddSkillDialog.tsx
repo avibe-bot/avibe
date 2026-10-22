@@ -172,14 +172,14 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
     <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
       <DialogContent
         closeLabel={t('common.close')}
-        className="max-w-[560px] gap-0 overflow-y-auto overflow-x-hidden rounded-2xl border-border-strong bg-surface-2 p-0 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)] md:top-10 md:max-h-[calc(100dvh-5rem)] md:translate-y-0 max-md:bottom-4 max-md:left-4 max-md:right-4 max-md:top-4 max-md:w-auto max-md:max-w-none max-md:max-h-[calc(100dvh-2rem)] max-md:translate-x-0 max-md:translate-y-0 max-md:rounded-2xl max-md:p-0 max-md:pb-0"
+        className="max-w-[560px] w-[calc(100vw-2rem)] gap-0 overflow-y-auto overflow-x-hidden rounded-2xl border-border-strong bg-surface-2 p-0 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)] sm:w-[calc(100vw-5rem)] md:top-10 md:max-h-[calc(100dvh-5rem)] md:translate-y-0 max-md:bottom-auto max-md:left-1/2 max-md:right-auto max-md:top-4 max-md:w-[calc(100vw-2rem)] max-md:max-w-none max-md:max-h-[calc(100dvh-2rem)] max-md:translate-x-[-50%] max-md:translate-y-0 max-md:rounded-2xl max-md:p-0 max-md:pb-0"
       >
         <div className="flex min-w-0 items-center gap-3 border-b border-border px-5 py-4">
           <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] border border-mint/40 bg-mint-soft text-mint-ink">
             <PackagePlus className="size-[17px]" />
           </span>
           <div className="flex min-w-0 flex-1 flex-col">
-            <DialogTitle id="add-skill-dialog-title" className="break-words p-0 text-[16px] font-bold text-foreground [overflow-wrap:anywhere]">{t('skills.addDialog.title')}</DialogTitle>
+            <DialogTitle className="break-words p-0 text-[16px] font-bold text-foreground [overflow-wrap:anywhere]">{t('skills.addDialog.title')}</DialogTitle>
             <DialogDescription className="break-words text-[11px] text-muted [overflow-wrap:anywhere]">{t('skills.addDialog.subtitle')}</DialogDescription>
           </div>
         </div>

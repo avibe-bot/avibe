@@ -121,6 +121,9 @@ test('custom skill dialogs keep their actions reachable on short viewports', asy
   await page.getByRole('button', { name: 'Add skill', exact: true }).click();
   const add = page.getByRole('dialog').filter({ hasText: 'Add a skill' });
   await expect(add).toBeVisible();
+  const initialAddBox = await add.boundingBox();
+  expect(initialAddBox).not.toBeNull();
+  expect(initialAddBox!.height).toBeLessThan(MOBILE_SHORT.height - 32);
   await add.getByPlaceholder('github.com/owner/repo or gh:owner/repo@skill').fill('github.com/fixture/repository');
   await add.getByRole('button', { name: 'Fetch', exact: true }).click();
   await expect(add.getByRole('checkbox')).toHaveCount(DISCOVERED_SKILLS.length);
