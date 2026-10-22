@@ -470,8 +470,8 @@
       "missing": "{agent} was deleted, so this session can't continue on it."
     },
     "continueOnVibey": {
-      "workbench": "Switch to Vibey to pick up right where you left off: your last message goes straight to it, along with the conversation so far.",
-      "im": "Open this session in the Avibe Workbench and switch it to Vibey to keep going; the conversation so far comes along."
+      "workbench": "Switch to Vibey to pick up right where you left off.",
+      "im": "Open this session in the Avibe Workbench and switch it to Vibey to keep going."
     },
     "streamTurnInProgress": "⚠️ A reply is already streaming for this session — wait for it to finish, then try again.",
     "sessionReset": "Session error detected. Session has been reset. Please try your message again.",
