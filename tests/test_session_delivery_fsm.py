@@ -270,11 +270,33 @@ def test_fsm_template_matches_real_empty_metadata(tmp_path, _fsm_schema_template
         assert clone.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
+def test_durable_binding_refresh_drops_a_native_the_session_switched_away_from() -> None:
+    """A Delivery admitted before a backend switch carries the replaced native in its
+    projections; the durable refresh must replace it with the row's, or the new
+    backend's resume helpers would try to resume the old backend's conversation."""
+    context = _context()
+    context.platform_specific["agent_session_target"].update(
+        {"agent_backend": "codex", "native_session_id": "claude-native"}
+    )
+    context.platform_specific["agent_run_target"] = {
+        "agent_session_id": "ses_fsm",
+        "agent_backend": "codex",
+        "native_session_id": "claude-native",
+    }
+    binding = {"id": "ses_fsm", "agent_backend": "codex", "agent_variant": "codex", "native_session_id": ""}
+
+    assert SessionTurnManager._binding_projection_is_stale(context, binding)
+    SessionTurnManager._apply_session_binding_to_context(context, binding)
+    assert context.platform_specific["agent_session_target"]["native_session_id"] == ""
+    assert context.platform_specific["agent_run_target"]["native_session_id"] == ""
+
+
 @pytest.mark.anyio
-async def test_native_start_receipt_clears_the_handoff_its_turn_carried(managers) -> None:
-    """A backend switch's handoff is spent when the new native accepts the turn that
-    carried it (its native-start receipt), in the same transaction; the rest of the
-    session metadata is kept. Until then the marker stays for the next turn."""
+async def test_native_start_receipt_accepts_the_handoff_its_turn_carried(managers) -> None:
+    """A backend switch's handoff is accepted in the native-start receipt transaction of
+    the turn that carried it; the rest of the session metadata is kept. The row is
+    not bound yet (Claude reports acceptance before its init binds the id), so the
+    marker stays, flagged accepted, for the bind to spend."""
     from core.session_handoff import BACKEND_HANDOFF_TURN_KEY
     from storage.agent_session_rows import pending_backend_handoff
 
@@ -310,7 +332,7 @@ async def test_native_start_receipt_clears_the_handoff_its_turn_carried(managers
         runtime_key=f"runtime-key-{admitted.turn_id}",
         runtime_turn_id=f"runtime-{admitted.turn_id}",
     )
-    assert metadata() == {"keep": 1}
+    assert metadata() == {"keep": 1, "backend_handoff": {"id": "switch-1", "accepted": True}}
 
 
 @pytest.mark.anyio

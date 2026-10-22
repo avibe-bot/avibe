@@ -28,6 +28,7 @@ from storage.agent_session_rows import (
     new_session_id,
     normalize_workdir,
     pending_backend_handoff,
+    settle_backend_handoff_on_bind,
     reserve_write_lock,
     snapshot_scope_workdir,
 )
@@ -1187,14 +1188,18 @@ class SQLiteSessionsService:
             route_metadata = parsed_route_metadata if isinstance(parsed_route_metadata, dict) else {}
             already_bound = bool(decode_session_value((route_row or {}).get("native_session_id")))
             handoff = pending_backend_handoff(route_metadata)
-            if handoff is not None and handoff["from_native"] and handoff["from_native"] == encoded_session_id:
-                # The session switched away from this native. Only the old backend's
-                # runtime still knows it, so this is a late event from that runtime:
-                # rebinding would undo the switch (and relabel the row back to the
-                # old backend). Keep the row as the switch left it.
+            if handoff is not None and (
+                (handoff["from_native"] and handoff["from_native"] == encoded_session_id)
+                or (requested_backend and requested_backend != current_backend)
+            ):
+                # The session switched backend and the new one has not taken over
+                # yet. The replaced native is known only to the old backend's
+                # runtime, and another backend's bind (a one-off Agent run, a late
+                # event) would relabel the row: either undoes the user's switch.
+                # Keep the row as the switch left it.
                 logger.warning(
-                    "Ignoring a bind of the native session_id=%s switched away from; "
-                    "agent_session=%s backend=%s requested=%s",
+                    "Ignoring a bind into a session that is switching backend; "
+                    "native=%s agent_session=%s backend=%s requested=%s",
                     native_session_id,
                     session_id,
                     current_backend,
@@ -1305,6 +1310,9 @@ class SQLiteSessionsService:
                     .values(**values, native_session_id=encoded_session_id)
                 )
                 if first_bind.rowcount:
+                    # The UPDATE holds the write lock, so this read-merge-write of
+                    # the metadata is atomic with the bind.
+                    settle_backend_handoff_on_bind(conn, str(session_id), encoded_session_id)
                     return str(session_id)
                 # LOST the first bind. Return the winner immediately, exactly as the
                 # cross-backend branch above does -- the two lost-race paths now

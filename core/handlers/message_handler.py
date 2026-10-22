@@ -15,7 +15,7 @@ from core.agent_input import AgentInputMetadata, harness_label
 from core.backend_failure import emit_backend_failure
 from core.delivery_target import routed_delivery_context
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
-from core.session_handoff import BACKEND_HANDOFF_TURN_KEY, build_backend_handoff_from_store as _build_backend_handoff
+from core.session_handoff import BACKEND_HANDOFF_TURN_KEY
 from core.message_context import (
     resolve_context_platform,
     resolve_context_thread_id,
@@ -1388,37 +1388,59 @@ class MessageHandler(BaseHandler):
     ) -> None:
         """Prepare a turn of a Session that switched backend and has not continued yet.
 
-        The switch left ``backend_handoff`` on the row and cleared its native
-        (``docs/plans/2026-10-22-session-backend-switch.md``). While the row has no
-        native, any runtime the target backend still caches for the Session is from
-        an earlier phase and is released first. The input then carries the handoff,
-        and the turn is tagged so its native-start receipt clears the marker; a
-        turn that never reaches the native leaves it for the next one. A release
-        failure fails the turn rather than resume the replaced conversation.
+        The switch cleared the row's native and left ``backend_handoff``
+        (``docs/plans/2026-10-22-session-backend-switch.md``). The row is read by
+        primary key, whichever projection selected it (a Workbench target or an
+        IM/CLI run target), because a projection can predate the switch. A turn that
+        continues the Session's own conversation on the switched-to backend then:
+
+        - drops any runtime that backend still caches for the Session from an earlier
+          phase, while the row has no native yet, and stops every projection from
+          offering a native the row no longer holds;
+        - carries the handoff in its input, and is tagged so its native-start receipt
+          can spend the marker.
+
+        A turn into a namespaced conversation (a subagent) or on another backend (a
+        one-off Agent run) neither carries nor spends it. Any failure fails the turn
+        before dispatch, so the next turn retries; the first accepted turn on the new
+        native is always one that carried the handoff.
         """
-        from storage.agent_session_rows import pending_backend_handoff
+        from core.agent_session_context import resolve_context_agent_session_target
+        from core.session_handoff import load_pending_handoff, pending_handoff_for_row
 
         spec = context.platform_specific or {}
-        target = spec.get("agent_session_target")
-        if not isinstance(target, dict) or spec.get("vibey_resume") is True:
+        if spec.get("vibey_resume") is True:
             return
-        handoff = pending_backend_handoff(target.get("metadata"))
-        session_id = str(target.get("id") or "").strip()
-        if handoff is None or not session_id:
+        # The same marks the backends namespace a conversation by: a Claude/Codex
+        # subagent base (set above) or a routing-default subagent.
+        if spec.get("backend_base_session_id") or spec.get("routing_subagent"):
             return
-        if not str(target.get("native_session_id") or "").strip():
+        target = resolve_context_agent_session_target(context) or {}
+        session_id = str(target.get("id") or spec.get("agent_session_id") or "").strip()
+        if not session_id:
+            return
+        read_row = getattr(self.sessions, "get_agent_session_by_id", None)
+        if not callable(read_row):
+            return
+        row = await asyncio.to_thread(read_row, session_id)
+        handoff = pending_handoff_for_row(row, backend)
+        if handoff is None:
+            return
+        pending = await asyncio.to_thread(load_pending_handoff, row, handoff, backend)
+        spec = dict(context.platform_specific or {})
+        for key in ("agent_session_target", "agent_run_target"):
+            projection = spec.get(key)
+            if isinstance(projection, dict) and projection.get("native_session_id") != pending.native_session_id:
+                spec[key] = {**projection, "native_session_id": pending.native_session_id}
+        context.platform_specific = spec
+        if not pending.native_session_id:
             agent = getattr(getattr(self.controller, "agent_service", None), "agents", {}).get(backend)
             release = getattr(agent, "release_native_runtime", None)
             if callable(release):
                 await release(request)
-        try:
-            text = await asyncio.to_thread(_build_backend_handoff, session_id, handoff, backend)
-        except Exception:
-            logger.exception("Could not build the backend handoff for session %s", session_id)
-            return
-        request.input_metadata = replace(request.input_metadata or AgentInputMetadata(), handoff=text)
+        request.input_metadata = replace(request.input_metadata or AgentInputMetadata(), handoff=pending.text)
         spec = dict(context.platform_specific or {})
-        spec[BACKEND_HANDOFF_TURN_KEY] = handoff["id"]
+        spec[BACKEND_HANDOFF_TURN_KEY] = pending.handoff_id
         context.platform_specific = spec
 
     async def prepare_input_metadata(

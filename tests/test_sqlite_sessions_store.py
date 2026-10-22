@@ -2864,46 +2864,65 @@ def test_bind_agent_session_by_id_does_not_use_anchor_suffix_as_workdir(tmp_path
         service.close()
 
 
-def test_bind_agent_session_by_id_refuses_the_native_a_backend_switch_replaced(tmp_path: Path) -> None:
-    """After a bound session switches backend, a late bind from the old backend's
-    runtime must not rebind (or relabel the row back to) the replaced native, while
-    the new backend's first bind still lands."""
+def test_bind_agent_session_by_id_holds_a_switched_session_for_the_new_backend(tmp_path: Path) -> None:
+    """After a bound session switches backend, a late bind of the replaced native, or
+    a bind from any other backend, must not rebind or relabel the row. The switch's
+    handoff marker is spent only once a turn carrying it was accepted AND the row is
+    bound to the new native, in whichever order the backend reports the two."""
     from storage import workbench_sessions_service
+    from storage.agent_session_rows import accept_backend_handoff, pending_backend_handoff
 
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
-    try:
+
+    def switched(anchor: str, from_backend: str, to_backend: str) -> str:
         reserved_id = service.reserve_agent_session(
             scope_key="slack::channel::C123",
-            agent_backend="claude",
-            session_anchor="slack_private-agent",
-            agent_name="claude",
+            agent_backend=from_backend,
+            session_anchor=anchor,
+            agent_name=from_backend,
         )
         assert reserved_id is not None
-        service.bind_agent_session_by_id(session_id=reserved_id, native_session_id="claude-native")
+        service.bind_agent_session_by_id(session_id=reserved_id, native_session_id=f"{from_backend}-native")
         with service.engine.begin() as conn:
             workbench_sessions_service.update_session(
-                conn, reserved_id, agent_backend="vibey", agent_name="vibey"
+                conn, reserved_id, agent_backend=to_backend, agent_name=to_backend
             )
+        return reserved_id
 
-        for backend in ("claude", None):
-            assert service.bind_agent_session_by_id(
-                session_id=reserved_id,
-                native_session_id="claude-native",
-                vibe_agent_backend=backend,
-            ) == reserved_id
-            row = service.get_agent_session_by_id(reserved_id)
-            assert row is not None
-            assert (row["agent_backend"], row["native_session_id"]) == ("vibey", "")
-
-        service.bind_agent_session_by_id(
-            session_id=reserved_id,
-            native_session_id=reserved_id,
-            vibe_agent_backend="vibey",
-        )
-        row = service.get_agent_session_by_id(reserved_id)
+    def state(session_id: str) -> tuple[str, str, dict | None]:
+        row = service.get_agent_session_by_id(session_id)
         assert row is not None
-        assert (row["agent_backend"], row["native_session_id"]) == ("vibey", reserved_id)
+        return row["agent_backend"], row["native_session_id"], pending_backend_handoff(json.loads(row["metadata_json"]))
+
+    def accept(session_id: str) -> None:
+        handoff = state(session_id)[2]
+        assert handoff is not None
+        with service.engine.begin() as conn:
+            assert accept_backend_handoff(conn, session_id, handoff["id"])
+
+    try:
+        # Bind-then-accept (Vibey, Codex, OpenCode).
+        vibey = switched("slack_vibey", "claude", "vibey")
+        for native, backend in (("claude-native", "claude"), ("claude-native", None), ("codex-thread", "codex")):
+            assert service.bind_agent_session_by_id(
+                session_id=vibey, native_session_id=native, vibe_agent_backend=backend
+            ) == vibey
+            assert state(vibey)[:2] == ("vibey", "")
+        service.bind_agent_session_by_id(session_id=vibey, native_session_id=vibey, vibe_agent_backend="vibey")
+        backend, native, handoff = state(vibey)
+        # Bound before any turn was accepted (a thread whose first turn then failed):
+        # the next turn still owes the handoff.
+        assert (backend, native) == ("vibey", vibey) and handoff is not None and not handoff["accepted"]
+        accept(vibey)
+        assert state(vibey) == ("vibey", vibey, None)
+
+        # Accept-then-bind (Claude reports acceptance before its init binds the id).
+        claude = switched("slack_claude", "codex", "claude")
+        accept(claude)
+        assert state(claude)[2]["accepted"] is True
+        service.bind_agent_session_by_id(session_id=claude, native_session_id="claude-new", vibe_agent_backend="claude")
+        assert state(claude) == ("claude", "claude-new", None)
     finally:
         service.close()
 

@@ -32,14 +32,18 @@ context-pressure triggers or automatic policy.
 A cross-backend change on a session with a bound native is accepted only when:
 
 - the current backend is not `vibey`;
-- the session is not running (controller in-flight registry and
-  `agent_status`), and it is not a pending fork;
+- no durable Turn of the session is unsettled, the row is not `running`, and it
+  is not a pending fork. The Turn row is written by the controller under the
+  same SQLite write lock before anything is dispatched, so it is the reservation
+  the switch commits against; `agent_status` and the controller's in-memory
+  registry both lag it;
 - the controller is reachable and reports no backend Activity and no unclaimed
   Activity output for the session. A detached Claude Activity runs on the old
   client and would otherwise keep producing output for a session that moved.
 
-Refusals stay retryable `409`s: `backend_locked` (running, pending fork, bound
-Vibey) and `backend_busy` (background backend work, controller unreachable).
+Refusals stay retryable `409`s: `backend_locked` (running or unsettled Turn,
+pending fork, bound Vibey) and `backend_busy` (background backend work,
+controller unreachable).
 
 Unbound sessions keep today's behavior.
 
@@ -57,36 +61,45 @@ Unbound sessions keep today's behavior.
    to_backend, switched_at}`.
 
 The UPDATE re-asserts the state the decision was made from: same native, same
-backend, not running, not archived.
-
-### Stale bind guard
-
-While `backend_handoff` is present, `bind_agent_session_by_id` refuses to bind
-`from_native` again. A late init or thread event from the old backend's runtime
-therefore cannot rebind or relabel the switched row.
-
-### First turn on the new backend (controller)
-
-At dispatch, in `MessageHandler`, when the session target carries
-`backend_handoff`:
-
-1. If the row has no native yet, release any runtime the target backend still
-   caches for this session (`BaseAgent.release_native_runtime`): Claude drops
-   its SDK client, Codex unloads its thread mapping. OpenCode and Vibey cache
-   nothing that survives an empty native. This covers A -> B -> A, where A
-   may still hold the old conversation in memory.
-2. Build the handoff off the loop and attach it to `AgentInputMetadata`, which
-   every backend renders at its last write boundary. The canonical Message
-   stays the user's text.
-3. Tag the turn with the handoff id.
-
-`SessionTurns.on_native_start` clears the marker inside the native-start receipt
-transaction, compare-and-set on the id. A turn that fails before the native
-accepts it leaves the marker, so the next turn resends the handoff.
+backend, not running, no unsettled Turn, not archived.
 
 A forked session's spent fork source (`fork_source_native_session_id`,
 `fork_source_backend`) is dropped by the switch, so the emptied native cannot
 re-arm a native fork or pin the picker to the fork's backend.
+
+### While the handoff is pending
+
+- `bind_agent_session_by_id` refuses a bind of `from_native`, or from any
+  backend other than the row's. A late event from the old runtime or a one-off
+  Agent run on another backend cannot rebind or relabel the switched row.
+- The durable binding refresh carries the row's `native_session_id` into the
+  routing projections, so a Delivery admitted before the switch cannot offer
+  the replaced native to the new backend's resume helpers.
+
+### First turn on the new backend (controller)
+
+At dispatch, `MessageHandler` reads the session row by primary key, whichever
+projection selected it (Workbench target or IM/CLI run target). A turn that
+continues the session's own conversation on the switched-to backend (not a
+namespaced subagent, not a one-off run on another backend):
+
+1. If the row has no native yet, releases any runtime the target backend still
+   caches for this session (`BaseAgent.release_native_runtime`): Claude ends its
+   SDK client, Codex releases its thread binding. This covers A -> B -> A.
+2. Carries the handoff in `AgentInputMetadata.handoff`, which every backend
+   renders at its last write boundary. The canonical Message keeps the user's
+   text.
+3. Is tagged with the handoff id.
+
+Any failure there fails the turn before dispatch; the next turn retries.
+
+The marker is spent once both facts hold, in either order: a tagged turn's
+native-start receipt (`accept_backend_handoff`, in the receipt transaction) and
+the row bound to the new native (`settle_backend_handoff_on_bind`, in the bind
+transaction). Claude reports acceptance before its init binds the id; Vibey,
+Codex and OpenCode bind first. A native bound before any tagged turn was
+accepted (a Codex thread whose `turn/start` failed) keeps the marker, so the
+next turn still carries the handoff.
 
 ### Handoff content
 
@@ -108,6 +121,8 @@ One bounded block, rendered in English for the model:
   eviction. It is idle by the switch rule and cannot rebind the row.
 - Legacy non-durable turns do not record a native-start receipt; on that path
   the handoff can be sent again on the next turn.
+- A namespaced subagent turn after a switch starts its own conversation without
+  the handoff; the session's own conversation still receives it.
 
 ## Todo
 

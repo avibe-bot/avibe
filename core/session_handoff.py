@@ -3,8 +3,9 @@
 A bound session that switches backend keeps its Avibe session id and transcript,
 but the new backend starts a fresh native conversation
 (``docs/plans/2026-10-22-session-backend-switch.md``). The switch leaves a
-``backend_handoff`` marker on the session; until the new backend accepts a turn,
-each turn's input is prefixed with this block (``AgentInputMetadata.handoff``).
+``backend_handoff`` marker on the session; until the new backend has both accepted
+a turn carrying it and bound its native, each turn of that conversation is prefixed
+with this block (``AgentInputMetadata.handoff``).
 
 The block is mechanical and bounded: a continuity notice, the open Harness work
 bound to the session, the most recent transcript that fits the budget, and a
@@ -15,6 +16,7 @@ it again from what is true then.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from sqlalchemy.engine import Connection
@@ -22,7 +24,7 @@ from sqlalchemy.engine import Connection
 from modules.agents.catalog import display_name_for_backend
 
 #: ``platform_specific`` key naming the handoff a turn carries; its native-start
-#: receipt clears exactly that marker (``SessionTurnManager.on_native_start``).
+#: receipt accepts exactly that marker (``SessionTurnManager.on_native_start``).
 BACKEND_HANDOFF_TURN_KEY = "backend_handoff_id"
 
 #: The whole block, in characters. Each transcript message is clipped first.
@@ -49,13 +51,46 @@ _OPEN_WORK_LABELS = {
 _PLAIN_ID = re.compile(r"[A-Za-z0-9_-]+")
 
 
-def build_backend_handoff_from_store(session_id: str, handoff: Mapping[str, str], to_backend: str) -> str:
-    """``build_backend_handoff`` on its own read connection; blocking, run it off the loop."""
+@dataclass(frozen=True)
+class PendingHandoff:
+    """A session's pending switch handoff, read fresh from its row at dispatch."""
 
+    handoff_id: str
+    #: The row's native as it is now: empty until the new backend binds one.
+    native_session_id: str
+    text: str
+
+
+def pending_handoff_for_row(row: Any, backend: str) -> dict[str, Any] | None:
+    """The handoff a turn on ``backend`` owes, from the session row read at dispatch.
+
+    Read by primary key, not from a routing projection: a Delivery admitted before
+    the switch, or an IM run target, can carry a copy from before it. Only the
+    backend the session switched to carries it; a turn routed to another backend
+    (a one-off Agent run) is not continuing this conversation.
+    """
+
+    from storage.agent_session_rows import decode_metadata_object, pending_backend_handoff
+
+    if not isinstance(row, Mapping) or str(row.get("agent_backend") or "") != str(backend or ""):
+        return None
+    return pending_backend_handoff(decode_metadata_object(row.get("metadata_json")))
+
+
+def load_pending_handoff(row: Mapping[str, Any], handoff: Mapping[str, Any], backend: str) -> PendingHandoff:
+    """Build the block for ``handoff`` on its own read connection. Blocking."""
+
+    from storage.agent_session_rows import decode_session_value
     from storage.db import get_cached_sqlite_engine
 
+    session_id = str(row.get("id") or "")
     with get_cached_sqlite_engine().connect() as conn:
-        return build_backend_handoff(conn, session_id, handoff, to_backend=to_backend)
+        text = build_backend_handoff(conn, session_id, handoff, to_backend=backend)
+    return PendingHandoff(
+        handoff_id=str(handoff["id"]),
+        native_session_id=str(decode_session_value(row.get("native_session_id")) or "").strip(),
+        text=text,
+    )
 
 
 def build_backend_handoff(

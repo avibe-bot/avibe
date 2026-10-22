@@ -71,7 +71,7 @@ from core.services.agent_steering import (
 from storage import loop_writers, messages_service
 from storage import message_deliveries as delivery_store
 from storage.agent_transcript import last_response, recovered_watch_ids
-from storage.agent_session_rows import clear_backend_handoff, reserve_write_lock
+from storage.agent_session_rows import accept_backend_handoff, decode_session_value, reserve_write_lock
 from storage.db import get_cached_sqlite_engine
 from storage.background import (
     OWED_FAILURE_NOTICE_KEY,
@@ -1438,6 +1438,10 @@ class SessionTurnManager:
         return context
 
     @staticmethod
+    def _binding_native(binding: dict[str, Any]) -> str:
+        return str(decode_session_value(binding.get("native_session_id")) or "").strip()
+
+    @staticmethod
     def _binding_metadata(binding: dict[str, Any]) -> dict[str, Any]:
         raw_metadata = binding.get("metadata_json")
         try:
@@ -1556,6 +1560,15 @@ class SessionTurnManager:
                     return True
             if "metadata" in projection and projection.get("metadata") != SessionTurnManager._binding_metadata(binding):
                 return True
+            # A Delivery admitted before a backend switch still carries the native
+            # the switch replaced; resuming it on the new backend would fail.
+            if (
+                "native_session_id" in projection
+                and "native_session_id" in binding
+                and str(projection.get("native_session_id") or "").strip()
+                != SessionTurnManager._binding_native(binding)
+            ):
+                return True
             return False
 
         session_target = spec.get("agent_session_target")
@@ -1621,6 +1634,8 @@ class SessionTurnManager:
                     "metadata": SessionTurnManager._binding_metadata(binding),
                 }
             )
+            if "native_session_id" in binding:
+                target["native_session_id"] = SessionTurnManager._binding_native(binding)
         spec["agent_session_target"] = target
         # Keep every routing projection on the same durable winner. MessageHandler
         # and Controller prefer these cached fields over agent_session_target, so
@@ -1654,6 +1669,8 @@ class SessionTurnManager:
                     "reasoning_effort": binding.get("reasoning_effort"),
                 }
             )
+            if "native_session_id" in binding:
+                run_target["native_session_id"] = SessionTurnManager._binding_native(binding)
             spec["agent_run_target"] = run_target
         context.platform_specific = spec
 
@@ -1667,6 +1684,7 @@ class SessionTurnManager:
             agent_sessions.c.agent_variant,
             agent_sessions.c.model,
             agent_sessions.c.reasoning_effort,
+            agent_sessions.c.native_session_id,
             agent_sessions.c.metadata_json,
             agent_sessions.c.status,
         )
@@ -6054,8 +6072,9 @@ class SessionTurnManager:
                 ).strip()
                 if bound is not None and handoff_id:
                     # The new backend accepted the turn that carried the switch
-                    # handoff: later turns continue its native conversation.
-                    clear_backend_handoff(conn, session_id, handoff_id)
+                    # handoff; once the row also holds its native, later turns
+                    # continue that conversation without one.
+                    accept_backend_handoff(conn, session_id, handoff_id)
                 if bound is not None:
                     materialized = delivery_store.materialize_start_acceptance(
                         conn,

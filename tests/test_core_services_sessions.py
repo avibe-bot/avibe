@@ -20,7 +20,7 @@ from core.services import sessions as sessions_service
 from storage import workbench_sessions_service as storage_sessions
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_sessions, scope_settings
+from storage.models import agent_sessions, scope_settings, session_turns
 from storage.settings_service import upsert_scope
 
 
@@ -706,14 +706,33 @@ def test_update_session_bound_backend_switch_replaces_native(isolated_state):
             "claude",
         )
         assert ":superseded:" in snapshot["session_anchor"]
-        # Only the receipt of the turn that carried THIS handoff spends it.
-        from storage.agent_session_rows import clear_backend_handoff
+        # Only the receipt of a turn that carried THIS handoff can accept it.
+        from storage.agent_session_rows import accept_backend_handoff
 
-        assert clear_backend_handoff(conn, sid, "an-older-switch") is False
-        assert sessions_service.get_session(conn, sid)["metadata"]["backend_handoff"]["id"] == handoff["id"]
+        assert accept_backend_handoff(conn, sid, "an-older-switch") is False
+        assert sessions_service.get_session(conn, sid)["metadata"]["backend_handoff"] == handoff
 
-        # The new backend binds; the session can still move, here onto Vibey.
+        # The new backend binds; the session can still move, here onto Vibey, but
+        # not while a durable Turn owns it: the controller writes that row before
+        # it dispatches, under the same write lock, ahead of agent_status.
         _bind_native(conn, sid, "codex-thread")
+        conn.execute(
+            session_turns.insert().values(
+                id="turn-open",
+                session_id=sid,
+                initial_delivery_id="delivery-open",
+                state="starting",
+                backend="codex",
+                start_attempt_id="attempt-open",
+                dispatch_text="next",
+                dispatch_sha256="dispatch",
+                created_at="2026-10-22T00:00:00Z",
+                updated_at="2026-10-22T00:00:00Z",
+            )
+        )
+        with pytest.raises(sessions_service.SessionBackendLockedError):
+            sessions_service.update_session(conn, sid, agent_backend="vibey", agent_name="vibey")
+        conn.execute(session_turns.delete().where(session_turns.c.id == "turn-open"))
         sessions_service.update_session(conn, sid, agent_backend="vibey", agent_name="vibey")
         _bind_native(conn, sid, sid)
         # A bound Vibey session stays on Vibey; Agents within Vibey stay switchable.

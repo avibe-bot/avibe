@@ -61,6 +61,7 @@ from storage.models import (
     run_definitions,
     scope_settings,
     scopes,
+    session_turns,
     show_pages,
     state_meta,
     agents,
@@ -1166,6 +1167,7 @@ def update_session(
     bound_switch = backend_changes and bool(bound_native and current_backend)
     if backend_changes and (
         (bound_switch and (current_backend == TERMINAL_SWITCH_BACKEND or not str(agent_backend or "")))
+        or (bound_switch and conn.execute(_open_turn_for_session(session_id)).first() is not None)
         or str(existing.agent_status or "") == "running"
         or pending_fork
     ):
@@ -1321,11 +1323,15 @@ def update_session(
     )
     if bound_switch:
         # The switch was decided from this exact binding: still idle, still on
-        # the backend and native the snapshot above recorded.
+        # the backend and native the snapshot above recorded, and no durable Turn
+        # owns the session. The Turn row is what the controller writes, under the
+        # same SQLite write lock, before it dispatches anything; ``agent_status``
+        # and the controller's in-memory registry both lag it.
         stmt = (
             stmt.where(func.coalesce(agent_sessions.c.agent_status, "idle") != "running")
             .where(func.coalesce(agent_sessions.c.agent_backend, "") == current_backend)
             .where(func.coalesce(agent_sessions.c.native_session_id, "") == bound_native)
+            .where(~_open_turn_for_session(session_id).exists())
         )
     elif backend_changes:
         # Re-assert the lock INSIDE the UPDATE: the guard above is read-then-
@@ -1375,6 +1381,18 @@ def update_session(
             requested_backend=agent_backend,
         )
     return get_session(conn, session_id, authorization_context=authorization)
+
+
+def _open_turn_for_session(session_id: str):
+    """A durable Turn of the session that has not settled: one is starting, running,
+    or queued to start on the backend it was claimed for."""
+
+    return (
+        select(session_turns.c.id)
+        .where(session_turns.c.session_id == str(session_id))
+        .where(session_turns.c.state != "terminal")
+        .limit(1)
+    )
 
 
 def _backend_for_agent_name(conn: Connection, agent_name: str) -> str:
