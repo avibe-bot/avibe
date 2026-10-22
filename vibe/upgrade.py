@@ -54,8 +54,19 @@ UV_FALLBACK_BIN_DIRS = (".local/bin", ".cargo/bin")
 # names; it never scans the filesystem.
 INSTALLER_LAUNCHER_DIRS = ("~/.local/bin", "~/bin", "/usr/local/bin", "/opt/homebrew/bin")
 UPGRADE_INSTALL_TIMEOUT_SECONDS = 30 * 60
+# A slow interpreter download may finish; a hung one must not take the whole
+# install bound from the Avibe install that follows it.
+PYTHON_PATCH_UPGRADE_TIMEOUT_SECONDS = 10 * 60
 RESTART_PENDING_GRACE_SECONDS = 5 * 60
 DEFERRED_ACTIVATION_TIMEOUT_SECONDS = 5 * 60
+# The directory of a uv-managed CPython, named by its uv install key: a patch
+# such as ``cpython-3.12.12-macos-aarch64-none`` or uv's minor-version link
+# ``cpython-3.12-macos-aarch64-none``. Variant builds (freethreaded, debug)
+# carry a ``+`` and are deliberately not matched.
+_UV_MANAGED_CPYTHON_DIR_RE = re.compile(
+    r"cpython-(?P<minor>\d+\.\d+)(?:\.\d+(?:(?:a|b|rc)\d+)?)?"
+    r"-(?P<platform>[a-z0-9_]+-[a-z0-9_]+-[a-z0-9_]+)"
+)
 # A spec that names nothing but a package, so appending ``==<version>`` to it
 # yields a requirement rather than a broken string. PEP 508 names only:
 # anything with a path separator, a URL scheme, extras, a marker, or a version
@@ -117,6 +128,7 @@ class UpgradePlan:
     preflight_fallback_command: list[str] | None = None
     activation: "AtomicActivation | None" = None
     preflight_error: str | None = None
+    python_upgrade_command: list[str] | None = None
 
 
 def execute_upgrade_plan(
@@ -139,11 +151,48 @@ def execute_upgrade_plan(
         if preflight.returncode != 0:
             return preflight
 
+    if plan.python_upgrade_command is not None:
+        _upgrade_python_patch(plan.python_upgrade_command, env=plan.env, run=run, **run_kwargs)
+
     if plan.activation is not None:
         from vibe.install_generations import mark_install_generation
 
         mark_install_generation(plan.activation.candidate_launcher, os.getpid())
     return run(plan.command, env=plan.env, **run_kwargs)
+
+
+def _upgrade_python_patch(
+    command: list[str],
+    *,
+    env: dict[str, str] | None,
+    run: Callable[..., subprocess.CompletedProcess[str]],
+    **run_kwargs: object,
+) -> None:
+    """Move the interpreter's minor version to its newest patch, best effort.
+
+    uv never moves an installed Python to a newer patch by itself, so without
+    this a tool environment keeps the CPython and OpenSSL it was created with.
+    The staged install that follows selects the newest installed patch. An
+    older uv without ``python install --upgrade``, an offline machine, or a
+    failed download leaves the installed patch in use and the upgrade goes on.
+    """
+
+    try:
+        result = run(command, env=env, **{**run_kwargs, "timeout": PYTHON_PATCH_UPGRADE_TIMEOUT_SECONDS})
+    except (OSError, subprocess.SubprocessError) as exc:
+        logger.warning("Keeping the installed Python patch: %s failed: %s", shlex.join(command), exc)
+        return
+    output = "\n".join(part.strip() for part in (result.stdout, result.stderr) if part and part.strip())
+    if result.returncode != 0:
+        logger.warning(
+            "Keeping the installed Python patch (a newer one needs uv 0.9.10 or later and network access): "
+            "%s exited %s: %s",
+            shlex.join(command),
+            result.returncode,
+            output,
+        )
+        return
+    logger.info("Python patch check: %s", output or "done")
 
 
 def preflight_upgrade_plan(
@@ -1617,6 +1666,31 @@ def pinned_package_spec(version: str | None, *, package_name: str) -> str:
     return f"{package_name}=={version}"
 
 
+def _uv_managed_python_minor(python_executable: str) -> str | None:
+    """The uv request for the minor version of a uv-managed tool interpreter.
+
+    A tool environment records its base interpreter as ``home`` in
+    ``pyvenv.cfg``: the install directory on Windows, its ``bin`` on POSIX. Any
+    other interpreter, such as a system Python, is not uv's to upgrade.
+    """
+
+    try:
+        config = (Path(python_executable).parent.parent / "pyvenv.cfg").read_text(encoding="utf-8")
+    except (OSError, ValueError):
+        return None
+    for line in config.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator or key.strip() != "home":
+            continue
+        home = Path(value.strip())
+        for directory in (home, home.parent):
+            match = _UV_MANAGED_CPYTHON_DIR_RE.fullmatch(directory.name)
+            if match is not None:
+                return f"cpython-{match['minor']}-{match['platform']}"
+        return None
+    return None
+
+
 def build_upgrade_plan(
     *,
     python_executable: str | None = None,
@@ -1661,6 +1735,18 @@ def build_upgrade_plan(
             # The staged environment is new, so uv would pick a native arm64
             # interpreter again; keep the x64 one install.ps1 chose.
             command += ["--python", WINDOWS_ARM64_UV_PYTHON]
+            python_minor = WINDOWS_ARM64_UV_PYTHON
+        else:
+            # uv still chooses the staged interpreter: an explicit `--python`
+            # would stop it from leaving a minor version that a new release
+            # no longer supports. Upgrading the current minor first only gives
+            # that choice its newest patch.
+            python_minor = _uv_managed_python_minor(executable)
+        python_upgrade_command = (
+            [uv_binary, "python", "install", "--upgrade", "--no-bin", "--no-registry", python_minor]
+            if python_minor
+            else None
+        )
         if not version:
             command.append("--upgrade")
         if version or package_spec != PACKAGE_NAME or is_legacy_uv_tool_install(executable):
@@ -1673,6 +1759,7 @@ def build_upgrade_plan(
             preflight_command=preflight_command,
             activation=atomic,
             preflight_error=preflight_error,
+            python_upgrade_command=python_upgrade_command,
         )
 
     command = [executable, "-m", "pip", "install"]

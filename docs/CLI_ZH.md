@@ -506,6 +506,14 @@ vibe upgrade
 因此任何 `PATH` 查找都不会留在旧版本上。指向其他位置的启动器永远不会被修改。
 参见 [Upgrading](UPGRADING.md#stable-launchers)。
 
+当 Avibe 运行在 uv 管理的 CPython 上时，升级会先用
+`uv python install --upgrade --no-bin` 把这个 Python 小版本更新到最新补丁版本，
+让 CPython 和 OpenSSL 的安全修复随 Avibe 版本一起到达。它不会改变小版本，也不会在
+`PATH` 中添加 `python3.x` 命令。与 `uv python upgrade` 相同，其他跟随该小版本托管
+Python 的 uv 环境也会一起使用新补丁。uv 只知道在它自身版本发布之前的补丁；uv 低于
+0.9.10、离线或下载失败时，升级会继续使用已安装的补丁，并在日志中说明原因。运行
+`uv self update` 即可获得更新的补丁。
+
 ## 服务生命周期
 
 ### 理解「重启」与「停止」的区别
