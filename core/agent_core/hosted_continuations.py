@@ -11,8 +11,8 @@ from core.agent_core.messages import AssistantMessage, HostedToolBlock, Message,
 
 
 def pending_hosted(message: AssistantMessage) -> dict[str, HostedToolBlock]:
-    """Server searches deferred behind client calls, not unfinished calls from another protocol/stop."""
-    if message.origin.api != "anthropic" or message.stop_reason != "tool_use" or not message.tool_calls:
+    """Anthropic server searches deferred at a tool boundary, not cut-off searches."""
+    if message.origin.api != "anthropic" or message.stop_reason != "tool_use":
         return {}
     return {
         block.id: block for block in message.content
@@ -28,24 +28,6 @@ def result_fragment(block: HostedToolBlock) -> bool:
         block.tool == "web_search" and block.record.status != "pending" and len(block.native.payload) == 1
         and block.native.payload[0].get("type") == "web_search_tool_result"
         and block.native.payload[0].get("tool_use_id") == block.id
-    )
-
-
-def deferred_completion_matches(
-    previous: AssistantMessage,
-    current: AssistantMessage,
-    result: HostedToolBlock,
-) -> bool:
-    """Whether ``result`` is the adjacent continuation of ``previous``'s pending call."""
-    if previous.origin != current.origin or previous.source_identity != current.source_identity:
-        return False
-    call = pending_hosted(previous).get(result.id)
-    return (
-        call is not None
-        and result_fragment(result)
-        and call.native.source_id == result.native.source_id
-        and call.tool == result.tool
-        and call.action == result.action
     )
 
 

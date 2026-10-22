@@ -65,11 +65,7 @@ export const activityGroupsForForeground = (
   groups: ActivityGroup[],
   foreground: ActivityForeground,
 ): { settled: ActivityGroup[]; inflight: ActivityGroup | null } => {
-  if (foreground === 'idle') return {
-    settled: groups.map((group) => ({ ...group, rows: group.rows?.map((row) => row.hosted?.in_progress
-      ? { ...row, hosted: { ...row.hosted, in_progress: false } } : row) })),
-    inflight: null,
-  };
+  if (foreground === 'idle') return { settled: groups, inflight: null };
 
   let inflight: ActivityGroup | null = null;
   if (foreground === 'running') {
@@ -177,26 +173,6 @@ export const shouldShowRunningCard = (
   liveRowCount: number,
 ): boolean => enabled && working && liveRowCount > 0;
 
-// Native fragments share their durable Turn and originating response, never merely a provider id.
-const activityRowKey = (row: ActivityRow): string => row.hosted?.mode === 'native'
-  ? JSON.stringify([row.hosted.turn_id, row.hosted.origin_response_id ?? row.hosted.response_id, row.hosted.call_id]) : row.id;
-
-const mergeActivityRows = (rows: ActivityRow[]): ActivityRow[] => {
-  const merged = new Map<string, ActivityRow>();
-  for (const row of rows) {
-    const key = activityRowKey(row);
-    const previous = merged.get(key);
-    // A provisional envelope arriving after hydration cannot overwrite the finished card.
-    if (previous && !previous.hosted?.in_progress && row.hosted?.in_progress) continue;
-    if (previous && previous.id !== row.id) {
-      merged.set(key, { ...row, id: previous.id, created_at: previous.created_at, order_micros: previous.order_micros });
-    } else {
-      merged.set(key, row);
-    }
-  }
-  return [...merged.values()];
-};
-
 export const liveActivityReducer = (
   state: LiveActivityState,
   event: LiveActivityEvent,
@@ -219,7 +195,7 @@ export const liveActivityReducer = (
       }
       return {
         ...state,
-        rows: mergeActivityRows([...state.rows, event.row]),
+        rows: [...state.rows, event.row],
         startedAt: state.rows.length === 0 ? event.now : state.startedAt,
       };
     case 'settle':
@@ -236,7 +212,7 @@ export const liveActivityReducer = (
       // Durable rows win overlap so SSE cannot erase storage-only ordering keys.
       return {
         ...state,
-        rows: mergeActivityRows([...state.rows, ...event.rows])
+        rows: [...new Map([...state.rows, ...event.rows].map((row) => [row.id, row])).values()]
           .sort((a, b) => {
             const timeOrder = activityRowTimeMs(a) - activityRowTimeMs(b);
             return timeOrder || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);

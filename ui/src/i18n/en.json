@@ -5145,8 +5145,7 @@
         "status": {
           "failed": "Failed",
           "incomplete": "Incomplete",
-          "pending": "Cut off",
-          "searching": "Searching…"
+          "pending": "Cut off"
         },
         "cost": {
           "included": "Included in subscription",

@@ -454,7 +454,10 @@ scenarios:
       - tests/agent_core/ai/test_anthropic_deferred.py::test_deferred_completion_never_invents_a_charge_from_a_result_block
       - tests/agent_core/ai/test_anthropic_deferred.py::test_a_steer_waits_until_the_deferred_result_and_never_enters_the_tool_result_user_message
       - tests/agent_core/ai/test_anthropic_deferred.py::test_deferred_result_then_pause_turn_keeps_the_native_exchange_without_replay_evidence
-      - tests/test_vibey_agent.py::test_anthropic_deferred_search_is_one_live_and_reloaded_card_and_one_im_line
+      - tests/test_vibey_agent.py::test_anthropic_deferred_search_shows_only_its_completion_live_and_on_reload
+      - tests/test_vibey_agent.py::test_restart_defers_accepted_steer_until_native_search_continuation
+      - tests/test_hosted_activity.py::test_deferred_search_has_no_card_or_share_of_an_earlier_search_cost
+      - tests/test_agent_activity_service.py::test_reload_omits_only_old_deferred_search_cards
   - id: MH-HOSTED-VIBEY-007
     name: An image_generate call goes to the gateway's image endpoint with its arguments alone, after the turn's frozen models accept every argument and its reference images are read as read reads them; the images it returns are saved through the media sink and its record names those files; no base64 enters history, and a call that saved no file is a failed record with its code
     status: covered

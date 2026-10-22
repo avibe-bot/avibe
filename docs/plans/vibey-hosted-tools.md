@@ -470,7 +470,11 @@ C-5's commit boundary, so its completion is append-only:
   identity. A result from a re-resolved hop cannot complete an old Source's call.
 - Usage and hosted counters remain on the response reporting them, unchanged. Parsing a completion never adds a
   charge inferred from a block. A missing reported counter remains missing; it is not manufactured as zero or one.
-- The Web projects the two append-only activity fragments by durable Turn and call id: response 1 is pending while the Turn runs, and response 2's ordinary completion card supplies the committed result. Reload uses the same transcript/trace projection; a completion already committed in the model row is completed even if its trace emit was interrupted by restart. A pending call in a terminal Turn is interrupted. IM suppresses response 1's pending card and emits no card for an incomplete call; response 2 uses the existing ordinary hosted-card path, with the same commit-to-send behavior as every other card. No held-card map, settlement flush, restart restoration, audit receipt or special delivery guarantee exists.
+- Web and IM follow one rule: a deferred use produces no card; response 2's result fragment renders as an ordinary
+  hosted card at its own position, after the client-tool activity, live and on reload. A call that never completes
+  produces no card. Old pending trace cards of this exact deferred shape are also hidden at read time; other pending
+  calls (for example a stream cut with `stop_reason: error`) retain interrupted rendering. No cross-response card
+  merge, provisional state, held-card map, audit receipt or special delivery guarantee exists.
 
 Provider source, fetched **2026-10-22**: [Server tools — Mixing server tools and client tools in one turn](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools.md).
 
@@ -484,7 +488,10 @@ tool still declared natively on that hop (§3.5).
 For a mixed pending group (§4.3), the assistant content is sent in its original order, followed by **one user
 message containing only all client `tool_result` blocks**, with the same tool declarations. No user text follows
 those results: it would close the still-open server-tool turn and the provider rejects it. Queued steers therefore
-wait until the deferred result has arrived. A subsequent internal `pause_turn` preserves the entire linked exchange
+wait until the deferred result has arrived, including after a restart: T3 derives the open barrier from the
+persisted transcript and owning Turn, leaves accepted inputs unconsumed, and restores them to `Agent.resume`'s
+queue before it opens admission. A stopped/settled Turn has no continuation barrier and admits them normally.
+A subsequent internal `pause_turn` preserves the entire linked exchange
 natively without requiring historical replay evidence.
 
 **Fallback form.** It applies when the pinned Source refuses in-flight verbatim replay, when the fresh hop no
@@ -1019,10 +1026,15 @@ and no real credentials.
    response-wide facts (§4.2). The row is not rewritten, new writes stay strict, and known tools retain strict
    validation—including a result-only fragment for a known deferred completion; only an unrecognized tool name
    degrades portably. This is the intentional downgrade path before a new hosted tool ships.
-9. **A deferred call without a completion remains interrupted.** Stop, an error before its result, `pin_unavailable`,
-   or re-resolution to a different Source do not synthesize a success or retry the search elsewhere. The existing
-   §4.4 fallback remains unchanged. Already dropped result blocks in old transcripts cannot be recovered.
-10. **IM intentionally omits incomplete deferred calls.** Response 1's pending card is persisted for the Web projection but emits no IM line. Response 2's completion card uses the ordinary hosted-card emission path. Stop, an error before response 2, `pin_unavailable`, Source change and other non-completing paths produce no IM search line; Web renders the committed pending fragment as interrupted. There is no held-card state, restart flush, audit receipt or special delivery guarantee.
+9. **A deferred call without a completion stays unresolved in model history.** Stop, an error before its result,
+   `pin_unavailable`, or re-resolution to a different Source do not synthesize a success or retry the search elsewhere.
+   The existing §4.4 fallback remains unchanged. Already dropped result blocks in old transcripts cannot be recovered.
+10. **Deferred calls have no card on any surface.** Response 1's use-only pending block with `stop_reason: tool_use`
+    is a protocol fact, not a search that ran. Web and IM omit it, including the old interrupted cards emitted for this
+    exact shape by earlier builds. A later completion uses the ordinary hosted-card path at response 2's position;
+    a call that never completes has no card. Other pending blocks retain interrupted rendering. No Web merge,
+    provisional searching state, held-card state, restart flush, audit receipt or special delivery guarantee exists;
+    the ordinary commit-to-trace/send crash gap remains unchanged.
 11. **Unreported hosted usage is unknown.** Counters/cost are read from wire usage only, never inferred from the
     number of parsed calls or completion fragments. The 2026-10-22 live probe's installed parser dropped the result
     block and its hosted summary, so that transcript cannot establish which response reported the search counter.

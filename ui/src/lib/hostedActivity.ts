@@ -52,14 +52,6 @@ export type HostedActivity = {
   /** Natively in the model's response, by a search executor, or on an image endpoint directly. */
   mode: 'native' | 'proxy' | 'direct';
   status: 'completed' | 'failed' | 'incomplete' | 'pending';
-  /** Pending mixed-group call, still awaiting a result; cleared at Turn settlement. */
-  in_progress?: boolean;
-  /** Durable Avibe Turn owner used to merge append-only native fragments across response rows. */
-  turn_id?: string;
-  /** Response row that originated this call instance; deferred completions keep it for identity. */
-  origin_response_id?: string;
-  /** Original use's or completion response's committed row; retained for ordering/debugging. */
-  response_id?: string;
   /** Model-facing English, shown as is only for a provider's own reason. */
   error?: string;
   /** The stable code of a reason Avibe worded itself, shown in the reader's language. */

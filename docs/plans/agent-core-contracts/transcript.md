@@ -58,7 +58,7 @@ and usage) or
   the response's identity after restart. Legacy responses without it retain the input-order fallback.
 - A response row is inserted at `message_end` with both `content_json.model` and its commit-time display
   `content_text`.
-- A hosted continuation's two immutable fragments are projected as one Web card by owning durable Turn and call id. The first fragment is pending while the Turn runs; a committed completion is completed after reload even if no trace emit followed it; a pending fragment in a terminal Turn is interrupted. IM suppresses pending and incomplete deferred cards, while response 2 uses the ordinary hosted-card path.
+- A deferred hosted use produces no activity card on Web or IM. Its completion fragment uses the ordinary hosted-card path at the completion response's own position. A deferred use that never completes has no card; old trace cards for that exact shape are hidden at read time. Other pending blocks retain interrupted rendering. There is no cross-response Web merge or extra delivery guarantee.
 - An Anthropic server call deferred behind client tools finishes in a later response (C-1 `cross-provider.md`,
   2026-10-22). Both existing v1 hosted-block fragments are appended in the provider's real response order; neither
   response row changes. C-1 request conversion joins the logical call for portable replay, while display joins

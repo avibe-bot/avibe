@@ -246,6 +246,28 @@ def test_a_source_no_browser_should_open_is_named_but_not_linked():
     ]
 
 
+@pytest.mark.parametrize("stop_reason", ["tool_use", "error", "aborted"])
+async def test_deferred_search_has_no_card_or_share_of_an_earlier_search_cost(stop_reason):
+    """The producer omits only a deferred call; stream cuts keep interrupted cards.
+
+    A response can also contain a finished search. Its summary must stay on that
+    card, not disappear with the omitted use or be counted on a later completion.
+    """
+    from tests.agent_core.ai.test_anthropic_deferred import _paused
+
+    _, message = await _paused("FSC")
+    cost = HostedCost(basis="reported", usd=0.01)
+    message = replace(message, stop_reason=stop_reason, hosted_summary=HostedSummary(cost=cost))
+    activities = native_activities(message)
+    assert [activity.call_id for activity in activities] == (
+        ["srvtoolu_0"] if stop_reason == "tool_use" else ["srvtoolu_0", "srvtoolu_1"]
+    )
+    assert [activity.cost for activity in activities] == ([cost] if stop_reason == "tool_use" else [None, cost])
+    assert all(activity.cost_calls == len(activities) for activity in activities)
+    if stop_reason != "tool_use":
+        assert activities[-1].status == "pending" and not activities[-1].completed
+
+
 def test_a_response_scoped_summary_is_shown_once():
     """The response's cost covers all its calls, and xAI's cited posts belong to its X search."""
 

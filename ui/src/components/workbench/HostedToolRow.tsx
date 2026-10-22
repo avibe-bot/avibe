@@ -4,7 +4,7 @@
 // sources or image it produced. Every mode draws the same card from the same record.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { AtSign, Check, ChevronRight, CircleSlash, Download, FileImage, Globe, Image as ImageIcon, LoaderCircle, TriangleAlert, Type, Waypoints } from 'lucide-react';
+import { AtSign, Check, ChevronRight, CircleSlash, Download, FileImage, Globe, Image as ImageIcon, TriangleAlert, Type, Waypoints } from 'lucide-react';
 import clsx from 'clsx';
 
 import { ChatImage } from '../ui/chat-image';
@@ -95,8 +95,8 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
     // It did not finish, so it claims no way of having run: cut off with its turn, or failed.
     return card.status === 'pending' ? (
       <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-gold/40 bg-gold/10 px-2 py-px text-[11px] font-medium text-gold-ink">
-        {card.in_progress ? <LoaderCircle className="size-3 animate-spin" aria-hidden="true" /> : <CircleSlash className="size-3" aria-hidden="true" />}
-        {t(`chat.agentActivity.hosted.status.${card.in_progress ? 'searching' : 'pending'}`)}
+        <CircleSlash className="size-3" aria-hidden="true" />
+        {t('chat.agentActivity.hosted.status.pending')}
       </span>
     ) : (
       <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-px text-[11px] font-medium text-destructive-ink">

@@ -43,12 +43,11 @@ from typing import Any, Optional
 
 from sqlalchemy import select
 
-from core.agent_core.hosted_continuations import deferred_completion_matches, pending_hosted
-from core.agent_core.messages import AssistantMessage, HostedToolBlock, message_from_dict
+from core.agent_core.hosted_continuations import pending_hosted
+from core.agent_core.messages import AssistantMessage, message_from_dict
 from core.backend_failure import is_backend_failure_notification
-from core.hosted_activity import hosted_activity_key, native_activities
 from storage import agent_events_service, messages_service
-from storage.models import message_deliveries, messages as messages_table, session_turns
+from storage.models import message_deliveries, messages, session_turns
 from vibe.message_types import (
     PROMOTED_FROM_KEY,
     PROMOTED_FROM_TYPES,
@@ -251,111 +250,36 @@ def _event_emit_micros(event: dict[str, Any], ts: datetime) -> int:
     return anchor - 1 if isinstance(precedes, str) and precedes else anchor
 
 
-def _merge_hosted_card(current: dict[str, Any], incoming: dict[str, Any]) -> None:
-    """Merge one logical card without downgrading a terminal record to pending."""
-    if current.get("status") != "pending" and incoming.get("status") == "pending":
-        merged = {**incoming, **current}
-    else:
-        merged = {**current, **incoming}
-    if merged.get("status") != "pending":
-        merged.pop("in_progress", None)
-    current.clear()
-    current.update(merged)
+def _without_deferred_traces(conn, session_id: str, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Old releases emitted interrupted cards for calls Anthropic deferred, which never ran.
 
-
-def _model_hosted_cards(
-    conn,
-    messages: list[dict[str, Any]],
-    accepted_roles: dict[str, dict[str, Any]],
-) -> dict[tuple[str, ...], dict[str, Any]]:
-    """Project native hosted fragments from committed model rows.
-
-    Trace emission is deliberately after the model row commits.  A restart can therefore
-    leave a perfectly valid completion with no trace event; the activity read must still
-    show it.  The earliest fragment supplies the card's position, while a later result
-    fragment supplies its terminal record and keeps an originating-response identity so
-    reused provider ids remain separate.
+    Suppress only that exact shape, using each trace's own response. No fragment
+    merging or position changes; every other pending/terminal card stays as written.
     """
-    ids = tuple(str(message["id"]) for message in messages if message.get("id"))
-    if not ids:
-        return {}
-    raw = {
-        str(row["id"]): row["content_json"]
-        for row in conn.execute(
-            select(messages_table.c.id, messages_table.c.content_json).where(messages_table.c.id.in_(ids))
-        ).mappings()
-    }
-    decoded: list[tuple[str, dict[str, Any], AssistantMessage]] = []
-    for row in messages:
-        row_id = str(row.get("id") or "")
+    candidates = {}
+    for event in events:
+        card = (event.get("content") or {}).get("hosted")
+        if isinstance(card, dict) and card.get("mode") == "native" and card.get("status") == "pending":
+            response_id = card.get("response_id") or (event.get("metadata") or {}).get("precedes_message_id")
+            if isinstance(response_id, str) and response_id:
+                candidates[event["id"]] = (response_id, card.get("call_id"))
+    if not candidates:
+        return events
+    deferred = set()
+    for row_id, owner_session, raw in conn.execute(select(messages.c.id, messages.c.session_id, messages.c.content_json).where(
+        messages.c.id.in_({owner for owner, _ in candidates.values()})
+    )):
+        if owner_session != session_id:
+            continue
         try:
-            content = json.loads(raw.get(row_id) or "{}")
-            model = content.get("model", {}).get("message")
-            message = message_from_dict(model)
-        except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+            message = message_from_dict(json.loads(raw or "{}")["model"]["message"])
+        except (KeyError, TypeError, ValueError):
             continue
         if isinstance(message, AssistantMessage):
-            decoded.append((row_id, row, message))
-
-    owners: dict[tuple[str, str], str] = {}
-    for (previous_id, previous_row, previous), (current_id, current_row, current) in zip(decoded, decoded[1:]):
-        previous_turn = str((previous_row.get("metadata") or {}).get("turn_id") or "").strip()
-        current_turn = str((current_row.get("metadata") or {}).get("turn_id") or "").strip()
-        if not previous_turn or previous_turn != current_turn:
-            continue
-        for block in current.content:
-            if isinstance(block, HostedToolBlock) and deferred_completion_matches(previous, current, block):
-                owners[(current_id, block.id)] = previous_id
-
-    projected: dict[tuple[str, ...], dict[str, Any]] = {}
-    for row_id, row, message in decoded:
-        metadata = row.get("metadata") or {}
-        accepted = accepted_roles.get(row_id)
-        turn_id = str(metadata.get("turn_id") or (accepted or {}).get("turn_id") or "").strip() or None
-        created_at = row.get("created_at")
-        timestamp = _parse_ts(created_at)
-        deferred = pending_hosted(message)
-        for activity in native_activities(message, response_id=row_id, turn_id=turn_id):
-            # The owner lookup is applied after construction because each response may
-            # contain both a new call and a result fragment from its predecessor.
-            origin_response_id = owners.get((row_id, activity.call_id), row_id)
-            card = activity.to_payload()
-            if activity.call_id in deferred:
-                card["in_progress"] = True
-            card["origin_response_id"] = origin_response_id
-            key = hosted_activity_key(card)
-            if key is None:
-                continue
-            item = {
-                "ts": timestamp,
-                "sort": _emit_micros(row_id, timestamp) - 1,
-                "rank": _PHASE_RANK["activity"],
-                "created_at": created_at,
-                "kind": "activity",
-                "id": f"model-hosted:{row_id}:{activity.call_id}",
-                "mtype": "model_hosted",
-                "turn_id": turn_id,
-                "row_kind": "tool_call",
-                "text": "",
-                "hosted": card,
-            }
-            previous = projected.get(key)
-            if previous is None:
-                projected[key] = item
-                continue
-            _merge_hosted_card(previous["hosted"], card)
-    return projected
+            deferred.update((row_id, call_id) for call_id in pending_hosted(message))
+    return [event for event in events if candidates.get(event["id"]) not in deferred]
 
 
-def _merge_projected_hosted(existing: dict[str, Any], projected: dict[str, Any]) -> None:
-    """Apply a model-row projection without reviving a terminal trace card."""
-    current = existing.get("hosted")
-    incoming = projected.get("hosted")
-    if not isinstance(current, dict) or not isinstance(incoming, dict):
-        return
-    _merge_hosted_card(current, incoming)
-    if not existing.get("text"):
-        existing["text"] = projected.get("text") or ""
 def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, Any]]:
     """Merge the recent tail of relevant messages + tool-call events into one
     chronologically-ordered list of classified items."""
@@ -373,6 +297,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         limit=EVENT_SCAN_LIMIT,
         newest_first=True,
     )
+    events = _without_deferred_traces(conn, session_id, events)
     message_ids = tuple(
         str(message["id"])
         for message in msgs
@@ -408,7 +333,6 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
             if current is None or candidate["delivery_id"] == candidate["initial_delivery_id"]:
                 accepted_roles[key] = candidate
 
-    model_hosted = _model_hosted_cards(conn, msgs, accepted_roles)
     items: list[dict[str, Any]] = []
     for msg in msgs:
         mtype = msg.get("type")
@@ -501,33 +425,9 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
     # second), so a same-second event emitted BEFORE the oldest scanned message is
     # dropped too.
     oldest_msg_sort = min((item["sort"] for item in items), default=None)
-    hosted_cards: dict[tuple[str, ...], dict[str, Any]] = {}
     for event in events:
         event_ts = _parse_ts(event.get("created_at"))
         event_sort = _event_emit_micros(event, event_ts)
-        card = (event.get("content") or {}).get("hosted")
-        if isinstance(card, dict) and event.get("turn_id") and not card.get("turn_id"):
-            card = {**card, "turn_id": str(event["turn_id"])}
-        card_key = hosted_activity_key(card)
-        if card_key is not None and card_key in hosted_cards:
-            # Trace rows remain append-only. Keep the earliest fragment's position while
-            # the terminal payload wins over a later/earlier pending duplicate.
-            existing = hosted_cards[card_key]
-            if event_sort < existing["sort"]:
-                existing.update(
-                    ts=event_ts,
-                    sort=event_sort,
-                    rank=_PHASE_RANK["activity"],
-                    created_at=event.get("created_at"),
-                    id=event.get("id"),
-                )
-            if include_text:
-                if isinstance(existing.get("hosted"), dict):
-                    _merge_hosted_card(existing["hosted"], card)
-                else:
-                    existing["hosted"] = card
-                existing["text"] = event.get("text") or existing.get("text") or ""
-            continue
         # Window membership by the row the event belongs to, never by its sort key:
         # a card sorted just ahead of the oldest retained response is still its card.
         if oldest_msg_sort is not None and _event_anchor_micros(event, event_ts) < oldest_msg_sort:
@@ -571,18 +471,9 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
                 "text": event.get("text") if include_text else None,
                 # A hosted-tool call carries its card (``core.hosted_activity``); every
                 # other tool call is its text alone.
-                "hosted": (card if include_text else None),
+                "hosted": ((event.get("content") or {}).get("hosted") if include_text else None),
             }
         )
-        if card_key is not None:
-            hosted_cards[card_key] = items[-1]
-    for card_key, projected in model_hosted.items():
-        existing = hosted_cards.get(card_key)
-        if existing is not None:
-            _merge_projected_hosted(existing, projected)
-        else:
-            items.append(projected)
-            hosted_cards[card_key] = projected
     for turn in conn.execute(
         select(
             session_turns.c.id,
@@ -658,36 +549,25 @@ def _make_group(
         "_turn_id": turn_id,
     }
     if include_rows:
-        rows = []
-        for item in pending:
-            hosted = item.get("hosted")
-            if isinstance(hosted, dict):
-                hosted = dict(hosted)
-                if not open_turn:
-                    hosted.pop("in_progress", None)
-                    if hosted.get("status") == "pending":
-                        # A terminal Turn never ran this deferred call.  Keep the
-                        # card visible, but render it as interrupted rather than live.
-                        hosted["status"] = "incomplete"
-            rows.append(
-                {
-                    "id": item["id"],
-                    "kind": item["row_kind"],
-                    "text": item.get("text") or "",
-                    "created_at": item["created_at"],
-                    # Migrated event ids are hashes; only storage has the original clock.
-                    "order_micros": item["sort"],
-                    # Omitted entirely when there is nothing to carry, so an ordinary
-                    # row keeps the wire shape it always had.
-                    **(
-                        {"citations": item["citations"]}
-                        if isinstance(item.get("citations"), list) and item["citations"]
-                        else {}
-                    ),
-                    **({"hosted": hosted} if hosted is not None else {}),
-                }
-            )
-        group["rows"] = rows
+        group["rows"] = [
+            {
+                "id": item["id"],
+                "kind": item["row_kind"],
+                "text": item.get("text") or "",
+                "created_at": item["created_at"],
+                # Migrated event ids are hashes; only storage has the original clock.
+                "order_micros": item["sort"],
+                # Omitted entirely when there is nothing to carry, so an ordinary
+                # row keeps the wire shape it always had.
+                **(
+                    {"citations": item["citations"]}
+                    if isinstance(item.get("citations"), list) and item["citations"]
+                    else {}
+                ),
+                **({"hosted": item["hosted"]} if isinstance(item.get("hosted"), dict) else {}),
+            }
+            for item in pending
+        ]
     return group
 
 

@@ -27,25 +27,6 @@ const BASH = '🔧 `Bash` `{"command":"pdftotext report.pdf"}`';
 const READ = '🔧 `Read` `{"path":"notes.md"}`';
 const NO_PARAMS = '🔧 `TodoWrite`';
 
-describe('deferred hosted cards', () => {
-  it('joins live completion and hydration without duplicating or reviving the pending card', () => {
-    const pending: ActivityRow = { id: 'pending', kind: 'tool_call', text: 'searching', created_at: '2026-10-22T00:00:00Z',
-      hosted: { version: 1, call_id: 'srvtoolu_1', response_id: 'response1', mode: 'native', tool: 'web_search',
-        status: 'pending', in_progress: true, sources: [], images: [] } };
-    const completed: ActivityRow = { ...pending, id: 'completion', text: 'found', created_at: '2026-10-22T00:00:01Z',
-      hosted: { ...pending.hosted!, status: 'completed', in_progress: undefined, sources: [{ url: 'https://example.com' }] } };
-    let state = liveActivityReducer(initialLiveActivity(), { type: 'row', row: pending, now: 1 });
-    state = liveActivityReducer(state, { type: 'row', row: completed, now: 2 });
-    expect(state.rows).toHaveLength(1);
-    expect(state.rows[0]).toEqual({ ...completed, id: pending.id, created_at: pending.created_at });
-    state = liveActivityReducer(state, { type: 'rehydrate_for_gen', gen: state.gen, rows: [pending], startedAt: 1 });
-    expect(state.rows[0].hosted?.status).toBe('completed');
-    const otherTurn = { ...completed, id: 'other', hosted: { ...completed.hosted!, response_id: 'response2' } };
-    state = liveActivityReducer(state, { type: 'row', row: otherTurn, now: 3 });
-    expect(state.rows).toHaveLength(2);
-  });
-});
-
 describe('parseToolName', () => {
   it('extracts the backtick-wrapped tool name after the wrench', () => {
     expect(parseToolName(BASH)).toBe('Bash');

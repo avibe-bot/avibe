@@ -4151,11 +4151,6 @@ class ConsolidatedMessageDispatcher:
             presentation=decision,
         )
 
-        if hosted and hosted.get("in_progress") is True:
-            # Deferred native searches are provisional Web cards. IM emits neither the pending
-            # fragment nor an incomplete deferred call; a later completion uses the ordinary path.
-            return None
-
         # The row above is the only copy of an intermediate message that carries a
         # sidecar. Everything left below is what the channel is shown - the concise
         # status line, the consolidated log, the hidden-type log preview - so write

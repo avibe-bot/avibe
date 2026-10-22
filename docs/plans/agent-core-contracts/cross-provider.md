@@ -75,7 +75,9 @@ Invariants:
   client results and server result in their original response boundaries; portable replay emits one synthetic
   call in the first response's parallel group, with its result among that group's client results, and removes the
   completion fragment from response 2. Usage and cost remain on the reporting response and are never inferred
-  again from the completion. An unmatched pending use keeps the interrupted rule. Web projects the fragments by owning durable Turn and call id: a committed completion is completed after reload even if its trace emit was interrupted by restart, while a pending call in a terminal Turn is interrupted. IM suppresses the pending fragment and emits no line for an incomplete call; response 2 uses the ordinary hosted-card path with no held-card state or special delivery guarantee. This is a C-1 interpretation of
+  again from the completion. An unmatched pending use keeps the interrupted rule for model replay. On Web and IM,
+  deferred use-only calls produce no card; response 2's result fragment uses the ordinary hosted-card path at its own
+  position. There is no cross-response card merge, held-card state or special delivery guarantee. This is a C-1 interpretation of
   existing v1 fields, verified by round-tripping both fragments through the v3.2.2 and gh-v3.2.3rc2 readers; no new
   message discriminator or reader-breaking field is introduced. Provider contract, fetched **2026-10-22**:
   [Server tools, mixed client/server groups](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools.md).

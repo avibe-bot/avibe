@@ -157,17 +157,9 @@ class HostedActivity:
     # The stable code of a reason Avibe worded itself (``HOSTED_ERROR_CODES``), by
     # which each surface says it in its reader's language; None for a provider's own.
     error_code: Optional[str] = None
-    # The durable Avibe Turn owning this native call.  It lets Web merge the two
-    # append-only fragments without joining same provider ids across Turns.
-    turn_id: Optional[str] = None
     # The committed response row a native call came in. Its card is ordered just
     # before that row, as the call happened before the text that reads its result.
     response_id: Optional[str] = None
-    # The response row that originated this call instance. A deferred completion carries
-    # its own response_id but keeps this owner so same-turn provider-id reuse cannot merge.
-    origin_response_id: Optional[str] = None
-    # A mixed Anthropic group is still awaiting its deferred result; this is a provisional Web row and is suppressed on IM.
-    in_progress: bool = False
     # The Source that refused to run this search natively, so it ran by proxy instead (``hosted.fallback_from``),
     # with its current name.
     fallback_source_id: Optional[str] = None
@@ -214,14 +206,10 @@ class HostedActivity:
             "quality": self.quality,
             "revised_prompt": self.revised_prompt,
             "duration_ms": self.duration_ms,
-            "turn_id": self.turn_id,
             "response_id": self.response_id,
-            "origin_response_id": self.origin_response_id,
             "executor_kind": self.executor_kind,
         }
         payload.update({key: value for key, value in optional.items() if value is not None})
-        if self.in_progress:
-            payload["in_progress"] = True
         if self.extra_queries:
             payload["extra_queries"] = list(self.extra_queries)
         if self.attempts is not None:
@@ -304,37 +292,23 @@ def _subject(action: HostedAction) -> tuple[Optional[str], tuple[str, ...]]:
     return None, ()
 
 
-def hosted_activity_key(payload: Any) -> Optional[tuple[str, ...]]:
-    """A native card's immutable call instance: Turn + originating response + call id.
-
-    Released payloads have no ``origin_response_id`` and fall back to their response id;
-    this keeps old rows readable without merging reused provider ids across responses.
-    """
-    if isinstance(payload, dict) and payload.get("mode") == "native":
-        owner = payload.get("origin_response_id") or payload.get("response_id")
-        call = payload.get("call_id")
-        turn = payload.get("turn_id")
-        if isinstance(owner, str) and owner and isinstance(call, str) and call:
-            return ((turn, owner, call) if isinstance(turn, str) and turn else (owner, call))
-    return None
-
-
 def native_activities(
     message: AssistantMessage,
     *,
     source_names: SourceNames = _no_names,
     response_id: Optional[str] = None,
-    origin_response_id: Optional[str] = None,
-    turn_id: Optional[str] = None,
 ) -> list[HostedActivity]:
     """Every native hosted call in a response, in content order.
 
-    The response's summary is shown once: its cost on the last hosted call that ran (not one deferred), and
+    The response's summary is shown once: its cost on the last hosted call, and
     its cited posts on the last X search that has no sources of its own (xAI
     reports X-search results only as citations on the answer).
     """
 
-    blocks = [block for block in message.content if isinstance(block, HostedToolBlock)]
+    # A deferred call has not run. It produces no card on either surface; its later
+    # result fragment is an ordinary hosted block at that response's own position.
+    deferred = pending_hosted(message)
+    blocks = [block for block in message.content if isinstance(block, HostedToolBlock) and block.id not in deferred]
     if not blocks:
         return []
     summary = message.hosted_summary
@@ -347,17 +321,12 @@ def native_activities(
         None,
     )
     activities = []
-    # Deferred calls have not run: if this response also finished searches, its cost belongs on the last of those,
-    # not a provisional card that will later carry a different response's cost.
-    deferred = pending_hosted(message)
-    billed_blocks = [index for index, block in enumerate(blocks) if block.id not in deferred]
-    cost_owner = billed_blocks[-1] if billed_blocks else len(blocks) - 1
     for index, block in enumerate(blocks):
         subject, extra = _subject(block.action)
         sources = block.record.sources
         if index == cited_owner and summary is not None:
             sources = summary.cited_sources
-        last = index == cost_owner
+        last = index == len(blocks) - 1
         activities.append(
             HostedActivity(
                 call_id=block.id,
@@ -380,10 +349,8 @@ def native_activities(
                 # A native generate action's prompt is the provider's revised prompt.
                 revised_prompt=block.action.prompt if block.action.type == "generate" else None,
                 cost=summary.cost if last and summary is not None else None,
-                cost_calls=len(billed_blocks) or len(blocks),
+                cost_calls=len(blocks),
                 response_id=response_id,
-                origin_response_id=origin_response_id or response_id,
-                turn_id=turn_id,
             )
         )
     return activities

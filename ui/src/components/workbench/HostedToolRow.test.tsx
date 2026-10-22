@@ -90,13 +90,6 @@ describe('hosted tool cards', () => {
     expect(within(native).queryAllByRole('link')).toEqual([]);
   });
 
-  it.each(['en', 'zh'] as const)('shows deferred searches as in progress until settlement (%s)', (lng) => {
-    renderGroup([{ ...fixture.native_web_search, status: 'pending', in_progress: true, sources: [] }], lng);
-    const card = row('srvtoolu_01');
-    within(card).getByText(lng === 'zh' ? '搜索中…' : 'Searching…');
-    expect(card.textContent).not.toContain(lng === 'zh' ? '已中断' : 'Cut off');
-  });
-
   it('says why a call failed instead of counting results it never had', () => {
     renderGroup(['proxy_failed']);
     const failed = row('call_x2');

@@ -3361,7 +3361,7 @@ async def test_a_native_search_is_kept_as_one_hosted_call_and_replayed_next_turn
 
 @pytest.mark.parametrize("platform", ["avibe", "telegram"])
 @pytest.mark.parametrize("outcome", ["completed", "error", "stop"])
-async def test_anthropic_deferred_search_is_one_live_and_reloaded_card_and_one_im_line(
+async def test_anthropic_deferred_search_shows_only_its_completion_live_and_on_reload(
     engine, session, tmp_path, published, outcome, platform, monkeypatch
 ):
     """The real parser, loop, immutable store, dispatcher and activity projection agree at every boundary."""
@@ -3371,7 +3371,7 @@ async def test_anthropic_deferred_search_is_one_live_and_reloaded_card_and_one_i
     from tests.agent_core.ai.test_anthropic_deferred import USE, RESULT, _sse
     monkeypatch.setattr("core.message_mirror._activity_streaming_enabled", lambda: True)
 
-    started, release, card_ready = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    started, release, client_shown = asyncio.Event(), asyncio.Event(), asyncio.Event()
     async def client_tool(arguments, ctx):
         started.set()
         if outcome == "stop":
@@ -3395,13 +3395,12 @@ async def test_anthropic_deferred_search_is_one_live_and_reloaded_card_and_one_i
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
         harness = _Harness(engine, tmp_path, platform, [], tools=[FakeTool("echo", execute=client_tool)],
                            providers=registry_providers(media_loader=None, client=client))
-        real_emit = harness.agent._emit_hosted
+        real_emit = harness.agent._emit_tool_line
+        async def emit_client(*args, **kwargs):
+            await real_emit(*args, **kwargs)
+            client_shown.set()
+        harness.agent._emit_tool_line = emit_client
         harness.controller.hub_source_id = "src_served00001"
-        async def emit_card(run, activity):
-            await real_emit(run, activity)
-            if activity.status == "pending":
-                card_ready.set()
-        harness.agent._emit_hosted = emit_card
         harness.controller.im_client.supports_message_editing = lambda context=None: False
         harness.controller.hub_hosted_tools = {"web_search": {
             "native": "assumed", "declaration": {"type": "web_search_20250305", "name": "web_search"},
@@ -3410,14 +3409,13 @@ async def test_anthropic_deferred_search_is_one_live_and_reloaded_card_and_one_i
         request = harness.request("search")
         running = asyncio.create_task(harness.agent.handle_message(request))
         await asyncio.wait_for(started.wait(), timeout=5)
-        await asyncio.wait_for(card_ready.wait(), timeout=5)
+        await asyncio.wait_for(client_shown.wait(), timeout=5)
         before = await harness.context_rows()
         original = next(row for row in before if row.kind == "response")
         with engine.connect() as conn:
             groups = agent_activity_service.list_turn_groups(conn, session_id=SESSION)["groups"]
             detail = agent_activity_service.get_turn_group(conn, session_id=SESSION, group_id=groups[-1]["id"])
-        [pending] = [row["hosted"] for row in detail["rows"] if row.get("hosted")]
-        assert pending["status"] == "pending" and pending["in_progress"] is True
+        assert not any(row.get("hosted") for row in detail["rows"])
         assert not any("avibe release" in line for line in harness.controller.im_client.sent)
         if outcome == "stop":
             assert await harness.agent.handle_stop(AgentRequest(**{**request.__dict__, "message": "stop"}))
@@ -3436,25 +3434,19 @@ async def test_anthropic_deferred_search_is_one_live_and_reloaded_card_and_one_i
         groups = agent_activity_service.list_turn_groups(conn, session_id=SESSION)["groups"]
         details = [agent_activity_service.get_turn_group(conn, session_id=SESSION, group_id=group["id"]) for group in groups]
     cards = [row["hosted"] for detail in details for row in detail["rows"] if row.get("hosted")]
-    assert len(cards) == 1
-    card = cards[0]
+    assert len(cards) == (1 if outcome == "completed" else 0)
     if outcome == "completed":
-        assert card["response_id"] != original.row_id
-    else:
-        assert card["response_id"] == original.row_id
-    assert not card.get("in_progress")
-    assert card["status"] == ("completed" if outcome == "completed" else "incomplete")
+        [card] = cards
+        assert card["response_id"] != original.row_id and card["status"] == "completed"
+        # The client-tool activity comes first; the completed search stays at response 2.
+        activity_rows = [row for detail in details for row in detail["rows"]]
+        assert next(index for index, row in enumerate(activity_rows) if row.get("hosted")) > 0
     lines = [line for line in harness.controller.im_client.sent if "avibe release" in line]
     assert len(lines) == (1 if outcome == "completed" else 0)
     if platform == "avibe":
         live = [payload["content"]["hosted"] for name, payload in published
                 if name == "message.new" and (payload.get("content") or {}).get("hosted")]
-        assert len(live) == (2 if outcome == "completed" else 1)
-        assert live[0]["in_progress"]
-        if outcome == "completed":
-            assert not live[1].get("in_progress")
-            assert live[-1] == card
-        assert {item["turn_id"] for item in live} == {card["turn_id"]}
+        assert live == cards
     if outcome == "completed":
         assert all("Cut off" not in line for line in lines) and len(card["sources"]) == 1
         assert sent[1]["tools"] == sent[0]["tools"]
@@ -3466,6 +3458,107 @@ async def test_anthropic_deferred_search_is_one_live_and_reloaded_card_and_one_i
     else:
         assert not lines
 
+
+
+@pytest.mark.parametrize("client_finished", [False, True])
+@pytest.mark.parametrize("case", ["continue", "stopped", "preflight_failed"])
+async def test_restart_defers_accepted_steer_until_native_search_continuation(
+    engine, session, tmp_path, published, client_finished, case
+):
+    """T3 must not insert a recovered steer into the tool-result-only continuation.
+
+    The old path consumes it before Agent.resume; an in-process steer test cannot
+    see this. Seed the real parser's committed cut, discard the adapter, then run
+    startup recovery twice and the durable Turn's actual transcript resume.
+    """
+    import httpx
+    from dataclasses import replace
+    from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER
+    from modules.agents.vibey.models import registry_providers
+    from tests.agent_core.ai.test_anthropic_deferred import _paused, _sse, RESULT
+    from tests.agent_core.fakes import ORIGIN
+
+    sent = []
+    def gateway(wire):
+        sent.append(wire)
+        blocks = [{**RESULT, "tool_use_id": "srvtoolu_0"}, {"type": "text", "text": "found"}] if len(sent) == 1 else [
+            {"type": "text", "text": "steer answered"}
+        ]
+        served = {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": "src_served00001"}
+        return httpx.Response(200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": json.dumps(served)},
+                              text=_sse(blocks, stop="end_turn"))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(engine, tmp_path, "avibe", [], providers=registry_providers(media_loader=None, client=client))
+        harness.controller.hub_source_id = "src_served00001"
+        harness.controller.hub_hosted_tools = {"web_search": {
+            "native": "assumed", "declaration": {"type": "web_search_20250305", "name": "web_search"},
+            "include": [], "replay": "unsupported",
+        }}
+        request = harness.request("search")
+        turn_id = _turn(request.context)
+        harness.controller._native_start(request.context)
+        harness.agent.store.bind_agent(SESSION, None, turn_id=turn_id)
+        await harness.agent.store.consume_input(
+            SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("search"),))
+        )
+        paused_request, paused = await _paused()
+        paused = replace(paused, origin=ORIGIN, source_identity="sha256:test-source-identity")
+        original = await harness.agent.store.append_response(SESSION, paused, final=False)
+        steer_id, attempt = harness.open_steer("and the docs", turn_id, harness.controller.started[-1])
+        harness.accept_steer(steer_id, attempt, turn_id)
+        if client_finished:
+            await harness.agent.store.append_tool_result(SESSION, paused_request.messages[-1], details={})
+        if case == "stopped":
+            with engine.begin() as conn:
+                message_deliveries.terminalize_turn(
+                    conn, turn_id, outcome="canceled", settled_by="test_stop", evidence_kind="test"
+                )
+        else:
+            with engine.begin() as conn:
+                turn = message_deliveries.get_turn(conn, turn_id)
+                assert message_deliveries.rotate_restart_generation(
+                    conn, turn_id, expected_version=int(turn["version"]), streak=1, response_seq=original.context_seq
+                )
+        harness.new_agent()
+        await harness.agent.recover_runtime_state()
+        await harness.agent.recover_runtime_state()
+        rows = await harness.context_rows()
+        if case == "stopped":
+            assert rows[-1].row_id == steer_id and not sent
+            return
+        assert all(row.row_id != steer_id for row in rows)
+        context = _context("avibe", SESSION, turn_id=turn_id, delivery_id=request.context.platform_specific["delivery_id"])
+        context.platform_specific.update({"vibey_resume": True, "vibey_source_turn_id": turn_id})
+        scheduled = []
+        if case == "preflight_failed":
+            async def unavailable(*_args):
+                raise RuntimeError("Source unavailable")
+            harness.agent._preflight = unavailable
+            harness.controller.vibey_recovery = SimpleNamespace(ensure=lambda: scheduled.append(True))
+        await harness.agent.handle_message(AgentRequest(**{**request.__dict__, "context": context, "message": "", "user_message": ""}))
+        if case == "preflight_failed":
+            assert scheduled
+            _owner_settled(engine, request)
+            await harness.agent.recover_runtime_state()
+            assert (await harness.context_rows())[-1].row_id == steer_id and not sent
+            return
+
+    assert len(sent) == 2
+    continuation, answered = [json.loads(wire.content) for wire in sent]
+    assert sent[0].headers[PIN_SOURCE_HEADER] == "src_served00001"
+    assert sent[0].headers[PIN_MODEL_HEADER] == "test-model"
+    assert continuation["messages"][-1]["role"] == "user"
+    assert {block["type"] for block in continuation["messages"][-1]["content"]} == {"tool_result"}
+    assert "and the docs" not in json.dumps(continuation)
+    assert "and the docs" in json.dumps(answered)
+    rows = await harness.context_rows()
+    completion = next(row for row in rows if row.kind == "response" and row.row_id != original.row_id)
+    [hosted] = [block for block in completion.message.content if isinstance(block, HostedToolBlock)]
+    assert hosted.record.status == "completed"
+    [steer] = [row for row in rows if row.row_id == steer_id]
+    assert completion.context_seq < steer.context_seq
+    assert next(row for row in rows if row.row_id == original.row_id) == original
 
 
 def _anthropic_reply(*blocks: str, stop_reason: str) -> str:

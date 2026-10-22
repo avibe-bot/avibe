@@ -61,12 +61,13 @@ from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.harness.context import ContextConfig
 from core.agent_core.harness.projection import open_tool_calls
+from core.agent_core.hosted_continuations import pending_hosted
+from core.agent_core.ai.transform import in_flight_position
 from core.agent_core.tools.base import CallInstance
 from core.agent_core.tools.jobs import call_instance
 from core.agent_core.messages import (
     HOSTED_RESULT_TOOLS,
     HostedImage,
-    HostedToolBlock,
     IMAGE_MIME_TYPES,
     AssistantMessage,
     TextBlock,
@@ -91,7 +92,6 @@ from core.backend_failure import emit_backend_failure
 from core.agent_output import Narration, Reply, ToolActivity, TurnEnd, TurnOutcome, emit_output
 from core.citations import CitationBundle, register_text_citations
 from core.hosted_activity import HostedActivity, hosted_line, native_activities, proxy_activity
-from core.agent_core.hosted_continuations import deferred_completion_matches, pending_hosted, result_fragment
 from core.message_output import MessageOutput, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
@@ -224,8 +224,6 @@ class _Run:
     tool_started: dict[str, float] = field(default_factory=dict)
     # Images the run's hosted calls generated, as (path, label), attached to its final reply.
     hosted_images: list[tuple[str, str]] = field(default_factory=list)
-    # Deferred searches are provisional Web activity rows only.  The completion response emits
-    # its own ordinary card; no in-memory delivery state survives the Turn.
 
     @property
     def native_turn_id(self) -> str:
@@ -315,8 +313,6 @@ class VibeyAgent(BaseAgent):
         async with self._held(session_id, run=turn) as runtime:
             try:
                 await self._run_turn(runtime, turn, input_id)
-            except asyncio.CancelledError:
-                raise
             except Exception as error:
                 if turn.settled:
                     # Raised during or after settlement (its emits, or a failure notice): the
@@ -330,7 +326,14 @@ class VibeyAgent(BaseAgent):
                 )
                 await self._fail(request, type(error).__name__, f"turn failed: {error}", cause=error)
             finally:
-                await self._admit_returned_inputs(turn)
+                await self._admit_returned_inputs(turn, defer_continuation=self._service_stopping(turn))
+                if (
+                    (context.platform_specific or {}).get("vibey_resume")
+                    and turn.reason not in _COMPLETED
+                    and not self._service_stopping(turn)
+                ):
+                    # Preflight/Stop can end a rerun before its Agent took the durable inputs.
+                    self._schedule_recovery()
                 self.store.bind_agent(session_id, None)
                 if turn.router is not None:
                     await turn.router.aclose()
@@ -420,6 +423,7 @@ class VibeyAgent(BaseAgent):
                     agent_input,
                     turn_id=turn.turn_id,
                     turn_inputs=resume_turn_inputs,
+                    pending_inputs=await self._recovered_inputs(session_id),
                 )
                 if transcript_resume
                 else turn.agent.run(agent_input, turn_id=turn.turn_id)
@@ -432,10 +436,10 @@ class VibeyAgent(BaseAgent):
                 if turn.continuation_started_at is None:
                     turn.continuation_started_at = time.monotonic()
                 # Finish T2 before asking the same Agent to build its next request.
-                # Accepted P1 inputs are admitted into the transcript, but never
-                # become an implicit user-visible continuation message.
+                # Accepted P1 inputs enter context unless the native continuation still
+                # requires a tool-result-only user message; those restore to its queue.
                 await self._settle_left_open(runtime)
-                resume_turn_inputs = await self._admit_returned_inputs(turn)
+                resume_turn_inputs = await self._admit_returned_inputs(turn, defer_continuation=True)
                 if await self._wait_auto_continue(turn):
                     turn.continuations += 1
                     turn.reason = None
@@ -443,6 +447,8 @@ class VibeyAgent(BaseAgent):
                     turn.final_row = None
                     transcript_resume = True
                     continue
+                # Stop/backoff exhaustion ended the continuation we deferred T3 for.
+                await self._resume(runtime)
             agent_input = await self._continuing_input(turn)
         if self._cut_by_service_stop(turn):
             # Stopping the service (its Model Hub gateway first) ended this run, not
@@ -1034,7 +1040,7 @@ class VibeyAgent(BaseAgent):
         run.reason = None
         return pending[-1]
 
-    async def _admit_returned_inputs(self, run: _Run) -> tuple[int, ...]:
+    async def _admit_returned_inputs(self, run: _Run, *, defer_continuation: bool = False) -> tuple[int, ...]:
         """Inputs a stopped or failed run accepted but did not consume enter the context (T3).
 
         They belong to the Turn that accepted them and share its outcome, as a message
@@ -1045,7 +1051,11 @@ class VibeyAgent(BaseAgent):
         if run.agent is None:
             return ()
         try:
-            for item in await run.agent.take_pending_inputs():
+            pending = await run.agent.take_pending_inputs()
+            if pending and defer_continuation and await self._deferred_continuation_open(run.session_id):
+                # Durable accepted rows restore the queue at resume, including after shutdown.
+                return ()
+            for item in pending:
                 entry = await self.store.consume_input(run.session_id, item.message_id, item.message)
                 consumed.append(entry.context_seq)
         except Exception:
@@ -1074,9 +1084,27 @@ class VibeyAgent(BaseAgent):
             return
         if not runtime.cwd:
             runtime.cwd = await asyncio.to_thread(self._session_workdir, session_id)
+        if (defer_continued or stop is not None) and await self._deferred_continuation_open(session_id):
+            # T3 cannot close an Anthropic server-tool turn. Startup leaves the accepted
+            # rows untouched; Agent.resume restores them to its queue before admission opens.
+            return
+        for item in await self._recovered_inputs(session_id):
+            await self.store.consume_input(session_id, item.message_id, item.message)
+
+    async def _deferred_continuation_open(self, session_id: str) -> bool:
+        entries = [row for row in await self.store.load(session_id) if row.message is not None]
+        position = in_flight_position([row.message for row in entries])
+        if position is None or not pending_hosted(entries[position].message):
+            return False
+        _, turn_id = await asyncio.to_thread(self._response_owner, entries[position].row_id)
+        return await asyncio.to_thread(self._work_state, turn_id) == "open"
+
+    async def _recovered_inputs(self, session_id: str) -> tuple[AgentInput, ...]:
+        inputs = []
         for message_id, text_value, files, delivery in await asyncio.to_thread(self._unconsumed_inputs, session_id):
             message = await self._render_input(session_id, text_value, files, await self._input_metadata(delivery))
-            await self.store.consume_input(session_id, message_id, message)
+            inputs.append(AgentInput(message_id, message))
+        return tuple(inputs)
 
     async def _input_metadata(self, delivery: dict[str, Any]) -> Optional[AgentInputMetadata]:
         """A recovered input's sender facts, from the owner the live steer path uses (T3).
@@ -1687,8 +1715,6 @@ class VibeyAgent(BaseAgent):
 
     async def _emit_hosted(self, run: _Run, activity: HostedActivity) -> None:
         """One hosted call: its line for IM and its card for the Web (``core.hosted_activity``)."""
-        if activity.mode == "native" and activity.turn_id is None:
-            activity = replace(activity, turn_id=run.turn_id)
         # Only a completed call delivers what it produced, as only its image counts as a reply (``has_reply``).
         if activity.completed:
             run.hosted_images.extend(
@@ -1705,44 +1731,12 @@ class VibeyAgent(BaseAgent):
         except Exception:
             logger.exception("Vibey could not show hosted call %s", activity.call_id)
 
-    def _native_completion_owner(self, run: _Run, row_id: str, block: HostedToolBlock) -> str:
-        """Link only an adjacent deferred result to the response that introduced its call instance."""
-        ordered = tuple(run.responses.items())
-        for index, (candidate_id, current) in enumerate(ordered):
-            if candidate_id != row_id or index == 0:
-                continue
-            previous_id, previous = ordered[index - 1]
-            if deferred_completion_matches(previous, current, block):
-                return previous_id
-        return row_id
-
     async def _emit_native_hosted(self, run: _Run, row_id: str) -> None:
         message = run.responses.get(row_id)
         if message is None:
             return
         names, _states = await self._source_display()
-        pending = pending_hosted(message)
-        blocks = {block.id: block for block in message.content if isinstance(block, HostedToolBlock)}
-        for activity in native_activities(
-            message,
-            source_names=names.get,
-            response_id=row_id,
-            origin_response_id=row_id,
-            turn_id=run.turn_id,
-        ):
-            block = blocks[activity.call_id]
-            if result_fragment(block):
-                activity = replace(
-                    activity,
-                    origin_response_id=self._native_completion_owner(run, row_id, block),
-                )
-            if block.id in pending:
-                # The dispatcher persists this provisional Web row but suppresses its IM line.
-                activity = replace(activity, in_progress=True)
-            elif result_fragment(block):
-                # Response 2 is an ordinary standalone completion card. The Web projection
-                # joins it back to response 1 by durable Turn + call id.
-                activity = replace(activity, in_progress=False)
+        for activity in native_activities(message, source_names=names.get, response_id=row_id):
             await self._emit_hosted(run, activity)
 
     async def _emit_proxy_hosted(self, run: _Run, event: ToolFinished) -> None:

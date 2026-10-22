@@ -5145,8 +5145,7 @@
         "status": {
           "failed": "失败",
           "incomplete": "未完成",
-          "pending": "已中断",
-          "searching": "搜索中…"
+          "pending": "已中断"
         },
         "cost": {
           "included": "订阅内含",

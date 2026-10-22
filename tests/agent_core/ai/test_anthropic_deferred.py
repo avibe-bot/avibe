@@ -203,7 +203,8 @@ async def test_each_responses_cost_stays_on_a_card_that_ran_and_is_never_counted
     paused = replace(paused, hosted_summary=HostedSummary(cost=HostedCost("list", usd=0.01)))
     completed = replace(_completion(paused), hosted_summary=HostedSummary(cost=HostedCost("list", usd=0.01)))
     first, second = native_activities(paused), native_activities(completed)
-    assert first[0].cost.usd == 0.01 and first[1].cost is None
+    assert len(first) == len(second) == 1
+    assert first[0].cost.usd == 0.01
     assert second[0].cost.usd == 0.01
     assert sum(card.cost.usd for card in (*first, *second) if card.cost) == 0.02
     assert first[0].cost_calls == second[0].cost_calls == 1
