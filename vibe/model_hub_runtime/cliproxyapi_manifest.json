@@ -6,61 +6,61 @@
   "source_url": "https://github.com/router-for-me/CLIProxyAPI/tree/5be2cdab0869cbaa3d401891f740aebf7e15aa99",
   "source_sha": "5be2cdab0869cbaa3d401891f740aebf7e15aa99",
   "release_tag": "v8.0.30",
-  "asset_release_tag": "model-hub-engine-v8.0.30-1",
+  "asset_release_tag": "model-hub-engine-v8.0.30-2",
   "license": "MIT",
   "assets": [
     {
       "platform": "darwin-arm64",
-      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_darwin_aarch64.tar.gz",
-      "size_bytes": 40998093,
-      "sha256": "5350a46bee04f8bde5346f70cd8d5d71cc2bc2e73399f508ee197f9280088aba",
-      "binary_sha256": "c10089fd11f03ef8b01dd489da8e2ed6ce0dcc01ef33f795416d489dd0bcdd64",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-2/CLIProxyAPI_8.0.30_darwin_aarch64.tar.gz",
+      "size_bytes": 41279615,
+      "sha256": "9b43d2a06e3be182116b937fae9762724c4d4d10f570f0f14d85fa9b155143c6",
+      "binary_sha256": "e11b3028685aef0d81009ce45f8abecbfcd11eb20267044c1b8e063fdc54b418",
       "bin_path": "cli-proxy-api"
     },
     {
       "platform": "darwin-x64",
-      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_darwin_amd64.tar.gz",
-      "size_bytes": 43496850,
-      "sha256": "229583a38aeef6f1228aa5ebeaf77f0d9e0cb818163d426c930787fde02fce16",
-      "binary_sha256": "8c16904ea866cd6ee35eec827d4f691c5230c496147725b5e4a19c0e1115f295",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-2/CLIProxyAPI_8.0.30_darwin_amd64.tar.gz",
+      "size_bytes": 43800161,
+      "sha256": "bbaabfb60b02c126da0a1819e9e6e5f9a9db3903ae066c0769904708b70c7656",
+      "binary_sha256": "37103ba11cdeee94423c8d1a59a7cb4d3d36e2b2887ed2a04ca7d163d6ddef03",
       "bin_path": "cli-proxy-api"
     },
     {
       "platform": "linux-amd64",
-      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_linux_amd64.tar.gz",
-      "size_bytes": 41420943,
-      "sha256": "dd7e0c8e1f0464cb4f933b4132005a0390d1c9f3ffcdeaf10dfd73bac5dcd0ae",
-      "binary_sha256": "ca55c3d255b5391d823990ea39dceec596c91c6be5ee80856e174e397e46566b",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-2/CLIProxyAPI_8.0.30_linux_amd64.tar.gz",
+      "size_bytes": 41717934,
+      "sha256": "1e60cfea3389f1be6922c9c63ee60d59d43a118b016b2be63459e26de3df9fb6",
+      "binary_sha256": "a966666c9a3b54566a1bb5bf44a967b169113086ca79b10dc0f53e290c9ab4f2",
       "bin_path": "cli-proxy-api"
     },
     {
       "platform": "linux-arm64",
-      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_linux_aarch64.tar.gz",
-      "size_bytes": 38014778,
-      "sha256": "e7d2d3ef548769195e8843069435e49dc82cf4ae9777d9f0af8a4dc40057e843",
-      "binary_sha256": "54f85bc24a68cced977a422c01f9726d4b7c916bc24d2c3465258c1fa1ecce0b",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-2/CLIProxyAPI_8.0.30_linux_aarch64.tar.gz",
+      "size_bytes": 38275741,
+      "sha256": "0ea9758b520932535779e7c2e2b3eeed35ce1c63d205f05be35556bc77e952f4",
+      "binary_sha256": "a03ff2a1e5233ae7d231202f1d79266a9c1f77a11c7bd4457bc6fbc29fc6ce14",
       "bin_path": "cli-proxy-api"
     },
     {
       "platform": "windows-amd64",
-      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_windows_amd64.tar.gz",
-      "size_bytes": 41954382,
-      "sha256": "c7ac88680a02476660abf00ee56e07768cb9a859c12c7558cd77fcf9d4919127",
-      "binary_sha256": "cb34b4d627efa056bb5b44a1301aad855d2006e350a2b7ed460900ebbcc4428c",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-2/CLIProxyAPI_8.0.30_windows_amd64.tar.gz",
+      "size_bytes": 42244854,
+      "sha256": "a13477ed1a71589e2c042e5a8d623691c895274cd010e3e7c4818b2a535f84e5",
+      "binary_sha256": "09d14f44f77040050868b8795bfa15817b0fd54ef21251f0ecb6df41c5bdf48b",
       "bin_path": "cli-proxy-api.exe"
     },
     {
       "platform": "windows-arm64",
-      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_windows_aarch64.tar.gz",
-      "size_bytes": 38272453,
-      "sha256": "71eba861e9385cdb44bfc7aae5075a49209e3e4dfbc0c7e06255aff1b5d57c64",
-      "binary_sha256": "854351aa7942333c08f52e08139055570dcd7582f732dd8b83ba90a886e5c092",
+      "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-2/CLIProxyAPI_8.0.30_windows_aarch64.tar.gz",
+      "size_bytes": 38523898,
+      "sha256": "567a2d5ec80735381099f3b6cb51cfabb62d8b437ab9c54e9ad2b206a6e131b4",
+      "binary_sha256": "211741542a28d4beb93b9c8eb299e2d3e90d8369fba85cc1c58e7a5bc858b891",
       "bin_path": "cli-proxy-api.exe"
     }
   ],
   "build": {
     "builder": "scripts/build_model_hub_engine.py",
-    "go_version": "go1.26.9",
+    "go_version": "go1.26.10",
     "cgo_enabled": false,
     "trimpath": true,
     "buildvcs": false,
@@ -100,6 +100,10 @@
       {
         "path": "patches/model-hub-cpa-v8.0.30/gemini-schema-content-keywords.patch",
         "sha256": "57dc0b3eeacb8d74211fbe1bcd27106be5cd3004c389d7bf0719a2300a4849c4"
+      },
+      {
+        "path": "patches/model-hub-cpa-v8.0.30/go-module-security-refresh.patch",
+        "sha256": "27fd4fe1880e5cc7a49d9259da1dc4fa48d3748a02ff21b63bfae381dc64817e"
       }
     ],
     "source_date_epoch": 0
