@@ -10212,6 +10212,36 @@ def _backend_locked_response(err):
     )
 
 
+def _backend_runtime_busy(turn_state: dict) -> bool:
+    """Whether the controller reports backend work outside a turn for the session.
+
+    Harness items in the same list (Watches, Tasks, delegated runs) are durable and
+    follow the session to its new backend; only process-local backend Activities
+    and their unclaimed output belong to the runtime a switch leaves behind.
+    """
+    activities = turn_state.get("background_activities") or []
+    if any(isinstance(item, dict) and item.get("item_kind") == "backend_activity" for item in activities):
+        return True
+    try:
+        return int(turn_state.get("pending_activity_output_count") or 0) > 0
+    except (TypeError, ValueError):
+        return True
+
+
+def _backend_busy_response(*, current_backend, requested_backend):
+    """Retryable 409 for a backend switch the old runtime's background work blocks."""
+    from core.services import settings as settings_service
+
+    lang = settings_service.load_config_or_default().language
+    return _coded_error_response(
+        "backend_busy",
+        t("errors.sessionBackendBusy", lang),
+        409,
+        current_backend=current_backend,
+        requested_backend=requested_backend,
+    )
+
+
 def _publish_session_update_activity(
     broker,
     *,
@@ -10357,11 +10387,21 @@ async def sessions_update(session_id: str):
         except LookupError as err:
             return jsonify({"error": str(err)}), 404
         if str(requested_backend or "") != str(current.get("agent_backend") or ""):
+            # A BOUND session switches by replacing its native conversation, so the
+            # old backend's runtime must also be settled: a detached background
+            # Activity (or its undelivered output) would keep working on the
+            # replaced conversation. Only the controller knows, so an unreachable
+            # controller refuses that switch instead of assuming idle.
+            bound_switch = bool(current.get("native_session_id")) and bool(current.get("agent_backend"))
+            runtime_busy = False
             try:
                 turn_result = await internal_client.turn_state(session_id)
-                in_flight = bool((turn_result.get("body") or {}).get("in_flight"))
+                turn_body = turn_result.get("body") or {}
+                in_flight = bool(turn_body.get("in_flight"))
+                runtime_busy = _backend_runtime_busy(turn_body)
             except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
                 in_flight = False
+                runtime_busy = bound_switch
             if in_flight:
                 return _backend_locked_response(
                     workbench_sessions_service.SessionBackendLockedError(
@@ -10369,6 +10409,11 @@ async def sessions_update(session_id: str):
                         current_backend=current.get("agent_backend"),
                         requested_backend=requested_backend,
                     )
+                )
+            if bound_switch and runtime_busy:
+                return _backend_busy_response(
+                    current_backend=current.get("agent_backend"),
+                    requested_backend=requested_backend,
                 )
 
     try:

@@ -3673,27 +3673,31 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
   const hasMobileSessionActions = writable && mobileSessionActions.length > 0;
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   const sessionAgentLabel = sessionAgentDisplayName(session, agents);
-  // Backend locks once a NATIVE conversation exists — a native can only be
-  // resumed by the backend that created it — or while a turn is RUNNING (the
-  // in-flight turn binds its native on the current route any moment); mirrors
-  // update_session's guard. Until then a session may carry a project-default
-  // backend, but the user can still re-route it to any backend or clear back
-  // to the default. A locked session with a KNOWN backend keeps the picker
-  // open for same-backend agent/model changes; locked with a BLANK backend
-  // (the global-default route mid-turn) has no valid choice at all — every
-  // concrete pick would 409 — so the picker disables until the turn settles.
-  // Idle blank-backend rows with a native (legacy, pre-backfill) stay enabled:
-  // the server allows their one-time "initial pin".
+  // Mirrors update_session's guard. A session with a NATIVE conversation can
+  // still move to another backend: the server replaces the conversation and
+  // hands the next turn a handoff (docs/plans/2026-10-22-session-backend-switch.md).
+  // It stays on its backend while a turn is RUNNING (the in-flight turn binds
+  // its native on the current route any moment), as a pending fork, and for
+  // good once it has a Vibey conversation: Vibey is where a session can move
+  // to, never from. A bound session also has no "default" choice, which would
+  // clear it to a blank backend. A locked session with a KNOWN backend keeps
+  // the picker open for same-backend agent/model changes; locked with a BLANK
+  // backend (the global-default route mid-turn) has no valid choice at all —
+  // every concrete pick would 409 — so the picker disables until the turn
+  // settles. Idle blank-backend rows with a native (legacy, pre-backfill) stay
+  // enabled: the server allows their one-time "initial pin".
   const concreteBackend = session.agent_backend?.trim() || null;
+  const nativeBound = Boolean(session.native_session_id);
   const pendingForkBackend =
     !session.native_session_id &&
     session.metadata?.created_via === 'session_fork' &&
     typeof session.metadata?.fork_source_backend === 'string'
       ? session.metadata.fork_source_backend.trim() || null
       : null;
-  const backendLocked = Boolean(session.native_session_id) || working || Boolean(pendingForkBackend);
+  const backendLocked =
+    (nativeBound && concreteBackend === 'vibey') || working || Boolean(pendingForkBackend);
   const pinnedBackend = pendingForkBackend ?? (backendLocked ? concreteBackend : null);
-  const canClearToDefault = !backendLocked;
+  const canClearToDefault = !backendLocked && !nativeBound;
   const pickerDisabled = working && !concreteBackend && !pendingForkBackend;
   const defaultRoute = defaultAgent
     ? {

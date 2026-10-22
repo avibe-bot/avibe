@@ -24,8 +24,10 @@ from storage.agent_session_rows import (
     decode_session_value,
     encode_session_value,
     get_or_create_agent_session_row,
+    insert_superseded_native_snapshot,
     new_session_id,
     normalize_workdir,
+    pending_backend_handoff,
     reserve_write_lock,
     snapshot_scope_workdir,
 )
@@ -1184,6 +1186,21 @@ class SQLiteSessionsService:
             parsed_route_metadata = _json_loads((route_row or {}).get("metadata_json"), {})
             route_metadata = parsed_route_metadata if isinstance(parsed_route_metadata, dict) else {}
             already_bound = bool(decode_session_value((route_row or {}).get("native_session_id")))
+            handoff = pending_backend_handoff(route_metadata)
+            if handoff is not None and handoff["from_native"] and handoff["from_native"] == encoded_session_id:
+                # The session switched away from this native. Only the old backend's
+                # runtime still knows it, so this is a late event from that runtime:
+                # rebinding would undo the switch (and relabel the row back to the
+                # old backend). Keep the row as the switch left it.
+                logger.warning(
+                    "Ignoring a bind of the native session_id=%s switched away from; "
+                    "agent_session=%s backend=%s requested=%s",
+                    native_session_id,
+                    session_id,
+                    current_backend,
+                    requested_backend,
+                )
+                return str(session_id)
             backend_changes = bool(requested_backend) and requested_backend != current_backend
             if backend_changes and not already_bound:
                 # The three cases below are decided from a SNAPSHOT, and these reads
@@ -1358,37 +1375,12 @@ class SQLiteSessionsService:
             if current != expected:
                 return None
 
-            snapshot_id = new_session_id(conn)
-            anchor = str(row["session_anchor"] or "")
-            superseded_anchor = f"{anchor}{SUPERSEDED_ANCHOR_INFIX}{snapshot_id}"
-            metadata_value = _json_loads(row["metadata_json"], {})
-            snapshot_metadata = (
-                dict(metadata_value) if isinstance(metadata_value, dict) else {}
+            insert_superseded_native_snapshot(
+                conn,
+                row,
+                now=now,
+                binding={"active_session_id": str(session_id), "replaced_at": now},
             )
-            snapshot_metadata["superseded_native_binding"] = {
-                "active_session_id": str(session_id),
-                "replaced_at": now,
-            }
-            snapshot = dict(row)
-            snapshot.update(
-                {
-                    "id": snapshot_id,
-                    "session_anchor": superseded_anchor,
-                    "status": "archived",
-                    "visibility": "background",
-                    "pinned": 0,
-                    "agent_status": "idle",
-                    "composer_draft_text": None,
-                    "composer_draft_updated_at": None,
-                    "metadata_json": json.dumps(
-                        snapshot_metadata,
-                        separators=(",", ":"),
-                        ensure_ascii=False,
-                    ),
-                    "updated_at": now,
-                }
-            )
-            conn.execute(agent_sessions.insert().values(**snapshot))
             replaced = conn.execute(
                 agent_sessions.update()
                 .where(agent_sessions.c.id == str(session_id))

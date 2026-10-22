@@ -2864,6 +2864,50 @@ def test_bind_agent_session_by_id_does_not_use_anchor_suffix_as_workdir(tmp_path
         service.close()
 
 
+def test_bind_agent_session_by_id_refuses_the_native_a_backend_switch_replaced(tmp_path: Path) -> None:
+    """After a bound session switches backend, a late bind from the old backend's
+    runtime must not rebind (or relabel the row back to) the replaced native, while
+    the new backend's first bind still lands."""
+    from storage import workbench_sessions_service
+
+    db_path = tmp_path / "vibe.sqlite"
+    service = SQLiteSessionsService(db_path)
+    try:
+        reserved_id = service.reserve_agent_session(
+            scope_key="slack::channel::C123",
+            agent_backend="claude",
+            session_anchor="slack_private-agent",
+            agent_name="claude",
+        )
+        assert reserved_id is not None
+        service.bind_agent_session_by_id(session_id=reserved_id, native_session_id="claude-native")
+        with service.engine.begin() as conn:
+            workbench_sessions_service.update_session(
+                conn, reserved_id, agent_backend="vibey", agent_name="vibey"
+            )
+
+        for backend in ("claude", None):
+            assert service.bind_agent_session_by_id(
+                session_id=reserved_id,
+                native_session_id="claude-native",
+                vibe_agent_backend=backend,
+            ) == reserved_id
+            row = service.get_agent_session_by_id(reserved_id)
+            assert row is not None
+            assert (row["agent_backend"], row["native_session_id"]) == ("vibey", "")
+
+        service.bind_agent_session_by_id(
+            session_id=reserved_id,
+            native_session_id=reserved_id,
+            vibe_agent_backend="vibey",
+        )
+        row = service.get_agent_session_by_id(reserved_id)
+        assert row is not None
+        assert (row["agent_backend"], row["native_session_id"]) == ("vibey", reserved_id)
+    finally:
+        service.close()
+
+
 def test_bind_agent_session_by_id_does_not_derive_variant_from_vibe_agent_name(tmp_path: Path) -> None:
     db_path = tmp_path / "vibe.sqlite"
     service = SQLiteSessionsService(db_path)
@@ -6828,6 +6872,12 @@ _MARKER_EXEMPT_ROUTE_WRITE_SITES = {
         # caller, which is the layer that knows whether the new row PINS its
         # model / effort or merely inherits them.
         "create_agent_session_row": "INSERT path: metadata comes from the caller",
+        # Native replacement snapshot (OpenCode repair, backend switch): the INSERT
+        # copies the old binding's complete route and metadata marker unchanged
+        # into an inert superseded row.
+        "insert_superseded_native_snapshot": (
+            "superseded snapshot: route and marker are copied together unchanged"
+        ),
     },
     "storage/sessions_service.py": {
         # Native-bind UPDATEs -- TWO detected sites since HFR-254 split the write
@@ -6866,12 +6916,6 @@ _MARKER_EXEMPT_ROUTE_WRITE_SITES = {
         "save_state": (
             "legacy import: the detected site is the INSERT path, and the upsert's "
             "set_ excludes both pinnable columns (see the note on its backend relabel)"
-        ),
-        # Native repair snapshot: the INSERT copies the old binding's complete
-        # route and metadata marker unchanged into an inert superseded row. The
-        # active-row UPDATE changes only native_session_id and timestamps.
-        "replace_agent_session_native": (
-            "native repair snapshot: route and marker are copied together unchanged"
         ),
     },
 }

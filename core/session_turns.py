@@ -57,6 +57,7 @@ from core.run_settlement import (
 )
 from core.processing_indicator import INTERRUPTED_REACTION_EMOJI
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn_with_outcome
+from core.session_handoff import BACKEND_HANDOFF_TURN_KEY
 from core.services.agent_steering import (
     SteerOutcome,
     SteerReconcileRequest,
@@ -70,7 +71,7 @@ from core.services.agent_steering import (
 from storage import loop_writers, messages_service
 from storage import message_deliveries as delivery_store
 from storage.agent_transcript import last_response, recovered_watch_ids
-from storage.agent_session_rows import reserve_write_lock
+from storage.agent_session_rows import clear_backend_handoff, reserve_write_lock
 from storage.db import get_cached_sqlite_engine
 from storage.background import (
     OWED_FAILURE_NOTICE_KEY,
@@ -6048,6 +6049,13 @@ class SessionTurnManager:
                     execution=execution,
                 )
                 materialized: list[dict[str, Any]] = []
+                handoff_id = str(
+                    (getattr(context, "platform_specific", None) or {}).get(BACKEND_HANDOFF_TURN_KEY) or ""
+                ).strip()
+                if bound is not None and handoff_id:
+                    # The new backend accepted the turn that carried the switch
+                    # handoff: later turns continue its native conversation.
+                    clear_backend_handoff(conn, session_id, handoff_id)
                 if bound is not None:
                     materialized = delivery_store.materialize_start_acceptance(
                         conn,

@@ -6,7 +6,7 @@ import os
 import secrets
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from sqlalchemy import Connection, func, select, update
 
@@ -637,6 +637,108 @@ def _row_for_scope_anchor(
 # row is kept and a prefix clear would otherwise hard-delete it.
 SUPERSEDED_ANCHOR_MARKER = "superseded"
 SUPERSEDED_ANCHOR_INFIX = f":{SUPERSEDED_ANCHOR_MARKER}:"
+
+
+def insert_superseded_native_snapshot(
+    conn: Connection,
+    row: Mapping[str, Any],
+    *,
+    now: str,
+    binding: Mapping[str, Any],
+) -> str:
+    """Keep a session's current native binding as an inert archived row.
+
+    ``row`` is the full active ``agent_sessions`` row. The snapshot copies it under
+    a fresh id, an anchor suffixed with ``SUPERSEDED_ANCHOR_INFIX``, archived and
+    background, so it never appears in session lists or anchor lookups while the
+    replaced native id stays on record. ``binding`` is stored as the snapshot's
+    ``superseded_native_binding`` metadata. The caller holds the write lock and
+    then replaces the active row's binding in the same transaction.
+    """
+
+    snapshot_id = new_session_id(conn)
+    anchor = str(row["session_anchor"] or "")
+    metadata_value = decode_metadata_object(row["metadata_json"])
+    metadata_value["superseded_native_binding"] = dict(binding)
+    snapshot = dict(row)
+    snapshot.update(
+        {
+            "id": snapshot_id,
+            "session_anchor": f"{anchor}{SUPERSEDED_ANCHOR_INFIX}{snapshot_id}",
+            "status": "archived",
+            "visibility": "background",
+            "pinned": 0,
+            "agent_status": "idle",
+            "composer_draft_text": None,
+            "composer_draft_updated_at": None,
+            "metadata_json": json.dumps(metadata_value, separators=(",", ":"), ensure_ascii=False),
+            "updated_at": now,
+        }
+    )
+    conn.execute(agent_sessions.insert().values(**snapshot))
+    return snapshot_id
+
+
+#: The backend a bound session can switch to but never away from
+#: (``docs/plans/2026-10-22-session-backend-switch.md``).
+TERMINAL_SWITCH_BACKEND = "vibey"
+
+#: ``metadata_json`` key a cross-backend switch leaves on the active row. It names the
+#: binding the switch replaced, and stays until the new backend accepts its first
+#: turn, which carries the handoff.
+BACKEND_HANDOFF_METADATA_KEY = "backend_handoff"
+_BACKEND_HANDOFF_FIELDS = ("id", "from_backend", "from_native", "to_backend", "switched_at")
+
+
+def pending_backend_handoff(metadata: Any) -> dict[str, str] | None:
+    """The pending switch handoff in a session's metadata, or None.
+
+    A value without a non-empty string ``id`` (malformed, or a shape this release
+    does not know) reads as absent, so it can never fail a turn or a bind.
+    """
+
+    value = metadata.get(BACKEND_HANDOFF_METADATA_KEY) if isinstance(metadata, Mapping) else None
+    if not isinstance(value, Mapping):
+        return None
+    handoff_id = value.get("id")
+    if not isinstance(handoff_id, str) or not handoff_id.strip():
+        return None
+    return {name: str(value.get(name) or "") for name in _BACKEND_HANDOFF_FIELDS}
+
+
+def clear_backend_handoff(conn: Connection, session_id: str, handoff_id: str) -> bool:
+    """Drop the session's pending handoff if it is still ``handoff_id``.
+
+    Compare-and-set on the id, so a late receipt cannot clear a newer switch. The
+    caller holds the write lock; other metadata keys are preserved.
+    """
+
+    raw = conn.execute(
+        select(agent_sessions.c.metadata_json).where(agent_sessions.c.id == str(session_id))
+    ).scalar_one_or_none()
+    metadata = decode_metadata_object(raw)
+    pending = pending_backend_handoff(metadata)
+    if pending is None or pending["id"] != str(handoff_id):
+        return False
+    metadata.pop(BACKEND_HANDOFF_METADATA_KEY, None)
+    conn.execute(
+        update(agent_sessions)
+        .where(agent_sessions.c.id == str(session_id))
+        .values(metadata_json=json.dumps(metadata, separators=(",", ":"), ensure_ascii=False))
+    )
+    return True
+
+
+def decode_metadata_object(raw: Any) -> dict[str, Any]:
+    """An ``agent_sessions.metadata_json`` value as a dict; anything else reads as empty."""
+
+    if isinstance(raw, dict):
+        return dict(raw)
+    try:
+        value = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def unchanged_text(column: Any, value: Any) -> Any:

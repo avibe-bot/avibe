@@ -1,7 +1,9 @@
 """Message routing and Agent communication handlers"""
 
+import asyncio
 import logging
 import inspect
+from dataclasses import replace
 from typing import Any, List, Optional, Tuple
 
 from core.audio_asr import (
@@ -13,6 +15,7 @@ from core.agent_input import AgentInputMetadata, harness_label
 from core.backend_failure import emit_backend_failure
 from core.delivery_target import routed_delivery_context
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
+from core.session_handoff import BACKEND_HANDOFF_TURN_KEY, build_backend_handoff_from_store as _build_backend_handoff
 from core.message_context import (
     resolve_context_platform,
     resolve_context_thread_id,
@@ -816,6 +819,7 @@ class MessageHandler(BaseHandler):
             )
             if processing_indicator is not None:
                 self.controller.processing_indicator.apply_to_request(request, processing_indicator)
+            await self._attach_backend_handoff(context, agent_name, request)
             try:
                 await self.controller.agent_service.handle_message(agent_name, request)
                 agent_dispatched = True
@@ -1377,6 +1381,44 @@ class MessageHandler(BaseHandler):
             return
         spec = dict(context.platform_specific or {})
         spec[HARNESS_PROMPT_ECHO_SPEC_KEY] = message
+        context.platform_specific = spec
+
+    async def _attach_backend_handoff(
+        self, context: MessageContext, backend: str, request: AgentRequest
+    ) -> None:
+        """Prepare a turn of a Session that switched backend and has not continued yet.
+
+        The switch left ``backend_handoff`` on the row and cleared its native
+        (``docs/plans/2026-10-22-session-backend-switch.md``). While the row has no
+        native, any runtime the target backend still caches for the Session is from
+        an earlier phase and is released first. The input then carries the handoff,
+        and the turn is tagged so its native-start receipt clears the marker; a
+        turn that never reaches the native leaves it for the next one. A release
+        failure fails the turn rather than resume the replaced conversation.
+        """
+        from storage.agent_session_rows import pending_backend_handoff
+
+        spec = context.platform_specific or {}
+        target = spec.get("agent_session_target")
+        if not isinstance(target, dict) or spec.get("vibey_resume") is True:
+            return
+        handoff = pending_backend_handoff(target.get("metadata"))
+        session_id = str(target.get("id") or "").strip()
+        if handoff is None or not session_id:
+            return
+        if not str(target.get("native_session_id") or "").strip():
+            agent = getattr(getattr(self.controller, "agent_service", None), "agents", {}).get(backend)
+            release = getattr(agent, "release_native_runtime", None)
+            if callable(release):
+                await release(request)
+        try:
+            text = await asyncio.to_thread(_build_backend_handoff, session_id, handoff, backend)
+        except Exception:
+            logger.exception("Could not build the backend handoff for session %s", session_id)
+            return
+        request.input_metadata = replace(request.input_metadata or AgentInputMetadata(), handoff=text)
+        spec = dict(context.platform_specific or {})
+        spec[BACKEND_HANDOFF_TURN_KEY] = handoff["id"]
         context.platform_specific = spec
 
     async def prepare_input_metadata(

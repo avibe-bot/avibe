@@ -1071,6 +1071,25 @@ class ResultSettlesTurnOnEmitFailureTests(unittest.IsolatedAsyncioTestCase):
         agent.controller.emit_agent_message.assert_awaited_once()
         agent._release_service_runtime_turn.assert_called_once_with(context)
 
+    async def test_backend_switch_release_ends_the_client_an_earlier_phase_left(self):
+        """Claude -> other -> Claude: the cached SDK client, reused before the row is
+        read, still holds the replaced conversation, so the switched Session's first
+        turn ends it; with nothing cached the release is a no-op."""
+        agent = _build_agent([])
+        composite_key = "session-switch:/tmp/work"
+        agent.end_runtime_session = AsyncMock(return_value=True)
+        request = SimpleNamespace(
+            composite_session_id=composite_key,
+            context=SimpleNamespace(platform_specific={}),
+        )
+
+        await agent.release_native_runtime(request)
+        agent.end_runtime_session.assert_not_awaited()
+
+        agent.claude_sessions[composite_key] = object()
+        await agent.release_native_runtime(request)
+        agent.end_runtime_session.assert_awaited_once_with(composite_key)
+
     async def test_end_runtime_session_serializes_with_steering_write(self):
         mark_idle_calls: list[str] = []
         agent = _build_agent(mark_idle_calls)

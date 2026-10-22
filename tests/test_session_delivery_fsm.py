@@ -271,6 +271,49 @@ def test_fsm_template_matches_real_empty_metadata(tmp_path, _fsm_schema_template
 
 
 @pytest.mark.anyio
+async def test_native_start_receipt_clears_the_handoff_its_turn_carried(managers) -> None:
+    """A backend switch's handoff is spent when the new native accepts the turn that
+    carried it (its native-start receipt), in the same transaction; the rest of the
+    session metadata is kept. Until then the marker stays for the next turn."""
+    from core.session_handoff import BACKEND_HANDOFF_TURN_KEY
+    from storage.agent_session_rows import pending_backend_handoff
+
+    manager, _other, engine, _engine_b, _starts = managers
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(metadata_json=json.dumps({"keep": 1, "backend_handoff": {"id": "switch-1"}}))
+        )
+
+    def metadata() -> dict:
+        with engine.connect() as conn:
+            return json.loads(
+                conn.execute(
+                    select(agent_sessions.c.metadata_json).where(agent_sessions.c.id == "ses_fsm")
+                ).scalar_one()
+            )
+
+    context = _context()
+    admitted = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="next"),
+        context=context,
+    )
+    assert admitted.turn_id
+    assert pending_backend_handoff(metadata()) is not None
+    context.platform_specific["turn_token"] = admitted.turn_id
+    context.platform_specific[BACKEND_HANDOFF_TURN_KEY] = "switch-1"
+    manager._active_identity = lambda _backend, _session_id, logical_id: (logical_id, f"native-{logical_id}")
+    manager.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{admitted.turn_id}",
+        runtime_turn_id=f"runtime-{admitted.turn_id}",
+    )
+    assert metadata() == {"keep": 1}
+
+
+@pytest.mark.anyio
 async def test_session_lifecycle_invalidates_snapshot_after_operation(managers) -> None:
     manager, _other, _engine, _engine_b, _starts = managers
     snapshot = manager.snapshot_session_lifecycle("ses_fsm")

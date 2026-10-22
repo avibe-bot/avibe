@@ -648,11 +648,14 @@ def test_update_session_pending_fork_locks_backend_until_native_bind(isolated_st
             sessions_service.update_session(conn, sid, agent_backend=None, agent_name=None)
 
 
-def test_update_session_locks_backend_once_native_exists(isolated_state):
-    """Once the first turn bound a native conversation the backend is pinned for
-    life — the native can only be resumed by the backend that created it.
-    Same-backend agent/model changes stay allowed; a cross-backend switch or a
-    clear back to default raises SessionBackendLockedError."""
+def test_update_session_bound_backend_switch_replaces_native(isolated_state):
+    """A bound session switches backend by replacing its native conversation
+    (docs/plans/2026-10-22-session-backend-switch.md): the Avibe session id stays,
+    the old binding is kept as an archived superseded snapshot, the row's native is
+    cleared, and a handoff marker names what was replaced. Vibey is terminal: a
+    bound Vibey session never leaves it. A bound row cannot clear to the default."""
+
+    from sqlalchemy import select
 
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -660,16 +663,64 @@ def test_update_session_locks_backend_once_native_exists(isolated_state):
         sid = sessions_service.create_session(
             conn, scope_id=scope_id, agent_backend="claude", agent_name="claude"
         )["id"]
-        _bind_native(conn, sid)
-        # Same-backend change (different agent / model) is still allowed.
+        _bind_native(conn, sid, "claude-native")
+        conn.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == sid)
+            .values(
+                metadata_json='{"created_via":"session_fork","fork_source_session_id":"sesparent",'
+                '"fork_source_backend":"claude","fork_source_native_session_id":"parent-native"}'
+            )
+        )
+        # Same-backend change (different agent / model) keeps the conversation.
         sessions_service.update_session(conn, sid, agent_backend="claude", agent_name="claude-pro", model="opus")
-        # Cross-backend switch is rejected.
-        with pytest.raises(sessions_service.SessionBackendLockedError):
-            sessions_service.update_session(conn, sid, agent_backend="codex", agent_name="codex")
-        # Clearing back to the inherited default is rejected too: a future
-        # default switch could route the old session through another backend.
+        assert sessions_service.get_session(conn, sid)["native_session_id"] == "claude-native"
+        # Clearing back to the inherited default stays rejected.
         with pytest.raises(sessions_service.SessionBackendLockedError):
             sessions_service.update_session(conn, sid, agent_backend=None, agent_name=None)
+
+        switched = sessions_service.update_session(conn, sid, agent_backend="codex", agent_name="codex")
+        assert switched["id"] == sid
+        assert switched["agent_backend"] == "codex"
+        assert not switched["native_session_id"]
+        handoff = switched["metadata"]["backend_handoff"]
+        assert handoff["id"]
+        assert (handoff["from_backend"], handoff["from_native"], handoff["to_backend"]) == (
+            "claude",
+            "claude-native",
+            "codex",
+        )
+        # The spent fork source must not re-arm a native fork on the empty row.
+        assert "fork_source_native_session_id" not in switched["metadata"]
+        assert "fork_source_backend" not in switched["metadata"]
+        assert switched["metadata"]["fork_source_session_id"] == "sesparent"
+        snapshots = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.native_session_id == "claude-native")
+        ).mappings().all()
+        assert len(snapshots) == 1
+        snapshot = snapshots[0]
+        assert snapshot["id"] != sid
+        assert (snapshot["status"], snapshot["visibility"], snapshot["agent_backend"]) == (
+            "archived",
+            "background",
+            "claude",
+        )
+        assert ":superseded:" in snapshot["session_anchor"]
+        # Only the receipt of the turn that carried THIS handoff spends it.
+        from storage.agent_session_rows import clear_backend_handoff
+
+        assert clear_backend_handoff(conn, sid, "an-older-switch") is False
+        assert sessions_service.get_session(conn, sid)["metadata"]["backend_handoff"]["id"] == handoff["id"]
+
+        # The new backend binds; the session can still move, here onto Vibey.
+        _bind_native(conn, sid, "codex-thread")
+        sessions_service.update_session(conn, sid, agent_backend="vibey", agent_name="vibey")
+        _bind_native(conn, sid, sid)
+        # A bound Vibey session stays on Vibey; Agents within Vibey stay switchable.
+        with pytest.raises(sessions_service.SessionBackendLockedError):
+            sessions_service.update_session(conn, sid, agent_backend="claude", agent_name="claude")
+        sessions_service.update_session(conn, sid, agent_backend="vibey", agent_name="vibey-helper")
+        assert sessions_service.get_session(conn, sid)["native_session_id"] == sid
 
 
 def test_update_session_running_turn_locks_backend(isolated_state):
@@ -762,8 +813,8 @@ def test_update_session_backend_switch_reserves_writer_before_decision(isolated_
 def test_update_session_legacy_blank_backend_keeps_initial_pin_escape(isolated_state):
     """Legacy agent-less rows whose native predates the bind-time backend
     backfill don't know which backend owns their native; the empty -> concrete
-    "initial pin" stays allowed so their picker isn't permanently stuck. The pin
-    then locks the session like any other."""
+    "initial pin" stays allowed so their picker isn't permanently stuck, without
+    replacing the native. The pin then makes it an ordinary bound session."""
 
     engine = create_sqlite_engine()
     with engine.begin() as conn:
@@ -772,10 +823,13 @@ def test_update_session_legacy_blank_backend_keeps_initial_pin_escape(isolated_s
         _bind_native(conn, sid)
         # Empty -> concrete is the initial pin, even with a native bound.
         sessions_service.update_session(conn, sid, agent_backend="codex", agent_name="codex")
-        assert sessions_service.get_session(conn, sid)["agent_backend"] == "codex"
-        # Now pinned: a different backend is rejected.
-        with pytest.raises(sessions_service.SessionBackendLockedError):
-            sessions_service.update_session(conn, sid, agent_backend="claude", agent_name="claude")
+        pinned = sessions_service.get_session(conn, sid)
+        assert (pinned["agent_backend"], pinned["native_session_id"]) == ("codex", "native-1")
+        assert "backend_handoff" not in pinned["metadata"]
+        # Now pinned: a different backend replaces the native like any bound switch.
+        switched = sessions_service.update_session(conn, sid, agent_backend="claude", agent_name="claude")
+        assert not switched["native_session_id"]
+        assert switched["metadata"]["backend_handoff"]["from_native"] == "native-1"
 
 
 # --- HFR-247: the override marker must not outlive the columns it describes ----

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -32,6 +33,9 @@ from vibe.authorization import (
 )
 from storage.agent_session_rows import (
     ASSIGNABLE_SESSION_VISIBILITIES,
+    BACKEND_HANDOFF_METADATA_KEY,
+    TERMINAL_SWITCH_BACKEND,
+    insert_superseded_native_snapshot,
     SESSION_PROJECT_BASE_METADATA_KEY,
     WORKSPACE_NOTICE_SESSION_ID,
     create_agent_session_row,
@@ -938,12 +942,13 @@ class ReservedSessionError(PermissionError):
 
 
 class SessionBackendLockedError(Exception):
-    """Raised when a caller tries to switch the backend of a session that already
-    has a native conversation (pinned for life: the native can only be resumed by
-    the backend that created it, so switching would strand it and silently lose
-    context) or whose turn is currently running (the in-flight turn will bind its
-    native on the current route any moment). Changing the agent WITHIN the same
-    backend stays allowed."""
+    """Raised when a caller tries to change a session's backend while that is not
+    allowed: its turn is running (the in-flight turn will bind its native on the
+    current route any moment), it is a pending fork, it is a bound Vibey session
+    (Vibey is where a bound session can switch to but never away from), or a bound
+    session would be cleared to a blank backend. A bound session on another backend
+    switches by replacing its native conversation (``update_session``). Changing the
+    agent WITHIN the same backend stays allowed."""
 
     def __init__(self, *, session_id: str, current_backend: Optional[str], requested_backend: Optional[str]):
         self.session_id = session_id
@@ -1126,9 +1131,14 @@ def update_session(
     ):
         raise VibeAgentAccessError("Agent access is not permitted.")
 
-    # Backend is pinned once a NATIVE conversation exists: the native can only
-    # be resumed by the backend that created it, so switching (or clearing) the
-    # backend would strand it. A RUNNING turn locks it too — the first turn is
+    # A bound session may change backend by REPLACING its native conversation
+    # (docs/plans/2026-10-22-session-backend-switch.md): the current binding is
+    # kept as an inert superseded snapshot, the active row's native is cleared,
+    # and a ``backend_handoff`` marker makes the new backend's first turn carry a
+    # handoff. Same Avibe session id, so the transcript, deliveries, callbacks,
+    # Watches, Tasks and URL all stay. Two bound cases stay locked: a Vibey
+    # session never leaves Vibey, and a bound row cannot be cleared to a blank
+    # (default) backend. A RUNNING turn locks every backend change — the first turn is
     # already executing on the current route and will bind its native shortly,
     # so a mid-turn switch would either be silently overwritten by the bind-time
     # backfill or route queued follow-ups inconsistently (a stale ``running``
@@ -1144,17 +1154,18 @@ def update_session(
     # backfill keep the old empty -> concrete "initial pin" escape (while idle)
     # — the row doesn't know which backend owns its native, and locking them
     # would leave their picker permanently stuck.
-    backend_changes = agent_backend is not _UNSET and str(agent_backend or "") != str(
-        existing.agent_backend or ""
-    )
+    current_backend = str(existing.agent_backend or "")
+    bound_native = str(existing.native_session_id or "")
+    backend_changes = agent_backend is not _UNSET and str(agent_backend or "") != current_backend
     existing_metadata = _load_metadata(existing.metadata_json)
     pending_fork = bool(
         existing_metadata.get("created_via") == "session_fork"
-        and not str(existing.native_session_id or "")
+        and not bound_native
         and str(existing_metadata.get("fork_source_backend") or "")
     )
+    bound_switch = backend_changes and bool(bound_native and current_backend)
     if backend_changes and (
-        (str(existing.native_session_id or "") and str(existing.agent_backend or ""))
+        (bound_switch and (current_backend == TERMINAL_SWITCH_BACKEND or not str(agent_backend or "")))
         or str(existing.agent_status or "") == "running"
         or pending_fork
     ):
@@ -1165,6 +1176,35 @@ def update_session(
         )
 
     values: dict[str, Any] = {"updated_at": _utc_now_iso()}
+    if bound_switch:
+        full_row = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == session_id)
+        ).mappings().one()
+        insert_superseded_native_snapshot(
+            conn,
+            full_row,
+            now=values["updated_at"],
+            binding={
+                "active_session_id": str(session_id),
+                "replaced_at": values["updated_at"],
+                "reason": "backend_switch",
+                "to_backend": str(agent_backend),
+            },
+        )
+        values["native_session_id"] = ""
+        # A fork already bound its native, so its pending-fork source is spent;
+        # left on a row whose native is empty again it would re-arm the fork
+        # (or pin the picker to the fork's backend) on the next turn.
+        existing_metadata.pop("fork_source_native_session_id", None)
+        existing_metadata.pop("fork_source_backend", None)
+        existing_metadata[BACKEND_HANDOFF_METADATA_KEY] = {
+            "id": uuid.uuid4().hex,
+            "from_backend": current_backend,
+            "from_native": bound_native,
+            "to_backend": str(agent_backend),
+            "switched_at": values["updated_at"],
+        }
+        values["metadata_json"] = _dumps_metadata(existing_metadata)
     if title is not _UNSET:
         cleaned = str(title or "").strip()
         values["title"] = cleaned or None
@@ -1279,7 +1319,15 @@ def update_session(
         .where(agent_sessions.c.id == session_id)
         .where(agent_sessions.c.status != "archived")
     )
-    if backend_changes:
+    if bound_switch:
+        # The switch was decided from this exact binding: still idle, still on
+        # the backend and native the snapshot above recorded.
+        stmt = (
+            stmt.where(func.coalesce(agent_sessions.c.agent_status, "idle") != "running")
+            .where(func.coalesce(agent_sessions.c.agent_backend, "") == current_backend)
+            .where(func.coalesce(agent_sessions.c.native_session_id, "") == bound_native)
+        )
+    elif backend_changes:
         # Re-assert the lock INSIDE the UPDATE: the guard above is read-then-
         # write, and a turn start / native bind can commit in between (the
         # SELECT runs before this statement takes the write lock). The predicate
