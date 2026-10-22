@@ -2886,7 +2886,7 @@ def test_bind_agent_session_by_id_holds_a_switched_session_for_the_new_backend(t
         service.bind_agent_session_by_id(session_id=reserved_id, native_session_id=f"{from_backend}-native")
         with service.engine.begin() as conn:
             workbench_sessions_service.update_session(
-                conn, reserved_id, agent_backend=to_backend, agent_name=to_backend
+                conn, reserved_id, agent_backend=to_backend, agent_name=to_backend, runtime_idle_through_turn=""
             )
         return reserved_id
 

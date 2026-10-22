@@ -39,6 +39,7 @@ _TRANSCRIPT_LABELS = {
     "harness": "Harness input",
     "annotation": "Show Page annotation",
     "output": "Assistant",
+    "interim": "Assistant",
     "result": "Assistant",
     "error": "Error",
 }
@@ -112,10 +113,7 @@ def build_backend_handoff(
         tail=True,
         limit=_TRANSCRIPT_FETCH_LIMIT,
     )
-    try:
-        open_work = derive_session_harness_activities(conn, session_id)
-    except Exception:
-        open_work = []
+    open_work = derive_session_harness_activities(conn, session_id)
     return render_backend_handoff(
         session_id,
         handoff,

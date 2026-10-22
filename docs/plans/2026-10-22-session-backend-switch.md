@@ -40,6 +40,13 @@ A cross-backend change on a session with a bound native is accepted only when:
 - the controller is reachable and reports no backend Activity and no unclaimed
   Activity output for the session. A detached Claude Activity runs on the old
   client and would otherwise keep producing output for a session that moved.
+  That answer is a point-in-time read, so the caller first reads the session's
+  newest durable Turn id and the switch commits only if it is still the newest
+  (`update_session(runtime_idle_through_turn=...)`). Every Activity starts in a
+  turn, and every turn writes its row before dispatch, so an unchanged watermark
+  means the controller's answer still holds at commit;
+- the request selects an Agent on the new backend. The Agent identity routes the
+  next turn ahead of `agent_backend`, so a backend-only edit is refused (`400`).
 
 Refusals stay retryable `409`s: `backend_locked` (running or unsettled Turn,
 pending fork, bound Vibey) and `backend_busy` (background backend work,
@@ -61,7 +68,7 @@ Unbound sessions keep today's behavior.
    to_backend, switched_at}`.
 
 The UPDATE re-asserts the state the decision was made from: same native, same
-backend, not running, no unsettled Turn, not archived.
+backend, not running, no unsettled Turn, the same newest Turn, not archived.
 
 A forked session's spent fork source (`fork_source_native_session_id`,
 `fork_source_backend`) is dropped by the switch, so the emptied native cannot

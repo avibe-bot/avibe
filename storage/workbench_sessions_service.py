@@ -994,10 +994,17 @@ def update_session(
     visibility: Any = _UNSET,
     pinned: Any = _UNSET,
     scope_id: Any = _UNSET,
+    runtime_idle_through_turn: Optional[str] = None,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
     user_context: Any = None,
 ) -> dict[str, Any]:
     """Apply a caller's edits to one session row.
+
+    A cross-backend change of a BOUND session replaces its native conversation and
+    requires ``runtime_idle_through_turn``: the session's ``latest_session_turn_id``
+    read BEFORE the caller confirmed with the controller that the old backend keeps
+    no background work for it. A turn created after that read could have left such
+    work, so the switch refuses unless the newest turn is still that one.
 
     THE RESERVED WORKSPACE-NOTICE SESSION IS REFUSED HERE TOO, for the same reason
     ``archive_session`` refuses it and on the same IDENTITY test (so the answer does not
@@ -1165,9 +1172,20 @@ def update_session(
         and str(existing_metadata.get("fork_source_backend") or "")
     )
     bound_switch = backend_changes and bool(bound_native and current_backend)
+    if bound_switch and str(agent_backend or "") and not (selector_changed and (agent_name or agent_id)):
+        # The Agent identity routes the next turn ahead of ``agent_backend``; a
+        # backend-only edit would leave the old Agent sending it to the old backend.
+        raise ValueError("A backend switch must select an Agent on the new backend")
     if backend_changes and (
         (bound_switch and (current_backend == TERMINAL_SWITCH_BACKEND or not str(agent_backend or "")))
         or (bound_switch and conn.execute(_open_turn_for_session(session_id)).first() is not None)
+        or (
+            bound_switch
+            and (
+                runtime_idle_through_turn is None
+                or latest_session_turn_id(conn, session_id) != str(runtime_idle_through_turn)
+            )
+        )
         or str(existing.agent_status or "") == "running"
         or pending_fork
     ):
@@ -1332,6 +1350,10 @@ def update_session(
             .where(func.coalesce(agent_sessions.c.agent_backend, "") == current_backend)
             .where(func.coalesce(agent_sessions.c.native_session_id, "") == bound_native)
             .where(~_open_turn_for_session(session_id).exists())
+            .where(
+                func.coalesce(_latest_turn_for_session(session_id).scalar_subquery(), "")
+                == str(runtime_idle_through_turn)
+            )
         )
     elif backend_changes:
         # Re-assert the lock INSIDE the UPDATE: the guard above is read-then-
@@ -1381,6 +1403,26 @@ def update_session(
             requested_backend=agent_backend,
         )
     return get_session(conn, session_id, authorization_context=authorization)
+
+
+def _latest_turn_for_session(session_id: str):
+    return (
+        select(session_turns.c.id)
+        .where(session_turns.c.session_id == str(session_id))
+        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
+        .limit(1)
+    )
+
+
+def latest_session_turn_id(conn: Connection, session_id: str) -> str:
+    """The session's newest durable Turn id, or ``""``: the watermark a bound backend
+    switch is verified against (``update_session(runtime_idle_through_turn=...)``).
+
+    Every turn, and so every background Activity a turn starts, writes a row here
+    before it dispatches; an unchanged newest id means nothing ran since the read.
+    """
+
+    return str(conn.execute(_latest_turn_for_session(session_id)).scalar_one_or_none() or "")
 
 
 def _open_turn_for_session(session_id: str):

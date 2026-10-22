@@ -95,6 +95,8 @@ def test_public_surface_is_stable():
         "reserve_standalone_agent_session",
         # Backend-pin guard raised by update_session on a cross-backend switch:
         "SessionBackendLockedError",
+        # The turn watermark a bound backend switch is verified against:
+        "latest_session_turn_id",
         # Terminal-archive guard raised by update_session on an archived row:
         "SessionArchivedError",
         # Localized user-facing copy for that guard's 409 body:
@@ -679,7 +681,15 @@ def test_update_session_bound_backend_switch_replaces_native(isolated_state):
         with pytest.raises(sessions_service.SessionBackendLockedError):
             sessions_service.update_session(conn, sid, agent_backend=None, agent_name=None)
 
-        switched = sessions_service.update_session(conn, sid, agent_backend="codex", agent_name="codex")
+        # The switch must name the turn history the old runtime was found idle
+        # against, and select an Agent: the Agent identity routes the next turn.
+        with pytest.raises(sessions_service.SessionBackendLockedError):
+            sessions_service.update_session(conn, sid, agent_backend="codex", agent_name="codex")
+        with pytest.raises(ValueError):
+            sessions_service.update_session(conn, sid, agent_backend="codex", runtime_idle_through_turn="")
+        switched = sessions_service.update_session(
+            conn, sid, agent_backend="codex", agent_name="codex", runtime_idle_through_turn=""
+        )
         assert switched["id"] == sid
         assert switched["agent_backend"] == "codex"
         assert not switched["native_session_id"]
@@ -731,13 +741,39 @@ def test_update_session_bound_backend_switch_replaces_native(isolated_state):
             )
         )
         with pytest.raises(sessions_service.SessionBackendLockedError):
-            sessions_service.update_session(conn, sid, agent_backend="vibey", agent_name="vibey")
+            sessions_service.update_session(
+                conn, sid, agent_backend="vibey", agent_name="vibey", runtime_idle_through_turn="turn-open"
+            )
+        # A turn that ran after the controller was asked, even one already
+        # settled, may have left background work: the stale watermark refuses.
+        conn.execute(
+            session_turns.update()
+            .where(session_turns.c.id == "turn-open")
+            .values(
+                state="terminal",
+                terminal_outcome="not_written",
+                terminal_at="2026-10-22T00:00:01Z",
+                start_attempt_id=None,
+                dispatch_text=None,
+                dispatch_sha256=None,
+            )
+        )
+        with pytest.raises(sessions_service.SessionBackendLockedError):
+            sessions_service.update_session(
+                conn, sid, agent_backend="vibey", agent_name="vibey", runtime_idle_through_turn=""
+            )
+        assert sessions_service.latest_session_turn_id(conn, sid) == "turn-open"
+        sessions_service.update_session(
+            conn, sid, agent_backend="vibey", agent_name="vibey", runtime_idle_through_turn="turn-open"
+        )
+        # (The seeded Turn names no real Delivery; drop it before the commit.)
         conn.execute(session_turns.delete().where(session_turns.c.id == "turn-open"))
-        sessions_service.update_session(conn, sid, agent_backend="vibey", agent_name="vibey")
         _bind_native(conn, sid, sid)
         # A bound Vibey session stays on Vibey; Agents within Vibey stay switchable.
         with pytest.raises(sessions_service.SessionBackendLockedError):
-            sessions_service.update_session(conn, sid, agent_backend="claude", agent_name="claude")
+            sessions_service.update_session(
+                conn, sid, agent_backend="claude", agent_name="claude", runtime_idle_through_turn="turn-open"
+            )
         sessions_service.update_session(conn, sid, agent_backend="vibey", agent_name="vibey-helper")
         assert sessions_service.get_session(conn, sid)["native_session_id"] == sid
 
@@ -846,7 +882,9 @@ def test_update_session_legacy_blank_backend_keeps_initial_pin_escape(isolated_s
         assert (pinned["agent_backend"], pinned["native_session_id"]) == ("codex", "native-1")
         assert "backend_handoff" not in pinned["metadata"]
         # Now pinned: a different backend replaces the native like any bound switch.
-        switched = sessions_service.update_session(conn, sid, agent_backend="claude", agent_name="claude")
+        switched = sessions_service.update_session(
+            conn, sid, agent_backend="claude", agent_name="claude", runtime_idle_through_turn=""
+        )
         assert not switched["native_session_id"]
         assert switched["metadata"]["backend_handoff"]["from_native"] == "native-1"
 

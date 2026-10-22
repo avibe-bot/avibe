@@ -10380,10 +10380,14 @@ async def sessions_update(session_id: str):
     # bind-time backend backfill. Consult the controller's authoritative in-flight
     # registry first; an unreachable/slow controller falls through to the
     # row-status guard inside ``update_session`` (best effort).
+    runtime_idle_through_turn = None
     if should_check_backend_lock:
         try:
             with engine.connect() as conn:
                 current = workbench_sessions_service.get_session(conn, session_id)
+                # Read BEFORE asking the controller: the switch commits only if no
+                # turn started since, so the controller's answer still holds then.
+                runtime_idle_through_turn = workbench_sessions_service.latest_session_turn_id(conn, session_id)
         except LookupError as err:
             return jsonify({"error": str(err)}), 404
         if str(requested_backend or "") != str(current.get("agent_backend") or ""):
@@ -10439,6 +10443,7 @@ async def sessions_update(session_id: str):
             session = workbench_sessions_service.update_session(
                 conn,
                 session_id,
+                runtime_idle_through_turn=runtime_idle_through_turn,
                 authorization_context=getattr(g, "authorization_context", None),
                 **updatable,
             )

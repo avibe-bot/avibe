@@ -45,6 +45,7 @@ def _seed_session(tmp_path, monkeypatch, *, native: str = "") -> str:
                 ("user", "user", "Please migrate the parser to the new API."),
                 ("agent", "result", "Done with the lexer; the parser is next."),
                 ("user", "user", "Keep the old CLI flags working."),
+                ("agent", "interim", "Rewriting the flag parser now, before the turn stopped."),
             )
         ):
             stamp = f"2026-10-22T00:00:0{index}Z"
@@ -111,6 +112,8 @@ async def test_switched_session_turn_releases_stale_runtime_and_carries_the_hand
     handoff = request.input_metadata.handoff
     assert f"Avibe session `{sid}`" in handoff
     assert handoff.index("Please migrate the parser") < handoff.index("Keep the old CLI flags")
+    # A stopped turn's narration survives only as an interim row; it is the latest work.
+    assert "Rewriting the flag parser now" in handoff
     rendered = request.input_metadata.render("next step", SimpleNamespace(include_time_info=False))
     assert rendered.startswith("[Avibe handoff]")
     assert rendered.endswith("[Alex<U1>]\nnext step")
@@ -145,12 +148,13 @@ async def test_only_turns_continuing_the_switched_conversation_carry_the_handoff
 
 @pytest.mark.anyio
 async def test_a_handoff_that_cannot_be_built_fails_the_turn(tmp_path, monkeypatch):
-    """The first accepted turn must be the one carrying the handoff, so a store
-    failure fails the turn before dispatch instead of starting without it."""
+    """The first accepted turn must carry the complete handoff, so a store failure
+    (here reading the open work) fails the turn before dispatch instead of starting
+    without it, or with an incomplete one."""
 
     sid = _seed_session(tmp_path, monkeypatch)
     monkeypatch.setattr(
-        "core.session_handoff.build_backend_handoff",
+        "storage.workbench_sessions_service.derive_session_harness_activities",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("database is locked")),
     )
     context, request = _im_turn(sid)
