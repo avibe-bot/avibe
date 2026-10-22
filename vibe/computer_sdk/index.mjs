@@ -49,6 +49,8 @@ const WINDOW_SELECTOR_FIELDS = new Set([
   ...BASE_SELECTOR_FIELDS,
   "title",
   "titleContains",
+  "windowId",
+  "onScreen",
 ]);
 const ELEMENT_SELECTOR_FIELDS = new Set([
   ...BASE_SELECTOR_FIELDS,
@@ -336,6 +338,18 @@ function validateSelector(selector, allowedFields, noun, depth = 0) {
   ) {
     invalidSelector(noun, "index must be a non-negative integer", "index");
   }
+  if (
+    selector.windowId !== undefined &&
+    (!Number.isInteger(selector.windowId) || selector.windowId < 0)
+  ) {
+    invalidSelector(noun, "windowId must be a non-negative integer", "windowId");
+  }
+  if (
+    selector.onScreen !== undefined &&
+    typeof selector.onScreen !== "boolean"
+  ) {
+    invalidSelector(noun, "onScreen must be a boolean", "onScreen");
+  }
   if (selector.within !== undefined) {
     validateSelector(
       selector.within,
@@ -410,7 +424,9 @@ function windowMatches(record, selector) {
       value: (item) => item.title,
     }) &&
     exactString(record.title, selector.title) &&
-    containsString(record.title, selector.titleContains)
+    containsString(record.title, selector.titleContains) &&
+    exactString(record.window_id, selector.windowId) &&
+    exactString(record.is_on_screen, selector.onScreen)
   );
 }
 

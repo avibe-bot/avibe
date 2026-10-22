@@ -1926,6 +1926,129 @@ export default async () => {
     assert payload["error"]["step"] == "app.window"
 
 
+def _qq_windows() -> list[dict]:
+    """The live QQ shape: four windows titled "QQ", only one on screen."""
+    return [
+        {
+            "pid": 41,
+            "window_id": window_id,
+            "app_name": "QQ",
+            "title": "QQ",
+            "bounds": {"x": 0, "y": 0, "width": 800, "height": 600},
+            "is_on_screen": window_id == 12,
+            "z_index": z_index,
+        }
+        for window_id, z_index in [(10, None), (11, None), (12, 3), (13, None)]
+    ]
+
+
+def test_sdk_window_on_screen_resolves_off_screen_title_siblings(
+    tmp_path: Path,
+) -> None:
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const qq = await computer.app({ bundleId: "com.apple.mail" });
+  let ambiguous;
+  try {
+    await qq.window({ title: "QQ" });
+  } catch (error) {
+    ambiguous = { name: error.name, count: error.params.count };
+  }
+  const visible = await qq.window({ title: "QQ", onScreen: true });
+  const waited = await qq.waitFor({ title: "QQ", onScreen: true }, 0);
+  const hidden = await qq.window({ title: "QQ", onScreen: false, index: 0 })
+    .catch((error) => error.code);
+  return { ambiguous, visible: visible.windowId, waited: waited.windowId, hidden };
+};
+""",
+        windows=_qq_windows(),
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {
+            "ambiguous": {"name": "Ambiguous", "count": 4},
+            "visible": 12,
+            "waited": 12,
+            # Three off-screen siblings without a stacking order stay unordered.
+            "hidden": "window_order_unavailable",
+        },
+    }
+
+
+def test_sdk_window_id_selects_one_exact_window(tmp_path: Path) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const qq = await computer.app({ bundleId: "com.apple.mail" });
+  const exact = await qq.window({ windowId: 11 });
+  const missing = await qq.window({ windowId: 99 }).catch((error) => error.name);
+  const mismatch = await qq
+    .window({ windowId: 11, onScreen: true })
+    .catch((error) => error.name);
+  return { exact: [exact.windowId, exact.title], missing, mismatch };
+};
+""",
+        windows=_qq_windows(),
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {
+            "exact": [11, "QQ"],
+            "missing": "NotFound",
+            "mismatch": "NotFound",
+        },
+    }
+    assert {
+        json.dumps(request["payload"]["arguments"], sort_keys=True)
+        for request in requests
+        if request["payload"].get("tool") == "list_windows"
+    } == {json.dumps({"pid": 41})}
+
+
+@pytest.mark.parametrize(
+    ("selector", "field"),
+    [
+        ('{ windowId: "11" }', "windowId"),
+        ("{ windowId: -1 }", "windowId"),
+        ("{ windowId: 1.5 }", "windowId"),
+        ('{ onScreen: "yes" }', "onScreen"),
+        ("{ onScreen: 1 }", "onScreen"),
+    ],
+)
+def test_sdk_rejects_malformed_window_identity_selectors(
+    tmp_path: Path,
+    selector: str,
+    field: str,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        f"""
+import {{ computer }} from "@avibe/computer";
+
+export default async () => {{
+  const qq = await computer.app({{ bundleId: "com.apple.mail" }});
+  await qq.window({selector});
+}};
+""",
+        windows=_qq_windows(),
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_selector"
+    assert payload["error"]["params"] == {"field": field}
+    assert payload["error"]["step"] == "app.window"
+    assert all(request["payload"].get("tool") != "list_windows" for request in requests)
+
+
 def test_runner_returns_null_and_exits_with_user_timers_still_open(
     tmp_path: Path,
 ) -> None:
