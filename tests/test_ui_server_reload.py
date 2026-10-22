@@ -2,6 +2,11 @@ from __future__ import annotations
 
 import threading
 
+# These tests monkeypatch ``threading.Thread`` before building their first test
+# client. The app loads Starlette's client lazily, and its request portal comes
+# from ``anyio.from_thread``, which binds ``threading.Thread`` at import; load it
+# here, before any patch, so anyio keeps the real thread class.
+import fastapi.testclient  # noqa: F401
 from config.v2_config import (
     AgentsConfig,
     PlatformsConfig,

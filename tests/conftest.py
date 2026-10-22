@@ -69,19 +69,12 @@ from contextlib import closing, contextmanager
 from functools import wraps
 from pathlib import Path
 
-import fastapi.testclient  # noqa: F401  # see the note below
 import psutil
 import pytest
 from sqlalchemy.exc import SAWarning
 
 from tests import network_guard, process_reaper
 from tests.fake_pid_helpers import PID_LIMIT
-
-# ``fastapi.testclient`` is imported above, ahead of any test, because the app
-# loads it only when a test builds a client. Starlette's client runs requests
-# through ``anyio.from_thread``, which binds ``threading.Thread`` at import;
-# a test that monkeypatches ``threading.Thread`` before its first client would
-# otherwise hand anyio a fake thread and hang the request.
 
 REAL_USER_HOME = Path.home()
 _SQLITE_DEFAULT_STATE_MODULES: dict[Path, bool] = {}
