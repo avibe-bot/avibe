@@ -2763,7 +2763,7 @@ def build_base_image(args: argparse.Namespace) -> int:
                 {cloud_init_wait_command()}
                 apt-get update
                 apt-get install -y bash ca-certificates curl git build-essential python3 python3-pip python3-venv rsync sudo tmux
-                curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+                curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
                 apt-get install -y nodejs
                 # Backends must be service-owned at creation so their updaters
                 # stay writable without a recursive ownership repair at deployment.

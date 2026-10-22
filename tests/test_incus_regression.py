@@ -875,7 +875,7 @@ def test_build_base_uses_publishable_temp_instance() -> None:
     joined = "\n".join(" ".join(command) for command in commands)
     assert "--ephemeral" not in joined
     assert "incus --project default launch images:ubuntu/24.04/cloud avibe-regression-base-build --storage default --network incusbr0" in joined
-    assert "https://deb.nodesource.com/setup_20.x" in joined
+    assert "https://deb.nodesource.com/setup_22.x" in joined
     assert "useradd --create-home --shell /bin/bash --groups sudo avibe" in joined
     backend_install = joined.split("sudo -H -u avibe -- bash -s <<'AVIBE_BACKENDS'\n", 1)[1].split("\nAVIBE_BACKENDS", 1)[0]
     assert 'avibe_home="$HOME"' in backend_install
@@ -1003,7 +1003,7 @@ BACKEND
 chmod +x "$HOME/.opencode/bin/opencode"
 INSTALLER
         ;;
-    '-fsSL https://deb.nodesource.com/setup_20.x'|'-fsSL https://askill.sh')
+    '-fsSL https://deb.nodesource.com/setup_22.x'|'-fsSL https://askill.sh')
         printf 'exit 0\n' ;;
     *) exit 98 ;;
 esac
@@ -1156,7 +1156,7 @@ def write_ui_builder_stage(root: Path, *, external: Sequence[str] = ()) -> None:
     """
     copies = "".join(f"COPY {relative} /app/{relative}\n" for relative in external)
     (root / "Dockerfile").write_text(
-        "FROM node:20-slim AS ui-builder\n"
+        "FROM node:22-slim AS ui-builder\n"
         "WORKDIR /app/ui\n"
         "COPY ui/package.json ui/package-lock.json ./\n"
         f"{copies}"
