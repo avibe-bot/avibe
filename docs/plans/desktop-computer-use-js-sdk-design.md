@@ -169,7 +169,7 @@ Controller connection per script, and enforces one total script timeout.
 Scripts have no privilege beyond the agent's existing shell; only desktop
 actions pass through Controller rules.
 
-Desktop packages currently carry private Node `v22.23.3` for macOS and
+Desktop packages currently carry private Node `v22.23.4` for macOS and
 Windows, with the launcher injecting its absolute path as
 `VIBE_SHOW_RUNTIME_NODE_BIN`; the packaged tree also carries npm. The desktop
 package engine accepts `^20.19.0 || >=22.12.0`. See
