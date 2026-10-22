@@ -130,6 +130,34 @@ def _validate_boundary(
     return turn
 
 
+def existing_retry(
+    conn: Connection,
+    session_id: str,
+    notice_id: str,
+    *,
+    notice: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """The retry this notice already owns, when a repeated click must resolve to it.
+
+    An admitted or reserved retry is returned as it is: a duplicate click wakes the
+    same owner (even after a lost response) instead of creating, or re-deciding, a
+    second one. A link to a Delivery this notice does not own is refused.
+    """
+    notice = notice if notice is not None else _notice(conn, session_id, notice_id)
+    link = notice["content"].get("failure_retry") or {}
+    existing = deliveries.get_delivery(conn, str(link.get("delivery_id") or ""))
+    if existing is None or existing["session_id"] != session_id:
+        return None
+    binding = retry_binding(existing)
+    if binding is None or binding.get("notice_id") != notice_id:
+        raise RetryUnavailable("retry_not_available")
+    if policy_for(existing["state"]).submission == "admitted" or existing["state"] == "reserved":
+        # Admission retires a reservation if the boundary changed; leaving a stale
+        # one here would strand an ordering fence in front of later normal input.
+        return existing
+    return None
+
+
 def reserve_retry(
     conn: Connection,
     *,
@@ -143,19 +171,9 @@ def reserve_retry(
     is admitted through the input admission entry with its binding as the event.
     """
     notice = _notice(conn, session_id, notice_id)
-    link = notice["content"].get("failure_retry") or {}
-    existing = deliveries.get_delivery(conn, str(link.get("delivery_id") or ""))
-    if existing is not None and existing["session_id"] == session_id:
-        binding = retry_binding(existing)
-        if binding is None or binding.get("notice_id") != notice_id:
-            raise RetryUnavailable("retry_not_available")
-        if policy_for(existing["state"]).submission == "admitted":
-            return existing
-        if existing["state"] == "reserved":
-            # Wake the same owner even after a lost response. Admission retires
-            # it if the boundary changed; leaving a stale reservation here would
-            # strand an ordering fence in front of subsequent normal input.
-            return existing
+    existing = existing_retry(conn, session_id, notice_id, notice=notice)
+    if existing is not None:
+        return existing
 
     source_turn = deliveries.get_turn(conn, str(notice["metadata"]["turn_id"]))
     original = (

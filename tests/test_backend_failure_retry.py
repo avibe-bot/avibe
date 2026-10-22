@@ -1367,6 +1367,16 @@ def test_continue_on_vibey_moves_the_session_and_runs_the_unwritten_message(isol
 
     with patch("core.vibe_agents.ensure_agent_selection_access", side_effect=VibeAgentAccessError("denied")):
         assert client.post(url, headers=headers, json=continue_body).status_code == 403
+    # Without the controller there is nothing to run the input: nothing moves.
+    from vibe import internal_client
+
+    with patch("vibe.internal_client.turn_state", AsyncMock(side_effect=internal_client.InternalServerUnavailable("down"))):
+        offline = client.post(url, headers=headers, json=continue_body)
+    assert (offline.status_code, offline.get_json()["code"]) == (503, "controller_unavailable")
+    with create_sqlite_engine().connect() as conn:
+        assert conn.execute(
+            select(agent_sessions.c.agent_backend).where(agent_sessions.c.id == session_id)
+        ).scalar_one() == "codex"
     dispatch = AsyncMock(return_value={"status_code": 202, "body": {"delivery_state": "queued", "queued": True}})
     with (
         patch("vibe.internal_client.turn_state", idle),
@@ -1383,6 +1393,18 @@ def test_continue_on_vibey_moves_the_session_and_runs_the_unwritten_message(isol
         session = conn.execute(select(agent_sessions).where(agent_sessions.c.id == session_id)).mappings().one()
     assert (session["agent_backend"], session["agent_name"]) == ("vibey", vibey.name)
     assert ("backend_handoff" in json.loads(session["metadata_json"])) is bound
+
+    # A repeated click resolves to that retry and does not move the session again,
+    # even after the user picked another Vibey Agent.
+    with create_sqlite_engine().begin() as conn:
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == session_id).values(agent_name="vibey-helper"))
+    with patch("vibe.internal_client.turn_state", idle), patch("vibe.internal_client.dispatch_async", dispatch):
+        again = client.post(url, headers=headers, json=continue_body)
+    assert again.status_code in {201, 202}
+    with create_sqlite_engine().connect() as conn:
+        assert conn.execute(
+            select(agent_sessions.c.agent_name).where(agent_sessions.c.id == session_id)
+        ).scalar_one() == "vibey-helper"
 
 
 def test_continue_on_vibey_refuses_a_message_the_old_backend_already_ran(isolated_state, tmp_path):

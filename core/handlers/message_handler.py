@@ -974,7 +974,8 @@ class MessageHandler(BaseHandler):
         workbench = resolve_context_platform(target) == "avibe"
         if not workbench and escape_reason:
             reason = self._get_formatter(target).escape_special_chars(reason)
-        offer = failing_backend != "vibey" and self._builtin_vibey_available()
+        # Catalog and Model Hub reads: off the controller loop.
+        offer = failing_backend != "vibey" and await asyncio.to_thread(self._builtin_vibey_available)
         output = output_with_next_step(request, CONTINUE_ON_VIBEY_NEXT_STEP) if offer and workbench else None
         text = f"❌ {reason}"
         if offer:
@@ -992,7 +993,9 @@ class MessageHandler(BaseHandler):
 
     def _builtin_vibey_available(self) -> bool:
         """Whether a continuation on Vibey could run now: its built-in Agent exists and
-        the Model Hub supplies it a model (the same answer a Vibey turn starts from)."""
+        the Model Hub supplies it a model (the same answer a Vibey turn starts from).
+        Blocking. A problem with Vibey's own selected model is not predicted here: the
+        continuation then ends with Vibey's own notice, which says what to fix."""
         from modules.agents.model_hub import hub_supply_refusal
 
         store = getattr(self.controller, "vibe_agent_store", None)

@@ -10223,7 +10223,7 @@ def _builtin_agent_for_backend(backend: str):
         store.close()
 
 
-async def _backend_switch_preflight(engine, session_id: str, requested_backend):
+async def _backend_switch_preflight(engine, session_id: str, requested_backend, *, require_controller: bool = False):
     """Ask the controller whether the session may change to ``requested_backend``.
 
     Returns ``(refusal, runtime_idle_through_turn)``: a ready error response, or the
@@ -10233,7 +10233,8 @@ async def _backend_switch_preflight(engine, session_id: str, requested_backend):
     switches by replacing its native conversation, so the old backend's runtime
     must also be settled: a detached background Activity (or its undelivered
     output) would keep working on the replaced conversation. Only the controller
-    knows, so an unreachable controller refuses that switch instead of assuming idle.
+    knows, so an unreachable controller refuses that switch instead of assuming idle,
+    as it refuses any switch when ``require_controller``.
     """
     from core.services import sessions as workbench_sessions_service
     from vibe import internal_client
@@ -10247,15 +10248,21 @@ async def _backend_switch_preflight(engine, session_id: str, requested_backend):
     if str(requested_backend or "") == str(current.get("agent_backend") or ""):
         return None, runtime_idle_through_turn
     bound_switch = bool(current.get("native_session_id")) and bool(current.get("agent_backend"))
-    runtime_busy = False
     try:
         turn_result = await internal_client.turn_state(session_id)
         turn_body = turn_result.get("body") or {}
         in_flight = bool(turn_body.get("in_flight"))
         runtime_busy = _backend_runtime_busy(turn_body)
     except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
+        if bound_switch or require_controller:
+            from core.services import settings as settings_service
+
+            lang = settings_service.load_config_or_default().language
+            return _coded_error_response(
+                "controller_unavailable", t("errors.sessionControllerUnavailable", lang), 503
+            ), None
         in_flight = False
-        runtime_busy = bound_switch
+        runtime_busy = False
     if in_flight:
         return _backend_locked_response(
             workbench_sessions_service.SessionBackendLockedError(
@@ -12222,8 +12229,11 @@ async def sessions_messages_create(session_id: str):
                 ensure_agent_selection_access(conn, agent_id=continue_agent.id, user_context=user_context)
         except VibeAgentAccessError as err:
             return _coded_error_response("agent_access_forbidden", str(err), 403)
+        # The switch commits only with the controller there to run the input it
+        # retries: committing it for a dispatch that cannot happen would move the
+        # session for nothing.
         refusal, continue_idle_through_turn = await _backend_switch_preflight(
-            engine, session_id, continue_agent.backend
+            engine, session_id, continue_agent.backend, require_controller=True
         )
         if refusal is not None:
             return refusal
@@ -12286,7 +12296,11 @@ async def sessions_messages_create(session_id: str):
                 metadata=message_metadata,
                 message_kind=message_kind,
             )
-            if continue_agent is not None:
+            from core.backend_failure_retry import existing_retry
+
+            # A repeated click resolves to the retry it already made, without moving
+            # the session again (the user may have picked another Agent since).
+            if continue_agent is not None and existing_retry(conn, session_id, retry_for) is None:
                 # Same switch the Chat header's picker makes, with its guards; a
                 # refused retry below rolls it back with everything else.
                 switched["session"] = workbench_sessions_service.update_session(

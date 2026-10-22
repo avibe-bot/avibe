@@ -12,7 +12,8 @@
     "modelsNextStepImUrl": "Someone who manages this Avibe can fix it in Models: {url}",
     "modelsNextStepIm": "Someone who manages this Avibe can fix it in Models, in the Avibe Workbench.",
     "opencodeModelProviderRequired": "Select an OpenCode model with a provider in Avibe, or configure its Model Hub route.",
-    "sessionBackendBusy": "This session still has background work running on its current backend. Switch after it finishes."
+    "sessionBackendBusy": "This session still has background work running on its current backend. Switch after it finishes.",
+    "sessionControllerUnavailable": "Avibe's service isn't reachable right now. Try again in a moment."
   },
   "status": {
     "backendUnresponsive": "backend not responding",
