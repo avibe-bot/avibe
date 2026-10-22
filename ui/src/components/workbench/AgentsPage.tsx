@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -2152,29 +2152,41 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   // A Hub catalog's effort menu follows capability evidence, which a turn in any
   // session can change while this panel stays open. Like the route picker, which
   // reads it as its menu opens, read it again as the user turns to the effort
-  // field, the moment it is chosen from; the last answer shows until it lands,
-  // and the controls that can write an effort are held while the read is in
-  // flight (`readHubBackendModels`).
+  // field. Keep the buttons focusable while the read is out: disabling them
+  // during pointer entry/focus swallows the click. A choice made during the
+  // read waits for its answer and is validated before it can write an effort.
   const effortRefreshRef = useRef<(() => void) | null>(null);
+  const effortPointerInsideRef = useRef(false);
+  const effortFieldRef = useCallback((node: HTMLDivElement | null) => {
+    // A model with no efforts removes the field without a pointerleave event.
+    if (!node) effortPointerInsideRef.current = false;
+  }, []);
+  const pendingEffortChoiceRef = useRef<{ model: string; value: string } | null>(null);
+  const settleEffortChoiceRef = useRef<(result?: BackendModels) => void>(() => {});
   // One read per approach: a read still out answers for this one too. Dropping a
   // read does not stop its request, so restarting would only add requests.
   const effortRefreshOutRef = useRef(false);
   const [effortRefreshOut, setEffortRefreshOut] = useState(false);
   const refreshEffortMenus = useCallback(() => {
     if (!surfaceActive || !hubKnownRef.current || effortRefreshOutRef.current) return;
+    // A settled native fallback can still have catalog retries pending. Retire
+    // its loader so no older answer can settle this approach's queued choice.
+    effortRefreshRef.current?.();
     effortRefreshOutRef.current = true;
     setEffortRefreshOut(true);
     const backend = agent.backend;
-    const settle = () => {
+    const settle = (result?: BackendModels) => {
       effortRefreshOutRef.current = false;
       setEffortRefreshOut(false);
+      settleEffortChoiceRef.current(result);
     };
     effortRefreshRef.current = loadBackendModelsWithRefresh(
       api,
       backend,
       (result) => {
-        settle();
+        const accepted = supersedesHubAnswer(result, hubKnownRef.current);
         takeModelCatalog(backend, result);
+        settle(accepted ? result : undefined);
       },
       settle,
     );
@@ -2185,6 +2197,8 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
     effortRefreshRef.current?.();
     effortRefreshRef.current = null;
     effortRefreshOutRef.current = false;
+    effortPointerInsideRef.current = false;
+    pendingEffortChoiceRef.current = null;
     setEffortRefreshOut(false);
     // A new activation or backend starts without knowing which catalog serves it.
     hubKnownRef.current = false;
@@ -2278,6 +2292,30 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   const consumeBackgroundMutation = (operation: Promise<unknown>) => {
     void operation.catch(() => undefined);
   };
+
+  const submitEffortChoice = (value: string) => {
+    markFieldEdit('effort');
+    markFieldSubmitted('effort');
+    setEffort(value);
+    consumeBackgroundMutation(submitFields({ reasoning_effort: value }, ['effort']));
+  };
+  useLayoutEffect(() => {
+    settleEffortChoiceRef.current = (result) => {
+      const choice = pendingEffortChoiceRef.current;
+      pendingEffortChoiceRef.current = null;
+      if (!choice || !surfaceActive || !canEdit || choice.model !== model) return;
+      // An unread Hub must not replace its last accepted menu with the native
+      // ladder. A failed read retains the same last-answer policy as the picker.
+      const options = resolveEffortOptions(agent.backend, model, result ? result.reasoningOptions ?? {} : reasoningOptions);
+      if (!options.includes(choice.value)) {
+        showToast(t('agents.detail.effortUnavailable', {
+          effort: choice.value === 'none' ? t('chat.picker.effortOptions.none') : choice.value,
+        }), 'error');
+        return;
+      }
+      submitEffortChoice(choice.value);
+    };
+  });
 
   // Only user Agents can be renamed; the backend moves every durable name
   // reference in the same transaction.
@@ -2527,15 +2565,25 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
           no efforts has nothing to choose, so the field is absent rather than an
           empty outline the user would read as a control that failed to load. */}
       {(effortOptions.length > 0 || refusedEffort) && (
-      <Field label={t('agents.detail.effort')}>
+      <Field
+        label={t('agents.detail.effort')}
+        labelRight={effortRefreshOut ? <Loader2 aria-label={t('common.loading')} className="size-3 animate-spin text-muted" /> : undefined}
+      >
         <div
           className="grid gap-0.5 rounded-lg border border-border-strong bg-surface-2 p-0.5"
           style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(3.25rem, 1fr))' }}
           data-effort-field
-          onPointerEnter={refreshEffortMenus}
-          // Focus coming into the field, not moving between its buttons.
+          ref={effortFieldRef}
+          aria-busy={effortRefreshOut}
+          onPointerEnter={() => {
+            effortPointerInsideRef.current = true;
+            refreshEffortMenus();
+          }}
+          onPointerLeave={() => { effortPointerInsideRef.current = false; }}
+          // Pointer-induced focus belongs to the approach already refreshed,
+          // even if that read finished before the pointer was pressed.
           onFocusCapture={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) refreshEffortMenus();
+            if (!effortPointerInsideRef.current && !event.currentTarget.contains(event.relatedTarget as Node | null)) refreshEffortMenus();
           }}
         >
           {refusedEffort && (
@@ -2552,13 +2600,14 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
               <button
                 key={opt}
                 type="button"
-                disabled={!canEdit || !effortsAnswered || effortRefreshOut}
+                disabled={!canEdit || !effortsAnswered}
                 title={canEdit ? undefined : t('agents.remoteReadOnlyHint')}
                 onClick={() => {
-                  markFieldEdit('effort');
-                  markFieldSubmitted('effort');
-                  setEffort(opt);
-                  consumeBackgroundMutation(submitFields({ reasoning_effort: opt }, ['effort']));
+                  if (effortRefreshOutRef.current) {
+                    pendingEffortChoiceRef.current = { model, value: opt };
+                    return;
+                  }
+                  submitEffortChoice(opt);
                 }}
                 className={clsx(
                   'truncate rounded-md px-1 py-1.5 text-[11px] capitalize transition disabled:cursor-not-allowed',

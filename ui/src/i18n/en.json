@@ -4428,6 +4428,7 @@
       "modelPlaceholder": "Pick or type a model",
       "modelEmpty": "No matches — you can type a custom value.",
       "effort": "Reasoning effort",
+      "effortUnavailable": "{{effort}} is no longer available for this model. Your setting was not changed.",
       "systemPrompt": "System prompt",
       "systemPromptCount": "~{{count}} tokens",
       "systemPromptExpand": "Expand editor",
