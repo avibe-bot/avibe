@@ -37,7 +37,7 @@ searches natively first.
 Implement keyless Exa as a **built-in Source at the search resolver boundary**:
 
 - Stable Source id: `src_exakeyless`.
-- Catalog service id: `exa/mcp`.
+- Search service id: `exa/mcp`.
 - Endpoint: `https://mcp.exa.ai/mcp` with the explicit tool selection
   `web_search_exa,web_fetch_exa`.
 - No credential, no Vault operation, no add flow, and no persisted credential
@@ -45,10 +45,11 @@ Implement keyless Exa as a **built-in Source at the search resolver boundary**:
   usage, activity, and UI purposes.
 - Saved setting: `model_hub.hosted_tools.web_search.services.src_exakeyless`.
   Missing means `{enabled: true, results: 5}`.
-- Default automatic order: persisted user search services in `service_order`
-  (including an auto-enrolled official DeepSeek Source), then
-  `src_exakeyless`, then model executors. Existing saved orders are augmented
-  at read time under §4.1; no migration write is required.
+- Default automatic order: tool-only search Sources in `service_order`, then
+  enabled auto-enrolled official model Sources with a search API (currently an
+  official DeepSeek Source), then `src_exakeyless`, then model executors.
+  Existing saved orders are augmented at read time under §4.1; no migration
+  write is required.
 - Search price and recorded cost are exactly `$0`; UI says **免费** rather than
   displaying a zero dollar amount. Every sent search `tools/call` increments
   usage `requests`, even though `billable_requests` stays zero.
@@ -217,8 +218,8 @@ For keyless Exa specifically:
   request or retain full page text in phase 1.
 - Exa can see the honest integration identity `avibe`, the MCP client name and
   version, the MCP session id, and the request's normal network metadata. Avibe
-  does not send a credential or user identity unless a later authenticated
-  feature explicitly changes the service.
+  adds no separate Avibe account or user identifier and sends no credential;
+  the query contents themselves may contain identifying information.
 
 These are facts and current upstream terms, not a general promise that future
 Avibe defaults or Exa processing practices cannot change.
@@ -234,7 +235,8 @@ The row has these stable values:
 | Field | Value |
 | --- | --- |
 | Source id | `src_exakeyless` |
-| Catalog/service id | `exa/mcp` |
+| Catalog/vendor id | `exa-mcp` (synthetic built-in vendor id, distinct from keyed vendor `exa`) |
+| Search service id | `exa/mcp` |
 | Display label | `Exa（免费）` in Chinese; `Exa (free)` in English |
 | Endpoint | `https://mcp.exa.ai/mcp` with `tools=web_search_exa,web_fetch_exa` |
 | Transport | Streamable HTTP MCP |
@@ -247,7 +249,11 @@ The row has these stable values:
 | Tool-only | true |
 | Built-in | true; always available in the catalog, not addable or removable |
 
-`service_vendors[]` includes this row alongside the keyed Exa `exa/search` row.
+The built-in row uses vendor id `exa-mcp` and search `service_id: exa/mcp`.
+The slash-free vendor id is required by the catalog; the slash-bearing service
+id is the service identity used in `executor_order`, usage, and the adapter. It
+is not an overload of the keyed REST vendor row `exa` / `exa/search`.
+
 Its `source_ids` contains `src_exakeyless`; its `facts` adds `built_in: true`
 and `requires_setup: false` (unknown fields remain ignored by older readers).
 The candidate's `model_id` is `exa/mcp`, not a model name. The candidate keeps
@@ -287,9 +293,10 @@ services-design §3.2. `enabled: false` is the ordinary service opt-out and
 keeps the row in the order/read as `disabled`.
 
 The built-in Source is not appended to persisted `service_order` on creation:
-it has no creation event. Read-time automatic resolution appends it after all
-user-owned search services. If a user explicitly reorders the mixed list, the
-server saves `src_exakeyless` in `executor_order` and
+it has no creation event. Read-time automatic resolution places it after
+`service_order`'s tool-only Sources and enabled auto-enrolled model Sources.
+If a user explicitly reorders the mixed list, the server saves
+`src_exakeyless` in `executor_order` and
 `executor_order_kinds[src_exakeyless] = "service"`.
 
 ### 3.3 Older builds and saved orders
@@ -314,17 +321,16 @@ an old order.
 
 With no saved `executor_order`, the effective order is exactly:
 
-1. user-owned search services in `service_order` (Tavily, keyed Exa, and any
-   other tool-only services), followed by enabled official model Sources whose
-   catalog search API is `auto_enroll` (currently official DeepSeek);
-2. `src_exakeyless`, if enabled; it remains in the candidate/read order while
-   cooling, blocked, or temporarily unavailable so admission can record the
-   skip and the UI can show the cooldown;
-3. model executors in the existing automatic order.
-
-A disabled service remains in the effective/read order at the existing disabled
- tail, and is never requested. The effective order therefore describes the
-user-editable chain, not only the candidates that are runnable at this instant.
+1. all tool-only search Sources in `service_order` (Tavily, keyed Exa, and any
+   other tool-only services);
+2. enabled official model Sources whose catalog search API is `auto_enroll`
+   (currently official DeepSeek), in the existing Source order;
+3. enabled `src_exakeyless`;
+4. model executors in the existing automatic order;
+5. disabled search rows at the existing disabled tail, including
+   `src_exakeyless` when its `enabled` setting is false. Cooling, blocked, and
+   temporarily unavailable enabled rows stay in their service position; state
+   controls admission, not the editable order.
 
 If the user saved an order, use services-design §4.1 unchanged:
 
@@ -354,9 +360,7 @@ For `GET /api/models/hosted-tools`, `web_search` returns:
 
 ```json
 {
-  "services": {
-    "src_exakeyless": {"enabled": true, "results": 5}
-  },
+  "services": {},
   "executor_order": null,
   "effective_order": ["src_tavily001", "src_exa000001", "src_deepseek001", "src_exakeyless", "src_model001"],
   "executor_candidates": [
@@ -387,11 +391,19 @@ For `GET /api/models/hosted-tools`, `web_search` returns:
 }
 ```
 
-`effective_order` always shows keyless Exa when enabled, even when no user Source
-exists, and keeps a cooling/blocked/unavailable row present so the chain can
-record its skip and the UI can expose its cooldown/remedy. A disabled row stays
-in the disabled tail. No empty search-service state is inferred from an empty
-`sources[]`.
+`services` is the saved partial-override map, not a resolved-default map. In
+this no-override example it is empty; the keyless candidate's
+`settings: {"enabled": true, "results": 5}` carries its effective defaults.
+`effective_order` always includes the built-in keyless row, even when the saved
+map has no entry for it. An enabled row stays in its automatic position while
+cooling, blocked, or temporarily unavailable so admission can record the skip.
+A disabled keyless row remains in the disabled tail, and its candidate/settings
+stay visible so the user can turn it back on. For `src_exakeyless`, an active
+service cooldown is serialized in `cooldown_until` even when less than the
+generic 60-second visibility threshold; the UI must be able to show the
+rate-limit state and **Retry now** for every active keyless cooldown. No empty
+search-service state is inferred from an empty `sources[]`.
+
 
 ## 5. Execution
 
@@ -399,9 +411,12 @@ in the disabled tail. No empty search-service state is inferred from an empty
 
 The Model Hub owns the MCP client and keeps one in-memory session per Avibe
 runtime and endpoint/tool selection. It is not written to disk and is not
-shared with another runtime. A per-session async lock permits one `tools/call`
-at a time; this avoids response association and burst surprises without adding
-a scheduler.
+shared with another runtime. A per-session async lock spans session lookup or
+creation, initialize, `notifications/initialized`, `tools/list`, schema
+invalidation, and `tools/call`; lock wait consumes the same overall 30-second
+service deadline. At most one search call is admitted for a session at a time,
+which avoids response association and burst surprises without adding a
+scheduler.
 
 The first call, within the one service attempt's existing 30-second cap, does:
 
@@ -409,11 +424,17 @@ The first call, within the one service attempt's existing 30-second cap, does:
 2. send MCP `initialize` with the supported protocol version, no capabilities
    beyond what Avibe uses, and honest `clientInfo` (`name: "avibe"`, the
    running Avibe version);
-3. retain the returned `Mcp-Session-Id` and send
+3. retain the returned `Mcp-Session-Id` and negotiated `protocolVersion`,
+   reject a version Avibe does not support, and send
    `notifications/initialized`;
 4. call `tools/list`, parse the returned schema, and require
    `web_search_exa`; then
 5. send one `tools/call` for the search.
+
+A `notifications/initialized` notification has no JSON-RPC result body; accept
+its conforming HTTP 202 response with an empty body as success. Do not apply
+that empty-body exception to `initialize`, `tools/list`, or `tools/call`, which
+must return a matching JSON-RPC response.
 
 Later calls reuse the session and cached tool schema, sending only the
 `tools/call`. A missing/expired session is reinitialized once before the call
@@ -425,12 +446,16 @@ call. Once the replay's `tools/call` request bytes begin, Avibe never retries it
 automatically: a retry could duplicate a search and a usage request.
 
 Every exchange uses `Accept: application/json, text/event-stream`,
-`Content-Type: application/json`, `MCP-Protocol-Version`, the session header
-when present, and `x-exa-source: avibe`. The response parser accepts both the
-Streamable HTTP SSE `event: message` / `data: <JSON-RPC>` shape and a single
-`application/json` JSON-RPC response, matching the response id in either form.
-The 8 MiB existing response-body cap applies to either form; notifications and
-unrelated events are ignored only within that cap.
+`Content-Type: application/json`, and the retained negotiated
+`MCP-Protocol-Version`, plus the session header when present and
+`x-exa-source: avibe`. The response parser accepts both the Streamable HTTP SSE
+`event: message` / `data: <JSON-RPC>` shape and a single `application/json`
+JSON-RPC response, matching the response id in either form. A
+`notifications/tools/list_changed` notification is not discarded as unrelated:
+it invalidates the cached schema, and the next call (under the same lock) runs
+`tools/list` again before building arguments. The 8 MiB existing
+response-body cap applies to either response form; notifications are processed
+only within that cap.
 
 No API key, bearer token, Vault reference, or user credential is present in the
 MCP request. The adapter is still the custody/transport boundary and returns
@@ -516,7 +541,7 @@ A successful keyless attempt writes the existing positive service evidence with
 execution origin is the existing service variant:
 
 ```json
-{"provider": "exa", "api": "search_api", "model": "exa/mcp"}
+{"provider": "exa-mcp", "api": "search_api", "model": "exa/mcp"}
 ```
 
 Every reached attempt has one `attempts[]` entry. The label is
@@ -557,8 +582,8 @@ and native-preference switch. In the visible **搜索顺序 / Search order** lis
   with the existing `cooldown_until` detail and **立即重试 / Retry now** action.
   It never says “密钥无效 / invalid key”.
 - The caption explicitly says the current automatic order:
-  **已添加的搜索服务（含官方 DeepSeek） → Exa（免费） → 模型代搜；可拖动调整。/ Your added
-  search services (including official DeepSeek) → Exa (free) → model
+  **已添加的搜索服务 → 已启用的官方 DeepSeek → Exa（免费） → 模型代搜；可拖动调整。/ Your added
+  search services → enabled official DeepSeek → Exa (free) → model
   executors; drag to reorder.**
   The caption is a current behavior statement, not a promise about future
   defaults.
@@ -632,9 +657,11 @@ The public English and Chinese documentation shipped with activation states
 these current facts:
 
 1. Web search normally prefers a native-capable model's own search.
-2. When the proxy chain is used, the current automatic order is the user's
-   configured search services, then built-in keyless Exa (on by default), then
-   model executors. Users can reorder or turn off every row.
+2. When the proxy chain is used, the current automatic order is tool-only
+   search services in their saved order, enabled auto-enrolled official model
+   Sources with search APIs (currently official DeepSeek), built-in keyless Exa
+   (on by default), then model executors. Users can reorder or turn off every
+   search row.
 3. Keyless Exa requires no key or setup, costs `$0`, and is rate-limited by Exa.
    Usage counts requests even though cost is free.
 4. The query is sent directly from the Avibe runtime host to Exa's hosted MCP
@@ -712,9 +739,11 @@ coordinated activation; no lane merges this design PR.
    turn/service and mapped to `numResults`; an `objective` field is added only
    when the live `tools/list` schema requires it.
 6. A reused MCP session performs one initialize/list lifecycle and one
-   `tools/call` per attempted search; an expired session can reinitialize and
-   replay once only before the server accepts the tool call, but an admitted
-   call is never automatically duplicated.
+   `tools/call` per attempted search; cold starts serialize that lifecycle under
+   the session lock; the negotiated protocol version is validated and reused;
+   `tools/list_changed` causes a fresh list before the next call; an expired
+   session can reinitialize and replay once only before the server accepts the
+   tool call, but an admitted call is never automatically duplicated.
 7. All service work fits the existing 30-second service cap and 180-second
    chain deadline; no blocking parse runs on the controller loop.
 8. Valid results are highlights-only, bounded, ordered, and become one
@@ -735,9 +764,11 @@ coordinated activation; no lane merges this design PR.
 Use a stub MCP Streamable HTTP server, not Exa, with deterministic SSE and
 JSON-RPC fixtures:
 
-- `initialize` returns a session id, server info, and capabilities; assert
-  `notifications/initialized`, `MCP-Protocol-Version`, honest
-  `x-exa-source`, and `clientInfo.name` are sent.
+- `initialize` returns a session id, a supported negotiated protocol version,
+  server info, and capabilities; assert the version is retained on later
+  requests, `notifications/initialized`, `MCP-Protocol-Version`, honest
+  `x-exa-source`, and `clientInfo.name` are sent, and its empty HTTP 202
+  response is accepted. An unsupported negotiated version is rejected.
 - `tools/list` variants cover the current source shape and the live-probed
   required `objective` shape; the request mapper adds the field only in the
   latter case.
@@ -751,6 +782,10 @@ JSON-RPC fixtures:
 - Session reuse sends one initialize/list for two searches; an expired session
   returns the standard session-not-found 404 and reconnects/replays once before
   admission; a connection failure after the call is sent is not retried.
+- The stub can emit `notifications/tools/list_changed`; the cached schema is
+  invalidated and the next call performs `tools/list` before mapping arguments.
+- Two parallel cold starts share one initialize/list lifecycle under the lock,
+  and lock wait consumes the service deadline.
 - The transport fixture covers both SSE and direct `application/json` JSON-RPC
   responses.
 - HTTP 429 with `Retry-After`, HTTP 429 with reset headers, JSON-RPC `-32000`,
@@ -759,15 +794,17 @@ JSON-RPC fixtures:
   quoting that text does not.
 - 5xx, unexpected 4xx, redirects, timeouts, closed sessions, server `isError`,
   and malformed content map to `service_unavailable` and fail over.
-- Default order, saved order, role-map insertion, explicit disable, restart,
-  older-build unknown-id reading, keyed-Exa-plus-keyless fallback,
-  auto-enrolled official-DeepSeek-plus-keyless ordering, and
-  native-preference behavior are table-driven.
+- Default order, saved order, role-map insertion, explicit disable (including a
+  visible disabled-tail row), restart, older-build unknown-id reading,
+  keyed-Exa-plus-keyless fallback, auto-enrolled official-DeepSeek-plus-keyless
+  ordering, and native-preference behavior are table-driven.
 - Attempts, service origin, exact-zero cost, request-only usage, no lower-bound
-  charge, and cooldown projection are asserted at their owning boundaries.
-- The Tools read/UI fixtures cover the always-present row, free label, egress
-  fact, inline switch, reorder controls, add-dialog keyed Exa distinction,
-  detail panel, Chat card, IM line, and both locales.
+  charge, and cooldown projection (including an active cooldown shorter than
+  60 seconds) are asserted at their owning boundaries.
+- The Tools read/UI fixtures cover the always-present row, saved-partial versus
+  effective settings, disabled-tail visibility, free label, egress fact, inline
+  switch, reorder controls, add-dialog keyed Exa distinction, detail panel, Chat
+  card, IM line, and both locales.
 
 No live call is permitted in CI. The 2026-10-22 probe facts above are evidence
 for this plan, not an automated dependency.
