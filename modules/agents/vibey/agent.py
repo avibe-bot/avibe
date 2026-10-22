@@ -227,6 +227,8 @@ class _Run:
     hosted_images: list[tuple[str, str]] = field(default_factory=list)
     # Deferred searches show provisionally on Web, but reach IM once, after completion or final settlement.
     deferred_hosted: dict[tuple[str, str], tuple[AssistantMessage, HostedActivity]] = field(default_factory=dict)
+    # A resumed Turn may need its immutable transcript for deferred-card recovery and pairing. Load it once per run.
+    transcript_rows: Optional[tuple[ContextEntry, ...]] = None
 
     @property
     def native_turn_id(self) -> str:
@@ -344,6 +346,10 @@ class VibeyAgent(BaseAgent):
         # A transcript resume (a Turn rerun after a restart) gives a job that survived the restart
         # the foreground wait its live call would have, so its real output becomes the call's result.
         resuming = (context.platform_specific or {}).get("vibey_resume") is True
+        # A transcript resume can be stopped before it reaches the continuation. Rebuild the held IM cards from
+        # immutable rows before any resume-side failure or settlement path can run.
+        if resuming:
+            await self._restore_deferred_hosted(turn)
         try:
             await self._resume(runtime, stop=turn.stop_event if resuming else None)
         except asyncio.CancelledError:
@@ -1705,6 +1711,44 @@ class VibeyAgent(BaseAgent):
         except Exception:
             logger.exception("Vibey could not show hosted call %s", activity.call_id)
 
+    async def _transcript_rows(self, run: _Run) -> tuple[ContextEntry, ...]:
+        """Load one immutable transcript snapshot for this run's deferred pairing work."""
+        if run.transcript_rows is None:
+            run.transcript_rows = tuple(await self.store.load(run.session_id))
+        return run.transcript_rows
+
+    async def _restore_deferred_hosted(self, run: _Run) -> None:
+        """Rehydrate the latest held native search before a restarted Turn can settle."""
+        rows = await self._transcript_rows(run)
+        messages = tuple(row.message for row in rows if row.kind in {"response", "tool_result"} and row.message is not None)
+        completions = hosted_completions(messages)
+        completed = {(pair.call.native.source_id, pair.call.id) for pair in completions}
+        pending_entry = next(
+            (
+                row
+                for row in reversed(rows)
+                if row.kind == "response" and isinstance(row.message, AssistantMessage) and pending_hosted(row.message)
+            ),
+            None,
+        )
+        if pending_entry is None or not isinstance(pending_entry.message, AssistantMessage):
+            return
+        names, _states = await self._source_display()
+        pending = pending_hosted(pending_entry.message)
+        activities = {activity.call_id: activity for activity in native_activities(
+            pending_entry.message, source_names=names.get, response_id=pending_entry.row_id
+        )}
+        for call_id, block in pending.items():
+            key = (block.native.source_id, call_id)
+            if key in completed:
+                continue
+            activity = activities.get(call_id)
+            if activity is not None:
+                run.deferred_hosted[key] = (
+                    pending_entry.message,
+                    replace(activity, in_progress=True),
+                )
+
     async def _emit_native_hosted(self, run: _Run, row_id: str) -> None:
         message = run.responses.get(row_id)
         if message is None:
@@ -1724,12 +1768,13 @@ class VibeyAgent(BaseAgent):
                     activity = replace(activity, response_id=prior[1].response_id)
                     del run.deferred_hosted[key]
                 else:
-                    # A transcript-only resume has no in-memory pending card. Its immutable rows still name the owner.
-                    rows = [row for row in await self.store.load(run.session_id)
-                            if row.kind in {"input", "response", "tool_result"}]
-                    for pair in hosted_completions(tuple(row.message for row in rows)):
-                        if rows[pair.result_position].row_id == row_id and pair.result.id == block.id:
-                            activity = replace(activity, response_id=rows[pair.use_position].row_id)
+                    rows = await self._transcript_rows(run)
+                    history = tuple(
+                        row for row in rows if row.kind in {"response", "tool_result"} and row.message is not None
+                    )
+                    for pair in hosted_completions(tuple(row.message for row in history)):
+                        if history[pair.result_position].row_id == row_id and pair.result.id == block.id:
+                            activity = replace(activity, response_id=history[pair.use_position].row_id)
                             break
             await self._emit_hosted(run, activity)
 

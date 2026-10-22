@@ -3456,6 +3456,72 @@ async def test_anthropic_deferred_search_is_one_live_and_reloaded_card_and_one_i
     else:
         assert all("cut off" in line.lower() for line in lines)
 
+async def test_restart_resume_rehydrates_a_deferred_card_before_stop(
+    engine, session, tmp_path, published, monkeypatch
+) -> None:
+    """A restart keeps a deferred native card held for IM until the resumed Turn settles."""
+    harness = _Harness(engine, tmp_path, "telegram", [])
+    first = harness.request("search after restart")
+    turn_id = _turn(first.context)
+    harness.controller.hub_source_id = "src_served00001"
+    harness.controller._native_start(first.context)
+    harness.agent.store.bind_agent(SESSION, None, turn_id=turn_id)
+    await harness.agent.store.consume_input(
+        SESSION, first.context.platform_specific["delivery_id"], UserMessage((text("search after restart"),))
+    )
+    hosted_id = "srvtoolu_restart"
+    pending = HostedToolBlock(
+        id=hosted_id,
+        tool="web_search",
+        action=HostedAction(type="search", queries=("restart search",)),
+        record=HostedRecord(status="pending"),
+        native=HostedNative(
+            source_id="src_served00001",
+            payload=({"type": "server_tool_use", "id": hosted_id, "name": "web_search", "input": {"query": "restart search"}},),
+        ),
+    )
+    response = AssistantMessage(
+        (pending, ToolCallBlock(id="toolu_client", name="echo", arguments={})),
+        ORIGIN,
+        "tool_use",
+        hosted_summary=HostedSummary(),
+        source_identity="sha256:" + "a1" * 32,
+    )
+    await harness.agent.store.append_response(SESSION, response, final=False)
+    await harness.agent.store.append_tool_result(
+        SESSION, ToolResultMessage("toolu_client", "echo", (text("client result"),)), details={}
+    )
+    with engine.begin() as conn:
+        turn = message_deliveries.get_turn(conn, turn_id)
+        assert message_deliveries.rotate_restart_generation(
+            conn, turn_id, expected_version=int(turn["version"]), streak=1, response_seq=2
+        )
+
+    harness.controller.message_dispatcher = ConsolidatedMessageDispatcher(harness.controller)
+    harness.new_agent()
+    entered_preflight, release_preflight = asyncio.Event(), asyncio.Event()
+    original_preflight = harness.agent._preflight
+
+    async def blocked_preflight(run):
+        entered_preflight.set()
+        await release_preflight.wait()
+        return await original_preflight(run)
+
+    monkeypatch.setattr(harness.agent, "_preflight", blocked_preflight)
+    context = _context("telegram", SESSION, turn_id=turn_id, delivery_id=first.context.platform_specific["delivery_id"])
+    context.platform_specific.update({"vibey_resume": True, "vibey_source_turn_id": turn_id})
+    resume = AgentRequest(**{**first.__dict__, "context": context, "message": "", "user_message": ""})
+    running = asyncio.create_task(harness.agent.handle_message(resume))
+    await asyncio.wait_for(entered_preflight.wait(), timeout=5)
+    assert await harness.agent.handle_stop(resume)
+    release_preflight.set()
+    await asyncio.wait_for(running, timeout=10)
+
+    lines = [line for line in harness.controller.im_client.sent if "restart search" in line]
+    assert len(lines) == 1
+    assert "cut off" in lines[0].lower()
+
+
 
 def _anthropic_reply(*blocks: str, stop_reason: str) -> str:
     """An Anthropic stream of whole content blocks, each given as its ``content_block_start`` JSON."""
