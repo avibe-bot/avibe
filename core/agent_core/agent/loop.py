@@ -171,6 +171,8 @@ logger = logging.getLogger(__name__)
 
 #: The result of a call a hook's ``end`` or ``skip_tools`` settled without running it (C-3 section 3).
 _SKIPPED = "[skipped by policy]"
+#: Safe model-visible result for a provider tool call whose arguments failed strict JSON validation.
+_MALFORMED_TOOL_CALL = "[tool call skipped: provider returned malformed JSON arguments; no tool was executed]"
 
 
 class _Ended(Exception):
@@ -1044,7 +1046,12 @@ class Agent:
             await self._audit("attempt", payload)
 
     async def _commit_model_message(
-        self, message: AssistantMessage, emit: Callable[..., Awaitable[None]], *, replied: bool
+        self,
+        message: AssistantMessage,
+        emit: Callable[..., Awaitable[None]],
+        *,
+        replied: bool,
+        keep_open: bool = False,
     ) -> tuple[ContextEntry, bool]:
         """Commit the response: its row, and whether it is final. Finality and queued-input admission share one lock
         with the commit. ``replied`` is the run's decision whether it replies, which the store takes as given."""
@@ -1062,7 +1069,7 @@ class Agent:
                 # A completed reply the pending input took the final word from: one cut off at its output limit
                 # never completed, as ``final_outcome`` holds for a final.
                 superseded = bool(pending) and replied and message.stop_reason != "length"
-                if final or failed:
+                if (final or failed) and not keep_open:
                     self._open = False
                 row = await self._response(message, final=final, replied=replied, superseded=superseded)
                 for item, is_steer in pending:
@@ -1087,61 +1094,85 @@ class Agent:
         first_selection: Optional[ModelSelection] = selected
         length_tool_retries = 0
         while True:
+            malformed_recovery: Optional[tuple[ProviderError, dict[str, Tool], ContextEntry]] = None
             async with self._model(system, emit, first_selection) as (terminal, tools):
                 first_selection = None
                 if isinstance(terminal, ProviderError):
-                    if terminal.partial is not None and not terminal.partial.content:
-                        # A usage-only partial is attempt data, never context; the ledger audits it.
-                        terminal = replace(terminal, partial=None)
-                    reason = (
-                        "context_exhausted"
-                        if terminal.kind == "overflow"
-                        else "aborted"
-                        if terminal.kind == "aborted"
-                        else "error"
-                    )
-                    decided = self._outcome.primary(reason)
-                    # ``aborted`` is the loop's own cancellation and ``overflow`` says our request was too large;
-                    # every other provider error is the source's.
-                    origin = "local" if terminal.kind in {"aborted", "overflow"} else "source"
-                    await self._error(
-                        emit, terminal.kind, terminal.message, origin, cause=decided, provider_error=terminal
-                    )
-                    if terminal.partial is not None:
-                        row = await self._response(terminal.partial, final=False)
-                        await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=False)
-                    return reason
-                message = terminal.message
-                failed = message.stop_reason in {"error", "aborted"}
-                if not (message.tool_calls and message.stop_reason == "length"):
-                    length_tool_retries = 0
-                if failed:
-                    aborted = message.stop_reason == "aborted"
-                    decided = self._outcome.primary("aborted" if aborted else "error")
-                    await self._error(
-                        emit,
-                        message.stop_reason,
-                        message.error_message or f"Model stopped with {message.stop_reason}.",
-                        "local" if aborted else "source",
-                        cause=decided,
-                    )
-                # Decided once: the empty-reply test, the row's type and settlement all take it (``has_reply``).
-                replied = has_reply(message, generated_images=bool(self._generated_images))
-                response, final = await self._commit_model_message(message, emit, replied=replied)
-                empty_reply = final and not replied
-                truncated_reply = final and message.stop_reason == "length"
-                if empty_reply or truncated_reply:
-                    decided = self._outcome.primary("error")
-                    await self._error(
-                        emit,
-                        message.stop_reason if message.stop_reason in {"length", "refusal", "safety"} else "empty_response",
-                        message.error_message or (
-                            "The model reached its output limit before completing the reply."
-                            if truncated_reply else f"Model stopped with {message.stop_reason} without a reply."
-                        ),
-                        "source",
-                        cause=decided,
-                    )
+                    malformed = terminal.malformed_tool_calls
+                    if terminal.partial is not None and malformed:
+                        calls_by_id = {call.id: call for call in terminal.partial.tool_calls}
+                        malformed_by_id = {item.id: item for item in malformed}
+                        if (
+                            terminal.partial.stop_reason == "error"
+                            and len(malformed_by_id) == len(malformed)
+                            and all(
+                                item.id in calls_by_id and calls_by_id[item.id].name == item.name
+                                for item in malformed
+                            )
+                        ):
+                            replied = has_reply(terminal.partial, generated_images=bool(self._generated_images))
+                            response, _ = await self._commit_model_message(
+                                terminal.partial, emit, replied=replied, keep_open=True
+                            )
+                            malformed_recovery = (terminal, tools, response)
+                    if malformed_recovery is None:
+                        if terminal.partial is not None and not terminal.partial.content:
+                            # A usage-only partial is attempt data, never context; the ledger audits it.
+                            terminal = replace(terminal, partial=None)
+                        reason = (
+                            "context_exhausted"
+                            if terminal.kind == "overflow"
+                            else "aborted"
+                            if terminal.kind == "aborted"
+                            else "error"
+                        )
+                        decided = self._outcome.primary(reason)
+                        # ``aborted`` is the loop's own cancellation and ``overflow`` says our request was too large;
+                        # every other provider error is the source's.
+                        origin = "local" if terminal.kind in {"aborted", "overflow"} else "source"
+                        await self._error(
+                            emit, terminal.kind, terminal.message, origin, cause=decided, provider_error=terminal
+                        )
+                        if terminal.partial is not None:
+                            row = await self._response(terminal.partial, final=False)
+                            await emit(MessageCommitted, message_id=row.row_id, context_seq=row.context_seq, final=False)
+                        return reason
+                if malformed_recovery is None:
+                    message = terminal.message
+                    failed = message.stop_reason in {"error", "aborted"}
+                    if not (message.tool_calls and message.stop_reason == "length"):
+                        length_tool_retries = 0
+                    if failed:
+                        aborted = message.stop_reason == "aborted"
+                        decided = self._outcome.primary("aborted" if aborted else "error")
+                        await self._error(
+                            emit,
+                            message.stop_reason,
+                            message.error_message or f"Model stopped with {message.stop_reason}.",
+                            "local" if aborted else "source",
+                            cause=decided,
+                        )
+                    # Decided once: the empty-reply test, the row's type and settlement all take it (``has_reply``).
+                    replied = has_reply(message, generated_images=bool(self._generated_images))
+                    response, final = await self._commit_model_message(message, emit, replied=replied)
+                    empty_reply = final and not replied
+                    truncated_reply = final and message.stop_reason == "length"
+                    if empty_reply or truncated_reply:
+                        decided = self._outcome.primary("error")
+                        await self._error(
+                            emit,
+                            message.stop_reason if message.stop_reason in {"length", "refusal", "safety"} else "empty_response",
+                            message.error_message or (
+                                "The model reached its output limit before completing the reply."
+                                if truncated_reply else f"Model stopped with {message.stop_reason} without a reply."
+                            ),
+                            "source",
+                            cause=decided,
+                        )
+            if malformed_recovery is not None:
+                recovery_error, tools, response = malformed_recovery
+                message = recovery_error.partial
+                assert message is not None
             # aclose failures are diagnostics, never a reason to discard the
             # committed response or skip its tools. Primary errors precede them.
             await self._flush_diagnostics(emit)
@@ -1152,6 +1183,50 @@ class Agent:
                     end = True
                     break
                 skip = skip or isinstance(decision, SkipTools)
+            if malformed_recovery is not None:
+                recovery_message = message
+                malformed_ids = {call.id for call in recovery_error.malformed_tool_calls}
+                skip_calls = {call_id: _MALFORMED_TOOL_CALL for call_id in malformed_ids}
+                terminate, step_end = await self._calls(
+                    recovery_message.tool_calls,
+                    response,
+                    tools,
+                    emit,
+                    skip=_SKIPPED if skip or end else None,
+                    skip_calls=skip_calls,
+                )
+                if end or step_end:
+                    self._open = False
+                    await self._error(
+                        emit,
+                        recovery_error.kind,
+                        recovery_error.message,
+                        "source",
+                        cause=False,
+                        provider_error=recovery_error,
+                    )
+                    return "ended_by_hook"
+                if terminate:
+                    self._open = False
+                    await self._error(
+                        emit,
+                        recovery_error.kind,
+                        recovery_error.message,
+                        "source",
+                        cause=False,
+                        provider_error=recovery_error,
+                    )
+                    return "completed"
+                await self._error(
+                    emit,
+                    recovery_error.kind,
+                    recovery_error.message,
+                    "source",
+                    cause=True,
+                    provider_error=recovery_error,
+                )
+                await self._drain_steers(emit)
+                return "error"
             if message.tool_calls and message.stop_reason != "tool_use":
                 reason = message.stop_reason
                 skip_reason = (
@@ -1259,9 +1334,11 @@ class Agent:
         emit: Callable[..., Awaitable[None]],
         *,
         skip: Optional[str] = None,
+        skip_calls: Optional[Mapping[str, str]] = None,
     ) -> tuple[bool, bool]:
         """A response's calls, group after group (C-3 sections 2 and 3): whether a result terminates the run, and
-        whether a hook ended it. ``skip`` settles every call with that text instead, one at a time, running none."""
+        whether a hook ended it. ``skip`` settles every call with that text instead, one at a time, running none;
+        ``skip_calls`` settles only the named calls and does not expose them as started work."""
         terminate = end = False
         for group in [[call] for call in calls] if skip is not None else self._groups(calls, tools):
             self._scope.check()
@@ -1269,8 +1346,9 @@ class Agent:
             gated: list[tuple[ToolCallBlock, Optional[ToolResult], bool]] = []
             for original in group:
                 call = deepcopy(original)
-                if skip is not None or end:
-                    gated.append((call, ToolResult((text(skip or _SKIPPED),), is_error=True), False))
+                call_skip = (skip_calls or {}).get(call.id)
+                if skip is not None or call_skip is not None or end:
+                    gated.append((call, ToolResult((text(call_skip or skip or _SKIPPED),), is_error=True), False))
                     continue
                 call, result, ended = await self._gate(call, self.hooks)
                 if result is None and call.name not in tools:
@@ -1280,12 +1358,13 @@ class Agent:
             running: dict[int, asyncio.Task[ToolResult]] = {}
             try:
                 for index, (call, result, _) in enumerate(gated):
-                    await emit(
-                        ToolStarted,
-                        tool_call_id=call.id,
-                        name=call.name,
-                        preview=json.dumps(call.arguments, ensure_ascii=False)[:500],
-                    )
+                    if call.id not in (skip_calls or {}):
+                        await emit(
+                            ToolStarted,
+                            tool_call_id=call.id,
+                            name=call.name,
+                            preview=json.dumps(call.arguments, ensure_ascii=False)[:500],
+                        )
                     if result is None:
                         instance = CallInstance(response.session_id, response.row_id, response.context_seq, call.id)
                         running[index] = asyncio.create_task(self._execute(tools[call.name], call, instance, emit))
@@ -1302,7 +1381,12 @@ class Agent:
                                 break
                             if isinstance(decision, AlterResult):
                                 result = decision.result
-                    await self._commit_result(call, result, emit)
+                    await self._commit_result(
+                        call,
+                        result,
+                        emit,
+                        emit_finished=call.id not in (skip_calls or {}),
+                    )
                     terminate = terminate or result.terminate
             finally:
                 await self._join(running.values())
@@ -1323,7 +1407,12 @@ class Agent:
             raise
 
     async def _commit_result(
-        self, call: ToolCallBlock, result: ToolResult, emit: Callable[..., Awaitable[None]]
+        self,
+        call: ToolCallBlock,
+        result: ToolResult,
+        emit: Callable[..., Awaitable[None]],
+        *,
+        emit_finished: bool = True,
     ) -> None:
         message = ToolResultMessage(call.id, call.name, result.content, result.is_error, hosted=result.hosted)
         validate_message_append(self._rows, session_id=self.session_id, kind="tool_result", message=message)
@@ -1338,13 +1427,14 @@ class Agent:
         if committed is not None and committed.record.status == "completed":
             # Only an image a surface can deliver counts toward the reply, and is carried with it.
             self._generated_images.extend(image for image in committed.record.images or () if image_deliverable(image))
-        await emit(
-            ToolFinished,
-            tool_call_id=call.id,
-            event_id=row.row_id,
-            is_error=result.is_error,
-            watch_id=result.details.get("watch_id"),
-        )
+        if emit_finished:
+            await emit(
+                ToolFinished,
+                tool_call_id=call.id,
+                event_id=row.row_id,
+                is_error=result.is_error,
+                watch_id=result.details.get("watch_id"),
+            )
 
     async def _execute(
         self,

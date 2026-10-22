@@ -208,6 +208,18 @@ class Done:
 
 
 @dataclass(frozen=True)
+class MalformedToolCall:
+    """A provider tool call whose final JSON arguments were not a JSON object.
+
+    This carries only canonical call identity. The malformed provider bytes never
+    cross the adapter boundary or enter the transcript.
+    """
+
+    id: str
+    name: str
+
+
+@dataclass(frozen=True)
 class ProviderError:
     kind: ErrorKind
     message: str
@@ -224,6 +236,10 @@ class ProviderError:
     #: Permission to continue from the committed transcript, not replay this request. False by default:
     #: only a classified transient failure grants it, even when streaming makes ``retryable`` false.
     continuable: bool = False
+    #: Malformed final arguments are still strict protocol errors, but this
+    #: narrow metadata grants Vibey one transcript-only recovery. The partial
+    #: contains safe empty arguments for these calls; the loop must not execute them.
+    malformed_tool_calls: tuple[MalformedToolCall, ...] = ()
 
 
 @dataclass(frozen=True)

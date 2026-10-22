@@ -37,7 +37,7 @@ from sqlalchemy import select, update
 from config.v2_config import ModelHubConfig
 from core.agent_core.agent.events import NAMED_ERROR_KINDS, ToolFinished
 from core.agent_core.agent.recovery import UNRECORDED_EFFECT
-from core.agent_core.ai.provider import Done
+from core.agent_core.ai.provider import Done, MalformedToolCall
 from core.agent_core.harness.projection import project
 from core.agent_core.messages import (
     AssistantMessage,
@@ -59,6 +59,7 @@ from core.agent_core.messages import (
     ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
+    Usage,
     UserMessage,
     text,
     message_from_dict,
@@ -1307,6 +1308,125 @@ async def test_a_transient_failure_continues_from_the_same_transcript_without_a_
     assert harness.rows("notify") == []
     assert harness.controller.im_client.sent == ["recovered"]
     assert harness.controller.terminals[-1]["is_error"] is False
+
+
+async def test_malformed_tool_arguments_recover_without_executing_the_bad_call(
+    engine, session, tmp_path, published, continuation_policy
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+
+    continuation_policy(initial_delay_s=0)
+    valid = ToolCallBlock(id="call_valid", name="echo", arguments={"value": "ok"})
+    malformed = ToolCallBlock(id="call_bad", name="echo", arguments={})
+    partial = AssistantMessage(
+        (text("before"), valid, malformed), ORIGIN, "error", usage=Usage(input_tokens=17, output_tokens=23)
+    )
+    failure = ProviderError(
+        "invalid_request",
+        "malformed tool arguments: expected a JSON object",
+        False,
+        partial=partial,
+        continuable=True,
+        malformed_tool_calls=(MalformedToolCall(id=malformed.id, name=malformed.name),),
+    )
+    tool = FakeTool("echo")
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "telegram",
+        [[failure], [Done(assistant("recovered"))]],
+        tools=[tool],
+    )
+
+    await harness.agent.handle_message(harness.request("run the safe call"))
+
+    assert len(tool.calls) == 1
+    assert tool.calls[0][0] == {"value": "ok"}
+    assert len(harness.provider.requests) == 2
+    resumed = harness.provider.requests[1].messages
+    assert any(
+        isinstance(message, ToolResultMessage)
+        and message.tool_call_id == malformed.id
+        and message.is_error
+        for message in resumed
+    )
+    rows = await harness.context_rows()
+    responses = [row for row in rows if row.kind == "response"]
+    assert responses[0].message.stop_reason == "error"
+    assert responses[0].message.tool_calls == (valid, malformed)
+    results = [row.message for row in rows if row.kind == "tool_result"]
+    assert len(results) == 2
+    assert any(result.tool_call_id == malformed.id and result.is_error for result in results)
+    assert any(
+        "malformed JSON arguments" in block.text
+        for result in results
+        for block in result.content
+        if isinstance(block, TextBlock)
+    )
+    assert harness.controller.im_client.sent == ["before", "recovered"]
+    with engine.connect() as conn:
+        assert conn.execute(
+            select(agent_events.c.id).where(
+                agent_events.c.session_id == SESSION, agent_events.c.event_type == "model_attempt"
+            )
+        ).first() is None
+    assert harness.controller.terminals[-1]["is_error"] is False
+
+
+async def test_malformed_tool_recovery_honors_a_terminating_valid_sibling(
+    engine, session, tmp_path, published, continuation_policy
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+
+    continuation_policy(initial_delay_s=0)
+    valid = ToolCallBlock(id="call_valid", name="echo", arguments={"value": "stop"})
+    malformed = ToolCallBlock(id="call_bad", name="echo", arguments={})
+    failure = ProviderError(
+        "invalid_request",
+        "malformed tool arguments: expected a JSON object",
+        False,
+        partial=AssistantMessage((valid, malformed), ORIGIN, "error"),
+        continuable=True,
+        malformed_tool_calls=(MalformedToolCall(id=malformed.id, name=malformed.name),),
+    )
+    tool = FakeTool("echo", result=ToolResult((text("terminated"),), terminate=True))
+    harness = _Harness(engine, tmp_path, "telegram", [[failure]], tools=[tool])
+
+    await harness.agent.handle_message(harness.request("stop after the safe call"))
+
+    assert len(harness.provider.requests) == 1
+    assert len(tool.calls) == 1
+    assert harness.controller.terminals[-1]["is_error"] is False
+
+
+async def test_malformed_hosted_tool_does_not_emit_tool_activity(
+    engine, session, tmp_path, published, continuation_policy
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+
+    continuation_policy(initial_delay_s=0)
+    malformed = ToolCallBlock(id="call_hosted", name="web_search", arguments={})
+    failure = ProviderError(
+        "invalid_request",
+        "malformed tool arguments: expected a JSON object",
+        False,
+        partial=AssistantMessage((malformed,), ORIGIN, "error"),
+        continuable=True,
+        malformed_tool_calls=(MalformedToolCall(id=malformed.id, name=malformed.name),),
+    )
+    tool = FakeTool("web_search")
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "telegram",
+        [[failure], [Done(assistant("recovered"))]],
+        tools=[tool],
+    )
+
+    await harness.agent.handle_message(harness.request("search safely"))
+
+    assert tool.calls == []
+    assert not any(item.startswith("🔧 web_search") for item in harness.controller.im_client.sent)
 
 
 async def test_a_continuation_reuses_a_committed_tool_result_without_rerunning_the_tool(
