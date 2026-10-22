@@ -436,14 +436,20 @@ its conforming HTTP 202 response with an empty body as success. Do not apply
 that empty-body exception to `initialize`, `tools/list`, or `tools/call`, which
 must return a matching JSON-RPC response.
 
-Later calls reuse the session and cached tool schema, sending only the
-`tools/call`. A missing/expired session is reinitialized once before the call
-is admitted. If a `tools/call` receives the MCP session-not-found response (the
-standard HTTP 404/session error, not an endpoint/protocol 404), clear the stale
-session, initialize/list again, and replay that one call once within the
-original deadline; this is safe because the server has not accepted the tool
-call. Once the replay's `tools/call` request bytes begin, Avibe never retries it
-automatically: a retry could duplicate a search and a usage request.
+Later calls reuse the session, but each admitted search refreshes `tools/list`
+under the same lock before mapping arguments; this bounded refresh is the
+authoritative protection against schema changes when no idle receive stream is
+open. It is not a new search request and does not increment usage. A
+`notifications/tools/list_changed` message received in any active response
+stream still invalidates the cache immediately, so the next call's mandatory
+refresh uses the new schema. A missing/expired session is reinitialized once
+before the request. If a session-bound `tools/list` or `tools/call` receives
+the MCP session-not-found response (the standard HTTP 404/session error, not
+an endpoint/protocol 404), clear the stale session, initialize/list again, and
+replay the affected pre-tool request once within the original deadline; this is
+safe because the server has not accepted the tool call. Once the replay's
+`tools/call` request bytes begin, Avibe never retries it automatically: a retry
+could duplicate a search and a usage request.
 
 Every exchange uses `Accept: application/json, text/event-stream`,
 `Content-Type: application/json`, and the retained negotiated
@@ -451,11 +457,12 @@ Every exchange uses `Accept: application/json, text/event-stream`,
 `x-exa-source: avibe`. The response parser accepts both the Streamable HTTP SSE
 `event: message` / `data: <JSON-RPC>` shape and a single `application/json`
 JSON-RPC response, matching the response id in either form. A
-`notifications/tools/list_changed` notification is not discarded as unrelated:
-it invalidates the cached schema, and the next call (under the same lock) runs
-`tools/list` again before building arguments. The 8 MiB existing
-response-body cap applies to either response form; notifications are processed
-only within that cap.
+`notifications/tools/list_changed` notification is not discarded as
+unrelated: it invalidates any cached schema, and the next call's mandatory
+`tools/list` refresh runs before building arguments. The implementation does
+not depend on an always-open idle receive stream; the bounded per-call refresh
+is the correctness rule. The 8 MiB existing response-body cap applies to either
+response form; notifications are processed only within that cap.
 
 No API key, bearer token, Vault reference, or user credential is present in the
 MCP request. The adapter is still the custody/transport boundary and returns
@@ -554,8 +561,11 @@ Usage records one request for every sent search `tools/call`; initialize,
 `tools/list`, and notifications are not search requests. Keyless Exa's
 `billable_requests` and `reported_requests` remain zero, `api_cost_usd` is
 zero, and no lower-bound flag is introduced by an interrupted free request.
-Usage still exposes the request count so the user can see how often the built-in
-fallback was used.
+The usage reader resolves `src_exakeyless` through the built-in catalog and
+synthesizes its stable `Exa（免费）` / `Exa (free)` label and service identity;
+it must never classify these rows as a removed Source merely because the
+Source is not in `model_hub.sources[]`. Usage still exposes the request count
+so the user can see how often the built-in fallback was used.
 
 ## 7. UI specification
 
@@ -580,7 +590,11 @@ and native-preference switch. In the visible **搜索顺序 / Search order** lis
 - A cooldown row remains in place and says, for example,
   **Exa（免费）暂时限流 · 稍后重试 / Exa (free) rate-limited · retry later**,
   with the existing `cooldown_until` detail and **立即重试 / Retry now** action.
-  It never says “密钥无效 / invalid key”.
+  The action calls `POST /api/models/hosted-tools/web_search/services/src_exakeyless/retry`
+  with `service_id: "exa/mcp"`; the controller resolves this built-in catalog
+  entry before user Sources, clears only its in-memory cooldown, and returns the
+  normal empty success. It must not call the ordinary `_source` lookup, create a
+  credential Source, or show a key repair. It never says “密钥无效 / invalid key”.
 - The caption explicitly says the current automatic order:
   **已添加的搜索服务 → 已启用的官方 DeepSeek → Exa（免费） → 模型代搜；可拖动调整。/ Your added
   search services → enabled official DeepSeek → Exa (free) → model
@@ -714,7 +728,9 @@ flip plus public docs together**.
 
 | Lane | Scope | Gate |
 | --- | --- | --- |
-| KEX-1 readers and catalog | Add the built-in catalog/read shape, `src_exakeyless` defaulting and old-order reader behavior; extend status/candidate, attempts, service-origin, usage, activity, and UI readers/types/fixtures; add contract mirrors and released-shape compatibility tests. No network call. | `KEYLESS_EXA_ACTIVE = false`; all existing service behavior remains unchanged. |
+| KEX-1 readers and catalog | Add the built-in catalog/read shape, `src_exakeyless` defaulting and old-order reader behavior; extend status/candidate, attempts, service-origin, usage, activity, and UI readers/types/fixtures; add contract
+mirrors, the built-in cooldown-retry RPC/route branch, and released-shape
+compatibility tests. No network call. | `KEYLESS_EXA_ACTIVE = false`; all existing service behavior remains unchanged. |
 | KEX-2 producer | Add the adapter's keyless MCP session boundary, schema adaptation, SSE/JSON-RPC parser, highlights-only mapping, rate-limit detection/cooldown, service outcomes, usage writes, and UI actions behind the same flag. Use only stub MCP servers. | Flag-off control stays green; flag-on focused tests prove the new path. |
 | KEX-3 activation and public docs | Re-check contract tags, flip the producer/read predicate together, publish the English/Chinese privacy/default/UI copy, and run exact-head review/CI. | No activation before the public disclosure is present. |
 
@@ -779,9 +795,10 @@ JSON-RPC fixtures:
 - Exa notice-prefixed no-results text is normalized to a completed empty record.
 - `web_fetch_exa` is a phase-2 parser fixture only; no phase-2 production
   activation is implied by the test.
-- Session reuse sends one initialize/list for two searches; an expired session
-  returns the standard session-not-found 404 and reconnects/replays once before
-  admission; a connection failure after the call is sent is not retried.
+- Session reuse sends one initialize and one `tools/list` refresh per search for
+  two searches; an expired session returns the standard session-not-found 404 and
+  reconnects/replays the affected pre-tool request once before admission; a
+  connection failure after the call is sent is not retried.
 - The stub can emit `notifications/tools/list_changed`; the cached schema is
   invalidated and the next call performs `tools/list` before mapping arguments.
 - Two parallel cold starts share one initialize/list lifecycle under the lock,
@@ -801,6 +818,10 @@ JSON-RPC fixtures:
 - Attempts, service origin, exact-zero cost, request-only usage, no lower-bound
   charge, and cooldown projection (including an active cooldown shorter than
   60 seconds) are asserted at their owning boundaries.
+- The controller's actual Retry now POST clears a short and a long built-in
+  cooldown through the synthetic Source branch, without looking for a
+  credential Source; the usage projection keeps keyless rows labeled Exa (free)
+  rather than Removed providers.
 - The Tools read/UI fixtures cover the always-present row, saved-partial versus
   effective settings, disabled-tail visibility, free label, egress fact, inline
   switch, reorder controls, add-dialog keyed Exa distinction, detail panel, Chat
