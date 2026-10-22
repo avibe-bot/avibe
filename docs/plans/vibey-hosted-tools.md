@@ -473,7 +473,11 @@ C-5's commit boundary, so its completion is append-only:
 - The Web projects append-only activity fragments by the original `(response_id, call_id)`: one card, searching
   while deferred, completed with sources when the result arrives, interrupted only after settlement without a
   result. Live and reloaded cards use that same owner. IM holds the provisional card and emits it once on completion
-  or final settlement, including Stop and error; it may follow the client-tool lines.
+  or final settlement, including Stop and error; it may follow the client-tool lines. A restart rebuilds only
+  pending cards owned by the resumed durable Turn, not unmatched fragments from settled Turns or fork ancestry.
+  Completion ownership includes the original response row, so a reused provider call id cannot settle another
+  call. Restoration shares the surviving client-tool wait's cancellation guard; a service shutdown leaves that
+  work for the next restart, while cancellation outside shutdown stops it.
 
 Provider source, fetched **2026-10-22**: [Server tools — Mixing server tools and client tools in one turn](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools.md).
 

@@ -2702,7 +2702,7 @@ async def test_a_restart_rerun_ends_with_the_final_its_cut_run_committed(
     "case",
     [
         "exits", "window_passed", "watch_unavailable", "stop", "cancelled", "cancelled_at_shutdown", "stopped_left_open",
-        "stop_pending", "cancel_pending",
+        "stop_pending", "cancel_pending", "cancelled_restoring", "cancelled_restoring_at_shutdown",
     ],
 )
 async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_would(
@@ -2823,17 +2823,30 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
             }
         )
 
+        restoring = asyncio.Event()
+        if case in {"cancelled_restoring", "cancelled_restoring_at_shutdown"}:
+            # Stop the first transcript read inside card restoration, before _resume can own the job.
+            load = harness.agent.store.load
+            async def blocked_first_load(session_id):
+                if not restoring.is_set():
+                    restoring.set()
+                    await asyncio.Event().wait()
+                return await load(session_id)
+            monkeypatch.setattr(harness.agent.store, "load", blocked_first_load)
         resumed = asyncio.create_task(harness.agent.handle_message(resume))
-        if case in {"cancelled", "cancelled_at_shutdown"}:
-            await _until(lambda: harness.agent._run_for(SESSION, cut_turn) is not None, "the rerun never ran")
-            await asyncio.sleep(0.3)
-            harness.controller.shutdown_requested = case == "cancelled_at_shutdown"
+        if case in {"cancelled", "cancelled_at_shutdown", "cancelled_restoring", "cancelled_restoring_at_shutdown"}:
+            if case.startswith("cancelled_restoring"):
+                await asyncio.wait_for(restoring.wait(), timeout=5)
+            else:
+                await _until(lambda: harness.agent._run_for(SESSION, cut_turn) is not None, "the rerun never ran")
+                await asyncio.sleep(0.3)
+            harness.controller.shutdown_requested = case.endswith("at_shutdown")
             # The Turn task is cancelled directly, without ``handle_stop``.
             resumed.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(resumed, timeout=20)
             results = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
-            if case == "cancelled":
+            if not harness.controller.shutdown_requested:
                 assert "Stopped by the user" in results[0].message.content[0].text
                 assert suite.jobs.status(job_id).state != "running"
             else:
@@ -3456,11 +3469,13 @@ async def test_anthropic_deferred_search_is_one_live_and_reloaded_card_and_one_i
     else:
         assert all("cut off" in line.lower() for line in lines)
 
+@pytest.mark.parametrize("owner", ["resumed_turn", "older_turn", "reused_id", "multiple_pending"])
 async def test_restart_resume_rehydrates_a_deferred_card_before_stop(
-    engine, session, tmp_path, published, monkeypatch
+    engine, session, tmp_path, published, monkeypatch, owner
 ) -> None:
-    """A restart keeps a deferred native card held for IM until the resumed Turn settles."""
+    """Only this Turn's pending search is held for IM; an older Turn's fragment is not live work."""
     harness = _Harness(engine, tmp_path, "telegram", [])
+    harness.controller.im_client.supports_message_editing = lambda context=None: False
     first = harness.request("search after restart")
     turn_id = _turn(first.context)
     harness.controller.hub_source_id = "src_served00001"
@@ -3491,6 +3506,50 @@ async def test_restart_resume_rehydrates_a_deferred_card_before_stop(
     await harness.agent.store.append_tool_result(
         SESSION, ToolResultMessage("toolu_client", "echo", (text("client result"),)), details={}
     )
+    if owner == "reused_id":
+        completed = HostedToolBlock(
+            id=hosted_id, tool="web_search", action=pending.action,
+            record=HostedRecord(status="completed"),
+            native=HostedNative(source_id=pending.native.source_id, payload=(
+                {"type": "web_search_tool_result", "tool_use_id": hosted_id, "content": []},
+            )),
+        )
+        await harness.agent.store.append_response(
+            SESSION, AssistantMessage(
+                (completed,), ORIGIN, "stop", hosted_summary=HostedSummary(), source_identity=response.source_identity,
+            ), final=True,
+        )
+    if owner == "multiple_pending":
+        from dataclasses import replace
+
+        other = replace(
+            pending, id="srvtoolu_other", action=HostedAction(type="search", queries=("restart search other",)),
+            native=HostedNative(
+                source_id=pending.native.source_id,
+                payload=({**pending.native.payload[0], "id": "srvtoolu_other", "input": {"query": "restart search other"}},),
+            ),
+        )
+        await harness.agent.store.append_response(
+            SESSION, replace(response, content=(other, ToolCallBlock(id="client_other", name="echo", arguments={}))),
+            final=False,
+        )
+        await harness.agent.store.append_tool_result(
+            SESSION, ToolResultMessage("client_other", "echo", (text("other client result"),)), details={}
+        )
+    if owner in {"older_turn", "reused_id"}:
+        # A later Turn in the same Session resumes after a restart. Provider ids are not global identities.
+        first = harness.request("another task")
+        turn_id = _turn(first.context)
+        harness.controller._native_start(first.context)
+        harness.agent.store.bind_agent(SESSION, None, turn_id=turn_id)
+        await harness.agent.store.consume_input(
+            SESSION, first.context.platform_specific["delivery_id"], UserMessage((text("another task"),))
+        )
+        if owner == "reused_id":
+            await harness.agent.store.append_response(SESSION, response, final=False)
+            await harness.agent.store.append_tool_result(
+                SESSION, ToolResultMessage("toolu_client", "echo", (text("new client result"),)), details={}
+            )
     with engine.begin() as conn:
         turn = message_deliveries.get_turn(conn, turn_id)
         assert message_deliveries.rotate_restart_generation(
@@ -3518,8 +3577,8 @@ async def test_restart_resume_rehydrates_a_deferred_card_before_stop(
     await asyncio.wait_for(running, timeout=10)
 
     lines = [line for line in harness.controller.im_client.sent if "restart search" in line]
-    assert len(lines) == 1
-    assert "cut off" in lines[0].lower()
+    assert len(lines) == {"older_turn": 0, "multiple_pending": 2}.get(owner, 1)
+    assert all("cut off" in line.lower() for line in lines)
 
 
 

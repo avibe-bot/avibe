@@ -346,11 +346,11 @@ class VibeyAgent(BaseAgent):
         # A transcript resume (a Turn rerun after a restart) gives a job that survived the restart
         # the foreground wait its live call would have, so its real output becomes the call's result.
         resuming = (context.platform_specific or {}).get("vibey_resume") is True
-        # A transcript resume can be stopped before it reaches the continuation. Rebuild the held IM cards from
-        # immutable rows before any resume-side failure or settlement path can run.
-        if resuming:
-            await self._restore_deferred_hosted(turn)
         try:
+            # A transcript resume can be stopped before it reaches the continuation. Rebuild the held IM cards
+            # inside the same cancellation guard as the surviving client-tool wait.
+            if resuming:
+                await self._restore_deferred_hosted(turn)
             await self._resume(runtime, stop=turn.stop_event if resuming else None)
         except asyncio.CancelledError:
             if resuming and getattr(self.controller, "shutdown_requested", False) is not True:
@@ -1718,36 +1718,39 @@ class VibeyAgent(BaseAgent):
         return run.transcript_rows
 
     async def _restore_deferred_hosted(self, run: _Run) -> None:
-        """Rehydrate the latest held native search before a restarted Turn can settle."""
+        """Rehydrate this Turn's held native searches before a restarted Turn can settle."""
         rows = await self._transcript_rows(run)
-        messages = tuple(row.message for row in rows if row.kind in {"response", "tool_result"} and row.message is not None)
-        completions = hosted_completions(messages)
-        completed = {(pair.call.native.source_id, pair.call.id) for pair in completions}
-        pending_entry = next(
-            (
-                row
-                for row in reversed(rows)
-                if row.kind == "response" and isinstance(row.message, AssistantMessage) and pending_hosted(row.message)
-            ),
-            None,
-        )
-        if pending_entry is None or not isinstance(pending_entry.message, AssistantMessage):
+        history = tuple(row for row in rows if row.message is not None)
+        completions = hosted_completions(tuple(row.message for row in history))
+        completed = {(history[pair.use_position].row_id, pair.call.id) for pair in completions}
+        pending_entries = []
+        for row in reversed(rows):
+            if row.kind != "response" or not isinstance(row.message, AssistantMessage):
+                continue
+            # The Session has one Turn writer. Stop at its boundary, including inherited fork rows;
+            # an unmatched immutable fragment from a settled Turn is not live work.
+            _agent, owner_turn = await asyncio.to_thread(self._response_owner, row.row_id)
+            if owner_turn != run.turn_id:
+                break
+            if pending_hosted(row.message):
+                pending_entries.append(row)
+        if not pending_entries:
             return
         names, _states = await self._source_display()
-        pending = pending_hosted(pending_entry.message)
-        activities = {activity.call_id: activity for activity in native_activities(
-            pending_entry.message, source_names=names.get, response_id=pending_entry.row_id
-        )}
-        for call_id, block in pending.items():
-            key = (block.native.source_id, call_id)
-            if key in completed:
-                continue
-            activity = activities.get(call_id)
-            if activity is not None:
-                run.deferred_hosted[key] = (
-                    pending_entry.message,
-                    replace(activity, in_progress=True),
-                )
+        for pending_entry in reversed(pending_entries):
+            pending = pending_hosted(pending_entry.message)
+            activities = {activity.call_id: activity for activity in native_activities(
+                pending_entry.message, source_names=names.get, response_id=pending_entry.row_id
+            )}
+            for call_id, block in pending.items():
+                if (pending_entry.row_id, call_id) in completed:
+                    continue
+                activity = activities.get(call_id)
+                if activity is not None:
+                    run.deferred_hosted[(block.native.source_id, call_id)] = (
+                        pending_entry.message,
+                        replace(activity, in_progress=True),
+                    )
 
     async def _emit_native_hosted(self, run: _Run, row_id: str) -> None:
         message = run.responses.get(row_id)
