@@ -1429,6 +1429,19 @@ class CodexAgent(BaseAgent):
             return
         await self._release_session_thread(generation, base_session_id)
 
+    async def release_native_runtime(self, request: AgentRequest) -> None:
+        """Unload the thread an earlier Codex phase of this Session left bound.
+
+        Without it the in-memory thread mapping, consulted before the row, would
+        resume the conversation the backend switch replaced.
+        """
+        payload = getattr(request.context, "platform_specific", None) or {}
+        base_session_id = str(payload.get("backend_base_session_id") or request.base_session_id or "")
+        if not base_session_id:
+            return
+        async with self.session_lifecycle(base_session_id):
+            await self.release_session_runtime(base_session_id)
+
     async def end_session(self, base_session_id: str) -> dict[str, bool]:
         """End one Session's live runtime, for End in Running Agents.
 

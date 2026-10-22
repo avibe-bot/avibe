@@ -1,7 +1,9 @@
 """Message routing and Agent communication handlers"""
 
+import asyncio
 import logging
 import inspect
+from dataclasses import replace
 from typing import Any, List, Optional, Tuple
 
 from core.audio_asr import (
@@ -13,6 +15,7 @@ from core.agent_input import AgentInputMetadata, harness_label
 from core.backend_failure import emit_backend_failure
 from core.delivery_target import routed_delivery_context
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
+from core.session_handoff import BACKEND_HANDOFF_TURN_KEY
 from core.message_context import (
     resolve_context_platform,
     resolve_context_thread_id,
@@ -816,6 +819,7 @@ class MessageHandler(BaseHandler):
             )
             if processing_indicator is not None:
                 self.controller.processing_indicator.apply_to_request(request, processing_indicator)
+            await self._attach_backend_handoff(context, agent_name, request)
             try:
                 await self.controller.agent_service.handle_message(agent_name, request)
                 agent_dispatched = True
@@ -1377,6 +1381,66 @@ class MessageHandler(BaseHandler):
             return
         spec = dict(context.platform_specific or {})
         spec[HARNESS_PROMPT_ECHO_SPEC_KEY] = message
+        context.platform_specific = spec
+
+    async def _attach_backend_handoff(
+        self, context: MessageContext, backend: str, request: AgentRequest
+    ) -> None:
+        """Prepare a turn of a Session that switched backend and has not continued yet.
+
+        The switch cleared the row's native and left ``backend_handoff``
+        (``docs/plans/2026-10-22-session-backend-switch.md``). The row is read by
+        primary key, whichever projection selected it (a Workbench target or an
+        IM/CLI run target), because a projection can predate the switch. A turn that
+        continues the Session's own conversation on the switched-to backend then:
+
+        - drops any runtime that backend still caches for the Session from an earlier
+          phase, while the row has no native yet, and stops every projection from
+          offering a native the row no longer holds;
+        - carries the handoff in its input, and is tagged so its native-start receipt
+          can spend the marker.
+
+        A turn into a namespaced conversation (a subagent) or on another backend (a
+        one-off Agent run) neither carries nor spends it. Any failure fails the turn
+        before dispatch, so the next turn retries; the first accepted turn on the new
+        native is always one that carried the handoff.
+        """
+        from core.agent_session_context import resolve_context_agent_session_target
+        from core.session_handoff import load_pending_handoff, pending_handoff_for_row
+
+        spec = context.platform_specific or {}
+        if spec.get("vibey_resume") is True:
+            return
+        # The same marks the backends namespace a conversation by: a Claude/Codex
+        # subagent base (set above) or a routing-default subagent.
+        if spec.get("backend_base_session_id") or spec.get("routing_subagent"):
+            return
+        target = resolve_context_agent_session_target(context) or {}
+        session_id = str(target.get("id") or spec.get("agent_session_id") or "").strip()
+        if not session_id:
+            return
+        read_row = getattr(self.sessions, "get_agent_session_by_id", None)
+        if not callable(read_row):
+            return
+        row = await asyncio.to_thread(read_row, session_id)
+        handoff = pending_handoff_for_row(row, backend)
+        if handoff is None:
+            return
+        pending = await asyncio.to_thread(load_pending_handoff, row, handoff, backend)
+        spec = dict(context.platform_specific or {})
+        for key in ("agent_session_target", "agent_run_target"):
+            projection = spec.get(key)
+            if isinstance(projection, dict) and projection.get("native_session_id") != pending.native_session_id:
+                spec[key] = {**projection, "native_session_id": pending.native_session_id}
+        context.platform_specific = spec
+        if not pending.native_session_id:
+            agent = getattr(getattr(self.controller, "agent_service", None), "agents", {}).get(backend)
+            release = getattr(agent, "release_native_runtime", None)
+            if callable(release):
+                await release(request)
+        request.input_metadata = replace(request.input_metadata or AgentInputMetadata(), handoff=pending.text)
+        spec = dict(context.platform_specific or {})
+        spec[BACKEND_HANDOFF_TURN_KEY] = pending.handoff_id
         context.platform_specific = spec
 
     async def prepare_input_metadata(

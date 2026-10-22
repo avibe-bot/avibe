@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -32,6 +33,9 @@ from vibe.authorization import (
 )
 from storage.agent_session_rows import (
     ASSIGNABLE_SESSION_VISIBILITIES,
+    BACKEND_HANDOFF_METADATA_KEY,
+    TERMINAL_SWITCH_BACKEND,
+    insert_superseded_native_snapshot,
     SESSION_PROJECT_BASE_METADATA_KEY,
     WORKSPACE_NOTICE_SESSION_ID,
     create_agent_session_row,
@@ -57,6 +61,7 @@ from storage.models import (
     run_definitions,
     scope_settings,
     scopes,
+    session_turns,
     show_pages,
     state_meta,
     agents,
@@ -938,12 +943,13 @@ class ReservedSessionError(PermissionError):
 
 
 class SessionBackendLockedError(Exception):
-    """Raised when a caller tries to switch the backend of a session that already
-    has a native conversation (pinned for life: the native can only be resumed by
-    the backend that created it, so switching would strand it and silently lose
-    context) or whose turn is currently running (the in-flight turn will bind its
-    native on the current route any moment). Changing the agent WITHIN the same
-    backend stays allowed."""
+    """Raised when a caller tries to change a session's backend while that is not
+    allowed: its turn is running (the in-flight turn will bind its native on the
+    current route any moment), it is a pending fork, it is a bound Vibey session
+    (Vibey is where a bound session can switch to but never away from), or a bound
+    session would be cleared to a blank backend. A bound session on another backend
+    switches by replacing its native conversation (``update_session``). Changing the
+    agent WITHIN the same backend stays allowed."""
 
     def __init__(self, *, session_id: str, current_backend: Optional[str], requested_backend: Optional[str]):
         self.session_id = session_id
@@ -988,10 +994,17 @@ def update_session(
     visibility: Any = _UNSET,
     pinned: Any = _UNSET,
     scope_id: Any = _UNSET,
+    runtime_idle_through_turn: Optional[str] = None,
     authorization_context: AuthorizationContext | Mapping[str, Any] | None = None,
     user_context: Any = None,
 ) -> dict[str, Any]:
     """Apply a caller's edits to one session row.
+
+    A cross-backend change of a BOUND session replaces its native conversation and
+    requires ``runtime_idle_through_turn``: the session's ``latest_session_turn_id``
+    read BEFORE the caller confirmed with the controller that the old backend keeps
+    no background work for it. A turn created after that read could have left such
+    work, so the switch refuses unless the newest turn is still that one.
 
     THE RESERVED WORKSPACE-NOTICE SESSION IS REFUSED HERE TOO, for the same reason
     ``archive_session`` refuses it and on the same IDENTITY test (so the answer does not
@@ -1126,9 +1139,14 @@ def update_session(
     ):
         raise VibeAgentAccessError("Agent access is not permitted.")
 
-    # Backend is pinned once a NATIVE conversation exists: the native can only
-    # be resumed by the backend that created it, so switching (or clearing) the
-    # backend would strand it. A RUNNING turn locks it too — the first turn is
+    # A bound session may change backend by REPLACING its native conversation
+    # (docs/plans/2026-10-22-session-backend-switch.md): the current binding is
+    # kept as an inert superseded snapshot, the active row's native is cleared,
+    # and a ``backend_handoff`` marker makes the new backend's first turn carry a
+    # handoff. Same Avibe session id, so the transcript, deliveries, callbacks,
+    # Watches, Tasks and URL all stay. Two bound cases stay locked: a Vibey
+    # session never leaves Vibey, and a bound row cannot be cleared to a blank
+    # (default) backend. A RUNNING turn locks every backend change — the first turn is
     # already executing on the current route and will bind its native shortly,
     # so a mid-turn switch would either be silently overwritten by the bind-time
     # backfill or route queued follow-ups inconsistently (a stale ``running``
@@ -1144,17 +1162,30 @@ def update_session(
     # backfill keep the old empty -> concrete "initial pin" escape (while idle)
     # — the row doesn't know which backend owns its native, and locking them
     # would leave their picker permanently stuck.
-    backend_changes = agent_backend is not _UNSET and str(agent_backend or "") != str(
-        existing.agent_backend or ""
-    )
+    current_backend = str(existing.agent_backend or "")
+    bound_native = str(existing.native_session_id or "")
+    backend_changes = agent_backend is not _UNSET and str(agent_backend or "") != current_backend
     existing_metadata = _load_metadata(existing.metadata_json)
     pending_fork = bool(
         existing_metadata.get("created_via") == "session_fork"
-        and not str(existing.native_session_id or "")
+        and not bound_native
         and str(existing_metadata.get("fork_source_backend") or "")
     )
+    bound_switch = backend_changes and bool(bound_native and current_backend)
+    if bound_switch and str(agent_backend or "") and not (selector_changed and (agent_name or agent_id)):
+        # The Agent identity routes the next turn ahead of ``agent_backend``; a
+        # backend-only edit would leave the old Agent sending it to the old backend.
+        raise ValueError("A backend switch must select an Agent on the new backend")
     if backend_changes and (
-        (str(existing.native_session_id or "") and str(existing.agent_backend or ""))
+        (bound_switch and (current_backend == TERMINAL_SWITCH_BACKEND or not str(agent_backend or "")))
+        or (bound_switch and conn.execute(_open_turn_for_session(session_id)).first() is not None)
+        or (
+            bound_switch
+            and (
+                runtime_idle_through_turn is None
+                or latest_session_turn_id(conn, session_id) != str(runtime_idle_through_turn)
+            )
+        )
         or str(existing.agent_status or "") == "running"
         or pending_fork
     ):
@@ -1165,6 +1196,35 @@ def update_session(
         )
 
     values: dict[str, Any] = {"updated_at": _utc_now_iso()}
+    if bound_switch:
+        full_row = conn.execute(
+            select(agent_sessions).where(agent_sessions.c.id == session_id)
+        ).mappings().one()
+        insert_superseded_native_snapshot(
+            conn,
+            full_row,
+            now=values["updated_at"],
+            binding={
+                "active_session_id": str(session_id),
+                "replaced_at": values["updated_at"],
+                "reason": "backend_switch",
+                "to_backend": str(agent_backend),
+            },
+        )
+        values["native_session_id"] = ""
+        # A fork already bound its native, so its pending-fork source is spent;
+        # left on a row whose native is empty again it would re-arm the fork
+        # (or pin the picker to the fork's backend) on the next turn.
+        existing_metadata.pop("fork_source_native_session_id", None)
+        existing_metadata.pop("fork_source_backend", None)
+        existing_metadata[BACKEND_HANDOFF_METADATA_KEY] = {
+            "id": uuid.uuid4().hex,
+            "from_backend": current_backend,
+            "from_native": bound_native,
+            "to_backend": str(agent_backend),
+            "switched_at": values["updated_at"],
+        }
+        values["metadata_json"] = _dumps_metadata(existing_metadata)
     if title is not _UNSET:
         cleaned = str(title or "").strip()
         values["title"] = cleaned or None
@@ -1279,7 +1339,23 @@ def update_session(
         .where(agent_sessions.c.id == session_id)
         .where(agent_sessions.c.status != "archived")
     )
-    if backend_changes:
+    if bound_switch:
+        # The switch was decided from this exact binding: still idle, still on
+        # the backend and native the snapshot above recorded, and no durable Turn
+        # owns the session. The Turn row is what the controller writes, under the
+        # same SQLite write lock, before it dispatches anything; ``agent_status``
+        # and the controller's in-memory registry both lag it.
+        stmt = (
+            stmt.where(func.coalesce(agent_sessions.c.agent_status, "idle") != "running")
+            .where(func.coalesce(agent_sessions.c.agent_backend, "") == current_backend)
+            .where(func.coalesce(agent_sessions.c.native_session_id, "") == bound_native)
+            .where(~_open_turn_for_session(session_id).exists())
+            .where(
+                func.coalesce(_latest_turn_for_session(session_id).scalar_subquery(), "")
+                == str(runtime_idle_through_turn)
+            )
+        )
+    elif backend_changes:
         # Re-assert the lock INSIDE the UPDATE: the guard above is read-then-
         # write, and a turn start / native bind can commit in between (the
         # SELECT runs before this statement takes the write lock). The predicate
@@ -1327,6 +1403,38 @@ def update_session(
             requested_backend=agent_backend,
         )
     return get_session(conn, session_id, authorization_context=authorization)
+
+
+def _latest_turn_for_session(session_id: str):
+    return (
+        select(session_turns.c.id)
+        .where(session_turns.c.session_id == str(session_id))
+        .order_by(session_turns.c.created_at.desc(), session_turns.c.id.desc())
+        .limit(1)
+    )
+
+
+def latest_session_turn_id(conn: Connection, session_id: str) -> str:
+    """The session's newest durable Turn id, or ``""``: the watermark a bound backend
+    switch is verified against (``update_session(runtime_idle_through_turn=...)``).
+
+    Every turn, and so every background Activity a turn starts, writes a row here
+    before it dispatches; an unchanged newest id means nothing ran since the read.
+    """
+
+    return str(conn.execute(_latest_turn_for_session(session_id)).scalar_one_or_none() or "")
+
+
+def _open_turn_for_session(session_id: str):
+    """A durable Turn of the session that has not settled: one is starting, running,
+    or queued to start on the backend it was claimed for."""
+
+    return (
+        select(session_turns.c.id)
+        .where(session_turns.c.session_id == str(session_id))
+        .where(session_turns.c.state != "terminal")
+        .limit(1)
+    )
 
 
 def _backend_for_agent_name(conn: Connection, agent_name: str) -> str:

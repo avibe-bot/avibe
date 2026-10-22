@@ -470,6 +470,10 @@ class SessionsStore:
             expected_route=expected_route,
         )
 
+    def get_agent_session_by_id(self, session_id: str) -> Optional[dict]:
+        self._ensure_service()
+        return self._service.get_agent_session_by_id(session_id)
+
     def get_agent_session_runtime_marker(
         self,
         session_id: str,

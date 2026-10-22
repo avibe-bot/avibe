@@ -397,7 +397,8 @@ continuity but does not fail dispatch.
 - Self-heal when the native resume target is gone (Claude/Codex currently fail
   the turn) for sessions with rotation enabled.
 - Backend switch on a bound session through rotation instead of
-  `SessionBackendLockedError`.
+  `SessionBackendLockedError` (done without the rotation triggers:
+  `docs/plans/2026-10-22-session-backend-switch.md`).
 - OpenCode context usage.
 - Agent-authored handoff note.
 

@@ -270,6 +270,71 @@ def test_fsm_template_matches_real_empty_metadata(tmp_path, _fsm_schema_template
         assert clone.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
+def test_durable_binding_refresh_drops_a_native_the_session_switched_away_from() -> None:
+    """A Delivery admitted before a backend switch carries the replaced native in its
+    projections; the durable refresh must replace it with the row's, or the new
+    backend's resume helpers would try to resume the old backend's conversation."""
+    context = _context()
+    context.platform_specific["agent_session_target"].update(
+        {"agent_backend": "codex", "native_session_id": "claude-native"}
+    )
+    context.platform_specific["agent_run_target"] = {
+        "agent_session_id": "ses_fsm",
+        "agent_backend": "codex",
+        "native_session_id": "claude-native",
+    }
+    binding = {"id": "ses_fsm", "agent_backend": "codex", "agent_variant": "codex", "native_session_id": ""}
+
+    assert SessionTurnManager._binding_projection_is_stale(context, binding)
+    SessionTurnManager._apply_session_binding_to_context(context, binding)
+    assert context.platform_specific["agent_session_target"]["native_session_id"] == ""
+    assert context.platform_specific["agent_run_target"]["native_session_id"] == ""
+
+
+@pytest.mark.anyio
+async def test_native_start_receipt_accepts_the_handoff_its_turn_carried(managers) -> None:
+    """A backend switch's handoff is accepted in the native-start receipt transaction of
+    the turn that carried it; the rest of the session metadata is kept. The row is
+    not bound yet (Claude reports acceptance before its init binds the id), so the
+    marker stays, flagged accepted, for the bind to spend."""
+    from core.session_handoff import BACKEND_HANDOFF_TURN_KEY
+    from storage.agent_session_rows import pending_backend_handoff
+
+    manager, _other, engine, _engine_b, _starts = managers
+    with engine.begin() as conn:
+        conn.execute(
+            update(agent_sessions)
+            .where(agent_sessions.c.id == "ses_fsm")
+            .values(metadata_json=json.dumps({"keep": 1, "backend_handoff": {"id": "switch-1"}}))
+        )
+
+    def metadata() -> dict:
+        with engine.connect() as conn:
+            return json.loads(
+                conn.execute(
+                    select(agent_sessions.c.metadata_json).where(agent_sessions.c.id == "ses_fsm")
+                ).scalar_one()
+            )
+
+    context = _context()
+    admitted = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="next"),
+        context=context,
+    )
+    assert admitted.turn_id
+    assert pending_backend_handoff(metadata()) is not None
+    context.platform_specific["turn_token"] = admitted.turn_id
+    context.platform_specific[BACKEND_HANDOFF_TURN_KEY] = "switch-1"
+    manager._active_identity = lambda _backend, _session_id, logical_id: (logical_id, f"native-{logical_id}")
+    manager.on_native_start(
+        context,
+        backend="codex",
+        runtime_key=f"runtime-key-{admitted.turn_id}",
+        runtime_turn_id=f"runtime-{admitted.turn_id}",
+    )
+    assert metadata() == {"keep": 1, "backend_handoff": {"id": "switch-1", "accepted": True}}
+
+
 @pytest.mark.anyio
 async def test_session_lifecycle_invalidates_snapshot_after_operation(managers) -> None:
     manager, _other, _engine, _engine_b, _starts = managers

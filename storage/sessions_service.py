@@ -24,8 +24,11 @@ from storage.agent_session_rows import (
     decode_session_value,
     encode_session_value,
     get_or_create_agent_session_row,
+    insert_superseded_native_snapshot,
     new_session_id,
     normalize_workdir,
+    pending_backend_handoff,
+    settle_backend_handoff_on_bind,
     reserve_write_lock,
     snapshot_scope_workdir,
 )
@@ -1184,6 +1187,25 @@ class SQLiteSessionsService:
             parsed_route_metadata = _json_loads((route_row or {}).get("metadata_json"), {})
             route_metadata = parsed_route_metadata if isinstance(parsed_route_metadata, dict) else {}
             already_bound = bool(decode_session_value((route_row or {}).get("native_session_id")))
+            handoff = pending_backend_handoff(route_metadata)
+            if handoff is not None and (
+                (handoff["from_native"] and handoff["from_native"] == encoded_session_id)
+                or (requested_backend and requested_backend != current_backend)
+            ):
+                # The session switched backend and the new one has not taken over
+                # yet. The replaced native is known only to the old backend's
+                # runtime, and another backend's bind (a one-off Agent run, a late
+                # event) would relabel the row: either undoes the user's switch.
+                # Keep the row as the switch left it.
+                logger.warning(
+                    "Ignoring a bind into a session that is switching backend; "
+                    "native=%s agent_session=%s backend=%s requested=%s",
+                    native_session_id,
+                    session_id,
+                    current_backend,
+                    requested_backend,
+                )
+                return str(session_id)
             backend_changes = bool(requested_backend) and requested_backend != current_backend
             if backend_changes and not already_bound:
                 # The three cases below are decided from a SNAPSHOT, and these reads
@@ -1288,6 +1310,9 @@ class SQLiteSessionsService:
                     .values(**values, native_session_id=encoded_session_id)
                 )
                 if first_bind.rowcount:
+                    # The UPDATE holds the write lock, so this read-merge-write of
+                    # the metadata is atomic with the bind.
+                    settle_backend_handoff_on_bind(conn, str(session_id), encoded_session_id)
                     return str(session_id)
                 # LOST the first bind. Return the winner immediately, exactly as the
                 # cross-backend branch above does -- the two lost-race paths now
@@ -1358,37 +1383,12 @@ class SQLiteSessionsService:
             if current != expected:
                 return None
 
-            snapshot_id = new_session_id(conn)
-            anchor = str(row["session_anchor"] or "")
-            superseded_anchor = f"{anchor}{SUPERSEDED_ANCHOR_INFIX}{snapshot_id}"
-            metadata_value = _json_loads(row["metadata_json"], {})
-            snapshot_metadata = (
-                dict(metadata_value) if isinstance(metadata_value, dict) else {}
+            insert_superseded_native_snapshot(
+                conn,
+                row,
+                now=now,
+                binding={"active_session_id": str(session_id), "replaced_at": now},
             )
-            snapshot_metadata["superseded_native_binding"] = {
-                "active_session_id": str(session_id),
-                "replaced_at": now,
-            }
-            snapshot = dict(row)
-            snapshot.update(
-                {
-                    "id": snapshot_id,
-                    "session_anchor": superseded_anchor,
-                    "status": "archived",
-                    "visibility": "background",
-                    "pinned": 0,
-                    "agent_status": "idle",
-                    "composer_draft_text": None,
-                    "composer_draft_updated_at": None,
-                    "metadata_json": json.dumps(
-                        snapshot_metadata,
-                        separators=(",", ":"),
-                        ensure_ascii=False,
-                    ),
-                    "updated_at": now,
-                }
-            )
-            conn.execute(agent_sessions.insert().values(**snapshot))
             replaced = conn.execute(
                 agent_sessions.update()
                 .where(agent_sessions.c.id == str(session_id))

@@ -172,6 +172,19 @@ class BaseAgent(ABC):
 
         return None
 
+    async def release_native_runtime(self, request: AgentRequest) -> None:
+        """Drop any runtime this backend still holds for the request's Session.
+
+        Called before the first turn after the Session switched to this backend
+        while its row has no native yet (``core/session_handoff.py``). A runtime
+        still cached from an earlier phase on this backend holds the conversation
+        the switch replaced, so the turn must not reuse it. No turn of the Session
+        is running. Must be idempotent and cheap when nothing is cached; a
+        backend that keeps no per-Session state outside the row needs nothing.
+        """
+
+        return None
+
     def backend_alive(self, context: Any) -> Optional[bool]:
         """Best-effort liveness of this backend for the given turn context.
 

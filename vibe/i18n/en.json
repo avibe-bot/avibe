@@ -11,7 +11,8 @@
     "modelSourceRequired": "{backend} has no model source yet. Add an API key or a subscription in Models.",
     "modelsNextStepImUrl": "Someone who manages this Avibe can fix it in Models: {url}",
     "modelsNextStepIm": "Someone who manages this Avibe can fix it in Models, in the Avibe Workbench.",
-    "opencodeModelProviderRequired": "Select an OpenCode model with a provider in Avibe, or configure its Model Hub route."
+    "opencodeModelProviderRequired": "Select an OpenCode model with a provider in Avibe, or configure its Model Hub route.",
+    "sessionBackendBusy": "This session still has background work running on its current backend. Switch after it finishes."
   },
   "status": {
     "backendUnresponsive": "backend not responding",

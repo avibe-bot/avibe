@@ -2081,6 +2081,16 @@ class ClaudeAgent(BaseAgent):
 
         return True
 
+    async def release_native_runtime(self, request: AgentRequest) -> None:
+        """End the SDK client an earlier Claude phase of this Session left cached.
+
+        A cached client is reused before the row is consulted, and it still holds
+        the conversation the backend switch replaced.
+        """
+        composite_key = self.runtime_turn_key(request)
+        if composite_key and composite_key in self.claude_sessions:
+            await self.end_runtime_session(composite_key)
+
     async def end_runtime_session(self, composite_key: str) -> bool:
         """Interrupt and clean up one runtime without racing native steering."""
         async with self._steering_lock(composite_key):

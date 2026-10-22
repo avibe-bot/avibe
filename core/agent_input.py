@@ -144,9 +144,12 @@ class AgentInputMetadata:
     user_id: str | None = None
     user_name: str | None = None
     harness_source: str | None = None
+    #: The block the first turn after a backend switch carries ahead of everything else
+    #: (``core/session_handoff.py``); it is context for the model, not part of the input.
+    handoff: str | None = None
 
     def render(self, text: str, config: Any, *, now: datetime | None = None) -> str:
-        lines: list[str] = []
+        lines: list[str] = [self.handoff.rstrip() + "\n"] if self.handoff and self.handoff.strip() else []
         if self.harness_source:
             lines.append(f"{HARNESS_MARKER} {self.harness_source}]")
         if getattr(config, "include_time_info", True):
