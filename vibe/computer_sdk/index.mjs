@@ -240,6 +240,32 @@ function structured(result) {
     : {};
 }
 
+function observationHasScreenshot(result) {
+  const payload = structured(result);
+  // The driver may return capture metadata alongside an explicitly invalid
+  // frame. That metadata does not authorize pixel coordinates.
+  if (payload.screenshot_frame_valid === false) {
+    return false;
+  }
+  if (
+    typeof payload.screenshot_file_path === "string" &&
+    payload.screenshot_file_path
+  ) {
+    return true;
+  }
+  return (
+    Array.isArray(result?.content) &&
+    result.content.some(
+      (item) =>
+        item &&
+        item.type === "image" &&
+        typeof item.data === "string" &&
+        item.data.length > 0 &&
+        (!item.mimeType || item.mimeType === "image/png"),
+    )
+  );
+}
+
 function effectResult(result) {
   const payload = sanitizePublic(structured(result));
   const status = EFFECT_STATUSES.has(payload.effect)
@@ -822,15 +848,16 @@ async function observeWindow(handle, force, options = {}, deadline) {
   if (!force && state.snapshot && state.snapshotKey === key) {
     return state.snapshot;
   }
-  state.snapshot = await callHandleTool(
+  const observation = await callHandleTool(
     handle,
     "get_window_state",
     windowArguments(handle, options),
     deadline,
   );
+  state.snapshot = observation;
   state.snapshotKey = key;
-  state.snapshotHasScreenshot = options.include_screenshot !== false;
-  return state.snapshot;
+  state.snapshotHasScreenshot = observationHasScreenshot(observation);
+  return observation;
 }
 
 // Element resolution reads only the accessibility tree. Element actions act
