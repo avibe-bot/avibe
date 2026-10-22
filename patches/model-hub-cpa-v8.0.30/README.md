@@ -1,9 +1,11 @@
 # Avibe-owned CPA v8.0.30 compatibility patches
 
 This directory records the source patches carried by Avibe's
-`model-hub-engine-v8.0.30-1` build. The build applies them with
-`git apply --whitespace=error`, in the order the manifest's `build.patches`
-records; each one applies on top of the ones before it.
+`model-hub-engine-v8.0.30-*` builds: `-1` carries patches 1 to 9, and `-2`
+adds patch 10, the Go module security refresh, built with Go 1.26.10. The
+build applies them with `git apply --whitespace=error`, in the order the
+manifest's `build.patches` records; each one applies on top of the ones before
+it. The packaged manifest names the build Avibe installs.
 
 Base:
 
@@ -366,6 +368,57 @@ stripped, and properties named after the keywords survive. Dropping
 `contentMediaType` from the list fails the test.
 
 Drop at the next bump to v8.0.33 or later, which contains a43026d7.
+
+## `go-module-security-refresh.patch`
+
+Patch 10, new in `model-hub-engine-v8.0.30-2`. `govulncheck -mode binary`
+reports eleven reachable advisories in the `-1` engine: GO-2026-6809 in the
+standard library's `crypto/x509` (Go 1.26.9) and ten in Go modules. The
+standard-library fix is the toolchain, Go 1.26.10, which the manifest records
+as `build.go_version`. This patch moves the modules to their first fixed
+releases:
+
+| Module | v8.0.30 | Patched | Advisories |
+| --- | --- | --- | --- |
+| `golang.org/x/net` | v0.57.0 | v0.60.0 | GO-2026-6603, -6610, -6611, -6612, -6617 (HTTP/2) |
+| `golang.org/x/crypto` | v0.54.0 | v0.57.0 | GO-2026-6354, -6355 (ssh) |
+| `golang.org/x/text` | v0.40.0 | v0.42.0 | GO-2026-6629 |
+| `github.com/go-git/go-git/v6` | v6.0.0-alpha.4.0.20260520124234-0860a7d8a164 | v6.0.0-alpha.5 | GO-2026-6213, -6214 |
+
+Only `x/net` v0.60.0 and `go-git` v6.0.0-alpha.5 are requested. Minimal
+version selection raises the rest: `x/net` v0.60.0 requires `x/crypto`
+v0.57.0, `x/text` v0.42.0 and `x/sys` v0.48.0, `x/text` v0.42.0 requires
+`x/sync` v0.23.0, and `go-git` v6.0.0-alpha.5 requires `go-billy`
+v6.0.0-alpha.2. `go mod tidy` then removes the go.sum lines of the replaced
+versions; no other requirement changes. Upstream v8.0.38, the latest release
+when this patch was made, and upstream `main` still require the vulnerable
+versions.
+
+`go-git` v6.0.0-alpha.5 rewrites pack file access (`internal/packhandle`,
+`x/fdpool`), and a repository handle can keep a pack open after it is deleted.
+Upstream's `corruptGitRepository` test helper removed the packs and then
+checked the corruption through the handle that had just repacked them, which
+still reads them. The patch makes the helper check through a new handle, as
+the store's own operations open one. With that change, every
+`internal/store` test passes unchanged on v6.0.0-alpha.5, and the helper still
+fails when the packs are not removed. The test change does not alter the
+engine binary. `internal/store`'s git token store is the engine's only
+`go-git` user. Avibe never enables it: it needs `GITSTORE_GIT_URL`, which
+the engine's allow-listed environment (`vibe/model_hub_runtime/environment.py`)
+does not pass and no `.env` in the engine's Avibe-owned working directory sets.
+
+Measured with Go 1.26.10. With all ten patches applied, `go test ./...`
+passes: 102 packages, as on the unrefreshed tree. Patches 4 and 5's HTTP/2
+health-check tests also pass on `x/net` v0.60.0. Two candidate builds from
+empty Go caches were byte-identical. `govulncheck -mode binary` reports no
+reachable advisory on any of the six binaries. It still lists two advisories
+it does not find called: GO-2026-5841 (`klauspost/compress/s2`, imported but
+not called) and GO-2026-5932 (`x/crypto/openpgp`, deprecated with no fix).
+
+Drop it once a CPA release that Avibe adopts requires these versions or later.
+At every bump, rebase it onto the new `go.mod` and keep only the lines upstream
+does not already cover, then re-run `govulncheck -mode binary` on the
+candidate.
 
 ## Known risk: model registration superseded mid-flight (#6718)
 
