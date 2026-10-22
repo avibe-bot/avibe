@@ -545,9 +545,10 @@ Send only fields present in the live advanced schema. `enableHighlights` is
 required by this design; `textMaxCharacters: 1` is the smallest positive bound
 accepted by the source wrapper and prevents full page text from crossing the
 wire. Do not send filters, summaries, subpage, crawl, or context fields in
-phase 1. If the selected tool is absent or does not advertise the required
-highlight controls, classify the service as unavailable rather than silently
-switching to the ambiguous text formatter.
+phase 1. If the selected tool is absent or does not advertise all required
+highlight and `textMaxCharacters` controls, classify the service as
+`service_unavailable` rather than silently switching to the ambiguous text
+formatter.
 
 Use a single overall 30-second service deadline, including a cold-session
 initialize/list. Connection/TLS setup has the existing 5-second transport
@@ -611,6 +612,11 @@ A successful keyless attempt writes the existing positive service evidence with
 capability-evidence writer and pruner receive the synthetic built-in identity
 alongside `config.sources`, so this success is retained and later reads expose
 its latest service-mode evidence instead of dropping it as an unknown Source.
+The hosted-activity projection uses the same synthetic catalog identity for
+`_source_display`/current-state lookup. It must not treat an absent
+`hub.sources` entry as superseded: `service_rate_limited` and
+`service_unavailable` attempts keep their distinct fallback reasons and render
+against `Exa（免费）` / `Exa (free)`.
 The execution origin is the existing service variant:
 
 ```json
@@ -887,10 +893,10 @@ JSON-RPC fixtures:
   `x-exa-source`, and `clientInfo.name` are sent, and its empty HTTP 202
   response is accepted. An unsupported negotiated version is rejected.
 - `tools/list` variants cover the selected advanced tool with its required
-  `query`/`numResults`/highlight controls and a missing-required-control case
-  that fails as `service_unavailable`; the simple tool's live required
-  `objective` shape remains a compatibility evidence fixture, not a phase-1
-  dispatch path.
+  `query`/`numResults`/highlight controls and `textMaxCharacters`; a missing
+  required control fails as `service_unavailable`. The simple tool's live
+  required `objective` shape remains a compatibility evidence fixture, not a
+  phase-1 dispatch path.
 - `tools/call` returns valid advanced JSON with one result, multiple results,
   empty results, a valid URL with no highlights, multiple highlights that are
   joined in order and capped at 1,000 characters, text fields that must be
@@ -928,10 +934,10 @@ JSON-RPC fixtures:
   visible disabled-tail row), restart, older-build unknown-id reading,
   keyed-Exa-plus-keyless fallback, auto-enrolled official-DeepSeek-plus-keyless
   ordering, and native-preference behavior are table-driven.
-- Attempts, service origin, exact-zero cost, request-only usage, no lower-bound
-  charge, capability-evidence retention, and cooldown projection (including an
-  active cooldown shorter than 60 seconds) are asserted at their owning
-  boundaries.
+- Attempts, service origin, exact-zero cost, request-only usage, capability
+  evidence, activity projection of rate-limit/unavailable fallback reasons,
+  no lower-bound charge, and cooldown projection (including an active cooldown
+  shorter than 60 seconds) are asserted at their owning boundaries.
 - The synthetic (`src_exakeyless`, `exa/mcp`) cooldown survives config saves
   and later-candidate health writes; a successful keyless attempt clears only
   its own generation.
