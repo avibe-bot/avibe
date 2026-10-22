@@ -2169,6 +2169,9 @@ const AgentDetailPanel: React.FC<DetailProps> = ({ agent, isDefault, canEdit, ca
   const [effortRefreshOut, setEffortRefreshOut] = useState(false);
   const refreshEffortMenus = useCallback(() => {
     if (!surfaceActive || !hubKnownRef.current || effortRefreshOutRef.current) return;
+    // A settled native fallback can still have catalog retries pending. Retire
+    // its loader so no older answer can settle this approach's queued choice.
+    effortRefreshRef.current?.();
     effortRefreshOutRef.current = true;
     setEffortRefreshOut(true);
     const backend = agent.backend;

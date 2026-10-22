@@ -54,6 +54,7 @@ type FakeModelCatalog = {
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
   effortMenus?: Record<string, { omitted: string[]; not_on: Record<string, string[]> }>;
   hubUnread?: true;
+  catalogRefreshPending?: boolean;
 };
 let modelCatalog: FakeModelCatalog = { models: [] };
 let modelCatalogReads = 0;
@@ -1872,6 +1873,53 @@ describe('AgentsPage reconnect reconciliation', () => {
     const directReads = modelCatalogReads;
     fireEvent.pointerEnter(field());
     expect(modelCatalogReads).toBe(directReads);
+  });
+
+  it('does not let an older catalog retry drain a choice waiting for a newer refresh', async () => {
+    const hub = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }] },
+      effortMenus: { 'reasoning-model': { omitted: [], not_on: {} } },
+    };
+    modelCatalog = hub;
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult(initial)), vi.fn().mockResolvedValue(fullAgent(initial, 'prompt')),
+      undefined, undefined, updateVibeAgent,
+    );
+    renderPage(api, { canManageAgents: true });
+    const high = await screen.findByRole('button', { name: 'high', exact: true });
+    const field = document.querySelector('[data-effort-field]') as HTMLElement;
+    deferModelReads = true;
+    modelCatalog = {
+      models: [], reasoningOptions: hub.reasoningOptions, hubUnread: true, catalogRefreshPending: true,
+    };
+    fireEvent.pointerEnter(field);
+    // A native fallback settles the approach but its loader can answer again
+    // after a catalogRefreshPending retry. Retain that same loader callback.
+    const oldAnswer = pendingModelReads.shift()!;
+    act(() => oldAnswer());
+
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+      effortMenus: { 'reasoning-model': { omitted: ['high'], not_on: {} } },
+    };
+    fireEvent.pointerLeave(field);
+    fireEvent.pointerEnter(field);
+    fireEvent.click(high);
+    expect(updateVibeAgent).not.toHaveBeenCalled();
+
+    // A retry from the older approach must not settle the new read or submit
+    // its queued choice using an older menu that still offers high.
+    await act(async () => oldAnswer());
+    expect(updateVibeAgent).not.toHaveBeenCalled();
+    expect(field.getAttribute('aria-busy')).toBe('true');
+    act(() => pendingModelReads.shift()!());
+    expect(updateVibeAgent).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'high', exact: true })).toBeNull();
+    expect(showToast).toHaveBeenCalledWith('agents.detail.effortUnavailable:{"effort":"high"}', 'error');
   });
 
   it('validates a queued choice against the last Hub menu when the refresh falls back to a native list', async () => {
