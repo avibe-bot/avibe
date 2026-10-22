@@ -17,6 +17,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
+import re
 from typing import Any, AsyncIterator, Awaitable, Callable, Final, Literal, Mapping, Protocol, Sequence
 
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
@@ -28,6 +29,53 @@ MODEL_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat", "google")
 SOURCE_PROTOCOLS = MODEL_PROTOCOLS + ("search",)
 SEARCH_RESPONSE_MAX_BYTES: Final = 8 * 1024 * 1024
 SEARCH_TRANSPORT_TIMEOUT_SECONDS: Final = 30.0
+# Response correlation is a diagnostic fact, not a header-forwarding surface. These
+# are the only upstream response header names allowed to cross the engine boundary.
+RESPONSE_CORRELATION_HEADER_NAMES: Final = frozenset({"request-id", "x-request-id"})
+RESPONSE_CORRELATION_ID_MAX_LENGTH: Final = 256
+RESPONSE_CORRELATION_ID_MAX_ITEMS: Final = len(RESPONSE_CORRELATION_HEADER_NAMES)
+_CORRELATION_ID_CREDENTIAL_PATTERN = re.compile(
+    r"(?i)(?:bearer|basic)\s+|"
+    r"(?:authorization|api[_ -]?key|access[_ -]?token|token|secret|password|"
+    r"credential|cookie|session|signature)\s*[:=]|"
+    r"(?:sk|rk|pk|sess|token|secret|cred|key)[-_][a-z0-9_-]{8,}"
+)
+
+
+def sanitize_response_correlation_ids(values: object) -> tuple[tuple[str, str], ...]:
+    """Keep only bounded, credential-free values from the two trusted headers."""
+
+    pairs = values.items() if isinstance(values, Mapping) else values
+    try:
+        iterator = iter(pairs)  # type: ignore[arg-type]
+    except TypeError:
+        return ()
+    retained: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for pair in iterator:
+        if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+            continue
+        raw_name, raw_value = pair
+        if not isinstance(raw_name, str) or not isinstance(raw_value, str):
+            continue
+        name = raw_name.lower()
+        if name not in RESPONSE_CORRELATION_HEADER_NAMES or name in seen:
+            continue
+        if (
+            not raw_value
+            or len(raw_value) > RESPONSE_CORRELATION_ID_MAX_LENGTH
+            or any(not 0x21 <= ord(char) <= 0x7E for char in raw_value)
+            or _CORRELATION_ID_CREDENTIAL_PATTERN.search(raw_value)
+        ):
+            continue
+        seen.add(name)
+        retained.append((name, raw_value))
+        if len(retained) >= RESPONSE_CORRELATION_ID_MAX_ITEMS:
+            break
+    order = {name: index for index, name in enumerate(sorted(RESPONSE_CORRELATION_HEADER_NAMES))}
+    return tuple(sorted(retained, key=lambda item: order[item[0]]))
+
+
 OBSERVATION_OUTCOMES = (
     "observed",
     "ambiguous",
@@ -228,6 +276,10 @@ class RawCallOutcome:
     # The search tools whose own completed item a served response carried, for
     # the positive evidence written at settlement (``vibey-hosted-tools.md`` §3.2).
     hosted_tools: frozenset[str] = frozenset()
+    # The response header name is retained in lowercase so relay ``x-request-id``
+    # and provider ``request-id`` values cannot be conflated. The client and
+    # provenance writer re-validate this tuple before persistence.
+    response_correlation_ids: tuple[tuple[str, str], ...] = ()
 
 
 class ObservationOutcome(str, Enum):

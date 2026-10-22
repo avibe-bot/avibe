@@ -116,6 +116,52 @@ def test_existing_outcome_constructors_keep_retry_advice_optional(optional_count
 
 @pytest.mark.parametrize("protocol", WIRE)
 @pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streaming"])
+async def test_failed_response_carries_only_allowlisted_correlation_ids(protocol: str, stream: bool) -> None:
+    async def respond(_request: web.Request) -> web.Response:
+        return web.Response(
+            status=400,
+            body=ERROR_BODY,
+            headers={
+                "X-Request-Id": "relay-request-1",
+                "Request-Id": "provider-request-1",
+                "Set-Cookie": "session=secret",
+                "Organization-Id": "org-private",
+            },
+            content_type="application/json",
+        )
+
+    async with _engine(respond) as (client, _requests):
+        outcome, body = await _invoke(client, protocol, stream)
+
+    assert outcome.kind is RawOutcomeKind.HTTP_ERROR
+    assert outcome.response_correlation_ids == (
+        ("request-id", "provider-request-1"),
+        ("x-request-id", "relay-request-1"),
+    )
+    assert body == b""
+
+
+@pytest.mark.parametrize("protocol", WIRE)
+@pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streaming"])
+async def test_success_response_carries_its_own_correlation_ids(protocol: str, stream: bool) -> None:
+    _path, buffered, streamed, _stream_error = WIRE[protocol]
+
+    async def respond(_request: web.Request) -> web.Response:
+        return web.Response(
+            status=200,
+            body=streamed if stream else buffered,
+            headers={"X-Request-Id": "served-request-1"},
+            content_type="text/event-stream" if stream else "application/json",
+        )
+
+    async with _engine(respond) as (client, _requests):
+        outcome, _body = await _invoke(client, protocol, stream)
+
+    assert outcome.kind is RawOutcomeKind.SUCCESS
+    assert outcome.response_correlation_ids == (("x-request-id", "served-request-1"),)
+
+@pytest.mark.parametrize("protocol", WIRE)
+@pytest.mark.parametrize("stream", [False, True], ids=["buffered", "streaming"])
 @pytest.mark.parametrize(
     ("advice", "expected"),
     [

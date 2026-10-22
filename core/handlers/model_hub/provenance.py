@@ -27,7 +27,7 @@ from core.run_settlement import (
 )
 from vibe.i18n import t as i18n_t
 
-from .adapter import RawCallOutcome
+from .adapter import RawCallOutcome, sanitize_response_correlation_ids
 from .classification import (
     UPSTREAM_MACHINE_ERROR_CODES,
     ResolutionDecision,
@@ -1030,6 +1030,20 @@ def _terminal_reason(decision: ResolutionDecision) -> str:
     if code == "tool_incompatible":
         return "tool_incompatible"
     return "protocol_error"
+
+
+def _response_correlation_payload(values: object) -> dict[str, list[dict[str, str]]]:
+    """Serialize only the adapter's bounded, allowlisted response IDs."""
+
+    ids = sanitize_response_correlation_ids(values)
+    if not ids:
+        return {}
+    return {
+        "response_correlation_ids": [
+            {"header": header, "value": value}
+            for header, value in ids
+        ]
+    }
 
 
 def _degrade_persisted_provenance(record: dict) -> dict:
@@ -2164,6 +2178,7 @@ class TurnCorrelationRegistry:
         stream_started: bool,
         force: bool = False,
         local_error_detail: str | None = None,
+        response_correlation_ids: tuple[tuple[str, str], ...] = (),
     ) -> None:
         if turn_id is None:
             return
@@ -2194,6 +2209,7 @@ class TurnCorrelationRegistry:
                     "reason": reason,
                     "stream_started": stream_started,
                     **({"local_error_detail": local_error_detail} if local_error_detail else {}),
+                    **_response_correlation_payload(response_correlation_ids),
                 }
                 return
             if self._peer_request_open(trace, request_id):
@@ -2522,6 +2538,7 @@ class TurnCorrelationRegistry:
                 reason="engine_down",
                 stream_started=outcome.stream_started,
                 local_error_detail=format_os_errno(outcome.os_errno),
+                response_correlation_ids=outcome.response_correlation_ids,
                 force=True,
             )
             return
@@ -2534,11 +2551,17 @@ class TurnCorrelationRegistry:
                 return
             trace.pending_attempts.pop(request_id, None)
             if decision.action == "return":
-                trace.served = identity.payload()
+                trace.served = {
+                    **identity.payload(),
+                    **_response_correlation_payload(outcome.response_correlation_ids),
+                }
                 trace.terminal_error = None
                 return
             # The engine client already redacted and bounded this text.
-            detail = {"upstream_detail": outcome.upstream_detail} if outcome.upstream_detail else {}
+            detail = {
+                "upstream_detail": outcome.upstream_detail
+            } if outcome.upstream_detail else {}
+            detail.update(_response_correlation_payload(outcome.response_correlation_ids))
             logger.warning(
                 "Model Hub attempt failed turn=%s source=%s model=%s http_status=%s reason=%s "
                 "stream_started=%s detail=%s",

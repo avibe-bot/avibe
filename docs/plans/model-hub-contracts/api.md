@@ -1466,6 +1466,16 @@ of control and bidi characters, whitespace-collapsed, and bounded to 400 charact
 They are omitted when no message was observed and in older records, and are never
 read by classification.
 
+`failed_attempts[].response_correlation_ids`, `terminal_error.response_correlation_ids`,
+and `served.response_correlation_ids` are independently optional arrays of at most two
+`{header, value}` facts from that exact response. The only accepted canonical header
+names are `request-id` (provider request identity) and `x-request-id` (relay/request
+correlation); values are printable ASCII, bounded to 256 characters, and rejected when
+they contain controls or credential-like material. Arbitrary response headers,
+request headers, request bodies, and raw response bytes are never persisted. These
+facts are diagnostic only and do not affect classification, fallback, retry policy,
+model identity, or vendor inference. Historical records may omit them.
+
 `terminal_error.reason: backend_error` is an agent backend's own report of a failed
 turn that the gateway did not end itself
 (`docs/plans/model-hub-backend-failure-facts.md`). The shared failure bridge records
@@ -1916,6 +1926,7 @@ contract harness and API-boundary tests enforce:
 <!-- authority-consumer: network.failure network_failure.shaped_before_first_byte network_failure.transport_before_first_byte network_failure.shaped_after_first_byte network_failure.transport_after_first_byte -->
 <!-- authority-consumer: live_backoff.health backoff -->
 <!-- authority-consumer: live_backoff.reason models.source.backoff.connection_failed -->
+<!-- authority-consumer: response_correlation.header request-id x-request-id -->
 
 | Guard | Boundary |
 | --- | --- |

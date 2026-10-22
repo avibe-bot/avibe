@@ -642,6 +642,13 @@ export type AgentChain = {
   supply_state: 'ok' | 'waiting' | 'interrupted';
 };
 
+export type ResponseCorrelationHeader = 'request-id' | 'x-request-id';
+export type ResponseCorrelationId = {
+  /** Canonical response header name; values are bounded and sanitized server-side. */
+  header: ResponseCorrelationHeader;
+  value: string;
+};
+
 export type RecordedAttempt = {
   source_id: string;
   configured_model_id: string;
@@ -649,7 +656,9 @@ export type RecordedAttempt = {
   stripped_reasoning_efforts?: string[];
   declared_reasoning_efforts?: string[];
   origin?: { provider: string; api: ModelProtocol; model: string };
+  response_correlation_ids?: ResponseCorrelationId[];
 };
+export type CanceledAttempt = Omit<RecordedAttempt, 'response_correlation_ids'>;
 export type TurnProvenance = {
   contract_version: (typeof PERSISTED_TURN_CONTRACT_VERSIONS)[number];
   turn_id: string;
@@ -659,7 +668,7 @@ export type TurnProvenance = {
   outcome: 'served' | 'exhausted' | 'failed_terminal' | 'no_candidate' | 'canceled';
   failed_attempts: Array<RecordedAttempt & { reason: ResolutionReason; http_status?: number | null; upstream_detail?: string }>;
   served: RecordedAttempt | null;
-  canceled_attempt: RecordedAttempt | null;
+  canceled_attempt: CanceledAttempt | null;
   terminal_error: {
     source_id: string | null;
     configured_model_id: string | null;
@@ -674,6 +683,7 @@ export type TurnProvenance = {
     http_status?: number | null;
     upstream_error_code?: string | null;
     upstream_detail?: string;
+    response_correlation_ids?: ResponseCorrelationId[];
     error_kind?: never;
     backend_error_detail?: never;
   } | {

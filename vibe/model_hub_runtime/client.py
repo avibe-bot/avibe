@@ -29,7 +29,9 @@ from core.handlers.model_hub.adapter import (
     InvokeCancelledError,
     RawCallOutcome,
     RawOutcomeKind,
+    RESPONSE_CORRELATION_HEADER_NAMES,
     UpstreamRejection,
+    sanitize_response_correlation_ids,
 )
 from core.handlers.model_hub.async_owner import run_owned_in_thread
 from core.handlers.model_hub.classification import UPSTREAM_MACHINE_ERROR_CODES
@@ -101,10 +103,14 @@ _ProjectedJSON = TypeVar("_ProjectedJSON")
 
 # The engine forwards an upstream's response headers (``passthrough-headers``),
 # minus hop-by-hop ones, and on errors it filters nothing. Avibe reads only these
-# and builds every gateway response from its own headers, so no other upstream
-# header (``set-cookie``, ``request-id``, an organization id) reaches Vibey, the
-# Web UI or a gateway client. A header joins this list with the code that uses it.
-ENGINE_RESPONSE_HEADER_ALLOW_LIST: frozenset[str] = frozenset({"retry-after"})
+# allowlisted names and builds every gateway response from its own headers, so no
+# other upstream header (``set-cookie``, organization ids, rate-limit details)
+# reaches Vibey, the Web UI or a gateway client. Correlation values are projected
+# again by ``sanitize_response_correlation_ids`` before they cross the outcome
+# boundary.
+ENGINE_RESPONSE_HEADER_ALLOW_LIST: frozenset[str] = frozenset(
+    {"retry-after", *RESPONSE_CORRELATION_HEADER_NAMES}
+)
 
 
 def _allowed_engine_header(headers: Mapping[str, str], name: str) -> str | None:
@@ -560,6 +566,7 @@ class EngineClient:
         response: aiohttp.ClientResponse | None = None
         retry_after: str | None = None
         response_received_at: datetime | None = None
+        response_correlation_ids: tuple[tuple[str, str], ...] = ()
         first_received = False
         model_output_started = False
         ownership_transferred = False
@@ -584,6 +591,8 @@ class EngineClient:
                 outcome = replace(outcome, usage=wire_state.usage)
             if wire_state is not None and wire_state.model_output_started:
                 outcome = replace(outcome, recovery_verified=True)
+            if response_correlation_ids:
+                outcome = replace(outcome, response_correlation_ids=response_correlation_ids)
             if response_received_at is not None:
                 outcome = replace(
                     outcome,
@@ -610,6 +619,7 @@ class EngineClient:
                 headers=headers,
                 allow_redirects=False,
             )
+            response_correlation_ids = sanitize_response_correlation_ids(response.headers)
             if response.status >= 300:
                 response_received_at = datetime.now(timezone.utc)
                 retry_after = _allowed_engine_header(response.headers, "Retry-After")
@@ -683,6 +693,7 @@ class EngineClient:
                     model_id=model_id,
                     http_status=response.status,
                     stream_started=False,
+                    response_correlation_ids=response_correlation_ids,
                 )
                 assert outcome is not None
                 response.close()
@@ -729,6 +740,7 @@ class EngineClient:
                     model_id=model_id,
                     http_status=response.status,
                     stream_started=observation.outcome == "served",
+                    response_correlation_ids=response_correlation_ids,
                 )
                 assert outcome is not None
                 response.close()
@@ -752,6 +764,7 @@ class EngineClient:
                 wire_state=wire_state,
                 source=source,
                 model_id=model_id,
+                response_correlation_ids=response_correlation_ids,
             )
             model_output_started = wire_state.model_output_started
             if prelude_outcome is not None:
@@ -776,6 +789,7 @@ class EngineClient:
                 outcome_future=outcome_future,
                 wire_state=wire_state,
                 on_transport_done=on_transport_done,
+                response_correlation_ids=response_correlation_ids,
             )
 
             async def close_response_stream() -> None:
@@ -792,6 +806,8 @@ class EngineClient:
                     model_id,
                     response.status,
                 )
+                if outcome is not None:
+                    outcome = replace(outcome, response_correlation_ids=response_correlation_ids)
                 if outcome is not None and not outcome_future.done():
                     outcome_future.set_result(outcome)
 
@@ -1654,6 +1670,7 @@ async def _read_stream_prelude(
     wire_state: ProtocolSSEState,
     source: SourceRecord,
     model_id: str,
+    response_correlation_ids: tuple[tuple[str, str], ...] = (),
 ) -> RawCallOutcome | None:
     """Buffer transport metadata until the sole first-model-output fact.
 
@@ -1671,7 +1688,7 @@ async def _read_stream_prelude(
             response.status,
         )
         if outcome is not None:
-            return outcome
+            return replace(outcome, response_correlation_ids=response_correlation_ids)
         chunk = await response.content.read(_STREAM_CHUNK_BYTES)
         if not chunk:
             completion = _observed_stream_terminal_outcome(
@@ -1681,8 +1698,10 @@ async def _read_stream_prelude(
                 response.status,
             )
             if completion is not None:
-                return completion
-            return _prelude_ended_outcome(source, model_id, response.status)
+                return replace(completion, response_correlation_ids=response_correlation_ids)
+            return _prelude_ended_outcome(
+                source, model_id, response.status, response_correlation_ids=response_correlation_ids,
+            )
         await _received(chunk, prelude=prelude, wire_state=wire_state)
     return None
 
@@ -1703,6 +1722,7 @@ def _prelude_ended_outcome(
     source: SourceRecord,
     model_id: str,
     http_status: int,
+    response_correlation_ids: tuple[tuple[str, str], ...] = (),
 ) -> RawCallOutcome:
     return _outcome(
         kind=RawOutcomeKind.NETWORK_ERROR,
@@ -1710,6 +1730,7 @@ def _prelude_ended_outcome(
         model_id=model_id,
         http_status=http_status,
         message="upstream stream ended before model output",
+        response_correlation_ids=response_correlation_ids,
     )
 
 
@@ -1723,6 +1744,7 @@ async def _response_stream(
     protocol: str,
     outcome_future: asyncio.Future[RawCallOutcome],
     wire_state: ProtocolSSEState,
+    response_correlation_ids: tuple[tuple[str, str], ...] = (),
     on_transport_done: Callable[[], None] | None = None,
 ) -> AsyncIterator[bytes]:
     outcome: RawCallOutcome | None = None
@@ -1796,6 +1818,8 @@ async def _response_stream(
                 model_id,
                 response.status,
             )
+        if outcome is not None:
+            outcome = replace(outcome, response_correlation_ids=response_correlation_ids)
         prelude.close()
         response.close()
         try:
@@ -1832,6 +1856,7 @@ def _reduce_protocol_observation(
     model_id: str,
     http_status: int | None,
     stream_started: bool,
+    response_correlation_ids: tuple[tuple[str, str], ...] = (),
 ) -> RawCallOutcome | None:
     """Sole conversion from protocol observations to runtime call outcomes.
 
@@ -1850,6 +1875,7 @@ def _reduce_protocol_observation(
             model_id=model_id,
             http_status=http_status,
             stream_started=stream_started,
+            response_correlation_ids=response_correlation_ids,
             usage=observation.usage,
             recovery_verified=observation.recovery_verified,
             hosted_tools=observation.hosted_tools,
@@ -1896,6 +1922,7 @@ def _reduce_protocol_observation(
                 model_id=model_id,
                 message="engine could not reach the upstream",
                 stream_started=stream_started,
+                response_correlation_ids=response_correlation_ids,
                 usage=observation.usage,
                 recovery_verified=observation.recovery_verified,
                 upstream_detail=upstream_detail,
@@ -1910,6 +1937,7 @@ def _reduce_protocol_observation(
             error_candidates=candidates,
             message=observation.message or "upstream returned a protocol error event",
             stream_started=stream_started,
+            response_correlation_ids=response_correlation_ids,
             usage=observation.usage,
             recovery_verified=observation.recovery_verified,
             upstream_detail=upstream_detail,
@@ -1930,6 +1958,7 @@ def _reduce_protocol_observation(
         http_status=http_status,
         message=observation.message or "upstream emitted invalid protocol data",
         stream_started=stream_started,
+        response_correlation_ids=response_correlation_ids,
         usage=observation.usage,
         recovery_verified=observation.recovery_verified,
     )
@@ -2022,6 +2051,7 @@ def _outcome(
     stream_started: bool = False,
     usage: ProtocolUsageReport | None = None,
     recovery_verified: bool = False,
+    response_correlation_ids: tuple[tuple[str, str], ...] = (),
     upstream_detail: str | None = None,
     os_errno: int | None = None,
     rejection: UpstreamRejection | None = None,
@@ -2039,6 +2069,7 @@ def _outcome(
         error_candidates=error_candidates,
         usage=usage,
         recovery_verified=recovery_verified,
+        response_correlation_ids=response_correlation_ids,
         upstream_detail=upstream_detail,
         os_errno=os_errno,
         rejection=rejection,

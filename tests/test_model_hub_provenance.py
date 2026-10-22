@@ -354,6 +354,219 @@ def test_new_terminal_records_retain_only_safe_recognized_error_metadata(
     assert "credential" not in serialized
 
 
+def test_response_correlation_ids_stay_on_the_exact_failed_attempt_and_terminal_error(tmp_path):
+    registry = TurnCorrelationRegistry(BoundedProvenanceStore(tmp_path / "records.json"))
+    token = registry.credentials("claude", "fixture", "turn-correlation")
+    turn_id = registry.begin_gateway_request(
+        backend="claude", token=token, requested_model_id=MODEL,
+    )
+    registry.begin_attempt(
+        turn_id, source_id="src_primary01", resolved_model_id=MODEL,
+        channel="hub", via_mapping=False,
+    )
+    registry.finish_attempt(
+        turn_id,
+        outcome=RawCallOutcome(
+            kind=RawOutcomeKind.HTTP_ERROR,
+            http_status=429,
+            error_code="rate_limit_error",
+            redacted_message=None,
+            stream_started=False,
+            model_id=MODEL,
+            source_id="src_primary01",
+            upstream_detail="first upstream detail",
+            response_correlation_ids=(
+                ("x-request-id", "relay-first"),
+                ("request-id", "provider-first"),
+            ),
+        ),
+        decision=ResolutionDecision("fallback", reason="rate_limited", cooldown_seconds=30),
+    )
+    registry.begin_attempt(
+        turn_id, source_id="src_terminal01", resolved_model_id=MODEL,
+        channel="hub", via_mapping=False,
+    )
+    registry.finish_attempt(
+        turn_id,
+        outcome=RawCallOutcome(
+            kind=RawOutcomeKind.HTTP_ERROR,
+            http_status=400,
+            error_code="invalid_request_error",
+            redacted_message=None,
+            stream_started=False,
+            model_id=MODEL,
+            source_id="src_terminal01",
+            upstream_detail="terminal upstream detail",
+            response_correlation_ids=(("request-id", "provider-terminal"),),
+        ),
+        decision=ResolutionDecision("surface", error_code="upstream_request_invalid", downstream_status=400),
+    )
+    registry.settle(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    record = registry.store.get(turn_id)
+    assert record is not None
+    assert record["failed_attempts"][0]["response_correlation_ids"] == [
+        {"header": "request-id", "value": "provider-first"},
+        {"header": "x-request-id", "value": "relay-first"},
+    ]
+    assert record["terminal_error"]["response_correlation_ids"] == [
+        {"header": "request-id", "value": "provider-terminal"},
+    ]
+    assert record["failed_attempts"][0]["upstream_detail"] == "first upstream detail"
+    assert record["terminal_error"]["upstream_detail"] == "terminal upstream detail"
+
+
+def test_served_response_correlation_ids_belong_to_the_served_attempt(tmp_path):
+    registry = TurnCorrelationRegistry(BoundedProvenanceStore(tmp_path / "records.json"))
+    token = registry.credentials("claude", "fixture", "turn-served-correlation")
+    turn_id = registry.begin_gateway_request(
+        backend="claude", token=token, requested_model_id=MODEL,
+    )
+    registry.begin_attempt(
+        turn_id, source_id="src_first0001", resolved_model_id=MODEL,
+        channel="hub", via_mapping=False,
+    )
+    registry.finish_attempt(
+        turn_id,
+        outcome=RawCallOutcome(
+            kind=RawOutcomeKind.HTTP_ERROR,
+            http_status=503,
+            error_code="server_error",
+            redacted_message=None,
+            stream_started=False,
+            model_id=MODEL,
+            source_id="src_first0001",
+            response_correlation_ids=(("x-request-id", "failed-request"),),
+        ),
+        decision=ResolutionDecision("fallback", reason="server_error", cooldown_seconds=30),
+    )
+    registry.begin_attempt(
+        turn_id, source_id="src_served01", resolved_model_id=MODEL,
+        channel="hub", via_mapping=False,
+    )
+    registry.finish_attempt(
+        turn_id,
+        outcome=RawCallOutcome(
+            kind=RawOutcomeKind.SUCCESS,
+            http_status=200,
+            error_code=None,
+            redacted_message=None,
+            stream_started=True,
+            model_id=MODEL,
+            source_id="src_served01",
+            response_correlation_ids=(("x-request-id", "served-request"),),
+        ),
+        decision=ResolutionDecision("return"),
+    )
+    registry.settle(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    record = registry.store.get(turn_id)
+    assert record is not None
+    assert record["failed_attempts"] == [
+        {
+            "source_id": "src_first0001",
+            "configured_model_id": MODEL,
+            "channel": "hub",
+            "reason": "server_error",
+            "http_status": 503,
+            "response_correlation_ids": [
+                {"header": "x-request-id", "value": "failed-request"},
+            ],
+        },
+    ]
+    assert record["served"] == {
+        "source_id": "src_served01",
+        "configured_model_id": MODEL,
+        "channel": "hub",
+        "response_correlation_ids": [
+            {"header": "x-request-id", "value": "served-request"},
+        ],
+    }
+    assert record["terminal_error"] is None
+
+
+def test_response_correlation_ids_are_sanitized_before_provenance_persistence(tmp_path):
+    registry = TurnCorrelationRegistry(BoundedProvenanceStore(tmp_path / "records.json"))
+    token = registry.credentials("claude", "fixture", "turn-correlation-safe")
+    turn_id = registry.begin_gateway_request(
+        backend="claude", token=token, requested_model_id=MODEL,
+    )
+    registry.begin_attempt(
+        turn_id, source_id="src_primary01", resolved_model_id=MODEL,
+        channel="hub", via_mapping=False,
+    )
+    registry.finish_attempt(
+        turn_id,
+        outcome=RawCallOutcome(
+            kind=RawOutcomeKind.HTTP_ERROR,
+            http_status=400,
+            error_code="invalid_request_error",
+            redacted_message=None,
+            stream_started=False,
+            model_id=MODEL,
+            source_id="src_primary01",
+            response_correlation_ids=(
+                ("x-request-id", "bad\nvalue"),
+                ("request-id", "Bearer secret-token-value"),
+                ("Set-Cookie", "session=secret"),
+                ("Request-Id", "provider-safe"),
+            ),
+        ),
+        decision=ResolutionDecision("surface", error_code="upstream_request_invalid", downstream_status=400),
+    )
+    registry.settle(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    record = registry.store.get(turn_id)
+    assert record is not None
+    assert record["terminal_error"]["response_correlation_ids"] == [
+        {"header": "request-id", "value": "provider-safe"},
+    ]
+    serialized = registry.store.path.read_text()
+    assert "secret-token" not in serialized
+    assert "Set-Cookie" not in serialized
+
+
+def test_engine_down_terminal_error_keeps_safe_response_correlation_ids(tmp_path):
+    registry = TurnCorrelationRegistry(BoundedProvenanceStore(tmp_path / "records.json"))
+    token = registry.credentials("claude", "fixture", "turn-engine-down-correlation")
+    turn_id = registry.begin_gateway_request(
+        backend="claude", token=token, requested_model_id=MODEL,
+    )
+    registry.begin_attempt(
+        turn_id, source_id="src_engine01", resolved_model_id=MODEL,
+        channel="hub", via_mapping=False,
+    )
+    registry.finish_attempt(
+        turn_id,
+        outcome=RawCallOutcome(
+            kind=RawOutcomeKind.NETWORK_ERROR,
+            http_status=502,
+            error_code="engine_down",
+            redacted_message=None,
+            stream_started=False,
+            model_id=MODEL,
+            source_id="src_engine01",
+            response_correlation_ids=(
+                ("x-request-id", "relay-engine-down"),
+            ),
+        ),
+        decision=ResolutionDecision("surface", error_code="engine_down", downstream_status=502),
+    )
+    registry.settle(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT)
+
+    record = registry.store.get(turn_id)
+    assert record is not None
+    assert record["terminal_error"] == {
+        "source_id": None,
+        "configured_model_id": None,
+        "channel": None,
+        "reason": "engine_down",
+        "stream_started": False,
+        "response_correlation_ids": [
+            {"header": "x-request-id", "value": "relay-engine-down"},
+        ],
+    }
+
 def test_model_history_read_preserves_legacy_records_and_current_route_state(tmp_path):
     service, store, adapter = _service(tmp_path, _sparse_config())
     legacy = _record("legacy")
