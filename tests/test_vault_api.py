@@ -3352,7 +3352,7 @@ def test_agent_deliver_fetch_uses_finite_timeout(monkeypatch):
             seen_timeout.append(timeout)
             return FakeClient()
 
-    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_require_avault_fetch_surface", lambda _feature, floor=None: None)
     monkeypatch.setattr(api, "_avault_agent_manager", lambda: FakeManager())
 
     result = api.avault_agent_deliver_fetch(
@@ -4823,3 +4823,46 @@ def test_create_grant_relays_every_protected_record_and_rejects_missing_dek(monk
         "PROTECTED_LOGIN.username",
         "PROTECTED_LOGIN.totp",
     ]
+
+
+_FETCH_REQUEST = {
+    "method": "GET",
+    "url": "https://example.com",
+    "allowed_hosts": ["example.com"],
+    "inject": {"type": "bearer"},
+}
+
+
+@pytest.mark.parametrize("installed_version", ["0.1.6", None])
+def test_one_shot_deliver_fetch_refuses_avault_without_refreshed_tls_trust(monkeypatch, installed_version):
+    status = {"installed": installed_version is not None, "version": installed_version}
+    monkeypatch.setattr(api, "avault_status", lambda: status)
+    monkeypatch.setattr(api, "_run_avault", lambda *a, **k: pytest.fail("credential handed to a pre-0.1.7 avault"))
+
+    with pytest.raises(api.AvaultPreHandoffError):
+        api.avault_deliver_fetch("GRANT_KEY", _sealed(), dict(_FETCH_REQUEST))
+
+
+def test_one_shot_deliver_fetch_runs_on_avault_with_refreshed_tls_trust(monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": api.AVAULT_FETCH_TLS_MIN_VERSION})
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, stdout='{"status": 200, "headers": {}, "body": "ok"}', stderr="")
+
+    monkeypatch.setattr(api, "_run_avault", fake_run)
+
+    assert api.avault_deliver_fetch("GRANT_KEY", _sealed(), dict(_FETCH_REQUEST))["status"] == 200
+    assert calls == [["deliver", "fetch"]]
+
+
+def test_agent_deliver_fetch_refuses_avault_without_refreshed_tls_trust(monkeypatch):
+    # 0.1.6 clears the protected-record floor but not the fetch TLS floor.
+    monkeypatch.setattr(api, "avault_status", lambda: {"installed": True, "version": api.AVAULT_PROTECTED_RECORD_MIN_VERSION})
+    monkeypatch.setattr(api, "_avault_agent_manager", lambda: pytest.fail("credential handed to a pre-0.1.7 agent"))
+
+    with pytest.raises(api.AvaultPreHandoffError, match=api.AVAULT_FETCH_TLS_MIN_VERSION):
+        api.avault_agent_deliver_fetch(grant_id="vgr_grant", name="GRANT_KEY", sealed=_sealed(), request=dict(_FETCH_REQUEST))

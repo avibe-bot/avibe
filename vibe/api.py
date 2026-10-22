@@ -8681,6 +8681,11 @@ AVAULT_GRANT_DELIVERY_MIN_VERSION = "0.1.4"
 # Older binaries cannot open browser-sealed protected values and fail with
 # "open failed for <name>", so protected Vaults must not treat them as ready.
 AVAULT_PROTECTED_RECORD_MIN_VERSION = "0.1.6"
+# ``deliver fetch`` hands a credential to avault's own HTTPS client. avault 0.1.7
+# refreshed that client's trust store (webpki-roots 1.0.10 / rustls-webpki
+# 0.103.16) to reject the compromised eMudhra/emSign intermediates, so older
+# binaries must not receive credentials for HTTPS egress.
+AVAULT_FETCH_TLS_MIN_VERSION = "0.1.7"
 # Installer pin must reference a published release. v0.1.7 refreshes the
 # outbound TLS trust (webpki-roots 1.0.10 / rustls-webpki 0.103.16) so delivery
 # fetches reject the compromised eMudhra/emSign intermediates.
@@ -9364,6 +9369,19 @@ def _require_avault_grant_protocol_surface(feature: str) -> None:
     )
 
 
+def _require_avault_fetch_surface(feature: str, *, floor: str | None = None) -> None:
+    # Fetch egress needs the refreshed TLS trust on top of whatever floor the
+    # path already requires (the resident path also opens a protected record).
+    minimum = AVAULT_FETCH_TLS_MIN_VERSION
+    if floor and not _version_at_least(minimum, floor):
+        minimum = floor
+    _require_avault_min_version(
+        feature,
+        minimum,
+        managed_available=_version_at_least(AVAULT_VERSION, minimum),
+    )
+
+
 # ---------------------------------------------------------------------------
 # avault client — Avibe's only path to value cryptography.
 #
@@ -9785,7 +9803,7 @@ def avault_agent_deliver_fetch(
     """Broker an HTTP request under a protected grant."""
     from vibe.avault_agent import AvaultAgentError
 
-    _require_avault_grant_delivery_surface("resident agent deliver fetch")
+    _require_avault_fetch_surface("resident agent deliver fetch", floor=_avault_ready_min_version())
     try:
         return _avault_agent_manager().client(timeout=_AVAULT_FETCH_TIMEOUT_SECONDS).deliver_fetch(
             grant_id=grant_id,
@@ -9832,6 +9850,7 @@ def avault_deliver_fetch(name: str, sealed, request: dict) -> dict:
     ``request`` must include ``allowed_hosts`` (avault rejects the target otherwise).
     Returns ``{"status", "headers", "body"}`` — the response only, never the secret.
     """
+    _require_avault_fetch_surface("deliver fetch")
     body = json.dumps(
         {"name": name, "envelope": _envelope_payload(sealed), "request": request}
     ).encode("utf-8")
@@ -10492,7 +10511,9 @@ def reconcile_startup_dependencies() -> dict:
 
         _set_startup_dependency_reconciling("avault", True)
         try:
-            avault = ensure_avault_installed(force=False)
+            # Pin-aware: Desktop never runs `vibe runtime prepare`, so startup is
+            # where an existing install below AVAULT_VERSION moves to the pin.
+            avault = refresh_avault_if_stale()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Startup dependency reconcile failed to ensure avault: %s", exc, exc_info=True)
             avault = {"ok": False, "message": str(exc)}
