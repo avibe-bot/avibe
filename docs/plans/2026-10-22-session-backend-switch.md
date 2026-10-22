@@ -70,6 +70,11 @@ Unbound sessions keep today's behavior.
 The UPDATE re-asserts the state the decision was made from: same native, same
 backend, not running, no unsettled Turn, the same newest Turn, not archived.
 
+A backend change that names no model or reasoning effort resets both, with
+their explicit-override marker: they belong to the old backend's catalog, and
+the new Agent's defaults apply instead. The Chat header always sends the picked
+Agent's pair; this protects API callers that send only the Agent.
+
 A forked session's spent fork source (`fork_source_native_session_id`,
 `fork_source_backend`) is dropped by the switch, so the emptied native cannot
 re-arm a native fork or pin the picker to the fork's backend.
