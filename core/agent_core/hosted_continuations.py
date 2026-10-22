@@ -31,6 +31,24 @@ def result_fragment(block: HostedToolBlock) -> bool:
     )
 
 
+def deferred_completion_matches(
+    previous: AssistantMessage,
+    current: AssistantMessage,
+    result: HostedToolBlock,
+) -> bool:
+    """Whether ``result`` is the adjacent continuation of ``previous``'s pending call."""
+    if previous.origin != current.origin or previous.source_identity != current.source_identity:
+        return False
+    call = pending_hosted(previous).get(result.id)
+    return (
+        call is not None
+        and result_fragment(result)
+        and call.native.source_id == result.native.source_id
+        and call.tool == result.tool
+        and call.action == result.action
+    )
+
+
 @dataclass(frozen=True)
 class HostedCompletion:
     use_position: int

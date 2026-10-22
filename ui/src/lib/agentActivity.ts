@@ -177,9 +177,9 @@ export const shouldShowRunningCard = (
   liveRowCount: number,
 ): boolean => enabled && working && liveRowCount > 0;
 
-// Native completion trace events share the owning Turn, never merely a provider response id.
+// Native fragments share their durable Turn and originating response, never merely a provider id.
 const activityRowKey = (row: ActivityRow): string => row.hosted?.mode === 'native'
-  ? JSON.stringify([row.hosted.turn_id ?? row.hosted.response_id, row.hosted.call_id]) : row.id;
+  ? JSON.stringify([row.hosted.turn_id, row.hosted.origin_response_id ?? row.hosted.response_id, row.hosted.call_id]) : row.id;
 
 const mergeActivityRows = (rows: ActivityRow[]): ActivityRow[] => {
   const merged = new Map<string, ActivityRow>();

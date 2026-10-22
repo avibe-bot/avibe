@@ -163,6 +163,9 @@ class HostedActivity:
     # The committed response row a native call came in. Its card is ordered just
     # before that row, as the call happened before the text that reads its result.
     response_id: Optional[str] = None
+    # The response row that originated this call instance. A deferred completion carries
+    # its own response_id but keeps this owner so same-turn provider-id reuse cannot merge.
+    origin_response_id: Optional[str] = None
     # A mixed Anthropic group is still awaiting its deferred result; this is a provisional Web row and is suppressed on IM.
     in_progress: bool = False
     # The Source that refused to run this search natively, so it ran by proxy instead (``hosted.fallback_from``),
@@ -213,6 +216,7 @@ class HostedActivity:
             "duration_ms": self.duration_ms,
             "turn_id": self.turn_id,
             "response_id": self.response_id,
+            "origin_response_id": self.origin_response_id,
             "executor_kind": self.executor_kind,
         }
         payload.update({key: value for key, value in optional.items() if value is not None})
@@ -300,14 +304,18 @@ def _subject(action: HostedAction) -> tuple[Optional[str], tuple[str, ...]]:
     return None, ()
 
 
-def hosted_activity_key(payload: Any) -> Optional[tuple[str, str]]:
-    """A native card's immutable owner: durable Turn + call id when available, with
-    response + call as the compatibility fallback for released rows."""
+def hosted_activity_key(payload: Any) -> Optional[tuple[str, ...]]:
+    """A native card's immutable call instance: Turn + originating response + call id.
+
+    Released payloads have no ``origin_response_id`` and fall back to their response id;
+    this keeps old rows readable without merging reused provider ids across responses.
+    """
     if isinstance(payload, dict) and payload.get("mode") == "native":
-        owner = payload.get("turn_id") or payload.get("response_id")
+        owner = payload.get("origin_response_id") or payload.get("response_id")
         call = payload.get("call_id")
+        turn = payload.get("turn_id")
         if isinstance(owner, str) and owner and isinstance(call, str) and call:
-            return owner, call
+            return ((turn, owner, call) if isinstance(turn, str) and turn else (owner, call))
     return None
 
 
@@ -316,6 +324,7 @@ def native_activities(
     *,
     source_names: SourceNames = _no_names,
     response_id: Optional[str] = None,
+    origin_response_id: Optional[str] = None,
     turn_id: Optional[str] = None,
 ) -> list[HostedActivity]:
     """Every native hosted call in a response, in content order.
@@ -373,6 +382,7 @@ def native_activities(
                 cost=summary.cost if last and summary is not None else None,
                 cost_calls=len(billed_blocks) or len(blocks),
                 response_id=response_id,
+                origin_response_id=origin_response_id or response_id,
                 turn_id=turn_id,
             )
         )

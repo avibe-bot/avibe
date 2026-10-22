@@ -91,7 +91,7 @@ from core.backend_failure import emit_backend_failure
 from core.agent_output import Narration, Reply, ToolActivity, TurnEnd, TurnOutcome, emit_output
 from core.citations import CitationBundle, register_text_citations
 from core.hosted_activity import HostedActivity, hosted_line, native_activities, proxy_activity
-from core.agent_core.hosted_continuations import pending_hosted, result_fragment
+from core.agent_core.hosted_continuations import deferred_completion_matches, pending_hosted, result_fragment
 from core.message_output import MessageOutput, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
 from core.processing_indicator import STOPPED_REACTION_EMOJI
@@ -1705,6 +1705,17 @@ class VibeyAgent(BaseAgent):
         except Exception:
             logger.exception("Vibey could not show hosted call %s", activity.call_id)
 
+    def _native_completion_owner(self, run: _Run, row_id: str, block: HostedToolBlock) -> str:
+        """Link only an adjacent deferred result to the response that introduced its call instance."""
+        ordered = tuple(run.responses.items())
+        for index, (candidate_id, current) in enumerate(ordered):
+            if candidate_id != row_id or index == 0:
+                continue
+            previous_id, previous = ordered[index - 1]
+            if deferred_completion_matches(previous, current, block):
+                return previous_id
+        return row_id
+
     async def _emit_native_hosted(self, run: _Run, row_id: str) -> None:
         message = run.responses.get(row_id)
         if message is None:
@@ -1712,8 +1723,19 @@ class VibeyAgent(BaseAgent):
         names, _states = await self._source_display()
         pending = pending_hosted(message)
         blocks = {block.id: block for block in message.content if isinstance(block, HostedToolBlock)}
-        for activity in native_activities(message, source_names=names.get, response_id=row_id, turn_id=run.turn_id):
+        for activity in native_activities(
+            message,
+            source_names=names.get,
+            response_id=row_id,
+            origin_response_id=row_id,
+            turn_id=run.turn_id,
+        ):
             block = blocks[activity.call_id]
+            if result_fragment(block):
+                activity = replace(
+                    activity,
+                    origin_response_id=self._native_completion_owner(run, row_id, block),
+                )
             if block.id in pending:
                 # The dispatcher persists this provisional Web row but suppresses its IM line.
                 activity = replace(activity, in_progress=True)

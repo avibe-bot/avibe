@@ -33,6 +33,7 @@ from core.agent_core.messages import (
     HostedRecord,
     HostedToolBlock,
     HostedSummary,
+    ToolCallBlock,
     Origin,
     message_to_dict,
 )
@@ -359,20 +360,27 @@ def test_a_native_hosted_card_sorts_before_the_response_that_carried_it(isolated
 
 
 
-def _model_hosted_message(*, call_id: str, status: str) -> dict:
-    message = AssistantMessage(
-        (
-            HostedToolBlock(
-                id=call_id,
-                tool="web_search",
-                action=HostedAction(type="search", queries=("restart-safe search",)),
-                record=HostedRecord(status=status),
-                native=HostedNative(
-                    source_id="src_testsrc1",
-                    payload=({"type": "server_tool_use", "id": call_id},),
+def _model_hosted_message(*, call_id: str, status: str, with_client: bool = False) -> dict:
+    content = [
+        HostedToolBlock(
+            id=call_id,
+            tool="web_search",
+            action=HostedAction(type="search", queries=("restart-safe search",)),
+            record=HostedRecord(status=status),
+            native=HostedNative(
+                source_id="src_testsrc1",
+                payload=(
+                    ({"type": "server_tool_use", "id": call_id},)
+                    if status == "pending"
+                    else ({"type": "web_search_tool_result", "tool_use_id": call_id},)
                 ),
             ),
         ),
+    ]
+    if with_client:
+        content.append(ToolCallBlock(id="client_call", name="echo", arguments={}))
+    message = AssistantMessage(
+        tuple(content),
         ORIGIN,
         "stop" if status != "pending" else "tool_use",
         hosted_summary=HostedSummary(),
@@ -443,7 +451,7 @@ def test_model_completion_projects_after_commit_without_trace_event(isolated_sta
             author="agent",
             created_at="2026-06-01T10:00:01Z",
             metadata={"turn_id": "trn_model_completion"},
-            content=_model_hosted_message(call_id="srv_model", status="pending"),
+            content=_model_hosted_message(call_id="srv_model", status="pending", with_client=True),
         )
         _msg(
             conn,
@@ -491,7 +499,7 @@ def test_model_projection_does_not_merge_reused_call_id_across_turns(isolated_st
                 author="agent",
                 created_at=created_at,
                 metadata={"turn_id": turn_id},
-                content=_model_hosted_message(call_id="srv_reused", status=status),
+                content=_model_hosted_message(call_id="srv_reused", status=status, with_client=status == "pending"),
             )
 
     with engine.connect() as conn:
@@ -504,15 +512,19 @@ def test_model_projection_does_not_merge_reused_call_id_across_turns(isolated_st
             {},
         )
 
-    assert set(projected) == {("trn_reused_a", "srv_reused"), ("trn_reused_b", "srv_reused")}
-    assert projected[("trn_reused_a", "srv_reused")]["hosted"]["status"] == "pending"
-    assert projected[("trn_reused_b", "srv_reused")]["hosted"]["status"] == "completed"
+    assert set(projected) == {("trn_reused_a", "m_reused_a", "srv_reused"), ("trn_reused_b", "m_reused_b", "srv_reused")}
+    assert projected[("trn_reused_a", "m_reused_a", "srv_reused")]["hosted"]["status"] == "pending"
+    assert projected[("trn_reused_b", "m_reused_b", "srv_reused")]["hosted"]["status"] == "completed"
+
+
+@pytest.mark.parametrize(("outcome", "group_status"), [("canceled", "interrupted"), ("failed", "failed")])
+def test_terminal_turn_projects_pending_model_card_as_interrupted(isolated_state, outcome, group_status):
     """A pending fragment in a terminal Turn is interrupted after reload, not live."""
     engine = create_sqlite_engine()
     sid = "ses_model_interrupted"
     with engine.begin() as conn:
         scope = _seed_session(conn, session_id=sid)
-        _insert_activity_turn(conn, scope=scope, session_id=sid, turn_id="trn_model_interrupted", outcome="canceled")
+        _insert_activity_turn(conn, scope=scope, session_id=sid, turn_id="trn_model_interrupted", outcome=outcome)
         _msg(
             conn,
             scope,
@@ -530,7 +542,7 @@ def test_model_projection_does_not_merge_reused_call_id_across_turns(isolated_st
         detail = agent_activity_service.get_turn_group(conn, session_id=sid, group_id=group["id"])
 
     assert detail is not None
-    assert detail["status"] == "interrupted"
+    assert detail["status"] == group_status
     assert detail["open"] is False
     [card] = [row["hosted"] for row in detail["rows"] if row.get("hosted")]
     assert card["status"] == "incomplete"
@@ -571,7 +583,59 @@ def test_a_native_hosted_card_stays_with_its_response_at_the_scan_window_edge(is
     assert rows == ["evt_00063f0000000200cccccccc"]
 
 
-def test_narration_the_transcript_draws_is_not_repeated_in_activity(isolated_state):
+
+
+def test_duplicate_trace_fragments_keep_earliest_activity_position(isolated_state):
+    """A newer completion updates the card without moving it after intervening activity."""
+    engine = create_sqlite_engine()
+    sid = "ses_trace_position"
+    pending = {
+        "version": 1,
+        "call_id": "srv_trace",
+        "tool": "web_search",
+        "mode": "native",
+        "status": "pending",
+        "turn_id": "trn_trace",
+        "response_id": "resp_1",
+        "origin_response_id": "resp_1",
+        "in_progress": True,
+    }
+    completed = {**pending, "status": "completed", "response_id": "resp_2", "in_progress": False}
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_trace_user", mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q", source="user")
+        _msg(conn, scope, sid, mid="m_trace_result", mtype="result", author="agent", created_at="2026-06-01T10:00:04Z", text="done")
+        for event_id, created_at, text, card in (
+            ("e_trace_pending", "2026-06-01T10:00:01Z", "pending", pending),
+            ("e_trace_client", "2026-06-01T10:00:02Z", "client", None),
+            ("e_trace_completed", "2026-06-01T10:00:03Z", "completed", completed),
+        ):
+            conn.execute(
+                agent_events.insert().values(
+                    id=event_id,
+                    scope_id=scope,
+                    session_id=sid,
+                    platform="avibe",
+                    event_type="tool_call",
+                    visibility="trace",
+                    content_text=text,
+                    content_json=json.dumps({"kind": "toolcall", "hosted": card} if card else {"kind": "toolcall"}),
+                    metadata_json="{}",
+                    source="agent",
+                    turn_id="trn_trace",
+                    created_at=created_at,
+                    updated_at=created_at,
+                )
+            )
+
+    with engine.connect() as conn:
+        [group] = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+        detail = agent_activity_service.get_turn_group(conn, session_id=sid, group_id=group["id"])
+
+    assert detail is not None
+    assert [row["id"] for row in detail["rows"]] == ["e_trace_pending", "e_trace_client"]
+    assert detail["rows"][0]["hosted"]["status"] == "completed"
+
     """A narration with an ``interim`` transcript copy appears once, as the bubble."""
     engine = create_sqlite_engine()
     sid = "ses_twin"
