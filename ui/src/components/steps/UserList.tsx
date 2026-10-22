@@ -419,18 +419,18 @@ const ActiveCodeBox: React.FC<{
 
 const Modal: React.FC<{ title: string; onClose: () => void; children: React.ReactNode }> = ({ title, onClose, children }) => (
   <div
-    className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4"
+    className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/40 px-4 py-4"
     role="dialog"
     aria-modal="true"
     aria-label={title}
     onClick={onClose}
   >
     <div
-      className="flex max-h-[80vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl border border-border bg-surface-2 shadow-[0_42px_80px_-42px_rgba(0,0,0,0.85)]"
+      className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col overflow-y-auto rounded-2xl border border-border bg-surface-2 shadow-[0_42px_80px_-42px_rgba(0,0,0,0.85)]"
       onClick={(e) => e.stopPropagation()}
     >
-      <div className="flex items-center justify-between border-b border-border px-4 py-3">
-        <h4 className="text-base font-semibold text-foreground">{title}</h4>
+      <div className="flex min-w-0 items-center justify-between gap-3 border-b border-border px-4 py-3">
+        <h4 className="min-w-0 flex-1 break-words text-base font-semibold text-foreground [overflow-wrap:anywhere]">{title}</h4>
         <button
           type="button"
           onClick={onClose}

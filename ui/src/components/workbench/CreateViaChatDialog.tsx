@@ -93,14 +93,14 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[#080812F0] px-4"
+      className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-[#080812F0] px-4 py-4"
       role="dialog"
       aria-modal="true"
       aria-label={t('harness.createDialog.title')}
       onClick={onClose}
     >
       <div
-        className="flex w-full max-w-[500px] flex-col items-center gap-5 rounded-2xl border border-violet/30 bg-surface p-7 shadow-[0_24px_48px_-6px_rgba(0,0,0,0.8),var(--shadow-glow-lg-violet)]"
+        className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[500px] flex-col items-center gap-5 overflow-y-auto rounded-2xl border border-violet/30 bg-surface p-7 shadow-[0_24px_48px_-6px_rgba(0,0,0,0.8),var(--shadow-glow-lg-violet)]"
         onClick={(e) => e.stopPropagation()}
       >
         <button
@@ -117,7 +117,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
           <Sparkles className="size-[30px]" />
         </div>
 
-        <div className="flex flex-col gap-1.5 text-center">
+        <div className="flex min-w-0 flex-col gap-1.5 text-center">
           <div className="text-[20px] font-bold text-foreground">{t('harness.createDialog.title')}</div>
           <div className="text-[12px] italic text-muted">{t('harness.createDialog.subtitle')}</div>
         </div>

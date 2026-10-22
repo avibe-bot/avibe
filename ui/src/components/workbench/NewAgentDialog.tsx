@@ -204,18 +204,18 @@ export const NewAgentDialog: React.FC<NewAgentDialogProps> = ({ open, onClose, o
   return (
     <>
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/60 px-4 py-4"
       role="dialog"
       aria-modal="true"
       onClick={onClose}
     >
       <div
-        className="flex w-full max-w-[520px] flex-col gap-5 rounded-2xl border border-border-strong bg-surface p-7 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
+        className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[520px] flex-col gap-5 overflow-y-auto rounded-2xl border border-border-strong bg-surface p-7 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <h2 className="text-[18px] font-bold text-foreground">{t('agents.create.title')}</h2>
+        <div className="flex min-w-0 items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <h2 className="break-words text-[18px] font-bold text-foreground [overflow-wrap:anywhere]">{t('agents.create.title')}</h2>
             <p className="mt-1 max-w-[420px] text-[11.5px] leading-relaxed text-muted">
               {t('agents.create.body')}
             </p>
