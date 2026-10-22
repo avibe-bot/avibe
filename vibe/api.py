@@ -8681,18 +8681,19 @@ AVAULT_GRANT_DELIVERY_MIN_VERSION = "0.1.4"
 # Older binaries cannot open browser-sealed protected values and fail with
 # "open failed for <name>", so protected Vaults must not treat them as ready.
 AVAULT_PROTECTED_RECORD_MIN_VERSION = "0.1.6"
-# Installer pin must reference a published release. v0.1.6 adds the
-# protected-record v2 AAD fix so agent delivery can open browser-sealed protected values.
-AVAULT_VERSION = "0.1.6"
+# Installer pin must reference a published release. v0.1.7 refreshes the
+# outbound TLS trust (webpki-roots 1.0.10 / rustls-webpki 0.103.16) so delivery
+# fetches reject the compromised eMudhra/emSign intermediates.
+AVAULT_VERSION = "0.1.7"
 # (sha256, size) of each AVAULT_VERSION archive by target, copied from that
 # release's manifest.json so the download is verified whichever source served it.
 _AVAULT_ARCHIVES = {
-    "linux-arm64": ("3405d740ac91c5490a0c16839bb878a2c574ee21053a7a4362d7bbeb7ce3f110", 3251581),
-    "linux-x64": ("42d5bd3bed5ccdd4748a99cfd64f2e32ab1649e4cd2dd13fcc060806c39109f2", 3574160),
-    "macos-arm64": ("2bf9ace2e055c9988ca3b24aa483676e1123b7a588b5082f57cc18d7d856f7c9", 1458126),
-    "macos-x64": ("558b4559b0bcdaeb713758183530d6944c2eacd68fcbfb35cd43ebd017fde163", 1597445),
-    "windows-arm64": ("0b1a2a91ad0a24c392172164e4040fb3c50bec81fd3a14d58e6e13d04053d864", 1316664),
-    "windows-x64": ("c0b9404d30980531f2a6df5e2b4f8bf6e5a34b31a916f7971b522a3a6cad71ad", 1394102),
+    "linux-arm64": ("22bbed967ba7403e323549eb8b161c2d918c1f5ed692f38d4e3b1049ad7d23dd", 3256706),
+    "linux-x64": ("ccc329b92a70c2d5b583b66725b0780a0f182975f2cbe6e7501232d9963ceb4c", 3580615),
+    "macos-arm64": ("d6e5fe7911c571d05734213af5c1b17332b3d7a71635f60c68887bd2dc977998", 1462107),
+    "macos-x64": ("56874a51ef37aab01be137898b3220c4a78bdbff0fc5362a862a42dd18a0abcc", 1583787),
+    "windows-arm64": ("6f7f7cbc69decb280a78e4936cfef7c15e95820168df981a3020393937f4c7aa", 1325310),
+    "windows-x64": ("c49cf29062fa5f22eab76e7785c040006a6fcf9fabf84667c120f8e99f5ccf0a", 1406456),
 }
 
 
