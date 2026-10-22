@@ -168,14 +168,14 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
   ];
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[#05050B]/[0.72] p-4 backdrop-blur-[6px] sm:p-10">
-      <div className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[560px] flex-col overflow-y-auto rounded-2xl border border-border-strong bg-surface-2 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)]">
+    <div role="dialog" aria-modal="true" aria-labelledby="add-skill-dialog-title" className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto overflow-x-hidden bg-[#05050B]/[0.72] p-4 backdrop-blur-[6px] sm:p-10">
+      <div className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[560px] flex-col overflow-y-auto overflow-x-hidden rounded-2xl border border-border-strong bg-surface-2 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)] sm:max-h-[calc(100dvh-5rem)]">
         <div className="flex min-w-0 items-center gap-3 border-b border-border px-5 py-4">
           <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] border border-mint/40 bg-mint-soft text-mint-ink">
             <PackagePlus className="size-[17px]" />
           </span>
           <div className="flex min-w-0 flex-1 flex-col">
-            <div className="break-words text-[16px] font-bold text-foreground [overflow-wrap:anywhere]">{t('skills.addDialog.title')}</div>
+            <div id="add-skill-dialog-title" className="break-words text-[16px] font-bold text-foreground [overflow-wrap:anywhere]">{t('skills.addDialog.title')}</div>
             <div className="break-words text-[11px] text-muted [overflow-wrap:anywhere]">{t('skills.addDialog.subtitle')}</div>
           </div>
           <button type="button" onClick={onClose} aria-label={t('common.close')} className="flex size-[26px] items-center justify-center rounded-md text-muted transition hover:bg-foreground/[0.06]">
@@ -200,7 +200,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
           {source === 'github' ? (
             <label className="flex flex-col gap-1.5">
               <span className="font-mono text-[10px] font-bold uppercase tracking-[0.1em] text-muted">{t('skills.addDialog.urlLabel')}</span>
-              <div className="flex items-center gap-2 rounded-lg border border-border-strong bg-surface px-2.5 py-2">
+              <div className="flex min-w-0 items-center gap-2 rounded-lg border border-border-strong bg-surface px-2.5 py-2">
                 <Github className="size-3.5 shrink-0 text-muted" />
                 <input
                   value={url}
@@ -210,7 +210,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
                   }}
                   onKeyDown={(e) => e.key === 'Enter' && fetchGithub()}
                   placeholder={t('skills.addDialog.urlPlaceholder')}
-                  className="flex-1 bg-transparent font-mono text-[12px] text-foreground outline-none placeholder:text-muted"
+                  className="min-w-0 flex-1 bg-transparent font-mono text-[12px] text-foreground outline-none placeholder:text-muted"
                 />
                 <button
                   type="button"
@@ -277,7 +277,7 @@ export function AddSkillDialog({ defaultScope, projectId, projectName, onClose, 
           </div>
 
           {error ? (
-            <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">{error}</div>
+            <div className="break-words rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink [overflow-wrap:anywhere]">{error}</div>
           ) : null}
         </div>
 

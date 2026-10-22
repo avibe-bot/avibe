@@ -73,14 +73,14 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-[#05050B]/[0.72] p-4 backdrop-blur-[6px] sm:p-10">
-      <div className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[760px] flex-col overflow-y-auto rounded-2xl border border-border-strong bg-surface-2 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)]">
+    <div role="dialog" aria-modal="true" aria-labelledby="browse-registry-dialog-title" className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto overflow-x-hidden bg-[#05050B]/[0.72] p-4 backdrop-blur-[6px] sm:p-10">
+      <div className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[760px] flex-col overflow-y-auto overflow-x-hidden rounded-2xl border border-border-strong bg-surface-2 shadow-[0_24px_60px_-12px_rgba(0,0,0,0.7)] sm:max-h-[calc(100dvh-5rem)]">
         <div className="flex min-w-0 items-center gap-3 border-b border-border px-5 py-4">
           <span className="flex size-[34px] shrink-0 items-center justify-center rounded-[9px] border border-cyan/40 bg-cyan-soft text-cyan-ink">
             <Compass className="size-[17px]" />
           </span>
           <div className="flex min-w-0 flex-1 flex-col">
-            <div className="break-words text-[16px] font-bold text-foreground [overflow-wrap:anywhere]">{t('skills.browse.title')}</div>
+            <div id="browse-registry-dialog-title" className="break-words text-[16px] font-bold text-foreground [overflow-wrap:anywhere]">{t('skills.browse.title')}</div>
             <div className="break-words text-[11px] text-muted [overflow-wrap:anywhere]">{t('skills.browse.subtitle')}</div>
           </div>
           <button type="button" onClick={onClose} aria-label={t('common.close')} className="flex size-[26px] items-center justify-center rounded-md text-muted transition hover:bg-foreground/[0.06]">
@@ -89,14 +89,14 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
         </div>
 
         <div className="flex flex-col gap-3.5 p-5">
-          <div className="flex items-center gap-2.5 rounded-[10px] border border-border-strong bg-surface px-3.5 py-2.5">
-            <Search className="size-[15px] text-muted" />
+          <div className="flex min-w-0 items-center gap-2.5 rounded-[10px] border border-border-strong bg-surface px-3.5 py-2.5">
+            <Search className="size-[15px] shrink-0 text-muted" />
             <input
               autoFocus
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={t('skills.browse.searchPlaceholder')}
-              className="flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted"
+              className="min-w-0 flex-1 bg-transparent text-[13px] text-foreground outline-none placeholder:text-muted"
             />
             {loading ? <Loader2 className="size-3.5 animate-spin text-muted" /> : (
               <span className="font-mono text-[10.5px] text-muted">{t('skills.browse.resultsCount', { count: results.length })}</span>
@@ -155,7 +155,7 @@ export function BrowseRegistryDialog({ scope, projectId, installedNames, onClose
                     <div className="line-clamp-2 text-[11.5px] text-muted">{item.description}</div>
                     <div className="flex flex-wrap items-center gap-2 font-mono text-[10px] text-muted">
                       {(item.tags ?? []).slice(0, 3).map((tg) => (
-                        <span key={tg} className="rounded border border-border bg-surface-3 px-1.5 py-0.5">
+                        <span key={tg} className="max-w-full break-all rounded border border-border bg-surface-3 px-1.5 py-0.5">
                           {tg}
                         </span>
                       ))}
