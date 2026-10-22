@@ -68,7 +68,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
-from sqlalchemy import and_, func, or_, select, text
+from sqlalchemy import and_, bindparam, func, or_, select, text
 from sqlalchemy.engine import Connection, Engine
 
 from core.agent_core.harness.fork import fork_point, latest_cut
@@ -89,7 +89,7 @@ from core.agent_core.messages import (
 from storage import agent_events_service, media_service, messages_service
 from storage.agent_session_rows import reserve_write_lock
 from storage.message_deliveries import TURN_OWNER_STATES
-from storage.models import agent_events, agent_sessions, message_deliveries, messages, scopes, session_turns
+from storage.models import MESSAGE_TURN_ID_SQL, agent_events, agent_sessions, message_deliveries, messages, scopes, session_turns
 from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
 
 INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
@@ -216,6 +216,10 @@ class SQLiteTranscriptStore:
 
     async def load(self, session_id: str) -> Sequence[ContextEntry]:
         return await asyncio.to_thread(self._load, session_id)
+
+    async def load_turn(self, session_id: str, turn_id: str) -> Sequence[ContextEntry]:
+        """This durable Turn's context only, without other Turns or fork ancestry (adapter recovery)."""
+        return await asyncio.to_thread(self._load, session_id, turn_id=turn_id)
 
     async def consume_input(self, session_id: str, message_id: str, message: UserMessage) -> ContextEntry:
         if not isinstance(message, UserMessage):
@@ -433,11 +437,13 @@ class SQLiteTranscriptStore:
             session_id, seq, kind, row["id"], message=message, payload=payload, created_at=_epoch(row["created_at"])
         )
 
-    def _load(self, session_id: str) -> list[ContextEntry]:
+    def _load(self, session_id: str, *, turn_id: Optional[str] = None) -> list[ContextEntry]:
         with self._engine.begin() as conn:
-            # One read snapshot across both tables and every ancestor.
+            # One read snapshot across both tables and every ancestor (or just the requested Turn).
             if not conn.connection.dbapi_connection.in_transaction:
                 conn.exec_driver_sql("BEGIN")
+            if turn_id is not None:
+                return _turn_context_entries(conn, session_id, turn_id)
             return _context_entries(conn, session_id)
 
 async def _settle(task: asyncio.Future[Any]) -> None:
@@ -932,6 +938,37 @@ def _context_rows(conn: Connection, session_id: str, bound: Optional[int]) -> li
         ).mappings()
         entries.extend(to_entry(session_id, row) for row in rows)
     return entries
+
+
+def _turn_context_entries(conn: Connection, session_id: str, turn_id: str) -> list[ContextEntry]:
+    """Three indexed reads bounded by one Turn, using the same decoders as full context loading."""
+    entries = []
+    for table, index, owner, columns, to_entry in (
+        ("messages", "ix_messages_turn_id", MESSAGE_TURN_ID_SQL, "type", _message_entry),
+        ("agent_events", "ix_agent_events_turn_sequence_id", "turn_id", "event_type, visibility", _event_entry),
+    ):
+        # Pin the owning index: SQLite otherwise prefers session/context_seq and visits all historical events.
+        query = text(
+            f"SELECT id, context_seq, content_json, created_at, {columns} FROM {table} INDEXED BY {index} "
+            f"WHERE session_id = :session_id AND context_seq IS NOT NULL AND ({owner}) = :turn_id"
+            + (" AND type IN :response_types" if table == "messages" else "")
+        )
+        params = {"session_id": session_id, "turn_id": turn_id}
+        if table == "messages":
+            query = query.bindparams(bindparam("response_types", expanding=True))
+            params["response_types"] = RESPONSE_TYPES
+        entries.extend(to_entry(session_id, row) for row in conn.execute(query, params).mappings())
+    # Input ownership lives on Deliveries, not response metadata. Keep accepted steers as pairing barriers.
+    query = text(
+        "SELECT messages.id, messages.context_seq, messages.content_json, messages.created_at, messages.type "
+        "FROM message_deliveries INDEXED BY ix_message_deliveries_turn "
+        "CROSS JOIN messages ON messages.id = message_deliveries.message_id "
+        "WHERE message_deliveries.turn_id = :turn_id AND message_deliveries.state = 'accepted' "
+        "AND messages.session_id = :session_id AND messages.context_seq IS NOT NULL AND messages.type IN :input_types"
+    ).bindparams(bindparam("input_types", expanding=True))
+    rows = conn.execute(query, {"session_id": session_id, "turn_id": turn_id, "input_types": INPUT_TYPES}).mappings()
+    entries.extend(_message_entry(session_id, row) for row in rows)
+    return sorted(entries, key=lambda row: row.context_seq)
 
 
 def _message_entry(session_id: str, row: Mapping[str, Any]) -> ContextEntry:

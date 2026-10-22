@@ -61,7 +61,6 @@ from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.harness.context import ContextConfig
 from core.agent_core.harness.projection import open_tool_calls
-from core.agent_core.harness.store import ContextEntry
 from core.agent_core.tools.base import CallInstance
 from core.agent_core.tools.jobs import call_instance
 from core.agent_core.messages import (
@@ -227,8 +226,6 @@ class _Run:
     hosted_images: list[tuple[str, str]] = field(default_factory=list)
     # Deferred searches show provisionally on Web, but reach IM once, after completion or final settlement.
     deferred_hosted: dict[tuple[str, str], tuple[AssistantMessage, HostedActivity]] = field(default_factory=dict)
-    # A resumed Turn may need its immutable transcript for deferred-card recovery and pairing. Load it once per run.
-    transcript_rows: Optional[tuple[ContextEntry, ...]] = None
 
     @property
     def native_turn_id(self) -> str:
@@ -1711,33 +1708,20 @@ class VibeyAgent(BaseAgent):
         except Exception:
             logger.exception("Vibey could not show hosted call %s", activity.call_id)
 
-    async def _transcript_rows(self, run: _Run) -> tuple[ContextEntry, ...]:
-        """Load one immutable transcript snapshot for this run's deferred pairing work."""
-        if run.transcript_rows is None:
-            run.transcript_rows = tuple(await self.store.load(run.session_id))
-        return run.transcript_rows
-
     async def _restore_deferred_hosted(self, run: _Run) -> None:
         """Rehydrate this Turn's held native searches before a restarted Turn can settle."""
-        rows = await self._transcript_rows(run)
+        rows = await self.store.load_turn(run.session_id, run.turn_id)
         history = tuple(row for row in rows if row.message is not None)
         completions = hosted_completions(tuple(row.message for row in history))
         completed = {(history[pair.use_position].row_id, pair.call.id) for pair in completions}
-        pending_entries = []
-        for row in reversed(rows):
-            if row.kind != "response" or not isinstance(row.message, AssistantMessage):
-                continue
-            # The Session has one Turn writer. Stop at its boundary, including inherited fork rows;
-            # an unmatched immutable fragment from a settled Turn is not live work.
-            _agent, owner_turn = await asyncio.to_thread(self._response_owner, row.row_id)
-            if owner_turn != run.turn_id:
-                break
-            if pending_hosted(row.message):
-                pending_entries.append(row)
+        pending_entries = [
+            row for row in rows
+            if row.kind == "response" and isinstance(row.message, AssistantMessage) and pending_hosted(row.message)
+        ]
         if not pending_entries:
             return
         names, _states = await self._source_display()
-        for pending_entry in reversed(pending_entries):
+        for pending_entry in pending_entries:
             pending = pending_hosted(pending_entry.message)
             activities = {activity.call_id: activity for activity in native_activities(
                 pending_entry.message, source_names=names.get, response_id=pending_entry.row_id
@@ -1759,6 +1743,7 @@ class VibeyAgent(BaseAgent):
         names, _states = await self._source_display()
         pending = pending_hosted(message)
         blocks = {block.id: block for block in message.content if isinstance(block, HostedToolBlock)}
+        completion_owners: Optional[dict[str, str]] = None
         for activity in native_activities(message, source_names=names.get, response_id=row_id):
             block = blocks[activity.call_id]
             key = (block.native.source_id, block.id)
@@ -1771,14 +1756,17 @@ class VibeyAgent(BaseAgent):
                     activity = replace(activity, response_id=prior[1].response_id)
                     del run.deferred_hosted[key]
                 else:
-                    rows = await self._transcript_rows(run)
-                    history = tuple(
-                        row for row in rows if row.kind in {"response", "tool_result"} and row.message is not None
-                    )
-                    for pair in hosted_completions(tuple(row.message for row in history)):
-                        if history[pair.result_position].row_id == row_id and pair.result.id == block.id:
-                            activity = replace(activity, response_id=history[pair.use_position].row_id)
-                            break
+                    if completion_owners is None:
+                        # A bounded read once for this response, not once per call. It includes the just-committed
+                        # completion, unlike a cached snapshot taken before the resumed model request.
+                        rows = await self.store.load_turn(run.session_id, run.turn_id)
+                        history = tuple(row for row in rows if row.message is not None)
+                        completion_owners = {
+                            pair.result.id: history[pair.use_position].row_id
+                            for pair in hosted_completions(tuple(row.message for row in history))
+                            if history[pair.result_position].row_id == row_id
+                        }
+                    activity = replace(activity, response_id=completion_owners.get(block.id, activity.response_id))
             await self._emit_hosted(run, activity)
 
     async def _emit_proxy_hosted(self, run: _Run, event: ToolFinished) -> None:

@@ -2826,13 +2826,13 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
         restoring = asyncio.Event()
         if case in {"cancelled_restoring", "cancelled_restoring_at_shutdown"}:
             # Stop the first transcript read inside card restoration, before _resume can own the job.
-            load = harness.agent.store.load
-            async def blocked_first_load(session_id):
+            load = harness.agent.store.load_turn
+            async def blocked_first_load(session_id, turn_id):
                 if not restoring.is_set():
                     restoring.set()
                     await asyncio.Event().wait()
-                return await load(session_id)
-            monkeypatch.setattr(harness.agent.store, "load", blocked_first_load)
+                return await load(session_id, turn_id)
+            monkeypatch.setattr(harness.agent.store, "load_turn", blocked_first_load)
         resumed = asyncio.create_task(harness.agent.handle_message(resume))
         if case in {"cancelled", "cancelled_at_shutdown", "cancelled_restoring", "cancelled_restoring_at_shutdown"}:
             if case.startswith("cancelled_restoring"):
@@ -3558,6 +3558,16 @@ async def test_restart_resume_rehydrates_a_deferred_card_before_stop(
 
     harness.controller.message_dispatcher = ConsolidatedMessageDispatcher(harness.controller)
     harness.new_agent()
+    restore = harness.agent._restore_deferred_hosted
+
+    async def bounded_restore(run):
+        async def no_full_history(_session_id):
+            raise AssertionError("deferred restoration must not load Session history")
+        with monkeypatch.context() as patch:
+            patch.setattr(harness.agent.store, "load", no_full_history)
+            await restore(run)
+
+    monkeypatch.setattr(harness.agent, "_restore_deferred_hosted", bounded_restore)
     entered_preflight, release_preflight = asyncio.Event(), asyncio.Event()
     original_preflight = harness.agent._preflight
 
