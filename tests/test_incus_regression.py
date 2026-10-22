@@ -876,6 +876,9 @@ def test_build_base_uses_publishable_temp_instance() -> None:
     assert "--ephemeral" not in joined
     assert "incus --project default launch images:ubuntu/24.04/cloud avibe-regression-base-build --storage default --network incusbr0" in joined
     assert "https://deb.nodesource.com/setup_22.x" in joined
+    node_install = joined.split("apt-get install -y nodejs\n", 1)[1]
+    assert node_install.splitlines()[0].startswith("node -e ")
+    assert node_install.splitlines()[0].endswith(f" {incus_regression.REGRESSION_NODE_MIN_VERSION}")
     assert "useradd --create-home --shell /bin/bash --groups sudo avibe" in joined
     backend_install = joined.split("sudo -H -u avibe -- bash -s <<'AVIBE_BACKENDS'\n", 1)[1].split("\nAVIBE_BACKENDS", 1)[0]
     assert 'avibe_home="$HOME"' in backend_install

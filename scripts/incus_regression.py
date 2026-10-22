@@ -65,6 +65,11 @@ OPENCODE_INSTALL_SH = (
     "curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors https://opencode.ai/install "
     '| HOME="$opencode_home" bash -s -- --no-modify-path --version "$opencode_version"'
 )
+# The regression base installs Node from NodeSource's rolling 22.x channel,
+# which can lag an upstream security release; refuse to publish a base whose
+# Node is older than the patched floor.
+REGRESSION_NODE_MAJOR = 22
+REGRESSION_NODE_MIN_VERSION = "22.23.4"
 VENV_DIR = "/opt/avibe/venv"
 METADATA_DIR = "/var/lib/avibe-regression"
 METADATA_PATH = f"{METADATA_DIR}/metadata.json"
@@ -2763,8 +2768,9 @@ def build_base_image(args: argparse.Namespace) -> int:
                 {cloud_init_wait_command()}
                 apt-get update
                 apt-get install -y bash ca-certificates curl git build-essential python3 python3-pip python3-venv rsync sudo tmux
-                curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+                curl -fsSL https://deb.nodesource.com/setup_{REGRESSION_NODE_MAJOR}.x | bash -
                 apt-get install -y nodejs
+                node -e 'const want = process.argv[1].split(".").map(Number); const have = process.versions.node.split(".").map(Number); const ok = have[0] === want[0] && (have[1] > want[1] || (have[1] === want[1] && have[2] >= want[2])); if (!ok) {{ console.error(`NodeSource installed Node ${{process.versions.node}}, need ${{process.argv[1]}} or a newer ${{want[0]}}.x`); process.exit(1); }}' {REGRESSION_NODE_MIN_VERSION}
                 # Backends must be service-owned at creation so their updaters
                 # stay writable without a recursive ownership repair at deployment.
                 id -u avibe >/dev/null 2>&1 || useradd --create-home --shell /bin/bash --groups sudo avibe
