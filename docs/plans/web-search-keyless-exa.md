@@ -113,10 +113,10 @@ The advanced tool is not needed for the phase-1 canonical `{query}` contract.
 ### 2.2 Live keyless probe
 
 The probe ran from the Avibe development machine on **2026-10-22**, without an
-API key, OAuth token, or `x-api-key`. It used seven JSON-RPC requests in total
-(two `initialize`, two `tools/list`, two successful/default protocol calls,
-and one advanced call), well below the requested limit of 20, and did not try
-to exhaust a limit.
+API key, OAuth token, or `x-api-key`. It used twelve JSON-RPC requests in total
+(the original seven-request probe plus a five-request follow-up for
+`web_fetch_exa`), well below the requested limit of 20, and did not try to
+exhaust a limit.
 
 1. The default endpoint initialized with HTTP 200 and
    `Content-Type: text/event-stream`; it returned `Mcp-Session-Id`, protocol
@@ -142,8 +142,22 @@ to exhaust a limit.
    message. This is a live example of a JSON-RPC/application-level limit signal
    in addition to the HTTP 429 path documented and implemented by Exa.
 
-The live probe establishes the shapes and the two rate-limit signal forms; it
-is not a CI fixture and must not be repeated in CI.
+6. A five-request follow-up reused the same keyless endpoint with a fresh
+   session: `initialize` returned HTTP 200 SSE and protocol `2025-06-18`,
+   `notifications/initialized` returned HTTP 202 with an empty body,
+   `tools/list` advertised `web_fetch_exa` with required `urls` and optional
+   positive `maxCharacters`, and the two fetch calls below stayed keyless.
+7. Fetching `https://exa.ai/docs/get-started/exa-mcp` with
+   `maxCharacters: 240` returned HTTP 200 SSE and one text block containing
+   Markdown-style `# title`/`URL`/page-text output plus `_meta.searchTime`.
+8. Fetching `https://example.invalid/avibe-keyless-exa-probe` with the same
+   bound returned HTTP 200 SSE with `isError: true` and
+   `Error fetching URL(s): ...: CRAWL_UNKNOWN_ERROR`; the server did not turn a
+   failed crawl into an empty successful result.
+
+The live probe establishes the search and fetch shapes plus the observed
+application-level rate-limit signal; it is not a CI fixture and must not be
+repeated in CI.
 
 ### 2.3 Rate limits and headers
 
@@ -164,6 +178,11 @@ Official facts are not one single numeric contract:
   service's promise.
 - Third-party claims of 3 QPS/150 per day and approximately 2 QPS/50 per day
   are therefore not equivalent sources. The design relies on no fixed quota.
+- The same official `api/mcp.ts` source applies those buckets to every JSON-RPC
+  `tools/call` regardless of tool name and counts batched tool calls; it skips
+  `initialize`, `tools/list`, and other protocol methods. Therefore keyless
+  `web_search_exa` and `web_fetch_exa` share the per-IP buckets rather than
+  having separate search/fetch quotas.
 
 The client recognizes all of these observed/officially specified signals:
 
@@ -292,8 +311,16 @@ reads clamp a saved value to the current maximum without failing startup, as in
 services-design §3.2. `enabled: false` is the ordinary service opt-out and
 keeps the row in the order/read as `disabled`.
 
-The built-in Source is not appended to persisted `service_order` on creation:
-it has no creation event. Read-time automatic resolution places it after
+The synthetic cooldown is keyed by (`src_exakeyless`, `exa/mcp`) and has a
+catalog identity independent of `model_hub.sources[]`. `ServiceCooldowns.reconcile`
+receives that synthetic identity alongside `config.sources`, and every config-save
+reconciliation and later candidate-health write must retain the identity and its
+active cooldown. Saving settings or settling a later candidate must not
+silently re-admit keyless Exa before `cooldown_until`. A successful keyless
+attempt clears only its own cooldown generation.
+
+The built-in Source is not appended to persisted `service_order` on creation; it
+has no creation event. Read-time automatic resolution places it after
 `service_order`'s tool-only Sources and enabled auto-enrolled model Sources.
 If a user explicitly reorders the mixed list, the server saves
 `src_exakeyless` in `executor_order` and
@@ -370,7 +397,7 @@ For `GET /api/models/hosted-tools`, `web_search` returns:
       "model_id": "exa/mcp",
       "billing": "metered",
       "relay": false,
-      "price": {"unit": "search", "usd_per_1k": 0, "extra": [], "as_of": "2026-10-22", "url": "https://exa.ai/docs/admin/billing"},
+      "price": {"unit": "search", "usd_per_1k": 0, "extra": [], "as_of": "2026-10-22", "url": "https://exa.ai/docs/get-started/exa-mcp#authentication"},
       "settings": {"enabled": true, "results": 5},
       "state": {"status": "active"},
       "trial_pending": false,
@@ -381,7 +408,7 @@ For `GET /api/models/hosted-tools`, `web_search` returns:
     {
       "id": "exa-mcp",
       "name": "Exa（免费）",
-      "price": {"unit": "search", "usd_per_1k": 0, "extra": [], "as_of": "2026-10-22", "url": "https://exa.ai/docs/admin/billing"},
+      "price": {"unit": "search", "usd_per_1k": 0, "extra": [], "as_of": "2026-10-22", "url": "https://exa.ai/docs/get-started/exa-mcp#authentication"},
       "free_tier": "免费（按 IP 限流）",
       "results_max": 100,
       "source_ids": ["src_exakeyless"],
@@ -410,13 +437,15 @@ search-service state is inferred from an empty `sources[]`.
 ### 5.1 MCP session lifecycle
 
 The Model Hub owns the MCP client and keeps one in-memory session per Avibe
-runtime and endpoint/tool selection. It is not written to disk and is not
-shared with another runtime. A per-session async lock spans session lookup or
-creation, initialize, `notifications/initialized`, `tools/list`, schema
-invalidation, and `tools/call`; lock wait consumes the same overall 30-second
-service deadline. At most one search call is admitted for a session at a time,
-which avoids response association and burst surprises without adding a
-scheduler.
+runtime, endpoint, authentication mode, and honest client identity—not per
+MCP tool name. This makes the same initialized client reusable for the phase-2
+`web_fetch_exa` tool without creating a second session or rate-limit burst. It
+is not written to disk and is not shared with another runtime. A per-session
+async lock spans session lookup or creation, initialize,
+`notifications/initialized`, `tools/list`, schema invalidation, and
+`tools/call`; lock wait consumes the same overall 30-second service deadline.
+At most one tool call is admitted for a session at a time, which avoids
+response association and burst surprises without adding a scheduler.
 
 The first call, within the one service attempt's existing 30-second cap, does:
 
@@ -427,9 +456,10 @@ The first call, within the one service attempt's existing 30-second cap, does:
 3. retain the returned `Mcp-Session-Id` and negotiated `protocolVersion`,
    reject a version Avibe does not support, and send
    `notifications/initialized`;
-4. call `tools/list`, parse the returned schema, and require
-   `web_search_exa`; then
-5. send one `tools/call` for the search.
+4. call `tools/list`, retain the complete tool schema for this session, and
+   require `web_search_exa` for phase 1; phase 2 may dispatch
+   `web_fetch_exa` through the same session after validating that tool; then
+5. send one `tools/call` for the selected tool.
 
 A `notifications/initialized` notification has no JSON-RPC result body; accept
 its conforming HTTP 202 response with an empty body as success. Do not apply
@@ -495,17 +525,21 @@ search chain's single 180-second budget remains authoritative.
 
 ### 5.3 Response mapping
 
-`web_search_exa` returns a text content block, not a stable JSON object. Parse
-its source-defined sections conservatively:
+`web_search_exa` currently returns a text content block, not a stable JSON object.
+Prefer a structured JSON/array content block if a future Exa tool supplies one;
+otherwise use a zero-trust parser for the checked source-defined text grammar:
 
-- split result sections on the source's separator;
-- read `Title`, `URL`, `Published`, `Author`, and `Highlights` prefixes;
-- join all highlight lines into the canonical `snippet`;
-- map `Published` to `page_age` under the existing bounded date/text rule;
-- accept only HTTP(S) URLs and apply the existing 2,048/300/1,000/64-character
-  bounds;
-- ignore `Author` unless a future canonical field owns it;
-- ignore `Text` entirely, even when present;
+- recognize a result section only in the exact source field order and accept only
+  HTTP(S) URLs with the existing bounds;
+- preserve raw offsets while scanning the unescaped result separator; a
+  separator is a boundary only when both adjacent sections validate completely;
+- treat a separator or field-prefix-looking line in a highlight as ambiguous
+  content, not as permission to fabricate another result. If the raw text can
+  represent either a highlight or a new section, reject the entire response as
+  `service_unreadable` rather than return partial or fabricated sources;
+- join all highlight lines into the canonical `snippet`, map `Published` to
+  `page_age` under the existing bounded date/text rule, ignore `Author` unless a
+  future canonical field owns it, and ignore `Text` entirely;
 - preserve Exa ranking order and cap to the frozen `results` count.
 
 A valid explicit no-results text is a completed record with no sources. Exa's
@@ -591,10 +625,11 @@ and native-preference switch. In the visible **搜索顺序 / Search order** lis
   **Exa（免费）暂时限流 · 稍后重试 / Exa (free) rate-limited · retry later**,
   with the existing `cooldown_until` detail and **立即重试 / Retry now** action.
   The action calls `POST /api/models/hosted-tools/web_search/services/src_exakeyless/retry`
-  with `service_id: "exa/mcp"`; the controller resolves this built-in catalog
-  entry before user Sources, clears only its in-memory cooldown, and returns the
-  normal empty success. It must not call the ordinary `_source` lookup, create a
-  credential Source, or show a key repair. It never says “密钥无效 / invalid key”.
+  with the existing empty `{}` body; `service_id: "exa/mcp"` is derived inside
+  the controller's built-in catalog branch, which clears only its in-memory
+  cooldown and returns the normal empty success. It must not call the ordinary
+  `_source` lookup, create a credential Source, or show a key repair. It never
+  says “密钥无效 / invalid key”.
 - The caption explicitly says the current automatic order:
   **已添加的搜索服务 → 已启用的官方 DeepSeek → Exa（免费） → 模型代搜；可拖动调整。/ Your added
   search services → enabled official DeepSeek → Exa (free) → model
@@ -695,15 +730,46 @@ these current facts:
 Do not add a general statement that nothing else will turn on automatically.
 Document the current default and routing facts only.
 
-## 9. Phase 2 `web_fetch`
+### 9. Phase 2 `web_fetch`
 
-Phase 2 reuses the same in-memory MCP session and endpoint. It calls
-`web_fetch_exa` with the model-selected known URL(s) and a bounded
-`maxCharacters` setting, maps returned Markdown into the future `web_fetch`
-record, and applies the same HTTPS pinning, SSE parsing, 30-second service cap,
-rate-limit cooldown, honest `x-exa-source`, and no-key boundary. It does not
-change phase-1 `web_search` results into page content and does not add
-`web_search_advanced_exa` to the canonical phase-1 tool.
+This section records only the upstream facts needed to keep the phase-1 client
+reusable; the separate phase-2 lane owns the `web_fetch` product design.
+
+- The exact keyless MCP tool is `web_fetch_exa`. The checked source also
+  registers `crawling_exa` as a deprecated alias that points to the same
+  implementation; Avibe should use `web_fetch_exa`.
+- The live keyless `tools/list` on **2026-10-22** advertised the input schema
+  `{urls: string[], maxCharacters?: number}`: `urls` is required and batches
+  one or more URL strings; `maxCharacters` is optional, positive, and applied
+  per page. The checked source defaults it to **3,000** characters when absent
+  and passes it as Exa `/contents` `text.maxCharacters`. The official Exa
+  schema retrieved **2026-10-22** permits `text.maxCharacters` from 1 through
+  **1,000,000**; the MCP wrapper itself does not declare a finite maximum, so a
+  future caller must impose its own bounded value.
+- The output is one MCP text content block formatted as clean Markdown:
+  `# title`, `URL: ...`, optional `Published:`/`Author:` lines, then extracted
+  page text; a successful live call returned HTTP 200 SSE with that shape and
+  `_meta.searchTime`. Multiple URLs are batched into the same text result. A
+  no-content response is the text `No content found for the provided URL(s).`
+  If Exa reports per-URL crawl errors, the source appends `Error fetching <id>:
+  <tag>`; when there are no successful results and an error status exists, it
+  returns `isError: true` with `Error fetching URL(s): <id>: <tag>`.
+- A keyless fetch of `https://example.invalid/avibe-keyless-exa-probe` on
+  **2026-10-22** returned HTTP 200 SSE with `isError: true` and the text
+  `Error fetching URL(s): ...: CRAWL_UNKNOWN_ERROR`. This is an MCP tool error
+  envelope, not an empty successful result.
+- The official hosted-server source commit
+  `0b499f095c4ca145eee07b09137641c037d58449` (2026-10-19) applies the anonymous
+  IP limiter to every `tools/call`, counts the calls in the JSON-RPC batch, and
+  explicitly excludes `initialize`, `tools/list`, and other protocol methods.
+  It does not create separate search and fetch buckets: `web_search_exa` and
+  `web_fetch_exa` both consume the same per-IP QPS/daily limiter. The source
+  documents defaults of 2 QPS and 50 calls/day when the limiter is configured,
+  but these are deployment defaults rather than a public quota promise. The
+  live fetch responses exposed no rate-limit headers; do not infer a separate
+  fetch allowance. Phase 1 therefore reuses the same cooldown for any tool-call
+  rate-limit signal.
+
 
 ## 10. Contract version and freeze rule
 
@@ -728,9 +794,7 @@ flip plus public docs together**.
 
 | Lane | Scope | Gate |
 | --- | --- | --- |
-| KEX-1 readers and catalog | Add the built-in catalog/read shape, `src_exakeyless` defaulting and old-order reader behavior; extend status/candidate, attempts, service-origin, usage, activity, and UI readers/types/fixtures; add contract
-mirrors, the built-in cooldown-retry RPC/route branch, and released-shape
-compatibility tests. No network call. | `KEYLESS_EXA_ACTIVE = false`; all existing service behavior remains unchanged. |
+| KEX-1 readers and catalog | Add the built-in catalog/read shape, `src_exakeyless` defaulting and old-order reader behavior; extend status/candidate, attempts, service-origin, usage, activity, and UI readers/types/fixtures; add contract mirrors, the built-in cooldown-retry RPC/route branch, and released-shape compatibility tests. No network call. | `KEYLESS_EXA_ACTIVE = false`; all existing service behavior remains unchanged. |
 | KEX-2 producer | Add the adapter's keyless MCP session boundary, schema adaptation, SSE/JSON-RPC parser, highlights-only mapping, rate-limit detection/cooldown, service outcomes, usage writes, and UI actions behind the same flag. Use only stub MCP servers. | Flag-off control stays green; flag-on focused tests prove the new path. |
 | KEX-3 activation and public docs | Re-check contract tags, flip the producer/read predicate together, publish the English/Chinese privacy/default/UI copy, and run exact-head review/CI. | No activation before the public disclosure is present. |
 
@@ -754,12 +818,14 @@ coordinated activation; no lane merges this design PR.
 5. Only the canonical `{query}` reaches the agent. Result count is frozen per
    turn/service and mapped to `numResults`; an `objective` field is added only
    when the live `tools/list` schema requires it.
-6. A reused MCP session performs one initialize/list lifecycle and one
-   `tools/call` per attempted search; cold starts serialize that lifecycle under
-   the session lock; the negotiated protocol version is validated and reused;
-   `tools/list_changed` causes a fresh list before the next call; an expired
-   session can reinitialize and replay once only before the server accepts the
-   tool call, but an admitted call is never automatically duplicated.
+6. A reused MCP session performs one initialize lifecycle and one bounded
+   `tools/list` refresh before each attempted tool call; cold starts serialize
+   that lifecycle under the session lock; the negotiated protocol version is
+   validated and reused; `tools/list_changed` causes a fresh list before the
+   next call; an expired session can reinitialize and replay once only before
+   the server accepts the tool call, but an admitted call is never automatically
+   duplicated. The same session/client boundary is reusable for
+   `web_fetch_exa` in phase 2.
 7. All service work fits the existing 30-second service cap and 180-second
    chain deadline; no blocking parse runs on the controller loop.
 8. Valid results are highlights-only, bounded, ordered, and become one
@@ -792,9 +858,13 @@ JSON-RPC fixtures:
   highlights, text-only content that must be ignored, malformed sections, an
   invalid URL, and oversized/bounded fields. Cover a valid result/highlight
   containing the free-rate-limit phrase; it must not trigger cooldown.
+- A highlight containing the unescaped result separator and field-looking lines
+  produces no fabricated source: the ambiguous response is rejected as
+  `service_unreadable`, not partially mapped.
 - Exa notice-prefixed no-results text is normalized to a completed empty record.
-- `web_fetch_exa` is a phase-2 parser fixture only; no phase-2 production
-  activation is implied by the test.
+- `web_fetch_exa` is a phase-2 parser fixture only; the shared session/client
+  boundary accepts it as a second validated tool without a second initialize or
+  session key; no phase-2 production activation is implied by the test.
 - Session reuse sends one initialize and one `tools/list` refresh per search for
   two searches; an expired session returns the standard session-not-found 404 and
   reconnects/replays the affected pre-tool request once before admission; a
@@ -818,10 +888,9 @@ JSON-RPC fixtures:
 - Attempts, service origin, exact-zero cost, request-only usage, no lower-bound
   charge, and cooldown projection (including an active cooldown shorter than
   60 seconds) are asserted at their owning boundaries.
-- The controller's actual Retry now POST clears a short and a long built-in
-  cooldown through the synthetic Source branch, without looking for a
-  credential Source; the usage projection keeps keyless rows labeled Exa (free)
-  rather than Removed providers.
+- The synthetic (`src_exakeyless`, `exa/mcp`) cooldown survives config saves
+  and later-candidate health writes; a successful keyless attempt clears only
+  its own generation.
 - The Tools read/UI fixtures cover the always-present row, saved-partial versus
   effective settings, disabled-tail visibility, free label, egress fact, inline
   switch, reorder controls, add-dialog keyed Exa distinction, detail panel, Chat
@@ -852,9 +921,9 @@ for this plan, not an automated dependency.
 
 - Exa MCP reference/quickstart: https://exa.ai/docs/reference/exa-mcp and https://exa.ai/docs/get-started/exa-mcp (2026-10-22).
 - Exa MCP landing page: https://exa.ai/mcp (2026-10-22).
-- Exa hosted MCP source: https://github.com/exa-labs/exa-mcp-server, commit `0b499f095c4ca145eee07b09137641c037d58449` (2026-10-19).
+- Exa hosted MCP source: https://github.com/exa-labs/exa-mcp-server, commit `0b499f095c4ca145eee07b09137641c037d58449` (2026-10-19), especially `api/mcp.ts`, `src/tools/webFetch.ts`, `src/tools/config.ts`, and `src/mcp-handler.ts`.
 - Exa Search API schema: https://exa.ai/docs/exa-spec.yaml (retrieved 2026-10-22).
 - Exa Highlights: https://exa.ai/docs/search/highlights (retrieved 2026-10-22).
-- Exa Billing and Rate Limits: https://exa.ai/docs/admin/billing (retrieved 2026-10-22).
+- Exa MCP authentication/free access: https://exa.ai/docs/get-started/exa-mcp#authentication (retrieved 2026-10-22).
 - Exa Terms of Service: https://exa.ai/terms (retrieved 2026-10-22).
-- Keyless live probe: `https://mcp.exa.ai/mcp`, 2026-10-22, no key, seven JSON-RPC requests, three `tools/call` attempts.
+- Keyless live probe: `https://mcp.exa.ai/mcp`, 2026-10-22, no key, twelve JSON-RPC requests, five `tools/call` attempts, no deliberate exhaustion.
