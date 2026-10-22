@@ -30,11 +30,6 @@ ROW = {"url": "https://example.test/a", "title": "Title", "summary": "Model exce
        "date": "2026-10-21", "published_date": "today", "publishedDate": "yesterday"}
 
 
-@pytest.fixture(autouse=True)
-def active(monkeypatch):
-    monkeypatch.setattr(hosted_tools, "SEARCH_SERVICES_ACTIVE", True)
-
-
 def owner(tmp_path, vendors=("exa",), *, web=None, model=False):
     service, store, adapter = _service(tmp_path)
     config = _config(web)
@@ -495,16 +490,26 @@ async def test_free_check_is_joined_without_holding_the_mutation_lock(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_flag_off_retains_the_released_frozen_read_and_chain(tmp_path, monkeypatch):
+async def test_search_read_and_chain_activate_together(tmp_path, monkeypatch):
+    """MH-SEARCH-SERVICES-001: shipped defaults expose the same service that the frozen turn executes.
+
+    No activation monkeypatch: a dormant producer or a separately gated read must fail here.
+    """
     service = owner(tmp_path, ("exa",), web={"prefer_native": False})
-    monkeypatch.setattr(hosted_tools, "SEARCH_SERVICES_ACTIVE", False)
     calls = answers(monkeypatch, service, wire())
     frozen = service.freeze_turn_hosted_tools(service.store.load())
-    assert getattr(frozen, "prefer_native", None) is None and frozen.executors["web_search"] == ()
-    assert _web(service)["executor_candidates"] == [] and "service_vendors" not in _web(service)
+    visible = _web(service)
+    assert frozen.prefer_native is False
+    assert [(slot.source_id, slot.kind, slot.results, slot.label) for slot in frozen.executors["web_search"]] == [
+        (EXA, "service", 5, "exa"),
+    ]
+    assert [(row["source_id"], row["kind"]) for row in visible["executor_candidates"]] == [(EXA, "service")]
+    assert {vendor["id"] for vendor in visible["service_vendors"]} == {"exa", "tavily", "deepseek"}
     answer = await run(service, turn=frozen)
-    assert not calls and "attempts" not in answer["record"]
-    assert "Add an API key" in answer["record"]["error"]
+    assert len(calls) == 1 and calls[0][0] == EXA
+    assert answer["record"]["status"] == "completed"
+    assert answer["record"]["attempts"][0]["source_id"] == EXA
+    assert answer["execution"]["executor_origin"]["api"] == "search_api"
 
 
 @pytest.mark.asyncio
@@ -901,8 +906,7 @@ async def test_tavily_validation_error_keeps_bounded_vendor_text_but_not_echoed_
     assert "do not echo me" not in result["record"]["error"]
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_retry_http_client_rpc_clears_only_the_service_fence_with_plain_success(tmp_path, monkeypatch, enabled):
+def test_retry_http_client_rpc_clears_only_the_service_fence_with_plain_success(tmp_path, monkeypatch):
     """The existing route inventory checks registration, not forwarding or controller-owned state."""
     from core.handlers.model_hub.rpc import dispatch_model_hub_rpc
     from tests.test_model_hub_api import app, csrf_headers, save_config
@@ -910,7 +914,6 @@ def test_retry_http_client_rpc_clears_only_the_service_fence_with_plain_success(
 
     save_config(tmp_path / "home")
     service = owner(tmp_path)
-    monkeypatch.setattr(hosted_tools, "SEARCH_SERVICES_ACTIVE", enabled)
     source = service.store.load().sources[0]
     source.state = ModelHubSourceStateConfig(status="needs_action", detail_key="models.source.needs_action.balance_exhausted")
     generation = service._service_cooldowns.advance(source, "exa/search")
@@ -926,7 +929,7 @@ def test_retry_http_client_rpc_clears_only_the_service_fence_with_plain_success(
     response = client.post(f"/api/models/hosted-tools/web_search/services/{EXA}/retry", json={},
                            headers=csrf_headers(client, "http://127.0.0.1:15131"))
     assert response.status_code == 200
-    assert response.get_json() == {"ok": True, "contract_version": 19}
+    assert response.get_json() == {"ok": True, "contract_version": 20}
     assert calls == [("clear_service_cooldown", {"source_id": EXA, "service_id": None})]
     assert not service._service_cooldowns.current(source, "exa/search", generation)
     assert service.store.load().sources[0].state == source.state

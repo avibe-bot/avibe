@@ -1,6 +1,25 @@
-# S2b-1: dormant search-service producer
+# S2b: search-service producer and activation
 
-## Change contract
+## S2b-2 activation change contract
+
+S2b-1 merged as `424b3fd`. S2b-2 sets `SEARCH_SERVICES_ACTIVE = True`: the Tools read,
+S4's existing `service_vendors` UI predicate, frozen turn choices and execution activate together.
+The retry route is now required by the client/server inventory, with no dormant exception.
+The shipped-default activation test does not monkeypatch the flag; its read and chain assertions
+must both pass. Existing producer tests run under that default, and prior dormant assertions
+now cover the active shape. No vendor request, mapping, billing or custody rule changes.
+
+Validation covers focused hosted-tools/read/chain/API tests through `hd1-test`, the UI build and
+relevant Vitest cases, with synthetic responses only. No live paid search or deployment is included.
+The release workflow owns notes (`docs/release.md`); the PR body supplies English/Chinese disclosure
+covering DeepSeek auto-enrollment/opt-out, query egress, list prices and downgrade loss (§12).
+The owner coordinates merge with S6 public disclosure; this lane does not merge.
+
+The close-out release check found `gh-v3.2.3rc1` carrying S2a/S2b-1's v19; the
+2026-10-22 recheck also found `gh-v3.2.3rc2`. Activation therefore opens v20, advances all
+version mirrors and preserves persisted TurnProvenance v5–v19 without rewriting it.
+
+## S2b-1 change contract (historical)
 
 Implement `web-search-services.md` §§3–5 behind `SEARCH_SERVICES_ACTIVE = False`.
 The flag-off chain, hop facts, frozen turn and Tools read retain their released behavior.
@@ -61,7 +80,7 @@ Local validation (2026-10-21):
 - Changed Python files pass Ruff. CI owns the full suite; no runtime restart/deployment or
   live-vendor/manual UI acceptance is included in this dormant change.
 
-## Contract version
+## S2b-1 contract version (historical)
 
 At start, 2026-10-21: `git tag --contains 01fc7b0` returned none; latest RC release
 was `gh-v3.2.2rc13`, before S2a. Recheck before first push and close-out. Use v19 while

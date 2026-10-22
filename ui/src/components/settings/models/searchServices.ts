@@ -1,6 +1,6 @@
 import type { HostedSearchServiceVendor, HostedToolsStatus, HostedWebSearchToolStatus } from './types';
 
-/** One activation signal across Tools, Sources and detail. S2 activates the read and execution together. */
+/** One read signal across Tools, Sources and detail; S2b-2 activates service reads and execution together. */
 export const searchServicesActive = (tool: HostedWebSearchToolStatus | null | undefined): boolean =>
   tool?.service_vendors !== undefined;
 

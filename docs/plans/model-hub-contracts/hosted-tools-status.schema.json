@@ -130,7 +130,7 @@
     },
     "ServiceExecutor": {
       "type": "object",
-      "description": "Dormant until S2. A search API's catalog service id occupies model_id; Source health and one-shot trial state are display facts, not a probe.",
+      "description": "A search API's catalog service id occupies model_id; Source health and one-shot trial state are display facts, not a probe.",
       "required": ["kind", "source_id", "model_id", "billing", "relay", "price", "settings", "state", "trial_pending", "cooldown_until"],
       "additionalProperties": false,
       "properties": {
@@ -185,7 +185,7 @@
       }],
       "properties": {
         "name": { "enum": ["web_search", "x_search"] },
-        "prefer_native": { "type": "boolean", "description": "Saved preference, true when absent. S2 activates its effect on hop facts." },
+        "prefer_native": { "type": "boolean", "description": "Saved preference, true when absent; active search hops honor it." },
         "services": {
           "type": "object",
           "description": "Saved partial overrides for currently search-capable Sources, not resolved defaults. Extant retargeted/retired Sources are omitted while incapable, but their overrides remain in config for when capability returns. Removed Sources are ignored and obsolete catalog bounds read clamped.",
@@ -193,7 +193,7 @@
           "additionalProperties": { "$ref": "#/definitions/SavedServiceSettings" }
         },
         "service_order": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/definitions/SourceId" }, "description": "Server-owned tool-only Source creation order, skipping ids that no longer name a Source. Read-only; absent config reads as an empty list." },
-        "service_vendors": { "type": "array", "items": { "$ref": "#/definitions/ServiceVendor" }, "description": "Absent until S2 activates both service reads and execution. Not a client toggle." },
+        "service_vendors": { "type": "array", "items": { "$ref": "#/definitions/ServiceVendor" }, "description": "Catalog vendors exposed with active service candidates and execution." },
         "enabled": { "type": "boolean" },
         "status": { "$ref": "#/definitions/Status" },
         "executor_order": {

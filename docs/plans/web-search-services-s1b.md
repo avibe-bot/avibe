@@ -1,4 +1,7 @@
-# S1b: settings and dormant Tools read
+# S1b: settings and prepared Tools read (historical)
+
+This records S1b's gated delivery. S2b-2 now activates the read and execution together;
+see `web-search-services.md` §9 for current release ordering.
 
 Source of truth: `web-search-services.md` §3.2, §3.5, §8–9; S1a is merged as
 `68a59d11e9dea070f5fe4d231e90d0acbc2aca64`.

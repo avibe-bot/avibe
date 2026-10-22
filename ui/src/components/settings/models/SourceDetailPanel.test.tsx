@@ -1330,7 +1330,7 @@ describe('SourceDetailPanel', () => {
     // Still bounded well below a hung render.
   }, 15_000);
 
-  it.each([false, true])('runs the dedicated re-enable action with search services active=%s and holds an armed trial', async (active) => {
+  it('runs the dedicated re-enable action on the active service read and holds an armed trial', async () => {
     const blockedSearch: Source = {
       ...SEARCH_SOURCES[0],
       protocol: 'search',
@@ -1347,7 +1347,7 @@ describe('SourceDetailPanel', () => {
     const onSource = vi.fn().mockResolvedValue(undefined);
     const trackMutation: TrackSourceMutation = (work) => work(blockedSearch, settlement({ source: onSource }));
 
-    const panel = (current: Source) => <I18nextProvider i18n={i18n}><CommittedPanel source={current} hostedTools={active ? readyRegion({ tools: [ACTIVE_SEARCH] }) : undefined} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>;
+    const panel = (current: Source) => <I18nextProvider i18n={i18n}><CommittedPanel source={current} hostedTools={readyRegion({ tools: [ACTIVE_SEARCH] })} trackMutation={trackMutation} onReauth={noReauth} /></I18nextProvider>;
     const view = render(panel(blockedSearch));
     await userEvent.click(screen.getByRole('button', { name: /^Re-enable$|^重新启用$/i }));
     await waitFor(() => expect(reenable).toHaveBeenCalledWith(blockedSearch.id));

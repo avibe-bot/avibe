@@ -261,7 +261,7 @@ def test_live_recovery_snapshots_never_revive_invalid_or_terminal_owners(tmp_pat
 def _record(turn_id, *, backend="claude", model=MODEL, outcome="failed_terminal"):
     identity = {"source_id": "src_deleted01", "configured_model_id": "unknown-model", "channel": "hub"}
     return {
-        "contract_version": 19,
+        "contract_version": 20,
         "turn_id": turn_id,
         "ts": "2026-09-06T00:00:00Z",
         "agent": backend,
@@ -299,7 +299,7 @@ def test_latest_record_is_backend_model_isolated_bounded_and_not_latest_error(tm
     assert len(json.loads(path.read_text())) == 3
 
 
-@pytest.mark.parametrize("version", range(5, 11))
+@pytest.mark.parametrize("version", range(5, 21))
 def test_persisted_versions_remain_readable_without_rewriting(tmp_path, version):
     record = {**_record("historical"), "contract_version": version}
     path = tmp_path / "provenance.json"
@@ -461,6 +461,6 @@ def test_model_history_client_rpc_http_share_nullable_read_only_result(monkeypat
         f"/api/models/agents/claude/provenance?model={MODEL}", headers=csrf_headers(client, origin), base_url=origin
     )
     assert response.status_code == 200
-    assert response.get_json() == {"ok": True, "contract_version": 19, "provenance": record}
+    assert response.get_json() == {"ok": True, "contract_version": 20, "provenance": record}
     assert store.config.to_payload() == before
     assert adapter.synced == []

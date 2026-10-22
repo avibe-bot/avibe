@@ -36,9 +36,3 @@ export const ACTIVE_SEARCH: HostedWebSearchToolStatus = {
     { id: 'exa', name: 'Exa', results_max: 10, price: price(7), free_tier: null, source_ids: ['src_exa000001'], facts: { tool_only: true, auto_enroll: false, free_check: false } },
   ],
 };
-
-export const INACTIVE_SEARCH: HostedWebSearchToolStatus = {
-  name: 'web_search', enabled: true, prefer_native: false, services: {}, service_order: [], executor_order: null,
-  status: ACTIVE_SEARCH.status, effective_order: ['src_claude001'],
-  executor_candidates: [ACTIVE_SEARCH.executor_candidates[2]],
-};
