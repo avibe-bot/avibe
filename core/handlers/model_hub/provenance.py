@@ -2197,7 +2197,21 @@ class TurnCorrelationRegistry:
             ):
                 return
             if reason == "engine_down":
-                # The engine, not one request, is what went down.
+                # The engine, not one request, is what went down. Preserve
+                # correlation facts when a later forced finalization repeats
+                # this same terminalization without another response.
+                previous_ids = ()
+                if isinstance(trace.terminal_error, dict) and trace.terminal_error.get("reason") == reason:
+                    previous = trace.terminal_error.get("response_correlation_ids")
+                    if isinstance(previous, list):
+                        previous_ids = tuple(
+                            (item.get("header"), item.get("value"))
+                            for item in previous
+                            if isinstance(item, Mapping)
+                        )
+                correlation_payload = _response_correlation_payload(response_correlation_ids)
+                if not correlation_payload:
+                    correlation_payload = _response_correlation_payload(previous_ids)
                 trace.pending_attempts.clear()
                 trace.served = None
                 trace.model_supply_state = None
@@ -2209,7 +2223,7 @@ class TurnCorrelationRegistry:
                     "reason": reason,
                     "stream_started": stream_started,
                     **({"local_error_detail": local_error_detail} if local_error_detail else {}),
-                    **_response_correlation_payload(response_correlation_ids),
+                    **correlation_payload,
                 }
                 return
             if self._peer_request_open(trace, request_id):
@@ -2501,6 +2515,15 @@ class TurnCorrelationRegistry:
                 if identity is not None and identity.channel == "hub"
                 else trace.served
             )
+            if payload is not None:
+                # A backend_error describes the backend's own report, not the
+                # earlier gateway response that the backend rejected. The
+                # response-only correlation facts are therefore not valid on
+                # this terminal variant and must not cross its schema boundary.
+                payload = {
+                    key: value for key, value in payload.items()
+                    if key != "response_correlation_ids"
+                }
             if payload is None or payload.get("channel") != "hub":
                 return
             # The backend rejected the turn's result, not one request's.

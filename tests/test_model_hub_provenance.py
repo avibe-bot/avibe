@@ -485,6 +485,38 @@ def test_served_response_correlation_ids_belong_to_the_served_attempt(tmp_path):
     assert record["terminal_error"] is None
 
 
+def test_backend_failure_drops_response_correlation_ids_from_prior_served_response(tmp_path):
+    registry = TurnCorrelationRegistry(BoundedProvenanceStore(tmp_path / "records.json"))
+    token = registry.credentials("codex", "fixture", "turn-backend-failure-correlation")
+    turn_id = registry.begin_gateway_request(
+        backend="codex", token=token, requested_model_id=MODEL,
+    )
+    registry.begin_attempt(
+        turn_id, source_id="src_served01", resolved_model_id=MODEL,
+        channel="hub", via_mapping=False,
+    )
+    registry.finish_attempt(
+        turn_id,
+        outcome=RawCallOutcome(
+            kind=RawOutcomeKind.SUCCESS,
+            http_status=200,
+            error_code=None,
+            redacted_message=None,
+            stream_started=True,
+            model_id=MODEL,
+            source_id="src_served01",
+            response_correlation_ids=(("x-request-id", "served-request"),),
+        ),
+        decision=ResolutionDecision("return"),
+    )
+    registry.fail_hub_attempt(turn_id, error_kind="stalled", diagnostic="backend rejected the response")
+
+    trace = registry._traces[turn_id]
+    assert trace.terminal_error is not None
+    assert trace.terminal_error["reason"] == "backend_error"
+    assert "response_correlation_ids" not in trace.terminal_error
+
+
 def test_response_correlation_ids_are_sanitized_before_provenance_persistence(tmp_path):
     registry = TurnCorrelationRegistry(BoundedProvenanceStore(tmp_path / "records.json"))
     token = registry.credentials("claude", "fixture", "turn-correlation-safe")
@@ -552,6 +584,7 @@ def test_engine_down_terminal_error_keeps_safe_response_correlation_ids(tmp_path
         ),
         decision=ResolutionDecision("surface", error_code="engine_down", downstream_status=502),
     )
+    registry._terminalize_gateway_exit(turn_id, stream_started=False, force=True)
     registry.settle(turn_id, settled_by=SETTLED_BY_TERMINAL_RESULT)
 
     record = registry.store.get(turn_id)
