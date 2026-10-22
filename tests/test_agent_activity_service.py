@@ -26,11 +26,22 @@ from sqlalchemy import select  # noqa: F401  (kept parallel to sibling tests)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from core.agent_core.messages import (
+    AssistantMessage,
+    HostedAction,
+    HostedNative,
+    HostedRecord,
+    HostedToolBlock,
+    HostedSummary,
+    Origin,
+    message_to_dict,
+)
 from storage import agent_activity_service, message_deliveries, messages_service
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_events, agent_sessions, messages
 from storage.settings_service import upsert_scope
+from tests.agent_core.fakes import ORIGIN
 
 
 @pytest.fixture()
@@ -344,6 +355,186 @@ def test_a_native_hosted_card_sorts_before_the_response_that_carried_it(isolated
     assert detail is not None and detail["status"] == "done"
     assert detail["anchor_message_id"] == "msg_00063f0000000100bbbbbbbb"
     assert [row["id"] for row in detail["rows"]] == ["evt_00063f0000000200cccccccc"]
+
+
+
+
+def _model_hosted_message(*, call_id: str, status: str) -> dict:
+    message = AssistantMessage(
+        (
+            HostedToolBlock(
+                id=call_id,
+                tool="web_search",
+                action=HostedAction(type="search", queries=("restart-safe search",)),
+                record=HostedRecord(status=status),
+                native=HostedNative(
+                    source_id="src_testsrc1",
+                    payload=({"type": "server_tool_use", "id": call_id},),
+                ),
+            ),
+        ),
+        ORIGIN,
+        "stop" if status != "pending" else "tool_use",
+        hosted_summary=HostedSummary(),
+    )
+    return {"model": {"message": message_to_dict(message)}}
+
+
+def _insert_activity_turn(conn, *, scope: str, session_id: str, turn_id: str, outcome: str) -> None:
+    delivery = message_deliveries.insert_delivery(
+        conn,
+        delivery_id=f"delivery_{turn_id}",
+        session_id=session_id,
+        priority="p3",
+        state="reserved",
+        snapshot=message_deliveries.message_snapshot(
+            scope_id=scope,
+            session_id=session_id,
+            platform="avibe",
+            author="harness",
+            source="harness",
+            message_type="harness",
+            text="search",
+        ),
+        dispatch_text="search",
+        now="2026-06-01T10:00:00.000000+00:00",
+    )
+    message_deliveries.insert_turn(
+        conn,
+        turn_id=turn_id,
+        session_id=session_id,
+        initial_delivery_id=delivery["id"],
+        state="starting",
+        backend="claude",
+        start_attempt_id=f"attempt_{turn_id}",
+        dispatch_text="search",
+        now="2026-06-01T10:00:00.000000+00:00",
+    )
+    assert message_deliveries.open_start_attempt(
+        conn,
+        delivery["id"],
+        expected_version=int(delivery["version"]),
+        turn_id=turn_id,
+        attempt_id=f"attempt_{turn_id}",
+    ) is not None
+    assert _accept_start(conn, turn_id)
+    message_deliveries.terminalize_turn(
+        conn,
+        turn_id,
+        outcome=outcome,
+        settled_by="test_activity_projection",
+        evidence_kind="test_projection",
+    )
+
+
+def test_model_completion_projects_after_commit_without_trace_event(isolated_state):
+    """Reload projects a committed response-2 completion even when trace emit was lost."""
+    engine = create_sqlite_engine()
+    sid = "ses_model_completion"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _insert_activity_turn(conn, scope=scope, session_id=sid, turn_id="trn_model_completion", outcome="completed")
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_model_pending",
+            mtype="assistant",
+            author="agent",
+            created_at="2026-06-01T10:00:01Z",
+            metadata={"turn_id": "trn_model_completion"},
+            content=_model_hosted_message(call_id="srv_model", status="pending"),
+        )
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_model_completed",
+            mtype="assistant",
+            author="agent",
+            created_at="2026-06-01T10:00:02Z",
+            metadata={"turn_id": "trn_model_completion"},
+            content=_model_hosted_message(call_id="srv_model", status="completed"),
+        )
+
+    with engine.connect() as conn:
+        [group] = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+        detail = agent_activity_service.get_turn_group(conn, session_id=sid, group_id=group["id"])
+
+    assert detail is not None
+    assert detail["status"] == "done"
+    assert detail["open"] is False
+    cards = [row["hosted"] for row in detail["rows"] if row.get("hosted")]
+    assert len(cards) == 1
+    assert cards[0]["status"] == "completed"
+    assert cards[0]["response_id"] == "m_model_completed"
+
+
+
+
+def test_model_projection_does_not_merge_reused_call_id_across_turns(isolated_state):
+    """The durable Turn is part of the owner, so a provider id reused later stays separate."""
+    engine = create_sqlite_engine()
+    sid = "ses_model_reused_call"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        for row_id, turn_id, status, created_at in (
+            ("m_reused_a", "trn_reused_a", "pending", "2026-06-01T10:00:01Z"),
+            ("m_reused_b", "trn_reused_b", "completed", "2026-06-01T10:00:02Z"),
+        ):
+            _msg(
+                conn,
+                scope,
+                sid,
+                mid=row_id,
+                mtype="assistant",
+                author="agent",
+                created_at=created_at,
+                metadata={"turn_id": turn_id},
+                content=_model_hosted_message(call_id="srv_reused", status=status),
+            )
+
+    with engine.connect() as conn:
+        projected = agent_activity_service._model_hosted_cards(
+            conn,
+            [
+                {"id": "m_reused_a", "metadata": {"turn_id": "trn_reused_a"}, "created_at": "2026-06-01T10:00:01Z"},
+                {"id": "m_reused_b", "metadata": {"turn_id": "trn_reused_b"}, "created_at": "2026-06-01T10:00:02Z"},
+            ],
+            {},
+        )
+
+    assert set(projected) == {("trn_reused_a", "srv_reused"), ("trn_reused_b", "srv_reused")}
+    assert projected[("trn_reused_a", "srv_reused")]["hosted"]["status"] == "pending"
+    assert projected[("trn_reused_b", "srv_reused")]["hosted"]["status"] == "completed"
+    """A pending fragment in a terminal Turn is interrupted after reload, not live."""
+    engine = create_sqlite_engine()
+    sid = "ses_model_interrupted"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _insert_activity_turn(conn, scope=scope, session_id=sid, turn_id="trn_model_interrupted", outcome="canceled")
+        _msg(
+            conn,
+            scope,
+            sid,
+            mid="m_model_only_pending",
+            mtype="assistant",
+            author="agent",
+            created_at="2026-06-01T10:00:01Z",
+            metadata={"turn_id": "trn_model_interrupted"},
+            content=_model_hosted_message(call_id="srv_model", status="pending"),
+        )
+
+    with engine.connect() as conn:
+        [group] = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+        detail = agent_activity_service.get_turn_group(conn, session_id=sid, group_id=group["id"])
+
+    assert detail is not None
+    assert detail["status"] == "interrupted"
+    assert detail["open"] is False
+    [card] = [row["hosted"] for row in detail["rows"] if row.get("hosted")]
+    assert card["status"] == "incomplete"
+    assert card.get("in_progress") is not True
 
 
 def test_a_native_hosted_card_stays_with_its_response_at_the_scan_window_edge(isolated_state, monkeypatch):

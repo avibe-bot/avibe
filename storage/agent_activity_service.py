@@ -37,15 +37,17 @@ are exactly the ones covered.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import select
 
+from core.agent_core.messages import AssistantMessage, message_from_dict
 from core.backend_failure import is_backend_failure_notification
-from core.hosted_activity import hosted_activity_key
+from core.hosted_activity import hosted_activity_key, native_activities
 from storage import agent_events_service, messages_service
-from storage.models import message_deliveries, session_turns
+from storage.models import message_deliveries, messages as messages_table, session_turns
 from vibe.message_types import (
     PROMOTED_FROM_KEY,
     PROMOTED_FROM_TYPES,
@@ -248,6 +250,86 @@ def _event_emit_micros(event: dict[str, Any], ts: datetime) -> int:
     return anchor - 1 if isinstance(precedes, str) and precedes else anchor
 
 
+def _model_hosted_cards(
+    conn,
+    messages: list[dict[str, Any]],
+    accepted_roles: dict[str, dict[str, Any]],
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """Project native hosted fragments from committed model rows.
+
+    Trace emission is deliberately after the model row commits.  A restart can therefore
+    leave a perfectly valid completion with no trace event; the activity read must still
+    show it.  The earliest fragment supplies the card's position, while a later result
+    fragment supplies its terminal record.
+    """
+    ids = tuple(str(message["id"]) for message in messages if message.get("id"))
+    if not ids:
+        return {}
+    raw = {
+        str(row["id"]): row["content_json"]
+        for row in conn.execute(
+            select(messages_table.c.id, messages_table.c.content_json).where(messages_table.c.id.in_(ids))
+        ).mappings()
+    }
+    projected: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in messages:
+        row_id = str(row.get("id") or "")
+        metadata = row.get("metadata") or {}
+        accepted = accepted_roles.get(row_id)
+        turn_id = str(metadata.get("turn_id") or (accepted or {}).get("turn_id") or "").strip() or None
+        try:
+            content = json.loads(raw.get(row_id) or "{}")
+            model = content.get("model", {}).get("message")
+            message = message_from_dict(model)
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+            continue
+        if not isinstance(message, AssistantMessage):
+            continue
+        created_at = row.get("created_at")
+        timestamp = _parse_ts(created_at)
+        for activity in native_activities(message, response_id=row_id, turn_id=turn_id):
+            card = activity.to_payload()
+            key = hosted_activity_key(card)
+            if key is None:
+                continue
+            item = {
+                "ts": timestamp,
+                "sort": _emit_micros(row_id, timestamp) - 1,
+                "rank": _PHASE_RANK["activity"],
+                "created_at": created_at,
+                "kind": "activity",
+                "id": f"model-hosted:{row_id}:{activity.call_id}",
+                "mtype": "model_hosted",
+                "turn_id": turn_id,
+                "row_kind": "tool_call",
+                "text": "",
+                "hosted": card,
+            }
+            previous = projected.get(key)
+            if previous is None:
+                projected[key] = item
+                continue
+            previous_card = previous["hosted"]
+            if previous_card.get("status") == "pending" and card.get("status") != "pending":
+                previous["hosted"] = {**previous_card, **card}
+                previous["hosted"].pop("in_progress", None)
+    return projected
+
+
+def _merge_projected_hosted(existing: dict[str, Any], projected: dict[str, Any]) -> None:
+    """Apply a model-row projection without reviving a completed trace card."""
+    current = existing.get("hosted")
+    incoming = projected.get("hosted")
+    if not isinstance(current, dict) or not isinstance(incoming, dict):
+        return
+    if current.get("status") == "completed" and incoming.get("status") == "pending":
+        return
+    merged = {**current, **incoming}
+    if merged.get("status") != "pending":
+        merged.pop("in_progress", None)
+    existing["hosted"] = merged
+    if not existing.get("text"):
+        existing["text"] = projected.get("text") or ""
 def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, Any]]:
     """Merge the recent tail of relevant messages + tool-call events into one
     chronologically-ordered list of classified items."""
@@ -300,6 +382,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
             if current is None or candidate["delivery_id"] == candidate["initial_delivery_id"]:
                 accepted_roles[key] = candidate
 
+    model_hosted = _model_hosted_cards(conn, msgs, accepted_roles)
     items: list[dict[str, Any]] = []
     for msg in msgs:
         mtype = msg.get("type")
@@ -395,6 +478,8 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
     hosted_cards: dict[tuple[str, str], dict[str, Any]] = {}
     for event in events:
         card = (event.get("content") or {}).get("hosted")
+        if isinstance(card, dict) and event.get("turn_id") and not card.get("turn_id"):
+            card = {**card, "turn_id": str(event["turn_id"])}
         card_key = hosted_activity_key(card)
         if card_key is not None and card_key in hosted_cards:
             # Trace rows remain append-only. A completion updates the original logical card and its place, not its
@@ -454,6 +539,13 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         )
         if card_key is not None:
             hosted_cards[card_key] = items[-1]
+    for card_key, projected in model_hosted.items():
+        existing = hosted_cards.get(card_key)
+        if existing is not None:
+            _merge_projected_hosted(existing, projected)
+        else:
+            items.append(projected)
+            hosted_cards[card_key] = projected
     for turn in conn.execute(
         select(
             session_turns.c.id,
@@ -510,6 +602,12 @@ def _make_group(
     turn_id: Optional[str],
 ) -> dict[str, Any]:
     started = started_iso or pending[0]["created_at"]
+    hosted_pending = any(
+        isinstance(item.get("hosted"), dict) and item["hosted"].get("status") == "pending"
+        for item in pending
+    )
+    if hosted_pending:
+        status = "interrupted"
     group: dict[str, Any] = {
         "id": pending[0]["id"],
         # A group is positioned relative to a transcript message that is AT OR BEFORE
@@ -529,28 +627,36 @@ def _make_group(
         "_turn_id": turn_id,
     }
     if include_rows:
-        group["rows"] = [
-            {
-                "id": item["id"],
-                "kind": item["row_kind"],
-                "text": item.get("text") or "",
-                "created_at": item["created_at"],
-                # Migrated event ids are hashes; only storage has the original clock.
-                "order_micros": item["sort"],
-                # Omitted entirely when there is nothing to carry, so an ordinary
-                # row keeps the wire shape it always had.
-                **(
-                    {"citations": item["citations"]}
-                    if isinstance(item.get("citations"), list) and item["citations"]
-                    else {}
-                ),
-                **({"hosted": {
-                    **item["hosted"],
-                    **({"in_progress": False} if not open_turn and item["hosted"].get("in_progress") else {}),
-                }} if isinstance(item.get("hosted"), dict) else {}),
-            }
-            for item in pending
-        ]
+        rows = []
+        for item in pending:
+            hosted = item.get("hosted")
+            if isinstance(hosted, dict):
+                hosted = dict(hosted)
+                if not open_turn:
+                    hosted.pop("in_progress", None)
+                    if hosted.get("status") == "pending":
+                        # A terminal Turn never ran this deferred call.  Keep the
+                        # card visible, but render it as interrupted rather than live.
+                        hosted["status"] = "incomplete"
+            rows.append(
+                {
+                    "id": item["id"],
+                    "kind": item["row_kind"],
+                    "text": item.get("text") or "",
+                    "created_at": item["created_at"],
+                    # Migrated event ids are hashes; only storage has the original clock.
+                    "order_micros": item["sort"],
+                    # Omitted entirely when there is nothing to carry, so an ordinary
+                    # row keeps the wire shape it always had.
+                    **(
+                        {"citations": item["citations"]}
+                        if isinstance(item.get("citations"), list) and item["citations"]
+                        else {}
+                    ),
+                    **({"hosted": hosted} if hosted is not None else {}),
+                }
+            )
+        group["rows"] = rows
     return group
 
 

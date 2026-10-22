@@ -470,18 +470,7 @@ C-5's commit boundary, so its completion is append-only:
   identity. A result from a re-resolved hop cannot complete an old Source's call.
 - Usage and hosted counters remain on the response reporting them, unchanged. Parsing a completion never adds a
   charge inferred from a block. A missing reported counter remains missing; it is not manufactured as zero or one.
-- The Web projects append-only activity fragments by the original `(response_id, call_id)`: one card, searching
-  while deferred, completed with sources when the result arrives, interrupted only after settlement without a
-  result. Live and reloaded cards use that same owner. IM holds the provisional card and emits it once on completion
-  or final settlement, including Stop and error; it may follow the client-tool lines. A restart rebuilds only
-  pending cards owned by the resumed durable Turn, not unmatched fragments from settled Turns or fork ancestry.
-  Recovery reads only that Turn's indexed response/event rows and accepted Delivery inputs, off the event loop;
-  it neither loads full Session history nor looks up each response's owner separately. Accepted steers remain
-  pairing barriers. Completion ownership includes the original response row, so a reused provider call id cannot
-  settle another call. Normal completion, Stop, route refusal, setup failure and non-shutdown cancellation all
-  enter the same card settlement path before the terminal outcome; a held card is removed before its final emit.
-  Restoration shares the surviving client-tool wait's cancellation guard. A service shutdown leaves that work
-  for the next restart, while cancellation outside shutdown stops it, including cancellation during restoration.
+- The Web projects the two append-only activity fragments by durable Turn and call id: response 1 is pending while the Turn runs, and response 2's ordinary completion card supplies the committed result. Reload uses the same transcript/trace projection; a completion already committed in the model row is completed even if its trace emit was interrupted by restart. A pending call in a terminal Turn is interrupted. IM suppresses response 1's pending card and emits no card for an incomplete call; response 2 uses the existing ordinary hosted-card path, with the same commit-to-send behavior as every other card. No held-card map, settlement flush, restart restoration, audit receipt or special delivery guarantee exists.
 
 Provider source, fetched **2026-10-22**: [Server tools — Mixing server tools and client tools in one turn](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools.md).
 
@@ -1033,9 +1022,7 @@ and no real credentials.
 9. **A deferred call without a completion remains interrupted.** Stop, an error before its result, `pin_unavailable`,
    or re-resolution to a different Source do not synthesize a success or retry the search elsewhere. The existing
    §4.4 fallback remains unchanged. Already dropped result blocks in old transcripts cannot be recovered.
-10. **IM holds deferred cards.** Web can show a searching card and update it; every IM surface instead receives one
-    final line when the call completes or the Turn settles without it. That line may follow client-tool lines. No
-    platform-specific message-replacement mechanism is introduced.
+10. **IM intentionally omits incomplete deferred calls.** Response 1's pending card is persisted for the Web projection but emits no IM line. Response 2's completion card uses the ordinary hosted-card emission path. Stop, an error before response 2, `pin_unavailable`, Source change and other non-completing paths produce no IM search line; Web renders the committed pending fragment as interrupted. There is no held-card state, restart flush, audit receipt or special delivery guarantee.
 11. **Unreported hosted usage is unknown.** Counters/cost are read from wire usage only, never inferred from the
     number of parsed calls or completion fragments. The 2026-10-22 live probe's installed parser dropped the result
     block and its hosted summary, so that transcript cannot establish which response reported the search counter.

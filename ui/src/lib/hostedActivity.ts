@@ -54,7 +54,9 @@ export type HostedActivity = {
   status: 'completed' | 'failed' | 'incomplete' | 'pending';
   /** Pending mixed-group call, still awaiting a result; cleared at Turn settlement. */
   in_progress?: boolean;
-  /** Original use's committed response, also carried by its deferred completion. */
+  /** Durable Avibe Turn owner used to merge append-only native fragments across response rows. */
+  turn_id?: string;
+  /** Original use's or completion response's committed row; retained for ordering/debugging. */
   response_id?: string;
   /** Model-facing English, shown as is only for a provider's own reason. */
   error?: string;

@@ -113,9 +113,6 @@ class AdapterTranscriptStore:
     async def load(self, session_id: str) -> Sequence[ContextEntry]:
         return await self._store.load(session_id)
 
-    async def load_turn(self, session_id: str, turn_id: str) -> Sequence[ContextEntry]:
-        return await self._store.load_turn(session_id, turn_id)
-
     async def consume_input(self, session_id: str, message_id: str, message: UserMessage) -> ContextEntry:
         await self._await_input_row(session_id, message_id)
         previous = self._env_state.get(session_id)

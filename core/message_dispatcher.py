@@ -4152,8 +4152,8 @@ class ConsolidatedMessageDispatcher:
         )
 
         if hosted and hosted.get("in_progress") is True:
-            # Deferred native searches are provisional Web cards. IM (including append-only verbose platforms)
-            # receives exactly one line when the call completes or the Turn settles interrupted.
+            # Deferred native searches are provisional Web cards. IM emits neither the pending
+            # fragment nor an incomplete deferred call; a later completion uses the ordinary path.
             return None
 
         # The row above is the only copy of an intermediate message that carries a

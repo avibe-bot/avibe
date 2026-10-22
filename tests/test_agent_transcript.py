@@ -200,68 +200,6 @@ COMPACTION = {  # the current C-9 ``Compaction`` shape (transcript-rows.schema.j
 }
 
 
-@pytest.mark.parametrize("empty_turn", [False, True])
-async def test_turn_context_reads_seek_only_the_owned_rows_without_ancestry(engine, empty_turn) -> None:
-    """Deferred recovery must not scan/decode older Turns or fork ancestry, even with no current response."""
-    from sqlalchemy import event
-
-    store = SQLiteTranscriptStore(engine)
-    with engine.begin() as conn:
-        home = _scope(conn, "C-home")
-        _session(conn, "ses_parent", home)
-        initial = _accepted_turn(conn, "ses_parent", home, "old work", "turn_parent")
-    await store.consume_input("ses_parent", initial, _user("old work"))
-    await store.append_response("ses_parent", _assistant("old reply"), final=True, turn_id="turn_parent")
-    with engine.begin() as conn:
-        message_deliveries.terminalize_turn(
-            conn, "turn_parent", outcome="completed", settled_by="test", evidence_kind="test"
-        )
-        _fork(conn, "ses_child", home, "ses_parent")
-        old = _accepted_turn(conn, "ses_child", home, "previous task", "turn_old")
-    await store.consume_input("ses_child", old, _user("previous task"))
-    await store.append_response("ses_child", _assistant("previous reply", call_id="old"), final=False, turn_id="turn_old")
-    await store.append_tool_result("ses_child", _tool_result("old", "old output"), details={}, turn_id="turn_old")
-    with engine.begin() as conn:
-        message_deliveries.terminalize_turn(
-            conn, "turn_old", outcome="completed", settled_by="test", evidence_kind="test"
-        )
-        current = _accepted_turn(conn, "ses_child", home, "current task", "turn_current")
-    expected = [await store.consume_input("ses_child", current, _user("current task"))]
-    if not empty_turn:
-        expected.extend([
-            await store.append_response(
-                "ses_child", _assistant("current call", call_id="now"), final=False, turn_id="turn_current"
-            ),
-            await store.append_tool_result(
-                "ses_child", _tool_result("now", "current output"), details={}, turn_id="turn_current"
-            ),
-        ])
-        with engine.begin() as conn:
-            steer = _accepted_steer(conn, "ses_child", home, "a new instruction", "turn_current")
-        expected.append(await store.consume_input("ses_child", steer, _user("a new instruction")))
-    statements = []
-    def capture(_conn, _cursor, statement, parameters, _context, _executemany):
-        if statement.lstrip().upper().startswith("SELECT"):
-            statements.append((statement, parameters))
-    event.listen(engine, "before_cursor_execute", capture)
-    try:
-        loaded = await store.load_turn("ses_child", "turn_current")
-    finally:
-        event.remove(engine, "before_cursor_execute", capture)
-    assert loaded == expected
-    assert len(statements) == 3  # Responses, tool results, and accepted inputs; no ancestor or per-response queries.
-    with engine.connect() as conn:
-        plans = [
-            " ".join(str(row[3]) for row in conn.exec_driver_sql("EXPLAIN QUERY PLAN " + sql, params))
-            for sql, params in statements
-        ]
-    assert "SEARCH messages USING INDEX ix_messages_turn_id (<expr>=?)" in plans[0]
-    assert "SEARCH agent_events USING INDEX ix_agent_events_turn_sequence_id (turn_id=?)" in plans[1]
-    assert "SEARCH message_deliveries USING INDEX ix_message_deliveries_turn (turn_id=?)" in plans[2]
-    assert "SEARCH messages USING INDEX sqlite_autoindex_messages_1 (id=?)" in plans[2]
-    assert not any("SCAN " in plan or "TEMP B-TREE" in plan for plan in plans)
-    assert await store.load_turn("ses_parent", "turn_current") == []
-
 
 async def test_every_kind_round_trips_in_one_order_attributed_to_the_turn(engine) -> None:
     with engine.begin() as conn:

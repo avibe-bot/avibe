@@ -177,9 +177,9 @@ export const shouldShowRunningCard = (
   liveRowCount: number,
 ): boolean => enabled && working && liveRowCount > 0;
 
-// Native completion trace events share the original response/call owner, never merely a provider call id.
-const activityRowKey = (row: ActivityRow): string => row.hosted?.mode === 'native' && row.hosted.response_id
-  ? JSON.stringify([row.hosted.response_id, row.hosted.call_id]) : row.id;
+// Native completion trace events share the owning Turn, never merely a provider response id.
+const activityRowKey = (row: ActivityRow): string => row.hosted?.mode === 'native'
+  ? JSON.stringify([row.hosted.turn_id ?? row.hosted.response_id, row.hosted.call_id]) : row.id;
 
 const mergeActivityRows = (rows: ActivityRow[]): ActivityRow[] => {
   const merged = new Map<string, ActivityRow>();
