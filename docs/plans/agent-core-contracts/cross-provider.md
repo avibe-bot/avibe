@@ -78,9 +78,10 @@ Invariants:
   again from the completion. An unmatched pending use keeps the interrupted rule for model replay. On Web and IM,
   deferred use-only calls produce no card; response 2's result fragment uses the ordinary hosted-card path at its own
   position. There is no cross-response card merge, held-card state or special delivery guarantee. Failed `error`
-  attempts on the same deferred Anthropic exchange are omitted from in-flight discovery and pairing, as they are
-  from provider replay; an authorized retry resends the last valid continuation, preserving failed-attempt usage
-  separately (hosted-tools §§4.4/15). This is a C-1 interpretation of
+  attempts on the same deferred Anthropic exchange are omitted together with every client-tool result owned by each
+  failed response from the shared effective request history used by in-flight discovery, pairing and wire compilation;
+  an authorized retry resends the last valid continuation, preserving failed-attempt usage separately (hosted-tools
+  §§4.4/15). This is a C-1 interpretation of
   existing v1 fields, verified by round-tripping both fragments through the v3.2.2 and gh-v3.2.3rc2 readers; no new
   message discriminator or reader-breaking field is introduced. Provider contract, fetched **2026-10-22**:
   [Server tools, mixed client/server groups](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools.md).

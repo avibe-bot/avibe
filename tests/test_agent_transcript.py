@@ -461,6 +461,36 @@ async def test_fork_chain_reads_the_ancestry_up_to_each_fork_point(engine) -> No
     assert early.context_seq == 2
 
 
+async def test_turn_context_load_ignores_long_fork_history(engine) -> None:
+    with engine.begin() as conn:
+        home = _scope(conn, "C-long-root")
+        _session(conn, "ses_long_root", home)
+        root_input = _accepted_turn(conn, "ses_long_root", home, "root", "turn_long_root")
+    store = SQLiteTranscriptStore(engine)
+    await store.consume_input("ses_long_root", root_input, _user("root"))
+    for index in range(60):
+        await store.append_response("ses_long_root", _assistant(f"root-{index}"), final=False, turn_id="turn_long_root")
+    root_rows = list(await store.load("ses_long_root"))
+    with engine.begin() as conn:
+        _session(
+            conn,
+            "ses_long_child",
+            home,
+            {"fork_source_session_id": "ses_long_root", "fork_source_context_seq": root_rows[-1].context_seq},
+        )
+        child_input = _accepted_turn(conn, "ses_long_child", home, "child", "turn_long_child")
+    await store.consume_input("ses_long_child", child_input, _user("child"))
+    child_response = await store.append_response(
+        "ses_long_child", _assistant("child done"), final=False, turn_id="turn_long_child"
+    )
+
+    full = list(await store.load("ses_long_child"))
+    turn = list(await store.load_turn("ses_long_child", "turn_long_child"))
+    assert len(full) == len(root_rows) + 2
+    assert [entry.row_id for entry in turn] == [child_input, child_response.row_id]
+    assert all(entry.session_id == "ses_long_child" for entry in turn)
+
+
 async def test_a_cancelled_write_raises_only_after_its_commit_settled(engine) -> None:
     with engine.begin() as conn:
         home = _scope(conn, "C-home")
@@ -663,6 +693,7 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
             cut_turn = message_deliveries.get_turn(conn, "turn_cut")
             assert restart_resume_plan(conn, cut_turn) == "rerun"
             assert committed_final(conn, "ses_cut", "turn_cut") is None
+        assert [entry.kind for entry in await store.load_turn("ses_cut", "turn_cut")] == ["input", "response"]
         # The rerun's end, on the loop: the final's delivery.
         assert delivered_committed_row(rerun, final.row_id, outward=True) is None
         with engine.begin() as conn:
@@ -686,6 +717,10 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
         r"|session_id=\? AND context_seq>\?)\)"
     )
     for (sql, _params), plan in zip(statements, plans):
+        if sql.lstrip().upper() in {"BEGIN", "COMMIT"}:
+            continue
+        if "INDEXED BY ix_messages_turn_id" in sql or "INDEXED BY ix_agent_events_turn_sequence_id" in sql or "INDEXED BY ix_message_deliveries_turn" in sql:
+            continue
         searches = [step for step in plan if step.startswith(("SEARCH", "SCAN"))]
         if not searches and sql.lstrip().upper().startswith("UPDATE"):
             continue  # a CAS write keyed by the row id, whose plan names no table read
@@ -697,6 +732,18 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
         "current_target_turn_id" in sql and "steering" in str(params) and bounded.fullmatch(plan[0])
         for (sql, params), plan in zip(statements, plans)
     )
+    turn_queries = [
+        (sql, plan)
+        for (sql, _params), plan in zip(statements, plans)
+        if "INDEXED BY ix_messages_turn_id" in sql
+        or "INDEXED BY ix_agent_events_turn_sequence_id" in sql
+        or "INDEXED BY ix_message_deliveries_turn" in sql
+    ]
+    assert len(turn_queries) == 3
+    assert any("ix_messages_turn_id" in step for _, plan in turn_queries for step in plan)
+    assert any("ix_agent_events_turn_sequence_id" in step for _, plan in turn_queries for step in plan)
+    assert any("ix_message_deliveries_turn" in step for _, plan in turn_queries for step in plan)
+    assert all(not step.startswith("SCAN") for _, plan in turn_queries for step in plan)
 
 
 async def test_a_call_instance_is_settled_once_whoever_writes(engine) -> None:

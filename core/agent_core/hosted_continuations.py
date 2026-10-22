@@ -7,7 +7,7 @@ Only model-replay projections join them. Neither stored messages nor their usage
 from dataclasses import dataclass
 from collections.abc import Sequence
 
-from core.agent_core.messages import AssistantMessage, HostedToolBlock, Message, ToolResultMessage
+from core.agent_core.messages import AssistantMessage, HostedToolBlock, Message, ToolResultMessage, UserMessage
 
 
 def pending_hosted(message: AssistantMessage) -> dict[str, HostedToolBlock]:
@@ -35,6 +35,41 @@ def failed_deferred_attempt(previous: AssistantMessage, current: AssistantMessag
     )
 
 
+def effective_deferred_history(messages: Sequence[Message]) -> tuple[tuple[int, Message], ...]:
+    """Return the request history after removing failed attempts and their owned results.
+
+    A failed Anthropic response is not a valid response boundary when it follows a
+    pending server search from the same Source identity. Its client-tool results are
+    likewise failed-attempt facts, not results for the preceding valid response. Keep
+    raw positions so callers that index the original request can still address rows;
+    callers compiling a wire request should use the yielded message view itself.
+    """
+    effective: list[tuple[int, Message]] = []
+    previous: AssistantMessage | None = None
+    skipped_tool_ids: set[str] = set()
+    for position, message in enumerate(messages):
+        if isinstance(message, AssistantMessage):
+            if previous is not None and failed_deferred_attempt(previous, message):
+                skipped_tool_ids.update(call.id for call in message.tool_calls)
+                continue
+            previous = message
+            skipped_tool_ids.clear()
+            effective.append((position, message))
+            continue
+        if isinstance(message, UserMessage):
+            previous = None
+            skipped_tool_ids.clear()
+            effective.append((position, message))
+            continue
+        if isinstance(message, ToolResultMessage) and message.tool_call_id in skipped_tool_ids:
+            continue
+        if not isinstance(message, ToolResultMessage):
+            previous = None
+            skipped_tool_ids.clear()
+        effective.append((position, message))
+    return tuple(effective)
+
+
 def result_fragment(block: HostedToolBlock) -> bool:
     return (
         block.tool == "web_search" and block.record.status != "pending" and len(block.native.payload) == 1
@@ -58,18 +93,20 @@ def hosted_completions(messages: Sequence[Message]) -> tuple[HostedCompletion, .
     call. Failed attempts on that same deferred exchange are not valid responses. Call ids alone never authorize
     cross-Source pairing.
     """
+    return _hosted_completions(effective_deferred_history(messages))
+
+
+def _hosted_completions(history: Sequence[tuple[int, Message]]) -> tuple[HostedCompletion, ...]:
     pairs = []
     previous: tuple[int, AssistantMessage] | None = None
     results: list[str] = []
-    for position, message in enumerate(messages):
+    for position, message in history:
         if isinstance(message, ToolResultMessage):
             results.append(message.tool_call_id)
             continue
         if isinstance(message, AssistantMessage):
             if previous is not None:
                 before_position, before = previous
-                if failed_deferred_attempt(before, message):
-                    continue
                 pending = pending_hosted(before)
                 if (
                     pending and message.origin == before.origin and message.source_identity == before.source_identity

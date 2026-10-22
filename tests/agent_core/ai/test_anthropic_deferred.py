@@ -172,15 +172,23 @@ async def test_partial_deferred_failure_retries_the_open_exchange_and_pairs_only
 
     request, original = await _paused("SSC")
     result = {**RESULT, "tool_use_id": "srvtoolu_0"}
-    partial_wire = _sse([result], stop=None, searches=1).removesuffix('data: {"type": "message_stop"}\n\n')
+    original_client_id = next(call.id for call in original.tool_calls if call.name == "read")
+    failed_client_block = {**CLIENT, "id": original_client_id}
+    partial_wire = _sse([result, failed_client_block], stop=None, searches=1).removesuffix('data: {"type": "message_stop"}\n\n')
     _, failed = await _stream(lambda _: httpx.Response(200, headers=_served(), text=partial_wire), request)
     failure = failed[-1]
     assert isinstance(failure, ProviderError) and failure.continuable
-    partial = failure.partial
+    partial = replace(
+        failure.partial,
+        content=(*failure.partial.content, ToolCallBlock(original_client_id, "read", {"path": "a"})),
+    )
     assert partial.stop_reason == "error"
     assert partial.hosted_summary.counts == {"web_search_requests": 1}
     first = await build_wire_request(request, gateway=True)
-    retry = replace(request, messages=(*request.messages, *((partial,) * failures)))
+    retry_messages = list(request.messages)
+    for _ in range(failures):
+        retry_messages.extend((partial, ToolResultMessage(original_client_id, "read", (TextBlock("contents"),))))
+    retry = replace(request, messages=tuple(retry_messages))
     resent = await build_wire_request(retry, gateway=True)
     assert resent.body["messages"] == first.body["messages"]
     assert resent.body["tools"] == first.body["tools"]
@@ -209,6 +217,35 @@ async def test_partial_deferred_failure_retries_the_open_exchange_and_pairs_only
     else:
         assert sum(b["type"] == "tool_use" and b["name"] == "web_search" for b in blocks) == 2
         assert sum(b["type"] == "tool_result" for b in blocks) == 3
+
+
+async def test_failed_attempt_does_not_suppress_a_reused_client_id_after_a_valid_response():
+    from core.agent_core.hosted_continuations import effective_deferred_history
+
+    request, paused = await _paused("SC")
+    client_id = next(call.id for call in paused.tool_calls if call.name == "read")
+    failed = replace(
+        _completion(paused),
+        content=(*_completion(paused).content, ToolCallBlock(client_id, "read", {"path": "a"})),
+        stop_reason="error",
+    )
+    completed = replace(
+        _completion(paused),
+        content=(*_completion(paused).content, ToolCallBlock(client_id, "read", {"path": "a"})),
+        stop_reason="tool_use",
+    )
+    failed_result = ToolResultMessage(client_id, "read", (TextBlock("failed"),))
+    completed_result = ToolResultMessage(client_id, "read", (TextBlock("new-call-result"),))
+    history = (*request.messages, failed, failed_result, completed, completed_result, UserMessage((TextBlock("next"),)))
+    effective = effective_deferred_history(history)
+    assert failed not in [message for _, message in effective]
+    assert failed_result not in [message for _, message in effective]
+    endpoint = replace(request.endpoint, hosted_tools={
+        "web_search": replace(request.endpoint.hosted_tools["web_search"], replay=True),
+    })
+    wire = await build_wire_request(replace(request, endpoint=endpoint, messages=history), gateway=True)
+    body = json.dumps(wire.body)
+    assert "new-call-result" in body and "interrupted" not in body
 
 
 @pytest.mark.parametrize("boundary", ["user", "aborted", "origin", "identity", "ordinary_tools"])

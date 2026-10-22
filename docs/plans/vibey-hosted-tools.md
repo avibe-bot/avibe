@@ -494,8 +494,8 @@ queue before it opens admission. A stopped/settled Turn has no continuation barr
 A subsequent internal `pause_turn` preserves the entire linked exchange
 natively without requiring historical replay evidence.
 
-An `error` partial from an attempted continuation is not a valid provider response to replay. For the same
-Anthropic origin/account's deferred exchange, it neither closes the in-flight request nor completes a pair for
+A failed partial and every client-tool result owned by that failed response are omitted together from the effective request history used by in-flight discovery, completion pairing and wire compilation. Their durable rows remain audit facts, and reused client call ids become eligible again only after the next valid assistant response resets that failed-attempt scope. For the same
+Anthropic origin/account's deferred exchange, the partial neither closes the in-flight request nor completes a pair for
 replay eligibility. An already-authorized transcript retry therefore sends the preceding valid mixed response
 and its client results unchanged; a later successful response pairs across the failed attempts. The failed
 partials and their reported usage stay immutable in storage. This does not grant retry permission or make a

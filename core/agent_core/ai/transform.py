@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
-from core.agent_core.hosted_continuations import failed_deferred_attempt, hosted_completions, result_fragment
+from core.agent_core.hosted_continuations import effective_deferred_history, hosted_completions, result_fragment
 from core.agent_core.ai.hosted import portable_hosted
 from core.agent_core.ai.provider import ModelEndpoint, OpaquePayload
 from core.agent_core.messages import (
@@ -84,9 +84,15 @@ def transform_messages(
     """
 
     target_protocol = protocol or target.api
+    # Failed Anthropic attempts and their owned client results are audit facts, not request history. All three
+    # continuation decisions below use this same effective view; raw positions are retained by the helper for callers
+    # such as the provider adapter that must address the original request tuple.
+    effective = effective_deferred_history(messages)
+    raw_live = in_flight_position(messages)
+    live = next((index for index, (raw, _) in enumerate(effective) if raw == raw_live), None)
+    messages = tuple(message for _, message in effective)
     # The response the request continues within its turn keeps its hosted calls in place, verbatim or as text (§4.4);
     # every earlier one goes back verbatim with replay evidence or as a synthetic call and result (§5).
-    live = in_flight_position(messages)
     messages, portable_pairs, parallel_groups, continuing_pairs = _complete_hosted_history(
         messages, live=live, endpoint=endpoint, target=target, protocol=target_protocol
     )
@@ -310,29 +316,19 @@ def _assistant_part(message: AssistantMessage, content: list[AssistantContent], 
 
 
 def in_flight_position(messages: list[Message] | tuple[Message, ...]) -> int | None:
-    """The position of the response a request continues within its turn (§4.4), or None.
+    """The raw position of the response a request continues within its turn (§4.4), or None.
 
-    It is the request's last assistant message, stopped for tools, with nothing after it but tool results (a
-    ``pause_turn`` continuation has none). A user message after it means its turn ended, as one may right after its
-    tool results, so a later turn never counts as continuing it. A failed Anthropic
-    deferred attempt is not replayed and does not close its still-open exchange.
+    The effective deferred-exchange history is shared with pairing and wire compilation: failed Anthropic attempts and
+    their owned client results disappear before this tail check, while the returned position remains an index into the
+    caller's original message sequence.
     """
-
-    failures: list[AssistantMessage] = []
-    for position in range(len(messages) - 1, -1, -1):
-        message = messages[position]
+    history = effective_deferred_history(messages)
+    for raw_position, message in reversed(history):
         if isinstance(message, ToolResultMessage):
             continue
-        if not isinstance(message, AssistantMessage):
+        if not isinstance(message, AssistantMessage) or message.stop_reason != "tool_use":
             return None
-        if message.stop_reason == "error":
-            failures.append(message)
-            continue
-        if message.stop_reason != "tool_use" or any(
-            not failed_deferred_attempt(message, failure) for failure in failures
-        ):
-            return None
-        return position
+        return raw_position
     return None
 
 

@@ -1092,12 +1092,20 @@ class VibeyAgent(BaseAgent):
             await self.store.consume_input(session_id, item.message_id, item.message)
 
     async def _deferred_continuation_open(self, session_id: str) -> bool:
-        entries = [row for row in await self.store.load(session_id) if row.message is not None]
-        position = in_flight_position([row.message for row in entries])
-        if position is None or not pending_hosted(entries[position].message):
+        turn = await asyncio.to_thread(self._active_turn, session_id)
+        if turn is None:
             return False
-        _, turn_id = await asyncio.to_thread(self._response_owner, entries[position].row_id)
-        return await asyncio.to_thread(self._work_state, turn_id) == "open"
+        entries = [row for row in await self.store.load_turn(session_id, str(turn["id"])) if row.message is not None]
+        position = in_flight_position([row.message for row in entries])
+        return (
+            position is not None
+            and bool(pending_hosted(entries[position].message))
+            and await asyncio.to_thread(self._work_state, str(turn["id"])) == "open"
+        )
+
+    def _active_turn(self, session_id: str) -> Optional[dict[str, Any]]:
+        with self._engine.connect() as conn:
+            return delivery_store.active_turn(conn, session_id)
 
     async def _recovered_inputs(self, session_id: str) -> tuple[AgentInput, ...]:
         inputs = []
