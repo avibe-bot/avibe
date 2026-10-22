@@ -152,6 +152,17 @@ def test_an_agent_that_cannot_run_offers_to_continue_on_vibey():
     assert im_call.kwargs["display_text"] == f"❌ {disabled_text}\n{handler._t('error.continueOnVibey.im')}"
     assert im_call.kwargs["output"] is None
     assert handler._t("error.agentUnavailable.missing", agent="reviewer") in deleted_call.kwargs["display_text"]
+    # Resolved by id, a deleted Agent names only its id; the session still knows its name.
+    by_id = AgentUnavailableError("agent id 'a1b2' not found", agent_name="a1b2", reason="missing")
+    targeted = MessageContext(
+        user_id="U1",
+        channel_id="ses-1",
+        platform="avibe",
+        platform_specific={"agent_session_target": {"id": "ses-1", "agent_id": "a1b2", "agent_name": "reviewer"}},
+    )
+    (by_id_call,) = emitted_for((handler._emit_agent_dispatch_failure, targeted, None, by_id))
+    assert handler._t("error.agentUnavailable.missing", agent="reviewer") in by_id_call.kwargs["display_text"]
+    assert "a1b2" not in by_id_call.kwargs["display_text"]
     assert "agent 'codex' is disabled" not in workbench_call.kwargs["display_text"]
 
     controller.vibe_agent_store = SimpleNamespace(

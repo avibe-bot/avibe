@@ -919,6 +919,13 @@ class MessageHandler(BaseHandler):
 
         if isinstance(error, AgentUnavailableError) and error.reason in {"disabled", "missing"}:
             agent = error.agent_name
+            if error.reason == "missing":
+                # A deleted Agent resolved by id names only that id; the session's
+                # projection still carries the name the user knows.
+                from core.agent_session_context import resolve_context_agent_session_target
+
+                target = resolve_context_agent_session_target(context) or {}
+                agent = str(target.get("agent_name") or "").strip() or agent
             label = display_name_for_backend(agent) if is_agent_backend(agent) else agent
             await self._emit_agent_cannot_run(
                 context,

@@ -1362,9 +1362,20 @@ def test_continue_on_vibey_moves_the_session_and_runs_the_unwritten_message(isol
     idle = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": False}})
 
     assert client.post(url, headers=headers, json={"continue_on_backend": "vibey", "text": "x"}).status_code == 400
+    continue_body = {"retry_for": notice["id"], "continue_on_backend": "vibey"}
+    from core.vibe_agents import VibeAgentAccessError
+
+    with patch("core.vibe_agents.ensure_agent_selection_access", side_effect=VibeAgentAccessError("denied")):
+        assert client.post(url, headers=headers, json=continue_body).status_code == 403
     dispatch = AsyncMock(return_value={"status_code": 202, "body": {"delivery_state": "queued", "queued": True}})
-    with patch("vibe.internal_client.turn_state", idle), patch("vibe.internal_client.dispatch_async", dispatch):
-        response = client.post(url, headers=headers, json={"retry_for": notice["id"], "continue_on_backend": "vibey"})
+    with (
+        patch("vibe.internal_client.turn_state", idle),
+        patch("vibe.internal_client.dispatch_async", dispatch),
+        # The session's own Agent may be deleted and unusable by this caller: the
+        # continuation never runs it, so only the target Agent's access counts.
+        patch("core.vibe_agents.ensure_session_agent_access", side_effect=PermissionError("deleted Agent")),
+    ):
+        response = client.post(url, headers=headers, json=continue_body)
     assert response.status_code == 202
     assert dispatch.await_args.args[0]["message_id"] == _inputs[0]["id"]
     assert dispatch.await_args.args[0]["text"] == "检查这张图"

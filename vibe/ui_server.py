@@ -10212,6 +10212,17 @@ def _backend_locked_response(err):
     )
 
 
+def _builtin_agent_for_backend(backend: str):
+    """The backend's enabled built-in Agent, or None. Blocking."""
+    from core.vibe_agents import VibeAgentStore
+
+    store = VibeAgentStore()
+    try:
+        return store.get_builtin_default_agent_for_backend(backend)
+    finally:
+        store.close()
+
+
 async def _backend_switch_preflight(engine, session_id: str, requested_backend):
     """Ask the controller whether the session may change to ``requested_backend``.
 
@@ -12162,7 +12173,10 @@ async def sessions_messages_create(session_id: str):
             from core.vibe_agents import ensure_session_agent_access
 
             _config, _session_payload, user_context = _remote_resource_access_context()
-            ensure_session_agent_access(conn, session, user_context=user_context)
+            # Continuing on another Agent never runs the session's current one,
+            # which may be deleted; the target Agent's access is checked below.
+            if continue_on_backend is None:
+                ensure_session_agent_access(conn, session, user_context=user_context)
             # Archived sessions are terminal + inert: refuse to start a turn on one
             # even via a stale/direct request (the workbench hides them from the
             # list, so this only fires on a leftover tab or a hand-crafted call).
@@ -12195,13 +12209,10 @@ async def sessions_messages_create(session_id: str):
     continue_agent = None
     continue_idle_through_turn = None
     if continue_on_backend is not None:
-        from core.vibe_agents import VibeAgentAccessError, VibeAgentStore, ensure_agent_selection_access
+        from core.vibe_agents import VibeAgentAccessError, ensure_agent_selection_access
 
-        store = VibeAgentStore()
-        try:
-            continue_agent = store.get_builtin_default_agent_for_backend(continue_on_backend)
-        finally:
-            store.close()
+        # The store's constructor checks and prefills state: off the event loop.
+        continue_agent = await asyncio.to_thread(_builtin_agent_for_backend, continue_on_backend)
         if continue_agent is None:
             return _coded_error_response(
                 "builtin_agent_unavailable", t("desktopMini.builtinAgentUnavailable", _request_ui_language()), 409
