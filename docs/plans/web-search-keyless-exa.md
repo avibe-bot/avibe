@@ -45,8 +45,10 @@ Implement keyless Exa as a **built-in Source at the search resolver boundary**:
   usage, activity, and UI purposes.
 - Saved setting: `model_hub.hosted_tools.web_search.services.src_exakeyless`.
   Missing means `{enabled: true, results: 5}`.
-- Default automatic order: persisted user search services in `service_order`,
-  then `src_exakeyless`, then model executors.
+- Default automatic order: persisted user search services in `service_order`
+  (including an auto-enrolled official DeepSeek Source), then
+  `src_exakeyless`, then model executors. Existing saved orders are augmented
+  at read time under §4.1; no migration write is required.
 - Search price and recorded cost are exactly `$0`; UI says **免费** rather than
   displaying a zero dollar amount. Every sent search `tools/call` increments
   usage `requests`, even though `billable_requests` stays zero.
@@ -170,10 +172,13 @@ The client recognizes all of these observed/officially specified signals:
 3. a successful HTTP response whose result metadata contains
    `_meta.ai.exa/rateLimited: true`, as observed on 2026-10-22;
 4. the hosted-MCP free-rate-limit text when a deployed version omits the
-   metadata marker.
+   metadata marker, but only in an error-shaped result (`isError: true`, a
+   JSON-RPC error, or an otherwise response-level error envelope). Never match
+   that phrase inside a valid result section or highlight.
 
 A rate-limit signal is a **cooldown**, never a credential failure. It maps to
-`service_unavailable` with a rate-limit detail and `cooldown_until`. If no
+`service_rate_limited` (the operational failover class is
+`service_unavailable`) with a rate-limit detail and `cooldown_until`. If no
 server advice is present, reuse services-design §4.2's conservative 30-second
 cooldown, doubling on consecutive failures to 300 seconds. This is a client
 backoff, not a claim about Exa's window. A later success resets it.
@@ -310,17 +315,24 @@ an old order.
 With no saved `executor_order`, the effective order is exactly:
 
 1. user-owned search services in `service_order` (Tavily, keyed Exa, and any
-   other enabled search services; official DeepSeek retains its existing
-   `auto_enroll` behavior);
-2. `src_exakeyless`, if enabled and not cooling/blocked/unavailable;
+   other tool-only services), followed by enabled official model Sources whose
+   catalog search API is `auto_enroll` (currently official DeepSeek);
+2. `src_exakeyless`, if enabled; it remains in the candidate/read order while
+   cooling, blocked, or temporarily unavailable so admission can record the
+   skip and the UI can show the cooldown;
 3. model executors in the existing automatic order.
+
+A disabled service remains in the effective/read order at the existing disabled
+ tail, and is never requested. The effective order therefore describes the
+user-editable chain, not only the candidates that are runnable at this instant.
 
 If the user saved an order, use services-design §4.1 unchanged:
 
 - named entries in their deliberate saved positions stay there;
 - unnamed or role-changed search services, including a newly available
-  `src_exakeyless`, are inserted immediately before the first saved model
-  executor, in automatic service order;
+  `src_exakeyless` and an auto-enrolled official DeepSeek search service, are
+  inserted immediately before the first saved model executor, in automatic
+  service order;
 - unnamed model executors follow at the end;
 - a saved keyless row can therefore be placed before a user's own service or
   after a model executor, because user reordering wins;
@@ -346,7 +358,7 @@ For `GET /api/models/hosted-tools`, `web_search` returns:
     "src_exakeyless": {"enabled": true, "results": 5}
   },
   "executor_order": null,
-  "effective_order": ["src_tavily001", "src_exa000001", "src_exakeyless", "src_model001"],
+  "effective_order": ["src_tavily001", "src_exa000001", "src_deepseek001", "src_exakeyless", "src_model001"],
   "executor_candidates": [
     {
       "kind": "service",
@@ -375,10 +387,11 @@ For `GET /api/models/hosted-tools`, `web_search` returns:
 }
 ```
 
-The example is illustrative; it preserves the current read's field names and
-adds only the built-in facts needed for UI behavior. `effective_order` always
-shows keyless Exa when enabled, even when no user Source exists, so no empty
-search-service state is inferred from an empty `sources[]`.
+`effective_order` always shows keyless Exa when enabled, even when no user Source
+exists, and keeps a cooling/blocked/unavailable row present so the chain can
+record its skip and the UI can expose its cooldown/remedy. A disabled row stays
+in the disabled tail. No empty search-service state is inferred from an empty
+`sources[]`.
 
 ## 5. Execution
 
@@ -404,15 +417,20 @@ The first call, within the one service attempt's existing 30-second cap, does:
 
 Later calls reuse the session and cached tool schema, sending only the
 `tools/call`. A missing/expired session is reinitialized once before the call
-is admitted. Once the `tools/call` request bytes begin, Avibe never retries that
-call automatically: a retry could duplicate a search and a usage request.
+is admitted. If a `tools/call` receives the MCP session-not-found response (the
+standard HTTP 404/session error, not an endpoint/protocol 404), clear the stale
+session, initialize/list again, and replay that one call once within the
+original deadline; this is safe because the server has not accepted the tool
+call. Once the replay's `tools/call` request bytes begin, Avibe never retries it
+automatically: a retry could duplicate a search and a usage request.
 
 Every exchange uses `Accept: application/json, text/event-stream`,
 `Content-Type: application/json`, `MCP-Protocol-Version`, the session header
-when present, and `x-exa-source: avibe`. The response parser accepts the
-Streamable HTTP SSE `event: message` / `data: <JSON-RPC>` shape and matches the
-response id. The 8 MiB existing response-body cap applies to the SSE response;
-notifications and unrelated events are ignored only within that cap.
+when present, and `x-exa-source: avibe`. The response parser accepts both the
+Streamable HTTP SSE `event: message` / `data: <JSON-RPC>` shape and a single
+`application/json` JSON-RPC response, matching the response id in either form.
+The 8 MiB existing response-body cap applies to either form; notifications and
+unrelated events are ignored only within that cap.
 
 No API key, bearer token, Vault reference, or user credential is present in the
 MCP request. The adapter is still the custody/transport boundary and returns
@@ -458,12 +476,13 @@ its source-defined sections conservatively:
 - ignore `Text` entirely, even when present;
 - preserve Exa ranking order and cap to the frozen `results` count.
 
-A valid explicit no-results text is a completed record with no sources. A
-result array/section with no valid HTTP(S) URL is unreadable when non-empty;
-malformed JSON-RPC, missing content/text, an unparseable non-empty response, and
-server-generated `isError` results are `service_unavailable`. A result with a
-valid URL but no highlight is allowed with no snippet; Avibe still has not
-stored page content.
+A valid explicit no-results text is a completed record with no sources. Exa's
+notice wrapper may prepend bounded `Note:` lines; strip that notice preamble
+before matching the no-results sentinel. A result array/section with no valid
+HTTP(S) URL is unreadable when non-empty; malformed JSON-RPC, missing
+content/text, an unparseable non-empty response, and server-generated `isError`
+results are `service_unavailable`. A result with a valid URL but no highlight
+is allowed with no snippet; Avibe still has not stored page content.
 
 ## 6. Outcomes, records, and usage
 
@@ -472,17 +491,25 @@ Apply services-design §4.2 with the following keyless-specific clarifications:
 | MCP/HTTP result | Chain | State |
 | --- | --- | --- |
 | Valid result, including empty results | Ends with `completed`; cost `$0` | No state change |
-| HTTP 429, rate-limit JSON-RPC error, or `ai.exa/rateLimited` result metadata | Next candidate; attempt code `service_unavailable`, rate-limit detail | Service cooldown; never credential health |
-| Timeout, connection/TLS failure, closed/expired session after the call begins | Next candidate, `service_unavailable` | Service cooldown; no credential health |
+| HTTP 429, rate-limit JSON-RPC error, or `ai.exa/rateLimited` result metadata | Next candidate; attempt code `service_rate_limited` (operationally a `service_unavailable` cooldown) | Service cooldown; never credential health |
+| Stale MCP session-not-found 404 before the tool call is accepted | Reinitialize/list and replay once within the original deadline; if the replay fails, apply its actual outcome | Clear only the in-memory session; no credential health |
+| Timeout, connection/TLS failure, or closed session after the admitted call begins | Next candidate, `service_unavailable` | Service cooldown; no credential health |
 | Any HTTP 5xx or non-rate-limit JSON-RPC/server error | Next candidate, `service_unavailable` | Service cooldown; no credential health |
-| 3xx, 401, 403, 404, 405, or other unexpected 4xx | Next candidate, `service_unavailable` | Service cooldown; never `invalid_key` |
+| 3xx, 401, 403, 404 not recognized as stale-session, 405, or other unexpected 4xx | Next candidate, `service_unavailable` | Service cooldown; never `invalid_key` |
 | Malformed text, missing expected content, invalid URL-only result, or server `isError` | Next candidate, `service_unavailable` | Service cooldown; no credential health |
 
 A rate limit is not `service_key_invalid`, `service_balance`, or
 `service_limit`. It has no key to invalidate and no account balance to infer.
-`Retry-After` is honored in full; an absolute reset header is honored when it
-extends the deadline. The generic no-advice backoff is the existing 30-second
-then doubling cooldown, capped at 300 seconds.
+Persist it as the distinct `service_rate_limited` error code (with the
+localized rate-limit copy) while applying the same cooldown/failover mechanics
+as `service_unavailable`. Add that code to `HOSTED_ERROR_CODES`, the C-1
+attempt readers/writers, the hosted-activity projection, and the English/Chinese
+copy. This is needed so a later projection can still say
+**Exa（免费）限流，已改用下一个** rather than guessing from ephemeral cooldown
+state; it is never a credential blocker. `Retry-After` is honored in full; an
+absolute reset header is honored when it extends the deadline. The generic
+no-advice backoff is the existing 30-second then doubling cooldown, capped at
+300 seconds.
 
 A successful keyless attempt writes the existing positive service evidence with
 `mode: "service"`, keyed by (`src_exakeyless`, `exa/mcp`, `web_search`). The
@@ -530,8 +557,9 @@ and native-preference switch. In the visible **搜索顺序 / Search order** lis
   with the existing `cooldown_until` detail and **立即重试 / Retry now** action.
   It never says “密钥无效 / invalid key”.
 - The caption explicitly says the current automatic order:
-  **已添加的搜索服务 → Exa（免费） → 模型代搜；可拖动调整。/ Your added
-  search services → Exa (free) → model executors; drag to reorder.**
+  **已添加的搜索服务（含官方 DeepSeek） → Exa（免费） → 模型代搜；可拖动调整。/ Your added
+  search services (including official DeepSeek) → Exa (free) → model
+  executors; drag to reorder.**
   The caption is a current behavior statement, not a promise about future
   defaults.
 - Keep **添加搜索服务 / Add search service** below the order. The existence of
@@ -614,8 +642,9 @@ these current facts:
    public egress IP; it is not an `avibe.bot` proxy hop.
 5. Exa receives the query, requested result count, MCP/client identification,
    normal connection metadata, and returns titles, URLs, metadata, and
-   highlights. Phase 1 does not send page content to the model or retain full
-   page text from Exa.
+   highlights. Phase 1 sends those query-relevant highlights/snippets to the
+   model and stores them in the bounded search record; it does not send or
+   retain the full page text from Exa.
 6. Exa's current Terms govern the service and permit the processing/disclosure
    described in §2.4; users should not send information they are not permitted
    to disclose. The docs link to Exa's Terms rather than interpreting them.
@@ -683,15 +712,17 @@ coordinated activation; no lane merges this design PR.
    turn/service and mapped to `numResults`; an `objective` field is added only
    when the live `tools/list` schema requires it.
 6. A reused MCP session performs one initialize/list lifecycle and one
-   `tools/call` per attempted search; an expired session can reconnect before
-   admission, but an admitted call is never automatically duplicated.
+   `tools/call` per attempted search; an expired session can reinitialize and
+   replay once only before the server accepts the tool call, but an admitted
+   call is never automatically duplicated.
 7. All service work fits the existing 30-second service cap and 180-second
    chain deadline; no blocking parse runs on the controller loop.
 8. Valid results are highlights-only, bounded, ordered, and become one
    canonical completed record. Full page text is not requested or stored.
 9. HTTP 429, JSON-RPC/application rate-limit signals, malformed output, server
-   errors, and transport failures fail over as `service_unavailable`; rate
-   limits install a cooldown and never a credential blocker.
+   errors, and transport failures fail over as specified in §6; rate limits
+   persist as `service_rate_limited`, install a cooldown, and never become a
+   credential blocker.
 10. A successful or failed sent call records exact `$0`; every sent search call
     increments request usage; skips do not increment usage.
 11. The Tools card always makes the built-in service, default, egress, free
@@ -712,19 +743,25 @@ JSON-RPC fixtures:
   latter case.
 - `tools/call` returns formatted highlights, empty results, a valid URL with no
   highlights, text-only content that must be ignored, malformed sections, an
-  invalid URL, and oversized/bounded fields.
+  invalid URL, and oversized/bounded fields. Cover a valid result/highlight
+  containing the free-rate-limit phrase; it must not trigger cooldown.
+- Exa notice-prefixed no-results text is normalized to a completed empty record.
 - `web_fetch_exa` is a phase-2 parser fixture only; no phase-2 production
   activation is implied by the test.
 - Session reuse sends one initialize/list for two searches; an expired session
-  reconnects before admission; a connection failure after the call is sent is
-  not retried.
+  returns the standard session-not-found 404 and reconnects/replays once before
+  admission; a connection failure after the call is sent is not retried.
+- The transport fixture covers both SSE and direct `application/json` JSON-RPC
+  responses.
 - HTTP 429 with `Retry-After`, HTTP 429 with reset headers, JSON-RPC `-32000`,
-  `_meta.ai.exa/rateLimited`, and free-rate-limit text all produce cooldown
-  plus `service_unavailable`, never `needs_action`.
+  `_meta.ai.exa/rateLimited`, and error-shaped free-rate-limit text all produce
+  `service_rate_limited` plus cooldown, never `needs_action`; a valid highlight
+  quoting that text does not.
 - 5xx, unexpected 4xx, redirects, timeouts, closed sessions, server `isError`,
   and malformed content map to `service_unavailable` and fail over.
 - Default order, saved order, role-map insertion, explicit disable, restart,
-  older-build unknown-id reading, keyed-Exa-plus-keyless fallback, and
+  older-build unknown-id reading, keyed-Exa-plus-keyless fallback,
+  auto-enrolled official-DeepSeek-plus-keyless ordering, and
   native-preference behavior are table-driven.
 - Attempts, service origin, exact-zero cost, request-only usage, no lower-bound
   charge, and cooldown projection are asserted at their owning boundaries.

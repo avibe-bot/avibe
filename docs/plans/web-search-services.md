@@ -396,9 +396,10 @@ unrecognized tags keep the status-only fallback (including `403 FEATURE_DISABLED
     failed before `on_sent`, as with DNS, connect or TLS errors; a pre-send failure is `service_unavailable`, costs
     $0 and is not metered) or `skipped` (not tried);
   - `error_code` is set on a failed entry when the failure has a code. A failed search-service request always has
-    one of `service_key_invalid`, `service_balance`, `service_limit`, `service_unavailable`, `service_refused` and
-    `service_unreadable`, each with en and zh copy. A model executor has one only when its failure already carries
-    a code (`FAILURE_CODES`); otherwise the note says "失败" for that Source;
+    one of `service_key_invalid`, `service_balance`, `service_limit`, `service_unavailable`, `service_refused`,
+    `service_unreadable`, or the keyless-Exa-specific `service_rate_limited`, each with en and zh copy. The
+    rate-limited code is a cooldown/failover reason, never credential health. A model executor has one only when
+    its failure already carries a code (`FAILURE_CODES`); otherwise the note says "失败" for that Source;
   - `skipped` is `blocked`, `disabled`, `cooling`, `query_too_long` or `unavailable`; a `cooling` entry also
     carries `retry_at`, the deadline captured when the skip was decided, since a service cooldown is in memory
     and a later read cannot rebuild it;
@@ -661,8 +662,10 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   `HostedRecord.attempts[]` with `source_id`, `label`, `kind`, `outcome`, `error_code`, `skipped`, `retry_at`, `needs_action`, `cost` and
   `superseded`; the `core/hosted_activity` projection's "至少" for a total with an unpriced attempt; `HostedCost.estimate` ("≈" on a reported figure), and a cost of exactly 0 rendered as
   "$0" without "≈" by that projection, `HostedToolRow` and the IM line, since a zero is never an estimate; and
-  their reader and writer types, and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; and a
-  service executor origin. `Protocol` and the assistant-message `Origin` stay unchanged (four model protocols); a
+  their reader and writer types, and the six existing `service_*` codes plus keyless Exa's
+  `service_rate_limited` in `HOSTED_ERROR_CODES`, with copy on every surface; and a
+  service executor origin. The rate-limited code is operationally a service
+  cooldown/failover reason, never credential health. `Protocol` and the assistant-message `Origin` stay unchanged (four model protocols); a
   new `ServiceExecutorOrigin` definition `{provider, api, model}` has `api` fixed to the const `"search_api"`,
   `provider` the vendor and `model` the catalog service id, and `ProxyExecution.executor_origin` (today a `$ref` to `Origin`) becomes `oneOf` the
   released `Origin` and `ServiceExecutorOrigin`. C-1 owns the definition; the Python reader and writer types in
