@@ -39,7 +39,9 @@ Implement keyless Exa as a **built-in Source at the search resolver boundary**:
 - Stable Source id: `src_exakeyless`.
 - Search service id: `exa/mcp`.
 - Endpoint: `https://mcp.exa.ai/mcp` with the explicit tool selection
-  `web_search_exa,web_fetch_exa`.
+  `web_search_advanced_exa,web_fetch_exa`; the simple `web_search_exa` tool is
+  still documented and probed, but phase 1 selects the advanced tool's
+  structured result form to avoid parsing unescaped highlight delimiters.
 - No credential, no Vault operation, no add flow, and no persisted credential
   Source row. It is still a Source for ordering, health/cooldown, attempts,
   usage, activity, and UI purposes.
@@ -84,9 +86,9 @@ say no API key is required to get started. The default hosted tools are:
 
 | Tool | Current availability | Input shape relevant to Avibe | Phase |
 | --- | --- | --- | --- |
-| `web_search_exa` | Enabled by default | `query: string`; `numResults: number` is optional. The live endpoint on 2026-10-22 also advertised a required `objective: string`; adapt to the schema returned by `tools/list` and send `objective = query` only when it is required. | 1 |
+| `web_search_exa` | Enabled by default | `query: string`; `numResults: number` is optional. The live endpoint on 2026-10-22 also advertised a required `objective: string`; adapt to the schema returned by `tools/list` and send `objective = query` only when it is required. | Recorded upstream shape; not selected for phase 1 |
 | `web_fetch_exa` | Enabled by default | `urls: string[]`; optional `maxCharacters: number`. It calls Exa contents/crawling and returns clean text/Markdown. | 2 |
-| `web_search_advanced_exa` | Opt-in with a `tools` URL parameter | `query`, `numResults`, filters, dates, highlights, summaries, freshness, and subpage-crawl controls. | Not phase 1 |
+| `web_search_advanced_exa` | Opt-in with a `tools` URL parameter | `query`, `numResults`, filters, dates, highlights, summaries, freshness, and subpage-crawl controls. | 1 (selected canonical tool) |
 
 The source implementation of `web_search_exa` sends an Exa Search request with
 `type: "auto"`, a default of 10 results, and `contents.highlights: true`.
@@ -97,18 +99,31 @@ sent as `numResults`.
 The source implementation of `web_search_exa` returns one MCP text content
 block. Its text is a sequence of result sections containing `Title`, `URL`,
 `Published`, `Author`, and `Highlights`; the source falls back to `Text` only
-when highlights are absent. Avibe must request and map **highlights only** and
-must ignore `Text` even if a future server includes it. This preserves the
-services-design/S1c rule that phase-1 search is summary-only and never stores
-page content.
+when highlights are absent. Avibe records this as a supported upstream shape,
+but does not use it as the canonical phase-1 wire format because its unescaped
+separator cannot distinguish a page highlight from a new result section.
+
+Phase 1 selects `web_search_advanced_exa` by including it in the endpoint's
+`tools` parameter. The official source returns that tool's payload as JSON text
+with a `results` array; its schema supports `enableHighlights` and
+`highlightsMaxCharacters`. Avibe sets `enableHighlights: true`, bounds
+`highlightsMaxCharacters`, sets `textMaxCharacters: 1` as a defensive
+one-character wire bound, and ignores the returned `text`, summary, context,
+and subpage fields. The canonical record therefore remains highlights-only and
+never stores page content, while the JSON result shape is unambiguous.
 
 The source implementation of `web_fetch_exa` accepts one or more URLs and an
 optional per-page character cap, calls `/contents`, and formats returned page
 text as Markdown. Avibe reserves this for phase 2; see §9.
 
 The official source's `web_search_advanced_exa` schema says `numResults` is
-1–100. The live keyless `tools/list` response on 2026-10-22 matched that range.
-The advanced tool is not needed for the phase-1 canonical `{query}` contract.
+1–100; its input also includes `enableHighlights`,
+`highlightsMaxCharacters`, and `textMaxCharacters`. The live keyless
+`tools/list` response on 2026-10-22 advertised the advanced tool only when it
+was selected through the endpoint's `tools` URL parameter. The simple
+`web_search_exa` remains the documented/probed fallback shape, but phase 1
+requires the advanced tool so the adapter can consume its structured JSON
+payload without trusting unescaped text separators.
 
 ### 2.2 Live keyless probe
 
@@ -257,7 +272,7 @@ The row has these stable values:
 | Catalog/vendor id | `exa-mcp` (synthetic built-in vendor id, distinct from keyed vendor `exa`) |
 | Search service id | `exa/mcp` |
 | Display label | `Exa（免费）` in Chinese; `Exa (free)` in English |
-| Endpoint | `https://mcp.exa.ai/mcp` with `tools=web_search_exa,web_fetch_exa` |
+| Endpoint | `https://mcp.exa.ai/mcp` with `tools=web_search_advanced_exa,web_fetch_exa` |
 | Transport | Streamable HTTP MCP |
 | Auth | none |
 | Default results | 5 |
@@ -270,8 +285,10 @@ The row has these stable values:
 
 The built-in row uses vendor id `exa-mcp` and search `service_id: exa/mcp`.
 The slash-free vendor id is required by the catalog; the slash-bearing service
-id is the service identity used in `executor_order`, usage, and the adapter. It
-is not an overload of the keyed REST vendor row `exa` / `exa/search`.
+id is the adapter/usage identity. Persisted `executor_order` and its role map
+use the Source id `src_exakeyless`, never `exa/mcp`; `exa/mcp` is not a saved
+executor id. It is not an overload of the keyed REST vendor row `exa` /
+`exa/search`.
 
 Its `source_ids` contains `src_exakeyless`; its `facts` adds `built_in: true`
 and `requires_setup: false` (unknown fields remain ignored by older readers).
@@ -309,7 +326,12 @@ The effective defaults when the section, entry, or field is absent are
 `enabled: true` and `results: 5`. Writes validate `results` from 1 through 100;
 reads clamp a saved value to the current maximum without failing startup, as in
 services-design §3.2. `enabled: false` is the ordinary service opt-out and
-keeps the row in the order/read as `disabled`.
+keeps the row in the order/read as `disabled`. The settings read and PUT paths
+recognize `src_exakeyless` through the built-in `exa-mcp` catalog branch before
+resolving ordinary `config.sources`; a PUT round-trip may save its
+`{enabled, results}` override without creating a credential Source, and a read
+returns the saved partial override while effective defaults remain in the
+candidate settings.
 
 The synthetic cooldown is keyed by (`src_exakeyless`, `exa/mcp`) and has a
 catalog identity independent of `model_hub.sources[]`. `ServiceCooldowns.reconcile`
@@ -457,7 +479,7 @@ The first call, within the one service attempt's existing 30-second cap, does:
    reject a version Avibe does not support, and send
    `notifications/initialized`;
 4. call `tools/list`, retain the complete tool schema for this session, and
-   require `web_search_exa` for phase 1; phase 2 may dispatch
+   require `web_search_advanced_exa` for phase 1; phase 2 may dispatch
    `web_fetch_exa` through the same session after validating that tool; then
 5. send one `tools/call` for the selected tool.
 
@@ -502,20 +524,29 @@ search producer.
 ### 5.2 Request mapping and schema adaptation
 
 The canonical Avibe call remains exactly `{query}`. The frozen per-service
-`results` setting is mapped to MCP `numResults` and never exposed as a model
-argument.
+`results` setting is mapped to the advanced tool's `numResults` and never
+exposed as a model argument.
 
-Build the MCP arguments from `tools/list`:
+Build the phase-1 MCP arguments from `tools/list`:
 
 ```json
-{"query": "<canonical query>", "numResults": 5}
+{
+  "query": "<canonical query>",
+  "numResults": 5,
+  "type": "auto",
+  "enableHighlights": true,
+  "highlightsMaxCharacters": 1000,
+  "textMaxCharacters": 1
+}
 ```
 
-If the live schema marks `objective` required, add
-`"objective": "<canonical query>"`. Do not send advanced filters, `type`,
-summary, text, or crawl fields in phase 1. This handles the live 2026-10-22
-schema and the checked source implementation without changing Avibe's model
-contract.
+Send only fields present in the live advanced schema. `enableHighlights` is
+required by this design; `textMaxCharacters: 1` is the smallest positive bound
+accepted by the source wrapper and prevents full page text from crossing the
+wire. Do not send filters, summaries, subpage, crawl, or context fields in
+phase 1. If the selected tool is absent or does not advertise the required
+highlight controls, classify the service as unavailable rather than silently
+switching to the ambiguous text formatter.
 
 Use a single overall 30-second service deadline, including a cold-session
 initialize/list. Connection/TLS setup has the existing 5-second transport
@@ -525,30 +556,23 @@ search chain's single 180-second budget remains authoritative.
 
 ### 5.3 Response mapping
 
-`web_search_exa` currently returns a text content block, not a stable JSON object.
-Prefer a structured JSON/array content block if a future Exa tool supplies one;
-otherwise use a zero-trust parser for the checked source-defined text grammar:
+`web_search_advanced_exa` currently returns one MCP text content block whose
+text is a JSON object, not a stable JSON-RPC result object. Prefer
+`structuredContent` if a future server provides it; otherwise parse the text as
+bounded JSON and require an object with a `results` array. For each result,
+accept only an HTTP(S) `url` within the existing bounds, map bounded `title`,
+`publishedDate`, and `highlights[]`, preserve Exa ranking order, and cap to the
+frozen `results` count. Ignore `text`, `summary`, `context`, `subpages`, and
+unknown fields even when present. A notice-bearing JSON payload may contain a
+`notices` array before `results`; preserve no notice as a source and do not
+confuse notice text with result content.
 
-- recognize a result section only in the exact source field order and accept only
-  HTTP(S) URLs with the existing bounds;
-- preserve raw offsets while scanning the unescaped result separator; a
-  separator is a boundary only when both adjacent sections validate completely;
-- treat a separator or field-prefix-looking line in a highlight as ambiguous
-  content, not as permission to fabricate another result. If the raw text can
-  represent either a highlight or a new section, reject the entire response as
-  `service_unreadable` rather than return partial or fabricated sources;
-- join all highlight lines into the canonical `snippet`, map `Published` to
-  `page_age` under the existing bounded date/text rule, ignore `Author` unless a
-  future canonical field owns it, and ignore `Text` entirely;
-- preserve Exa ranking order and cap to the frozen `results` count.
-
-A valid explicit no-results text is a completed record with no sources. Exa's
-notice wrapper may prepend bounded `Note:` lines; strip that notice preamble
-before matching the no-results sentinel. A result array/section with no valid
-HTTP(S) URL is unreadable when non-empty; malformed JSON-RPC, missing
-content/text, an unparseable non-empty response, and server-generated `isError`
-results are `service_unavailable`. A result with a valid URL but no highlight
-is allowed with no snippet; Avibe still has not stored page content.
+A valid JSON object with `results: []` is a completed record with no sources.
+Malformed JSON, a missing/non-array `results`, a non-empty result without a
+valid HTTP(S) URL, missing expected content/text, and server-generated
+`isError` results are `service_unavailable`; never return partial or fabricated
+sources. A result with a valid URL but no highlight is allowed with no snippet;
+Avibe still has not stored page content.
 
 ## 6. Outcomes, records, and usage
 
@@ -579,7 +603,10 @@ no-advice backoff is the existing 30-second then doubling cooldown, capped at
 
 A successful keyless attempt writes the existing positive service evidence with
 `mode: "service"`, keyed by (`src_exakeyless`, `exa/mcp`, `web_search`). The
-execution origin is the existing service variant:
+capability-evidence writer and pruner receive the synthetic built-in identity
+alongside `config.sources`, so this success is retained and later reads expose
+its latest service-mode evidence instead of dropping it as an unknown Source.
+The execution origin is the existing service variant:
 
 ```json
 {"provider": "exa-mcp", "api": "search_api", "model": "exa/mcp"}
@@ -816,8 +843,9 @@ coordinated activation; no lane merges this design PR.
 4. An old build skips the unknown saved id and loads safely; a new build
    re-inserts the built-in candidate at read time without a migration write.
 5. Only the canonical `{query}` reaches the agent. Result count is frozen per
-   turn/service and mapped to `numResults`; an `objective` field is added only
-   when the live `tools/list` schema requires it.
+   turn/service and mapped to advanced `numResults`; the adapter sends only the
+   selected highlight controls and never forwards model-supplied filters,
+   summaries, or crawl fields.
 6. A reused MCP session performs one initialize lifecycle and one bounded
    `tools/list` refresh before each attempted tool call; cold starts serialize
    that lifecycle under the session lock; the negotiated protocol version is
@@ -829,7 +857,9 @@ coordinated activation; no lane merges this design PR.
 7. All service work fits the existing 30-second service cap and 180-second
    chain deadline; no blocking parse runs on the controller loop.
 8. Valid results are highlights-only, bounded, ordered, and become one
-   canonical completed record. Full page text is not requested or stored.
+   canonical completed record. The advanced adapter requests at most the
+   defensive one-character text field, ignores it, and never requests or
+   stores full page text.
 9. HTTP 429, JSON-RPC/application rate-limit signals, malformed output, server
    errors, and transport failures fail over as specified in §6; rate limits
    persist as `service_rate_limited`, install a cooldown, and never become a
@@ -851,17 +881,19 @@ JSON-RPC fixtures:
   requests, `notifications/initialized`, `MCP-Protocol-Version`, honest
   `x-exa-source`, and `clientInfo.name` are sent, and its empty HTTP 202
   response is accepted. An unsupported negotiated version is rejected.
-- `tools/list` variants cover the current source shape and the live-probed
-  required `objective` shape; the request mapper adds the field only in the
-  latter case.
-- `tools/call` returns formatted highlights, empty results, a valid URL with no
-  highlights, text-only content that must be ignored, malformed sections, an
-  invalid URL, and oversized/bounded fields. Cover a valid result/highlight
-  containing the free-rate-limit phrase; it must not trigger cooldown.
-- A highlight containing the unescaped result separator and field-looking lines
-  produces no fabricated source: the ambiguous response is rejected as
-  `service_unreadable`, not partially mapped.
-- Exa notice-prefixed no-results text is normalized to a completed empty record.
+- `tools/list` variants cover the selected advanced tool with its required
+  `query`/`numResults`/highlight controls and a missing-required-control case
+  that fails as `service_unavailable`; the simple tool's live required
+  `objective` shape remains a compatibility evidence fixture, not a phase-1
+  dispatch path.
+- `tools/call` returns valid advanced JSON with one result, multiple results,
+  empty results, a valid URL with no highlights, text fields that must be
+  ignored, malformed JSON, an invalid URL, and oversized/bounded fields. A
+  normal multi-result JSON payload is accepted without parsing unescaped text
+  delimiters. Cover a valid highlight containing the free-rate-limit phrase;
+  it must not trigger cooldown.
+- The advanced JSON payload's notice-bearing and empty `results` forms are
+  normalized to a completed empty record when appropriate.
 - `web_fetch_exa` is a phase-2 parser fixture only; the shared session/client
   boundary accepts it as a second validated tool without a second initialize or
   session key; no phase-2 production activation is implied by the test.
@@ -886,8 +918,9 @@ JSON-RPC fixtures:
   keyed-Exa-plus-keyless fallback, auto-enrolled official-DeepSeek-plus-keyless
   ordering, and native-preference behavior are table-driven.
 - Attempts, service origin, exact-zero cost, request-only usage, no lower-bound
-  charge, and cooldown projection (including an active cooldown shorter than
-  60 seconds) are asserted at their owning boundaries.
+  charge, capability-evidence retention, and cooldown projection (including an
+  active cooldown shorter than 60 seconds) are asserted at their owning
+  boundaries.
 - The synthetic (`src_exakeyless`, `exa/mcp`) cooldown survives config saves
   and later-candidate health writes; a successful keyless attempt clears only
   its own generation.
@@ -907,11 +940,14 @@ for this plan, not an automated dependency.
   promise 2 QPS/50 per day or 10 QPS.
 - Exa's free-MCP response can be HTTP 200 with rate-limit metadata/text, even
   though the docs and source also define HTTP 429. Both are supported.
-- Exa's deployed default schema and the checked source commit differed on the
-  required `objective` field on 2026-10-22. Runtime `tools/list` adaptation is
-  the smallest safe compatibility rule.
-- Advanced search and page fetching are not phase-1 canonical tools. Fetch is
-  reserved for phase 2; advanced search does not replace `{query}`.
+- The live default `web_search_exa` schema and the checked source commit differed
+  on the required `objective` field on 2026-10-22. That difference is recorded
+  for compatibility, but phase 1 selects the opt-in advanced JSON tool and does
+  not dispatch the simple text formatter.
+- The checked source's simple `web_search_exa` text formatter remains an
+  upstream compatibility fact, but advanced search is the phase-1 canonical
+  tool because its JSON payload is unambiguous and can be mapped to
+  highlights-only results. Fetch is reserved for phase 2.
 - No owner-level question remains open in this lane. The owner decisions above
   settle default-on, ordering, fallback, terms risk, and honest identity. The
   orchestrator still owns the final design.pen work, merge decision, and any
