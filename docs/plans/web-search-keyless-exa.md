@@ -495,13 +495,14 @@ open. It is not a new search request and does not increment usage. A
 `notifications/tools/list_changed` message received in any active response
 stream still invalidates the cache immediately, so the next call's mandatory
 refresh uses the new schema. A missing/expired session is reinitialized once
-before the request. If a session-bound `tools/list` or `tools/call` receives
-the MCP session-not-found response (the standard HTTP 404/session error, not
-an endpoint/protocol 404), clear the stale session, initialize/list again, and
-replay the affected pre-tool request once within the original deadline; this is
-safe because the server has not accepted the tool call. Once the replay's
-`tools/call` request bytes begin, Avibe never retries it automatically: a retry
-could duplicate a search and a usage request.
+before the request. If a session-bound `notifications/initialized`,
+`tools/list`, or `tools/call` exchange receives the MCP session-not-found
+response (the standard HTTP 404/session error, not an endpoint/protocol 404),
+clear the stale session, initialize again, resend `notifications/initialized`,
+and replay the affected pre-tool request once within the original deadline;
+this is safe because the server has not accepted the tool call. Once the
+replay's `tools/call` request bytes begin, Avibe never retries it automatically:
+a retry could duplicate a search and a usage request.
 
 Every exchange uses `Accept: application/json, text/event-stream`,
 `Content-Type: application/json`, and the retained negotiated
@@ -561,11 +562,14 @@ text is a JSON object, not a stable JSON-RPC result object. Prefer
 `structuredContent` if a future server provides it; otherwise parse the text as
 bounded JSON and require an object with a `results` array. For each result,
 accept only an HTTP(S) `url` within the existing bounds, map bounded `title`,
-`publishedDate`, and `highlights[]`, preserve Exa ranking order, and cap to the
-frozen `results` count. Ignore `text`, `summary`, `context`, `subpages`, and
-unknown fields even when present. A notice-bearing JSON payload may contain a
-`notices` array before `results`; preserve no notice as a source and do not
-confuse notice text with result content.
+`publishedDate`, and `highlights[]`, and convert the ordered highlight array to
+one canonical snippet by joining non-empty highlights with `\n\n` and truncating
+the final string to the existing **1,000-character** snippet bound. Do not emit
+an array or silently keep only the first highlight. Preserve Exa ranking order
+and cap to the frozen `results` count. Ignore `text`, `summary`, `context`,
+`subpages`, and unknown fields even when present. A notice-bearing JSON payload
+may contain a `notices` array before `results`; preserve no notice as a source
+and do not confuse notice text with result content.
 
 A valid JSON object with `results: []` is a completed record with no sources.
 Malformed JSON, a missing/non-array `results`, a non-empty result without a
@@ -585,7 +589,8 @@ Apply services-design §4.2 with the following keyless-specific clarifications:
 | Stale MCP session-not-found 404 before the tool call is accepted | Reinitialize/list and replay once within the original deadline; if the replay fails, apply its actual outcome | Clear only the in-memory session; no credential health |
 | Timeout, connection/TLS failure, or closed session after the admitted call begins | Next candidate, `service_unavailable` | Service cooldown; no credential health |
 | Any HTTP 5xx or non-rate-limit JSON-RPC/server error | Next candidate, `service_unavailable` | Service cooldown; no credential health |
-| 3xx, 401, 403, 404 not recognized as stale-session, 405, or other unexpected 4xx | Next candidate, `service_unavailable` | Service cooldown; never `invalid_key` |
+| 403 `PROHIBITED_CONTENT`, `CONTENT_FILTER_ERROR`, or another catalog-named query refusal | Next candidate, `service_refused` | No credential health and no cooldown |
+| 3xx, 401, 403, 404 not recognized as stale-session or query refusal, 405, or other unexpected 4xx | Next candidate, `service_unavailable` | Service cooldown; never `invalid_key` |
 | Malformed text, missing expected content, invalid URL-only result, or server `isError` | Next candidate, `service_unavailable` | Service cooldown; no credential health |
 
 A rate limit is not `service_key_invalid`, `service_balance`, or
@@ -887,7 +892,8 @@ JSON-RPC fixtures:
   `objective` shape remains a compatibility evidence fixture, not a phase-1
   dispatch path.
 - `tools/call` returns valid advanced JSON with one result, multiple results,
-  empty results, a valid URL with no highlights, text fields that must be
+  empty results, a valid URL with no highlights, multiple highlights that are
+  joined in order and capped at 1,000 characters, text fields that must be
   ignored, malformed JSON, an invalid URL, and oversized/bounded fields. A
   normal multi-result JSON payload is accepted without parsing unescaped text
   delimiters. Cover a valid highlight containing the free-rate-limit phrase;
@@ -898,9 +904,11 @@ JSON-RPC fixtures:
   boundary accepts it as a second validated tool without a second initialize or
   session key; no phase-2 production activation is implied by the test.
 - Session reuse sends one initialize and one `tools/list` refresh per search for
-  two searches; an expired session returns the standard session-not-found 404 and
-  reconnects/replays the affected pre-tool request once before admission; a
-  connection failure after the call is sent is not retried.
+  two searches; an expired session returns the standard session-not-found 404
+  during initialization notification or before the tool call, reinitializes,
+  resends the notification, and reconnects/replays the affected pre-tool
+  request once before admission; a connection failure after the call is sent is
+  not retried.
 - The stub can emit `notifications/tools/list_changed`; the cached schema is
   invalidated and the next call performs `tools/list` before mapping arguments.
 - Two parallel cold starts share one initialize/list lifecycle under the lock,
@@ -911,8 +919,11 @@ JSON-RPC fixtures:
   `_meta.ai.exa/rateLimited`, and error-shaped free-rate-limit text all produce
   `service_rate_limited` plus cooldown, never `needs_action`; a valid highlight
   quoting that text does not.
-- 5xx, unexpected 4xx, redirects, timeouts, closed sessions, server `isError`,
-  and malformed content map to `service_unavailable` and fail over.
+- 5xx, redirects, timeouts, closed sessions, server `isError`, and malformed
+  content map to `service_unavailable` and fail over. Recognized Exa query
+  refusals such as `PROHIBITED_CONTENT` and `CONTENT_FILTER_ERROR` map to
+  `service_refused` without a cooldown; unknown endpoint/protocol 4xx responses
+  remain `service_unavailable` with cooldown.
 - Default order, saved order, role-map insertion, explicit disable (including a
   visible disabled-tail row), restart, older-build unknown-id reading,
   keyed-Exa-plus-keyless fallback, auto-enrolled official-DeepSeek-plus-keyless

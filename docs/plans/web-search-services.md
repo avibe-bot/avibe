@@ -592,8 +592,10 @@ and an exact $0 do not; a total keeps "≈" when any non-zero figure in it does)
 ## 7. Defaults, cost and privacy
 
 - The current automatic order is a fact of this release: the user's own search services (Tavily, keyed Exa and
-  official DeepSeek) → the built-in keyless Exa service → model executors. Keyless Exa is on by default, needs no
-  key or setup, remains a fallback even when another service exists, and every row can be reordered or turned off.
+  official DeepSeek) → the built-in keyless Exa service → model executors. Keyless
+  Exa is on by default, needs no key or setup, remains a fallback even when
+  another service exists, and each search-service row can be reordered or
+  turned off.
   The complete keyless-Exa representation, MCP execution, rate-limit handling, UI and public-disclosure facts are in
   [`web-search-keyless-exa.md`](web-search-keyless-exa.md).
 - This design makes no general promise that nothing else will turn on automatically. Public docs state the current
