@@ -929,7 +929,7 @@ def test_retry_http_client_rpc_clears_only_the_service_fence_with_plain_success(
     response = client.post(f"/api/models/hosted-tools/web_search/services/{EXA}/retry", json={},
                            headers=csrf_headers(client, "http://127.0.0.1:15131"))
     assert response.status_code == 200
-    assert response.get_json() == {"ok": True, "contract_version": 19}
+    assert response.get_json() == {"ok": True, "contract_version": 20}
     assert calls == [("clear_service_cooldown", {"source_id": EXA, "service_id": None})]
     assert not service._service_cooldowns.current(source, "exa/search", generation)
     assert service.store.load().sources[0].state == source.state

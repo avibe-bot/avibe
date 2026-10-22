@@ -15,9 +15,9 @@ The release workflow owns notes (`docs/release.md`); the PR body supplies Englis
 covering DeepSeek auto-enrollment/opt-out, query egress, list prices and downgrade loss (§12).
 The owner coordinates merge with S6 public disclosure; this lane does not merge.
 
-At activation preparation on 2026-10-21, no tag contains `424b3fd` or S2a `01fc7b0`;
-`v3.2.2` points to `399fc34c1`, before both. Activation extends unshipped v19. Recheck before
-push and close-out, opening v20 if a release has carried v19 in the meantime.
+The close-out release check found `gh-v3.2.3rc1` carrying S2a/S2b-1's v19; the
+2026-10-22 recheck also found `gh-v3.2.3rc2`. Activation therefore opens v20, advances all
+version mirrors and preserves persisted TurnProvenance v5–v19 without rewriting it.
 
 ## S2b-1 change contract (historical)
 
@@ -80,7 +80,7 @@ Local validation (2026-10-21):
 - Changed Python files pass Ruff. CI owns the full suite; no runtime restart/deployment or
   live-vendor/manual UI acceptance is included in this dormant change.
 
-## Contract version
+## S2b-1 contract version (historical)
 
 At start, 2026-10-21: `git tag --contains 01fc7b0` returned none; latest RC release
 was `gh-v3.2.2rc13`, before S2a. Recheck before first push and close-out. Use v19 while

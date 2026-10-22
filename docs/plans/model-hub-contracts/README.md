@@ -1,8 +1,15 @@
 # Model Hub contracts
 
-Status: **contract_version 19**, 2026-10-21: active web-search services
-(S2a/S2b-1/S2b-2, `../web-search-services.md` §3–5, §6.5, §8). The RC tag `gh-v3.2.2rc13`
-carries v18, so these additions open a new event rather than changing v18.
+Status: **contract_version 20**, 2026-10-22: active web-search services (S2b-2).
+`gh-v3.2.3rc1` and `gh-v3.2.3rc2` carry v19, so activation opens v20 rather than
+changing the released event. `SEARCH_SERVICES_ACTIVE = True` activates service candidates,
+`service_vendors`, frozen turn settings and the mixed search chain together with S6 disclosure.
+The versioned mirrors advance together; persisted TurnProvenance retains v5–v19 and adds v20.
+The downgrade warning in `../web-search-services.md` §12 remains required.
+
+It builds on v19 (2026-10-21): dormant web-search-service readers and producer
+(S2a/S2b-1, `../web-search-services.md` §3–5, §6.5, §8). The RC tag `gh-v3.2.2rc13`
+carries v18, so those additions opened a new event rather than changing v18.
 - C-1 (`../agent-core-contracts/message.schema.json`) accepts `HostedRecord.attempts[]`
   (`HostedAttempt`), `HostedCost.estimate`, and a `ServiceExecutorOrigin`
   (`{provider, api: "search_api", model}`) beside the released `Origin` in
@@ -18,12 +25,9 @@ carries v18, so these additions open a new event rather than changing v18.
   `kind: "service"` bucket rows, `service_reported_usd` and `excluded_service_requests`
   on totals and days, and `pricing.service_price_date`. Model counts never include
   service requests.
-- S2b-1 added the producer; S2b-2 sets `SEARCH_SERVICES_ACTIVE = True`, activating the read and
-  unified service/model chain together: frozen preference/settings, bounded mapping, independently
-  fenced service cooldowns and Source health, re-enable trials, sent-request metering and positive evidence.
-  The activation release must include S6 disclosure and the downgrade warning in
-  `../web-search-services.md` §12. No tag contains S2b-1 (`424b3fd`) at activation preparation,
-  so activation extends the still-unshipped v19.
+- S2b-1 added the gated unified service/model chain: frozen preference/settings, bounded mapping,
+  independently fenced service cooldowns and Source health, re-enable trials, sent-request metering
+  and positive evidence. The flag-off runtime/read stayed unchanged in v19; S2b-2 activates in v20.
 - `POST /api/models/hosted-tools/web_search/services/<source_id>/retry` clears the controller's
   service cooldown and advances its generation, with a plain success response. It is available
   regardless of activation and follows the existing Member management boundary.
@@ -46,7 +50,7 @@ than changing v17.
   fields, and service vendor facts.
 - S1b kept service candidates and `service_vendors` absent behind the single internal
   activation gate, with no UI, service execution, placement rule, turn freeze or native-preference
-  routing change. S2b-2 activates them together in v19.
+  routing change. S2b-2 activates them together in v20.
 - The 2026-10-20 owner decision makes phase-1 web search snippet-only. This event
   withdraws v17's bundled page-content request/result mappings, `content_max_chars`
   and per-page price extras; Exa's included `contents.highlights`, reported-cost
@@ -338,7 +342,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 19 must coexist in all registered version locations on the same tested head:
+`contract_version` 20 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`

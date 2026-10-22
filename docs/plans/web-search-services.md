@@ -684,7 +684,7 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
 | **S5** Frames | design | §6 frames in `design.pen` through Pencil (done: avibe-docs#73) | — |
 | **S6** Public docs | docs | Models → Tools: services, order, defaults, privacy and cost, in English and Chinese. The disclosure part (an official DeepSeek Source joins the search order automatically, which data goes to each service, what it costs, and how to turn it off) publishes no later than the release that ships S2; the UI walkthrough follows S4 | the disclosure lands before or with S2 (S2 depends on it); the walkthrough follows S4 |
 
-The version event follows the v15 precedent in `model-hub-contracts/README.md`: S1a opened v17, S1b/S1c completed v18, and RC tag `gh-v3.2.2rc13` carries v18. S2a opened v19 for reader and usage shapes; S2b-1 and S2b-2 share that still-unshipped v19. S2b-2 activates the producer, Tools read and snippet-only search chain together with S6's disclosure; the freeze rule means a shipped version never changes meaning. S1c's compatibility rule for removed page-content fields remains in force.
+The version event follows the v15 precedent in `model-hub-contracts/README.md`: S1a opened v17, S1b/S1c completed v18, and RC tag `gh-v3.2.2rc13` carries v18. S2a and S2b-1 opened v19 for the readers and gated producer; `gh-v3.2.3rc1` and `gh-v3.2.3rc2` carry v19, so S2b-2 opens v20. S2b-2 activates the producer, Tools read and snippet-only search chain together with S6's disclosure; the freeze rule means a shipped version never changes meaning. S1c's compatibility rule for removed page-content fields remains in force.
 
 ## 10. Acceptance properties
 
