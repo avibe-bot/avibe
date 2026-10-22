@@ -4428,6 +4428,7 @@
       "modelPlaceholder": "选择或输入模型",
       "modelEmpty": "找不到匹配的模型,可以直接输入。",
       "effort": "推理强度",
+      "effortUnavailable": "此模型已不再支持 {{effort}}，你的设置未更改。",
       "systemPrompt": "系统提示词",
       "systemPromptCount": "~{{count}} tokens",
       "systemPromptExpand": "展开编辑器",
