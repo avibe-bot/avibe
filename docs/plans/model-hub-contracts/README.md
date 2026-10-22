@@ -5,6 +5,9 @@ Status: **contract_version 20**, 2026-10-22: active web-search services (S2b-2).
 changing the released event. `SEARCH_SERVICES_ACTIVE = True` activates service candidates,
 `service_vendors`, frozen turn settings and the mixed search chain together with S6 disclosure.
 The versioned mirrors advance together; persisted TurnProvenance retains v5–v19 and adds v20.
+Relay diagnostics in this v20 shape may retain only bounded, credential-free `request-id` and
+`x-request-id` response facts on the exact owning attempt; arbitrary headers, bodies and
+upstream identity inference remain outside the contract.
 The downgrade warning in `../web-search-services.md` §12 remains required.
 
 It builds on v19 (2026-10-21): dormant web-search-service readers and producer

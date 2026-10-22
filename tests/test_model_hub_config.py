@@ -1005,6 +1005,64 @@ def test_turn_provenance_contract_preserves_an_empty_stripped_effort():
     _assert_valid("turn-provenance.schema.json", payload)
 
 
+def test_turn_provenance_correlation_ids_are_strict_and_attempt_scoped():
+    served = copy.deepcopy(_schema("turn-provenance.schema.json")["examples"][0])
+    served["served"]["response_correlation_ids"] = [
+        {"header": "request-id", "value": "provider-request-1"},
+        {"header": "x-request-id", "value": "relay-request-1"},
+    ]
+    _assert_valid("turn-provenance.schema.json", served)
+
+    terminal = copy.deepcopy(served)
+    terminal.update(
+        outcome="failed_terminal",
+        failed_attempts=[],
+        served=None,
+        terminal_error={
+            "source_id": "src_anthkey01",
+            "configured_model_id": "claude-opus-4-6",
+            "channel": "hub",
+            "reason": "protocol_error",
+            "stream_started": False,
+            "response_correlation_ids": [
+                {"header": "x-request-id", "value": "relay-terminal-1"},
+            ],
+        },
+    )
+    _assert_valid("turn-provenance.schema.json", terminal)
+
+    for invalid_id in (
+        {"header": "set-cookie", "value": "session=secret"},
+        {"header": "request-id", "value": "bad\nvalue"},
+        {"header": "request-id", "value": "r" * 257},
+    ):
+        invalid = copy.deepcopy(served)
+        invalid["served"]["response_correlation_ids"] = [invalid_id]
+        with pytest.raises(ValidationError):
+            Draft7Validator(_schema("turn-provenance.schema.json")).validate(invalid)
+
+    backend_error = copy.deepcopy(terminal)
+    backend_error["terminal_error"] = {
+        "source_id": "src_anthkey01",
+        "configured_model_id": "claude-opus-4-6",
+        "channel": "hub",
+        "reason": "backend_error",
+        "stream_started": None,
+        "response_correlation_ids": [
+            {"header": "request-id", "value": "not-a-backend-fact"},
+        ],
+    }
+    with pytest.raises(ValidationError):
+        Draft7Validator(_schema("turn-provenance.schema.json")).validate(backend_error)
+
+    canceled = copy.deepcopy(_schema("turn-provenance.schema.json")["examples"][-1])
+    canceled["canceled_attempt"]["response_correlation_ids"] = [
+        {"header": "request-id", "value": "not-a-served-response"},
+    ]
+    with pytest.raises(ValidationError):
+        Draft7Validator(_schema("turn-provenance.schema.json")).validate(canceled)
+
+
 def test_permission_denial_contract_has_no_fallback_member():
     retired_reason = "permission_denied"
     event_schema = _schema("resolution-event.schema.json")

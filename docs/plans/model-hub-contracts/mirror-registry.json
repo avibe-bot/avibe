@@ -1029,6 +1029,37 @@
           "marker": "authority-consumer: catalog.guard.error "
         }
       ]
+    },
+    {
+      "id": "D30",
+      "domain": "response correlation header names",
+      "authority": {
+        "kind": "schema_vocabulary",
+        "schema": "turn-provenance.schema.json",
+        "paths": ["/definitions/responseCorrelationId/properties/header"]
+      },
+      "consumers": [
+        {
+          "kind": "python_string_assignment",
+          "file": "core/handlers/model_hub/adapter.py",
+          "name": "RESPONSE_CORRELATION_HEADER_NAMES"
+        },
+        {
+          "kind": "python_string_assignment",
+          "file": "docs/plans/model-hub-contracts/adapter-interface.py",
+          "name": "RESPONSE_CORRELATION_HEADER_NAMES"
+        },
+        {
+          "kind": "typescript_string_union",
+          "file": "ui/src/components/settings/models/types.ts",
+          "name": "ResponseCorrelationHeader"
+        },
+        {
+          "kind": "marker_tail",
+          "file": "docs/plans/model-hub-contracts/api.md",
+          "marker": "authority-consumer: response_correlation.header "
+        }
+      ]
     }
   ],
   "ownership_checks": [
