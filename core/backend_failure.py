@@ -19,6 +19,17 @@ from vibe.i18n import t as i18n_t
 from vibe.message_types import spec_for
 
 BACKEND_FAILURE_EVENT = "backend_failure"
+#: ``failure_next_step`` of a notice whose Agent cannot run (disabled, deleted, or its
+#: backend unavailable): the Workbench offers to move the session to Vibey and run the
+#: failed input there (``continue_on_backend`` on the notice's Retry).
+CONTINUE_ON_VIBEY_NEXT_STEP = "continue_on_vibey"
+
+
+def output_with_next_step(request: Any, next_step: str) -> MessageOutput:
+    """The terminal output of a failure notice that names ``next_step`` as data."""
+
+    terminal = terminal_output_for(request) if request is not None else terminal_turn_output()
+    return replace(terminal, metadata={**terminal.metadata, "failure_next_step": next_step})
 
 
 def is_backend_failure_notification(message_type: str | None, metadata: Any) -> bool:

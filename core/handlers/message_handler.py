@@ -12,7 +12,7 @@ from core.audio_asr import (
     format_audio_transcript_echo,
 )
 from core.agent_input import AgentInputMetadata, harness_label
-from core.backend_failure import emit_backend_failure
+from core.backend_failure import CONTINUE_ON_VIBEY_NEXT_STEP, emit_backend_failure, output_with_next_step
 from core.delivery_target import routed_delivery_context
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
 from core.session_handoff import BACKEND_HANDOFF_TURN_KEY
@@ -914,8 +914,20 @@ class MessageHandler(BaseHandler):
         A Model Hub supply refusal is already the user's copy and names its own cause.
         """
 
+        from core.vibe_agents import AgentUnavailableError
         from modules.agents.model_hub import ModelSupplyRefusal
 
+        if isinstance(error, AgentUnavailableError) and error.reason in {"disabled", "missing"}:
+            agent = error.agent_name
+            label = display_name_for_backend(agent) if is_agent_backend(agent) else agent
+            await self._emit_agent_cannot_run(
+                context,
+                request,
+                self._t(f"error.agentUnavailable.{error.reason}", agent=label),
+                failing_backend=None,
+                cause=error,
+            )
+            return
         if isinstance(error, ModelSupplyRefusal):
             error_text = f"❌ {error}"
         else:
@@ -933,6 +945,54 @@ class MessageHandler(BaseHandler):
             request=request,
             cause=error,
         )
+
+    async def _emit_agent_cannot_run(
+        self,
+        context: MessageContext,
+        request: AgentRequest | None,
+        reason: str,
+        *,
+        failing_backend: Optional[str],
+        cause: BaseException | None = None,
+        escape_reason: bool = True,
+    ) -> None:
+        """Notify that the session's Agent cannot run, and offer to continue on Vibey.
+
+        The Workbench draws the offer as a button from ``failure_next_step``: it moves
+        the session to the built-in Vibey Agent and runs the failed input there. A
+        chat app cannot change the session's Agent, so its notice says where to.
+        Nothing is offered when Vibey is what cannot run, or is not available.
+        """
+        target = routed_delivery_context(context)
+        workbench = resolve_context_platform(target) == "avibe"
+        if not workbench and escape_reason:
+            reason = self._get_formatter(target).escape_special_chars(reason)
+        offer = failing_backend != "vibey" and self._builtin_vibey_available()
+        output = output_with_next_step(request, CONTINUE_ON_VIBEY_NEXT_STEP) if offer and workbench else None
+        text = f"❌ {reason}"
+        if offer:
+            text = f"{text}\n{self._t('error.continueOnVibey.workbench' if workbench else 'error.continueOnVibey.im')}"
+        await emit_backend_failure(
+            self.controller,
+            context,
+            str(failing_backend or getattr(request, "vibe_agent_backend", None) or "agent"),
+            text,
+            display_text=text,
+            request=request,
+            output=output,
+            cause=cause,
+        )
+
+    def _builtin_vibey_available(self) -> bool:
+        store = getattr(self.controller, "vibe_agent_store", None)
+        getter = getattr(store, "get_builtin_default_agent_for_backend", None)
+        if not callable(getter):
+            return False
+        try:
+            return getter("vibey") is not None
+        except Exception:
+            logger.debug("Could not resolve the built-in Vibey Agent", exc_info=True)
+            return False
 
     async def _admit_human_delivery(
         self,
@@ -1741,15 +1801,11 @@ class MessageHandler(BaseHandler):
         display_backend = display_name_for_backend(backend) if backend else str(target)
         hint_key = f"error.agentNotConfiguredHint.{backend}" if backend else "error.agentNotConfiguredHint.generic"
         hint = self._t(hint_key)
-        msg = f"❌ {self._t('error.agentNotConfigured', agent=target, backend=display_backend, hint=hint)}"
+        reason = self._t('error.agentNotConfigured', agent=target, backend=display_backend, hint=hint)
+        msg = f"❌ {reason}"
         if request is not None:
-            await emit_backend_failure(
-                self.controller,
-                context,
-                backend or str(target),
-                msg,
-                display_text=msg,
-                request=request,
+            await self._emit_agent_cannot_run(
+                context, request, reason, failing_backend=backend or str(target), escape_reason=False
             )
             return
         await self._get_im_client(context).send_message(context, msg)

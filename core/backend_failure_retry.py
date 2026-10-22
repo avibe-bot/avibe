@@ -92,7 +92,11 @@ def _validate_boundary(
         or session["visibility"] == "system"
         or turn is None
         or turn["session_id"] != session_id
-        or turn["backend"] != session["agent_backend"]
+        # A continuation belongs to the backend that ran the Turn. An input that
+        # never reached it (``not_written``) belongs to no backend yet, so it may
+        # run wherever the session routes now: that is how "continue on Vibey"
+        # retries a message whose Agent was disabled.
+        or (turn["backend"] != session["agent_backend"] and turn["terminal_outcome"] != "not_written")
     ):
         raise RetryUnavailable("retry_not_available")
     latest = conn.execute(

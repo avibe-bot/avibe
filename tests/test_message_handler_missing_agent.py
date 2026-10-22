@@ -107,3 +107,73 @@ def test_dispatched_missing_agent_preserves_primary_delivery_in_terminal_contrac
         "delivered": True,
     }
     assert controller.im_client.sent == []
+
+
+def test_an_agent_that_cannot_run_offers_to_continue_on_vibey():
+    """A disabled or deleted Agent ends the turn with a notice that names it and
+    offers Vibey: the Workbench draws the offer as a button from data, a chat app
+    is told where to switch. Without a built-in Vibey there is nothing to offer,
+    and a backend that is missing is offered Vibey unless Vibey is what is missing."""
+    from unittest.mock import AsyncMock, patch
+
+    from core.backend_failure import CONTINUE_ON_VIBEY_NEXT_STEP
+    from core.vibe_agents import AgentUnavailableError
+
+    controller = _StubController()
+    controller.im_client.formatter = SimpleNamespace(escape_special_chars=lambda text: text)
+    vibey = SimpleNamespace(name="vibey")
+    controller.vibe_agent_store = SimpleNamespace(
+        get=lambda _name: None, get_builtin_default_agent_for_backend=lambda backend: vibey
+    )
+    handler = MessageHandler(controller)
+    workbench = MessageContext(user_id="U1", channel_id="ses-1", platform="avibe")
+    telegram = MessageContext(user_id="U1", channel_id="C1", platform="telegram")
+    disabled = AgentUnavailableError("agent 'codex' is disabled", agent_name="codex", reason="disabled")
+    deleted = AgentUnavailableError("agent 'reviewer' not found", agent_name="reviewer", reason="missing")
+
+    def emitted_for(*calls):
+        emitted = AsyncMock()
+        with patch.dict(MessageHandler._emit_agent_cannot_run.__globals__, emit_backend_failure=emitted):
+            for call in calls:
+                anyio.run(*call)
+        return emitted.await_args_list
+
+    workbench_call, im_call, deleted_call = emitted_for(
+        (handler._emit_agent_dispatch_failure, workbench, None, disabled),
+        (handler._emit_agent_dispatch_failure, telegram, None, disabled),
+        (handler._emit_agent_dispatch_failure, workbench, None, deleted),
+    )
+    disabled_text = handler._t("error.agentUnavailable.disabled", agent="Codex")
+    assert workbench_call.kwargs["display_text"] == (
+        f"❌ {disabled_text}\n{handler._t('error.continueOnVibey.workbench')}"
+    )
+    assert workbench_call.kwargs["output"].metadata["failure_next_step"] == CONTINUE_ON_VIBEY_NEXT_STEP
+    assert workbench_call.kwargs["cause"] is disabled
+    assert im_call.kwargs["display_text"] == f"❌ {disabled_text}\n{handler._t('error.continueOnVibey.im')}"
+    assert im_call.kwargs["output"] is None
+    assert handler._t("error.agentUnavailable.missing", agent="reviewer") in deleted_call.kwargs["display_text"]
+    assert "agent 'codex' is disabled" not in workbench_call.kwargs["display_text"]
+
+    controller.vibe_agent_store = SimpleNamespace(
+        get=lambda _name: None, get_builtin_default_agent_for_backend=lambda backend: None
+    )
+    (no_vibey,) = emitted_for((handler._emit_agent_dispatch_failure, workbench, None, disabled))
+    assert no_vibey.kwargs["display_text"] == f"❌ {disabled_text}"
+    assert no_vibey.kwargs["output"] is None
+
+    controller.vibe_agent_store = SimpleNamespace(
+        get=lambda _name: None, get_builtin_default_agent_for_backend=lambda backend: vibey
+    )
+    request = AgentRequest(
+        context=workbench,
+        message="hello",
+        user_message="hello",
+        working_path="/tmp",
+        base_session_id="base",
+        composite_session_id="base:/tmp",
+        session_key="avibe::ses-1",
+    )
+    for target, offered in (("codex", True), ("vibey", False)):
+        (call,) = emitted_for((lambda t=target: handler._handle_missing_agent(workbench, t, request=request),))
+        assert (call.kwargs["output"] is not None) is offered
+        assert (handler._t("error.continueOnVibey.workbench") in call.kwargs["display_text"]) is offered

@@ -4937,7 +4937,9 @@
     "retryRequested": "Retry requested",
     "failureNextStep": {
       "openModels": "Open Models",
-      "askAdmin": "Ask an Avibe admin to fix this in Models."
+      "askAdmin": "Ask an Avibe admin to fix this in Models.",
+      "continueOnVibey": "Continue with Vibey",
+      "continuedOnVibey": "Switched to Vibey"
     },
     "retryFailed": "Could not request retry. You can try again safely.",
     "collapse": "Collapse",
