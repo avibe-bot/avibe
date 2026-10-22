@@ -970,6 +970,10 @@ and no real credentials.
    unless enabled.
 7. **rc-era state is not migrated** (owner directive): probe evidence carries `basis: probe`, which v2's loader does not
    accept, so those records are pruned; an rc-era `hosted_tools` section keeps each tool's `enabled`, and its unknown
-   keys and fields are ignored (§3.3); an rc session holding a native `image_generation` block no longer loads its
-   context (§4.2), and its turn ends with the existing localized context-load error ("this session's history can't
-   be loaded; start a new session"), never a raw traceback: ordinary error handling, not a compatibility path.
+   keys and fields are ignored (§3.3). An rc session holding a removed native `image_generation` block is not restored
+   as a native image tool: the current reader degrades any unrecognized native hosted block to portable text, as it does
+   for a future hosted tool this build does not know.
+8. **History is readable across hosted-tool registry changes.** A stored hosted result for a tool added by a newer build
+   loads as an ordinary tool result, and a native call loads as portable text with its query or URL and sources when
+   available, otherwise a one-line unavailable placeholder. The row is not rewritten, new writes stay strict, and known
+   tools retain strict validation; this is the intentional downgrade path before a new hosted tool ships.

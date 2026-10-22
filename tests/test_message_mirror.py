@@ -161,6 +161,67 @@ def test_persist_agent_writes_typed_agent_row_on_same_scope(isolated_state):
     assert agent_row["scope_id"] == user_row["scope_id"]
 
 
+def test_message_mirror_upsert_survives_unknown_hosted_history(isolated_state):
+    now = "2026-10-22T00:00:00Z"
+    unknown_model = {
+        "version": 1,
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "hosted_tool",
+                    "tool": "web_fetch",
+                    "action": {"type": "open_page", "url": "https://example.com"},
+                    "record": {"status": "completed", "sources": []},
+                    "native": {"source_id": "src_x1a2b3c4d5", "payload": []},
+                }
+            ],
+        },
+    }
+    engine = create_sqlite_engine()
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_mirror", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id="ses_mirror_hosted",
+                scope_id=scope_id,
+                agent_name="vibey",
+                agent_backend="vibey",
+                agent_variant="default",
+                session_anchor="anchor_mirror_hosted",
+                native_session_id="",
+                status="active",
+                metadata_json="{}",
+                created_at=now,
+                updated_at=now,
+                last_active_at=now,
+            )
+        )
+        row = messages_service.append(
+            conn,
+            scope_id=scope_id,
+            session_id="ses_mirror_hosted",
+            platform="avibe",
+            author="agent",
+            source="agent",
+            message_type="assistant",
+            text="old",
+            content={"model": unknown_model},
+        )
+    ctx = MessageContext(
+        user_id="workbench",
+        channel_id="ses_mirror_hosted",
+        platform="avibe",
+        platform_specific={"agent_session_id": "ses_mirror_hosted"},
+    )
+    errors: list[Exception] = []
+
+    updated = persist_agent_message(ctx, "result", "new", existing_row_id=row["id"], error_sink=errors)
+
+    assert not errors
+    assert updated is not None and updated["text"] == "new"
+
+
 def test_persist_agent_keeps_result_footer_as_structured_content(isolated_state):
     ctx = _slack_ctx()
     mirror_inbound(ctx, "ping")

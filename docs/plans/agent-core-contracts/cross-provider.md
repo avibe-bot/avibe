@@ -17,6 +17,8 @@ cross-provider history tests (MIT).
 | Text block `citations` | not sent | not sent |
 | Tool result with `hosted` (a proxied hosted call) | kept, as any tool result | kept, as any tool result |
 
+**Reader compatibility.** Deserialization does not require the current hosted-tool registry to read stored history. A native `HostedToolBlock` whose `tool` this build does not recognize is replaced by one portable `TextBlock` that keeps any query or URL and its sources, or a one-line unavailable placeholder; if no recognized hosted block remains, response-scoped hosted facts are dropped with it. A proxied `ToolResultMessage.hosted` whose `tool_name` is unknown becomes an ordinary tool result with its stored `content` and `is_error`, and `hosted` is dropped. This degradation applies only to unrecognized tool names: known tools remain strictly validated, new writes remain strict, stored rows are not rewritten, and each degraded row logs one warning without content.
+
 Invariants:
 
 - Thinking never goes to a different origin, in any form (owner decision, 2026-10-21; Pi converts it to text). It is

@@ -9,10 +9,13 @@ rows, so the field names here are a shipped surface.
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Union
+
+logger = logging.getLogger(__name__)
 
 ProtocolName = Literal["anthropic", "openai_chat", "openai_responses", "google"]
 PROTOCOLS: tuple[str, ...] = ("anthropic", "openai_chat", "openai_responses", "google")
@@ -1032,7 +1035,46 @@ def _block_to_dict(block: Any) -> dict[str, Any]:
     raise TypeError(f"not a content block: {type(block).__name__}")
 
 
-def _block_from_dict(data: Any, allowed_types: tuple[str, ...]) -> Any:
+def _unknown_hosted_text(data: Mapping[str, Any]) -> str:
+    """Render an unknown native hosted block without validating its future shape."""
+
+    tool = data.get("tool")
+    tool_name = tool if isinstance(tool, str) and tool else "hosted tool"
+    action = data.get("action") if isinstance(data.get("action"), Mapping) else {}
+    record = data.get("record") if isinstance(data.get("record"), Mapping) else {}
+    queries: list[str] = []
+    raw_queries = action.get("queries")
+    if isinstance(raw_queries, list):
+        queries.extend(query for query in raw_queries if isinstance(query, str) and query)
+    for name in ("query", "url"):
+        value = action.get(name)
+        if isinstance(value, str) and value and value not in queries:
+            queries.append(value)
+    lines = [f"[{tool_name}: {'; '.join(queries)}]"] if queries else []
+    raw_sources = record.get("sources")
+    if isinstance(raw_sources, list):
+        for number, source in enumerate(raw_sources, 1):
+            if not isinstance(source, Mapping):
+                continue
+            url = source.get("url") if isinstance(source.get("url"), str) else None
+            title = source.get("title") if isinstance(source.get("title"), str) else None
+            snippet = source.get("snippet") if isinstance(source.get("snippet"), str) else None
+            page_age = source.get("page_age") if isinstance(source.get("page_age"), str) else None
+            if not any((url, title, snippet, page_age)):
+                continue
+            lines.append(f"{number}. {title or url or snippet or page_age}")
+            if title and url:
+                lines.append(f"   {url}")
+            if snippet:
+                lines.append(f"   {snippet}")
+            if page_age:
+                lines.append(f"   Published: {page_age}")
+    return "\n".join(lines) if lines else f"[{tool_name} result unavailable in this version]"
+
+
+def _block_from_dict(
+    data: Any, allowed_types: tuple[str, ...], *, unknown_hosted_tools: list[str] | None = None
+) -> Any:
     kind = data.get("type") if isinstance(data, Mapping) else None
     if kind not in allowed_types:
         raise ValueError(f"block type {kind!r} is not allowed here")
@@ -1052,6 +1094,11 @@ def _block_from_dict(data: Any, allowed_types: tuple[str, ...]) -> Any:
             )
         return TextBlock(text=f.get("text"), ref=ref, citations=citations)
     if kind == "hosted_tool":
+        raw_tool = data.get("tool") if isinstance(data, Mapping) else None
+        if isinstance(raw_tool, str) and raw_tool not in HOSTED_TOOLS:
+            if unknown_hosted_tools is not None:
+                unknown_hosted_tools.append(raw_tool)
+            return TextBlock(text=_unknown_hosted_text(data))
         f = _read(
             data,
             "hosted tool block",
@@ -1200,8 +1247,19 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
                 cited_sources=tuple(_source_from_dict(source) for source in h["cited_sources"]),
                 cost=_cost_from_dict(h["cost"]) if "cost" in h else None,
             )
+        unknown_hosted_tools: list[str] = []
+        content = tuple(
+            _block_from_dict(
+                b, ("text", "thinking", "tool_call", "hosted_tool"), unknown_hosted_tools=unknown_hosted_tools
+            )
+            for b in f["content"]
+        )
+        if unknown_hosted_tools:
+            logger.warning("stored message contains an unrecognized hosted tool; loading it portably")
+            if not any(isinstance(block, HostedToolBlock) for block in content):
+                summary = None
         return AssistantMessage(
-            content=tuple(_block_from_dict(b, ("text", "thinking", "tool_call", "hosted_tool")) for b in f["content"]),
+            content=content,
             origin=origin_from_dict(f["origin"]),
             stop_reason=f["stop_reason"],
             usage=usage_from_dict(f["usage"]) if "usage" in f else None,
@@ -1217,7 +1275,8 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
             {"hosted": dict},
         )
         hosted_result = None
-        if "hosted" in f:
+        unknown_hosted_tool = "hosted" in f and f["tool_name"] not in HOSTED_RESULT_TOOLS
+        if "hosted" in f and not unknown_hosted_tool:
             h = _read(
                 f["hosted"], "hosted result", {"record": dict}, {"execution": dict, "action": dict, "fallback_from": dict}
             )
@@ -1261,6 +1320,8 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
                 action=_action_from_dict(h["action"]) if "action" in h else None,
                 fallback_from=fallback,
             )
+        if unknown_hosted_tool:
+            logger.warning("stored message contains an unrecognized hosted tool; loading it portably")
         return ToolResultMessage(
             tool_call_id=f["tool_call_id"],
             tool_name=f["tool_name"],

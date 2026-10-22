@@ -272,14 +272,11 @@ VIOLATIONS = {
     "generate-on-web-search": _set(NATIVE, ("content", 0, "action"), {"type": "generate", "prompt": "p"}),
     "generate-on-proxied-search": _set(PROXIED, ("hosted", "action"), {"type": "generate", "prompt": "p"}),
     "search-on-x-search": _set(NATIVE, ("content", 2, "action"), {"type": "search", "queries": ["q"]}),
-    # v2 has no native image tool, and an rc-era block is not read (§4.2, §15).
-    "native-image-block": _set(NATIVE, ("content", 0, "tool"), "image_generation"),
     "unknown-action": _set(NATIVE, ("content", 0, "action"), {"type": "browse", "url": "https://a"}),
     "field-of-another-action": _set(NATIVE, ("content", 0, "action", "url"), "https://a"),
     "empty-queries": _set(NATIVE, ("content", 0, "action", "queries"), []),
     "x-search-limit-zero": _set(NATIVE, ("content", 2, "action", "limit"), 0),
     "x-search-mode": _set(NATIVE, ("content", 2, "action", "mode"), "latest"),
-    "unknown-tool": _set(NATIVE, ("content", 0, "tool"), "code_interpreter"),
     "empty-payload": _set(NATIVE, ("content", 0, "native", "payload"), []),
     "payload-not-objects": _set(NATIVE, ("content", 0, "native", "payload"), ["web_search_call"]),
     "native-replay-flag": _set(NATIVE, ("content", 0, "native", "replay"), True),
@@ -305,7 +302,6 @@ VIOLATIONS = {
         _set(PROXIED, ("hosted", "record"), {"status": "failed", "error": "upstream 500", "sources": []}), ("is_error",), False
     ),
     "completed-result-flagged": _set(PROXIED, ("is_error",), True),
-    "hosted-on-local-tool": _set(PROXIED, ("tool_name",), "bash"),
     "execution-mode": _set(PROXIED, ("hosted", "execution", "mode"), "native"),
     "proxy-billing": _set(PROXIED, ("hosted", "execution", "executor_billing"), "free"),
     "failed-attempt-billing": _set(PROXIED, ("hosted", "execution", "failed_attempts", 0, "billing"), "free"),
@@ -322,6 +318,55 @@ def test_schema_and_reader_refuse_the_same_hosted_violations(payload):
     assert not VALIDATOR.is_valid(payload)
     with pytest.raises(ValueError):
         message_from_dict(payload)
+
+
+def test_a_stored_proxied_result_for_an_unknown_tool_loads_as_a_plain_result(caplog):
+    stored = _set(_set(PROXIED, ("tool_name",), "web_fetch"), ("is_error",), True)
+
+    loaded = message_from_dict(stored)
+
+    assert isinstance(loaded, ToolResultMessage)
+    assert loaded.tool_name == "web_fetch"
+    assert loaded.hosted is None
+    assert loaded.is_error is True
+    assert message_to_dict(loaded) == {key: value for key, value in stored.items() if key != "hosted"}
+    assert [record.levelname for record in caplog.records] == ["WARNING"]
+
+
+@pytest.mark.parametrize(
+    ("action", "record", "expected"),
+    [
+        (
+            {"type": "open_page", "url": "https://example.com/docs"},
+            {"status": "completed", "sources": [{"url": "https://example.com/docs", "title": "Example Docs"}]},
+            ("https://example.com/docs", "Example Docs"),
+        ),
+        ({"type": "fetch"}, {"status": "completed", "sources": []}, ("result unavailable in this version",)),
+    ],
+    ids=["query-and-source", "placeholder"],
+)
+def test_a_native_unknown_hosted_block_loads_as_portable_text(action, record, expected, caplog):
+    stored = copy.deepcopy(NATIVE)
+    stored["content"] = [stored["content"][0]]
+    stored["content"][0].update(tool="web_fetch", action=action, record=record)
+
+    loaded = message_from_dict(stored)
+
+    assert isinstance(loaded, AssistantMessage)
+    assert loaded.hosted_summary is None
+    assert len(loaded.content) == 1 and isinstance(loaded.content[0], TextBlock)
+    assert all(fragment in loaded.content[0].text for fragment in expected)
+    assert [record.levelname for record in caplog.records] == ["WARNING"]
+
+
+def test_new_hosted_result_for_an_unknown_tool_stays_strict():
+    with pytest.raises(ValueError, match="web_fetch is not a hosted tool"):
+        ToolResultMessage(
+            tool_call_id="call_unknown",
+            tool_name="web_fetch",
+            content=(TextBlock(text="result"),),
+            hosted=_produced()[4].hosted,
+        )
 
 
 def test_a_count_past_the_bound_is_never_written_and_a_stored_one_is_dropped_on_read():
