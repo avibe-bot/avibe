@@ -84,7 +84,7 @@ ignored without parsing.
 | `content_block_start` | `index: non-negative integer`, `content_block: object`, `content_block.type: string` | text/thinking `text`/`thinking`/`signature: string`; redacted `data: non-empty string`; tool `id`/`name: string`, `input: object` |
 | `content_block_delta` | `index: non-negative integer`, `delta: object`, `delta.type: string` | `text_delta.text`, `thinking_delta.thinking`, `signature_delta.signature`, `input_json_delta.partial_json: string`; present fields with a wrong type are terminal |
 | `content_block_stop` | `index: non-negative integer` | none |
-| `message_delta` | none | `delta: object`, `delta.stop_reason: string`, `usage: object` |
+| `message_delta` | none | `delta: object`, `delta.stop_reason: string`, `usage: object`; `delta.stop_details` is read only when it is an object, and only its string `category` and `explanation` (a refusal's diagnostic never fails the response) |
 | `message_stop` | none | none |
 | named SSE `error` | none: plain text or JSON error envelope accepted | classified before data-event dispatch, matching Pi |
 | data-only `error` | `error: object` when an envelope is present | `error.type`/`error.message: string`; provider extension fields such as `code` are ignored |
@@ -523,7 +523,7 @@ Anthropic stream events:
 | `content_block_delta.signature_delta` | state | Appends to the thinking signature. |
 | `content_block_delta.input_json_delta` | delta | `ToolCallDelta`; the complete JSON is parsed at `Done`. |
 | `content_block_stop` | delta | `BlockEnd`. |
-| `message_delta.stop_reason` | delta/state | Normalized stop reason; usage fields are merged. |
+| `message_delta.stop_reason` | delta/state | Normalized stop reason; usage fields are merged. A `refusal` keeps `delta.stop_details` as its message's `error_message` (`category: …; explanation: …`, bounded to 1,000 characters). |
 | `message_delta.usage` with a non-object value | terminal `ProviderError` | `invalid_request`; malformed usage is never silently discarded. |
 | `message_stop` or clean EOF | Done or terminal `ProviderError` | `message_stop` yields `Done` when `message_delta.stop_reason` was present; after `message_start`, clean EOF without `message_stop` yields an incomplete error even when a stop reason was captured. A no-`message_start` stream with a stop reason follows Pi's clean-EOF completion path. |
 | `ping` | state | Ignored keepalive. |

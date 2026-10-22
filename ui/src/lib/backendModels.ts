@@ -90,9 +90,10 @@ export const supersedesHubAnswer = (result: BackendModels, knownHub: boolean): b
  *
  * A Hub effort menu follows capability evidence that any turn can change
  * (#2606). The route picker and the Agents page read it again as their menu
- * opens or the effort field is approached, and while that read is in flight the
- * controls that can write an effort (an effort, or a model that keeps or clears
- * one) are held. The New Agent dialog writes on Create, so Create reads this
+ * opens or the effort field is approached. The route picker holds controls
+ * while that read is in flight; the Agents page holds model changes and queues
+ * the latest effort choice, validating it against the answer before saving.
+ * The New Agent dialog writes on Create, so Create reads this
  * answer again and creates only an effort it still offers, and nothing when Hub
  * cannot answer. A write made outside those (a model changed before any read
  * started, or after a read that came back unread) uses the last answer; a stale

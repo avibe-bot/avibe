@@ -5,7 +5,8 @@ and the anchor's validity, §2; the cache lifetime per route, §3; the checkpoin
 amended 2026-10-15 by owner decision (the threshold stays below the route's context price step, §1); amended
 2026-10-18 by owner decision (`checkpoint-v5`: the checkpoint is a consolidation into a mind the turn revises with
 `edit`, a memo of the user's own messages it chooses by checkbox, and a now it writes; skills are carried back and the
-file lists shortened; §6, §7, §8 c, §9, §10, §11, §12).
+file lists shortened; §6, §7, §8 c, §9, §10, §11, §12); amended 2026-10-21 by owner decision (the run's bound on
+unproductive checkpoints stops checkpoint turns only: the drop, which calls no model, still makes room; §3, §8, §10).
 The `harness` owns the rules (`core/agent_core/harness/context.py`, `projection.py`); the loop applies them before
 every model request (`core/agent_core/agent/loop.py`); the adapter supplies the Session-specific parts (§9). Row
 shapes: [`transcript-rows.schema.json`](transcript-rows.schema.json); events:
@@ -138,14 +139,14 @@ before a retry alike:
 2. **Clear**, when enabled (§4), if the provider cache is cold (the request's route has not used it for longer than
    its lifetime, below; after a restart, measured from the response rows' `created_at`) or `est >= 0.8 * T`, which
    does not depend on the lifetime.
-3. **Checkpoint** when `est >= T`, the run has not stopped compacting (§10), and there is something to summarize,
+3. **Checkpoint** when `est >= T`, the run still takes checkpoints (§10), and there is something to summarize,
    at most once per model request: a normal checkpoint (§6, reason `threshold`) when the fork it would send can fit,
    otherwise the overflow ladder from (b) (§8, reason `overflow`). A checkpoint request that overflows continues at
    (b).
 4. **Ladder** (§8) when the request does not fit. With no checkpoint request left to try (one failed for this
-   request other than by overflow, or the run has stopped compacting), a request that can fit is sent and the
-   provider judges. Once the run has stopped compacting nothing is compacted at all: a request that cannot fit, or
-   that the provider refuses as overflow, ends the run `context_exhausted` (§10).
+   request other than by overflow, or the run takes no more checkpoints), a request that can fit is sent and the
+   provider judges. Once the run takes no more checkpoints, a request that cannot fit, or that the provider refuses
+   as overflow, goes straight to the drop (§8 c, §10).
 
 The cache lifetime is the documented lifetime of the cache mode Vibey requests for the conversation, where clearable
 results live, resolved on every request from the route's provider, protocol, and whole model id
@@ -329,7 +330,9 @@ applies them:
 - Anything else (a response refused at admission, a length stop, a `tool_use` stop without calls, calls under any
   other stop, an error, or a reply still rejected after the repair) is a failure: it counts as unproductive (§10),
   nothing enters the context, the old context is kept, and the ladder continues; the replies' text is only in the
-  audit row. So is a checkpoint whose row the host cannot complete (§10, invariant 4).
+  audit row. So is a checkpoint whose row the host cannot complete (§10, invariant 4). A stop the provider explains
+  (a refusal's `error_message`, such as the category of the safeguard that refused it) names that explanation in the
+  turn's error, and the adapter logs the failure; the user sees none of it.
 - Framing: the now, the mind, the memo, and each carried skill are shown later inside the summary's frame (§7),
   where the `<` of the frame's own tags in them is escaped; the block's tags never reach it (above).
 - A sentence the model writes outside the block (its looking back, or why it rewrote a section of its mind, §11) is
@@ -488,7 +491,8 @@ once the request fits:
   fit (§5), so the context becomes checkpoint + the rest verbatim; roll again while the request still does not fit,
   at most 2 rolls per request.
 - (c) **Dropped**: when no checkpoint request can help (one failed for this request other than by overflow, a rolling
-  one failed, no rolling prefix can fit, or the rolls are used up), no model is called:
+  one failed, no rolling prefix can fit, the rolls are used up, or the run takes no more checkpoints, §10), no model
+  is called:
   the earliest part (§5) moves out of the context. Built like any checkpoint row (§7: fresh `state`, and the
   in-flight Turn's inputs stay), the row keeps the previous checkpoint's now, mind, and carried skills as they were
   (a `checkpoint-v4` row names its skills only: the host renders them now, as a checkpoint carries them, §7),
@@ -504,7 +508,7 @@ once the request fits:
 - (d) **Stop**: when the request and its minimal request (what the drop would leave of it: the drop's own row, §8 c,
   plus the last unit; §3) both cannot fit (checked in the stage, §3,
   before provider admission), when nothing more can move out of a request that cannot fit or that the provider
-  refused, after 4 provider overflows of one request, or once the run has stopped compacting (§10), the run ends
+  refused, or after 4 provider overflows of one request, the run ends
   `context_exhausted` and the `context_exhausted` event says what fills the context. No model is called for a
   context that cannot fit. The error's kind names what is too large, decided by measurement when moving the
   conversation out cannot help: a part of the newest unit is named only when the request the stop judged (the
@@ -587,13 +591,15 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
   serializes them.
 - **A per-run bound on unproductive checkpoints.** A checkpoint attempt that fails, or a normal one whose result is
   still at least `0.75 * T` (ineffective), is unproductive; an effective one is not counted. After 2 unproductive
-  attempts in one run (`UNPRODUCTIVE_CHECKPOINTS`), the run stops compacting: nothing more is compacted in it (no
-  checkpoint, no mechanical drop), a request that can fit is still sent, and one that cannot fit or that the
-  provider refuses as overflow ends the run `context_exhausted` (§8 d). The bound is read live first on every
-  request, so nothing is built for a compaction it forbids (no hypothetical drop, no host call), and before every
-  step of the overflow ladder, which is one loop, so an attempt that uses it up ends the ladder there, never in a
-  drop. It is held in memory and never persisted: the next run starts at zero, whatever route or restart lies
-  between, so wasted checkpoint spend is at most 2 attempts per Turn. Nothing of it is shown to the user.
+  attempts in one run (`UNPRODUCTIVE_CHECKPOINTS`), the run takes no more checkpoints, normal or rolling: a request
+  that can fit is still sent, and one that cannot fit or that the provider refuses as overflow takes the mechanical
+  drop (§8 c), which calls no model and so is not bounded; only when nothing more can move out does the run stop
+  (§8 d). A provider's refusal of a checkpoint is no exception: the next run would drop anyway, so ending this one
+  would only make the user start over. The bound is read live first on every request, so nothing is built for a
+  compaction that cannot follow (a request sent as it is asks the host nothing), and before every step of the
+  overflow ladder, which is one loop, so an attempt that uses it up moves the ladder on to the drop. It is held in
+  memory and never persisted: the next run starts at zero, whatever route or restart lies between, so wasted
+  checkpoint spend is at most 2 attempts per Turn. Nothing of it is shown to the user.
 - **The mind and the memo hold, whatever the model wrote.** The turn's files are checked when it gives a final reply
   (§6). One repair names every problem; after it, a file still rejected takes its fallback and never fails the turn.
   Every check compares with what the harness wrote; nothing parses the model's free text:

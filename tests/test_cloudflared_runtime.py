@@ -16,7 +16,7 @@ from vibe import remote_access, runtime
 # Real fake-cloudflared connectors and their log sinks.
 pytestmark = [pytest.mark.reap_processes, pytest.mark.usefixtures("reap_helper_spawns")]
 
-UPSTREAM = "https://github.com/cloudflare/cloudflared/releases/download/2026.10.0"
+UPSTREAM = "https://github.com/cloudflare/cloudflared/releases/download/2026.10.3"
 
 
 def _fake_cloudflared(path: Path, version: str) -> Path:
@@ -71,7 +71,7 @@ def test_packaged_manifest_pins_one_release_for_every_platform(tmp_path: Path) -
     )
 
     assert manifest is not None
-    assert manifest.runtime_version == manifest.payload["release_tag"] == "2026.10.0"
+    assert manifest.runtime_version == manifest.payload["release_tag"] == "2026.10.3"
     assets = {
         "darwin-arm64": ("cloudflared-darwin-arm64.tgz", "tar.gz", "cloudflared"),
         "darwin-x64": ("cloudflared-darwin-amd64.tgz", "tar.gz", "cloudflared"),

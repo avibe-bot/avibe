@@ -34,6 +34,7 @@ def utc_timestamp(now: float) -> str:
 class MetricsSample:
     sampled_at: float
     ready: bool
+    # Connections the Cloudflare edge has registered, i.e. able to serve requests.
     ha_connections: int
     edge_locations: tuple[str, ...]
     smoothed_rtt_ms: tuple[float, ...]
@@ -50,8 +51,20 @@ class RequestPathSample:
     successes: tuple[bool, ...]
 
 
-def parse_metrics(text: str, *, ready: bool = True, now: float | None = None) -> MetricsSample:
-    """Parse cloudflared Prometheus metrics without depending on sample order."""
+def parse_metrics(
+    text: str,
+    *,
+    ready: bool = True,
+    registered_connections: int | None = None,
+    now: float | None = None,
+) -> MetricsSample:
+    """Parse cloudflared Prometheus metrics without depending on sample order.
+
+    ``registered_connections`` is the edge-registered count from cloudflared's
+    ``/ready`` endpoint. The ``cloudflared_tunnel_ha_connections`` gauge is only
+    a fallback: cloudflared raises it when a connection starts dialing, so it
+    reports four while the edge may have registered just one.
+    """
 
     values: dict[str, list[Any]] = {}
     for family in text_string_to_metric_families(text):
@@ -88,7 +101,11 @@ def parse_metrics(text: str, *, ready: bool = True, now: float | None = None) ->
     return MetricsSample(
         sampled_at=now if now is not None else time.time(),
         ready=ready,
-        ha_connections=max(0, int(round(scalar("cloudflared_tunnel_ha_connections")))),
+        ha_connections=(
+            registered_connections
+            if registered_connections is not None
+            else max(0, int(round(scalar("cloudflared_tunnel_ha_connections"))))
+        ),
         edge_locations=tuple(locations[:4]),
         smoothed_rtt_ms=tuple(rtt_values[:4]),
         request_errors_total=max(
@@ -109,7 +126,25 @@ def scrape_metrics(metrics_url: str, *, timeout: float = 0.5, now: float | None 
     ready_response = requests.get(f"{base_url}/ready", timeout=timeout)
     metrics_response = requests.get(f"{base_url}/metrics", timeout=timeout)
     metrics_response.raise_for_status()
-    return parse_metrics(metrics_response.text, ready=ready_response.ok, now=now)
+    return parse_metrics(
+        metrics_response.text,
+        ready=ready_response.ok,
+        registered_connections=_ready_connections(ready_response),
+        now=now,
+    )
+
+
+def _ready_connections(response: requests.Response) -> int | None:
+    """Read ``readyConnections`` from cloudflared's ``/ready`` JSON body."""
+
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    value = payload.get("readyConnections") if isinstance(payload, dict) else None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 def probe_request_path(

@@ -1451,16 +1451,18 @@ class Agent:
     ) -> bool:
         """C-9 on the final request (sections 3 and 8); True when it changed the context.
 
-        Whether the run still compacts is read from its live bound at every decision, never kept: a checkpoint
-        attempt in this pass can use it up.
+        Whether the run still takes checkpoints is read from its live bound at every decision, never kept: a
+        checkpoint attempt in this pass can use it up.
         """
-        if not self._stopped and (plan.est >= plan.threshold or not plan.fits or ladder.refused):
+        # Once the run takes no more checkpoints, only a drop can follow, and only for a request that cannot fit or
+        # that the provider refused; for one that will be sent as it is, nothing is built for a compaction.
+        compacting = not plan.can_fit or ladder.refused
+        if not self._stopped:
+            compacting = compacting or plan.est >= plan.threshold or not plan.fits
+        if compacting:
             # A compaction may follow: what a person typed, for its memo, read off the event loop first.
             await self._prefetch_typed(view)
-        # The bound first: once the run has stopped compacting, nothing is built for a compaction either.
         if not plan.can_fit:
-            if self._stopped:
-                raise self._exhausted(request, view, plan)  # (d); the provider never sees it
             _, minimal = await self._minimal(system, selected, request, view, plan, carry=False)
             if not minimal.can_fit:
                 # Not even the request the drop would leave (its row and the last unit, without the previous
@@ -1503,21 +1505,9 @@ class Agent:
 
     @property
     def _stopped(self) -> bool:
-        """The run has made ``UNPRODUCTIVE_CHECKPOINTS`` failed or ineffective checkpoint attempts (section 10)."""
+        """The run has made ``UNPRODUCTIVE_CHECKPOINTS`` failed or ineffective checkpoint attempts (section 10): it
+        takes no more checkpoints. The drop, which calls no model, still makes room."""
         return self._unproductive >= UNPRODUCTIVE_CHECKPOINTS
-
-    def _hold(self, request: ModelRequest, view: ContextView, plan: Budget, *, refused: bool) -> bool:
-        """The run's bound (section 10), read live before every step of the ladder.
-
-        Not stopped: False, and the step may run. Stopped: nothing more is compacted this run; a request that can
-        fit and the provider has not refused is sent as it is (True), and any other ends the run
-        ``context_exhausted``.
-        """
-        if not self._stopped:
-            return False
-        if refused or not plan.can_fit:
-            raise self._exhausted(request, view, plan)
-        return True
 
     async def _minimal(
         self,
@@ -1624,14 +1614,16 @@ class Agent:
     ) -> bool:
         """The overflow ladder (section 8), one loop; True when a step changed the context, False to send as it is.
 
-        Every step is preceded by the run's bound, read live (``_hold``), as the stage reads it first: a checkpoint
-        attempt that uses the bound up ends the ladder there, never in a drop.
+        Every step reads the run's bound live (section 10), as the stage does, so a checkpoint attempt here can use it
+        up: from then on no checkpoint is tried, a request that can fit and the provider has not refused is sent as it
+        is, and any other moves on to the drop.
         """
         units = view.units
         while True:
-            if self._hold(request, view, plan, refused=refused):
+            stopped = self._stopped
+            if stopped and not refused and plan.can_fit:
                 return False
-            if not ladder.summary_failed and not ladder.compacted:
+            if not stopped and not ladder.summary_failed and not ladder.compacted:
                 ladder.compacted = True
                 cut = normal_cut(units, plan.keep, turn_inputs=self._turn_inputs, pinned=view.pinned)
                 turn = (
@@ -1645,7 +1637,7 @@ class Agent:
                         return True
                     ladder.summary_failed = not outcome.overflow
                 continue
-            if not ladder.summary_failed and ladder.rolls < MAX_ROLLS:
+            if not stopped and not ladder.summary_failed and ladder.rolls < MAX_ROLLS:
                 def rolling(cut: int) -> SideTurn:
                     return self._checkpoint_turn(request, view, plan, cut, mode="rolling", reason="overflow")
 
@@ -2156,8 +2148,13 @@ class Agent:
                         produced.append(follow_up)
                         continue
                     if message.stop_reason != "tool_use" or not message.tool_calls:
-                        # Only a stop with no call is a reply, and only a tool-use stop carries calls.
-                        error = f"The {turn.purpose} turn stopped with {message.stop_reason} and no usable {turn.purpose}."
+                        # Only a stop with no call is a reply, and only a tool-use stop carries calls. The provider's
+                        # word on why it stopped (a refusal's category, say) is the audit's to keep.
+                        why = f" ({message.error_message})" if message.error_message else ""
+                        error = (
+                            f"The {turn.purpose} turn stopped with {message.stop_reason}{why}"
+                            f" and no usable {turn.purpose}."
+                        )
                         break
                     if not gate.open:
                         # Its earlier calls were already answered with the policy's budget text.

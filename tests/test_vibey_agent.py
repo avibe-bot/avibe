@@ -1948,6 +1948,24 @@ async def test_a_refused_model_route_fails_before_the_input_is_written(
 # --- settlement and run shape -----------------------------------------------------------
 
 
+async def test_a_failed_compaction_is_logged_with_why_and_never_shown(engine, session, tmp_path, published, caplog) -> None:
+    """C-9 keeps compaction silent to the user; the service log keeps why a checkpoint failed, the category a
+    provider's refusal named included, so a run that later runs out of room can be traced to it."""
+    from core.agent_core.agent.events import CompactionFailed
+    from modules.agents.vibey.agent import _Run
+
+    harness = _Harness(engine, tmp_path, "telegram", [])
+    run = _Run(request=harness.request("hello"), session_id=SESSION, turn_id="turn", instance="test")
+    error = "The checkpoint turn stopped with refusal (category: reasoning_extraction) and no usable checkpoint."
+
+    with caplog.at_level(logging.WARNING, logger="modules.agents.vibey.agent"):
+        await harness.agent._on_event(run, CompactionFailed("turn", 1, "threshold", error))
+
+    [line] = [record.getMessage() for record in caplog.records if record.getMessage().startswith("Vibey compaction")]
+    assert line == f"Vibey compaction failed: session={SESSION} turn=turn reason=threshold error={error}"
+    assert harness.controller.im_client.sent == []
+
+
 async def test_the_footer_reports_the_runs_final_outcome(engine, session, tmp_path, published, caplog) -> None:
     class _LeakyJobs(FakeJobHost):
         async def kill(self, job_id, *, reason="killed") -> None:

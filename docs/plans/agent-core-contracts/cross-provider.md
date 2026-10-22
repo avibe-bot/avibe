@@ -7,9 +7,9 @@ cross-provider history tests (MIT).
 | Input | Same origin as the target | Different origin |
 | --- | --- | --- |
 | Text block | kept | kept |
-| Thinking block with `signature` | replayed verbatim with its signature | converted to plain assistant text; the signature is dropped |
+| Thinking block with `signature` | replayed verbatim with its signature | dropped |
 | Thinking block, `redacted: true` | replayed verbatim | dropped |
-| Thinking block without `signature` (unverified origin, C-2) | sent as plain assistant text | sent as plain assistant text |
+| Thinking block without `signature` (unverified origin, C-2) | sent as plain assistant text | dropped |
 | Tool call | kept; `id` and `signature` as stored | kept without `signature`; `id` normalized to the target's rules (below) |
 | Tool result | kept | `tool_call_id` rewritten through the same id map |
 | Image in a user or tool-result message | kept | kept if the target model accepts images, else `[image: <name or mime>]` |
@@ -19,6 +19,15 @@ cross-provider history tests (MIT).
 
 Invariants:
 
+- Thinking never goes to a different origin, in any form (owner decision, 2026-10-21; Pi converts it to text). It is
+  the serving model's private reasoning, not something the assistant said: sent as assistant text it is attributed to
+  the target model, and Anthropic refuses requests whose history carries another model's reasoning as text
+  (`reasoning_extraction`), the same refusal on every retry, so a Session that switched models stays stuck. The
+  stored transcript keeps it; only the request leaves it out. An assistant message whose only content was such
+  thinking is left out of the request, as an aborted one is, never sent empty; the messages around it keep their
+  order (consecutive user-role messages are already valid on every protocol).
+- Same-origin unsigned thinking stays plain assistant text: a protocol that cannot take that reasoning back gets the
+  model's own words, attributed to the model that wrote them.
 - "Opaque provider payload" means any `signature` field on any block, and any redacted thinking. Every rule here
   about signatures applies to all of them. A signature is never synthesized and never sent to a different origin.
 - Opaque payloads are also bound to the account that issued them, the identity of the Source that served the message

@@ -8,10 +8,13 @@
 // is executing; outside an executing call there is no token to use.
 //
 // Evaluation uses V8's REPL mode through the in-process inspector, the same
-// semantics as the DevTools console: top-level await, and top-level `let`,
-// `const`, `class`, and `function` bindings that persist across calls and may
-// be redeclared. It needs no parser, no extra dependency, and no experimental
-// Node flag; a module-based design would lose non-exported bindings.
+// semantics as the DevTools console: top-level await, and top-level bindings
+// that persist across calls. REPL mode lets a binding be redeclared only with
+// its original kind, so `const x` followed later by `let x` would throw; the
+// kernel therefore evaluates `const` declarations as `let` (see
+// constDeclarationsAsLet). It needs no parser, no extra dependency, and no
+// experimental Node flag; a module-based design would lose non-exported
+// bindings.
 
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -20,6 +23,7 @@ import inspector from "node:inspector";
 import net from "node:net";
 import path from "node:path";
 import { inspect } from "node:util";
+import vm from "node:vm";
 import * as runtime from "./runtime.mjs";
 import { avibe, computer } from "./index.mjs";
 
@@ -82,6 +86,55 @@ globalThis.setInterval = function (callback, ...rest) {
   ]);
   return handle;
 };
+
+// `const` followed on the same line by a binding name or pattern. Whether a
+// match is a declaration is decided by V8 itself below, not by this pattern.
+const CONST_CANDIDATE = /(?<![\p{ID_Continue}$\\])const(?=[ \t]*[\p{ID_Start}$_\\{[])/gu;
+// Upper bound on characters compiled while classifying candidates, so a huge
+// call with many candidates is evaluated as written instead of stalling.
+const CONST_REWRITE_COMPILE_BUDGET = 16 * 1024 * 1024;
+
+function compiles(source) {
+  try {
+    // Compile only; the async wrapper admits top-level await like REPL mode.
+    new vm.Script(`(async () => {\n${source}\n})`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function spliceConst(source, index, replacement) {
+  return source.slice(0, index) + replacement + source.slice(index + 5);
+}
+
+// Rewrites every `const` declaration keyword to `let` (same length, so stack
+// positions are unchanged). V8 classifies each candidate: a keyword in code
+// breaks compilation when replaced by `@`, while text in a string, comment,
+// template, or regex does not; and only a statement-level declaration still
+// compiles when replaced by `;let`, which rules out property names and
+// `for (const ...)` heads. Code that does not compile, or exceeds the budget,
+// is returned unchanged so V8 reports or evaluates it as written.
+function constDeclarationsAsLet(code) {
+  const candidates = Array.from(code.matchAll(CONST_CANDIDATE), (match) => match.index);
+  if (
+    candidates.length === 0 ||
+    (2 * candidates.length + 1) * code.length > CONST_REWRITE_COMPILE_BUDGET ||
+    !compiles(code)
+  ) {
+    return code;
+  }
+  let rewritten = code;
+  for (const index of candidates) {
+    if (
+      !compiles(spliceConst(code, index, "@    ")) &&
+      compiles(spliceConst(code, index, ";let "))
+    ) {
+      rewritten = spliceConst(rewritten, index, "let  ");
+    }
+  }
+  return rewritten;
+}
 
 function send(message) {
   let line;
@@ -229,7 +282,7 @@ async function evaluate(message) {
   try {
     const response = await runtime.kernelCalls.run(call, () =>
       post("Runtime.evaluate", {
-        expression: message.code,
+        expression: constDeclarationsAsLet(message.code),
         replMode: true,
         awaitPromise: true,
         silent: true,

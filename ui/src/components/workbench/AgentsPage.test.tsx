@@ -1,6 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, useLocation } from 'react-router-dom';
 
@@ -53,6 +54,7 @@ type FakeModelCatalog = {
   reasoningOptions?: Record<string, { value: string; label: string }[]>;
   effortMenus?: Record<string, { omitted: string[]; not_on: Record<string, string[]> }>;
   hubUnread?: true;
+  catalogRefreshPending?: boolean;
 };
 let modelCatalog: FakeModelCatalog = { models: [] };
 let modelCatalogReads = 0;
@@ -1731,7 +1733,77 @@ describe('AgentsPage reconnect reconciliation', () => {
     await waitFor(() => expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull());
   });
 
-  it('MH-EFFORT-MENU-004: holds the effort buttons while that read is out, so a click cannot write an effort its answer removes', async () => {
+  it.each(['settled hover', 'pending hover', 'keyboard', 'touch'] as const)(
+    'saves a single effort choice after %s without losing it to catalog refresh',
+    async (interaction) => {
+      const user = userEvent.setup();
+      modelCatalog = {
+        models: [],
+        reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }] },
+        effortMenus: { 'reasoning-model': { omitted: [], not_on: {} } },
+      };
+      const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+      const saved = { ...initial, reasoning_effort: 'high' };
+      const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+      const api = makeApi(
+        vi.fn().mockResolvedValue(listResult(initial)),
+        vi.fn().mockResolvedValueOnce(fullAgent(initial, 'prompt')).mockResolvedValue(fullAgent(saved, 'prompt')),
+        undefined, undefined, updateVibeAgent,
+      );
+      renderPage(api, { canManageAgents: true });
+      const high = await screen.findByRole('button', { name: 'high', exact: true });
+      const reads = modelCatalogReads;
+      deferModelReads = true;
+
+      if (interaction === 'keyboard') {
+        act(() => high.focus());
+        await user.keyboard('{Enter}');
+      } else if (interaction === 'touch') {
+        await user.pointer([{ keys: '[TouchA>]', target: high }, { keys: '[/TouchA]' }]);
+      } else {
+        await user.hover(high);
+        if (interaction === 'settled hover') act(() => pendingModelReads.shift()!());
+        // Unlike fireEvent.click, this includes the pointer-induced focus that
+        // used to start another read and disable the button before its click.
+        await user.click(high);
+      }
+
+      if (interaction !== 'settled hover') {
+        expect(updateVibeAgent).not.toHaveBeenCalled();
+        act(() => pendingModelReads.shift()!());
+      }
+      await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { reasoning_effort: 'high' }));
+      expect(updateVibeAgent).toHaveBeenCalledTimes(1);
+      expect(modelCatalogReads).toBe(reads + 1);
+      await waitFor(() => expect(screen.getByRole('button', { name: 'high', exact: true }).className).toContain('bg-mint-soft'));
+    },
+  );
+
+  it('keeps only the latest effort choice while the catalog read is pending', async () => {
+    const user = userEvent.setup();
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }] },
+      effortMenus: { 'reasoning-model': { omitted: [], not_on: {} } },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult(initial)), vi.fn().mockResolvedValue(fullAgent(initial, 'prompt')),
+      undefined, undefined, updateVibeAgent,
+    );
+    renderPage(api, { canManageAgents: true });
+    const high = await screen.findByRole('button', { name: 'high', exact: true });
+    deferModelReads = true;
+    await user.click(high);
+    await user.click(screen.getByRole('button', { name: 'medium', exact: true }));
+    expect(updateVibeAgent).not.toHaveBeenCalled();
+    act(() => pendingModelReads.shift()!());
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { reasoning_effort: 'medium' }));
+    expect(updateVibeAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it('MH-EFFORT-MENU-004: validates a queued effort choice against the refreshed menu before writing', async () => {
     modelCatalog = {
       models: [],
       reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'xhigh', label: 'xhigh' }] },
@@ -1755,7 +1827,7 @@ describe('AgentsPage reconnect reconciliation', () => {
     deferModelReads = true;
     fireEvent.pointerEnter(document.querySelector('[data-effort-field]') as HTMLElement);
     const xhigh = screen.getByRole('button', { name: 'xhigh', exact: true }) as HTMLButtonElement;
-    expect(xhigh.disabled).toBe(true);
+    expect(xhigh.disabled).toBe(false);
     fireEvent.click(xhigh);
     // A model choice keeps or falls back from the effort, so it waits for the answer too.
     expect((screen.getByRole('combobox') as HTMLButtonElement).disabled).toBe(true);
@@ -1763,6 +1835,8 @@ describe('AgentsPage reconnect reconciliation', () => {
 
     act(() => pendingModelReads.shift()!());
     expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull();
+    expect(updateVibeAgent).not.toHaveBeenCalled();
+    expect(showToast).toHaveBeenCalledWith('agents.detail.effortUnavailable:{"effort":"xhigh"}', 'error');
     expect((screen.getByRole('button', { name: 'medium', exact: true }) as HTMLButtonElement).disabled).toBe(false);
   });
 
@@ -1801,6 +1875,87 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(modelCatalogReads).toBe(directReads);
   });
 
+  it('does not let an older catalog retry drain a choice waiting for a newer refresh', async () => {
+    const hub = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }] },
+      effortMenus: { 'reasoning-model': { omitted: [], not_on: {} } },
+    };
+    modelCatalog = hub;
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult(initial)), vi.fn().mockResolvedValue(fullAgent(initial, 'prompt')),
+      undefined, undefined, updateVibeAgent,
+    );
+    renderPage(api, { canManageAgents: true });
+    const high = await screen.findByRole('button', { name: 'high', exact: true });
+    const field = document.querySelector('[data-effort-field]') as HTMLElement;
+    deferModelReads = true;
+    modelCatalog = {
+      models: [], reasoningOptions: hub.reasoningOptions, hubUnread: true, catalogRefreshPending: true,
+    };
+    fireEvent.pointerEnter(field);
+    // A native fallback settles the approach but its loader can answer again
+    // after a catalogRefreshPending retry. Retain that same loader callback.
+    const oldAnswer = pendingModelReads.shift()!;
+    act(() => oldAnswer());
+
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+      effortMenus: { 'reasoning-model': { omitted: ['high'], not_on: {} } },
+    };
+    fireEvent.pointerLeave(field);
+    fireEvent.pointerEnter(field);
+    fireEvent.click(high);
+    expect(updateVibeAgent).not.toHaveBeenCalled();
+
+    // A retry from the older approach must not settle the new read or submit
+    // its queued choice using an older menu that still offers high.
+    await act(async () => oldAnswer());
+    expect(updateVibeAgent).not.toHaveBeenCalled();
+    expect(field.getAttribute('aria-busy')).toBe('true');
+    act(() => pendingModelReads.shift()!());
+    expect(updateVibeAgent).not.toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'high', exact: true })).toBeNull();
+    expect(showToast).toHaveBeenCalledWith('agents.detail.effortUnavailable:{"effort":"high"}', 'error');
+  });
+
+  it('validates a queued choice against the last Hub menu when the refresh falls back to a native list', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }] },
+      effortMenus: { 'reasoning-model': { omitted: [], not_on: {} } },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const saved = { ...initial, reasoning_effort: 'high' };
+    const updateVibeAgent = vi.fn().mockResolvedValue({ ok: true });
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult(initial)),
+      vi.fn().mockResolvedValueOnce(fullAgent(initial, 'prompt')).mockResolvedValue(fullAgent(saved, 'prompt')),
+      undefined, undefined, updateVibeAgent,
+    );
+    renderPage(api, { canManageAgents: true });
+    const high = await screen.findByRole('button', { name: 'high', exact: true });
+    // The native fallback does not know about high, but an unread Hub cannot
+    // revoke what its last accepted answer offered.
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
+      hubUnread: true,
+    };
+    deferModelReads = true;
+    fireEvent.pointerEnter(high);
+    fireEvent.click(high);
+    expect(api.updateVibeAgent).not.toHaveBeenCalled();
+    act(() => pendingModelReads.shift()!());
+    await waitFor(() => expect(updateVibeAgent).toHaveBeenCalledWith('agent-a', { reasoning_effort: 'high' }));
+    expect(updateVibeAgent).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.getByRole('button', { name: 'high', exact: true }).className).toContain('bg-mint-soft'));
+    expect(showToast).not.toHaveBeenCalledWith(expect.stringContaining('agents.detail.effortUnavailable'), 'error');
+  });
+
   it('reads the effort menu once per approach to the field, not on every focus move inside it', async () => {
     modelCatalog = {
       models: [],
@@ -1828,7 +1983,68 @@ describe('AgentsPage reconnect reconciliation', () => {
     expect(modelCatalogReads).toBe(reads + 1);
   });
 
-  it('drops an effort-menu read still out when Settings covers the page', async () => {
+  it('drops a queued effort choice if reconciliation changes the model before the menu answers', async () => {
+    modelCatalog = {
+      models: ['old-model', 'new-model'],
+      reasoningOptions: {
+        'old-model': [{ value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }],
+        'new-model': [],
+      },
+      effortMenus: { 'old-model': { omitted: [], not_on: {} }, 'new-model': { omitted: [], not_on: {} } },
+    };
+    const initial = { ...brief('agent-a', 'description'), model: 'old-model', reasoning_effort: 'medium' };
+    const getVibeAgent = vi.fn().mockResolvedValue(fullAgent(initial, 'prompt'));
+    const api = makeApi(vi.fn().mockResolvedValue(listResult(initial)), getVibeAgent);
+    renderPage(api, { canManageAgents: true });
+    const high = await screen.findByRole('button', { name: 'high', exact: true });
+    deferModelReads = true;
+    fireEvent.pointerEnter(high);
+    fireEvent.click(high);
+    expect(api.updateVibeAgent).not.toHaveBeenCalled();
+
+    getVibeAgent.mockResolvedValue(fullAgent({ ...initial, model: 'new-model' }, 'prompt'));
+    act(() => handlers?.onConnected?.());
+    await waitFor(() => expect(screen.getByRole('combobox').textContent).toContain('new-model'));
+    expect(document.querySelector('[data-effort-field]')).toBeNull();
+    act(() => pendingModelReads.shift()!());
+    expect(api.updateVibeAgent).not.toHaveBeenCalled();
+
+    // Removing a hovered field sends no pointerleave. If it returns, keyboard
+    // entry must still refresh rather than inheriting that old pointer presence.
+    getVibeAgent.mockResolvedValue(fullAgent(initial, 'prompt'));
+    act(() => handlers?.onConnected?.());
+    const restoredHigh = await screen.findByRole('button', { name: 'high', exact: true });
+    const reads = modelCatalogReads;
+    act(() => restoredHigh.focus());
+    expect(modelCatalogReads).toBe(reads + 1);
+    act(() => pendingModelReads.shift()!());
+    expect(api.updateVibeAgent).not.toHaveBeenCalled();
+  });
+
+  it('drops a queued effort choice when another Agent is selected', async () => {
+    modelCatalog = {
+      models: [],
+      reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'high', label: 'High' }] },
+      effortMenus: { 'reasoning-model': { omitted: [], not_on: {} } },
+    };
+    const a = { ...brief('agent-a', 'first description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const b = { ...brief('agent-b', 'second description'), model: 'reasoning-model', reasoning_effort: 'medium' };
+    const api = makeApi(
+      vi.fn().mockResolvedValue(listResult([a, b])),
+      vi.fn((name: string) => Promise.resolve(fullAgent(name === a.name ? a : b, 'prompt'))),
+    );
+    renderPage(api, { canManageAgents: true });
+    const high = await screen.findByRole('button', { name: 'high', exact: true });
+    deferModelReads = true;
+    fireEvent.pointerEnter(high);
+    fireEvent.click(high);
+    fireEvent.click(screen.getByText('agent-b'));
+    await screen.findByDisplayValue('second description');
+    act(() => pendingModelReads.splice(0).forEach((answer) => answer()));
+    expect(api.updateVibeAgent).not.toHaveBeenCalled();
+  });
+
+  it('drops an effort-menu read and queued choice when Settings covers the page', async () => {
     modelCatalog = {
       models: [],
       reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }, { value: 'xhigh', label: 'xhigh' }] },
@@ -1855,6 +2071,8 @@ describe('AgentsPage reconnect reconciliation', () => {
     // turn elsewhere records that every hop refuses `xhigh`.
     deferModelReads = true;
     fireEvent.pointerEnter(document.querySelector('[data-effort-field]') as HTMLElement);
+    fireEvent.click(screen.getByRole('button', { name: 'xhigh', exact: true }));
+    expect(api.updateVibeAgent).not.toHaveBeenCalled();
     modelCatalog = {
       models: [],
       reasoningOptions: { 'reasoning-model': [{ value: 'medium', label: 'Medium' }] },
@@ -1868,6 +2086,7 @@ describe('AgentsPage reconnect reconciliation', () => {
     // The read from before the visit lands last, and must not bring `xhigh` back.
     act(() => stale());
     expect(screen.queryByRole('button', { name: 'xhigh', exact: true })).toBeNull();
+    expect(api.updateVibeAgent).not.toHaveBeenCalled();
   });
 
   it('keeps a still-valid effort untouched when the model changes', async () => {

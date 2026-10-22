@@ -90,9 +90,9 @@ for xAI's). The loop answers it by rendering the request again, never by the gen
   never hands it back;
 - after `opaque_refused`, with each refused (identity, kind) in `opaque_refused`, so none of that identity's payloads
   of that kind is sent again: its earlier search calls take their portable form (the query and sources, readable;
-  no encrypted data), and its thinking goes without signatures. The loop keeps each new pair as a `replay_refusal`
-  row before resending, so the Session's later turns, and its forks, start without them (`transcript.md`). Each
-  pair is answered once; refused again, the error ends the run.
+  no encrypted data), and its thinking is left out, as a different origin's (`cross-provider.md`). The loop keeps
+  each new pair as a `replay_refusal` row before resending, so the Session's later turns, and its forks, start
+  without them (`transcript.md`). Each pair is answered once; refused again, the error ends the run.
 
 A `pause_turn` continuation's `pin_unavailable` comes after output, so it is no refusal (`conversion-tables.md`).
 
