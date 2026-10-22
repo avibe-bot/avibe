@@ -1,8 +1,9 @@
 """C-1 hosted-tool shapes (``vibey-hosted-tools.md`` §4.2 and §12 items 1-6, 22, 28).
 
 The dataclasses in ``core.agent_core.messages`` are the producer; ``message.schema.json``
-is the contract other components read. Every invariant is checked twice: the schema and
-the reader must refuse the same shapes, and what the producer writes must validate.
+is the contract other components read. Known-tool shapes are checked by both the
+schema and the reader, and what the producer writes must validate. Stored unknown
+tools have a reader-only portable fallback; new writes remain strict.
 """
 
 from __future__ import annotations
@@ -283,6 +284,12 @@ VIOLATIONS = {
     "bad-source-id": _set(NATIVE, ("content", 0, "native", "source_id"), "xai-key"),
     "summary-without-hosted-block": _set(message_to_dict(_produced()[1]), ("hosted_summary",), {"counts": {}, "cited_sources": []}),
     "hosted-block-without-summary": _without(NATIVE, (), "hosted_summary"),
+    "mixed-hosted-block-without-summary": _without(
+        _set(NATIVE, ("content", 0, "tool"), "web_fetch"), (), "hosted_summary"
+    ),
+    "mixed-known-tool-with-invalid-action": _set(
+        _set(NATIVE, ("content", 0, "tool"), "web_fetch"), ("content", 1, "action"), {"type": "fetch"}
+    ),
     "included-with-usd": _set(NATIVE, ("hosted_summary", "cost"), {"basis": "included", "usd": 0.1}),
     "list-without-usd": _set(NATIVE, ("hosted_summary", "cost"), {"basis": "list"}),
     "negative-usd": _set(NATIVE, ("hosted_summary", "cost", "usd"), -0.01),
@@ -333,6 +340,7 @@ def test_a_stored_proxied_result_for_an_unknown_tool_loads_as_a_plain_result(cap
     assert [record.levelname for record in caplog.records] == ["WARNING"]
 
 
+@pytest.mark.parametrize("keep_known", [False, True], ids=["all-unknown", "mixed"])
 @pytest.mark.parametrize(
     ("action", "record", "expected"),
     [
@@ -345,17 +353,29 @@ def test_a_stored_proxied_result_for_an_unknown_tool_loads_as_a_plain_result(cap
     ],
     ids=["query-and-source", "placeholder"],
 )
-def test_a_native_unknown_hosted_block_loads_as_portable_text(action, record, expected, caplog):
+def test_a_native_unknown_hosted_block_loads_as_portable_text(action, record, expected, keep_known, caplog):
     stored = copy.deepcopy(NATIVE)
-    stored["content"] = [stored["content"][0]]
+    if not keep_known:
+        stored["content"] = stored["content"][:1]
     stored["content"][0].update(tool="web_fetch", action=action, record=record)
+    original = copy.deepcopy(stored)
 
     loaded = message_from_dict(stored)
 
     assert isinstance(loaded, AssistantMessage)
-    assert loaded.hosted_summary is None
-    assert len(loaded.content) == 1 and isinstance(loaded.content[0], TextBlock)
+    if keep_known:
+        assert loaded.hosted_summary is not None
+        assert loaded.hosted_summary.counts == {}
+        assert loaded.hosted_summary.cited_sources == ()
+        assert loaded.hosted_summary.cost is None
+    else:
+        assert loaded.hosted_summary is None
+    portable = message_to_dict(loaded)
+    assert portable["content"][1:] == stored["content"][1:]
+    assert isinstance(loaded.content[0], TextBlock)
     assert all(fragment in loaded.content[0].text for fragment in expected)
+    VALIDATOR.validate(portable)
+    assert stored == original
     assert [record.levelname for record in caplog.records] == ["WARNING"]
 
 

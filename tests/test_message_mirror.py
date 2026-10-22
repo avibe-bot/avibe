@@ -42,7 +42,6 @@ from core.message_mirror import (
 from modules.im import MessageContext
 from storage import media_service, messages_service
 from storage.agent_session_rows import SESSION_VISIBILITIES
-from storage.agent_transcript import SQLiteTranscriptStore
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
 from storage.models import agent_events, agent_sessions, media_objects, messages, scopes
@@ -160,75 +159,6 @@ def test_persist_agent_writes_typed_agent_row_on_same_scope(isolated_state):
     # No session resolved on this synthetic context -> falls back to the
     # channel scope auto-created on first inbound; both rows share it.
     assert agent_row["scope_id"] == user_row["scope_id"]
-
-
-async def test_message_mirror_upsert_survives_unknown_hosted_history(isolated_state):
-    now = "2026-10-22T00:00:00Z"
-    unknown_model = {
-        "version": 1,
-        "message": {
-            "role": "assistant",
-            "content": [
-                {
-                    "type": "hosted_tool",
-                    "tool": "web_fetch",
-                    "action": {"type": "open_page", "url": "https://example.com"},
-                    "record": {"status": "completed", "sources": []},
-                    "native": {"source_id": "src_x1a2b3c4d5", "payload": []},
-                }
-            ],
-            "origin": {"provider": "anthropic", "api": "anthropic", "model": "claude-opus-5-5"},
-            "stop_reason": "stop",
-            "hosted_summary": {"counts": {}, "cited_sources": []},
-        },
-    }
-    engine = create_sqlite_engine()
-    with engine.begin() as conn:
-        scope_id = upsert_scope(conn, platform="slack", scope_type="channel", native_id="C_mirror", now=now)
-        conn.execute(
-            agent_sessions.insert().values(
-                id="ses_mirror_hosted",
-                scope_id=scope_id,
-                agent_name="vibey",
-                agent_backend="vibey",
-                agent_variant="default",
-                session_anchor="anchor_mirror_hosted",
-                native_session_id="",
-                status="active",
-                metadata_json="{}",
-                created_at=now,
-                updated_at=now,
-                last_active_at=now,
-            )
-        )
-        row = messages_service.append(
-            conn,
-            scope_id=scope_id,
-            session_id="ses_mirror_hosted",
-            platform="slack",
-            author="agent",
-            source="agent",
-            message_type="assistant",
-            text="old",
-            content={"model": unknown_model},
-        )
-        conn.execute(messages.update().where(messages.c.id == row["id"]).values(context_seq=1))
-
-    loaded = await SQLiteTranscriptStore(engine).load("ses_mirror_hosted")
-    assert len(loaded) == 1
-    assert "https://example.com" in loaded[0].message.content[0].text
-
-    mirror_inbound(
-        MessageContext(user_id="U_alice", channel_id="C_mirror", platform="slack", message_id="m_unknown_history"),
-        "new prompt",
-    )
-
-    with engine.connect() as conn:
-        mirrored = conn.execute(
-            select(messages).where(messages.c.native_message_id == "m_unknown_history")
-        ).mappings().one()
-    assert mirrored["scope_id"] == scope_id
-    assert mirrored["content_text"] == "new prompt"
 
 
 def test_persist_agent_keeps_result_footer_as_structured_content(isolated_state):

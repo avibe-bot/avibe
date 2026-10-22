@@ -426,10 +426,15 @@ never dropped.
   from receiving it), so an `image_generation_call` is ignored like any undeclared item, and a line over 8 MiB fails
   the stream like any oversized line. The #2589 codes `image_not_streamed` and `provider_no_image` lose their
   producers and stay in `HOSTED_ERROR_CODES` for records already written.
-- **rc-era transcripts are not migrated.** An rc session may hold an assistant row with a native `image_generation`
-  `HostedToolBlock`. No reader branch keeps that removed shape alive (owner directive; AGENTS.md forbids reintroducing
-  a removed optional-feature artifact through a compatibility shim), so such a session no longer loads its context
-  (§15).
+- **Stored history survives hosted-tool registry changes.** An unrecognized native `HostedToolBlock` loads as
+  portable text with its query or URL and sources when renderable, otherwise a one-line unavailable placeholder.
+  This includes an rc-era `image_generation` block without restoring its removed native shape or replay path.
+  A proxied result for an unrecognized tool keeps its `content` and `is_error`, with `hosted` dropped. New writes
+  and known-tool rows remain strict; no migration or stored-row rewrite is performed, and each degraded row logs
+  one warning without content.
+  If any native block is degraded, response-wide counts, cited sources and cost are discarded: they cannot be
+  partitioned between the unknown call and the remaining calls. A known block still requires a summary; an existing
+  summary becomes empty when known blocks remain and is omitted when none remain (§15).
 - **Per adapter notes.** xAI's X-search `reasoning` items (`tco_…`) stay ThinkingBlocks. The `custom_tool_call`
   becomes the HostedToolBlock, never a local tool call. Anthropic's `encrypted_content` is kept only in
   `native.payload`. Hosted payloads count against the 32 MiB `StreamAssembler` budget; search events measured at
@@ -826,8 +831,8 @@ under the freeze protocol (`model-hub-contracts/README.md`).
 
 ### 10.1 C-1 (`agent-core-contracts/message.schema.json`, `cross-provider.md`, `conversion-tables.md`)
 
-- A `HostedToolBlock` has `tool` `web_search` | `x_search`, written and read; an rc-era `image_generation` block is not
-  accepted (§4.2, §15).
+- A new `HostedToolBlock` has `tool` `web_search` | `x_search`, and known-tool rows are read strictly. Stored
+  unrecognized tools, including rc-era `image_generation`, load as portable text rather than native blocks (§4.2, §15).
 - `ToolResultMessage.hosted` keeps `{record, execution?, action?}`. `record.images[]` and `action: generate` occur
   only for `image_generate`; `generate` gains the `model` used, with `prompt` required for a `completed` record.
 - `ProxyExecution` becomes the result's `execution` with `mode: "proxy" | "direct"` (direct for an image endpoint)
@@ -975,5 +980,6 @@ and no real credentials.
    for a future hosted tool this build does not know.
 8. **History is readable across hosted-tool registry changes.** A stored hosted result for a tool added by a newer build
    loads as an ordinary tool result, and a native call loads as portable text with its query or URL and sources when
-   available, otherwise a one-line unavailable placeholder. The row is not rewritten, new writes stay strict, and known
-   tools retain strict validation; this is the intentional downgrade path before a new hosted tool ships.
+   available, otherwise a one-line unavailable placeholder. A degraded native block also clears unpartitionable
+   response-wide facts (§4.2). The row is not rewritten, new writes stay strict, and known tools retain strict
+   validation; this is the intentional downgrade path before a new hosted tool ships.

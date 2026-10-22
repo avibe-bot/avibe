@@ -1256,8 +1256,10 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
         )
         if unknown_hosted_tools:
             logger.warning("stored message contains an unrecognized hosted tool; loading it portably")
-            if not any(isinstance(block, HostedToolBlock) for block in content):
-                summary = None
+            # These facts cover the whole response, so they cannot be assigned to just the surviving calls.
+            # Keep the required empty envelope for known blocks, but do not invent a missing summary.
+            if summary is not None:
+                summary = HostedSummary() if any(isinstance(block, HostedToolBlock) for block in content) else None
         return AssistantMessage(
             content=content,
             origin=origin_from_dict(f["origin"]),
