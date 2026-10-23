@@ -2197,6 +2197,8 @@ class FeishuBot(BaseIMClient):
             "codex_agent": "codex_agent",
             "codex_model": "codex_model",
             "codex_reasoning": "codex_reasoning_effort",
+            "vibey_model": "vibey_model",
+            "vibey_reasoning": "vibey_reasoning_effort",
         }
         routing_field = routing_field_map.get(field_name)
         if not routing_field:
@@ -2214,18 +2216,20 @@ class FeishuBot(BaseIMClient):
         selected_value = self._normalize_routing_field_value(self._extract_select_action_value(action))
         draft_routing[routing_field] = selected_value
 
-        if routing_field == "claude_model":
-            draft_routing["claude_reasoning_effort"] = None
+        # A model change offers that model's efforts afresh, so the card is rebuilt around it.
+        refresh_backend = {"claude_model": "claude", "vibey_model": "vibey"}.get(routing_field)
+        if refresh_backend:
+            draft_routing[f"{refresh_backend}_reasoning_effort"] = None
 
         cache["draft_routing"] = draft_routing
         self._routing_cache[cache_key] = cache
 
-        if routing_field != "claude_model" or cache.get("_selected_backend") != "claude":
+        if refresh_backend is None or cache.get("_selected_backend") != refresh_backend:
             return True
 
         card = self._build_routing_backend_options_card(
             channel_id=context.channel_id,
-            selected_backend="claude",
+            selected_backend=refresh_backend,
             _user_id=context.user_id,
             **cache,
         )
@@ -2265,6 +2269,8 @@ class FeishuBot(BaseIMClient):
         codex_agent = _val("codex_agent", "codex_agent")
         codex_model = _val("codex_model", "codex_model")
         codex_reasoning = _val("codex_reasoning", "codex_reasoning_effort")
+        vibey_model = _val("vibey_model", "vibey_model")
+        vibey_reasoning = _val("vibey_reasoning", "vibey_reasoning_effort")
 
         if self._on_routing_update:
             await self._on_routing_update(
@@ -2280,6 +2286,8 @@ class FeishuBot(BaseIMClient):
                 codex_agent=codex_agent,
                 codex_model=codex_model,
                 codex_reasoning_effort=codex_reasoning,
+                vibey_model=vibey_model,
+                vibey_reasoning_effort=vibey_reasoning,
                 is_dm=context.platform_specific.get("is_dm", False),
             )
 
@@ -2653,6 +2661,7 @@ class FeishuBot(BaseIMClient):
             "codex_agents": kwargs.get("codex_agents", []),
             "codex_models": kwargs.get("codex_models", []),
             "backend_reasoning_options": kwargs.get("backend_reasoning_options", {}),
+            "vibey_models": kwargs.get("vibey_models", []),
         }
 
         # --- Backend selector options ---
@@ -2741,6 +2750,7 @@ class FeishuBot(BaseIMClient):
         codex_agents = kwargs.get("codex_agents", [])
         codex_models = kwargs.get("codex_models", [])
         backend_reasoning_options = kwargs.get("backend_reasoning_options", {})
+        vibey_models = kwargs.get("vibey_models", [])
 
         def _routing_value(field_name: str) -> Optional[str]:
             if field_name in draft_routing:
@@ -2956,6 +2966,62 @@ class FeishuBot(BaseIMClient):
                     "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectReasoningEffort")},
                     "options": cx_re_options,
                     "initial_option": cx_current_re if cx_current_re else "__default__",
+                }
+            )
+
+        # ---- Vibey section ----
+        elif selected_backend == "vibey":
+            vb_current_model = _routing_value("vibey_model")
+            vb_model_options = [
+                {"text": {"tag": "plain_text", "content": t("common.default")}, "value": "__default__"}
+            ]
+            for entry in vibey_models:
+                value = entry.get("value")
+                if value:
+                    vb_model_options.append(
+                        {"text": {"tag": "plain_text", "content": str(entry.get("label") or value)[:60]}, "value": value}
+                    )
+            # Keep a stored model the menu no longer lists, so saving does not silently drop it.
+            if vb_current_model and not any(option["value"] == vb_current_model for option in vb_model_options):
+                vb_model_options.append(
+                    {"text": {"tag": "plain_text", "content": vb_current_model[:60]}, "value": vb_current_model}
+                )
+            form_elements.append({"tag": "markdown", "content": t("modal.routing.model")})
+            form_elements.append(
+                {
+                    "tag": "select_static",
+                    "name": "vibey_model",
+                    "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectModel")},
+                    "options": vb_model_options,
+                    "initial_option": vb_current_model if vb_current_model else "__default__",
+                }
+            )
+
+            vb_re_defs = resolve_model_reasoning_options(
+                backend_reasoning_options.get("vibey"),
+                vb_current_model,
+                build_codex_reasoning_options([]),
+            )
+            vb_current_re = _routing_value("vibey_reasoning_effort")
+            if vb_current_re not in {item["value"] for item in vb_re_defs}:
+                vb_current_re = None
+            vb_re_options = []
+            for item in vb_re_defs:
+                value = item["value"]
+                if value == "__default__":
+                    label = t("common.default")
+                else:
+                    translated = t(f"reasoning.{value}")
+                    label = translated if translated != f"reasoning.{value}" else item["label"]
+                vb_re_options.append({"text": {"tag": "plain_text", "content": label}, "value": value})
+            form_elements.append({"tag": "markdown", "content": t("modal.routing.reasoningEffort")})
+            form_elements.append(
+                {
+                    "tag": "select_static",
+                    "name": "vibey_reasoning",
+                    "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectReasoningEffort")},
+                    "options": vb_re_options,
+                    "initial_option": vb_current_re if vb_current_re else "__default__",
                 }
             )
 

@@ -1337,6 +1337,8 @@ def test_routing_callback_save_persists_selected_backend() -> None:
         claude_reasoning_effort=None,
         codex_model="gpt-5",
         codex_reasoning_effort="high",
+        vibey_model=None,
+        vibey_reasoning_effort=None,
         picker_field=None,
         picker_page=0,
     )
@@ -1489,6 +1491,9 @@ def test_routing_state_keeps_backend_picker_entry_for_extra_backends(extra_backe
         claude_reasoning_effort=None,
         codex_model=None,
         codex_reasoning_effort=None,
+        vibey_models=[],
+        vibey_model=None,
+        vibey_reasoning_effort=None,
         picker_field=None,
         picker_page=0,
     )
@@ -1530,6 +1535,9 @@ def test_routing_callback_backend_picker_can_select_extra_backend(extra_backend)
         claude_reasoning_effort=None,
         codex_model=None,
         codex_reasoning_effort=None,
+        vibey_models=[],
+        vibey_model=None,
+        vibey_reasoning_effort=None,
         picker_field=None,
         picker_page=0,
     )

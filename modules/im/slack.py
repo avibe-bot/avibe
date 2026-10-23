@@ -2547,6 +2547,7 @@ class SlackBot(BaseIMClient):
                         "claude_agent_select",
                         "claude_model_select",
                         "codex_model_select",
+                        "vibey_model_select",
                     }
                     # Also check for prefixed action IDs (reasoning selects have unique suffixes)
                     should_update = (
@@ -2853,6 +2854,12 @@ class SlackBot(BaseIMClient):
             if codex_reasoning == "__default__":
                 codex_reasoning = None
 
+            vibey_selection = parse_routing_modal_selection(
+                view=view,
+                action={},
+                fallback_selected_backend=backend or "",
+            )
+
             # Update routing via callback
             if hasattr(self, "_on_routing_update"):
                 await self._on_routing_update(
@@ -2868,6 +2875,8 @@ class SlackBot(BaseIMClient):
                     codex_agent=codex_agent,
                     codex_model=codex_model,
                     codex_reasoning_effort=codex_reasoning,
+                    vibey_model=vibey_selection.selected_vibey_model,
+                    vibey_reasoning_effort=vibey_selection.selected_vibey_reasoning,
                     is_dm=isinstance(channel_id, str) and channel_id.startswith("D"),
                 )
 
@@ -3564,6 +3573,7 @@ class SlackBot(BaseIMClient):
         codex_agents: list = None,
         codex_models: list = None,
         backend_reasoning_options: dict = None,
+        vibey_models: list = None,
         selected_backend: object = _UNSET,
         selected_opencode_agent: object = _UNSET,
         selected_opencode_model: object = _UNSET,
@@ -3574,6 +3584,8 @@ class SlackBot(BaseIMClient):
         selected_codex_agent: object = _UNSET,
         selected_codex_model: object = _UNSET,
         selected_codex_reasoning: object = _UNSET,
+        selected_vibey_model: object = _UNSET,
+        selected_vibey_reasoning: object = _UNSET,
     ) -> dict:
         """Build modal view for agent/model routing settings."""
         # Build backend options
@@ -4170,6 +4182,112 @@ class SlackBot(BaseIMClient):
                 ]
             )
 
+        # Vibey options: its Model Hub models and each model's efforts (only if vibey is selected)
+        if effective_backend == "vibey" and "vibey" in registered_backends:
+            if selected_vibey_model is _UNSET:
+                current_vb_model = canonical_model if _canonical_applies_to_backend("vibey") else None
+            else:
+                current_vb_model = selected_vibey_model
+
+            if selected_vibey_reasoning is _UNSET:
+                current_vb_reasoning = canonical_reasoning if _canonical_applies_to_backend("vibey") else None
+            else:
+                current_vb_reasoning = selected_vibey_reasoning
+
+            vb_model_options = [
+                {"text": {"type": "plain_text", "text": self._t("common.default")}, "value": "__default__"}
+            ]
+            for entry in vibey_models or []:
+                value = entry.get("value")
+                if value:
+                    vb_model_options.append(
+                        {
+                            "text": {"type": "plain_text", "text": str(entry.get("label") or value)[:75]},
+                            "value": value,
+                        }
+                    )
+            # Keep a stored model the menu no longer lists, so saving does not silently drop it.
+            if current_vb_model and not any(opt["value"] == current_vb_model for opt in vb_model_options):
+                vb_model_options.append(
+                    {"text": {"type": "plain_text", "text": current_vb_model[:75]}, "value": current_vb_model}
+                )
+            vb_model_options = vb_model_options[:100]
+            initial_vb_model = next(
+                (opt for opt in vb_model_options if opt["value"] == current_vb_model),
+                vb_model_options[0],
+            )
+
+            vb_reasoning_entries = resolve_model_reasoning_options(
+                (backend_reasoning_options or {}).get("vibey"),
+                current_vb_model,
+                build_codex_reasoning_options([]),
+            )
+            available_vb_reasoning = {entry.get("value") for entry in vb_reasoning_entries}
+            selected_vb_reasoning = (
+                current_vb_reasoning if current_vb_reasoning in available_vb_reasoning else "__default__"
+            )
+            vb_reasoning_options = []
+            for entry in vb_reasoning_entries:
+                value = entry.get("value")
+                if not value:
+                    continue
+                if value == "__default__":
+                    label = self._t("common.default")
+                else:
+                    translated = self._t(f"reasoning.{value}")
+                    label = translated if translated != f"reasoning.{value}" else entry.get("label", value)
+                vb_reasoning_options.append({"text": {"type": "plain_text", "text": label}, "value": value})
+            initial_vb_reasoning = next(
+                (opt for opt in vb_reasoning_options if opt["value"] == selected_vb_reasoning),
+                vb_reasoning_options[0],
+            )
+            # Slack keeps an input's state across views.update while its action_id stays the same, so the
+            # effort select is keyed by model: a model change then offers that model's efforts afresh.
+            vb_reasoning_action_id = (
+                "vibey_reasoning_select__"
+                + hashlib.sha1((current_vb_model or "__default__").encode("utf-8")).hexdigest()[:8]
+            )
+
+            blocks.extend(
+                [
+                    {"type": "divider"},
+                    {
+                        "type": "section",
+                        "text": {"type": "mrkdwn", "text": f"*{self._t('modal.routing.vibeySettings')}*"},
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "vibey_model_block",
+                        "optional": True,
+                        "dispatch_action": True,
+                        "element": {
+                            "type": "static_select",
+                            "action_id": "vibey_model_select",
+                            "placeholder": {"type": "plain_text", "text": self._t("modal.routing.selectModel")},
+                            "options": vb_model_options,
+                            "initial_option": initial_vb_model,
+                        },
+                        "label": {"type": "plain_text", "text": self._t("modal.routing.model")},
+                    },
+                    {
+                        "type": "input",
+                        "block_id": "vibey_reasoning_block",
+                        "optional": True,
+                        "element": {
+                            "type": "static_select",
+                            "action_id": vb_reasoning_action_id,
+                            "placeholder": {
+                                "type": "plain_text",
+                                "text": self._t("modal.routing.selectReasoningEffort"),
+                            },
+                            "options": vb_reasoning_options,
+                            "initial_option": initial_vb_reasoning,
+                        },
+                        "label": {"type": "plain_text", "text": self._t("modal.routing.reasoningEffort")},
+                    },
+                ]
+            )
+
         # Add tip
         blocks.append(
             {
@@ -4350,6 +4468,7 @@ class SlackBot(BaseIMClient):
         codex_agents: list = None,
         codex_models: list = None,
         backend_reasoning_options: dict = None,
+        vibey_models: list = None,
     ):
         """Open a modal dialog for agent/model routing settings"""
         self._ensure_clients()
@@ -4367,6 +4486,7 @@ class SlackBot(BaseIMClient):
             codex_agents=codex_agents,
             codex_models=codex_models,
             backend_reasoning_options=backend_reasoning_options,
+            vibey_models=vibey_models,
         )
 
         try:
@@ -4391,6 +4511,7 @@ class SlackBot(BaseIMClient):
         codex_agents: list = None,
         codex_models: list = None,
         backend_reasoning_options: dict = None,
+        vibey_models: list = None,
         selected_backend: Optional[str] = None,
         selected_opencode_agent: Optional[str] = None,
         selected_opencode_model: Optional[str] = None,
@@ -4401,6 +4522,8 @@ class SlackBot(BaseIMClient):
         selected_codex_agent: Optional[str] = None,
         selected_codex_model: Optional[str] = None,
         selected_codex_reasoning: Optional[str] = None,
+        selected_vibey_model: Optional[str] = None,
+        selected_vibey_reasoning: Optional[str] = None,
     ) -> None:
         """Update routing modal when selections change."""
         self._ensure_clients()
@@ -4418,6 +4541,7 @@ class SlackBot(BaseIMClient):
             codex_agents=codex_agents,
             codex_models=codex_models,
             backend_reasoning_options=backend_reasoning_options,
+            vibey_models=vibey_models,
             selected_backend=selected_backend,
             selected_opencode_agent=selected_opencode_agent,
             selected_opencode_model=selected_opencode_model,
@@ -4428,6 +4552,8 @@ class SlackBot(BaseIMClient):
             selected_codex_agent=selected_codex_agent,
             selected_codex_model=selected_codex_model,
             selected_codex_reasoning=selected_codex_reasoning,
+            selected_vibey_model=selected_vibey_model,
+            selected_vibey_reasoning=selected_vibey_reasoning,
         )
 
         try:

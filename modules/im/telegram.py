@@ -78,6 +78,7 @@ class _TelegramRoutingState:
     claude_models: list[Any]
     codex_models: list[Any]
     backend_reasoning_options: dict[str, dict[str, list[dict[str, str]]]]
+    vibey_models: list[dict[str, str]]
     backend: str
     opencode_agent: Optional[str] = None
     opencode_model: Optional[str] = None
@@ -87,6 +88,8 @@ class _TelegramRoutingState:
     claude_reasoning_effort: Optional[str] = None
     codex_model: Optional[str] = None
     codex_reasoning_effort: Optional[str] = None
+    vibey_model: Optional[str] = None
+    vibey_reasoning_effort: Optional[str] = None
     picker_field: Optional[str] = None
     picker_page: int = 0
 
@@ -1744,19 +1747,24 @@ class TelegramBot(BaseIMClient):
             claude_reasoning_effort=current_effort if backend == "claude" else None,
             codex_model=current_model if backend == "codex" else None,
             codex_reasoning_effort=current_effort if backend == "codex" else None,
+            vibey_models=list(kwargs.get("vibey_models") or []),
+            vibey_model=current_model if backend == "vibey" else None,
+            vibey_reasoning_effort=current_effort if backend == "vibey" else None,
         )
-        if backend in {"claude", "codex"}:
+        if backend in {"claude", "codex", "vibey"}:
             from modules.agents.opencode.utils import (
                 build_claude_reasoning_options,
                 build_codex_reasoning_options,
                 resolve_model_reasoning_options,
             )
 
-            target_model = state.claude_model if backend == "claude" else state.codex_model
+            target_model = getattr(state, f"{backend}_model")
             fallback = (
                 build_claude_reasoning_options(target_model)
                 if backend == "claude"
                 else build_codex_reasoning_options()
+                if backend == "codex"
+                else build_codex_reasoning_options([])
             )
             available_efforts = {
                 entry.get("value")
@@ -1822,8 +1830,17 @@ class TelegramBot(BaseIMClient):
             "claude_reasoning_effort": self._t("routing.label.reasoningEffort"),
             "codex_model": self._t("routing.label.model"),
             "codex_reasoning_effort": self._t("routing.label.reasoningEffort"),
+            "vibey_model": self._t("routing.label.model"),
+            "vibey_reasoning_effort": self._t("routing.label.reasoningEffort"),
         }
         return mapping.get(field or "", field or "")
+
+    @staticmethod
+    def _vibey_model_label(state: _TelegramRoutingState) -> Optional[str]:
+        return next(
+            (str(entry.get("label") or "") for entry in state.vibey_models if entry.get("value") == state.vibey_model),
+            None,
+        ) or None
 
     def _question_definition(self, question: Any) -> tuple[str, str, list[tuple[str, str]], bool]:
         if isinstance(question, dict):
@@ -1988,6 +2005,14 @@ class TelegramBot(BaseIMClient):
             lines.append(
                 f"{self._t('routing.label.reasoningEffort')}: {self._option_label(state.codex_reasoning_effort)}"
             )
+        elif state.backend == "vibey":
+            lines.append(
+                f"{self._t('routing.label.model')}: "
+                f"{self._option_label(state.vibey_model, self._vibey_model_label(state))}"
+            )
+            lines.append(
+                f"{self._t('routing.label.reasoningEffort')}: {self._option_label(state.vibey_reasoning_effort)}"
+            )
         return lines
 
     def _routing_picker_options(self, state: _TelegramRoutingState) -> list[tuple[str, Optional[str]]]:
@@ -2082,6 +2107,25 @@ class TelegramBot(BaseIMClient):
                 )
                 if entry.get("value")
             ]
+        if field == "vibey_model":
+            return [(self._t("common.default"), None)] + [
+                (str(entry.get("label") or entry["value"]), str(entry["value"]))
+                for entry in state.vibey_models
+                if entry.get("value")
+            ]
+        if field == "vibey_reasoning_effort":
+            return [
+                (
+                    self._option_label(None if entry.get("value") == "__default__" else str(entry.get("value"))),
+                    None if entry.get("value") == "__default__" else str(entry.get("value")),
+                )
+                for entry in resolve_model_reasoning_options(
+                    state.backend_reasoning_options.get("vibey"),
+                    state.vibey_model,
+                    build_codex_reasoning_options([]),
+                )
+                if entry.get("value")
+            ]
         return []
 
     def _apply_routing_option(self, state: _TelegramRoutingState, value: Optional[str]) -> None:
@@ -2095,6 +2139,8 @@ class TelegramBot(BaseIMClient):
             state.claude_reasoning_effort = None
         if field == "codex_model":
             state.codex_reasoning_effort = None
+        if field == "vibey_model":
+            state.vibey_reasoning_effort = None
         state.picker_field = None
         state.picker_page = 0
 
@@ -2198,6 +2244,28 @@ class TelegramBot(BaseIMClient):
                     )
                 ]
             )
+        elif state.backend == "vibey":
+            rows.append(
+                [
+                    InlineButton(
+                        text=(
+                            f"{self._t('routing.label.model')}: "
+                            f"{self._option_label(state.vibey_model, self._vibey_model_label(state))}"
+                        )[:40],
+                        callback_data="tg_route:field:vibey_model",
+                    )
+                ]
+            )
+            rows.append(
+                [
+                    InlineButton(
+                        text=f"{self._t('routing.label.reasoningEffort')}: {self._option_label(state.vibey_reasoning_effort)}"[
+                            :40
+                        ],
+                        callback_data="tg_route:field:vibey_reasoning_effort",
+                    )
+                ]
+            )
 
         rows.append(
             [
@@ -2266,6 +2334,8 @@ class TelegramBot(BaseIMClient):
                 "claude_reasoning_effort": state.claude_reasoning_effort,
                 "codex_model": state.codex_model,
                 "codex_reasoning_effort": state.codex_reasoning_effort,
+                "vibey_model": state.vibey_model,
+                "vibey_reasoning_effort": state.vibey_reasoning_effort,
                 "is_dm": state.is_dm,
                 "platform": "telegram",
             }

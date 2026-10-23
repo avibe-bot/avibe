@@ -458,6 +458,7 @@ class SettingsHandler(BaseHandler):
         claude_models = []
         codex_agents = []
         codex_models = []
+        vibey_models = []
         backend_reasoning_options = {}
 
         if "opencode" in backends_to_load:
@@ -522,6 +523,14 @@ class SettingsHandler(BaseHandler):
             except Exception as e:
                 logger.warning(f"Failed to fetch Codex data: {e}")
 
+        if "vibey" in backends_to_load:
+            try:
+                menu = await asyncio.to_thread(self._vibey_routing_menu)
+                if menu is not None:
+                    vibey_models, backend_reasoning_options["vibey"] = menu
+            except Exception as e:
+                logger.warning(f"Failed to fetch Vibey data: {e}")
+
         return RoutingModalData(
             registered_backends=registered_backends,
             current_backend=visible_current_backend,
@@ -534,7 +543,42 @@ class SettingsHandler(BaseHandler):
             codex_agents=codex_agents,
             codex_models=codex_models,
             backend_reasoning_options=backend_reasoning_options,
+            vibey_models=vibey_models,
         )
+
+    def _vibey_routing_menu(self) -> Optional[tuple[list[dict[str, str]], dict[str, list[dict[str, str]]]]]:
+        """Vibey's model menu and per-model efforts, read from Model Hub as the Web route picker reads them.
+
+        An effort Model Hub's ``effort_menu`` omits would only fail, so it is not offered. The ``""`` key holds
+        the efforts of the model a route without its own model inherits: the built-in Vibey Agent's.
+        """
+        from modules.agents.opencode.utils import build_codex_reasoning_options
+
+        model_hub_service = getattr(self.controller, "model_hub_service", None)
+        if model_hub_service is None:
+            return None
+        catalog = model_hub_service.get_agent_sources("vibey").get("catalog_models") or []
+        models: list[dict[str, str]] = []
+        reasoning_options: dict[str, list[dict[str, str]]] = {}
+        for row in catalog:
+            model_id = str(row.get("id") or "").strip()
+            if not model_id or row.get("routeable") is False or model_id in reasoning_options:
+                continue
+            omitted = set((row.get("effort_menu") or {}).get("omitted") or [])
+            efforts = (
+                []
+                if row.get("supports_reasoning") is False
+                else [effort for effort in row.get("reasoning_efforts") or [] if effort not in omitted]
+            )
+            models.append({"value": model_id, "label": str(row.get("display_name") or model_id)})
+            # The shared option shape: "(Default)" first, then the catalog's efforts in order.
+            reasoning_options[model_id] = build_codex_reasoning_options(efforts)
+        store = getattr(self.controller, "vibe_agent_store", None)
+        agent = store.get_builtin_default_agent_for_backend("vibey", enabled_only=False) if store else None
+        inherited = reasoning_options.get(str(getattr(agent, "model", None) or "").strip())
+        if inherited:
+            reasoning_options[""] = inherited
+        return models, reasoning_options
 
     def _is_backend_enabled(self, backend: str) -> bool:
         if is_builtin_backend(backend):
@@ -829,6 +873,7 @@ class SettingsHandler(BaseHandler):
                     codex_agents=routing_data.codex_agents,
                     codex_models=routing_data.codex_models,
                     backend_reasoning_options=routing_data.backend_reasoning_options,
+                    vibey_models=routing_data.vibey_models,
                     selected_backend=visible_selected_backend,
                     selected_opencode_agent=selection.selected_opencode_agent,
                     selected_opencode_model=selection.selected_opencode_model,
@@ -839,6 +884,8 @@ class SettingsHandler(BaseHandler):
                     selected_codex_agent=selection.selected_codex_agent,
                     selected_codex_model=selection.selected_codex_model,
                     selected_codex_reasoning=selection.selected_codex_reasoning,
+                    selected_vibey_model=selection.selected_vibey_model,
+                    selected_vibey_reasoning=selection.selected_vibey_reasoning,
                 )
         except Exception as e:
             logger.error(f"Error updating routing modal: {e}", exc_info=True)
@@ -859,6 +906,8 @@ class SettingsHandler(BaseHandler):
         codex_agent: object = _UNSET,
         codex_model: Optional[str] = None,
         codex_reasoning_effort: Optional[str] = None,
+        vibey_model: Optional[str] = None,
+        vibey_reasoning_effort: Optional[str] = None,
         notify_user: bool = True,
         is_dm: bool = False,
         platform: Optional[str] = None,
@@ -898,6 +947,8 @@ class SettingsHandler(BaseHandler):
                     if backend == "claude"
                     else codex_model
                     if backend == "codex"
+                    else vibey_model
+                    if backend == "vibey"
                     else None
                 ),
                 reasoning_effort=(
@@ -907,6 +958,8 @@ class SettingsHandler(BaseHandler):
                     if backend == "claude"
                     else codex_reasoning_effort
                     if backend == "codex"
+                    else vibey_reasoning_effort
+                    if backend == "vibey"
                     else None
                 ),
                 opencode_agent=opencode_agent
@@ -947,6 +1000,11 @@ class SettingsHandler(BaseHandler):
                     parts.append(f"{self._t('routing.label.model')}: **{codex_model}**")
                 if codex_reasoning_effort:
                     parts.append(f"{self._t('routing.label.reasoningEffort')}: **{codex_reasoning_effort}**")
+            elif backend == "vibey":
+                if vibey_model:
+                    parts.append(f"{self._t('routing.label.model')}: **{vibey_model}**")
+                if vibey_reasoning_effort:
+                    parts.append(f"{self._t('routing.label.reasoningEffort')}: **{vibey_reasoning_effort}**")
             if needs_new_session_hint:
                 parts.extend(["", self._t("success.routingUpdateNeedsNewSession")])
 
@@ -963,7 +1021,8 @@ class SettingsHandler(BaseHandler):
                 f"claude_agent={claude_agent}, claude_model={claude_model}, "
                 f"claude_reasoning_effort={normalized_claude_reasoning_effort}, "
                 f"codex_agent={resolved_codex_agent}, codex_model={codex_model}, "
-                f"codex_reasoning_effort={codex_reasoning_effort}"
+                f"codex_reasoning_effort={codex_reasoning_effort}, "
+                f"vibey_model={vibey_model}, vibey_reasoning_effort={vibey_reasoning_effort}"
             )
 
         except Exception as e:

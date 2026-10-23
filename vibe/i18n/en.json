@@ -683,6 +683,7 @@
       "codexAgent": "Codex Agent",
       "selectCodexAgent": "Select Codex agent",
       "codexReasoningEffort": "Reasoning Effort",
+      "vibeySettings": "Vibey Settings",
       "tip": "Select (Default) to use the backend's configured defaults."
     }
   },

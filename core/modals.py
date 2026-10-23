@@ -23,6 +23,8 @@ class RoutingModalData:
     codex_agents: list[str]
     codex_models: list[str]
     backend_reasoning_options: dict[str, dict[str, list[dict[str, str]]]]
+    # Vibey's Model Hub menu as ``{"value": model_id, "label": display_name}`` entries.
+    vibey_models: list[dict[str, str]]
 
     def as_kwargs(self) -> dict[str, Any]:
         return {
@@ -37,6 +39,7 @@ class RoutingModalData:
             "codex_agents": self.codex_agents,
             "codex_models": self.codex_models,
             "backend_reasoning_options": self.backend_reasoning_options,
+            "vibey_models": self.vibey_models,
         }
 
 
@@ -54,3 +57,5 @@ class RoutingModalSelection:
     selected_codex_agent: Optional[str] = None
     selected_codex_model: Optional[str] = None
     selected_codex_reasoning: Optional[str] = None
+    selected_vibey_model: Optional[str] = None
+    selected_vibey_reasoning: Optional[str] = None

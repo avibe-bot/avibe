@@ -227,6 +227,8 @@ class FeishuRoutingCardTests(unittest.IsolatedAsyncioTestCase):
                 "codex_agent": "reviewer",
                 "codex_model": "gpt-5.4",
                 "codex_reasoning_effort": "high",
+                "vibey_model": None,
+                "vibey_reasoning_effort": None,
                 "is_dm": False,
             },
         )

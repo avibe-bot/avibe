@@ -269,6 +269,30 @@ def test_handle_routing_update_preserves_catalog_claude_effort() -> None:
     send_message.assert_not_awaited()
 
 
+def test_handle_routing_update_saves_vibey_model_and_effort_on_the_vibey_route() -> None:
+    settings_manager = _StubSettingsManager(RoutingSettings(agent_name="opencode", model="openai/gpt-5"))
+    handler, send_message = _make_handler(settings_manager)
+    handler.controller.vibe_agent_store = SimpleNamespace(routing_name_for_backend=lambda backend: f"{backend}-agent")
+
+    asyncio.run(
+        handler.handle_routing_update(
+            user_id="42",
+            channel_id="-100123",
+            backend="vibey",
+            opencode_agent=None,
+            opencode_model="openai/gpt-5",
+            vibey_model="claude-opus-5-5",
+            vibey_reasoning_effort="xhigh",
+            platform="telegram",
+        )
+    )
+
+    saved = settings_manager.saved_routing
+    assert (saved.agent_name, saved.model, saved.reasoning_effort) == ("vibey-agent", "claude-opus-5-5", "xhigh")
+    text = send_message.await_args.args[1]
+    assert "claude-opus-5-5" in text and "xhigh" in text
+
+
 def test_handle_routing_update_warns_flat_scope_with_existing_backend_session() -> None:
     handler, send_message, sessions = _make_flat_scope_handler(row={"agent_backend": "opencode"})
 
@@ -612,6 +636,38 @@ def test_gather_routing_modal_data_prefetches_all_backends_when_requested() -> N
         "models:/tmp/workspace",
         "config:/tmp/workspace",
     ]
+
+
+def test_gather_routing_modal_data_reads_vibey_menu_from_model_hub() -> None:
+    handler, server = _make_routing_handler()
+    handler.controller.resolve_agent_for_context = lambda context: "vibey"
+    catalog = [
+        {"id": "model-a", "display_name": "Model A", "routeable": True, "supports_reasoning": True,
+         "reasoning_efforts": ["low", "high", "max"], "effort_menu": {"omitted": ["max"], "not_on": {}}},
+        {"id": "model-b", "display_name": None, "routeable": True, "supports_reasoning": False,
+         "reasoning_efforts": ["low"], "effort_menu": {"omitted": [], "not_on": {}}},
+        {"id": "selector", "routeable": False, "reasoning_efforts": []},
+    ]
+    handler.controller.model_hub_service = SimpleNamespace(
+        get_agent_sources=lambda backend: {"backend": backend, "catalog_models": catalog},
+    )
+    handler.controller.vibe_agent_store = SimpleNamespace(
+        get_builtin_default_agent_for_backend=lambda backend, enabled_only=True: SimpleNamespace(model="model-a"),
+    )
+    context = MessageContext(user_id="U1", channel_id="D0APS47LPU2", platform="slack")
+
+    data = asyncio.run(handler._gather_routing_modal_data(context))
+
+    assert data.current_backend == "vibey"
+    assert data.vibey_models == [{"value": "model-a", "label": "Model A"}, {"value": "model-b", "label": "model-b"}]
+    efforts = {model: [entry["value"] for entry in entries] for model, entries in data.backend_reasoning_options["vibey"].items()}
+    # Model Hub's omitted efforts are not offered; a route without its own model inherits the Vibey Agent's.
+    assert efforts == {
+        "model-a": ["__default__", "low", "high"],
+        "model-b": ["__default__"],
+        "": ["__default__", "low", "high"],
+    }
+    assert server.calls == []
 
 
 def test_gather_routing_modal_data_hides_disabled_backends() -> None:

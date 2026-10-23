@@ -1594,6 +1594,7 @@ class DiscordBot(BaseIMClient):
         codex_agents: list,
         codex_models: list,
         backend_reasoning_options: Optional[dict] = None,
+        vibey_models: Optional[list] = None,
     ):
         interaction = trigger_id if isinstance(trigger_id, discord.Interaction) else None
 
@@ -1669,6 +1670,8 @@ class DiscordBot(BaseIMClient):
                 self.codex_agent = getattr(current_routing, "codex_agent", None) if current_routing else None
                 self.codex_model = _current_model("codex_model", "codex")
                 self.codex_reasoning = _current_reasoning("codex_reasoning_effort", "codex")
+                self.vibey_model = _current_model("vibey_model", "vibey")
+                self.vibey_reasoning = _current_reasoning("vibey_reasoning_effort", "vibey")
                 self._render()
 
             def _render(self):
@@ -2076,6 +2079,86 @@ class DiscordBot(BaseIMClient):
                     reasoning_select.callback = codex_reasoning_callback
                     self.add_item(reasoning_select)
 
+                if self.selected_backend == "vibey":
+                    model_options = [
+                        discord.SelectOption(
+                            label=_prefixed_label("discord.labels.model", self.outer._t("common.default")),
+                            value="__default__",
+                            default=self.vibey_model in (None, "__default__"),
+                        )
+                    ]
+                    vibey_entries = [entry for entry in vibey_models or [] if entry.get("value")]
+                    # Discord caps a select at 25 options; keep the active pick inside the cap.
+                    vibey_entries.sort(key=lambda entry: entry.get("value") != self.vibey_model)
+                    model_options += [
+                        discord.SelectOption(
+                            label=_prefixed_label("discord.labels.model", str(entry.get("label") or entry["value"])),
+                            value=entry["value"],
+                            default=entry["value"] == self.vibey_model,
+                        )
+                        for entry in vibey_entries
+                    ]
+                    model_select = discord.ui.Select(
+                        placeholder=self.outer._t("modal.routing.selectModel"),
+                        options=model_options[:25],
+                        min_values=1,
+                        max_values=1,
+                    )
+
+                    async def vibey_model_callback(select_interaction: discord.Interaction):
+                        if model_select.values:
+                            self.vibey_model = model_select.values[0]
+                            self.vibey_reasoning = None
+                        self._render()
+                        updated_embed = discord.Embed(
+                            title=self._content(),
+                            description=self.outer._t("discord.routingSubtitle"),
+                        )
+                        await select_interaction.response.edit_message(embed=updated_embed, view=self)
+
+                    model_select.callback = vibey_model_callback
+                    self.add_item(model_select)
+
+                    vibey_reasoning_entries = resolve_model_reasoning_options(
+                        (backend_reasoning_options or {}).get("vibey"),
+                        self.vibey_model if self.vibey_model not in (None, "__default__") else None,
+                        build_codex_reasoning_options([]),
+                    )
+                    available_vb_reasoning = {entry.get("value") for entry in vibey_reasoning_entries}
+                    if self.vibey_reasoning not in available_vb_reasoning:
+                        self.vibey_reasoning = None
+                    reasoning_options = []
+                    for entry in vibey_reasoning_entries:
+                        value = entry.get("value")
+                        if not value:
+                            continue
+                        if value == "__default__":
+                            label = self.outer._t("common.default")
+                        else:
+                            translated = self.outer._t(f"reasoning.{value}")
+                            label = translated if translated != f"reasoning.{value}" else entry.get("label", value)
+                        reasoning_options.append(
+                            discord.SelectOption(
+                                label=_prefixed_label("discord.labels.reasoningEffort", label),
+                                value=value,
+                                default=value == (self.vibey_reasoning or "__default__"),
+                            )
+                        )
+                    reasoning_select = discord.ui.Select(
+                        placeholder=self.outer._t("modal.routing.selectReasoningEffort"),
+                        options=reasoning_options,
+                        min_values=1,
+                        max_values=1,
+                    )
+
+                    async def vibey_reasoning_callback(select_interaction: discord.Interaction):
+                        if reasoning_select.values:
+                            self.vibey_reasoning = reasoning_select.values[0]
+                        await select_interaction.response.defer()
+
+                    reasoning_select.callback = vibey_reasoning_callback
+                    self.add_item(reasoning_select)
+
                 save_button = discord.ui.Button(
                     label=self.outer._t("common.save"),
                     style=discord.ButtonStyle.primary,
@@ -2123,6 +2206,8 @@ class DiscordBot(BaseIMClient):
                             codex_agent=_normalize(self.codex_agent),
                             codex_model=_normalize(self.codex_model),
                             codex_reasoning_effort=_normalize(self.codex_reasoning),
+                            vibey_model=_normalize(self.vibey_model),
+                            vibey_reasoning_effort=_normalize(self.vibey_reasoning),
                             notify_user=True,
                             is_dm=interaction.guild is None,
                         )

@@ -59,6 +59,8 @@ def parse_routing_modal_selection(
     codex_agent = _extract_selected_value(values, "codex_agent_block", "codex_agent_select")
     codex_model = _extract_selected_value(values, "codex_model_block", "codex_model_select")
     codex_reasoning = _extract_prefixed_selected_value(values, "codex_reasoning_block", "codex_reasoning_select")
+    vibey_model = _extract_selected_value(values, "vibey_model_block", "vibey_model_select")
+    vibey_reasoning = _extract_prefixed_selected_value(values, "vibey_reasoning_block", "vibey_reasoning_select")
 
     if isinstance(selected_action_id, str) and isinstance(selected_value, str):
         if selected_action_id == "opencode_agent_select":
@@ -79,6 +81,10 @@ def parse_routing_modal_selection(
             codex_model = selected_value
         elif selected_action_id.startswith("codex_reasoning_select"):
             codex_reasoning = selected_value
+        elif selected_action_id == "vibey_model_select":
+            vibey_model = selected_value
+        elif selected_action_id.startswith("vibey_reasoning_select"):
+            vibey_reasoning = selected_value
 
     return RoutingModalSelection(
         selected_backend=selected_backend,
@@ -91,4 +97,6 @@ def parse_routing_modal_selection(
         selected_codex_agent=_normalize_default(codex_agent),
         selected_codex_model=_normalize_default(codex_model),
         selected_codex_reasoning=_normalize_default(codex_reasoning),
+        selected_vibey_model=_normalize_default(vibey_model),
+        selected_vibey_reasoning=_normalize_default(vibey_reasoning),
     )

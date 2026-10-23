@@ -683,6 +683,7 @@
       "codexAgent": "Codex Agent",
       "selectCodexAgent": "选择 Codex Agent",
       "codexReasoningEffort": "推理强度",
+      "vibeySettings": "Vibey 设置",
       "tip": "选择“(默认)”以使用后端的配置默认值。"
     }
   },
