@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sys
 from typing import Optional
 
 from modules.agents import get_agent_display_name
@@ -552,10 +553,11 @@ class SettingsHandler(BaseHandler):
         menu.variants = _unique_options(
             agent.get("name") if isinstance(agent, dict) else agent for agent in agents or []
         )
-        # OpenCode spreads the cap over its providers, so the list is built for the select that shows it.
+        # OpenCode spreads the cap over its providers, so the list is built for the select that shows it; a
+        # platform without a cap (a paged picker) gets every model.
         entries = build_opencode_model_option_items(
             models,
-            max_total=(menu.option_limit - 1) if menu.option_limit else 200,
+            max_total=(menu.option_limit - 1) if menu.option_limit else sys.maxsize,
             preferred_providers=resolve_opencode_provider_preferences(default_config, stored_model),
             allowed_providers=resolve_opencode_allowed_providers(default_config, models),
         )

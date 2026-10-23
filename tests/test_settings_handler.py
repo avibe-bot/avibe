@@ -647,6 +647,19 @@ def test_gather_routing_modal_data_prefetches_all_backends_when_requested() -> N
     ]
 
 
+def test_opencode_route_menu_fits_the_platforms_cap_and_is_whole_without_one() -> None:
+    handler, server = _make_routing_handler()
+    models = {"providers": [{"id": "relay", "name": "Relay", "models": {f"m{i}": {"name": f"M{i}"} for i in range(250)}}]}
+    server.get_available_models = AsyncMock(return_value=models)
+    context = MessageContext(user_id="U1", channel_id="D0APS47LPU2", platform="telegram")
+    sizes = {}
+    for limit in (25, None):  # Discord's select; Telegram's paged picker
+        handler._get_im_client = lambda context, limit=limit: SimpleNamespace(route_option_limit=limit)
+        sizes[limit] = len(asyncio.run(handler._gather_routing_modal_data(context)).menus["opencode"].models)
+
+    assert sizes == {25: 24, None: 250}
+
+
 def test_gather_routing_modal_data_reads_vibey_menu_from_model_hub() -> None:
     handler, server = _make_routing_handler()
     handler.controller.resolve_agent_for_context = lambda context: "vibey"
