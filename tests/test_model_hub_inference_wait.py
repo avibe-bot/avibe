@@ -40,6 +40,12 @@ WIRE = {
 }
 
 
+# Only the local connection to the fixture engine: a busy CI runner can take longer
+# than a few milliseconds to accept it, which failed this suite with a connect
+# timeout before the request reached the fixture. Inference itself has no deadline.
+CONNECT_TIMEOUT_SECONDS = 1.0
+
+
 @pytest.mark.parametrize("protocol", WIRE)
 @pytest.mark.parametrize("phase", ["headers", "first_byte", "prelude", "stream_body", "buffered_body"])
 @pytest.mark.parametrize("cancel", [False, True], ids=["complete", "cancel"])
@@ -70,7 +76,7 @@ def test_connected_inference_waits_for_its_owner(
             # Gateway Sources name their vendor; the bare client fixture is a custom vendor.
             idle_bounded = streaming and entrypoint == "gateway" and protocol in {"anthropic", "openai_responses"}
             assert timeout.sock_read == (client_module._STREAM_IDLE_TIMEOUT_SECONDS if idle_bounded else None)
-            assert timeout.connect == timeout.sock_connect == 0.02
+            assert timeout.connect == timeout.sock_connect == CONNECT_TIMEOUT_SECONDS
             session = real_session(**kwargs)
             sessions.append(session)
             return session
@@ -124,7 +130,7 @@ def test_connected_inference_waits_for_its_owner(
         )
         client = EngineClient(
             EngineConnection(f"http://127.0.0.1:{port}", "fixture-management", "fixture-gateway"),
-            timeout=0.02,
+            timeout=CONNECT_TIMEOUT_SECONDS,
         )
         gateway = None
         adapter = None
