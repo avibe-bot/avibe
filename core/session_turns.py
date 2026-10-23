@@ -5665,9 +5665,18 @@ class SessionTurnManager:
                     evidence=terminal_commit["evidence"],
                     resume_successors=resume,
                 )
-                if not resume:
-                    result["defer_queue_resume"] = True
-                return result
+                # A failure reported before the backend was reached (its Agent
+                # disabled, say) cannot land on a start never accepted. Its start is
+                # provably absent, so it settles as such below rather than staying
+                # open, where it showed as running and recovery re-ran its input.
+                if not (
+                    definitive_prewrite_exit
+                    and not cancelled
+                    and result.get("reason") == "start_acceptance_unproven"
+                ):
+                    if not resume:
+                        result["defer_queue_resume"] = True
+                    return result
             if cancelled:
                 interruption = settled_by or SETTLED_BY_NO_TERMINAL_RESULT
                 resume_after_cancel = bool(

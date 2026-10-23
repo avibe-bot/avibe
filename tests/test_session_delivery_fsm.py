@@ -19,6 +19,7 @@ from core.services.dispatch import TurnDispatchOutcome
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_ATTEMPTING,
     DISPATCH_PHASE_PREWRITE,
+    mark_prewrite_recovery_required,
     prewrite_user_stop_requested,
     set_dispatch_phase,
 )
@@ -47,7 +48,7 @@ from core.session_turns import (
 )
 from core.agent_input import AgentInputMetadata, harness_source
 from core.handlers.message_handler import MessageHandler
-from core.message_context import resolve_turn_sink_key
+from core.message_context import TERMINAL_COMMIT_KEY, resolve_turn_sink_key
 from modules.agents.service import AgentService
 from modules.im import MessageContext
 from modules.im.base import FileAttachment
@@ -5210,6 +5211,90 @@ def test_definite_handler_prewrite_exit_requeues_through_terminal_boundary(
     assert turn is not None
     assert turn["terminal_outcome"] == "not_written"
     assert turn["settled_by"] == "no_terminal_result"
+
+
+@pytest.mark.parametrize("held", [True, False])
+def test_a_prewrite_failure_notice_settles_its_turn_as_unwritten(
+    managers,
+    monkeypatch,
+    held,
+) -> None:
+    """A failure reported before the backend was reached (its Agent is disabled) ends
+    with a failure notice, whose terminal write cannot land on a start never accepted.
+    The Turn still settles as unwritten: left open, it showed the session running and
+    re-ran the input on every recovery pass. An input that needs its owner's decision
+    is held for an explicit retry rather than retried on its own."""
+    manager, _other, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    delivery_id = delivery_store.new_delivery_id()
+    turn_id = delivery_store.new_turn_id()
+    with engine.begin() as conn:
+        delivery = delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="avibe",
+                author="user",
+                source="user",
+                message_type="user",
+                text="hello",
+            ),
+            dispatch_text="hello",
+        )
+        delivery_store.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id="ses_fsm",
+            backend="codex",
+            deliveries=[delivery],
+            dispatch_text="hello",
+        )
+
+    async def failure_notice_before_backend(_controller, context, *_args, **_kwargs):
+        set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+        if held:
+            mark_prewrite_recovery_required(context, "agent_unavailable")
+        # What the notice's terminal emit hands its runner.
+        context.platform_specific[TERMINAL_COMMIT_KEY] = {
+            "settled_by": SETTLED_BY_TERMINAL_RESULT,
+            "evidence": {"result_text": "", "terminal_error": "agent 'codex' is disabled"},
+        }
+        return TurnDispatchOutcome(
+            error="agent 'codex' is disabled",
+            settled_by=SETTLED_BY_TERMINAL_RESULT,
+            backend_dispatch_attempted=False,
+        )
+
+    monkeypatch.setattr(
+        "core.session_turns.dispatch_turn_with_outcome",
+        failure_notice_before_backend,
+    )
+
+    async def run() -> None:
+        await manager._run(
+            "ses_fsm",
+            _context(),
+            "hello",
+            logical_turn_id=turn_id,
+            delivery_id=delivery_id,
+            durable_preallocated=True,
+        )
+        await manager.in_flight["ses_fsm"].task
+
+    asyncio.run(run())
+
+    row = _row(engine, delivery_id)
+    assert row["state"] == "queued"
+    assert delivery_store.requires_explicit_start_retry(row) is held
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+    assert turn is not None
+    assert (turn["state"], turn["terminal_outcome"]) == ("terminal", "not_written")
 
 
 @pytest.mark.anyio

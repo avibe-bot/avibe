@@ -206,3 +206,35 @@ def test_an_agent_that_cannot_run_offers_to_continue_on_vibey(monkeypatch):
         (call,) = emitted_for((lambda t=target: handler._handle_missing_agent(workbench, t, request=request),))
         assert (call.kwargs["output"] is not None) is offered
         assert (handler._t("error.continueOnVibey.workbench") in call.kwargs["display_text"]) is offered
+
+
+def test_an_agent_that_cannot_run_holds_its_input_for_its_owner():
+    """Retrying on its own would fail the same way, so an input that never reached the
+    backend is held for an explicit retry: continue on Vibey, or Retry once the Agent
+    is back. One that already reached it is not claimed as unwritten."""
+    from unittest.mock import AsyncMock, patch
+
+    from core.native_dispatch_phase import (
+        DISPATCH_PHASE_ATTEMPTING,
+        DISPATCH_PHASE_PREWRITE,
+        backend_dispatch_attempted,
+        prewrite_failure_evidence,
+        set_dispatch_phase,
+    )
+    from core.vibe_agents import AgentUnavailableError
+
+    controller = _StubController()
+    handler = MessageHandler(controller)
+    disabled = AgentUnavailableError("agent 'codex' is disabled", agent_name="codex", reason="disabled")
+    contexts = {}
+    for phase in (DISPATCH_PHASE_PREWRITE, DISPATCH_PHASE_ATTEMPTING):
+        context = MessageContext(user_id="U1", channel_id="ses-1", platform="avibe")
+        set_dispatch_phase(context, phase)
+        contexts[phase] = context
+        with patch.dict(MessageHandler._emit_agent_cannot_run.__globals__, emit_backend_failure=AsyncMock()):
+            anyio.run(handler._emit_agent_dispatch_failure, context, None, disabled)
+
+    held = contexts[DISPATCH_PHASE_PREWRITE]
+    assert backend_dispatch_attempted(held) is False
+    assert prewrite_failure_evidence(held) == {"reason": "agent_unavailable", "requires_explicit_retry": True}
+    assert prewrite_failure_evidence(contexts[DISPATCH_PHASE_ATTEMPTING]) == {}
