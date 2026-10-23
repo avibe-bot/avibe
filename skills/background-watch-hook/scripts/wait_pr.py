@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -130,7 +131,10 @@ SUCCESS_BATCH_KEY = "success_batch"
 REVIEW_STALL_KEY = "review_stall_reported"
 REVIEW_STALL_HEAD_KEY = "review_stall_head"
 CODEX_SUMMARY_MARKER = "<!-- codex-pull-request-review-summary -->"
-CODEX_REVIEW_REQUEST = "@codex review"
+# A review request is a comment that is the trigger command and nothing else, the same
+# anchored shape ``DEFAULT_NOISE_COMMENT_PATTERNS`` treats as a trigger; a sentence that
+# merely mentions it is not one.
+CODEX_REVIEW_REQUEST = re.compile(r"\s*@codex\s+review\s*", re.IGNORECASE)
 # Codex reviews almost always conclude within minutes: over 68 reviews on
 # avibe-bot/avibe the median was 3.5 min, p90 15 min and p95 39 min, while a stuck one
 # can sit at "running" for hours. Past this, the review is treated as stalled.
@@ -575,7 +579,7 @@ def _codex_review_stall(
             parsed = _codex_summary_code_review(body) if CODEX_SUMMARY_MARKER in body else None
             if parsed is not None and (summary_at is None or stamp > summary_at):
                 summary_at, code_review = stamp, parsed
-        elif CODEX_REVIEW_REQUEST in body.lower():
+        elif CODEX_REVIEW_REQUEST.fullmatch(body):
             created = _github_time(comment.get("created_at")) or stamp
             request_at = created if request_at is None or created > request_at else request_at
     summary_head = str(code_review.get("commit_sha") or "").casefold() == head.casefold()
@@ -2512,8 +2516,8 @@ def main() -> int:
     if ci_error is not None:
         print(ci_error, file=sys.stderr)
         return 2
-    if args.review_stall_minutes < 0:
-        print("--review-stall-minutes must be 0 (off) or positive", file=sys.stderr)
+    if not math.isfinite(args.review_stall_minutes) or args.review_stall_minutes < 0:
+        print("--review-stall-minutes must be 0 (off) or a finite positive number", file=sys.stderr)
         return 2
     ci_enabled = _ci_enabled(args)
     success_conclusions = _parse_success_conclusions(args.success_conclusion)
@@ -2758,7 +2762,11 @@ def main() -> int:
     reported_stall = (_saved_str(saved, REVIEW_STALL_KEY) or "") if resumed else ""
     saved_stall_head = saved.get(REVIEW_STALL_HEAD_KEY) if resumed else None
     stall_head: dict[str, str] = (
-        {"sha": str(saved_stall_head["sha"]), "at": str(saved_stall_head["at"])}
+        {
+            "sha": str(saved_stall_head["sha"]),
+            "at": str(saved_stall_head["at"]),
+            "status": str(saved_stall_head.get("status") or ""),
+        }
         if isinstance(saved_stall_head, dict)
         and isinstance(saved_stall_head.get("sha"), str)
         and _github_time(saved_stall_head.get("at")) is not None
@@ -3193,8 +3201,16 @@ def main() -> int:
             nonlocal reported_stall, stall_head
             now = _utc_now()
             head = _current_pr_head_sha(state.get("pull_request"))
-            if head and stall_head.get("sha", "").casefold() != head.casefold():
-                stall_head = {"sha": head, "at": now.isoformat()}
+            pr_status = _current_pr_status(state.get("pull_request"))
+            # The clock of a head starts when the head appears, and again when the PR
+            # becomes reviewable (draft or closed to open): a review is expected only from then.
+            if head and (
+                stall_head.get("sha", "").casefold() != head.casefold()
+                or (pr_status == "open" and stall_head.get("status") != "open")
+            ):
+                stall_head = {"sha": head, "at": now.isoformat(), "status": pr_status}
+            elif head:
+                stall_head = {**stall_head, "status": pr_status}
             if args.seed_state or args.catch_up or explicit_replay or not head:
                 return output
             stall = _codex_review_stall(

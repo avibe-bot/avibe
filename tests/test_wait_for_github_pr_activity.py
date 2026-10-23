@@ -6502,3 +6502,58 @@ def test_a_managed_watch_reports_a_stalled_review_once_per_window(tmp_path):
     assert (rc, output) == (124, "")
     rc, output, _ = cycle(65, "2")
     assert rc == 0 and "Codex review stalled" in output
+
+
+def test_only_a_standalone_request_restarts_or_opens_a_stall():
+    """A comment that merely mentions the trigger is not a request for a review."""
+    from datetime import datetime, timedelta, timezone
+
+    module = _load_module()
+    mention = {**_review_request("2026-10-23T03:00:00Z"), "body": "Don't post `@codex review` while one is running."}
+    state = _success_state(issue_comments=[
+        _codex_summary(COALESCED_HEAD, status="completed", updated_at="2026-10-23T02:00:00Z"), mention,
+    ])
+    base = datetime(2026, 10, 23, 3, 0, tzinfo=timezone.utc)
+    assert module._codex_review_stall(
+        state, repo="example/repo", stall_seconds=1800, now=base + timedelta(minutes=90), head_seen_at=base,
+    ) is None
+
+
+@pytest.mark.parametrize("value", ["nan", "inf", "-1"])
+def test_a_stall_window_that_is_not_a_finite_duration_is_refused_up_front(tmp_path, value):
+    module = _load_module()
+    with (
+        patch("sys.argv", ["wait_pr.py", "--repo", "avibe-bot/avibe", "--pr", "153", "--review-stall-minutes", value]),
+        patch("sys.stderr", io.StringIO()) as stderr,
+    ):
+        assert module.main() == 2
+    assert "--review-stall-minutes" in stderr.getvalue()
+
+
+def test_a_draft_marked_ready_restarts_the_stall_clock(tmp_path):
+    """A draft is not expected to be reviewed; once marked ready (same head), Codex gets a
+    full window from then before the head counts as never picked up."""
+    from datetime import datetime, timedelta, timezone
+
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    older = [_codex_summary("b" * 40, status="completed", updated_at="2026-10-23T02:00:00Z")]
+    draft = _success_state(pending, issue_comments=older)
+    draft["pull_request"]["draft"] = True
+    ready = _success_state(pending, issue_comments=older)
+    _managed_state(module, path, "wat_9", **_complete_pr_baseline_fields(module, draft),
+                   actions=module.normalize_selected_runs({"CI": [pending]}))
+    base = datetime(2026, 10, 23, 3, 0, tzinfo=timezone.utc)
+
+    def cycle(minutes, state, delivery="1"):
+        with patch.object(module, "_utc_now", return_value=base + timedelta(minutes=minutes)):
+            return _ci_cycle(module, path, [state], delivery=delivery, extra_args=("--coalesce-success",))
+
+    for minutes in (0, 60):
+        rc, output, _ = cycle(minutes, draft)
+        assert "Codex review stalled" not in output
+    rc, output, _ = cycle(61, ready, delivery="2")
+    assert "Codex review stalled" not in output
+    rc, output, _ = cycle(95, ready, delivery="3")
+    assert rc == 0 and "has not started reviewing this head" in output
