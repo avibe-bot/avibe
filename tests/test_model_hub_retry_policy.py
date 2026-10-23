@@ -144,7 +144,23 @@ def test_retry_after_uses_response_receipt_and_keeps_long_upstream_advice(tmp_pa
     asyncio.run(run())
 
 
-def test_offsets_and_wall_clock_shifts_do_not_change_monotonic_admission(tmp_path):
+
+def test_retry_after_ms_reaches_recovery_as_fractional_seconds(tmp_path):
+    async def run():
+        service, clock = clock_service(tmp_path)
+        source = service.store.load().sources[0]
+        outcome = SimpleNamespace(
+            retry_after=None,
+            retry_after_ms=1500,
+            response_received_at=NOW,
+            stream_started=False,
+        )
+        await fail(service, source, "network", outcome=outcome)
+        retry_at = service.recovery.annotations(service.store.load())[source.id].retry_at
+        assert retry_at == (NOW + timedelta(milliseconds=1500)).isoformat()
+
+    asyncio.run(run())
+
     async def run():
         service, clock = clock_service(tmp_path)
         source = service.store.load().sources[0]
