@@ -207,7 +207,10 @@ The client recognizes all of these observed/officially specified signals:
    `X-RateLimit-Reset` is an absolute Unix-epoch timestamp in **milliseconds**,
    not seconds: parse a finite integer as milliseconds, convert it to the
    cooldown deadline, and ignore malformed or already-past values;
-2. a JSON-RPC error with Exa's rate-limit code/message;
+2. a JSON-RPC error with the hosted-MCP rate-limit message, or with code
+   `-32000` **and** that bounded message. The generic `-32000` code alone is
+   not sufficient: the checked hosted source also uses it for HTTP 401
+   authentication errors;
 3. a successful HTTP response whose result metadata contains
    `_meta.ai.exa/rateLimited: true`, as observed on 2026-10-22;
 4. the hosted-MCP free-rate-limit text when a deployed version omits the
@@ -599,9 +602,11 @@ payload as a valid result, classify an error-shaped envelope in this order:
 1. an exact catalog-named query-refusal tag/code in a JSON-RPC error or MCP
    tool error result, such as `PROHIBITED_CONTENT` or
    `CONTENT_FILTER_ERROR`, is `service_refused` with no cooldown;
-2. a rate-limit code or bounded free-rate-limit message in that same
-   error-shaped envelope, or the `_meta.ai.exa/rateLimited` marker on an
-   otherwise valid response, is `service_rate_limited` with cooldown;
+2. a bounded free-rate-limit message in that same error-shaped envelope, or
+   JSON-RPC code `-32000` paired with that message, or the
+   `_meta.ai.exa/rateLimited` marker on an otherwise valid response, is
+   `service_rate_limited` with cooldown. The generic `-32000` code alone is not
+   a rate-limit signal;
 3. any other JSON-RPC error, `isError: true` result, or response-level error is
    `service_unavailable` with cooldown.
 
@@ -632,7 +637,7 @@ Apply services-design §4.2 with the following keyless-specific clarifications:
 | MCP/HTTP result | Chain | State |
 | --- | --- | --- |
 | Valid result, including empty results | Ends with `completed`; cost `$0` | No state change |
-| HTTP 429, rate-limit JSON-RPC error, or `ai.exa/rateLimited` result metadata | Next candidate; attempt code `service_rate_limited` (operationally a `service_unavailable` cooldown) | Service cooldown; never credential health |
+| HTTP 429, or a JSON-RPC error whose code/message matches the bounded Exa free-rate-limit signal | Next candidate; attempt code `service_rate_limited` (operationally a `service_unavailable` cooldown) | Service cooldown; never credential health |
 | Stale MCP session-not-found 404 before the tool call is accepted | Reinitialize/list and replay once within the original deadline; if the replay fails, apply its actual outcome | Clear only the in-memory session; no credential health |
 | Timeout, connection/TLS failure, or closed session after the admitted call begins | Next candidate, `service_unavailable` | Service cooldown; no credential health |
 | Any HTTP 5xx or non-rate-limit JSON-RPC/server error | Next candidate, `service_unavailable` | Service cooldown; no credential health |
@@ -974,9 +979,12 @@ JSON-RPC fixtures:
 - HTTP 429 with `Retry-After`, HTTP 429 with reset headers (including
   `X-RateLimit-Reset: 1800000000000` interpreted as Unix epoch milliseconds;
   malformed and past values are ignored, and the later valid deadline wins),
-  JSON-RPC `-32000`, `_meta.ai.exa/rateLimited`, and error-shaped free-rate-limit
-  text all produce `service_rate_limited` plus cooldown, never `needs_action`;
-  a valid highlight quoting that text does not.
+  JSON-RPC `-32000` **with the bounded free-rate-limit message**,
+  `_meta.ai.exa/rateLimited`, and error-shaped free-rate-limit text all produce
+  `service_rate_limited` plus cooldown, never `needs_action`. A generic
+  JSON-RPC `-32000` without that message, including an HTTP 401 authentication
+  envelope, maps to `service_unavailable`; a valid highlight quoting the
+  rate-limit text does not.
 - 5xx, redirects, timeouts, closed sessions, generic HTTP 200 `isError`, and
   malformed content map to `service_unavailable` and fail over. HTTP 200
   `isError: true` containing `PROHIBITED_CONTENT`, `CONTENT_FILTER_ERROR`, or
