@@ -124,6 +124,24 @@ One bounded block, rendered in English for the model:
    then shown in order. Each message is clipped.
 4. A runnable `vibe data query` for the full history.
 
+## Continue on Vibey when the Agent cannot run
+
+When the session's Agent is disabled or deleted, or its backend is unavailable,
+the turn ends before anything reaches a backend. The failure notice names the
+cause in plain words and carries `failure_next_step: continue_on_vibey`. In the
+Workbench it replaces Retry with **Continue with Vibey**; a chat app's notice
+says to switch in the Workbench instead, since an IM thread cannot change its
+session's Agent.
+
+The button posts the notice's Retry with `continue_on_backend: "vibey"`. In one
+transaction the route switches the session to the built-in Vibey Agent (the
+same `update_session` switch and controller preflight as the Chat header, so a
+bound session gets the handoff) and reserves the retry. The retry re-queues the
+exact message that failed. A not-yet-written input belongs to no backend, so the
+retry boundary admits it on the backend the session now routes to; a turn that
+reached its backend still retries only there, and then the switch rolls back
+with the refused retry.
+
 ## Known by design
 
 - The handoff is lossy: tool calls, file reads, and reasoning of the old backend

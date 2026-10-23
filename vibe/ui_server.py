@@ -78,7 +78,13 @@ from core.show_session_events import (
     show_event_requests_dispatch,
 )
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, supports_runtime_refresh
+from modules.agents.catalog import (
+    AGENT_BACKENDS,
+    NATIVE_CLI_BACKENDS,
+    display_name_for_backend,
+    is_agent_backend,
+    supports_runtime_refresh,
+)
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
 from vibe.runtime import get_ui_dist_path, get_working_dir
@@ -10212,6 +10218,81 @@ def _backend_locked_response(err):
     )
 
 
+def _backend_supply_blocked(backend: str) -> bool:
+    """Whether the Model Hub leaves ``backend`` no model to run on now. Blocking."""
+    from config.v2_config import hub_supply_block
+    from core.services import settings as settings_service
+
+    return hub_supply_block(backend, settings_service.load_config_or_default().model_hub) is not None
+
+
+def _builtin_agent_for_backend(backend: str):
+    """The backend's enabled built-in Agent, or None. Blocking."""
+    from core.vibe_agents import VibeAgentStore
+
+    store = VibeAgentStore()
+    try:
+        return store.get_builtin_default_agent_for_backend(backend)
+    finally:
+        store.close()
+
+
+async def _backend_switch_preflight(engine, session_id: str, requested_backend, *, require_controller: bool = False):
+    """Ask the controller whether the session may change to ``requested_backend``.
+
+    Returns ``(refusal, runtime_idle_through_turn)``: a ready error response, or the
+    turn watermark ``update_session`` commits the switch against. The watermark is
+    read BEFORE the controller is asked, so the switch commits only if no turn
+    started since and the controller's answer still holds then. A BOUND session
+    switches by replacing its native conversation, so the old backend's runtime
+    must also be settled: a detached background Activity (or its undelivered
+    output) would keep working on the replaced conversation. Only the controller
+    knows, so an unreachable controller refuses that switch instead of assuming idle,
+    as it refuses any switch when ``require_controller``.
+    """
+    from core.services import sessions as workbench_sessions_service
+    from vibe import internal_client
+
+    try:
+        with engine.connect() as conn:
+            current = workbench_sessions_service.get_session(conn, session_id)
+            runtime_idle_through_turn = workbench_sessions_service.latest_session_turn_id(conn, session_id)
+    except LookupError as err:
+        return (jsonify({"error": str(err)}), 404), None
+    if str(requested_backend or "") == str(current.get("agent_backend") or "") and not require_controller:
+        return None, runtime_idle_through_turn
+    bound_switch = bool(current.get("native_session_id")) and bool(current.get("agent_backend"))
+    try:
+        turn_result = await internal_client.turn_state(session_id)
+        turn_body = turn_result.get("body") or {}
+        in_flight = bool(turn_body.get("in_flight"))
+        runtime_busy = _backend_runtime_busy(turn_body)
+    except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
+        if bound_switch or require_controller:
+            from core.services import settings as settings_service
+
+            lang = settings_service.load_config_or_default().language
+            return _coded_error_response(
+                "controller_unavailable", t("errors.sessionControllerUnavailable", lang), 503
+            ), None
+        in_flight = False
+        runtime_busy = False
+    if in_flight:
+        return _backend_locked_response(
+            workbench_sessions_service.SessionBackendLockedError(
+                session_id=session_id,
+                current_backend=current.get("agent_backend"),
+                requested_backend=requested_backend,
+            )
+        ), None
+    if bound_switch and runtime_busy:
+        return _backend_busy_response(
+            current_backend=current.get("agent_backend"),
+            requested_backend=requested_backend,
+        ), None
+    return None, runtime_idle_through_turn
+
+
 def _backend_runtime_busy(turn_state: dict) -> bool:
     """Whether the controller reports backend work outside a turn for the session.
 
@@ -10382,43 +10463,9 @@ async def sessions_update(session_id: str):
     # row-status guard inside ``update_session`` (best effort).
     runtime_idle_through_turn = None
     if should_check_backend_lock:
-        try:
-            with engine.connect() as conn:
-                current = workbench_sessions_service.get_session(conn, session_id)
-                # Read BEFORE asking the controller: the switch commits only if no
-                # turn started since, so the controller's answer still holds then.
-                runtime_idle_through_turn = workbench_sessions_service.latest_session_turn_id(conn, session_id)
-        except LookupError as err:
-            return jsonify({"error": str(err)}), 404
-        if str(requested_backend or "") != str(current.get("agent_backend") or ""):
-            # A BOUND session switches by replacing its native conversation, so the
-            # old backend's runtime must also be settled: a detached background
-            # Activity (or its undelivered output) would keep working on the
-            # replaced conversation. Only the controller knows, so an unreachable
-            # controller refuses that switch instead of assuming idle.
-            bound_switch = bool(current.get("native_session_id")) and bool(current.get("agent_backend"))
-            runtime_busy = False
-            try:
-                turn_result = await internal_client.turn_state(session_id)
-                turn_body = turn_result.get("body") or {}
-                in_flight = bool(turn_body.get("in_flight"))
-                runtime_busy = _backend_runtime_busy(turn_body)
-            except (internal_client.InternalServerUnavailable, internal_client.InternalServerTimeout):
-                in_flight = False
-                runtime_busy = bound_switch
-            if in_flight:
-                return _backend_locked_response(
-                    workbench_sessions_service.SessionBackendLockedError(
-                        session_id=session_id,
-                        current_backend=current.get("agent_backend"),
-                        requested_backend=requested_backend,
-                    )
-                )
-            if bound_switch and runtime_busy:
-                return _backend_busy_response(
-                    current_backend=current.get("agent_backend"),
-                    requested_backend=requested_backend,
-                )
+        refusal, runtime_idle_through_turn = await _backend_switch_preflight(engine, session_id, requested_backend)
+        if refusal is not None:
+            return refusal
 
     try:
         with engine.begin() as conn:
@@ -12106,6 +12153,14 @@ async def sessions_messages_create(session_id: str):
 
     payload = request.json or {}
     retry_for = payload.get("retry_for")
+    # ``continue_on_backend`` turns a Retry into "continue on another backend": the
+    # session moves to that backend's built-in Agent and the failed input runs there,
+    # in one transaction (a notice whose Agent was disabled or deleted offers it).
+    continue_on_backend = payload.get("continue_on_backend")
+    if continue_on_backend is not None and (
+        retry_for is None or not isinstance(continue_on_backend, str) or not is_agent_backend(continue_on_backend)
+    ):
+        return jsonify({"error": "invalid continue_on_backend"}), 400
     if retry_for is not None:
         if not isinstance(retry_for, str) or not retry_for.strip():
             return jsonify({"error": "invalid retry_for"}), 400
@@ -12139,7 +12194,10 @@ async def sessions_messages_create(session_id: str):
             from core.vibe_agents import ensure_session_agent_access
 
             _config, _session_payload, user_context = _remote_resource_access_context()
-            ensure_session_agent_access(conn, session, user_context=user_context)
+            # Continuing on another Agent never runs the session's current one,
+            # which may be deleted; the target Agent's access is checked below.
+            if continue_on_backend is None:
+                ensure_session_agent_access(conn, session, user_context=user_context)
             # Archived sessions are terminal + inert: refuse to start a turn on one
             # even via a stale/direct request (the workbench hides them from the
             # list, so this only fires on a leftover tab or a hand-crafted call).
@@ -12169,6 +12227,35 @@ async def sessions_messages_create(session_id: str):
     except PermissionError as err:
         return _coded_error_response("agent_access_forbidden", str(err), 403)
 
+    continue_agent = None
+    continue_idle_through_turn = None
+    if continue_on_backend is not None:
+        from core.vibe_agents import VibeAgentAccessError, ensure_agent_selection_access
+
+        # The store's constructor checks and prefills state: off the event loop.
+        continue_agent = await asyncio.to_thread(_builtin_agent_for_backend, continue_on_backend)
+        # The notice may be older than the state it was offered for: recheck, at the
+        # click, the same answers the offer was made from (``_builtin_vibey_available``).
+        if continue_agent is None or await asyncio.to_thread(_backend_supply_blocked, continue_on_backend):
+            return _coded_error_response(
+                "continue_agent_unavailable",
+                t("errors.sessionContinueAgentUnavailable", _request_ui_language(), backend=display_name_for_backend(continue_on_backend)),
+                409,
+            )
+        try:
+            with engine.connect() as conn:
+                ensure_agent_selection_access(conn, agent_id=continue_agent.id, user_context=user_context)
+        except VibeAgentAccessError as err:
+            return _coded_error_response("agent_access_forbidden", str(err), 403)
+        # The switch commits only with the controller there to run the input it
+        # retries: committing it for a dispatch that cannot happen would move the
+        # session for nothing.
+        refusal, continue_idle_through_turn = await _backend_switch_preflight(
+            engine, session_id, continue_agent.backend, require_controller=True
+        )
+        if refusal is not None:
+            return refusal
+
     dispatch_text = (
         (text if isinstance(text, str) else None)
         or (content.get("text") if isinstance(content, dict) else None)
@@ -12187,6 +12274,8 @@ async def sessions_messages_create(session_id: str):
             attachment_specs = resolve_attachment_specs(
                 conn, session_id=session_id, attachments=raw_attachments
             )
+
+    switched: dict[str, Any] = {}
 
     def _persist_user_row() -> dict | None:
         """Atomically persist one unaccepted submission as a Delivery."""
@@ -12225,6 +12314,25 @@ async def sessions_messages_create(session_id: str):
                 metadata=message_metadata,
                 message_kind=message_kind,
             )
+            from core.backend_failure_retry import existing_retry
+
+            # A repeated click resolves to the retry it already made, without moving
+            # the session again (the user may have picked another Agent since).
+            if continue_agent is not None and existing_retry(conn, session_id, retry_for) is None:
+                # Same switch the Chat header's picker makes, with its guards; a
+                # refused retry below rolls it back with everything else.
+                switched["session"] = workbench_sessions_service.update_session(
+                    conn,
+                    session_id,
+                    agent_id=continue_agent.id,
+                    agent_name=continue_agent.name,
+                    agent_backend=continue_agent.backend,
+                    agent_variant=continue_agent.backend,
+                    model=continue_agent.model,
+                    reasoning_effort=continue_agent.reasoning_effort,
+                    runtime_idle_through_turn=continue_idle_through_turn,
+                    authorization_context=getattr(g, "authorization_context", None),
+                )
             if retry_for:
                 from core.backend_failure_retry import reserve_retry
 
@@ -12252,9 +12360,25 @@ async def sessions_messages_create(session_id: str):
         message = _persist_user_row()
     except RetryUnavailable as error:
         return _coded_error_response(error.code, error.code, 409)
+    except workbench_sessions_service.SessionArchivedError:
+        return _session_archived_response()
+    except workbench_sessions_service.SessionBackendLockedError as err:
+        return _backend_locked_response(err)
+    except (ValueError, LookupError) as err:
+        if continue_agent is None:
+            raise
+        return jsonify({"error": str(err)}), 400
+    except PermissionError as err:
+        if continue_agent is None:
+            raise
+        return jsonify({"error": str(err)}), 403
     if message is None:
         # Archived between the pre-flight check and the reservation — stay terminal.
         return _session_archived_response()
+    if switched.get("session") is not None:
+        from vibe.sse_broker import broker
+
+        _publish_session_update_activity(broker, session_id=session_id, session=switched["session"])
     if retry_for:
         # Retained pre-write input comes from its immutable Delivery, including
         # attachments. The controller independently reconstructs the same input.

@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, describe, expect, it } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createInstance } from 'i18next';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -22,7 +22,9 @@ const refusal = {
   metadata: { event: 'backend_failure', failure_id: 'failed', turn_id: 'turn-1', failure_next_step: 'models' },
 } as WorkbenchMessage;
 
-function mount(message: WorkbenchMessage, canManage: boolean) {
+type StepProps = Omit<Parameters<typeof FailureNextStep>[0], 'message'>;
+
+function mount(message: WorkbenchMessage, canManage: boolean, props: StepProps = {}) {
   const authorization = {
     remote: true, instanceKind: null, instanceRole: null,
     capabilities: { ...DENIED_INSTANCE_CAPABILITIES, can_chat: true, can_manage_instance: canManage },
@@ -32,7 +34,7 @@ function mount(message: WorkbenchMessage, canManage: boolean) {
       <InstanceAuthorizationContext.Provider value={authorization as never}>
         <MemoryRouter initialEntries={['/chat/session']}>
           <Routes>
-            <Route path="/chat/session" element={<FailureNextStep message={message} />} />
+            <Route path="/chat/session" element={<FailureNextStep message={message} {...props} />} />
             <Route path="/settings/models" element={<p>Models page</p>} />
           </Routes>
         </MemoryRouter>
@@ -59,5 +61,28 @@ describe('FailureNextStep', () => {
   it('draws nothing for a notice without the step', () => {
     const { container } = mount({ ...refusal, metadata: { ...refusal.metadata, failure_next_step: undefined } }, true);
     expect(container.textContent).toBe('');
+  });
+
+  // The Agent the session runs on was disabled: the notice offers to move to Vibey.
+  const agentOff = {
+    ...refusal,
+    text: '❌ Codex is turned off, so this session can\'t continue on it.',
+    metadata: { ...refusal.metadata, failure_next_step: 'continue_on_vibey' },
+  } as WorkbenchMessage;
+
+  it('continues on Vibey through the notice-bound retry', async () => {
+    const onRetry = vi.fn().mockResolvedValue(true);
+    mount(agentOff, false, { onRetry });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue with Vibey' }));
+    expect(onRetry).toHaveBeenCalledWith('notice', { continueOnBackend: 'vibey' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Switched to Vibey' })).toHaveProperty('disabled', true));
+  });
+
+  it('offers nothing on a read-only transcript, and settles from the durable retry state', () => {
+    mount(agentOff, true, { readOnly: true, onRetry: vi.fn() });
+    expect(screen.queryByRole('button')).toBeNull();
+    cleanup();
+    mount({ ...agentOff, content: { failure_retry: { state: 'accepted' } } } as WorkbenchMessage, true, { onRetry: vi.fn() });
+    expect(screen.getByRole('button', { name: 'Switched to Vibey' })).toHaveProperty('disabled', true);
   });
 });

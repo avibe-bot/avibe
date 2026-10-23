@@ -21,7 +21,7 @@ import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { setConfigField } from '../../lib/configMutations';
 import { annotationStandIn, annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
-import { isAgentActivityBoundaryMessage, isRetriedFailureNotice, isRetryableFailureNotice, isTerminalAgentMessage, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
+import { isAgentActivityBoundaryMessage, isRetriedFailureNotice, isRetryableFailureNotice, isTerminalAgentMessage, offersContinueOnVibey, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
@@ -64,7 +64,7 @@ import {
 } from '../../lib/chatTrigger';
 import { AnnotationMessage } from './AnnotationMessage';
 import { FailureDetails } from './FailureDetails';
-import { FailureRetry } from './FailureRetry';
+import { FailureRetry, type FailureRetryOptions } from './FailureRetry';
 import { FailureNextStep } from './FailureNextStep';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
@@ -2248,16 +2248,21 @@ export const ChatPage: React.FC = () => {
     [sendMessage],
   );
 
-  const handleFailureRetry = useCallback(async (messageId: string): Promise<boolean> => {
+  const handleFailureRetry = useCallback(async (messageId: string, options?: FailureRetryOptions): Promise<boolean> => {
     const sid = sessionId;
     if (!sid || !writable) return false;
     setError(null);
     try {
       // A notice-bound action does not read, clear, or restore the composer.
+      // ``continueOnBackend`` moves the session to that backend's built-in Agent
+      // first, in the same server transaction as the retry.
       const response = await apiFetch(`/api/sessions/${encodeURIComponent(sid)}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ retry_for: messageId }),
+        body: JSON.stringify({
+          retry_for: messageId,
+          ...(options?.continueOnBackend ? { continue_on_backend: options.continueOnBackend } : {}),
+        }),
       });
       const body = await response.json().catch(() => null);
       if (sid !== sessionIdRef.current) return false;
@@ -2286,6 +2291,8 @@ export const ChatPage: React.FC = () => {
         else appendMessage(body as WorkbenchMessage);
       }
       void refreshQueue();
+      // The header shows the Agent the session moved to.
+      if (options?.continueOnBackend) void refreshSessionRow();
       return ['queued', 'claimed', 'accepted'].includes(body?.delivery_state ?? body?.state ?? '');
     } catch (err) {
       if (sid === sessionIdRef.current) setError(errorMessage(err) ?? t('chat.retryFailed'));
@@ -2293,7 +2300,7 @@ export const ChatPage: React.FC = () => {
     } finally {
       if (sid === sessionIdRef.current) void syncTurnStateRef.current?.();
     }
-  }, [sessionId, writable, api, appendMessage, reloadLatestMessages, refreshQueue, t]);
+  }, [sessionId, writable, api, appendMessage, reloadLatestMessages, refreshQueue, refreshSessionRow, t]);
 
   const stopMessage = useCallback(async () => {
     if (!sessionId || !working) return;
@@ -3962,7 +3969,7 @@ interface TranscriptProps {
   highlightedId: string | null;
   messageFontSize: number;
   onQuickReply: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
-  onFailureRetry?: (messageId: string) => Promise<boolean>;
+  onFailureRetry?: (messageId: string, options?: FailureRetryOptions) => Promise<boolean>;
   provisionRequestsByMessage: Map<string, VaultRequest[]>;
   onVaultRequestResolved: () => void;
   // Chat-selection toolbar: quote the selection into the composer, or fork +
@@ -4699,7 +4706,7 @@ type MessageRowProps = {
   agentBackend?: string | null;
   messageFontSize: number;
   onQuickReply?: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
-  onFailureRetry?: (messageId: string) => Promise<boolean>;
+  onFailureRetry?: (messageId: string, options?: FailureRetryOptions) => Promise<boolean>;
   retryDisabled?: boolean;
   vaultRequests?: VaultRequest[];
   onVaultRequestResolved?: () => void;
@@ -4943,8 +4950,13 @@ export const MessageRow = memo(function MessageRow({
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
-            <FailureNextStep message={message} />
-            {onFailureRetry && (
+            <FailureNextStep
+              message={message}
+              readOnly={readOnly}
+              disabled={retryDisabled}
+              onRetry={onFailureRetry}
+            />
+            {onFailureRetry && !offersContinueOnVibey(message) && (
               <FailureRetry
                 message={message}
                 readOnly={readOnly}
