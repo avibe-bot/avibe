@@ -280,6 +280,15 @@ def test_handle_routing_update_saves_vibey_model_and_effort_on_the_vibey_route()
     text = send_message.await_args.args[1]
     assert "claude-opus-5-5" in text and "xhigh" in text
 
+    # An opaque id of any length still yields a confirmation every platform can send.
+    asyncio.run(
+        handler.handle_routing_update(
+            user_id="42", channel_id="-100123", backend="vibey", model="m" * 5000, platform="telegram",
+        )
+    )
+    assert settings_manager.saved_routing.model == "m" * 5000
+    assert len(send_message.await_args.args[1]) < 1000
+
 
 def test_saving_an_unchanged_slack_form_keeps_a_stored_model_slack_cannot_show() -> None:
     """A Web-set model id past Slack's 150-character option values must survive saving the Slack form."""

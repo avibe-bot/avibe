@@ -924,7 +924,9 @@ class SettingsHandler(BaseHandler):
                 ("routing.label.reasoningEffort", reasoning_effort),
             ):
                 if value:
-                    parts.append(f"{self._t(label_key)}: **{value}**")
+                    # Route values are opaque and unbounded; a confirmation must fit any platform's message.
+                    shown = value if len(value) <= 100 else f"{value[:99]}…"
+                    parts.append(f"{self._t(label_key)}: **{shown}**")
             if needs_new_session_hint:
                 parts.extend(["", self._t("success.routingUpdateNeedsNewSession")])
 
