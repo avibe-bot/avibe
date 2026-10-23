@@ -407,9 +407,11 @@ and GitHub emits nothing more, so a loop waiting for the verdict would stay sile
 `wait_pr.py --pr` therefore reports `Codex review stalled` when the current head's
 review has shown running, the last `@codex review` request has gone unanswered, or
 an open (non-draft) head was never picked up, for `--review-stall-minutes` (default
-30; `0` disables). The clock starts at the later of the summary's last update and
-the last request, never before the watch first saw the head, so a re-request
-restarts it, and a review still stuck a window later is reported again. The report rides the
+30; `0` disables). Any Codex answer concludes it: a summary update, a review, a
+verdict comment, or the pass reaction. The clock starts at the later of the
+summary's last update and the last request, never before the watch saw the head
+become reviewable (pushed, reopened, or marked ready), so a re-request restarts it,
+and a review still stuck a window later is reported again. The report rides the
 same staged delivery as any other event. Only a non-default window is part of the
 watch identity, so existing state files keep working.
 

@@ -6493,6 +6493,9 @@ def test_a_managed_watch_reports_a_stalled_review_once_per_window(tmp_path):
         with patch.object(module, "_utc_now", return_value=base + timedelta(minutes=minutes)):
             return _ci_cycle(module, path, [running], delivery=delivery, extra_args=options)
 
+    # The watch first sees the head at 03:00, when the summary turned running.
+    rc, output, _ = cycle(0, "1")
+    assert (rc, output) == (124, "")
     rc, output, _ = cycle(10, "1")
     assert (rc, output) == (124, "")
     rc, output, payload = cycle(35, "1")
@@ -6557,3 +6560,54 @@ def test_a_draft_marked_ready_restarts_the_stall_clock(tmp_path):
     assert "Codex review stalled" not in output
     rc, output, _ = cycle(95, ready, delivery="3")
     assert rc == 0 and "has not started reviewing this head" in output
+
+
+@pytest.mark.parametrize("answer", ["verdict_comment", "review", "pass_reaction"])
+def test_any_codex_answer_concludes_a_request_or_a_new_head(answer):
+    """Codex may conclude through a verdict comment, a review, or its pass reaction
+    without touching its summary; each answers the request and the head."""
+    from datetime import datetime, timedelta, timezone
+
+    module = _load_module()
+    base = datetime(2026, 10, 23, 3, 0, tzinfo=timezone.utc)
+    older_summary = _codex_summary("b" * 40, status="completed", updated_at="2026-10-23T02:00:00Z")
+    items = {"issue_comments": [older_summary, _review_request("2026-10-23T03:00:00Z")]}
+    if answer == "verdict_comment":
+        items["issue_comments"].append({
+            **_clean_codex_comment(602, head=COALESCED_HEAD),
+            "created_at": "2026-10-23T03:05:00Z", "updated_at": "2026-10-23T03:05:00Z",
+        })
+    elif answer == "review":
+        items["reviews"] = [{
+            "id": 9, "state": "COMMENTED", "body": "findings", "commit_id": COALESCED_HEAD,
+            "submitted_at": "2026-10-23T03:05:00Z", "user": {"login": "chatgpt-codex-connector[bot]"},
+        }]
+    else:
+        items["reactions"] = [{
+            "id": 701, "content": "+1", "created_at": "2026-10-23T03:05:00Z",
+            "user": {"login": "chatgpt-codex-connector[bot]"},
+        }]
+    state = _success_state(**items)
+    assert module._codex_review_stall(
+        state, repo="example/repo", stall_seconds=1800, now=base + timedelta(minutes=90),
+        head_seen_at=base - timedelta(minutes=5),
+    ) is None
+
+
+def test_a_running_review_counts_only_from_when_the_pr_became_reviewable():
+    """A summary left running while the PR was closed counts from the reopening."""
+    from datetime import datetime, timedelta, timezone
+
+    module = _load_module()
+    base = datetime(2026, 10, 23, 3, 0, tzinfo=timezone.utc)
+    state = _success_state(issue_comments=[
+        _codex_summary(COALESCED_HEAD, status="running", updated_at="2026-10-23T01:00:00Z"),
+    ])
+
+    def stall(minutes):
+        return module._codex_review_stall(
+            state, repo="example/repo", stall_seconds=1800, now=base + timedelta(minutes=minutes), head_seen_at=base,
+        )
+
+    assert stall(20) is None
+    assert stall(31) is not None
