@@ -172,7 +172,7 @@ class _Form:
             state = self.bot._routing_states[self.bot._interaction_scope_key(self.context)]
             name = {"effort": "reasoning_effort"}.get(field, field)
             return [value or "__default__" for _, value in self.bot._routing_picker_options(state, name)]
-        name = f"route_{field}"
+        name = f"route_{field}:{self.backend}"
         select = next(e for e in self.card["body"]["elements"][0]["elements"] if e.get("name") == name)
         return [option["value"] for option in select["options"]]
 
@@ -203,7 +203,9 @@ class _Form:
             await bot._handle_routing_callback(context, f"tg_route:option:{index}")
         else:
             bot._patch_card_message = AsyncMock()
-            assert await bot._handle_routing_select_change(context, {"name": "route_model", "option": model})
+            assert await bot._handle_routing_select_change(
+                context, {"name": f"route_model:{self.backend}", "option": model}
+            )
             self.card = bot._patch_card_message.await_args.args[1]
 
     async def save(self):
@@ -224,11 +226,13 @@ class _Form:
             bot._controller = SimpleNamespace(settings_handler=SimpleNamespace(handle_routing_update=self.saved))
             await bot._handle_routing_callback(context, "tg_route:save")
         else:
-            # A Feishu form submits what each of its selects shows.
-            selects = [e for e in self.card["body"]["elements"][0]["elements"] if e["tag"] == "select_static"]
+            # A Feishu form submits what each of its selects shows, through its own submit button.
+            elements = self.card["body"]["elements"][0]["elements"]
+            selects = [e for e in elements if e["tag"] == "select_static"]
+            button = next(e for e in elements if e["tag"] == "button")
             bot._on_routing_update = self.saved
             await bot._handle_routing_form_submit(
-                context, {"backend": self.backend, **{e["name"]: e["initial_option"] for e in selects}},
+                context, {e["name"]: e["initial_option"] for e in selects}, button["name"],
             )
         self.saved.assert_awaited_once()
         kwargs = self.saved.await_args.kwargs

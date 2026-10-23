@@ -43,13 +43,13 @@ class FeishuRoutingCardTests(unittest.IsolatedAsyncioTestCase):
         bot = self._make_bot()
         bot._patch_card_message = AsyncMock()
         bot.check_authorization = lambda **kwargs: AuthResult(allowed=True)
-        bot._routing_cache["chat:user"] = {"routing": self._claude_routing(), "drafts": {}, "_selected_backend": "claude"}
+        bot._routing_cache["chat:user"] = {"routing": self._claude_routing(), "drafts": {}}
 
         def _event(model):
             return {
                 "operator": {"open_id": "user"},
                 "context": {"open_message_id": "om_123", "open_chat_id": "chat"},
-                "action": {"tag": "select_static", "name": "route_model", "option": {"value": model}},
+                "action": {"tag": "select_static", "name": "route_model:claude", "option": {"value": model}},
             }
 
         await bot._async_handle_card_action(_event("claude-sonnet-4-6"))
@@ -58,7 +58,9 @@ class FeishuRoutingCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot._patch_card_message.await_count, 2)
         self.assertEqual(bot._routing_cache["chat:user"]["drafts"]["claude"].model, "claude-opus-4-6")
         _, latest_card = bot._patch_card_message.await_args.args
-        reasoning_values = [option["value"] for option in self._find_select(latest_card, "route_effort")["options"]]
+        reasoning_values = [
+            option["value"] for option in self._find_select(latest_card, "route_effort:claude")["options"]
+        ]
         self.assertIn("max", reasoning_values)
 
     async def test_routing_submit_keeps_the_drafts_native_agent_when_the_form_omits_it(self):
@@ -69,11 +71,11 @@ class FeishuRoutingCardTests(unittest.IsolatedAsyncioTestCase):
             current_backend="codex",
             current_routing=RoutingSettings(agent_name="codex", model="gpt-5.1", codex_agent="reviewer"),
         )
-        bot._routing_cache["chat:user"] = {"routing": routing, "drafts": {}, "_selected_backend": "codex"}
+        bot._routing_cache["chat:user"] = {"routing": routing, "drafts": {}}
         context = MessageContext(user_id="user", channel_id="chat", platform="lark", platform_specific={"is_dm": False})
 
         await bot._handle_routing_form_submit(
-            context, {"backend": "codex", "route_model": "gpt-5.4", "route_effort": "high"}
+            context, {"route_model:codex": "gpt-5.4", "route_effort:codex": "high"}, "routing_submit:codex"
         )
 
         bot._on_routing_update.assert_awaited_once_with(
@@ -85,6 +87,28 @@ class FeishuRoutingCardTests(unittest.IsolatedAsyncioTestCase):
             reasoning_effort="high",
             is_dm=False,
         )
+
+    async def test_an_options_card_saves_its_own_backend_after_another_was_opened(self):
+        bot = self._make_bot()
+        bot._send_card_to_channel = AsyncMock()
+        bot._on_routing_update = AsyncMock()
+        context = MessageContext(user_id="user", channel_id="chat", platform="lark", platform_specific={"is_dm": False})
+        await bot.open_routing_modal(trigger_id=context, channel_id="chat", routing=self._claude_routing())
+        # The step-1 card stays active, so it can open a second backend's card before the first is submitted.
+        await bot._handle_routing_backend_select(context, {"backend": "claude"})
+        claude_card = bot._send_card_to_channel.await_args.args[1]
+        await bot._handle_routing_backend_select(context, {"backend": "codex"})
+
+        elements = claude_card["body"]["elements"][0]["elements"]
+        button = next(element for element in elements if element["tag"] == "button")
+        await bot._handle_routing_form_submit(
+            context,
+            {e["name"]: e["initial_option"] for e in elements if e["tag"] == "select_static"},
+            button["name"],
+        )
+
+        kwargs = bot._on_routing_update.await_args.kwargs
+        self.assertEqual((kwargs["backend"], kwargs["model"]), ("claude", "claude-sonnet-4-5"))
 
     async def test_settings_submit_binds_optional_fields_by_name(self):
         bot = self._make_bot()

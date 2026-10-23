@@ -891,8 +891,11 @@ class SettingsHandler(BaseHandler):
             settings_manager = self._get_settings_manager(context)
             existing_routing = settings_manager.get_channel_routing(settings_key)
             # A platform shows a stored choice it cannot carry as its own option value through a stand-in option;
-            # saving that option keeps the stored choice.
+            # saving that option keeps the stored choice. It stands for this backend's route only: one changed to
+            # another backend since the form rendered has no such choice, so the stand-in saves as Default.
             stored = normalize_routing_settings(existing_routing)
+            if self._resolve_route_backend(stored.agent_name) != backend:
+                stored = normalize_routing_settings(None)
             if model == STORED_OPTION_VALUE:
                 model = stored.model
             if reasoning_effort == STORED_OPTION_VALUE:

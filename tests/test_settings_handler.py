@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from config.v2_settings import RoutingSettings
 from core.handlers.settings_handler import SettingsHandler
-from core.modals import BackendRouteMenu, RouteOption, RoutingModalData, RoutingModalSelection
+from core.modals import STORED_OPTION_VALUE, BackendRouteMenu, RouteOption, RoutingModalData, RoutingModalSelection
 from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
 from modules.im import MessageContext
 
@@ -289,7 +289,9 @@ def test_saving_an_unchanged_slack_form_keeps_a_stored_model_slack_cannot_show()
     long_id = "vendor/" + "x" * 160
     settings_manager = _StubSettingsManager(RoutingSettings(agent_name="vibey", model=long_id, reasoning_effort="high"))
     handler, _ = _make_handler(settings_manager)
-    handler.controller.vibe_agent_store = SimpleNamespace(routing_name_for_backend=lambda backend: backend)
+    handler.controller.vibe_agent_store = SimpleNamespace(
+        routing_name_for_backend=lambda backend: backend, get=lambda name: SimpleNamespace(backend="vibey")
+    )
     bot = SlackBot(SlackConfig(bot_token="fixture-token"))
     bot._on_routing_update = handler.handle_routing_update
     data = RoutingModalData(["vibey"], "vibey", settings_manager.routing)
@@ -312,6 +314,28 @@ def test_saving_an_unchanged_slack_form_keeps_a_stored_model_slack_cannot_show()
 
     saved = settings_manager.saved_routing
     assert (saved.agent_name, saved.model, saved.reasoning_effort) == ("vibey", long_id, "high")
+
+
+def test_a_stored_stand_in_resolves_only_against_a_stored_route_on_its_backend() -> None:
+    # The form rendered while the route was on Vibey; by the time it saves, the route may be on Codex.
+    for stored_agent, expected in (("vibey", ("long-vibey-model", "high")), ("codex", (None, None))):
+        stored = RoutingSettings(agent_name=stored_agent, model=f"long-{stored_agent}-model", reasoning_effort="high")
+        settings_manager = _StubSettingsManager(stored)
+        handler, _ = _make_handler(settings_manager)
+        handler.controller.vibe_agent_store = SimpleNamespace(
+            routing_name_for_backend=lambda backend: backend, get=lambda name: SimpleNamespace(backend=name)
+        )
+
+        asyncio.run(
+            handler.handle_routing_update(
+                user_id="42", channel_id="-100123", backend="vibey",
+                model=STORED_OPTION_VALUE, reasoning_effort=STORED_OPTION_VALUE,
+                notify_user=False, platform="telegram",
+            )
+        )
+
+        saved = settings_manager.saved_routing
+        assert (saved.agent_name, saved.model, saved.reasoning_effort) == ("vibey", *expected)
 
 
 def test_handle_routing_update_warns_flat_scope_with_existing_backend_session() -> None:

@@ -2000,8 +2000,8 @@ class FeishuBot(BaseIMClient):
                     await self._handle_settings_form_submit(context, form_value)
                 elif button_name == "routing_backend_select":
                     await self._handle_routing_backend_select(context, form_value)
-                elif button_name == "routing_submit":
-                    await self._handle_routing_form_submit(context, form_value)
+                elif button_name.startswith("routing_submit"):
+                    await self._handle_routing_form_submit(context, form_value, button_name)
                 elif button_name.startswith("resume_submit"):
                     await self._handle_resume_form_submit(context, form_value, button_name)
                 elif button_name.startswith("question_submit"):
@@ -2105,8 +2105,15 @@ class FeishuBot(BaseIMClient):
             return None
         return str(value)
 
-    # A routing card's select names and the draft field each sets.
+    # A routing card's select names (``<prefix>:<backend>``) and the draft field each sets. The backend is in
+    # every name, so a card acts on its own backend even after the step-1 card opened another one.
     _ROUTE_FIELDS = {"route_variant": "variant", "route_model": "model", "route_effort": "reasoning_effort"}
+
+    @classmethod
+    def _route_field(cls, name: object) -> tuple[Optional[str], str]:
+        """A routing control's draft field and backend, from its name."""
+        prefix, _, backend = str(name or "").partition(":")
+        return cls._ROUTE_FIELDS.get(prefix), backend
 
     @staticmethod
     def _routing_draft(cache: Dict[str, Any], backend: str) -> RouteDraft:
@@ -2155,11 +2162,10 @@ class FeishuBot(BaseIMClient):
             raise RuntimeError(f"Feishu patch card failed: {response.msg}")
 
     async def _handle_routing_select_change(self, context: MessageContext, action: Dict[str, Any]) -> bool:
-        draft_field = self._ROUTE_FIELDS.get(action.get("name", ""))
+        draft_field, backend = self._route_field(action.get("name"))
         if not draft_field:
             return False
         cache = self._routing_cache.get(f"{context.channel_id}:{context.user_id}")
-        backend = cache.get("_selected_backend") if cache else None
         if not cache or not backend or "routing" not in cache:
             return False
 
@@ -2176,24 +2182,22 @@ class FeishuBot(BaseIMClient):
         await self._patch_card_message(context.message_id, card)
         return True
 
-    async def _handle_routing_form_submit(self, context: MessageContext, form_value: Dict[str, Any]):
-        """Handle step 2 routing form submission (backend-specific options)."""
+    async def _handle_routing_form_submit(self, context: MessageContext, form_value: Dict[str, Any], button_name: str):
+        """Handle step 2 routing form submission: the options card of the backend its button names."""
         cached = self._routing_cache.get(f"{context.channel_id}:{context.user_id}", {})
-        backend = form_value.get("backend") or cached.get("_selected_backend", "")
+        backend = button_name.partition(":")[2]
         if not backend or "routing" not in cached:
             logger.warning("Routing form submitted without a backend or cached routing, ignoring")
             return
 
         # The form carries what its selects show; a field it omits keeps the card's draft.
         menu = cached["routing"].menu(backend)
-        draft = replace(
-            self._routing_draft(cached, backend),
-            **{
-                draft_field: menu.chosen(draft_field, self._normalize_routing_field_value(form_value.get(name)))
-                for name, draft_field in self._ROUTE_FIELDS.items()
-                if name in form_value
-            },
-        )
+        changes = {}
+        for name, value in form_value.items():
+            draft_field, field_backend = self._route_field(name)
+            if draft_field and field_backend == backend:
+                changes[draft_field] = menu.chosen(draft_field, self._normalize_routing_field_value(value))
+        draft = replace(self._routing_draft(cached, backend), **changes)
         if self._on_routing_update:
             await self._on_routing_update(
                 user_id=context.user_id,
@@ -2607,8 +2611,6 @@ class FeishuBot(BaseIMClient):
         t = lambda key, **kw: self._t(key, channel_id, **kw)
         cache = self._routing_cache.setdefault(f"{channel_id}:{user_id}", {})
         cache.setdefault("routing", RoutingModalData(registered_backends=[], current_backend="", current_routing=None))
-        # The submit and select handlers read the shown backend from here.
-        cache["_selected_backend"] = selected_backend
         menu = cache["routing"].menu(selected_backend)
         draft = self._routing_draft(cache, selected_backend)
         backend_name = display_name_for_backend(selected_backend)
@@ -2636,21 +2638,21 @@ class FeishuBot(BaseIMClient):
         variants = menu.variant_options(draft.variant)
         if variants:
             _select(
-                "route_variant",
+                f"route_variant:{selected_backend}",
                 t("modal.routing.backendAgent", backend=backend_name),
                 t("modal.routing.selectBackendAgent", backend=backend_name),
                 variants,
                 draft.variant,
             )
         _select(
-            "route_model",
+            f"route_model:{selected_backend}",
             t("modal.routing.model"),
             t("modal.routing.selectModel"),
             menu.model_options(draft.model),
             draft.model,
         )
         _select(
-            "route_effort",
+            f"route_effort:{selected_backend}",
             t("modal.routing.reasoningEffort"),
             t("modal.routing.selectReasoningEffort"),
             menu.effort_options(draft.model, draft.reasoning_effort),
@@ -2663,7 +2665,7 @@ class FeishuBot(BaseIMClient):
                 "text": {"tag": "plain_text", "content": t("common.save")},
                 "type": "primary",
                 "action_type": "form_submit",
-                "name": "routing_submit",
+                "name": f"routing_submit:{selected_backend}",
             }
         )
         return {
