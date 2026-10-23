@@ -86,6 +86,9 @@ export const petBridge = {
   /** True inside the native pet window. */
   native: (): boolean => shellInvoke() !== null,
 
+  /** Whether `drag` goes through the shell (which shrinks the window to Vibey). */
+  shellDrags: (): boolean => shellInvoke() !== null && shellDrags,
+
   ready: async (): Promise<PetReady> => {
     const invoke = shellInvoke();
     if (!invoke) return { ...readDevBinding(), summon_pending: null };

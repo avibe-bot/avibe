@@ -376,6 +376,9 @@ const PetSurface: React.FC = () => {
   // The shell reports hover over Vibey and the dock: macOS gives a webview no
   // hover while its window is not key, and the pet never takes focus itself.
   const [hovered, setHovered] = useState(false);
+  // A shell drag shrinks the window to Vibey and the dock; the column, which
+  // would show only as a sliver at the strip's edge, waits for the drop.
+  const [dragging, setDragging] = useState(false);
   useEffect(() => onPetHover(setHovered), []);
 
   useEffect(() => {
@@ -832,11 +835,14 @@ const PetSurface: React.FC = () => {
           window.clearTimeout(press.timer);
           // A shell that drags the pet answers on release with the layout for
           // where it landed; the full window comes back once that is drawn.
+          if (petBridge.shellDrags()) setDragging(true);
           void petBridge.drag().then((next) => {
-            if (!next) return;
+            if (!next) { setDragging(false); return; }
             petPanel.setLayout(next);
-            requestAnimationFrame(() => requestAnimationFrame(() => { void petBridge.settle().catch(() => undefined); }));
-          }).catch(() => undefined);
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+              void petBridge.settle().catch(() => undefined).finally(() => setDragging(false));
+            }));
+          }).catch(() => setDragging(false));
         }}
         onPointerCancel={() => {
           const press = pressRef.current;
@@ -889,7 +895,7 @@ const PetSurface: React.FC = () => {
   );
 
   return (
-    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state} data-edge={layout.panel_edge}>
+    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state} data-edge={layout.panel_edge} data-dragging={dragging || undefined}>
       <div className={clsx('pet-mini-column', voice.busy && 'is-voice-active')} style={{ '--pet-collapsed-height': `${collapsedHeight}px`, '--pet-input-space': bubbleDrawn && inputShown ? `calc(${inputHeight}px + var(--pet-input-gap))` : '0px' } as CSSProperties}>
         <div className={clsx('pet-mini-cards', voice.busy && 'is-hidden')} inert={voice.busy || undefined} aria-label={cardsExpanded ? t('pet.panel') : undefined} style={{ height: cardsListed ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}>
           <div ref={collapsedRef} key={singleCard ? 'single' : cardsExpanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>

@@ -3185,9 +3185,12 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     expect(invoke.mock.calls.some(([command]) => command === 'plugin:window|start_dragging')).toBe(false);
     expect(edge()).toBe('bottom');
     expect(invoke.mock.calls.some(([command]) => command === 'pet_settle')).toBe(false);
+    // The column waits out the drag: the window is only the strip around Vibey.
+    expect(document.querySelector('.pet-mini-stage')?.hasAttribute('data-dragging')).toBe(true);
     await act(async () => dropped.resolve({ panel_side: 'left', panel_edge: 'top' }));
     await waitFor(() => expect(edgeAtSettle).toEqual(['top']));
     expect(edge()).toBe('top');
+    await waitFor(() => expect(document.querySelector('.pet-mini-stage')?.hasAttribute('data-dragging')).toBe(false));
     // The drag was not a click: the history stays closed.
     expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull();
   });
@@ -3205,6 +3208,8 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('plugin:window|start_dragging'));
     expect(invoke.mock.calls.some(([command]) => command === 'pet_drag')).toBe(false);
     expect(edge()).toBe('bottom');
+    // The window keeps its size in this drag, so the column stays drawn.
+    expect(document.querySelector('.pet-mini-stage')?.hasAttribute('data-dragging')).toBe(false);
   });
 
   it('peeks the stack layers out toward Vibey in either layout', async () => {

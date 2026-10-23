@@ -983,3 +983,7 @@ to {
   transform:rotate(180deg)}
 .pet-mini-stage[data-edge=top] .pet-mini-reply-toggle[aria-expanded=true] svg {
   transform:none}
+/* While the shell drags the pet, the window is only the strip around Vibey
+   and the dock (§9.1); the column comes back with the full window. */
+.pet-mini-stage[data-dragging] .pet-mini-column {
+  visibility:hidden}
