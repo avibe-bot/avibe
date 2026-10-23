@@ -3145,3 +3145,90 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     expect(screen.getByLabelText('pet.recentTurns').getAttribute('aria-expanded')).toBe('false');
   });
 });
+
+describe('dragging the pet to the top of the display (spec §9.1)', () => {
+  const shell = (invoke: (command: string, args?: unknown) => Promise<unknown>) => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+  };
+  const edge = () => document.querySelector('.pet-mini-stage')?.getAttribute('data-edge');
+  const drag = (avatar: HTMLElement) => {
+    fireEvent.pointerDown(avatar, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(avatar, { buttons: 1, pointerId: 1, clientX: 30, clientY: 10 });
+  };
+
+  it('draws the layout the shell chose at load', async () => {
+    shell(vi.fn(async (command: string) => command === 'pet_ready'
+      ? { binding: 'S', revision: 1, summon_pending: null, layout: { panel_side: 'left', panel_edge: 'top' } }
+      : { panel_side: 'left', panel_edge: 'top' }));
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    await waitFor(() => expect(edge()).toBe('top'));
+  });
+
+  it('draws the layout a drop answers before the shell brings the full window back', async () => {
+    const dropped = deferred<unknown>();
+    const edgeAtSettle: (string | null | undefined)[] = [];
+    const invoke = vi.fn((command: string) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null, layout: { panel_side: 'left', panel_edge: 'bottom' } });
+      if (command === 'pet_drag') return dropped.promise;
+      if (command === 'pet_settle') { edgeAtSettle.push(edge()); return Promise.resolve({ panel_side: 'left', panel_edge: 'top' }); }
+      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
+    });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_ready'));
+    await act(async () => {});
+    drag(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_drag'));
+    expect(invoke.mock.calls.some(([command]) => command === 'plugin:window|start_dragging')).toBe(false);
+    expect(edge()).toBe('bottom');
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_settle')).toBe(false);
+    await act(async () => dropped.resolve({ panel_side: 'left', panel_edge: 'top' }));
+    await waitFor(() => expect(edgeAtSettle).toEqual(['top']));
+    expect(edge()).toBe('top');
+    // The drag was not a click: the history stays closed.
+    expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull();
+  });
+
+  it('drags with the window\'s own start_dragging under a shell that does not drag the pet', async () => {
+    const invoke = vi.fn(async (command: string) => command === 'pet_ready'
+      ? { binding: 'S', revision: 1, summon_pending: null }
+      : { panel_side: 'left', panel_edge: 'bottom' });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_ready'));
+    await act(async () => {});
+    drag(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('plugin:window|start_dragging'));
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_drag')).toBe(false);
+    expect(edge()).toBe('bottom');
+  });
+
+  it('peeks the stack layers out toward Vibey in either layout', async () => {
+    canUseAgents = true;
+    const row = workingIn('running').agents[0];
+    runningAgents = { ...workingIn('running'), agents: ['A', 'B', 'C'].map((id) => ({ ...row, session_id: id })) };
+    const layers = () => [...document.querySelectorAll<HTMLElement>('.pet-mini-layer')].map((layer) => [layer.style.top, layer.style.bottom]);
+    let reply: 'top' | 'bottom' = 'bottom';
+    shell(vi.fn(async (command: string) => command === 'pet_ready'
+      ? { binding: 'S', revision: 1, summon_pending: null, layout: { panel_side: 'left', panel_edge: reply } }
+      : { panel_side: 'left', panel_edge: reply }));
+    mainSession('S'); const view = render(<PetPage />);
+    await waitFor(() => expect(document.querySelectorAll('.pet-mini-layer')).toHaveLength(2));
+    // Below the front card: the nearest layer peeks 9px, the next 18px.
+    expect(layers()).toEqual([['9px', '9px'], ['18px', '0px']]);
+    expect(document.querySelector<HTMLElement>('.pet-mini-collapsed')!.style.paddingBottom).toBe('18px');
+    view.unmount();
+    reply = 'top';
+    vi.resetModules();
+    ({ PetPage } = await import('./PetPage'));
+    render(<PetPage />);
+    await waitFor(() => expect(edge()).toBe('top'));
+    await waitFor(() => expect(document.querySelectorAll('.pet-mini-layer')).toHaveLength(2));
+    expect(layers()).toEqual([['9px', '9px'], ['0px', '18px']]);
+    expect(document.querySelector<HTMLElement>('.pet-mini-collapsed')!.style.paddingTop).toBe('18px');
+  });
+});

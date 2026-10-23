@@ -34,6 +34,12 @@ export const petPanel = {
   current: (): boolean => expanded,
   want: (): boolean => wantExpanded,
   layout: (): PetLayout => layout,
+  /** The shell chose a layout (on load, or where a drag dropped the pet). */
+  setLayout: (next: PetLayout) => {
+    if (next.panel_edge === layout.panel_edge && next.panel_side === layout.panel_side) return;
+    layout = next;
+    notify();
+  },
 };
 
 export function usePetPanel(): {
@@ -55,7 +61,8 @@ export function usePetPanel(): {
         const applied = await petBridge.setExpanded(next);
         if (request !== requestId) return;
         confirmedExpanded = next;
-        layout = applied;
+        // Only the shell chooses a layout; outside it there is none to apply.
+        if (petBridge.native()) layout = applied;
         expanded = next;
         notify();
       } catch {

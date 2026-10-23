@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "pet",
-  "description": "The desktop pet window's whole native surface: report readiness, record panel state and hit regions, persist dismissed cards, bind or clear its one session, open an avibe:// link in the main window, and drag itself. Only the pet window gets it, and only for the loopback Runtime origin it loads; it never sees the bundled bootstrap page, so it has no bootstrap command and no event permission (the shell reaches the page through dispatched DOM events).",
+  "description": "The desktop pet window's whole native surface: report readiness, record panel state and hit regions, drag itself through the shell (which shrinks the window for the drag and chooses the layout on release), persist dismissed cards, bind or clear its one session, open an avibe:// link in the main window, and drag itself. Only the pet window gets it, and only for the loopback Runtime origin it loads; it never sees the bundled bootstrap page, so it has no bootstrap command and no event permission (the shell reaches the page through dispatched DOM events).",
   "local": false,
   "windows": ["pet"],
   "remote": {
@@ -10,6 +10,8 @@
   "permissions": [
     "allow-pet-ready",
     "allow-pet-set-expanded",
+    "allow-pet-drag",
+    "allow-pet-settle",
     "allow-pet-hit-regions",
     "allow-pet-set-dismissed",
     "allow-pet-bind",

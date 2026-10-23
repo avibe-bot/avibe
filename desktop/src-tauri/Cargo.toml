@@ -51,6 +51,13 @@ url.workspace = true
 async-trait.workspace = true
 tauri = { version = "2", features = ["tray-icon", "macos-private-api", "test"] }
 
+[target.'cfg(windows)'.dependencies]
+# The pet's drag: the primary button's state and a one-step window frame.
+windows-sys = { version = "0.61", features = [
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
 [target.'cfg(windows)'.dev-dependencies]
 # Reads a native menu item's text, where muda keeps its accelerator.
 windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }

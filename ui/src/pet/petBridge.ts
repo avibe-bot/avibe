@@ -20,6 +20,8 @@ export type PetBinding = {
 
 export type PetReady = PetBinding & {
   summon_pending: { intent: PetIntent } | null;
+  /** Which side the column opens on; only shells that drag the pet send it. */
+  layout?: PetLayout;
 };
 
 export const PET_SUMMON_EVENT = 'avibe:pet-summon';
@@ -43,6 +45,18 @@ const shellInvoke = (): TauriInternals['invoke'] | null => {
 };
 
 const isIntent = (value: unknown): value is PetIntent => value === 'listen' || value === 'show' || value === 'release';
+
+const parseLayout = (value: unknown): PetLayout => {
+  const layout = value as Partial<PetLayout> | null;
+  return {
+    panel_side: layout?.panel_side === 'right' ? 'right' : 'left',
+    panel_edge: layout?.panel_edge === 'top' ? 'top' : 'bottom',
+  };
+};
+
+// Whether the shell drags the pet itself (`pet_drag`), learned from
+// `pet_ready`: older shells only offer the window's own `start_dragging`.
+let shellDrags = false;
 
 const parseBinding = (value: unknown): PetBinding => {
   const result = value as { binding?: unknown; revision?: unknown } | null;
@@ -75,22 +89,20 @@ export const petBridge = {
   ready: async (): Promise<PetReady> => {
     const invoke = shellInvoke();
     if (!invoke) return { ...readDevBinding(), summon_pending: null };
-    const result = (await invoke('pet_ready')) as { summon_pending?: { intent?: unknown } | null } | null;
+    const result = (await invoke('pet_ready')) as { summon_pending?: { intent?: unknown } | null; layout?: unknown } | null;
     const pending = result?.summon_pending;
+    shellDrags = Boolean(result?.layout);
     return {
       ...parseBinding(result),
       summon_pending: pending && isIntent(pending.intent) ? { intent: pending.intent } : null,
+      ...(result?.layout ? { layout: parseLayout(result.layout) } : {}),
     };
   },
 
   setExpanded: async (expanded: boolean): Promise<PetLayout> => {
     const invoke = shellInvoke();
     if (!invoke) return DEFAULT_LAYOUT;
-    const layout = (await invoke('pet_set_expanded', { expanded })) as Partial<PetLayout> | null;
-    return {
-      panel_side: layout?.panel_side === 'right' ? 'right' : 'left',
-      panel_edge: layout?.panel_edge === 'top' ? 'top' : 'bottom',
-    };
+    return parseLayout(await invoke('pet_set_expanded', { expanded }));
   },
 
   setHitRegions: async (rects: PetHitRect[]): Promise<void> => {
@@ -112,9 +124,27 @@ export const petBridge = {
     return devMemory;
   },
 
-  /** Moves the native window with the pointer (`start-dragging`). */
-  startDragging: (): void => {
-    void shellInvoke()?.('plugin:window|start_dragging');
+  /**
+   * Moves the native window with the pointer. A shell that drags the pet
+   * itself answers, once the button is released, with the layout for where it
+   * was dropped; the page draws it and then calls `settle`. Otherwise (an
+   * older shell, or outside one) this resolves to null.
+   */
+  drag: async (): Promise<PetLayout | null> => {
+    const invoke = shellInvoke();
+    if (!invoke) return null;
+    if (!shellDrags) {
+      void invoke('plugin:window|start_dragging');
+      return null;
+    }
+    return parseLayout(await invoke('pet_drag'));
+  },
+
+  /** Restores the full window around a dropped pet, in the layout it drew. */
+  settle: async (): Promise<PetLayout> => {
+    const invoke = shellInvoke();
+    if (!invoke) return DEFAULT_LAYOUT;
+    return parseLayout(await invoke('pet_settle'));
   },
 
   /** Opens an `avibe://` link in the main window. */

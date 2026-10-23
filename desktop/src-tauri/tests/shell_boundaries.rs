@@ -404,6 +404,8 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "computer_use_open_permission",
         "pet_ready",
         "pet_set_expanded",
+        "pet_drag",
+        "pet_settle",
         "pet_hit_regions",
         "pet_set_dismissed",
         "pet_bind",
@@ -1143,6 +1145,8 @@ fn the_pet_and_the_workbench_get_only_their_pet_commands_on_loopback_pages() {
         serde_json::json!([
             "allow-pet-ready",
             "allow-pet-set-expanded",
+            "allow-pet-drag",
+            "allow-pet-settle",
             "allow-pet-hit-regions",
             "allow-pet-set-dismissed",
             "allow-pet-bind",

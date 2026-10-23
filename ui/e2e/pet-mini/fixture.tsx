@@ -3,6 +3,7 @@ import { PetAvatar, type PetPose } from '../../src/pet/PetAvatar';
 import { PetPage } from '../../src/pet/PetPage';
 import { PetWindow } from '../../src/pet/PetWindow';
 import { petBridge } from '../../src/pet/petBridge';
+import { petPanel } from '../../src/pet/petPanel';
 import { ApiProvider } from '../../src/context/ApiContext';
 import { InstanceAuthorizationProvider } from '../../src/context/InstanceAuthorizationProvider';
 import { WorkbenchInboxProvider } from '../../src/context/WorkbenchInboxProvider';
@@ -50,6 +51,8 @@ window.petFixtureOpens = [];
 window.petFixtureStops = [];
 window.petFixtureMarkReads = [];
 petBridge.open = async (link) => { window.petFixtureOpens.push(link); };
+// `edge=top`: the layout a shell chooses near the top of the display (§9.1).
+if (params.get('edge') === 'top') petPanel.setLayout({ panel_side: 'left', panel_edge: 'top' });
 const hasMain = params.get('main') !== 'false';
 const layers = Number(params.get('layers') ?? 3);
 const personal = params.get('scenario') === 'personal';

@@ -1,6 +1,7 @@
 import { useEffect, useSyncExternalStore } from 'react';
 
 import { onPetEvents, petBridge, type PetBinding, type PetIntent } from './petBridge';
+import { petPanel } from './petPanel';
 import type { PetSurfaceEpoch } from './usePetSession';
 
 /** Document-local main resolution and pending summons. Legacy shell bindings
@@ -48,6 +49,7 @@ const start = () => {
   readyPromise = petBridge.ready().then((ready) => {
     legacyBinding = ready;
     readyLoaded = true;
+    if (ready.layout) petPanel.setLayout(ready.layout);
     if (ready.summon_pending && liveSummons === liveSummonsAtRequest) noteSummon(ready.summon_pending.intent);
   }).catch(() => undefined);
 };

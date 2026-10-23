@@ -22,7 +22,7 @@ import { VoiceTranscriptionError } from '@/lib/voiceTranscription';
 import { PetAvatar, type PetPose } from './PetAvatar';
 import { PetOpenButton } from './PetOpenButton';
 import { REPLY_LINGER_RESUME_MS, useReplyLinger } from './useReplyLinger';
-import { onPetHover, petBridge, sessionLink, vaultRequestLink } from './petBridge';
+import { onPetHover, petBridge, sessionLink, vaultRequestLink, type PetLayout } from './petBridge';
 import { petPanel, usePetPanel } from './petPanel';
 import { petComposer, usePetComposer } from './petComposer';
 import { petShell, useOnSummon, usePetBinding, usePetDismissed } from './petShell';
@@ -153,10 +153,11 @@ export const PetPage: React.FC = () => {
 const PetSetupPending: React.FC<{ recheck: () => void }> = ({ recheck }) => {
   const { t } = useTranslation();
   useOnSummon(recheck);
+  const { layout } = usePetPanel();
   const rootRef = useRef<HTMLDivElement>(null);
   useHitRegions(rootRef);
   return (
-    <div ref={rootRef} className="pet-mini-stage" data-pet-root>
+    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-edge={layout.panel_edge}>
       <div className="pet-mini-setup" data-pet-hit>
         <p>{t('pet.setupPending')}</p>
         <Button size="sm" onClick={() => void petBridge.open('avibe://settings')}>{t('pet.openAvibe')}</Button>
@@ -226,7 +227,7 @@ const PetSurface: React.FC = () => {
   const binding = usePetBinding();
   const { capabilities } = useInstanceAuthorization();
   const inbox = useWorkbenchInbox();
-  const { expanded, setPanel } = usePetPanel();
+  const { expanded, layout, setPanel } = usePetPanel();
   const { draft, references: draftReferences, uncertain, sending, listenPending, setDraft, setUncertain } = usePetComposer(binding);
   const data = usePetSession(binding);
   const epoch = data.epoch;
@@ -829,7 +830,13 @@ const PetSurface: React.FC = () => {
           if (Math.hypot(event.clientX - press.x, event.clientY - press.y) < 4) return;
           press.dragged = true;
           window.clearTimeout(press.timer);
-          void petBridge.startDragging();
+          // A shell that drags the pet answers on release with the layout for
+          // where it landed; the full window comes back once that is drawn.
+          void petBridge.drag().then((next) => {
+            if (!next) return;
+            petPanel.setLayout(next);
+            requestAnimationFrame(() => requestAnimationFrame(() => { void petBridge.settle().catch(() => undefined); }));
+          }).catch(() => undefined);
         }}
         onPointerCancel={() => {
           const press = pressRef.current;
@@ -882,7 +889,7 @@ const PetSurface: React.FC = () => {
   );
 
   return (
-    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state}>
+    <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state} data-edge={layout.panel_edge}>
       <div className={clsx('pet-mini-column', voice.busy && 'is-voice-active')} style={{ '--pet-collapsed-height': `${collapsedHeight}px`, '--pet-input-space': bubbleDrawn && inputShown ? `calc(${inputHeight}px + var(--pet-input-gap))` : '0px' } as CSSProperties}>
         <div className={clsx('pet-mini-cards', voice.busy && 'is-hidden')} inert={voice.busy || undefined} aria-label={cardsExpanded ? t('pet.panel') : undefined} style={{ height: cardsListed ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}>
           <div ref={collapsedRef} key={singleCard ? 'single' : cardsExpanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>
@@ -899,7 +906,7 @@ const PetSurface: React.FC = () => {
                 t={(key, options) => String(t(key as never, options as never))}
               />
             ) : (
-              <CollapsedCards cards={visibleCards} onOpen={openCards} t={(key, options) => String(t(key as never, options as never))} />
+              <CollapsedCards cards={visibleCards} edge={layout.panel_edge} onOpen={openCards} t={(key, options) => String(t(key as never, options as never))} />
             )
           )}
           </div>
@@ -1214,7 +1221,9 @@ const MiniDock: React.FC<{ enabled: boolean; listening: boolean; finishing?: boo
   </div>
 );
 
-const CollapsedCards: React.FC<{ cards: PetCard[]; onOpen: () => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ cards, onOpen, t }) => {
+// The layers peek out toward Vibey: below the front card, or above it when the
+// column opens downward.
+const CollapsedCards: React.FC<{ cards: PetCard[]; edge: PetLayout['panel_edge']; onOpen: () => void; t: (key: string, options?: Record<string, unknown>) => string }> = ({ cards, edge, onOpen, t }) => {
   const [front, ...remainingCards] = cards;
   if (!front) return null;
   const layers = remainingCards.slice(0, MAX_COLLAPSED_LAYERS);
@@ -1224,13 +1233,14 @@ const CollapsedCards: React.FC<{ cards: PetCard[]; onOpen: () => void; t: (key: 
     <button
       type="button"
       className="pet-mini-collapsed"
-      style={{ paddingBottom: layers.length * 9 }}
+      style={edge === 'top' ? { paddingTop: layers.length * 9 } : { paddingBottom: layers.length * 9 }}
       onClick={onOpen}
       aria-label={t('pet.stack.expand', { count, displayCount })}
     >
       {layers.map((card, index) => {
         const inset = 18 + 6 + index * 3;
-        return <span key={card.id} data-pet-hit className="pet-mini-layer" style={{ top: (index + 1) * 9, bottom: (layers.length - index - 1) * 9, left: inset, right: inset, zIndex: layers.length - index }} aria-hidden />;
+        const near = (index + 1) * 9, far = (layers.length - index - 1) * 9;
+        return <span key={card.id} data-pet-hit className="pet-mini-layer" style={{ top: edge === 'top' ? far : near, bottom: edge === 'top' ? near : far, left: inset, right: inset, zIndex: layers.length - index }} aria-hidden />;
       })}
       <div className="pet-mini-front" style={{ zIndex: layers.length + 1 }}>
         <CardBody
