@@ -469,7 +469,8 @@
     "processMessageFailed": "出错：{error}",
     "agentUnavailable": {
       "disabled": "{agent} 已停用，这个会话没法再用它继续。",
-      "missing": "{agent} 已被删除，这个会话没法再用它继续。"
+      "missing": "{agent} 已被删除，这个会话没法再用它继续。",
+      "resendLater": "这条消息不会自动重发，Agent 恢复后请重新发送。"
     },
     "continueOnVibey": {
       "workbench": "可以一键切换到 Vibey，无缝接着做。",

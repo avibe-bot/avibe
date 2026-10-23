@@ -295,3 +295,15 @@ def test_uploaded_image_survives_real_queue_admission_and_send_now(isolated_stat
                 else:
                     assert [(row["id"], row["state"]) for row in rows] == [(delivery_id, "queued")]
                     assert rows[0]["content"]["attachments"] == [attachment]
+
+
+def test_bootstrap_lists_disabled_agents_so_old_replies_keep_their_author(isolated_state, tmp_path):
+    """A session moved off a disabled Agent still names that Agent's earlier replies."""
+    from vibe.ui_server import app
+
+    _scope_id, session_id = _make_session(tmp_path)
+    with patch(
+        "vibe.api.get_vibe_agents", return_value={"agents": [], "default_agent_name": None}
+    ) as get_agents:
+        assert app.test_client().get(f"/api/sessions/{session_id}/bootstrap").status_code == 200
+    assert get_agents.call_args.kwargs == {"include_disabled": True, "include_archived": True}

@@ -3498,12 +3498,12 @@ export const QueueStrip: React.FC<{
 }> = ({ queue, onRemove, onRecall, onSendNow, sendingNow = false }) => {
   const { t } = useTranslation();
   if (queue.length === 0) return null;
-  const retryRequired = queue.some((item) => item.requires_explicit_retry === true);
+  const held = queue.filter((item) => item.requires_explicit_retry === true);
+  const retryRequired = held.length > 0;
   // An input held because its Agent cannot run is continued from the failure notice
-  // (Continue on Vibey, or Retry), not by fixing a startup error.
-  const agentUnavailable = queue.some(
-    (item) => item.requires_explicit_retry === true && item.retry_reason === 'agent_unavailable',
-  );
+  // (Continue on Vibey, or Retry), not by fixing a startup error. Any other hold keeps
+  // the general guidance, so the special copy needs every hold to share the reason.
+  const agentUnavailable = retryRequired && held.every((item) => item.retry_reason === 'agent_unavailable');
   const headFenced = isQueueDeliveryFenced(queue[0]);
   const reconciling = queue[0].state === 'reconciling_steer';
   const busy = sendingNow || headFenced;

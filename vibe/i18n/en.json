@@ -469,7 +469,8 @@
     "processMessageFailed": "Error: {error}",
     "agentUnavailable": {
       "disabled": "{agent} is turned off, so this session can't continue on it.",
-      "missing": "{agent} was deleted, so this session can't continue on it."
+      "missing": "{agent} was deleted, so this session can't continue on it.",
+      "resendLater": "This message won't run later; send it again once the Agent is back."
     },
     "continueOnVibey": {
       "workbench": "Switch to Vibey to pick up right where you left off.",

@@ -990,6 +990,9 @@ class MessageHandler(BaseHandler):
         text = f"❌ {reason}"
         if offer:
             text = f"{text}\n{self._t('error.continueOnVibey.workbench' if workbench else 'error.continueOnVibey.im')}"
+        elif not workbench:
+            # Its input was retired above, so it will not run once the Agent is back.
+            text = f"{text}\n{self._t('error.agentUnavailable.resendLater')}"
         await emit_backend_failure(
             self.controller,
             context,
