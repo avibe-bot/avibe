@@ -181,6 +181,10 @@ jobs:
             scripts/show_runtime_manifest_asset.py
             scripts/build_retired_companion.py
             scripts/release_package_version.py
+            scripts/ci_scenario_evidence.py
+            scripts/pytest_collection.py
+            .github/workflows/publish.yml
+            tests/scenarios/**/catalog.yaml
             tests/test_distribution_artifacts.py
             tests/__init__.py
             tests/e2e/test_retired_updater_bridge.py
@@ -365,11 +369,11 @@ jobs:
             (cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py -v \
               --junitxml="$RUNNER_TEMP/retired-updater-junit/retired-updater-bridge.xml") || pytest_status=$?
             evidence_status=0
-            python scripts/ci_scenario_evidence.py --release \
+            (cd release-automation && python scripts/ci_scenario_evidence.py --release \
               "$RUNNER_TEMP/retired-updater-junit" \
               --workflow .github/workflows/publish.yml \
-              --pytest-root release-automation \
-              --pytest-command-index 1 || evidence_status=$?
+              --pytest-root . \
+              --pytest-command-index 1) || evidence_status=$?
             if [ "$pytest_status" -ne 0 ]; then exit "$pytest_status"; fi
             exit "$evidence_status"
           else

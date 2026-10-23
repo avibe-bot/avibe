@@ -206,7 +206,12 @@ def test_release_evidence_uses_the_explicit_release_checkout_root(tmp_path: Path
     assert '--junitxml="$RUNNER_TEMP/model-hub-e2e-junit/model-hub-e2e.xml"' in model_workflow
     assert "--release" in publish_workflow
     assert "--workflow .github/workflows/publish.yml" in publish_workflow
-    assert "--pytest-root release-automation" in publish_workflow
+    assert "(cd release-automation && python scripts/ci_scenario_evidence.py --release" in publish_workflow
+    assert "--pytest-root ." in publish_workflow
+    assert "scripts/ci_scenario_evidence.py" in publish_workflow
+    assert "scripts/pytest_collection.py" in publish_workflow
+    assert ".github/workflows/publish.yml" in publish_workflow
+    assert "tests/scenarios/**/catalog.yaml" in publish_workflow
     assert "cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py" in publish_workflow
     assert '--junitxml="$RUNNER_TEMP/retired-updater-junit/retired-updater-bridge.xml"' in publish_workflow
 
