@@ -81,11 +81,25 @@ jobs:
       # Every scenario is hermetic, so it runs where only loopback answers: an
       # engine or CLI that ignores its loopback upstream fails at once instead
       # of reaching a real provider. The downloads above stay outside.
-      - name: Run the Model Hub E2E
+      # Every release E2E case selected below must be present and passing in this
+      # run's own report; collection or a green process is not enough.
+      - name: Run the Model Hub E2E and release evidence gate
         run: |
+          set +e
+          mkdir -p "$RUNNER_TEMP/model-hub-e2e-junit"
           bash scripts/ci_loopback_only.sh python -m pytest -m e2e_model_hub tests/e2e -p no:cacheprovider -ra \
-            --basetemp="$RUNNER_TEMP/e2e" 2>&1 | tee model-hub-e2e.log
-          exit "${PIPESTATUS[0]}"
+            --basetemp="$RUNNER_TEMP/e2e" \
+            --junitxml="$RUNNER_TEMP/model-hub-e2e-junit/model-hub-e2e.xml" 2>&1 | tee model-hub-e2e.log
+          pytest_status=${PIPESTATUS[0]}
+          python scripts/ci_scenario_evidence.py --release \
+            "$RUNNER_TEMP/model-hub-e2e-junit" \
+            --workflow .github/workflows/model-hub-e2e.yml \
+            --pytest-root . \
+            --pytest-command-index 0
+          evidence_status=$?
+          set -e
+          if [ "$pytest_status" -ne 0 ]; then exit "$pytest_status"; fi
+          exit "$evidence_status"
 
       - name: Upload the run log
         if: always()
