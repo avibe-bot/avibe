@@ -73,6 +73,8 @@ the main agent; there is no Follow up on cards.
   - Expanded: 6px panel padding plus 12px scroll padding.
   - Collapsed: 18px stack padding.
 - A card's width never depends on its content or on the number of cards.
+  Vibey's reply bubble is the one exception, and only while it shows a status
+  word alone (§4.2); the activity cards always keep the column width.
 - **Long text never widens anything.** Every flex/grid item on the path from
   the list to a text node needs `min-width: 0`, and grid rows need
   `grid-template-columns: minmax(0, 1fr)`. (A grid column sized by a long
@@ -248,9 +250,10 @@ order is unchanged; CSS places the detail above it, and the toggle's
 toggle row. On open the history scrolls to the very bottom, chat-style: the end
 of the newest result and the quick replies, Vault handoffs and notices that
 follow it sit right above the toggle row, with the §7.5 edge fades (no bottom
-fade, since the end is reached). While it is open, new content keeps a reader
-who is at the bottom (within 8px) pinned there and leaves one who has scrolled
-up where they are. Mark-read needs any part of the latest result in view. Collapsed shows an up chevron and expanded a down chevron.
+fade, since the end is reached). While it is open, new content, or the box
+shrinking because the input below it grows (§5.2), keeps a reader who is at the
+bottom (within 8px) pinned there and leaves one who has scrolled up where they
+are. The pin's own scroll is never read as the reader scrolling up. Mark-read needs any part of the latest result in view. Collapsed shows an up chevron and expanded a down chevron.
 
 Open in Avibe is an icon-only button (the card's `ExternalLink` open button,
 28px, on a solid surface) pinned to the top-right corner of the open history,
@@ -274,7 +277,19 @@ fades show there is more.
 Detail retains the 280ms grid / 200ms opacity transition and closes on stack
 collapse. Its own scroll region fits the existing window; opening it never
 resizes the avatar or the 292px activity scroll box. Input and dictation hide
-this detail according to §5.2, including quick replies.
+the bubble, quick replies included, unless its history is open: an open history
+stays above them (§5.2).
+
+**Width (owner decision, 2026-10-23).** While the summary row is a status word
+alone (thinking while the turn runs, or waiting with no reply) and the history
+is closed, the bubble is sized to its content, at least 160px, and centred on
+Vibey like the column, so its tail and Vibey stay put. When the reply (or a
+failure notice) takes the summary row, or the history opens, it widens to the
+column width from the centre over 300ms settle; a new running turn narrows it
+the same way. Reduced motion switches at once. The width animates through an
+explicit pixel width that is handed back to CSS when it lands, since CSS
+cannot interpolate between a content size and a percentage. The activity
+cards keep their width.
 
 ### 4.3 Visible activity cards
 
@@ -332,8 +347,20 @@ Known data limitations for P1:
     else keeps it shown (§4.2);
   - else, if there is any exchange, the bubble shows with the history open,
     scrolled to the bottom;
-  - with no messages yet, or while typing or dictating, the click does nothing
-    (the input and its draft are left as they are).
+  - with no messages yet, the click does nothing.
+
+  Typing and dictating do not stop a click (owner decision, 2026-10-23): the
+  history opens and closes above the input or the marquee, which keep their
+  draft, focus, caret and capture. A click on Vibey is not leaving the input:
+  the input keeps the focus (Vibey's press does not take it).
+- **Double-click Vibey** (owner decision, 2026-10-23) opens Vibey's
+  conversation in the Avibe main window (`avibe://session/<main>`, routed to
+  `/chat/<id>`). A single click is never delayed: the first click of a
+  double-click acts at once like any click, and the second puts the history
+  and the card list back as they were before the first, then opens the window.
+  The double-click is the platform's own (the press's click count), so its
+  speed follows the system setting. A hold or a drag is never a click, and
+  keyboard activation is always a single click.
 
   Every branch leaves the shell's panel state matching what is drawn, so
   nothing stays expanded out of sight. Vibey's button is labelled "Recent
@@ -383,7 +410,15 @@ Known data limitations for P1:
   Vibey. By priority it holds the marquee while dictating, otherwise the
   input bubble when it is open, otherwise Vibey's reply bubble when it has
   progress, history, a notice, quick replies or a pending authorization.
-  Only the highest-priority content is interactive or eligible for mark-read.
+  Only the highest-priority content is interactive or eligible for mark-read,
+  except an open history.
+- **History above the input (owner decision, 2026-10-23).** Vibey's history,
+  opened while the marquee or the input holds the slot, is drawn above them in
+  the same slot, 14px apart (room for the bubble's tail); both are
+  interactive. Opening the input keeps an open history, and closing the
+  history leaves the input as it is. The history's height also leaves room for
+  the measured input below it, which grows to its four lines inside the fixed
+  window; nothing clips.
 - **Mutually exclusive expansion.** Opening "Recent turns" collapses the cards
   into their layered stack. Opening the card stack expands the cards and closes
   history. Closing history returns to the collapsed mini.
@@ -434,7 +469,8 @@ Known data limitations for P1:
   - Enter sends; Shift+Enter is a newline; Enter during IME composition does
     not send;
   - Esc closes the bubble and discards the draft. Esc while dictating cancels
-    dictation first. Esc with nothing open collapses the stack.
+    dictation first. An open history above the input or the marquee closes
+    before either. Esc with nothing open collapses the stack.
 - **Sending:**
   - goes to the main agent only, with the existing composer rules: one
     message in flight, the uncertain-send lock, server-side queueing;
@@ -779,5 +815,12 @@ GET /api/sessions/main
 - [ ] Window: fixed size; Vibey anchored at the bottom; clicks pass through
       everywhere except the reported regions on macOS and Windows (shadows
       included); polling backs off and stops when hidden.
+- [ ] With the input or dictation open, a Vibey click opens the history above
+      it and a second closes it; draft, focus, caret and capture survive, and
+      Esc closes the history first. Everything fits the fixed window.
+- [ ] Vibey's bubble is content-sized and centred while it only says
+      thinking/waiting, and widens from the centre when the reply arrives.
+- [ ] A double-click on Vibey opens its conversation in Avibe and leaves the
+      history and cards as they were; single clicks are not delayed.
 - [ ] Reduced motion turns everything above into instant switches.
 - [ ] Icons are SVG. All copy is localized in en and zh.

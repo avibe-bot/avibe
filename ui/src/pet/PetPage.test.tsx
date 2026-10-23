@@ -1831,7 +1831,11 @@ describe('desktop mini v2 interaction contract', () => {
     expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'Yes', metadata: { quick_reply_for: 'q1' } });
     expect(screen.queryByRole('button', { name: 'Yes', exact: true })).toBeNull();
     expect(screen.queryByRole('button', { name: 'No', exact: true })).toBeNull();
+    // The history stayed open above the input; Escape closes it, then the input.
     await userEvent.keyboard('{Escape}');
+    expect(screen.getByRole('textbox')).toBeTruthy();
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('textbox')).toBeNull();
     await showDetail();
     // An older update must never reclaim a newer result's quick-reply group.
     await emit((h) => h.onMessageNew?.(message('q2', 'S', { content: { quick_replies: ['Continue', 'Wait'] } })));
@@ -1998,6 +2002,175 @@ describe('desktop mini v2 interaction contract', () => {
     expect(screen.queryByLabelText('pet.voice.open')).toBeNull();
     fireEvent.pointerUp(avatar, { pointerId: 2 });
     expect(api.sendSessionMessage).not.toHaveBeenCalled();
+  });
+
+  // Spec §5.1/§5.2: Vibey's history and the input are open together.
+  const historyIsOpen = () => document.querySelector('.pet-mini-detail.is-open') !== null;
+  const withHistory = () => {
+    tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' }), message('r', 'S', { text: 'Old reply' })];
+  };
+
+  it('opens the history above the typed input, keeping its draft, focus and caret, and Escape closes the history first', async () => {
+    withHistory();
+    mainSession('S'); render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    await userEvent.click(screen.getByLabelText('pet.keyboard.open'));
+    const input = await screen.findByRole('textbox') as HTMLTextAreaElement;
+    await userEvent.type(input, 'half a thought');
+    input.setSelectionRange(4, 4);
+    const avatar = screen.getByLabelText('pet.recentTurns');
+    await userEvent.click(avatar);
+    await waitFor(() => expect(historyIsOpen()).toBe(true));
+    expect(avatar.getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByRole('textbox')).toBe(input);
+    expect(input.value).toBe('half a thought');
+    expect(document.activeElement).toBe(input);
+    expect([input.selectionStart, input.selectionEnd]).toEqual([4, 4]);
+    // Drawn in the same slot, above the input.
+    const bubble = document.querySelector('.pet-mini-reply-bubble')!;
+    expect(bubble.closest('.pet-mini-slot')).toBe(input.closest('.pet-mini-slot'));
+    expect(bubble.compareDocumentPosition(input) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // A second click closes only the history.
+    await userEvent.click(avatar);
+    await waitFor(() => expect(historyIsOpen()).toBe(false));
+    expect(document.querySelector('.pet-mini-reply-bubble')).toBeNull();
+    expect(screen.getByRole('textbox')).toBe(input);
+    expect(input.value).toBe('half a thought');
+    // Escape: the history, then the input.
+    await userEvent.click(avatar);
+    await waitFor(() => expect(historyIsOpen()).toBe(true));
+    await userEvent.keyboard('{Escape}');
+    expect(historyIsOpen()).toBe(false);
+    expect(screen.getByRole('textbox')).toBe(input);
+    expect(input.value).toBe('half a thought');
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('textbox')).toBeNull();
+    expect(api.sendSessionMessage).not.toHaveBeenCalled();
+  });
+
+  it('keeps an open history when the input opens, and sends from the input below it', async () => {
+    withHistory();
+    mainSession('S'); render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(historyIsOpen()).toBe(true));
+    await userEvent.click(screen.getByLabelText('pet.keyboard.open'));
+    const input = await screen.findByRole('textbox');
+    expect(historyIsOpen()).toBe(true);
+    await userEvent.type(input, 'next{Enter}');
+    expect(api.sendSessionMessage).toHaveBeenCalledExactlyOnceWith('S', { text: 'next' });
+  });
+
+  it('opens the history above dictation without ending it, and Escape closes the history before cancelling', async () => {
+    const abort = vi.fn();
+    const finish = vi.fn();
+    class Dictation { done = new Promise<string>(() => {}); start = async () => {}; finish = finish; abort = abort; }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      withHistory();
+      mainSession('S'); render(<PetPage />);
+      await userEvent.click(await screen.findByLabelText('pet.voice.open'));
+      await waitFor(() => expect(pose()).toBe('listening'));
+      expect(document.querySelector('.pet-mini-marquee')).not.toBeNull();
+      await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+      await waitFor(() => expect(historyIsOpen()).toBe(true));
+      expect(pose()).toBe('listening');
+      expect(document.querySelector('.pet-mini-marquee')).not.toBeNull();
+      const bubble = document.querySelector('.pet-mini-reply-bubble')!;
+      expect(bubble.compareDocumentPosition(document.querySelector('.pet-mini-marquee')!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+      expect(historyIsOpen()).toBe(false);
+      expect(pose()).toBe('listening');
+      expect(abort).not.toHaveBeenCalled();
+      expect(finish).not.toHaveBeenCalled();
+      act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); });
+      expect(abort).toHaveBeenCalledTimes(1);
+      await waitFor(() => expect(pose()).not.toBe('listening'));
+    });
+  });
+
+  it('a double-click opens the conversation in Avibe and leaves the history as before', async () => {
+    const invoke = vi.fn((command: string) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
+      if (command === 'pet_open') return Promise.resolve(null);
+      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    try {
+      withHistory();
+      mainSession('S'); render(<PetPage />);
+      await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+      const avatar = screen.getByLabelText('pet.recentTurns');
+      const opens = () => invoke.mock.calls.filter(([command]) => command === 'pet_open');
+      // Closed before: closed after, with the conversation opened once.
+      await userEvent.setup().dblClick(avatar);
+      await waitFor(() => expect(opens()).toEqual([['pet_open', { link: 'avibe://session/S' }]]));
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
+      expect(historyIsOpen()).toBe(false);
+      expect(avatar.getAttribute('aria-expanded')).toBe('false');
+      // Open before: open after.
+      await userEvent.click(avatar);
+      await waitFor(() => expect(historyIsOpen()).toBe(true));
+      await userEvent.setup().dblClick(avatar);
+      await waitFor(() => expect(opens()).toHaveLength(2));
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
+      expect(historyIsOpen()).toBe(true);
+      expect(avatar.getAttribute('aria-expanded')).toBe('true');
+      // Keyboard activation (no click count) and single clicks never open it.
+      fireEvent.click(avatar);
+      await waitFor(() => expect(historyIsOpen()).toBe(false));
+      await userEvent.click(avatar);
+      await waitFor(() => expect(historyIsOpen()).toBe(true));
+      expect(opens()).toHaveLength(2);
+    } finally {
+      Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+      Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+    }
+  });
+
+  it('a quick click after a hold is a single click, not a double-click', async () => {
+    const invoke = vi.fn((command: string) => {
+      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
+      return Promise.resolve(command === 'pet_open' ? null : { panel_side: 'left', panel_edge: 'bottom' });
+    });
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    withHistory();
+    mainSession('S'); render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    const avatar = screen.getByLabelText('pet.recentTurns');
+    // A click, then a hold (which opens the input without voice), then a
+    // press the platform counts as the second of a double-click.
+    await userEvent.click(avatar);
+    await waitFor(() => expect(historyIsOpen()).toBe(true));
+    fireEvent.pointerDown(avatar, { button: 0, pointerId: 7 });
+    fireEvent.mouseDown(avatar, { detail: 2 });
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 400)));
+    fireEvent.pointerUp(avatar, { pointerId: 7 });
+    expect(await screen.findByRole('textbox')).toBeTruthy();
+    fireEvent.pointerDown(avatar, { button: 0, pointerId: 8 });
+    fireEvent.mouseDown(avatar, { detail: 2 });
+    fireEvent.pointerUp(avatar, { pointerId: 8 });
+    await waitFor(() => expect(historyIsOpen()).toBe(false));
+    expect(invoke.mock.calls.filter(([command]) => command === 'pet_open')).toEqual([]);
+  });
+
+  it('a double-click that first collapsed the card list puts the list back', async () => {
+    canUseAgents = true;
+    const row = workingIn('running').agents[0];
+    runningAgents = { ...workingIn('running'), agents: [
+      { ...row, session_id: 'A', title: 'Task A', visibility: 'foreground', openable_in_chat: true },
+      { ...row, session_id: 'B', title: 'Task B', visibility: 'foreground', openable_in_chat: true },
+    ] };
+    withHistory();
+    mainSession('S'); render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-collapsed')).not.toBeNull());
+    await showCards();
+    await waitFor(() => expect(document.querySelector('.pet-mini-scroll')).not.toBeNull());
+    await userEvent.setup().dblClick(screen.getByLabelText('pet.recentTurns'));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
+    expect(document.querySelector('.pet-mini-scroll')).not.toBeNull();
+    expect(historyIsOpen()).toBe(false);
   });
 });
 
@@ -2556,6 +2729,35 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
   afterEach(() => {
     vi.useRealTimers();
     api.getTurnState.mockImplementation(async () => idleTurn);
+  });
+
+  // Spec §4.2: a status word alone sizes the bubble to its content.
+  it('is content-sized while thinking, full width for the reply and whenever the history is open', async () => {
+    const compact = () => document.querySelector('.pet-mini-reply-bubble')!.classList.contains('is-compact');
+    tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' })];
+    let running = true;
+    api.getTurnState.mockImplementation(async () => (running ? { ...idleTurn, in_flight: true, foreground: 'running' as const } : idleTurn));
+    mainSession('S');
+    render(<PetPage />);
+    await waitFor(() => expect(bubbleOpen()).toBe(true));
+    expect(document.querySelector('.pet-mini-reply-toggle')?.textContent).toContain('pet.thinking');
+    expect(compact()).toBe(true);
+    fireEvent.click(document.querySelector('.pet-mini-reply-toggle')!);
+    await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).not.toBeNull());
+    expect(compact()).toBe(false);
+    fireEvent.click(document.querySelector('.pet-mini-reply-toggle')!);
+    await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull());
+    expect(compact()).toBe(true);
+    const result = message('r', 'S', { text: 'All done', read_at: null });
+    tails.S = [...tails.S, result];
+    running = false;
+    await emit((h) => {
+      h.onMessageNew?.(result);
+      h.onTurnEnd?.({ session_id: 'S' });
+    });
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-toggle')?.textContent).toContain('pet.repliedPrefix'));
+    expect(compact()).toBe(false);
+    expect(bubbleOpen()).toBe(true);
   });
 
   it('keeps the bubble open from running to its result, then shows the reply for 10s', async () => {

@@ -1164,12 +1164,144 @@ test('holding Vibey still starts input, not the history', async ({ page }) => {
   await page.mouse.up();
   await expect(page.getByRole('textbox')).toBeVisible();
   await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail.is-open')).toHaveCount(0);
-  // While typing, a Vibey click leaves the input, and its draft, alone.
+  // While typing, a Vibey click opens the history above the input and leaves
+  // the input, and its draft, as they are (§5.1).
   await page.getByRole('textbox').fill('a draft');
   await avatar.click();
   await expect(page.getByRole('textbox')).toHaveValue('a draft');
-  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail.is-open')).toHaveCount(0);
+  await expect(page.getByRole('textbox')).toBeFocused();
+  await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail.is-open')).toHaveCount(1);
 });
+
+for (const theme of ['light', 'dark']) {
+  for (const reduced of [false, true]) {
+    test(`the history opens above a growing input and both fit the fixed window (${theme}, reduced=${reduced})`, async ({ page }) => {
+      await page.emulateMedia({ reducedMotion: reduced ? 'reduce' : 'no-preference' });
+      await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=4');
+      await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+      const avatar = page.locator('.pet-mini-avatar-button');
+      await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+      const anchor = await avatar.boundingBox();
+      await avatar.hover();
+      await page.getByRole('button', { name: '输入消息', exact: true }).click();
+      const input = page.getByRole('textbox');
+      await input.fill('第一行');
+      // The caret, mid-draft, survives the click: typing continues where it was.
+      await input.evaluate((node: HTMLTextAreaElement) => node.setSelectionRange(2, 2));
+      await avatar.click();
+      await expect(page.locator('.pet-mini-detail')).toHaveClass(/is-open/);
+      await expect(input).toBeFocused();
+      await page.keyboard.type('·');
+      await expect(input).toHaveValue('第一·行');
+      await input.evaluate((node: HTMLTextAreaElement) => node.setSelectionRange(node.value.length, node.value.length));
+      // Grow the draft to the input's four-line cap while the history is open.
+      for (const line of ['第二行', '第三行', '第四行', '第五行']) {
+        await page.keyboard.press('Shift+Enter');
+        await page.keyboard.type(line);
+      }
+      await expect(input).toHaveValue('第一·行\n第二行\n第三行\n第四行\n第五行');
+      await settleMotion(page);
+      const fits = async () => {
+        const stack = (await page.locator('.pet-mini-cards').boundingBox())!;
+        const bubble = (await page.locator('.pet-mini-reply-bubble').boundingBox())!;
+        const history = (await page.locator('.pet-mini-bubble-history').boundingBox())!;
+        const form = (await page.locator('.pet-mini-input').boundingBox())!;
+        expect(stack.y).toBeGreaterThanOrEqual(0);
+        expect(stack.y + stack.height).toBeLessThanOrEqual(bubble.y + 1);
+        expect(history.y).toBeGreaterThanOrEqual(bubble.y - 1);
+        expect(history.height).toBeGreaterThan(40);
+        // The tail (7px) sits in the gap above the input, which ends above Vibey.
+        expect(bubble.y + bubble.height + 7).toBeLessThanOrEqual(form.y + 1);
+        expect(form.y + form.height).toBeLessThanOrEqual(anchor!.y + 4 + 1);
+        expect(await avatar.boundingBox()).toEqual(anchor);
+        // Both are desktop input regions.
+        await expect.poll(() => page.evaluate(() => {
+          const covered = (selector: string) => {
+            const box = document.querySelector(selector)!.getBoundingClientRect();
+            return window.petLayoutHitRegions.some((rect) => rect.x <= box.left + 1 && rect.y <= box.top + 1
+              && rect.x + rect.width >= box.right - 1 && rect.y + rect.height >= box.bottom - 1);
+          };
+          return covered('.pet-mini-reply-bubble') && covered('.pet-mini-input');
+        })).toBe(true);
+      };
+      await fits();
+      // The history scrolls inside its shrunken box, ending at the bottom.
+      const history = page.locator('.pet-mini-bubble-history');
+      expect(await history.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
+      await expect.poll(() => history.evaluate((node) => `${node.scrollTop} ${node.scrollHeight} ${node.clientHeight} ${Math.abs(node.scrollHeight - node.clientHeight - node.scrollTop) <= 1}`)).toMatch(/true$/);
+      // Escape closes the history first, then the input.
+      await page.keyboard.press('Escape');
+      await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(0);
+      await expect(input).toHaveValue('第一·行\n第二行\n第三行\n第四行\n第五行');
+      await page.keyboard.press('Escape');
+      await expect(page.getByRole('textbox')).toHaveCount(0);
+      expect(await page.evaluate(() => window.petFixtureSends)).toEqual([]);
+    });
+  }
+}
+
+test('a double-click opens the conversation in Avibe and leaves the history as it was', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long');
+  const avatar = page.locator('.pet-mini-avatar-button');
+  await expect(avatar).toBeVisible();
+  await avatar.dblclick();
+  await expect.poll(() => page.evaluate(() => window.petFixtureOpens)).toEqual(['avibe://session/ses_main']);
+  await page.waitForTimeout(100);
+  await expect(avatar).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(0);
+  await avatar.click();
+  await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(1);
+  await avatar.dblclick();
+  await expect.poll(() => page.evaluate(() => window.petFixtureOpens.length)).toBe(2);
+  await page.waitForTimeout(100);
+  await expect(avatar).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('.pet-mini-detail.is-open')).toHaveCount(1);
+  // A drag never opens it.
+  const box = (await avatar.boundingBox())!;
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width / 2 + 20, box.y + box.height / 2 + 5, { steps: 4 });
+  await page.mouse.up();
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => window.petFixtureOpens.length)).toBe(2);
+});
+
+for (const reduced of [false, true]) {
+  test(`thinking is content-sized and centred, and the reply widens it from the centre (reduced=${reduced})`, async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: reduced ? 'reduce' : 'no-preference' });
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1');
+    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('思考中');
+    await settleMotion(page);
+    const avatar = (await page.locator('.pet-mini-avatar-button').boundingBox())!;
+    const centre = avatar.x + avatar.width / 2;
+    const full = await page.locator('.pet-mini-slot-body').evaluate((node) => node.clientWidth - 36);
+    const narrow = (await page.locator('.pet-mini-reply-bubble').boundingBox())!;
+    expect(narrow.width).toBeGreaterThanOrEqual(160 - 0.5);
+    expect(narrow.width).toBeLessThan(full / 2);
+    expect(Math.abs(narrow.x + narrow.width / 2 - centre)).toBeLessThanOrEqual(1);
+    const frames = await page.evaluate(async () => {
+      const node = document.querySelector('.pet-mini-reply-bubble')!;
+      window.petFixtureFinishTurn({ id: 'live_reply', author: 'agent', type: 'result', text: '做完了，细节都整理好了。', read_at: null });
+      const seen: { width: number; centre: number }[] = [];
+      const start = performance.now();
+      while (performance.now() - start < 450) {
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+        const box = node.getBoundingClientRect();
+        seen.push({ width: box.width, centre: box.left + box.width / 2 });
+      }
+      return seen;
+    });
+    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('已回复');
+    for (const frame of frames) expect(Math.abs(frame.centre - centre)).toBeLessThanOrEqual(1);
+    const widths = frames.map((frame) => frame.width);
+    for (let i = 1; i < widths.length; i += 1) expect(widths[i]).toBeGreaterThanOrEqual(widths[i - 1] - 0.5);
+    expect(widths.at(-1)).toBeCloseTo(full, 0);
+    const between = widths.filter((width) => width > narrow.width + 2 && width < full - 2);
+    if (reduced) expect(between).toEqual([]);
+    else expect(between.length).toBeGreaterThan(2);
+    expect(await page.locator('.pet-mini-avatar-button').boundingBox()).toEqual(avatar);
+  });
+}
 
 for (const cards of [1, 3]) {
   test(`with ${cards} card${cards > 1 ? 's' : ''}, the bubble hidden, shown or open fits without overlap`, async ({ page }) => {
