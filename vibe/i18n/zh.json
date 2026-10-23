@@ -473,7 +473,7 @@
     },
     "continueOnVibey": {
       "workbench": "可以一键切换到 Vibey，无缝接着做。",
-      "im": "可以在 Avibe 工作台打开这个会话，切换到 Vibey 接着做。"
+      "im": "可以在 Avibe 工作台把这个会话切换到 Vibey，再重新发送这条消息。"
     },
     "streamTurnInProgress": "⚠️ 这个会话已经有一条回复在生成中，请等它完成后再试。",
     "sessionReset": "检测到会话错误。会话已重置，请重试。",

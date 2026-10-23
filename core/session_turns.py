@@ -5595,12 +5595,23 @@ class SessionTurnManager:
         else runs it, so an exit before its rerun dispatched fails it instead. Any other
         accepted Turn ignores the late claim, as before.
         """
+        retire_ids: set[str] | None = None
+        if (failure_evidence or {}).get("retire_input") is True:
+            # Its surface cannot retry it (``mark_prewrite_input_retired``).
+            with self._sqlite_engine().connect() as conn:
+                retire_ids = {
+                    str(row["id"])
+                    for row in delivery_store.initial_deliveries_for_turn(conn, turn_id)
+                    if row["state"] == "claimed"
+                }
         result = self._terminalize_durable_turn(
             turn_id,
             "not_written",
             settled_by=outcome,
             evidence_kind="definitive_prewrite_failure",
             evidence={"reason": outcome, **(failure_evidence or {})},
+            retire_unwritten_delivery_ids=retire_ids,
+            retire_unwritten_attempt_outcome="not_written",
         )
         if result.get("changed"):
             return result

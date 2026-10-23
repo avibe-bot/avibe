@@ -159,7 +159,7 @@ import {
 } from '../../lib/agentActivity';
 import { errorMessage } from '@/lib/errorMessage';
 import { pendingInitialMessageHandoff } from '@/lib/chatInitialMessage';
-import { sessionAgentBackend, sessionAgentDisplayName } from './sessionAgentName';
+import { messageAuthorAgent, sessionAgentBackend, sessionAgentDisplayName } from './sessionAgentName';
 import { useModelHubRecovery } from '../../lib/modelHubRecovery';
 import { getBackendUiMeta } from '@/lib/agentBackends';
 
@@ -2993,6 +2993,7 @@ export const ChatPage: React.FC = () => {
           session={session}
           agentDisplayName={agentDisplayName}
           agentBackend={agentBackend}
+          agents={agents}
           working={working}
           modelRecovery={runtimeState.model_recovery}
           hasOlder={!!olderCursor}
@@ -3498,6 +3499,11 @@ export const QueueStrip: React.FC<{
   const { t } = useTranslation();
   if (queue.length === 0) return null;
   const retryRequired = queue.some((item) => item.requires_explicit_retry === true);
+  // An input held because its Agent cannot run is continued from the failure notice
+  // (Continue on Vibey, or Retry), not by fixing a startup error.
+  const agentUnavailable = queue.some(
+    (item) => item.requires_explicit_retry === true && item.retry_reason === 'agent_unavailable',
+  );
   const headFenced = isQueueDeliveryFenced(queue[0]);
   const reconciling = queue[0].state === 'reconciling_steer';
   const busy = sendingNow || headFenced;
@@ -3536,7 +3542,11 @@ export const QueueStrip: React.FC<{
         {reconciling && (
           <p role="status" className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.sendReconciling')}</p>
         )}
-        {retryRequired && <p className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.retryHint')}</p>}
+        {retryRequired && (
+          <p className="px-1 pb-1.5 text-[11px] text-muted">
+            {t(agentUnavailable ? 'chat.queue.retryHintAgentUnavailable' : 'chat.queue.retryHint')}
+          </p>
+        )}
         <div
           data-queue-batch="true"
           className="flex max-h-32 flex-col overflow-y-auto rounded-lg bg-surface-2"
@@ -3948,12 +3958,16 @@ function transcriptOwnsUpwardInput(target: EventTarget, root: HTMLElement): bool
   return true;
 }
 
+const NO_AGENTS: VibeAgentBrief[] = [];
+
 interface TranscriptProps {
   messages: WorkbenchMessage[];
   session: WorkbenchSession;
   agentDisplayName: string | null;
   /** The backend the replies come from, resolved through an inherited default. */
   agentBackend?: string | null;
+  /** The Agents a reply's recorded author is resolved against (``messageAuthorAgent``). */
+  agents?: VibeAgentBrief[];
   working: boolean;
   modelRecovery?: SessionRuntimeState['model_recovery'];
   hasOlder: boolean;
@@ -4019,6 +4033,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   session,
   agentDisplayName,
   agentBackend = null,
+  agents = NO_AGENTS,
   working,
   modelRecovery,
   hasOlder,
@@ -4559,14 +4574,16 @@ export const Transcript: React.FC<TranscriptProps> = ({
             // just below the turn's trigger).
             const before = activity?.enabled ? activity.beforeAnchor.get(message.id) : undefined;
             const after = activity?.enabled ? activity.afterAnchor.get(message.id) : undefined;
+            // A reply another Agent wrote before the session switched keeps its author.
+            const author = message.author === 'agent' ? messageAuthorAgent(message.author_name, session, agents) : null;
             return (
               <Fragment key={message.id}>
                 {before?.map((group) => renderActivityChip(group))}
                 <MessageRow
                   message={message}
                   session={session}
-                  agentDisplayName={agentDisplayName}
-                  agentBackend={agentBackend}
+                  agentDisplayName={author ? author.displayName : agentDisplayName}
+                  agentBackend={author ? author.backend : agentBackend}
                   messageFontSize={messageFontSize}
                   onQuickReply={onQuickReply}
                   onFailureRetry={onFailureRetry}

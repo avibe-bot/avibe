@@ -190,6 +190,20 @@ describe('QueueStrip — compatible queued messages read as one batch', () => {
     expect(screen.getByText('Queued · 1')).toBeTruthy();
   });
 
+  it('says how to continue an input held because its Agent cannot run', () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <QueueStrip
+          queue={[queued({ requires_explicit_retry: true, retry_reason: 'agent_unavailable' })]}
+          onRemove={vi.fn()} onRecall={vi.fn()} onSendNow={vi.fn()}
+        />
+      </I18nextProvider>,
+    );
+    expect(screen.getByText('Retry needed · 1')).toBeTruthy();
+    expect(screen.getByText(/The Agent can't run/)).toBeTruthy();
+    expect(screen.queryByText(/Automatic startup retries stopped/)).toBeNull();
+  });
+
   it('gives immediate feedback and blocks duplicate sends while flushing', () => {
     render(
       <I18nextProvider i18n={i18n}>

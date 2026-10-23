@@ -19,6 +19,7 @@ from core.services.dispatch import TurnDispatchOutcome
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_ATTEMPTING,
     DISPATCH_PHASE_PREWRITE,
+    mark_prewrite_input_retired,
     mark_prewrite_recovery_required,
     prewrite_user_stop_requested,
     set_dispatch_phase,
@@ -5213,17 +5214,18 @@ def test_definite_handler_prewrite_exit_requeues_through_terminal_boundary(
     assert turn["settled_by"] == "no_terminal_result"
 
 
-@pytest.mark.parametrize("held", [True, False])
+@pytest.mark.parametrize("input_fate", ["held", "requeued", "retired"])
 def test_a_prewrite_failure_notice_settles_its_turn_as_unwritten(
     managers,
     monkeypatch,
-    held,
+    input_fate,
 ) -> None:
     """A failure reported before the backend was reached (its Agent is disabled) ends
     with a failure notice, whose terminal write cannot land on a start never accepted.
     The Turn still settles as unwritten: left open, it showed the session running and
     re-ran the input on every recovery pass. An input that needs its owner's decision
-    is held for an explicit retry rather than retried on its own."""
+    is held for an explicit retry rather than retried on its own; one whose surface
+    cannot retry it (a chat app) is retired, so it holds no later input behind it."""
     manager, _other, engine, _engine_b, _starts = managers
     manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
     delivery_id = delivery_store.new_delivery_id()
@@ -5257,8 +5259,10 @@ def test_a_prewrite_failure_notice_settles_its_turn_as_unwritten(
 
     async def failure_notice_before_backend(_controller, context, *_args, **_kwargs):
         set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
-        if held:
+        if input_fate == "held":
             mark_prewrite_recovery_required(context, "agent_unavailable")
+        elif input_fate == "retired":
+            mark_prewrite_input_retired(context, "agent_unavailable")
         # What the notice's terminal emit hands its runner.
         context.platform_specific[TERMINAL_COMMIT_KEY] = {
             "settled_by": SETTLED_BY_TERMINAL_RESULT,
@@ -5289,8 +5293,8 @@ def test_a_prewrite_failure_notice_settles_its_turn_as_unwritten(
     asyncio.run(run())
 
     row = _row(engine, delivery_id)
-    assert row["state"] == "queued"
-    assert delivery_store.requires_explicit_start_retry(row) is held
+    assert row["state"] == ("retired" if input_fate == "retired" else "queued")
+    assert delivery_store.requires_explicit_start_retry(row) is (input_fate == "held")
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, turn_id)
     assert turn is not None

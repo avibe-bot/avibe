@@ -13,7 +13,7 @@ import type { VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession }
 import { ToastProvider } from '../../context/ToastProvider';
 import { isVoiceControlDisabled } from '../../lib/voiceRecording';
 import { ChatHeaderBar, MessageRow, ThinkingBubble } from './ChatPage';
-import { sessionAgentBackend, sessionAgentDisplayName } from './sessionAgentName';
+import { messageAuthorAgent, sessionAgentBackend, sessionAgentDisplayName } from './sessionAgentName';
 import { BACKEND_BRAND_MARKS } from '../visual/backendBrandMarks';
 import { Composer } from './Composer';
 import { QuickReplies } from './QuickReplies';
@@ -269,6 +269,21 @@ describe('chat avatars', () => {
     expect(sessionAgentBackend(inherits, [claude, vibey], null)).toBeNull();
     expect(sessionAgentBackend(session({ agent_id: vibey.id, agent_name: 'vibey', agent_backend: null }), [claude, vibey], 'claude')).toBe('vibey');
     expect(sessionAgentBackend(session({ agent_backend: 'claude' }), [claude, vibey], 'vibey')).toBe('claude');
+  });
+
+  it('keeps a reply under the Agent that wrote it after the session switches', () => {
+    const reviewer = { ...archivedPm, id: 'agt-reviewer', name: 'reviewer', display_name: 'Reviewer', backend: 'claude' };
+    const switched = session({ agent_id: vibey.id, agent_name: 'vibey', agent_backend: 'vibey' });
+    expect(messageAuthorAgent('vibey', switched, [vibey, reviewer])).toBeNull();
+    expect(messageAuthorAgent(null, switched, [vibey, reviewer])).toBeNull();
+    expect(messageAuthorAgent('reviewer', switched, [vibey, reviewer])).toEqual({ displayName: 'Reviewer', backend: 'claude' });
+    // A built-in backend Agent keeps its name, so it resolves before the catalog loads.
+    expect(messageAuthorAgent('codex', switched, [])).toEqual({ displayName: 'codex', backend: 'codex' });
+    // A name no Agent carries any more (renamed, archived) reads as the session's Agent.
+    expect(messageAuthorAgent('old-name', switched, [vibey, reviewer])).toBeNull();
+    // The session's own Agent under a name it no longer has in this row.
+    const renamed = session({ agent_id: reviewer.id, agent_name: 'reviewer-2', agent_backend: 'claude' });
+    expect(messageAuthorAgent('reviewer', renamed, [reviewer])).toBeNull();
   });
 
   it('draws Vibey in the thinking and transcript bubbles of a session that inherits it', () => {

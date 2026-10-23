@@ -22,6 +22,7 @@ from core.message_context import (
 )
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
+    mark_prewrite_input_retired,
     mark_prewrite_recovery_required,
     set_dispatch_phase,
 )
@@ -971,11 +972,16 @@ class MessageHandler(BaseHandler):
         chat app cannot change the session's Agent, so its notice says where to.
         Nothing is offered when Vibey is what cannot run, or is not available.
         Retrying on its own would fail the same way, so an input that never reached
-        the backend waits for its owner: continue on Vibey, or Retry once it is back.
+        the backend waits for its owner in the Workbench: continue on Vibey, or Retry
+        once it is back. A chat app has no Retry, so its input is retired instead of
+        holding every later message behind it; the user sends again once switched.
         """
-        mark_prewrite_recovery_required(context, "agent_unavailable")
         target = routed_delivery_context(context)
         workbench = resolve_context_platform(target) == "avibe"
+        if workbench:
+            mark_prewrite_recovery_required(context, "agent_unavailable")
+        else:
+            mark_prewrite_input_retired(context, "agent_unavailable")
         if not workbench and escape_reason:
             reason = self._get_formatter(target).escape_special_chars(reason)
         # Catalog and Model Hub reads: off the controller loop.
