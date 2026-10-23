@@ -12,7 +12,7 @@ import pytest
 
 from config.v2_config import DiscordConfig, LarkConfig, SlackConfig, TelegramConfig
 from config.v2_settings import RoutingSettings
-from core.modals import BackendRouteMenu, RouteOption, RoutingModalData
+from core.modals import STORED_OPTION_VALUE, BackendRouteMenu, RouteOption, RoutingModalData
 from modules.agents.catalog import display_name_for_backend
 from modules.im import MessageContext
 from modules.im.discord import DiscordBot
@@ -87,7 +87,7 @@ def _efforts(*values):
     return [RouteOption(value, value.title()) for value in values]
 
 
-def _route(bot, backend):
+def _route(bot, backend, stored_model="model-b"):
     """A channel routed to ``backend``: its stored model sits past every platform's option cap, and its stored
     effort is one the menu no longer offers. Saving unchanged must keep both, on every platform."""
     long_id = "vendor/" + "x" * 160  # longer than a Slack or Discord option value may be
@@ -106,20 +106,21 @@ def _route(bot, backend):
         value_limit=getattr(bot, "route_option_value_limit", None),
     )
     stored = RoutingSettings(
-        agent_name=backend, model="model-b", reasoning_effort="max",
+        agent_name=backend, model=stored_model, reasoning_effort="max",
         codex_agent="reviewer" if backend == "codex" else None,
     )
     data = RoutingModalData(
         registered_backends=[backend, "opencode"], current_backend=backend, current_routing=stored,
         menus={backend: menu},
     )
+    menu.stored = data.stored_draft(backend)  # as the settings handler sets it
     return data, long_id
 
 
 class _Form:
     """Drive one platform's routing form through its own entry points: open, change the model, save."""
 
-    def __init__(self, platform, backend):
+    def __init__(self, platform, backend, stored_model="model-b"):
         self.platform = platform
         self.backend = backend
         self.context = MessageContext(user_id="42", channel_id="fixture-channel", message_id="88",
@@ -133,7 +134,7 @@ class _Form:
             self.bot = TelegramBot(TelegramConfig(bot_token="123456:fixture-token"))
         else:
             self.bot = FeishuBot(LarkConfig(app_id="fixture-app", app_secret="fixture-secret"))
-        self.data, self.long_id = _route(self.bot, backend)
+        self.data, self.long_id = _route(self.bot, backend, stored_model)
 
     async def open(self):
         bot, context = self.bot, self.context
@@ -178,7 +179,10 @@ class _Form:
     async def change_model(self, model):
         bot, context = self.bot, self.context
         if self.platform == "slack":
+            # A block_actions payload's state already holds the newly selected model.
             self.view["state"] = _shown_state(self.view)
+            model_block = next(key for key in self.view["state"]["values"] if key.startswith("route_model:"))
+            self.view["state"]["values"][model_block]["route_model"] = {"selected_option": {"value": model}}
             selection = parse_routing_modal_selection(view=self.view, action={
                 "action_id": "route_model", "block_id": f"route_model:{self.backend}",
                 "selected_option": {"value": model},
@@ -269,3 +273,17 @@ async def test_a_model_change_offers_that_models_efforts_and_clears_the_effort(p
 
     assert form.offered("effort") == ["__default__", "low"]
     assert await form.save() == ("vibey", None, "model-a", None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", PLATFORMS)
+async def test_reselecting_a_stored_model_the_platform_cannot_carry_keeps_its_effort(platform):
+    long_id = "vendor/" + "x" * 160
+    form = _Form(platform, "vibey", stored_model=long_id)
+    await form.open()
+
+    await form.change_model(form.data.menu("vibey").shown_value(long_id))
+
+    # Slack hands the stand-in to the settings handler, which resolves it to the stored model.
+    saved_model = STORED_OPTION_VALUE if platform == "slack" else long_id
+    assert await form.save() == ("vibey", None, saved_model, "max")

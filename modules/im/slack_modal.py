@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Optional
 
 from core.modals import DEFAULT_OPTION_VALUE, RouteDraft, RoutingModalSelection
@@ -52,5 +53,15 @@ def parse_routing_modal_selection(*, view: dict, action: dict) -> RoutingModalSe
         reasoning_effort=fields.get("route_effort"),
     )
     if block_id.startswith("route_model:") and isinstance(value, str):
-        draft = draft.with_model(_choice(value))
+        # The state already holds the new model, so the model shown before the change is the one the view was
+        # rendered with; only a different model clears the effort.
+        shown = next(
+            (
+                (block.get("element") or {}).get("initial_option", {}).get("value")
+                for block in view.get("blocks", [])
+                if str(block.get("block_id") or "").startswith("route_model:")
+            ),
+            None,
+        )
+        draft = replace(draft, model=_choice(shown)).with_model(_choice(value))
     return RoutingModalSelection(selected_backend=selected_backend, draft=draft)

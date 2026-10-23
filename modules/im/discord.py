@@ -1644,7 +1644,9 @@ class DiscordBot(BaseIMClient):
 
                     async def variant_callback(select_interaction: discord.Interaction):
                         if variant_select.values:
-                            self.drafts[backend] = replace(self._draft(), variant=_choice(variant_select.values[0]))
+                            self.drafts[backend] = replace(
+                                self._draft(), variant=menu.chosen("variant", _choice(variant_select.values[0]))
+                            )
                         await select_interaction.response.defer()
 
                     variant_select.callback = variant_callback
@@ -1659,7 +1661,9 @@ class DiscordBot(BaseIMClient):
 
                 async def model_callback(select_interaction: discord.Interaction):
                     if model_select.values:
-                        self.drafts[backend] = self._draft().with_model(_choice(model_select.values[0]))
+                        self.drafts[backend] = self._draft().with_model(
+                            menu.chosen("model", _choice(model_select.values[0]))
+                        )
                     await self._refresh(select_interaction)
 
                 model_select.callback = model_callback
@@ -1676,7 +1680,8 @@ class DiscordBot(BaseIMClient):
                 async def effort_callback(select_interaction: discord.Interaction):
                     if effort_select.values:
                         self.drafts[backend] = replace(
-                            self._draft(), reasoning_effort=_choice(effort_select.values[0])
+                            self._draft(),
+                            reasoning_effort=menu.chosen("reasoning_effort", _choice(effort_select.values[0])),
                         )
                     await select_interaction.response.defer()
 

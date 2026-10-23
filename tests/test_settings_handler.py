@@ -649,15 +649,23 @@ def test_gather_routing_modal_data_prefetches_all_backends_when_requested() -> N
 
 def test_opencode_route_menu_fits_the_platforms_cap_and_is_whole_without_one() -> None:
     handler, server = _make_routing_handler()
-    models = {"providers": [{"id": "relay", "name": "Relay", "models": {f"m{i}": {"name": f"M{i}"} for i in range(250)}}]}
-    server.get_available_models = AsyncMock(return_value=models)
-    context = MessageContext(user_id="U1", channel_id="D0APS47LPU2", platform="telegram")
-    sizes = {}
-    for limit in (25, None):  # Discord's select; Telegram's paged picker
-        handler._get_im_client = lambda context, limit=limit: SimpleNamespace(route_option_limit=limit)
-        sizes[limit] = len(asyncio.run(handler._gather_routing_modal_data(context)).menus["opencode"].models)
+    # Newer models sort first; these are too long for a Discord option value.
+    overlong = {f"{'x' * 120}-{i}": {"name": f"Long {i}", "release_date": "2026-09-01"} for i in range(30)}
+    usable = {f"m{i}": {"name": f"M{i}", "release_date": "2026-01-01"} for i in range(250)}
+    server.get_available_models = AsyncMock(
+        return_value={"providers": [{"id": "relay", "name": "Relay", "models": {**overlong, **usable}}]}
+    )
+    context = MessageContext(user_id="U1", channel_id="D0APS47LPU2", platform="discord")
+    menus = {}
+    for limit, value_limit in ((25, 100), (None, None)):  # Discord's select; Telegram's paged picker
+        handler._get_im_client = lambda context, limit=limit, value_limit=value_limit: SimpleNamespace(
+            route_option_limit=limit, route_option_value_limit=value_limit
+        )
+        menus[limit] = asyncio.run(handler._gather_routing_modal_data(context)).menus["opencode"]
 
-    assert sizes == {25: 24, None: 250}
+    capped = menus[25].model_options(None)
+    assert len(capped) == 24 and all(option.value.startswith("relay/m") for option in capped)
+    assert len(menus[None].model_options(None)) == 280
 
 
 def test_gather_routing_modal_data_reads_vibey_menu_from_model_hub() -> None:

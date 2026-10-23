@@ -2164,7 +2164,9 @@ class FeishuBot(BaseIMClient):
             return False
 
         draft = self._routing_draft(cache, backend)
-        value = self._normalize_routing_field_value(self._extract_select_action_value(action))
+        value = cache["routing"].menu(backend).chosen(
+            draft_field, self._normalize_routing_field_value(self._extract_select_action_value(action))
+        )
         if draft_field != "model":
             cache["drafts"][backend] = replace(draft, **{draft_field: value})
             return True
@@ -2183,10 +2185,11 @@ class FeishuBot(BaseIMClient):
             return
 
         # The form carries what its selects show; a field it omits keeps the card's draft.
+        menu = cached["routing"].menu(backend)
         draft = replace(
             self._routing_draft(cached, backend),
             **{
-                draft_field: self._normalize_routing_field_value(form_value.get(name))
+                draft_field: menu.chosen(draft_field, self._normalize_routing_field_value(form_value.get(name)))
                 for name, draft_field in self._ROUTE_FIELDS.items()
                 if name in form_value
             },

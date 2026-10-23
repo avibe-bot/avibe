@@ -86,6 +86,10 @@ class BackendRouteMenu:
             and (self.value_limit is None or len(value) <= self.value_limit)
         )
 
+    def chosen(self, field: str, value: Optional[str]) -> Optional[str]:
+        """The choice a selected option stands for: the stored ``field`` for the stand-in option."""
+        return getattr(self.stored, field) if value == STORED_OPTION_VALUE else value
+
     def shown_value(self, current: Optional[str]) -> str:
         """The option value a select shows for ``current``."""
         if not current:

@@ -1945,6 +1945,8 @@ class TelegramBot(BaseIMClient):
 
     def _apply_routing_option(self, state: _TelegramRoutingState, value: Optional[str]) -> None:
         draft = state.draft()
+        if state.picker_field in ("variant", "model", "reasoning_effort"):
+            value = state.routing.menu(state.backend).chosen(state.picker_field, value)
         if state.picker_field == "model":
             state.drafts[state.backend] = draft.with_model(value)
         elif state.picker_field == "variant":
