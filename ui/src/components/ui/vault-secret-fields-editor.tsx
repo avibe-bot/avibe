@@ -5,7 +5,7 @@ import { useApi, type VaultFieldValuePayload, type VaultSecret } from '@/context
 import { sealBlindBox, standardCreateBlindBoxContext } from '@/lib/vaultCrypto';
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
-import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
+import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
 import { MAX_VAULT_FIELDS, vaultDefaultField, vaultFieldNameIssue, vaultFieldNames, vaultRecordName } from '@/lib/vaultFields';
 import { Button } from './button';
 import {
@@ -74,14 +74,15 @@ export function VaultSecretFieldsEditor({
   const fields = vaultFieldNames(current);
   const defaultField = vaultDefaultField(current);
   const isProtected = current.protection === 'protected';
+  const passkeyNeedsBrowser = vaultPasskeyNeedsBrowser();
   const locked = disabled || busy;
   const fieldsCorrupt = current.fields_state === 'corrupt';
   const fieldMutationLocked = locked || fieldsCorrupt;
   const canWriteValue = !isProtected || vault.status === 'unlocked';
 
   useEffect(() => {
-    if (isProtected) void refresh();
-  }, [isProtected, refresh]);
+    if (isProtected && !passkeyNeedsBrowser) void refresh();
+  }, [isProtected, passkeyNeedsBrowser, refresh]);
 
   const hasErrorCode = (result: unknown, code: string): boolean =>
     typeof result === 'object' && result !== null && 'code' in result && result.code === code;

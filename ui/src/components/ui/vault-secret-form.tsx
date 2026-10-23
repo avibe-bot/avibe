@@ -43,7 +43,7 @@ import {
 import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
-import { openVaultsInBrowser } from '@/lib/vaultBrowserHandoff';
+import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
 import { Badge } from './badge';
 import { Button } from './button';
 import { Input } from './input';
@@ -282,15 +282,16 @@ export const VaultSecretForm: React.FC<{
   }, [api]);
 
   const protectedVault = useProtectedVault();
+  const passkeyNeedsBrowser = vaultPasskeyNeedsBrowser();
   // The vault status the current protected keypair was generated under. A transition away from
   // 'unlocked' (manual/auto lock, or an abandoned fresh setup that discards the VMK) means the
   // held envelope is sealed to a VMK that's no longer active — see the render-phase reset below.
   const [keypairSessionStatus, setKeypairSessionStatus] = useState(protectedVault.status);
   useEffect(() => {
-    if (protection === 'protected') void protectedVault.refresh();
+    if (protection === 'protected' && !passkeyNeedsBrowser) void protectedVault.refresh();
     // protectedVault.refresh is stable (useCallback); only re-check when the tier changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [protection]);
+  }, [protection, passkeyNeedsBrowser]);
 
   // Seed editable fields from an agent's request spec ONCE per distinct request. The chat
   // page rebuilds the request object on every poll/re-render, so keying this on the
