@@ -20,7 +20,7 @@ from core.processing_indicator import (
     STOPPED_REACTION_EMOJI,
 )
 from core.message_context import resolve_context_thread_id
-from core.modals import RoutingModalData
+from core.modals import AgentChoice, RoutingModalData
 from modules.agents.native_sessions import NativeResumeSession
 from modules.agents.catalog import AGENT_BACKENDS
 from modules.im import InlineButton, InlineKeyboard, MessageContext
@@ -1315,17 +1315,19 @@ def test_resume_callback_submits_selected_session() -> None:
     )
 
 
-def _routing_state(context, registered, backend):
+def _routing_state(context, names, current):
+    """A routing form listing one Agent per name; a name that is no backend is a user Agent on Claude Code."""
     from modules.im.telegram import _TelegramRoutingState
 
+    agents = [AgentChoice(f"id-{name}", name, name if name in AGENT_BACKENDS else "claude") for name in names]
     return _TelegramRoutingState(
         message_id="88",
         channel_id=context.channel_id,
         thread_id=None,
         user_id=context.user_id,
         is_dm=False,
-        routing=RoutingModalData(registered_backends=list(registered), current_backend=backend, current_routing=None),
-        backend=backend,
+        routing=RoutingModalData(agents=agents, current_agent=f"id-{current}", current_routing=None),
+        agent=f"id-{current}",
     )
 
 
@@ -1339,17 +1341,18 @@ def _routing_context() -> MessageContext:
     )
 
 
-def test_routing_state_marks_current_backend_in_first_row() -> None:
+def test_routing_state_marks_current_agent_in_first_row() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
 
-    _, keyboard = bot._render_routing_state(_routing_state(_routing_context(), ROUTING_BACKENDS, "claude"))
+    _, keyboard = bot._render_routing_state(_routing_state(_routing_context(), ROUTING_BACKENDS, "opencode"))
 
+    # Agent names are free text, so the buttons carry list positions within Telegram's 64-byte callback data.
     assert [button.callback_data for button in keyboard.buttons[0]] == [
-        "tg_route:backend:vibey",
-        "tg_route:backend:opencode",
-        "tg_route:backend:claude",
+        "tg_route:agent:0",
+        "tg_route:agent:1",
+        "tg_route:agent:2",
     ]
-    assert keyboard.buttons[0][2].text.startswith("☑️ ")
+    assert keyboard.buttons[0][1].text == "☑️ opencode"
 
 
 def test_routing_summary_bounds_an_unbounded_model_label() -> None:
@@ -1367,57 +1370,45 @@ def test_routing_summary_bounds_an_unbounded_model_label() -> None:
     assert all(len(button.text) <= 40 for row in keyboard.buttons for button in row)
 
 
-def test_routing_callback_backend_switches_without_nested_picker() -> None:
+def test_routing_callback_agent_switches_without_nested_picker() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
     context = _routing_context()
     bot._routing_states[bot._interaction_scope_key(context)] = _routing_state(context, ROUTING_BACKENDS, "opencode")
 
     with patch.object(bot, "edit_message", new=AsyncMock(return_value=True)) as edit_mock:
-        asyncio.run(bot._handle_routing_callback(context, "tg_route:backend:claude"))
+        asyncio.run(bot._handle_routing_callback(context, "tg_route:agent:2"))
 
     state = bot._routing_states[bot._interaction_scope_key(context)]
-    assert state.backend == "claude"
+    assert state.agent == f"id-{ROUTING_BACKENDS[2]}"
     assert state.picker_field is None
     edit_mock.assert_awaited_once()
 
 
-def _with_extra(extra_backend):
-    return [*ROUTING_BACKENDS, *([] if extra_backend in ROUTING_BACKENDS else [extra_backend])]
-
-
-@pytest.mark.parametrize("extra_backend", ["vibey", "extra"])
-def test_routing_state_keeps_backend_picker_entry_for_extra_backends(extra_backend) -> None:
+def test_routing_state_keeps_agent_picker_entry_for_more_agents() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
 
-    text, keyboard = bot._render_routing_state(_routing_state(_routing_context(), _with_extra(extra_backend), extra_backend))
-    if extra_backend == "vibey":
-        assert "Vibey" in text
+    text, keyboard = bot._render_routing_state(_routing_state(_routing_context(), [*ROUTING_BACKENDS, "pm"], "pm"))
 
-    assert [button.callback_data for button in keyboard.buttons[0]] == [
-        "tg_route:backend:vibey",
-        "tg_route:backend:opencode",
-        "tg_route:backend:claude",
-    ]
-    assert keyboard.buttons[1][0].callback_data == "tg_route:field:backend"
+    assert "pm · Claude Code" in text
+    assert len(keyboard.buttons[0]) == 3
+    assert keyboard.buttons[1][0].callback_data == "tg_route:field:agent"
 
 
-@pytest.mark.parametrize("extra_backend", ["vibey", "extra"])
-def test_routing_callback_backend_picker_can_select_extra_backend(extra_backend) -> None:
+def test_routing_callback_agent_picker_can_select_an_agent_past_the_first_row() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
     context = _routing_context()
     bot._routing_states[bot._interaction_scope_key(context)] = _routing_state(
-        context, _with_extra(extra_backend), "opencode"
+        context, [*ROUTING_BACKENDS, "pm"], "opencode"
     )
 
     with patch.object(bot, "edit_message", new=AsyncMock(return_value=True)) as edit_mock:
-        asyncio.run(bot._handle_routing_callback(context, "tg_route:field:backend"))
+        asyncio.run(bot._handle_routing_callback(context, "tg_route:field:agent"))
         state = bot._routing_states[bot._interaction_scope_key(context)]
-        asyncio.run(bot._handle_routing_callback(
-            context, f"tg_route:option:{state.registered_backends.index(extra_backend)}",
-        ))
+        values = [value for _, value in bot._routing_picker_options(state)]
+        asyncio.run(bot._handle_routing_callback(context, f"tg_route:option:{values.index('id-pm')}"))
 
     state = bot._routing_states[bot._interaction_scope_key(context)]
-    assert state.backend == extra_backend
+    assert state.agent == "id-pm"
     assert state.picker_field is None
     assert edit_mock.await_count == 2
 

@@ -29,7 +29,7 @@ from .download_target import open_download_target
 from config.v2_config import DiscordConfig
 from .formatters import DiscordFormatter
 from vibe.i18n import get_supported_languages, t as i18n_t
-from core.modals import DEFAULT_OPTION_VALUE, RouteDraft, RouteOption, RoutingModalData, route_option_label
+from core.modals import DEFAULT_OPTION_VALUE, RouteDraft, RoutingModalData, route_option_label
 from modules.agents.native_sessions.display import format_display_summary, format_display_time
 from modules.agents.native_sessions.types import NativeResumeSession
 
@@ -1572,24 +1572,18 @@ class DiscordBot(BaseIMClient):
                 super().__init__(timeout=900)
                 self.outer = outer
                 self.owner_id = owner_id
-                registered = routing.registered_backends
-                self.selected_backend = (
-                    routing.current_backend
-                    if routing.current_backend in registered
-                    else (registered[0] if registered else routing.current_backend)
-                )
-                # Each backend keeps its own choices while the view is open; one not yet shown starts stored.
+                self.selected_agent = routing.shown_agent(routing.current_agent)
+                # Each Agent keeps its own choices while the view is open; one not yet shown starts stored.
                 self.drafts: dict[str, RouteDraft] = {}
                 self._render()
 
             def _draft(self) -> RouteDraft:
-                backend = self.selected_backend
-                if backend not in self.drafts:
-                    self.drafts[backend] = routing.stored_draft(backend)
-                return self.drafts[backend]
+                agent_id = self.selected_agent
+                if agent_id not in self.drafts:
+                    self.drafts[agent_id] = routing.stored_draft(agent_id)
+                return self.drafts[agent_id]
 
-            def _select(self, placeholder: str, prefix: str, options, shown: str, *, effort=False):
-                default = RouteOption(DEFAULT_OPTION_VALUE, "")
+            def _select(self, placeholder: str, prefix: str, default, options, shown: str, *, effort=False):
                 return discord.ui.Select(
                     placeholder=placeholder,
                     options=[
@@ -1607,44 +1601,48 @@ class DiscordBot(BaseIMClient):
             def _render(self):
                 self.clear_items()
                 t = self.outer._t
-                backend_select = discord.ui.Select(
-                    placeholder=t("modal.routing.selectBackend"),
+                agent_select = discord.ui.Select(
+                    placeholder=t("modal.routing.selectAgent"),
                     options=[
                         discord.SelectOption(
-                            label=_prefixed_label(t("discord.labels.backend"), display_name_for_backend(backend)),
-                            value=backend,
-                            default=backend == self.selected_backend,
+                            label=_prefixed_label(t("discord.labels.agent"), agent.label),
+                            value=agent.id,
+                            default=agent.id == self.selected_agent,
                         )
-                        for backend in routing.registered_backends[:25]
+                        for agent in routing.agent_options()
                     ],
                     min_values=1,
                     max_values=1,
                 )
 
-                async def backend_callback(select_interaction: discord.Interaction):
-                    if backend_select.values:
-                        self.selected_backend = backend_select.values[0]
+                async def agent_callback(select_interaction: discord.Interaction):
+                    if agent_select.values:
+                        self.selected_agent = agent_select.values[0]
                     await self._refresh(select_interaction)
 
-                backend_select.callback = backend_callback
-                self.add_item(backend_select)
+                agent_select.callback = agent_callback
+                self.add_item(agent_select)
 
-                backend = self.selected_backend
-                menu = routing.menu(backend)
+                agent = routing.agent(self.selected_agent)
+                if agent is None:
+                    return
+                agent_id = agent.id
+                menu = routing.menu(agent_id)
                 draft = self._draft()
-                backend_name = display_name_for_backend(backend)
+                backend_name = display_name_for_backend(agent.backend)
                 variants = menu.variant_options(draft.variant)
                 if variants:
                     variant_select = self._select(
                         t("modal.routing.selectBackendAgent", backend=backend_name),
                         t("discord.labels.backendAgent", backend=backend_name),
+                        menu.default_option("variant"),
                         variants,
                         menu.shown_value(draft.variant),
                     )
 
                     async def variant_callback(select_interaction: discord.Interaction):
                         if variant_select.values:
-                            self.drafts[backend] = replace(
+                            self.drafts[agent_id] = replace(
                                 self._draft(), variant=menu.chosen("variant", _choice(variant_select.values[0]))
                             )
                         await select_interaction.response.defer()
@@ -1655,13 +1653,14 @@ class DiscordBot(BaseIMClient):
                 model_select = self._select(
                     t("modal.routing.selectModel"),
                     t("discord.labels.model"),
+                    menu.default_option("model"),
                     menu.model_options(draft.model),
                     menu.shown_value(draft.model),
                 )
 
                 async def model_callback(select_interaction: discord.Interaction):
                     if model_select.values:
-                        self.drafts[backend] = self._draft().with_model(
+                        self.drafts[agent_id] = self._draft().with_model(
                             menu.chosen("model", _choice(model_select.values[0]))
                         )
                     await self._refresh(select_interaction)
@@ -1672,6 +1671,7 @@ class DiscordBot(BaseIMClient):
                 effort_select = self._select(
                     t("modal.routing.selectReasoningEffort"),
                     t("discord.labels.reasoningEffort"),
+                    menu.default_option("reasoning_effort"),
                     menu.effort_options(draft.model, draft.reasoning_effort),
                     menu.shown_value(draft.reasoning_effort),
                     effort=True,
@@ -1679,7 +1679,7 @@ class DiscordBot(BaseIMClient):
 
                 async def effort_callback(select_interaction: discord.Interaction):
                     if effort_select.values:
-                        self.drafts[backend] = replace(
+                        self.drafts[agent_id] = replace(
                             self._draft(),
                             reasoning_effort=menu.chosen("reasoning_effort", _choice(effort_select.values[0])),
                         )
@@ -1726,7 +1726,7 @@ class DiscordBot(BaseIMClient):
                         await self.outer._on_routing_update(
                             user_id=str(interaction.user.id),
                             channel_id=channel_id,
-                            backend=self.selected_backend,
+                            agent_id=self.selected_agent,
                             variant=draft.variant,
                             model=draft.model,
                             reasoning_effort=draft.reasoning_effort,

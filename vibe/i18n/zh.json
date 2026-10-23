@@ -593,7 +593,7 @@
       "messageTypes": "消息类型",
       "mentionPolicy": "提及策略",
       "language": "语言",
-      "backend": "后端",
+      "agent": "Agent",
       "backendAgent": "{backend} Agent",
       "model": "模型",
       "reasoningEffort": "推理强度"
@@ -674,17 +674,16 @@
     },
     "routing": {
       "title": "Agent 设置",
-      "currentBackend": "当前后端：",
-      "backend": "后端",
-      "selectBackend": "选择后端",
-      "backendSettings": "{backend} 设置",
+      "currentAgent": "当前 Agent：",
+      "agent": "Agent",
+      "selectAgent": "选择 Agent",
       "backendAgent": "{backend} Agent",
       "selectBackendAgent": "选择 {backend} Agent",
       "model": "模型",
       "selectModel": "选择模型",
       "reasoningEffort": "推理强度（思考模式）",
       "selectReasoningEffort": "选择推理强度",
-      "tip": "选择“(默认)”以使用后端的配置默认值。"
+      "tip": "选择“(默认)”以使用该 Agent 自身的模型和推理强度。"
     }
   },
   "command": {
@@ -813,9 +812,9 @@
   "routing": {
     "slackOnly": "🤖 Agent 切换目前仅在 Slack 可用。请使用 Slack Agent 设置进行配置。",
     "introTitle": "Agent 与模型设置",
-    "introDesc": "配置该频道使用的后端。",
+    "introDesc": "选择该频道使用的 Agent。",
+    "noAgents": "该频道没有可用的 Agent。",
     "label": {
-      "backend": "后端",
       "agent": "Agent",
       "model": "模型",
       "reasoningEffort": "推理强度"

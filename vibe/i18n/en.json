@@ -593,7 +593,7 @@
       "messageTypes": "Message types",
       "mentionPolicy": "Mention policy",
       "language": "Language",
-      "backend": "Backend",
+      "agent": "Agent",
       "backendAgent": "{backend} agent",
       "model": "Model",
       "reasoningEffort": "Reasoning effort"
@@ -674,17 +674,16 @@
     },
     "routing": {
       "title": "Agent Settings",
-      "currentBackend": "Current Backend:",
-      "backend": "Backend",
-      "selectBackend": "Select backend",
-      "backendSettings": "{backend} Settings",
+      "currentAgent": "Current Agent:",
+      "agent": "Agent",
+      "selectAgent": "Select agent",
       "backendAgent": "{backend} Agent",
       "selectBackendAgent": "Select {backend} agent",
       "model": "Model",
       "selectModel": "Select model",
       "reasoningEffort": "Reasoning Effort (Thinking Mode)",
       "selectReasoningEffort": "Select reasoning effort",
-      "tip": "Select (Default) to use the backend's configured defaults."
+      "tip": "Select (Default) to use the Agent's own model and reasoning effort."
     }
   },
   "command": {
@@ -813,9 +812,9 @@
   "routing": {
     "slackOnly": "🤖 Agent switching is currently only available in Slack. Use Slack Agent Settings to configure routing.",
     "introTitle": "Agent & Model Settings",
-    "introDesc": "Configure which backend to use for this channel.",
+    "introDesc": "Choose which Agent this channel uses.",
+    "noAgents": "No Agent is available for this channel.",
     "label": {
-      "backend": "Backend",
       "agent": "Agent",
       "model": "Model",
       "reasoningEffort": "Reasoning Effort"

@@ -32,7 +32,7 @@ from config.v2_config import LarkConfig
 from core.citations import spell_destination
 from core.reply_enhancer import inline_links
 from vibe.i18n import get_supported_languages, t as i18n_t
-from core.modals import DEFAULT_OPTION_VALUE, RouteDraft, RouteOption, RoutingModalData, route_option_label
+from core.modals import DEFAULT_OPTION_VALUE, RouteDraft, RoutingModalData, route_option_label
 from modules.agents.native_sessions.display import format_display_summary, format_display_time
 from modules.agents.native_sessions.types import NativeResumeSession
 
@@ -2086,10 +2086,10 @@ class FeishuBot(BaseIMClient):
             )
 
     async def _handle_routing_backend_select(self, context: MessageContext, form_value: Dict[str, Any]):
-        """Handle step 1 of routing: user selected a backend, now show backend-specific options."""
-        selected_backend = form_value.get("backend", "")
-        if not selected_backend:
-            logger.warning("Routing backend select submitted with empty backend")
+        """Handle step 1 of routing: the user picked an Agent, now show its route fields."""
+        selected_agent = form_value.get("agent", "")
+        if not selected_agent:
+            logger.warning("Routing agent select submitted with empty agent")
             return
 
         cache_key = f"{context.channel_id}:{context.user_id}"
@@ -2097,7 +2097,7 @@ class FeishuBot(BaseIMClient):
             logger.warning("No cached routing data for %s", cache_key)
             return
 
-        await self._send_routing_backend_options_card(context.channel_id, selected_backend, context.user_id)
+        await self._send_routing_backend_options_card(context.channel_id, selected_agent, context.user_id)
 
     @staticmethod
     def _normalize_routing_field_value(value: Any) -> Optional[str]:
@@ -2105,23 +2105,23 @@ class FeishuBot(BaseIMClient):
             return None
         return str(value)
 
-    # A routing card's select names (``<prefix>:<backend>``) and the draft field each sets. The backend is in
-    # every name, so a card acts on its own backend even after the step-1 card opened another one.
+    # A routing card's select names (``<prefix>:<agent id>``) and the draft field each sets. The Agent is in
+    # every name, so a card acts on its own Agent even after the step-1 card opened another one.
     _ROUTE_FIELDS = {"route_variant": "variant", "route_model": "model", "route_effort": "reasoning_effort"}
 
     @classmethod
     def _route_field(cls, name: object) -> tuple[Optional[str], str]:
-        """A routing control's draft field and backend, from its name."""
-        prefix, _, backend = str(name or "").partition(":")
-        return cls._ROUTE_FIELDS.get(prefix), backend
+        """A routing control's draft field and Agent id, from its name."""
+        prefix, _, agent_id = str(name or "").partition(":")
+        return cls._ROUTE_FIELDS.get(prefix), agent_id
 
     @staticmethod
-    def _routing_draft(cache: Dict[str, Any], backend: str) -> RouteDraft:
-        """The backend's choices on this card; one not yet shown starts from the stored route."""
+    def _routing_draft(cache: Dict[str, Any], agent_id: str) -> RouteDraft:
+        """The Agent's choices on this card; one not yet shown starts from the stored route."""
         drafts = cache.setdefault("drafts", {})
-        if backend not in drafts:
-            drafts[backend] = cache["routing"].stored_draft(backend)
-        return drafts[backend]
+        if agent_id not in drafts:
+            drafts[agent_id] = cache["routing"].stored_draft(agent_id)
+        return drafts[agent_id]
 
     @staticmethod
     def _extract_select_action_value(action: Dict[str, Any]) -> Optional[str]:
@@ -2162,47 +2162,47 @@ class FeishuBot(BaseIMClient):
             raise RuntimeError(f"Feishu patch card failed: {response.msg}")
 
     async def _handle_routing_select_change(self, context: MessageContext, action: Dict[str, Any]) -> bool:
-        draft_field, backend = self._route_field(action.get("name"))
+        draft_field, agent_id = self._route_field(action.get("name"))
         if not draft_field:
             return False
         cache = self._routing_cache.get(f"{context.channel_id}:{context.user_id}")
-        if not cache or not backend or "routing" not in cache:
+        if not cache or not agent_id or "routing" not in cache:
             return False
 
-        draft = self._routing_draft(cache, backend)
-        value = cache["routing"].menu(backend).chosen(
+        draft = self._routing_draft(cache, agent_id)
+        value = cache["routing"].menu(agent_id).chosen(
             draft_field, self._normalize_routing_field_value(self._extract_select_action_value(action))
         )
         if draft_field != "model":
-            cache["drafts"][backend] = replace(draft, **{draft_field: value})
+            cache["drafts"][agent_id] = replace(draft, **{draft_field: value})
             return True
         # A model change offers that model's efforts afresh, so the card is rebuilt around it.
-        cache["drafts"][backend] = draft.with_model(value)
-        card = self._build_routing_backend_options_card(context.channel_id, backend, context.user_id)
+        cache["drafts"][agent_id] = draft.with_model(value)
+        card = self._build_routing_backend_options_card(context.channel_id, agent_id, context.user_id)
         await self._patch_card_message(context.message_id, card)
         return True
 
     async def _handle_routing_form_submit(self, context: MessageContext, form_value: Dict[str, Any], button_name: str):
-        """Handle step 2 routing form submission: the options card of the backend its button names."""
+        """Handle step 2 routing form submission: the options card of the Agent its button names."""
         cached = self._routing_cache.get(f"{context.channel_id}:{context.user_id}", {})
-        backend = button_name.partition(":")[2]
-        if not backend or "routing" not in cached:
-            logger.warning("Routing form submitted without a backend or cached routing, ignoring")
+        agent_id = button_name.partition(":")[2]
+        if not agent_id or "routing" not in cached:
+            logger.warning("Routing form submitted without an Agent or cached routing, ignoring")
             return
 
         # The form carries what its selects show; a field it omits keeps the card's draft.
-        menu = cached["routing"].menu(backend)
+        menu = cached["routing"].menu(agent_id)
         changes = {}
         for name, value in form_value.items():
-            draft_field, field_backend = self._route_field(name)
-            if draft_field and field_backend == backend:
+            draft_field, field_agent = self._route_field(name)
+            if draft_field and field_agent == agent_id:
                 changes[draft_field] = menu.chosen(draft_field, self._normalize_routing_field_value(value))
-        draft = replace(self._routing_draft(cached, backend), **changes)
+        draft = replace(self._routing_draft(cached, agent_id), **changes)
         if self._on_routing_update:
             await self._on_routing_update(
                 user_id=context.user_id,
                 channel_id=context.channel_id,
-                backend=backend,
+                agent_id=agent_id,
                 variant=draft.variant,
                 model=draft.model,
                 reasoning_effort=draft.reasoning_effort,
@@ -2547,38 +2547,34 @@ class FeishuBot(BaseIMClient):
             logger.error("Failed to send CWD card: %s", exc)
 
     async def open_routing_modal(self, trigger_id: Any, channel_id: str = None, routing: RoutingModalData = None):
-        """Step 1: send a card with only the backend selector.
+        """Step 1: send a card with only the Agent selector.
 
         The route menus are cached so that step 2 (``_send_routing_backend_options_card``) renders the selected
-        backend's options without re-fetching.
+        Agent's options without re-fetching.
         """
         t = lambda key, **kw: self._t(key, channel_id, **kw)
-        registered_backends = routing.registered_backends
 
         # Cache per channel+user, so users opening routing in one channel concurrently do not cross.
         cache_user_id = trigger_id.user_id if isinstance(trigger_id, MessageContext) else "unknown"
         self._routing_cache[f"{channel_id or ''}:{cache_user_id}"] = {"routing": routing, "drafts": {}}
 
-        backend_options = [
-            {"text": {"tag": "plain_text", "content": display_name_for_backend(b)}, "value": b}
-            for b in registered_backends
+        agent_options = [
+            {"text": {"tag": "plain_text", "content": agent.label[:60]}, "value": agent.id}
+            for agent in routing.agent_options()
         ]
-        if not backend_options:
+        if not agent_options:
             ctx = MessageContext(user_id="system", channel_id=channel_id or "")
-            await self.send_message(ctx, "No agent backends available.")
+            await self.send_message(ctx, t("routing.noAgents"))
             return
-        backend_initial = (
-            routing.current_backend if routing.current_backend in registered_backends else registered_backends[0]
-        )
 
         form_elements: list = [
-            {"tag": "markdown", "content": f"**{t('modal.routing.backend')}**"},
+            {"tag": "markdown", "content": f"**{t('modal.routing.agent')}**"},
             {
                 "tag": "select_static",
-                "name": "backend",
-                "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectBackend")},
-                "options": backend_options,
-                "initial_option": backend_initial,
+                "name": "agent",
+                "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectAgent")},
+                "options": agent_options,
+                "initial_option": routing.shown_agent(routing.current_agent),
             },
             {"tag": "markdown", "content": t("modal.routing.tip")},
             {
@@ -2606,18 +2602,21 @@ class FeishuBot(BaseIMClient):
         except Exception as exc:
             logger.error("Failed to send routing backend card: %s", exc)
 
-    def _build_routing_backend_options_card(self, channel_id: str, selected_backend: str, user_id: str) -> Dict[str, Any]:
-        """Build the step-2 routing card: the selected backend's route fields."""
+    def _build_routing_backend_options_card(self, channel_id: str, agent_id: str, user_id: str) -> Dict[str, Any]:
+        """Build the step-2 routing card: the selected Agent's route fields."""
         t = lambda key, **kw: self._t(key, channel_id, **kw)
         cache = self._routing_cache.setdefault(f"{channel_id}:{user_id}", {})
-        cache.setdefault("routing", RoutingModalData(registered_backends=[], current_backend="", current_routing=None))
-        menu = cache["routing"].menu(selected_backend)
-        draft = self._routing_draft(cache, selected_backend)
-        backend_name = display_name_for_backend(selected_backend)
-        default = RouteOption(DEFAULT_OPTION_VALUE, "")
-        form_elements: list = [{"tag": "markdown", "content": f"**{t('modal.routing.backend')}**: {backend_name}"}]
+        cache.setdefault("routing", RoutingModalData(agents=[], current_agent="", current_routing=None))
+        routing = cache["routing"]
+        agent = routing.agent(agent_id)
+        menu = routing.menu(agent_id)
+        draft = self._routing_draft(cache, agent_id)
+        backend_name = display_name_for_backend(agent.backend) if agent else ""
+        agent_label = agent.label if agent else agent_id
+        form_elements: list = [{"tag": "markdown", "content": f"**{t('modal.routing.agent')}**: {agent_label}"}]
 
-        def _select(name: str, label: str, placeholder: str, options, current, *, effort: bool = False) -> None:
+        def _select(field: str, name: str, label: str, placeholder: str, options, current) -> None:
+            effort = field == "reasoning_effort"
             form_elements.append({"tag": "markdown", "content": label})
             form_elements.append(
                 {
@@ -2629,7 +2628,7 @@ class FeishuBot(BaseIMClient):
                             "text": {"tag": "plain_text", "content": route_option_label(t, option, effort=effort)[:60]},
                             "value": option.value,
                         }
-                        for option in [default, *options]
+                        for option in [menu.default_option(field), *options]
                     ],
                     "initial_option": menu.shown_value(current),
                 }
@@ -2638,26 +2637,28 @@ class FeishuBot(BaseIMClient):
         variants = menu.variant_options(draft.variant)
         if variants:
             _select(
-                f"route_variant:{selected_backend}",
+                "variant",
+                f"route_variant:{agent_id}",
                 t("modal.routing.backendAgent", backend=backend_name),
                 t("modal.routing.selectBackendAgent", backend=backend_name),
                 variants,
                 draft.variant,
             )
         _select(
-            f"route_model:{selected_backend}",
+            "model",
+            f"route_model:{agent_id}",
             t("modal.routing.model"),
             t("modal.routing.selectModel"),
             menu.model_options(draft.model),
             draft.model,
         )
         _select(
-            f"route_effort:{selected_backend}",
+            "reasoning_effort",
+            f"route_effort:{agent_id}",
             t("modal.routing.reasoningEffort"),
             t("modal.routing.selectReasoningEffort"),
             menu.effort_options(draft.model, draft.reasoning_effort),
             draft.reasoning_effort,
-            effort=True,
         )
         form_elements.append(
             {
@@ -2665,13 +2666,13 @@ class FeishuBot(BaseIMClient):
                 "text": {"tag": "plain_text", "content": t("common.save")},
                 "type": "primary",
                 "action_type": "form_submit",
-                "name": f"routing_submit:{selected_backend}",
+                "name": f"routing_submit:{agent_id}",
             }
         )
         return {
             "schema": "2.0",
             "header": {
-                "title": {"tag": "plain_text", "content": f"{t('modal.routing.title')} — {backend_name}"},
+                "title": {"tag": "plain_text", "content": f"{t('modal.routing.title')} — {agent_label}"},
                 "template": "blue",
             },
             "body": {
@@ -2680,9 +2681,9 @@ class FeishuBot(BaseIMClient):
             },
         }
 
-    async def _send_routing_backend_options_card(self, channel_id: str, selected_backend: str, user_id: str):
-        """Step 2: send a card with options specific to the selected backend."""
-        card = self._build_routing_backend_options_card(channel_id, selected_backend, user_id)
+    async def _send_routing_backend_options_card(self, channel_id: str, agent_id: str, user_id: str):
+        """Step 2: send a card with the selected Agent's route fields."""
+        card = self._build_routing_backend_options_card(channel_id, agent_id, user_id)
         ctx = MessageContext(user_id="system", channel_id=channel_id or "")
         try:
             await self._send_card_to_channel(ctx, card)

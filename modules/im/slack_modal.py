@@ -24,28 +24,28 @@ def _choice(value: Optional[str]) -> Optional[str]:
 
 
 def parse_routing_modal_selection(*, view: dict, action: dict) -> RoutingModalSelection:
-    """Parse the routing modal's state into the shown backend and its route choices.
+    """Parse the routing modal's state into the shown Agent and its route choices.
 
-    Route blocks are ``route_<field>:<backend>[:...]`` (see ``SlackBot._route_section_blocks``). The draft is
-    ``None`` when the section on screen is not the selected backend's, as right after a backend switch.
+    Route blocks are ``route_<field>:<agent id>[:<model digest>]`` (see ``SlackBot._route_section_blocks``). The
+    draft is ``None`` when the section on screen is not the selected Agent's, as right after an Agent switch.
     """
     values = view.get("state", {}).get("values", {})
-    selected_backend = _selected_value(values.get("backend_block")) or ""
+    selected_agent = _selected_value(values.get("agent_block")) or ""
     fields: dict[str, Optional[str]] = {}
-    section_backend = None
+    section_agent = None
     for block_id, block in values.items():
         if not isinstance(block_id, str) or not block_id.startswith("route_"):
             continue
         field, _, rest = block_id.partition(":")
-        section_backend = rest.split(":", 1)[0]
+        section_agent = rest.split(":", 1)[0]
         fields[field] = _choice(_selected_value(block))
 
     block_id = str(action.get("block_id") or "")
     value = (action.get("selected_option") or {}).get("value") if isinstance(action, dict) else None
-    if action.get("action_id") == "backend_select" and isinstance(value, str):
-        selected_backend = value
-    if not selected_backend or section_backend != selected_backend:
-        return RoutingModalSelection(selected_backend=selected_backend)
+    if action.get("action_id") == "agent_select" and isinstance(value, str):
+        selected_agent = value
+    if not selected_agent or section_agent != selected_agent:
+        return RoutingModalSelection(selected_agent=selected_agent)
 
     draft = RouteDraft(
         variant=fields.get("route_variant"),
@@ -64,4 +64,4 @@ def parse_routing_modal_selection(*, view: dict, action: dict) -> RoutingModalSe
             None,
         )
         draft = replace(draft, model=_choice(shown)).with_model(_choice(value))
-    return RoutingModalSelection(selected_backend=selected_backend, draft=draft)
+    return RoutingModalSelection(selected_agent=selected_agent, draft=draft)
