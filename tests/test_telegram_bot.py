@@ -1352,6 +1352,21 @@ def test_routing_state_marks_current_backend_in_first_row() -> None:
     assert keyboard.buttons[0][2].text.startswith("☑️ ")
 
 
+def test_routing_summary_bounds_an_unbounded_model_label() -> None:
+    from config.v2_settings import RoutingSettings
+    from core.modals import BackendRouteMenu, RouteOption
+
+    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
+    state = _routing_state(_routing_context(), ["vibey"], "vibey")
+    state.routing.current_routing = RoutingSettings(agent_name="vibey", model="m" * 5000)
+    state.routing.menus["vibey"] = BackendRouteMenu("vibey", models=[RouteOption("m" * 5000, "Label " * 1000)])
+
+    text, keyboard = bot._render_routing_state(state)
+
+    assert len(text) < 1000
+    assert all(len(button.text) <= 40 for row in keyboard.buttons for button in row)
+
+
 def test_routing_callback_backend_switches_without_nested_picker() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
     context = _routing_context()

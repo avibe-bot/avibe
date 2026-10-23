@@ -1910,7 +1910,9 @@ class TelegramBot(BaseIMClient):
         for name, value in fields:
             target = menu.shown_value(value) if value else None
             options = self._routing_picker_options(state, name)
-            shown.append((name, next((text for text, option in options if option == target), value or "")))
+            text = next((text for text, option in options if option == target), value or "")
+            # Catalog labels and stored ids are unbounded, and a Telegram message holds 4096 characters.
+            shown.append((name, text if len(text) <= 100 else f"{text[:99]}…"))
         return shown
 
     def _routing_summary_lines(self, state: _TelegramRoutingState) -> list[str]:
