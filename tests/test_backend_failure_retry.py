@@ -1336,7 +1336,7 @@ def test_stale_retry_releases_a_newer_input_waiting_behind_its_reservation(manag
 
 
 @pytest.mark.parametrize("bound", [False, True])
-def test_continue_on_vibey_moves_the_session_and_runs_the_unwritten_message(isolated_state, tmp_path, bound):
+def test_continue_on_vibey_moves_the_session_and_runs_the_unwritten_message(isolated_state, tmp_path, monkeypatch, bound):
     """A message that never reached its disabled Agent continues on the built-in Vibey
     Agent: one request moves the session (the same switch, with its handoff when the
     session had a conversation) and runs that exact message there. The move and the
@@ -1345,6 +1345,8 @@ def test_continue_on_vibey_moves_the_session_and_runs_the_unwritten_message(isol
     from core.vibe_agents import VibeAgentStore
     from vibe.ui_server import app
 
+    # The Model Hub supplies Vibey a model unless a step below says otherwise.
+    monkeypatch.setattr("vibe.ui_server._backend_supply_blocked", lambda _backend: False)
     store = VibeAgentStore()
     try:
         vibey = store.ensure_builtin_default_agent(backend="vibey")
@@ -1367,6 +1369,10 @@ def test_continue_on_vibey_moves_the_session_and_runs_the_unwritten_message(isol
 
     with patch("core.vibe_agents.ensure_agent_selection_access", side_effect=VibeAgentAccessError("denied")):
         assert client.post(url, headers=headers, json=continue_body).status_code == 403
+    # A notice offered while Vibey could run may be clicked after it no longer can.
+    with patch("vibe.ui_server._backend_supply_blocked", return_value=True):
+        stale = client.post(url, headers=headers, json=continue_body)
+    assert (stale.status_code, stale.get_json()["code"]) == (409, "continue_agent_unavailable")
     # Without the controller there is nothing to run the input: nothing moves.
     from vibe import internal_client
 
@@ -1405,14 +1411,19 @@ def test_continue_on_vibey_moves_the_session_and_runs_the_unwritten_message(isol
         assert conn.execute(
             select(agent_sessions.c.agent_name).where(agent_sessions.c.id == session_id)
         ).scalar_one() == "vibey-helper"
+    # Already on the target backend, the action still needs the controller.
+    with patch("vibe.internal_client.turn_state", AsyncMock(side_effect=internal_client.InternalServerUnavailable("down"))):
+        same_backend = client.post(url, headers=headers, json=continue_body)
+    assert (same_backend.status_code, same_backend.get_json()["code"]) == (503, "controller_unavailable")
 
 
-def test_continue_on_vibey_refuses_a_message_the_old_backend_already_ran(isolated_state, tmp_path):
+def test_continue_on_vibey_refuses_a_message_the_old_backend_already_ran(isolated_state, tmp_path, monkeypatch):
     """The move and the retry commit together: a continuation of a turn that reached
     the old backend belongs to it, so both are refused and the session stays put."""
     from core.vibe_agents import VibeAgentStore
     from vibe.ui_server import app
 
+    monkeypatch.setattr("vibe.ui_server._backend_supply_blocked", lambda _backend: False)
     store = VibeAgentStore()
     try:
         store.ensure_builtin_default_agent(backend="vibey")

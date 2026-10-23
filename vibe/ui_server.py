@@ -78,7 +78,13 @@ from core.show_session_events import (
     show_event_requests_dispatch,
 )
 from core.terminal_service import TERMINAL_SUPPORTED, TerminalService, TerminalServiceError, sanitize_session_id
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, is_agent_backend, supports_runtime_refresh
+from modules.agents.catalog import (
+    AGENT_BACKENDS,
+    NATIVE_CLI_BACKENDS,
+    display_name_for_backend,
+    is_agent_backend,
+    supports_runtime_refresh,
+)
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
 from vibe.runtime import get_ui_dist_path, get_working_dir
@@ -10212,6 +10218,14 @@ def _backend_locked_response(err):
     )
 
 
+def _backend_supply_blocked(backend: str) -> bool:
+    """Whether the Model Hub leaves ``backend`` no model to run on now. Blocking."""
+    from config.v2_config import hub_supply_block
+    from core.services import settings as settings_service
+
+    return hub_supply_block(backend, settings_service.load_config_or_default().model_hub) is not None
+
+
 def _builtin_agent_for_backend(backend: str):
     """The backend's enabled built-in Agent, or None. Blocking."""
     from core.vibe_agents import VibeAgentStore
@@ -10245,7 +10259,7 @@ async def _backend_switch_preflight(engine, session_id: str, requested_backend, 
             runtime_idle_through_turn = workbench_sessions_service.latest_session_turn_id(conn, session_id)
     except LookupError as err:
         return (jsonify({"error": str(err)}), 404), None
-    if str(requested_backend or "") == str(current.get("agent_backend") or ""):
+    if str(requested_backend or "") == str(current.get("agent_backend") or "") and not require_controller:
         return None, runtime_idle_through_turn
     bound_switch = bool(current.get("native_session_id")) and bool(current.get("agent_backend"))
     try:
@@ -12220,9 +12234,13 @@ async def sessions_messages_create(session_id: str):
 
         # The store's constructor checks and prefills state: off the event loop.
         continue_agent = await asyncio.to_thread(_builtin_agent_for_backend, continue_on_backend)
-        if continue_agent is None:
+        # The notice may be older than the state it was offered for: recheck, at the
+        # click, the same answers the offer was made from (``_builtin_vibey_available``).
+        if continue_agent is None or await asyncio.to_thread(_backend_supply_blocked, continue_on_backend):
             return _coded_error_response(
-                "builtin_agent_unavailable", t("desktopMini.builtinAgentUnavailable", _request_ui_language()), 409
+                "continue_agent_unavailable",
+                t("errors.sessionContinueAgentUnavailable", _request_ui_language(), backend=display_name_for_backend(continue_on_backend)),
+                409,
             )
         try:
             with engine.connect() as conn:

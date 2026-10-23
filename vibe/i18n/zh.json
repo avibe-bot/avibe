@@ -13,7 +13,8 @@
     "modelsNextStepIm": "管理这个 Avibe 的人可以在 Avibe 工作台的「模型」页处理。",
     "opencodeModelProviderRequired": "请在 Avibe 中选择带供应商的 OpenCode 模型，或配置它的 Model Hub 路由。",
     "sessionBackendBusy": "这个会话在当前后端上还有后台任务在运行，等它结束后再切换。",
-    "sessionControllerUnavailable": "暂时连不上 Avibe 服务，请稍后再试。"
+    "sessionControllerUnavailable": "暂时连不上 Avibe 服务，请稍后再试。",
+    "sessionContinueAgentUnavailable": "{backend} 现在用不了，这个会话暂时没法切换过去。"
   },
   "status": {
     "backendUnresponsive": "后端无响应",

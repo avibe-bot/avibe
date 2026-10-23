@@ -2852,6 +2852,7 @@
     "backend_locked": "This session can't change to that backend now. A running turn has to finish first, and a Vibey session stays on Vibey.",
     "backend_busy": "This session still has background work running on its current backend. Switch after it finishes.",
     "controller_unavailable": "Avibe's service isn't reachable right now. Try again in a moment.",
+    "continue_agent_unavailable": "Vibey isn't available right now, so this session can't switch to it.",
     "reserved_session": "Avibe owns this session — it only receives workspace notifications.",
     "invalid_icon_type": "The icon must be an SVG, PNG, ICO, JPEG, or WebP image.",
     "icon_too_large": "That icon is too large. Use an image up to 2 MiB.",
