@@ -5903,6 +5903,17 @@ class ModelHubService:
             config, self._agent(config, backend), live_recovery=self.recovery.annotations(config),
         )
 
+    async def read_agent_sources(self, backend: str) -> dict:
+        """``get_agent_sources`` for a caller on the controller loop, which owns the recovery state.
+
+        Reading that state may wake its waiters, so it is read here; the config read and the payload are
+        built off the loop.
+        """
+        config = await asyncio.to_thread(self.store.load)
+        agent = self._agent(config, backend)
+        live_recovery = self.recovery.annotations(config)
+        return await asyncio.to_thread(self._agent_payload, config, agent, live_recovery=live_recovery)
+
     async def set_agent_chain(self, backend: str, model_id: object, payload: object) -> dict:
         if (
             backend not in MODEL_HUB_BACKENDS

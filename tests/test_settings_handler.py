@@ -8,9 +8,13 @@ from unittest.mock import patch
 
 from config.v2_settings import RoutingSettings
 from core.handlers.settings_handler import SettingsHandler
-from core.modals import RoutingModalSelection
+from core.modals import STORED_OPTION_VALUE, BackendRouteMenu, RouteOption, RoutingModalData, RoutingModalSelection
 from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
 from modules.im import MessageContext
+
+
+def _values(options) -> list[str]:
+    return [option.value for option in options]
 
 
 class _StubSettingsManager:
@@ -154,12 +158,8 @@ def test_handle_routing_update_preserves_existing_codex_agent_when_omitted() -> 
             user_id="42",
             channel_id="-100123",
             backend="codex",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model=None,
-            codex_model="gpt-5.4",
-            codex_reasoning_effort="high",
+            model="gpt-5.4",
+            reasoning_effort="high",
             notify_user=False,
             platform="telegram",
         )
@@ -190,13 +190,9 @@ def test_handle_routing_update_allows_explicit_codex_agent_clear() -> None:
             user_id="42",
             channel_id="-100123",
             backend="codex",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model=None,
-            codex_agent=None,
-            codex_model="gpt-5.4",
-            codex_reasoning_effort="high",
+            variant=None,
+            model="gpt-5.4",
+            reasoning_effort="high",
             notify_user=False,
             platform="telegram",
         )
@@ -219,12 +215,8 @@ def test_handle_routing_update_handles_first_codex_save_without_existing_routing
             user_id="42",
             channel_id="-100123",
             backend="codex",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model=None,
-            codex_model="gpt-5.4",
-            codex_reasoning_effort="high",
+            model="gpt-5.4",
+            reasoning_effort="high",
             notify_user=False,
             platform="telegram",
         )
@@ -253,11 +245,9 @@ def test_handle_routing_update_preserves_catalog_claude_effort() -> None:
                 user_id="42",
                 channel_id="-100123",
                 backend="claude",
-                opencode_agent=None,
-                opencode_model=None,
-                claude_agent="reviewer",
-                claude_model="claude-future-6",
-                claude_reasoning_effort="ultra",
+                variant="reviewer",
+                model="claude-future-6",
+                reasoning_effort="ultra",
                 notify_user=False,
                 platform="telegram",
             )
@@ -269,6 +259,94 @@ def test_handle_routing_update_preserves_catalog_claude_effort() -> None:
     send_message.assert_not_awaited()
 
 
+def test_handle_routing_update_saves_vibey_model_and_effort_on_the_vibey_route() -> None:
+    settings_manager = _StubSettingsManager(RoutingSettings(agent_name="opencode", model="openai/gpt-5"))
+    handler, send_message = _make_handler(settings_manager)
+    handler.controller.vibe_agent_store = SimpleNamespace(routing_name_for_backend=lambda backend: f"{backend}-agent")
+
+    asyncio.run(
+        handler.handle_routing_update(
+            user_id="42",
+            channel_id="-100123",
+            backend="vibey",
+            model="claude-opus-5-5",
+            reasoning_effort="xhigh",
+            platform="telegram",
+        )
+    )
+
+    saved = settings_manager.saved_routing
+    assert (saved.agent_name, saved.model, saved.reasoning_effort) == ("vibey-agent", "claude-opus-5-5", "xhigh")
+    text = send_message.await_args.args[1]
+    assert "claude-opus-5-5" in text and "xhigh" in text
+
+    # An opaque id of any length still yields a confirmation every platform can send.
+    asyncio.run(
+        handler.handle_routing_update(
+            user_id="42", channel_id="-100123", backend="vibey", model="m" * 5000, platform="telegram",
+        )
+    )
+    assert settings_manager.saved_routing.model == "m" * 5000
+    assert len(send_message.await_args.args[1]) < 1000
+
+
+def test_saving_an_unchanged_slack_form_keeps_a_stored_model_slack_cannot_show() -> None:
+    """A Web-set model id past Slack's 150-character option values must survive saving the Slack form."""
+    from config.v2_config import SlackConfig
+    from modules.im.slack import SlackBot
+
+    long_id = "vendor/" + "x" * 160
+    settings_manager = _StubSettingsManager(RoutingSettings(agent_name="vibey", model=long_id, reasoning_effort="high"))
+    handler, _ = _make_handler(settings_manager)
+    handler.controller.vibe_agent_store = SimpleNamespace(
+        routing_name_for_backend=lambda backend: backend, get=lambda name: SimpleNamespace(backend="vibey")
+    )
+    bot = SlackBot(SlackConfig(bot_token="fixture-token"))
+    bot._on_routing_update = handler.handle_routing_update
+    data = RoutingModalData(["vibey"], "vibey", settings_manager.routing)
+    data.menus["vibey"] = BackendRouteMenu(
+        "vibey",
+        models=[RouteOption("model-a", "Model A")],
+        efforts={"": [RouteOption("high", "High")]},
+        option_limit=bot.route_option_limit,
+        value_limit=bot.route_option_value_limit,
+        stored=data.stored_draft("vibey"),
+    )
+    view = bot._build_routing_modal_view(channel_id="-100123", routing=data)
+    view["state"] = {"values": {
+        block["block_id"]: {block["element"]["action_id"]: {"selected_option": block["element"]["initial_option"]}}
+        for block in view["blocks"] if block["type"] == "input"
+    }}
+
+    with patch.object(handler, "_routing_update_needs_new_session_hint", return_value=False):
+        asyncio.run(bot._handle_view_submission({"view": view, "user": {"id": "42"}}))
+
+    saved = settings_manager.saved_routing
+    assert (saved.agent_name, saved.model, saved.reasoning_effort) == ("vibey", long_id, "high")
+
+
+def test_a_stored_stand_in_resolves_only_against_a_stored_route_on_its_backend() -> None:
+    # The form rendered while the route was on Vibey; by the time it saves, the route may be on Codex.
+    for stored_agent, expected in (("vibey", ("long-vibey-model", "high")), ("codex", (None, None))):
+        stored = RoutingSettings(agent_name=stored_agent, model=f"long-{stored_agent}-model", reasoning_effort="high")
+        settings_manager = _StubSettingsManager(stored)
+        handler, _ = _make_handler(settings_manager)
+        handler.controller.vibe_agent_store = SimpleNamespace(
+            routing_name_for_backend=lambda backend: backend, get=lambda name: SimpleNamespace(backend=name)
+        )
+
+        asyncio.run(
+            handler.handle_routing_update(
+                user_id="42", channel_id="-100123", backend="vibey",
+                model=STORED_OPTION_VALUE, reasoning_effort=STORED_OPTION_VALUE,
+                notify_user=False, platform="telegram",
+            )
+        )
+
+        saved = settings_manager.saved_routing
+        assert (saved.agent_name, saved.model, saved.reasoning_effort) == ("vibey", *expected)
+
+
 def test_handle_routing_update_warns_flat_scope_with_existing_backend_session() -> None:
     handler, send_message, sessions = _make_flat_scope_handler(row={"agent_backend": "opencode"})
 
@@ -277,10 +355,8 @@ def test_handle_routing_update_warns_flat_scope_with_existing_backend_session() 
             user_id="58181121",
             channel_id="58181121",
             backend="claude",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model=None,
+            variant=None,
+            model=None,
             platform="telegram",
             is_dm=True,
         )
@@ -300,10 +376,8 @@ def test_handle_routing_update_warns_wechat_flat_scope_with_existing_backend_ses
             user_id="58181121",
             channel_id="58181121",
             backend="claude",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model=None,
+            variant=None,
+            model=None,
             platform="wechat",
             is_dm=True,
         )
@@ -330,10 +404,8 @@ def test_handle_routing_update_does_not_warn_flat_scope_same_backend_model_chang
             user_id="58181121",
             channel_id="58181121",
             backend="claude",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model="claude-opus-4-1",
+            variant=None,
+            model="claude-opus-4-1",
             platform="telegram",
             is_dm=True,
         )
@@ -360,11 +432,9 @@ def test_handle_routing_update_does_not_warn_flat_scope_same_backend_reasoning_c
             user_id="58181121",
             channel_id="58181121",
             backend="claude",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model="claude-sonnet-4-5",
-            claude_reasoning_effort="high",
+            variant=None,
+            model="claude-sonnet-4-5",
+            reasoning_effort="high",
             platform="telegram",
             is_dm=True,
         )
@@ -391,10 +461,8 @@ def test_handle_routing_update_does_not_warn_flat_scope_same_session_target() ->
             user_id="58181121",
             channel_id="58181121",
             backend="claude",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model="claude-sonnet-4-5",
+            variant=None,
+            model="claude-sonnet-4-5",
             platform="telegram",
             is_dm=True,
         )
@@ -413,10 +481,8 @@ def test_handle_routing_update_does_not_warn_when_flat_scope_has_no_session() ->
             user_id="58181121",
             channel_id="58181121",
             backend="claude",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model=None,
+            variant=None,
+            model=None,
             platform="telegram",
             is_dm=True,
         )
@@ -436,10 +502,8 @@ def test_handle_routing_update_does_not_warn_threaded_scope() -> None:
             user_id="U123",
             channel_id="D123",
             backend="claude",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model=None,
+            variant=None,
+            model=None,
             platform="slack",
             is_dm=True,
         )
@@ -570,8 +634,8 @@ def test_gather_routing_modal_data_fetches_selected_backend_on_modal_update() ->
         data = asyncio.run(handler._gather_routing_modal_data(context, selected_backend="claude"))
 
     assert data.current_backend == "opencode"
-    assert data.claude_agents == [{"id": "reviewer"}]
-    assert data.claude_models == ["claude-sonnet-4-6"]
+    assert _values(data.menus["claude"].variants) == ["reviewer"]
+    assert _values(data.menus["claude"].models) == ["claude-sonnet-4-6"]
     assert server.calls == []
 
 
@@ -583,7 +647,8 @@ def test_gather_routing_modal_data_prefetches_all_backends_when_requested() -> N
         "vibe.api.claude_models",
         return_value={
             "ok": True,
-            "models": ["claude-sonnet-4-6"],
+            # claude_models() appends the bare aliases after the dated catalog.
+            "models": ["claude-sonnet-4-6", "opus"],
             "reasoning_options": {"claude-sonnet-4-6": [{"value": "max", "label": "Max"}]},
         },
     ), patch("vibe.api.codex_agents", return_value={"ok": True, "agents": [{"id": "builder"}]}), patch(
@@ -597,21 +662,82 @@ def test_gather_routing_modal_data_prefetches_all_backends_when_requested() -> N
         data = asyncio.run(handler._gather_routing_modal_data(context, include_all_backend_data=True))
 
     assert data.registered_backends == list(AGENT_BACKENDS)
-    assert data.opencode_agents == [{"name": "build"}]
-    assert data.claude_agents == [{"id": "reviewer"}]
-    assert data.claude_models == ["claude-sonnet-4-6"]
-    assert data.codex_agents == [{"id": "builder"}]
-    assert data.codex_models == ["gpt-5.4"]
-    assert data.backend_reasoning_options == {
-        "claude": {"claude-sonnet-4-6": [{"value": "max", "label": "Max"}]},
-        "codex": {"gpt-5.4": [{"value": "ultra", "label": "Ultra"}]},
+    menus = data.menus
+    assert {backend: _values(menu.variants) for backend, menu in menus.items()} == {
+        "vibey": [], "opencode": ["build"], "claude": ["reviewer"], "codex": ["builder"],
     }
+    # The always-valid bare aliases lead, so a capped select trims dated snapshots first.
+    assert _values(menus["claude"].models) == ["opus", "claude-sonnet-4-6"]
+    assert _values(menus["codex"].models) == ["gpt-5.4"]
+    # Each model's catalog efforts, not a backend-wide ladder.
+    assert _values(menus["claude"].efforts["claude-sonnet-4-6"]) == ["max"]
+    assert _values(menus["codex"].efforts["gpt-5.4"]) == ["ultra"]
     assert server.calls == [
         "current_server",
         "agents:/tmp/workspace",
         "models:/tmp/workspace",
         "config:/tmp/workspace",
     ]
+
+
+def test_opencode_route_menu_fits_the_platforms_cap_and_is_whole_without_one() -> None:
+    handler, server = _make_routing_handler()
+    # More providers than the select has slots, each leading (newest first) with ids too long for Discord.
+    providers = [
+        {
+            "id": f"p{p}",
+            "name": f"P{p}",
+            "models": {
+                **{f"{'x' * 120}-{i}": {"name": f"Long {i}", "release_date": "2026-09-01"} for i in range(6)},
+                **{f"m{i}": {"name": f"M{i}", "release_date": "2026-01-01"} for i in range(3)},
+            },
+        }
+        for p in range(30)
+    ]
+    server.get_available_models = AsyncMock(return_value={"providers": providers})
+    context = MessageContext(user_id="U1", channel_id="D0APS47LPU2", platform="discord")
+    menus = {}
+    for limit, value_limit in ((25, 100), (None, None)):  # Discord's select; Telegram's paged picker
+        handler._get_im_client = lambda context, limit=limit, value_limit=value_limit: SimpleNamespace(
+            route_option_limit=limit, route_option_value_limit=value_limit
+        )
+        menus[limit] = asyncio.run(handler._gather_routing_modal_data(context)).menus["opencode"]
+
+    capped = menus[25].model_options(None)
+    assert len(capped) == 24 and all("/m" in option.value for option in capped)
+    assert len(menus[None].model_options(None)) == 270
+
+
+def test_gather_routing_modal_data_reads_vibey_menu_from_model_hub() -> None:
+    handler, server = _make_routing_handler()
+    handler.controller.resolve_agent_for_context = lambda context: "vibey"
+    catalog = [
+        {"id": "model-a", "display_name": "Model A", "routeable": True, "supports_reasoning": True,
+         "reasoning_efforts": ["low", "high", "max"], "effort_menu": {"omitted": ["max"], "not_on": {}}},
+        {"id": "model-b", "display_name": None, "routeable": True, "supports_reasoning": False,
+         "reasoning_efforts": ["low"], "effort_menu": {"omitted": [], "not_on": {}}},
+        {"id": "selector", "routeable": False, "reasoning_efforts": []},
+    ]
+    read_agent_sources = AsyncMock(return_value={"backend": "vibey", "catalog_models": catalog})
+    handler.controller.model_hub_service = SimpleNamespace(read_agent_sources=read_agent_sources)
+    handler.controller.vibe_agent_store = SimpleNamespace(
+        get_builtin_default_agent_for_backend=lambda backend, enabled_only=True: SimpleNamespace(model="model-a"),
+    )
+    context = MessageContext(user_id="U1", channel_id="D0APS47LPU2", platform="slack")
+
+    data = asyncio.run(handler._gather_routing_modal_data(context))
+
+    read_agent_sources.assert_awaited_once_with("vibey")
+    assert data.current_backend == "vibey"
+    menu = data.menus["vibey"]
+    assert menu.models == [RouteOption("model-a", "Model A"), RouteOption("model-b", "model-b")]
+    # Model Hub's omitted efforts are not offered; a route without its own model inherits the Vibey Agent's.
+    assert {model: _values(efforts) for model, efforts in menu.efforts.items()} == {
+        "model-a": ["low", "high"],
+        "model-b": [],
+        "": ["low", "high"],
+    }
+    assert server.calls == []
 
 
 def test_gather_routing_modal_data_hides_disabled_backends() -> None:
@@ -647,13 +773,65 @@ def test_gather_routing_modal_data_falls_back_to_visible_backend_when_current_is
     # Listed first, the built-in backend is still not the fallback while another is enabled.
     assert data.current_backend == "opencode"
     assert data.registered_backends == ["vibey", "opencode", "codex"]
-    assert data.opencode_agents == [{"name": "build"}]
+    assert _values(data.menus["opencode"].variants) == ["build"]
     assert server.calls == [
         "current_server",
         "agents:/tmp/workspace",
         "models:/tmp/workspace",
         "config:/tmp/workspace",
     ]
+
+
+def test_slack_backend_switch_back_shows_the_stored_route_not_blanks() -> None:
+    """Switching the Slack modal away from the stored backend and back must not blank what saving would persist."""
+    from config.v2_config import SlackConfig
+    from modules.im.slack import SlackBot
+    from modules.im.slack_modal import parse_routing_modal_selection
+
+    handler, _server = _make_routing_handler()
+    routing = RoutingSettings(agent_name="vibey", model="model-b", reasoning_effort="high")
+    handler.settings_manager = SimpleNamespace(get_channel_routing=lambda settings_key: routing)
+    handler.controller.resolve_agent_for_context = lambda context: "vibey"
+    catalog = [
+        {"id": model_id, "routeable": True, "reasoning_efforts": ["low", "high"], "effort_menu": {"omitted": []}}
+        for model_id in ("model-a", "model-b")
+    ]
+    handler.controller.model_hub_service = SimpleNamespace(
+        read_agent_sources=AsyncMock(return_value={"catalog_models": catalog}),
+    )
+    bot = SlackBot(SlackConfig(bot_token="fixture-token"))
+    bot._ensure_clients = lambda: None
+    bot.web_client = SimpleNamespace(views_update=AsyncMock())
+    handler._get_im_client = lambda context: bot
+    # The modal as Slack holds it after a switch to OpenCode: it has no Vibey controls.
+    view = bot._build_routing_modal_view(
+        channel_id="D0APS47LPU2",
+        routing=RoutingModalData(registered_backends=["vibey", "opencode"], current_backend="vibey", current_routing=routing),
+        selected_backend="opencode",
+    )
+    view["state"] = {"values": {
+        block["block_id"]: {block["element"]["action_id"]: {"selected_option": block["element"]["initial_option"]}}
+        for block in view["blocks"] if block["type"] == "input"
+    }}
+    view["state"]["values"]["backend_block"]["backend_select"] = {"selected_option": {"value": "vibey"}}
+    selection = parse_routing_modal_selection(
+        view=view, action={"action_id": "backend_select", "selected_option": {"value": "vibey"}}
+    )
+
+    asyncio.run(
+        handler.handle_routing_modal_update(
+            user_id="U1", channel_id="D0APS47LPU2", view_id="view-1", view_hash="hash-1",
+            selection=selection, platform="slack",
+        )
+    )
+
+    updated = bot.web_client.views_update.await_args.kwargs["view"]
+    shown = {
+        block["block_id"].rsplit(":", 1)[0] if block["block_id"].startswith("route_effort:") else block["block_id"]:
+        block["element"]["initial_option"]["value"]
+        for block in updated["blocks"] if block["type"] == "input"
+    }
+    assert (shown["route_model:vibey"], shown["route_effort:vibey"]) == ("model-b", "high")
 
 
 def test_handle_routing_modal_update_uses_visible_current_backend() -> None:
@@ -680,5 +858,5 @@ def test_handle_routing_modal_update_uses_visible_current_backend() -> None:
     )
 
     assert len(update_calls) == 1
-    assert update_calls[0]["current_backend"] == "opencode"
+    assert update_calls[0]["routing"].current_backend == "opencode"
     assert update_calls[0]["selected_backend"] == "opencode"

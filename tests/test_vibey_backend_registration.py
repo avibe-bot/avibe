@@ -471,7 +471,6 @@ def test_choosing_the_built_in_backend_in_an_im_picker_routes_to_its_agent(tmp_p
         for backend, expected in (("vibey", built_in.name), ("claude", "claude")):
             asyncio.run(handler.handle_routing_update(
                 user_id="U1", channel_id="C-test", backend=backend,
-                opencode_agent=None, opencode_model=None, claude_agent=None, claude_model=None,
                 notify_user=False, platform="slack",
             ))
             assert saved["C-test"].agent_name == expected

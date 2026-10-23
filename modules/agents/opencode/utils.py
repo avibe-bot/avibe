@@ -6,7 +6,7 @@ Shared by OpenCode, Claude, and Codex integrations for reasoning-effort option b
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 
 _REASONING_FALLBACK_OPTIONS = [
@@ -390,8 +390,13 @@ def build_opencode_model_option_items(
     max_total: int,
     preferred_providers: Optional[List[str]] = None,
     allowed_providers: Optional[List[str]] = None,
+    keep: Optional[Callable[[str], bool]] = None,
 ) -> List[Dict[str, str]]:
-    """Build sorted model options for OpenCode providers."""
+    """Build sorted model options for OpenCode providers.
+
+    ``keep`` drops an option value before it takes a provider's share of ``max_total`` (a value the select that
+    shows the list cannot carry), so the share goes to models that can be shown.
+    """
     if not isinstance(opencode_models, dict) or max_total <= 0:
         return []
 
@@ -465,6 +470,8 @@ def build_opencode_model_option_items(
                 model_id,
                 model_info,
             )
+            if keep is not None and not keep(full_model):
+                continue
             display = (
                 model_name
                 if opencode_model_is_hub_projected(model_info)

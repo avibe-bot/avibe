@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import sys
 from typing import Optional
 
 from modules.agents import get_agent_display_name
@@ -13,7 +14,15 @@ from modules.agents.catalog import (
     is_builtin_backend,
 )
 from modules.im import MessageContext, InlineKeyboard, InlineButton
-from core.modals import RoutingModalData, RoutingModalSelection
+from config.v2_settings import normalize_routing_settings
+from core.modals import (
+    DEFAULT_OPTION_VALUE,
+    STORED_OPTION_VALUE,
+    BackendRouteMenu,
+    RouteOption,
+    RoutingModalData,
+    RoutingModalSelection,
+)
 from vibe import backend_model_catalog
 
 from .base import BaseHandler
@@ -21,6 +30,20 @@ from .base import BaseHandler
 logger = logging.getLogger(__name__)
 
 _UNSET = object()
+
+
+def _unique_options(values) -> list[RouteOption]:
+    names = dict.fromkeys(str(value).strip() for value in values if value and str(value).strip())
+    return [RouteOption(name, name) for name in names]
+
+
+def _effort_options(entries) -> list[RouteOption]:
+    """Catalog effort entries as route options, without the Default entry every select adds itself."""
+    return [
+        RouteOption(str(entry["value"]), str(entry.get("label") or entry["value"]))
+        for entry in entries or []
+        if entry.get("value") and entry["value"] != DEFAULT_OPTION_VALUE
+    ]
 
 
 class SettingsHandler(BaseHandler):
@@ -403,21 +426,51 @@ class SettingsHandler(BaseHandler):
         """Handle routing command - show agent/model selection"""
         try:
             platform = context.platform or (context.platform_specific or {}).get("platform") or self.config.platform
-            # Only Slack has modal support for now
+            im_client = self._get_im_client(context)
+            if not hasattr(im_client, "open_routing_modal"):
+                await im_client.send_message(context, self._t("routing.slackOnly"))
+                return
+            platform_specific = context.platform_specific or {}
             if platform == "slack":
-                await self._handle_routing_slack(context)
+                # A Slack modal opens only from an interaction; a typed command gets a button that is one.
+                trigger = platform_specific.get("trigger_id")
+                if not trigger:
+                    keyboard = InlineKeyboard(
+                        buttons=[
+                            [
+                                InlineButton(
+                                    text=f"🤖 {self._t('button.agentSettings')}",
+                                    callback_data="open_routing_modal",
+                                )
+                            ]
+                        ]
+                    )
+                    await im_client.send_message_with_buttons(
+                        context,
+                        f"🤖 *{self._t('routing.introTitle')}*\n\n{self._t('routing.introDesc')}",
+                        keyboard,
+                    )
+                    return
             elif platform == "discord":
-                await self._handle_routing_discord(context)
-            elif platform == "telegram":
-                await self._handle_routing_telegram(context)
-            elif platform == "lark":
-                await self._handle_routing_lark(context)
+                trigger = platform_specific.get("interaction") or context
             else:
-                # For other platforms, show a simple message
-                await self._get_im_client(context).send_message(
-                    context,
-                    self._t("routing.slackOnly"),
+                trigger = context
+            # A form refreshed through ``update_routing_modal`` loads each backend as it is shown; the others
+            # render every backend up front.
+            routing_data = await self._gather_routing_modal_data(
+                context, include_all_backend_data=not hasattr(im_client, "update_routing_modal")
+            )
+            try:
+                await im_client.run_on_client_loop(
+                    im_client.open_routing_modal(
+                        trigger_id=trigger,
+                        channel_id=context.channel_id,
+                        routing=routing_data,
+                    )
                 )
+            except Exception as e:
+                logger.error(f"Error opening routing modal: {e}", exc_info=True)
+                await im_client.send_message(context, f"❌ {self._t('error.routingModalFailed')}")
         except Exception as e:
             logger.error(f"Error showing routing settings: {e}", exc_info=True)
             await self._get_im_client(context).send_message(
@@ -430,7 +483,7 @@ class SettingsHandler(BaseHandler):
         selected_backend: Optional[str] = None,
         include_all_backend_data: bool = False,
     ) -> RoutingModalData:
-        """Collect backend/agent/model data for routing modal renderers."""
+        """Collect each shown backend's route menu for the routing form renderers."""
         settings_key = self._get_settings_key(context)
         current_routing = self._get_settings_manager(context).get_channel_routing(settings_key)
 
@@ -449,92 +502,157 @@ class SettingsHandler(BaseHandler):
         if selected_backend in registered_backends:
             active_backend = selected_backend
         visible_current_backend = current_backend if current_backend in registered_backends else active_backend
-        backends_to_load = set(registered_backends) if include_all_backend_data else {active_backend}
+        backends_to_load = registered_backends if include_all_backend_data else [active_backend]
 
-        opencode_agents = []
-        opencode_models = {}
-        opencode_default_config = {}
-        claude_agents = []
-        claude_models = []
-        codex_agents = []
-        codex_models = []
-        backend_reasoning_options = {}
-
-        if "opencode" in backends_to_load:
-            try:
-                opencode_agent = self.controller.agent_service.agents.get("opencode")
-                if opencode_agent and hasattr(opencode_agent, "current_server"):
-                    async with opencode_agent.current_server() as server:  # type: ignore[attr-defined]
-                        cwd = self.controller.get_cwd(context)
-                        opencode_agents = await server.get_available_agents(cwd)
-                        model_hub_service = getattr(
-                            self.controller,
-                            "model_hub_service",
-                            None,
-                        )
-                        public_models = (
-                            model_hub_service.opencode_public_models()
-                            if model_hub_service is not None
-                            else None
-                        )
-                        if public_models is None:
-                            opencode_models = await server.get_available_models(cwd)
-                        else:
-                            opencode_models = await server.get_available_models(
-                                cwd,
-                                model_hub_models=public_models,
-                            )
-                        opencode_default_config = await server.get_default_config(cwd)
-            except Exception as e:
-                logger.warning(f"Failed to fetch OpenCode data: {e}")
-
-        if "claude" in backends_to_load:
-            try:
-                from vibe.api import claude_agents as get_claude_agents, claude_models as get_claude_models
-
-                cwd = self.controller.get_cwd(context)
-                agents_result = get_claude_agents(cwd)
-                if agents_result.get("ok"):
-                    claude_agents = agents_result.get("agents", [])
-                models_result = await asyncio.to_thread(get_claude_models)
-                if models_result.get("ok"):
-                    claude_models = models_result.get("models", [])
-                    reasoning_options = models_result.get("reasoning_options")
-                    if isinstance(reasoning_options, dict):
-                        backend_reasoning_options["claude"] = reasoning_options
-            except Exception as e:
-                logger.warning(f"Failed to fetch Claude data: {e}")
-
-        if "codex" in backends_to_load:
-            try:
-                from vibe.api import codex_agents as get_codex_agents, codex_models as get_codex_models
-
-                models_result = await asyncio.to_thread(get_codex_models)
-                if models_result.get("ok"):
-                    codex_models = models_result.get("models", [])
-                    reasoning_options = models_result.get("reasoning_options")
-                    if isinstance(reasoning_options, dict):
-                        backend_reasoning_options["codex"] = reasoning_options
-                cwd = self.controller.get_cwd(context)
-                agents_result = get_codex_agents(cwd)
-                if agents_result.get("ok"):
-                    codex_agents = agents_result.get("agents", [])
-            except Exception as e:
-                logger.warning(f"Failed to fetch Codex data: {e}")
-
-        return RoutingModalData(
+        data = RoutingModalData(
             registered_backends=registered_backends,
             current_backend=visible_current_backend,
             current_routing=current_routing,
-            opencode_agents=opencode_agents,
-            opencode_models=opencode_models,
-            opencode_default_config=opencode_default_config,
-            claude_agents=claude_agents,
-            claude_models=claude_models,
-            codex_agents=codex_agents,
-            codex_models=codex_models,
-            backend_reasoning_options=backend_reasoning_options,
         )
+        im_client = self._get_im_client(context)
+        for backend in backends_to_load:
+            menu = BackendRouteMenu(
+                backend,
+                option_limit=getattr(im_client, "route_option_limit", None),
+                value_limit=getattr(im_client, "route_option_value_limit", None),
+                stored=data.stored_draft(backend),
+            )
+            loader = self._route_menu_loaders.get(backend)
+            if loader is not None:
+                try:
+                    await loader(self, context, menu, menu.stored.model)
+                except Exception as e:
+                    logger.warning("Failed to load %s routing options: %s", backend, e)
+            data.menus[backend] = menu
+        return data
+
+    # Where each backend's route lists come from: the only backend-specific part of the routing form. Each
+    # loader fills ``menu`` in place; ``stored_model`` is the stored route's model when this is its backend.
+
+    async def _load_opencode_route_menu(self, context, menu: BackendRouteMenu, stored_model: Optional[str]) -> None:
+        from modules.agents.opencode.utils import (
+            build_opencode_model_option_items,
+            build_reasoning_effort_options,
+            resolve_opencode_allowed_providers,
+            resolve_opencode_provider_preferences,
+        )
+
+        opencode_agent = self.controller.agent_service.agents.get("opencode")
+        if not opencode_agent or not hasattr(opencode_agent, "current_server"):
+            return
+        async with opencode_agent.current_server() as server:  # type: ignore[attr-defined]
+            cwd = self.controller.get_cwd(context)
+            agents = await server.get_available_agents(cwd)
+            model_hub_service = getattr(self.controller, "model_hub_service", None)
+            public_models = model_hub_service.opencode_public_models() if model_hub_service is not None else None
+            if public_models is None:
+                models = await server.get_available_models(cwd)
+            else:
+                models = await server.get_available_models(cwd, model_hub_models=public_models)
+            default_config = await server.get_default_config(cwd)
+        menu.variants = _unique_options(
+            agent.get("name") if isinstance(agent, dict) else agent for agent in agents or []
+        )
+        # OpenCode spreads a select's cap over its providers, so the list is built for the select that shows it,
+        # without the values it cannot carry; a platform without a cap (a paged picker) gets every model.
+        entries = build_opencode_model_option_items(
+            models,
+            max_total=(menu.option_limit - 1) if menu.option_limit else sys.maxsize,
+            preferred_providers=resolve_opencode_provider_preferences(default_config, stored_model),
+            allowed_providers=resolve_opencode_allowed_providers(default_config, models),
+            keep=menu.fits,
+        )
+        menu.models = [RouteOption(str(entry["value"]), str(entry["label"])) for entry in entries if entry.get("value")]
+        for model in {"", *(option.value for option in menu.models), stored_model or ""}:
+            menu.efforts[model] = _effort_options(build_reasoning_effort_options(models, model or None))
+
+    async def _load_claude_route_menu(self, context, menu: BackendRouteMenu, stored_model: Optional[str]) -> None:
+        from modules.agents.opencode.utils import (
+            build_claude_reasoning_options,
+            format_claude_model_label,
+            resolve_model_reasoning_options,
+        )
+        from vibe.api import claude_agents as get_claude_agents, claude_models as get_claude_models
+        from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES
+
+        agents_result = get_claude_agents(self.controller.get_cwd(context))
+        if agents_result.get("ok"):
+            menu.variants = _unique_options(agent.get("id") for agent in agents_result.get("agents", []))
+        models_result = await asyncio.to_thread(get_claude_models)
+        if not models_result.get("ok"):
+            return
+        models = [str(model) for model in models_result.get("models", []) if model]
+        # The bare aliases are always valid and the most useful, so a capped select trims dated snapshots first.
+        aliases = [alias for alias in DEFAULT_CLAUDE_MODEL_ALIASES if alias in models]
+        ordered = aliases + [model for model in models if model not in aliases]
+        menu.models = [RouteOption(model, format_claude_model_label(model)) for model in ordered]
+        catalog = models_result.get("reasoning_options")
+        catalog = catalog if isinstance(catalog, dict) else None
+        for model in {"", *ordered, stored_model or ""}:
+            menu.efforts[model] = _effort_options(
+                resolve_model_reasoning_options(catalog, model, build_claude_reasoning_options(model or None))
+            )
+
+    async def _load_codex_route_menu(self, context, menu: BackendRouteMenu, stored_model: Optional[str]) -> None:
+        from modules.agents.opencode.utils import build_codex_reasoning_options, resolve_model_reasoning_options
+        from vibe.api import codex_agents as get_codex_agents, codex_models as get_codex_models
+
+        models_result = await asyncio.to_thread(get_codex_models)
+        agents_result = get_codex_agents(self.controller.get_cwd(context))
+        if agents_result.get("ok"):
+            menu.variants = _unique_options(agent.get("id") for agent in agents_result.get("agents", []))
+        if not models_result.get("ok"):
+            return
+        models = [str(model) for model in models_result.get("models", []) if model]
+        menu.models = [RouteOption(model, model) for model in models]
+        catalog = models_result.get("reasoning_options")
+        catalog = catalog if isinstance(catalog, dict) else None
+        for model in {"", *models, stored_model or ""}:
+            menu.efforts[model] = _effort_options(
+                resolve_model_reasoning_options(catalog, model, build_codex_reasoning_options())
+            )
+
+    async def _load_vibey_route_menu(self, context, menu: BackendRouteMenu, stored_model: Optional[str]) -> None:
+        """Vibey's menu from Model Hub, as the Web route picker reads it.
+
+        An effort Model Hub's ``effort_menu`` omits would only fail, so it is not offered. A route without its
+        own model inherits the built-in Vibey Agent's, so ``""`` holds that model's efforts.
+        """
+        model_hub_service = getattr(self.controller, "model_hub_service", None)
+        if model_hub_service is None:
+            return
+        catalog = (await model_hub_service.read_agent_sources("vibey")).get("catalog_models") or []
+        for row in catalog:
+            model_id = str(row.get("id") or "").strip()
+            if not model_id or row.get("routeable") is False or model_id in menu.efforts:
+                continue
+            omitted = set((row.get("effort_menu") or {}).get("omitted") or [])
+            menu.models.append(RouteOption(model_id, str(row.get("display_name") or model_id)))
+            menu.efforts[model_id] = (
+                []
+                if row.get("supports_reasoning") is False
+                else [
+                    RouteOption(effort, effort)
+                    for effort in dict.fromkeys(row.get("reasoning_efforts") or [])
+                    if effort not in omitted
+                ]
+            )
+        store = getattr(self.controller, "vibe_agent_store", None)
+        agent = (
+            await asyncio.to_thread(store.get_builtin_default_agent_for_backend, "vibey", enabled_only=False)
+            if store
+            else None
+        )
+        inherited = menu.efforts.get(str(getattr(agent, "model", None) or "").strip())
+        if inherited is not None:
+            menu.efforts[""] = inherited
+
+    _route_menu_loaders = {
+        "opencode": _load_opencode_route_menu,
+        "claude": _load_claude_route_menu,
+        "codex": _load_codex_route_menu,
+        "vibey": _load_vibey_route_menu,
+    }
 
     def _is_backend_enabled(self, backend: str) -> bool:
         if is_builtin_backend(backend):
@@ -585,13 +703,8 @@ class SettingsHandler(BaseHandler):
     def _routing_target_from_settings(self, routing) -> tuple[str, str, str, str, str]:
         agent_name = str(getattr(routing, "agent_name", None) or "").strip()
         backend = str(self._resolve_route_backend(agent_name) or agent_name).strip()
-        variant = ""
-        if backend == "opencode":
-            variant = str(getattr(routing, "opencode_agent", None) or "").strip()
-        elif backend == "claude":
-            variant = str(getattr(routing, "claude_agent", None) or "").strip()
-        elif backend == "codex":
-            variant = str(getattr(routing, "codex_agent", None) or "").strip()
+        variant = getattr(routing, f"{backend}_agent", None) if backend in NATIVE_CLI_BACKENDS else None
+        variant = str(variant or "").strip()
         return (
             agent_name,
             backend,
@@ -609,97 +722,6 @@ class SettingsHandler(BaseHandler):
         current_backend = current_target[1]
         next_backend = next_target[1]
         return bool(current_backend and next_backend and current_backend != next_backend)
-
-    async def _handle_routing_slack(self, context: MessageContext):
-        """Handle routing for Slack using modal dialog"""
-        im_client = self._get_im_client(context)
-        trigger_id = context.platform_specific.get("trigger_id") if context.platform_specific else None
-
-        if not trigger_id:
-            # No trigger_id, show button to open modal
-            buttons = [
-                [
-                    InlineButton(
-                        text=f"🤖 {self._t('button.agentSettings')}",
-                        callback_data="open_routing_modal",
-                    )
-                ]
-            ]
-            keyboard = InlineKeyboard(buttons=buttons)
-            await im_client.send_message_with_buttons(
-                context,
-                f"🤖 *{self._t('routing.introTitle')}*\n\n{self._t('routing.introDesc')}",
-                keyboard,
-            )
-            return
-
-        routing_data = await self._gather_routing_modal_data(context)
-
-        # Open modal
-        try:
-            await im_client.run_on_client_loop(
-                im_client.open_routing_modal(
-                    trigger_id=trigger_id,
-                    channel_id=context.channel_id,
-                    **routing_data.as_kwargs(),
-                )
-            )
-        except Exception as e:
-            logger.error(f"Error opening routing modal: {e}", exc_info=True)
-            await im_client.send_message(context, f"❌ {self._t('error.routingModalFailed')}")
-
-    async def _handle_routing_discord(self, context: MessageContext):
-        im_client = self._get_im_client(context)
-        interaction = context.platform_specific.get("interaction") if context.platform_specific else None
-        routing_data = await self._gather_routing_modal_data(context, include_all_backend_data=True)
-
-        try:
-            await im_client.run_on_client_loop(
-                im_client.open_routing_modal(
-                    trigger_id=interaction or context,
-                    channel_id=context.channel_id,
-                    **routing_data.as_kwargs(),
-                )
-            )
-        except Exception as e:
-            logger.error(f"Error opening routing modal: {e}", exc_info=True)
-            await im_client.send_message(context, f"❌ {self._t('error.routingModalFailed')}")
-
-    async def _handle_routing_telegram(self, context: MessageContext):
-        im_client = self._get_im_client(context)
-        routing_data = await self._gather_routing_modal_data(context, include_all_backend_data=True)
-        try:
-            await im_client.run_on_client_loop(
-                im_client.open_routing_modal(
-                    trigger_id=context,
-                    channel_id=context.channel_id,
-                    **routing_data.as_kwargs(),
-                )
-            )
-        except Exception as e:
-            logger.error(f"Error opening Telegram routing flow: {e}", exc_info=True)
-            await im_client.send_message(context, f"❌ {self._t('error.routingModalFailed')}")
-
-    async def _handle_routing_lark(self, context: MessageContext):
-        """Handle routing for Lark/Feishu using interactive form card.
-
-        Gathers the same backend/model/agent data as Slack/Discord so the
-        Feishu card can display selectors for all available options.
-        """
-        im_client = self._get_im_client(context)
-        routing_data = await self._gather_routing_modal_data(context, include_all_backend_data=True)
-
-        try:
-            await im_client.run_on_client_loop(
-                im_client.open_routing_modal(
-                    trigger_id=context,
-                    channel_id=context.channel_id,
-                    **routing_data.as_kwargs(),
-                )
-            )
-        except Exception as e:
-            logger.error(f"Error opening routing card for Lark: {e}", exc_info=True)
-            await im_client.send_message(context, f"❌ {self._t('error.routingModalFailed')}")
 
     async def handle_settings_update(
         self,
@@ -806,11 +828,10 @@ class SettingsHandler(BaseHandler):
             resolved_backend = self.controller.resolve_agent_for_context(context)
             selected_backend = selection.selected_backend or resolved_backend
             routing_data = await self._gather_routing_modal_data(context, selected_backend=selected_backend)
-            current_routing = routing_data.current_routing
-            registered_backends = routing_data.registered_backends
-            current_backend = routing_data.current_backend
             visible_selected_backend = (
-                selected_backend if selected_backend in registered_backends else current_backend
+                selected_backend
+                if selected_backend in routing_data.registered_backends
+                else routing_data.current_backend
             )
 
             if hasattr(im_client, "update_routing_modal"):
@@ -818,27 +839,10 @@ class SettingsHandler(BaseHandler):
                     view_id=view_id,
                     view_hash=view_hash,
                     channel_id=resolved_channel_id,
-                    registered_backends=registered_backends,
-                    current_backend=current_backend,
-                    current_routing=current_routing,
-                    opencode_agents=routing_data.opencode_agents,
-                    opencode_models=routing_data.opencode_models,
-                    opencode_default_config=routing_data.opencode_default_config,
-                    claude_agents=routing_data.claude_agents,
-                    claude_models=routing_data.claude_models,
-                    codex_agents=routing_data.codex_agents,
-                    codex_models=routing_data.codex_models,
-                    backend_reasoning_options=routing_data.backend_reasoning_options,
+                    routing=routing_data,
                     selected_backend=visible_selected_backend,
-                    selected_opencode_agent=selection.selected_opencode_agent,
-                    selected_opencode_model=selection.selected_opencode_model,
-                    selected_opencode_reasoning=selection.selected_opencode_reasoning,
-                    selected_claude_agent=selection.selected_claude_agent,
-                    selected_claude_model=selection.selected_claude_model,
-                    selected_claude_reasoning=selection.selected_claude_reasoning,
-                    selected_codex_agent=selection.selected_codex_agent,
-                    selected_codex_model=selection.selected_codex_model,
-                    selected_codex_reasoning=selection.selected_codex_reasoning,
+                    # A backend switch shows a section the form had no controls for: the stored route, not blanks.
+                    draft=selection.draft if visible_selected_backend == selected_backend else None,
                 )
         except Exception as e:
             logger.error(f"Error updating routing modal: {e}", exc_info=True)
@@ -848,22 +852,20 @@ class SettingsHandler(BaseHandler):
         user_id: str,
         channel_id: str,
         backend: str,
-        opencode_agent: Optional[str],
-        opencode_model: Optional[str],
         *,
+        variant: object = _UNSET,
+        model: Optional[str] = None,
+        reasoning_effort: Optional[str] = None,
         thread_id: Optional[str] = None,
-        opencode_reasoning_effort: Optional[str] = None,
-        claude_agent: Optional[str] = None,
-        claude_model: Optional[str] = None,
-        claude_reasoning_effort: Optional[str] = None,
-        codex_agent: object = _UNSET,
-        codex_model: Optional[str] = None,
-        codex_reasoning_effort: Optional[str] = None,
         notify_user: bool = True,
         is_dm: bool = False,
         platform: Optional[str] = None,
     ):
-        """Handle routing update submission (from modal)."""
+        """Save a routing form's choices for one backend.
+
+        ``variant`` is the backend's native agent; omitted, the stored one stays. Other backends' native agents
+        always stay, so switching back finds them.
+        """
         from config.v2_settings import RoutingSettings
         from modules.agents.opencode.utils import normalize_claude_reasoning_effort
 
@@ -879,74 +881,52 @@ class SettingsHandler(BaseHandler):
             im_client = self._get_im_client(context)
             settings_manager = self._get_settings_manager(context)
             existing_routing = settings_manager.get_channel_routing(settings_key)
-            normalized_claude_reasoning_effort = normalize_claude_reasoning_effort(
-                claude_model,
-                claude_reasoning_effort,
-                backend_model_catalog.catalog_reasoning_efforts_for_model("claude", claude_model),
-            )
-            if backend == "codex" and codex_agent is _UNSET:
-                resolved_codex_agent = existing_routing.codex_agent if existing_routing else None
-            else:
-                resolved_codex_agent = codex_agent
+            # A platform shows a stored choice it cannot carry as its own option value through a stand-in option;
+            # saving that option keeps the stored choice. It stands for this backend's route only: one changed to
+            # another backend since the form rendered has no such choice, so the stand-in saves as Default.
+            stored = normalize_routing_settings(existing_routing)
+            if self._resolve_route_backend(stored.agent_name) != backend:
+                stored = normalize_routing_settings(None)
+            if model == STORED_OPTION_VALUE:
+                model = stored.model
+            if reasoning_effort == STORED_OPTION_VALUE:
+                reasoning_effort = stored.reasoning_effort
+            if variant == STORED_OPTION_VALUE:
+                variant = _UNSET
+            variants = {
+                native: getattr(existing_routing, f"{native}_agent", None) if existing_routing else None
+                for native in NATIVE_CLI_BACKENDS
+            }
+            if backend in variants and variant is not _UNSET:
+                variants[backend] = variant
+            if backend == "claude":
+                # Claude Code rejects an effort its model does not support.
+                reasoning_effort = normalize_claude_reasoning_effort(
+                    model,
+                    reasoning_effort,
+                    backend_model_catalog.catalog_reasoning_efforts_for_model("claude", model),
+                )
 
             routing = RoutingSettings(
                 agent_name=self._routing_agent_name(backend),
-                model=(
-                    opencode_model
-                    if backend == "opencode"
-                    else claude_model
-                    if backend == "claude"
-                    else codex_model
-                    if backend == "codex"
-                    else None
-                ),
-                reasoning_effort=(
-                    opencode_reasoning_effort
-                    if backend == "opencode"
-                    else normalized_claude_reasoning_effort
-                    if backend == "claude"
-                    else codex_reasoning_effort
-                    if backend == "codex"
-                    else None
-                ),
-                opencode_agent=opencode_agent
-                if backend == "opencode"
-                else (existing_routing.opencode_agent if existing_routing else None),
-                claude_agent=claude_agent
-                if backend == "claude"
-                else (existing_routing.claude_agent if existing_routing else None),
-                codex_agent=resolved_codex_agent
-                if backend == "codex"
-                else (existing_routing.codex_agent if existing_routing else None),
+                model=model,
+                reasoning_effort=reasoning_effort,
+                **{f"{native}_agent": value for native, value in variants.items()},
             )
 
             settings_manager.set_channel_routing(settings_key, routing)
             needs_new_session_hint = self._routing_update_needs_new_session_hint(context, routing)
 
             parts = [f"{self._t('routing.label.backend')}: **{display_name_for_backend(backend)}**"]
-            if backend == "opencode":
-                if opencode_agent:
-                    parts.append(f"{self._t('routing.label.agent')}: **{opencode_agent}**")
-                if opencode_model:
-                    parts.append(f"{self._t('routing.label.model')}: **{opencode_model}**")
-                if opencode_reasoning_effort:
-                    parts.append(f"{self._t('routing.label.reasoningEffort')}: **{opencode_reasoning_effort}**")
-            elif backend == "claude":
-                if claude_agent:
-                    parts.append(f"{self._t('routing.label.agent')}: **{claude_agent}**")
-                if claude_model:
-                    parts.append(f"{self._t('routing.label.model')}: **{claude_model}**")
-                if normalized_claude_reasoning_effort:
-                    parts.append(
-                        f"{self._t('routing.label.reasoningEffort')}: **{normalized_claude_reasoning_effort}**"
-                    )
-            elif backend == "codex":
-                if resolved_codex_agent:
-                    parts.append(f"{self._t('routing.label.agent')}: **{resolved_codex_agent}**")
-                if codex_model:
-                    parts.append(f"{self._t('routing.label.model')}: **{codex_model}**")
-                if codex_reasoning_effort:
-                    parts.append(f"{self._t('routing.label.reasoningEffort')}: **{codex_reasoning_effort}**")
+            for label_key, value in (
+                ("routing.label.agent", variants.get(backend)),
+                ("routing.label.model", model),
+                ("routing.label.reasoningEffort", reasoning_effort),
+            ):
+                if value:
+                    # Route values are opaque and unbounded; a confirmation must fit any platform's message.
+                    shown = value if len(value) <= 100 else f"{value[:99]}…"
+                    parts.append(f"{self._t(label_key)}: **{shown}**")
             if needs_new_session_hint:
                 parts.extend(["", self._t("success.routingUpdateNeedsNewSession")])
 
@@ -958,12 +938,8 @@ class SettingsHandler(BaseHandler):
                 )
 
             logger.info(
-                f"Routing updated for {settings_key}: backend={backend}, "
-                f"opencode_agent={opencode_agent}, opencode_model={opencode_model}, "
-                f"claude_agent={claude_agent}, claude_model={claude_model}, "
-                f"claude_reasoning_effort={normalized_claude_reasoning_effort}, "
-                f"codex_agent={resolved_codex_agent}, codex_model={codex_model}, "
-                f"codex_reasoning_effort={codex_reasoning_effort}"
+                f"Routing updated for {settings_key}: backend={backend}, variant={variants.get(backend)}, "
+                f"model={model}, reasoning_effort={reasoning_effort}"
             )
 
         except Exception as e:

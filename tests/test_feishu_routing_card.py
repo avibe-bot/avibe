@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 from config.v2_config import LarkConfig
+from config.v2_settings import RoutingSettings
+from core.modals import BackendRouteMenu, RouteOption, RoutingModalData
 from core.auth import AuthResult
 from modules.im.base import MessageContext
 from modules.im.feishu import FeishuBot
@@ -20,216 +22,93 @@ class FeishuRoutingCardTests(unittest.IsolatedAsyncioTestCase):
                 return element
         raise AssertionError(f"select_static {field_name} not found")
 
-    async def test_codex_reasoning_uses_shared_catalog_options(self):
-        bot = self._make_bot()
-        current_routing = SimpleNamespace(
-            codex_agent=None,
-            codex_model="gpt-5.6-terra",
-            codex_reasoning_effort=None,
-        )
-        card = bot._build_routing_backend_options_card(
-            "chat",
-            "codex",
-            current_routing=current_routing,
-            draft_routing=bot._routing_draft_from_current(current_routing, "codex"),
-            codex_agents=[],
-            codex_models=["gpt-5.6-terra"],
-            backend_reasoning_options={
-                "codex": {
-                    "gpt-5.6-terra": [
-                        {"value": "__default__", "label": "(Default)"},
-                        {"value": "ultra", "label": "Ultra"},
-                    ]
-                }
+    @staticmethod
+    def _claude_routing() -> RoutingModalData:
+        efforts = [RouteOption("high", "High"), RouteOption("max", "Max")]
+        return RoutingModalData(
+            registered_backends=["claude", "codex"],
+            current_backend="claude",
+            current_routing=RoutingSettings(agent_name="claude", model="claude-sonnet-4-5", claude_agent="helper"),
+            menus={
+                "claude": BackendRouteMenu(
+                    "claude",
+                    models=[RouteOption(m, m) for m in ("claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-6")],
+                    efforts={"claude-sonnet-4-5": efforts[:1], "claude-opus-4-6": efforts},
+                ),
+                "codex": BackendRouteMenu("codex", models=[RouteOption("gpt-5.4", "gpt-5.4")]),
             },
-            _user_id="user",
         )
-
-        reasoning_select = self._find_select(card, "codex_reasoning")
-        self.assertEqual(
-            [option["value"] for option in reasoning_select["options"]],
-            ["__default__", "ultra"],
-        )
-
-    async def test_claude_model_change_refreshes_reasoning_options(self):
-        bot = self._make_bot()
-        bot._patch_card_message = AsyncMock()
-
-        current_routing = SimpleNamespace(
-            claude_agent="helper",
-            claude_model="claude-sonnet-4-5",
-            claude_reasoning_effort="high",
-            opencode_agent=None,
-            opencode_model=None,
-            opencode_reasoning_effort=None,
-            codex_agent=None,
-            codex_model=None,
-            codex_reasoning_effort=None,
-        )
-        bot._routing_cache["chat:user"] = {
-            "current_routing": current_routing,
-            "draft_routing": bot._routing_draft_from_current(current_routing),
-            "_selected_backend": "claude",
-            "claude_agents": ["helper", "reviewer"],
-            "claude_models": ["claude-sonnet-4-5", "claude-opus-4-6"],
-            "opencode_agents": [],
-            "opencode_models": {},
-            "opencode_default_config": {},
-            "codex_agents": [],
-            "codex_models": [],
-        }
-
-        context = MessageContext(user_id="user", channel_id="chat", message_id="om_123")
-
-        handled = await bot._handle_routing_select_change(
-            context,
-            {"tag": "select_static", "name": "claude_model", "option": {"value": "claude-opus-4-6"}},
-        )
-
-        self.assertTrue(handled)
-        bot._patch_card_message.assert_awaited_once()
-        first_call = bot._patch_card_message.await_args
-        assert first_call is not None
-        _, card = first_call.args
-
-        reasoning_select = self._find_select(card, "claude_reasoning")
-        reasoning_values = [option["value"] for option in reasoning_select["options"]]
-        self.assertIn("max", reasoning_values)
-        self.assertEqual(reasoning_select.get("initial_option"), "__default__")
-
-        agent_select = self._find_select(card, "claude_agent")
-        self.assertEqual(agent_select.get("initial_option"), "helper")
-
-        draft = bot._routing_cache["chat:user"]["draft_routing"]
-        self.assertEqual(draft["claude_model"], "claude-opus-4-6")
-        self.assertIsNone(draft["claude_reasoning_effort"])
 
     async def test_select_changes_with_different_options_are_not_deduped(self):
         bot = self._make_bot()
         bot._patch_card_message = AsyncMock()
         bot.check_authorization = lambda **kwargs: AuthResult(allowed=True)
+        bot._routing_cache["chat:user"] = {"routing": self._claude_routing(), "drafts": {}}
 
-        current_routing = SimpleNamespace(
-            claude_agent="helper",
-            claude_model="claude-sonnet-4-5",
-            claude_reasoning_effort="high",
-            opencode_agent=None,
-            opencode_model=None,
-            opencode_reasoning_effort=None,
-            codex_agent=None,
-            codex_model=None,
-            codex_reasoning_effort=None,
-        )
-        bot._routing_cache["chat:user"] = {
-            "current_routing": current_routing,
-            "draft_routing": bot._routing_draft_from_current(current_routing),
-            "_selected_backend": "claude",
-            "claude_agents": ["helper", "reviewer"],
-            "claude_models": ["claude-sonnet-4-5", "claude-sonnet-4-6", "claude-opus-4-6"],
-            "opencode_agents": [],
-            "opencode_models": {},
-            "opencode_default_config": {},
-            "codex_agents": [],
-            "codex_models": [],
-        }
+        def _event(model):
+            return {
+                "operator": {"open_id": "user"},
+                "context": {"open_message_id": "om_123", "open_chat_id": "chat"},
+                "action": {"tag": "select_static", "name": "route_model:claude", "option": {"value": model}},
+            }
 
-        first_event = {
-            "operator": {"open_id": "user"},
-            "context": {"open_message_id": "om_123", "open_chat_id": "chat"},
-            "action": {
-                "tag": "select_static",
-                "name": "claude_model",
-                "option": {"value": "claude-sonnet-4-6"},
-            },
-        }
-        second_event = {
-            "operator": {"open_id": "user"},
-            "context": {"open_message_id": "om_123", "open_chat_id": "chat"},
-            "action": {
-                "tag": "select_static",
-                "name": "claude_model",
-                "option": {"value": "claude-opus-4-6"},
-            },
-        }
-
-        await bot._async_handle_card_action(first_event)
-        await bot._async_handle_card_action(second_event)
+        await bot._async_handle_card_action(_event("claude-sonnet-4-6"))
+        await bot._async_handle_card_action(_event("claude-opus-4-6"))
 
         self.assertEqual(bot._patch_card_message.await_count, 2)
-        draft = bot._routing_cache["chat:user"]["draft_routing"]
-        self.assertEqual(draft["claude_model"], "claude-opus-4-6")
-        latest_call = bot._patch_card_message.await_args
-        assert latest_call is not None
-        _, latest_card = latest_call.args
-        reasoning_select = self._find_select(latest_card, "claude_reasoning")
-        reasoning_values = [option["value"] for option in reasoning_select["options"]]
+        self.assertEqual(bot._routing_cache["chat:user"]["drafts"]["claude"].model, "claude-opus-4-6")
+        _, latest_card = bot._patch_card_message.await_args.args
+        reasoning_values = [
+            option["value"] for option in self._find_select(latest_card, "route_effort:claude")["options"]
+        ]
         self.assertIn("max", reasoning_values)
 
-    async def test_routing_submit_preserves_cached_codex_agent_when_field_missing(self):
+    async def test_routing_submit_keeps_the_drafts_native_agent_when_the_form_omits_it(self):
         bot = self._make_bot()
         bot._on_routing_update = AsyncMock()
-
-        current_routing = SimpleNamespace(
-            claude_agent=None,
-            claude_model=None,
-            claude_reasoning_effort=None,
-            opencode_agent=None,
-            opencode_model=None,
-            opencode_reasoning_effort=None,
-            codex_agent="reviewer",
-            codex_model="gpt-5.1",
-            codex_reasoning_effort="medium",
+        routing = RoutingModalData(
+            registered_backends=["codex"],
+            current_backend="codex",
+            current_routing=RoutingSettings(agent_name="codex", model="gpt-5.1", codex_agent="reviewer"),
         )
-        bot._routing_cache["chat:user"] = {
-            "current_routing": current_routing,
-            "draft_routing": bot._routing_draft_from_current(current_routing),
-            "_selected_backend": "codex",
-            "claude_agents": [],
-            "claude_models": [],
-            "opencode_agents": [],
-            "opencode_models": {},
-            "opencode_default_config": {},
-            "codex_agents": [],
-            "codex_models": ["gpt-5.1", "gpt-5.4"],
-        }
-
-        context = MessageContext(
-            user_id="user",
-            channel_id="chat",
-            platform="lark",
-            platform_specific={"is_dm": False},
-        )
+        bot._routing_cache["chat:user"] = {"routing": routing, "drafts": {}}
+        context = MessageContext(user_id="user", channel_id="chat", platform="lark", platform_specific={"is_dm": False})
 
         await bot._handle_routing_form_submit(
-            context,
-            {
-                "backend": "codex",
-                "codex_model": "gpt-5.4",
-                "codex_reasoning": "high",
-            },
+            context, {"route_model:codex": "gpt-5.4", "route_effort:codex": "high"}, "routing_submit:codex"
         )
 
-        bot._on_routing_update.assert_awaited_once()
-        call = bot._on_routing_update.await_args
-        self.assertEqual(call.args, ())
-        self.assertEqual(
-            call.kwargs,
-            {
-                "user_id": "user",
-                "channel_id": "chat",
-                "backend": "codex",
-                "opencode_agent": None,
-                "opencode_model": None,
-                "opencode_reasoning_effort": None,
-                "claude_agent": None,
-                "claude_model": None,
-                "claude_reasoning_effort": None,
-                "codex_agent": "reviewer",
-                "codex_model": "gpt-5.4",
-                "codex_reasoning_effort": "high",
-                "is_dm": False,
-            },
+        bot._on_routing_update.assert_awaited_once_with(
+            user_id="user",
+            channel_id="chat",
+            backend="codex",
+            variant="reviewer",
+            model="gpt-5.4",
+            reasoning_effort="high",
+            is_dm=False,
         )
+
+    async def test_an_options_card_saves_its_own_backend_after_another_was_opened(self):
+        bot = self._make_bot()
+        bot._send_card_to_channel = AsyncMock()
+        bot._on_routing_update = AsyncMock()
+        context = MessageContext(user_id="user", channel_id="chat", platform="lark", platform_specific={"is_dm": False})
+        await bot.open_routing_modal(trigger_id=context, channel_id="chat", routing=self._claude_routing())
+        # The step-1 card stays active, so it can open a second backend's card before the first is submitted.
+        await bot._handle_routing_backend_select(context, {"backend": "claude"})
+        claude_card = bot._send_card_to_channel.await_args.args[1]
+        await bot._handle_routing_backend_select(context, {"backend": "codex"})
+
+        elements = claude_card["body"]["elements"][0]["elements"]
+        button = next(element for element in elements if element["tag"] == "button")
+        await bot._handle_routing_form_submit(
+            context,
+            {e["name"]: e["initial_option"] for e in elements if e["tag"] == "select_static"},
+            button["name"],
+        )
+
+        kwargs = bot._on_routing_update.await_args.kwargs
+        self.assertEqual((kwargs["backend"], kwargs["model"]), ("claude", "claude-sonnet-4-5"))
 
     async def test_settings_submit_binds_optional_fields_by_name(self):
         bot = self._make_bot()
@@ -264,30 +143,6 @@ class FeishuRoutingCardTests(unittest.IsolatedAsyncioTestCase):
                 "is_dm": False,
             },
         )
-
-    async def test_routing_draft_populates_selected_backend_from_current_selection(self):
-        bot = self._make_bot()
-
-        current_routing = SimpleNamespace(
-            model="claude-sonnet-4-6",
-            reasoning_effort="high",
-            claude_agent="helper",
-            claude_model=None,
-            claude_reasoning_effort=None,
-            opencode_agent=None,
-            opencode_model=None,
-            opencode_reasoning_effort=None,
-            codex_agent=None,
-            codex_model=None,
-            codex_reasoning_effort=None,
-        )
-
-        draft = bot._routing_draft_from_current(current_routing, "claude")
-
-        self.assertEqual(draft["claude_model"], "claude-sonnet-4-6")
-        self.assertEqual(draft["claude_reasoning_effort"], "high")
-        self.assertIsNone(draft["opencode_model"])
-        self.assertIsNone(draft["codex_model"])
 
     async def test_quick_reply_card_action_sets_lark_platform(self):
         bot = self._make_bot()
