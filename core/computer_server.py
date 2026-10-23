@@ -1288,6 +1288,10 @@ class ComputerUseServer:
                         element_token_windows=session_state.element_token_windows,
                     )
                     async with target_lock:
+                        await asyncio.to_thread(
+                            self._revalidate_daemon_key,
+                            state.daemon_key,
+                        )
                         pre_forward = False
                         result = await self._upstream_call(
                             upstream,
@@ -1414,11 +1418,25 @@ class ComputerUseServer:
                 "Every computer-use call requires the current Avibe session id.",
             )
 
+        expected_lock = self._session_locks.get(normalized)
+        expected_state = self._sessions.get(normalized)
         result = await self.end_session_if_active(normalized)
-        lock = self._session_locks.get(normalized)
-        if lock is not None:
-            async with lock:
+        if expected_lock is None:
+            return result
+
+        async with expected_lock:
+            # Archive closes Computer Use admission before this boundary, but
+            # compare exact identities so a late cleanup cannot remove a newer
+            # session generation or its lock.
+            if self._session_locks.get(normalized) is not expected_lock:
+                return result
+            current_state = self._sessions.get(normalized)
+            if current_state is not None and current_state is not expected_state:
+                return result
+            if current_state is expected_state:
                 self._sessions.pop(normalized, None)
+            # ``end_session`` may already have removed the expected state.
+            self._session_locks.pop(normalized, None)
         return result
 
     async def handle(self, message: Mapping[str, Any]) -> dict[str, Any] | None:

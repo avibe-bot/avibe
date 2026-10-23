@@ -14,6 +14,7 @@ from core.computer_server import (
     ComputerServerError,
     ComputerUseServer,
     JsonRpcUpstream,
+    _SessionState,
     _TargetLockManager,
     UpstreamUnavailable,
     _fold_tool_result,
@@ -1751,6 +1752,86 @@ async def test_end_session_if_active_releases_without_starting_unknown_session(
 
 
 @pytest.mark.asyncio
+async def test_retire_session_releases_session_state_and_lock(tmp_path: Path) -> None:
+    """Terminal archive cleanup drops both registries without starting unknown sessions."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+
+    unknown = await server.retire_session("ses-never-used")
+    assert unknown.get("isError") is not True
+    assert "ses-never-used" not in server._session_locks
+
+    server._session_locks["ses-idle"] = asyncio.Lock()
+    server._sessions["ses-idle"] = _SessionState()
+    idle = await server.retire_session("ses-idle")
+    assert idle.get("isError") is not True
+    assert "ses-idle" not in server._sessions
+    assert "ses-idle" not in server._session_locks
+
+    await server.call_tool("list_apps", {"session": "ses-a"})
+    assert "ses-a" in server._sessions
+    assert "ses-a" in server._session_locks
+
+    retired = await server.retire_session("ses-a")
+
+    assert retired.get("isError") is not True
+    assert "ses-a" not in server._sessions
+    assert "ses-a" not in server._session_locks
+    assert [params["name"] for _method, params in upstream.calls] == [
+        "start_session",
+        "list_apps",
+        "end_session",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replace_lock", [False, True])
+async def test_late_retire_cleanup_preserves_newer_session_identity(
+    tmp_path: Path,
+    replace_lock: bool,
+) -> None:
+    """A delayed archive cleanup cannot remove a replacement state or lock."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+    await server.call_tool("list_apps", {"session": "ses-a"})
+    old_lock = server._session_locks["ses-a"]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_end_session(_session: str) -> dict[str, Any]:
+        entered.set()
+        await release.wait()
+        return {"isError": False, "content": []}
+
+    server.end_session_if_active = delayed_end_session  # type: ignore[method-assign]
+    cleanup = asyncio.create_task(server.retire_session("ses-a"))
+    await entered.wait()
+
+    new_lock = asyncio.Lock() if replace_lock else old_lock
+    new_state = _SessionState()
+    server._session_locks["ses-a"] = new_lock
+    server._sessions["ses-a"] = new_state
+    release.set()
+    retired = await cleanup
+
+    assert retired.get("isError") is not True
+    assert server._session_locks["ses-a"] is new_lock
+    assert server._sessions["ses-a"] is new_state
+
+
+@pytest.mark.asyncio
 async def test_explicit_start_forwards_options_and_normalized_session(
     tmp_path: Path,
 ) -> None:
@@ -2314,6 +2395,75 @@ async def test_observations_are_not_serialized_across_sessions(tmp_path: Path) -
     upstream.block.set()
     assert not (await first).get("isError")
     assert not (await second).get("isError")
+
+
+@pytest.mark.asyncio
+async def test_target_lock_wait_revalidates_generation_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    """A daemon restart while waiting cannot send the waiting action to the old proxy."""
+
+    state_path, initial = _state(tmp_path)
+    current = initial
+    upstreams: list[FakeUpstream] = []
+    target_locks = _ObservedTargetLocks(wait_seconds=5.0)
+
+    async def factory(_state: ComputerUseState) -> FakeUpstream:
+        upstream = FakeUpstream()
+        if not upstreams:
+            upstream.block = asyncio.Event()
+            upstream.blocked_tools = {"clipboard_write"}
+        upstreams.append(upstream)
+        return upstream
+
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, current),
+        upstream_factory=factory,
+        target_lock_manager=target_locks,
+    )
+    first = asyncio.create_task(
+        server.call_tool(
+            "clipboard_write",
+            {"session": "ses-a", "text": "first"},
+        )
+    )
+    await _wait_until(
+        lambda: upstreams and upstreams[0].inflight_by_tool.get("clipboard_write")
+    )
+    second = asyncio.create_task(
+        server.call_tool(
+            "clipboard_write",
+            {"session": "ses-b", "text": "second"},
+        )
+    )
+    await _wait_until(lambda: target_locks.refusals)
+
+    current = ComputerUseState(
+        **{**initial.__dict__, "generation": initial.generation + 1}
+    )
+    old = upstreams[0]
+    assert old.block is not None
+    old.block.set()
+    first_result = await first
+    second_result = await second
+
+    assert first_result.get("isError") is not True
+    assert second_result.get("isError") is not True, second_result
+    assert len(upstreams) == 2
+    assert old.close_calls == 1
+    old_actions = [
+        params["arguments"]["text"]
+        for _method, params in old.calls
+        if params["name"] == "clipboard_write"
+    ]
+    new_actions = [
+        params["arguments"]["text"]
+        for _method, params in upstreams[1].calls
+        if params["name"] == "clipboard_write"
+    ]
+    assert old_actions == ["first"]
+    assert new_actions == ["second"]
 
 
 @pytest.mark.asyncio
