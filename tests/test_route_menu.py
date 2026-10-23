@@ -55,7 +55,9 @@ def test_efforts_follow_the_model_and_keep_a_stored_effort_the_menu_omits():
     # A model change clears the effort, so an unlisted one is the stored route's (Model Hub may refuse it now).
     assert _values(menu.effort_options("reasoner", "max")) == ["high", "max"]
     assert _values(menu.effort_options(None, "max")) == ["low", "max"]  # within the cap
-    assert RouteDraft(variant="v", model="a", reasoning_effort="max").with_model("b") == RouteDraft("v", "b", None)
+    draft = RouteDraft(variant="v", model="a", reasoning_effort="max")
+    assert draft.with_model("b") == RouteDraft("v", "b", None)
+    assert draft.with_model("a") == draft  # picking the shown model again keeps its effort
 
 
 def test_the_stored_route_shows_only_on_its_own_backend():

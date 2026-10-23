@@ -39,7 +39,10 @@ class RouteDraft:
 
     def with_model(self, model: Optional[str]) -> RouteDraft:
         # A model change offers that model's efforts afresh. It is also why an effort the menu does not list can
-        # only be the stored route's, which ``BackendRouteMenu.effort_options`` keeps shown.
+        # only be the stored route's, which ``BackendRouteMenu.effort_options`` keeps shown. Picking the shown
+        # model again changes nothing.
+        if model == self.model:
+            return self
         return replace(self, model=model, reasoning_effort=None)
 
 
