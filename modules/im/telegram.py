@@ -1903,13 +1903,15 @@ class TelegramBot(BaseIMClient):
     def _routing_fields(self, state: _TelegramRoutingState) -> list[tuple[str, str]]:
         """The shown backend's fields as ``(field, current value's text)``; the agent only where it has one."""
         draft = state.draft()
+        menu = state.routing.menu(state.backend)
         fields = [("model", draft.model), ("reasoning_effort", draft.reasoning_effort)]
-        if state.routing.menu(state.backend).variant_options(draft.variant):
+        if menu.variant_options(draft.variant):
             fields.insert(0, ("variant", draft.variant))
         shown = []
         for name, value in fields:
+            target = menu.shown_value(value) if value else None
             options = self._routing_picker_options(state, name)
-            shown.append((name, next((text for text, option in options if option == value), value or "")))
+            shown.append((name, next((text for text, option in options if option == target), value or "")))
         return shown
 
     def _routing_summary_lines(self, state: _TelegramRoutingState) -> list[str]:

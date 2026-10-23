@@ -2626,7 +2626,7 @@ class FeishuBot(BaseIMClient):
                         }
                         for option in [default, *options]
                     ],
-                    "initial_option": current or DEFAULT_OPTION_VALUE,
+                    "initial_option": menu.shown_value(current),
                 }
             )
 

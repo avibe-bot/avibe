@@ -13,8 +13,10 @@ from modules.agents.catalog import (
     is_builtin_backend,
 )
 from modules.im import MessageContext, InlineKeyboard, InlineButton
+from config.v2_settings import normalize_routing_settings
 from core.modals import (
     DEFAULT_OPTION_VALUE,
+    STORED_OPTION_VALUE,
     BackendRouteMenu,
     RouteOption,
     RoutingModalData,
@@ -512,11 +514,12 @@ class SettingsHandler(BaseHandler):
                 backend,
                 option_limit=getattr(im_client, "route_option_limit", None),
                 value_limit=getattr(im_client, "route_option_value_limit", None),
+                stored=data.stored_draft(backend),
             )
             loader = self._route_menu_loaders.get(backend)
             if loader is not None:
                 try:
-                    await loader(self, context, menu, data.stored_draft(backend).model)
+                    await loader(self, context, menu, menu.stored.model)
                 except Exception as e:
                     logger.warning("Failed to load %s routing options: %s", backend, e)
             data.menus[backend] = menu
@@ -875,6 +878,15 @@ class SettingsHandler(BaseHandler):
             im_client = self._get_im_client(context)
             settings_manager = self._get_settings_manager(context)
             existing_routing = settings_manager.get_channel_routing(settings_key)
+            # A platform shows a stored choice it cannot carry as its own option value through a stand-in option;
+            # saving that option keeps the stored choice.
+            stored = normalize_routing_settings(existing_routing)
+            if model == STORED_OPTION_VALUE:
+                model = stored.model
+            if reasoning_effort == STORED_OPTION_VALUE:
+                reasoning_effort = stored.reasoning_effort
+            if variant == STORED_OPTION_VALUE:
+                variant = _UNSET
             variants = {
                 native: getattr(existing_routing, f"{native}_agent", None) if existing_routing else None
                 for native in NATIVE_CLI_BACKENDS

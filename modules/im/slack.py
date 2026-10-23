@@ -3538,7 +3538,7 @@ class SlackBot(BaseIMClient):
                     "placeholder": {"type": "plain_text", "text": placeholder},
                     "options": slack_options,
                     "initial_option": next(
-                        (option for option in slack_options if option["value"] == (current or DEFAULT_OPTION_VALUE)),
+                        (option for option in slack_options if option["value"] == menu.shown_value(current)),
                         slack_options[0],
                     ),
                 },

@@ -18,6 +18,9 @@ from modules.settings_manager import ChannelRouting
 
 # The value of every select's Default option: no choice of its own, so the route inherits its Agent's.
 DEFAULT_OPTION_VALUE = "__default__"
+# The value of the option showing a stored choice the platform cannot carry as an option value of its own (too
+# long, or a reserved value). Saving it keeps the stored choice (``SettingsHandler.handle_routing_update``).
+STORED_OPTION_VALUE = "__stored__"
 
 
 @dataclass(frozen=True)
@@ -46,7 +49,8 @@ class BackendRouteMenu:
 
     ``efforts`` maps a model to its efforts (the Default option excluded); ``""`` holds those of a route without
     its own model, and a model with no entry falls back to them. ``option_limit`` caps one select's options, the
-    Default option included; ``value_limit`` is the longest option value the platform carries.
+    Default option included; ``value_limit`` is the longest option value the platform carries. ``stored`` is the
+    stored route as this backend shows it, which names the choice a ``STORED_OPTION_VALUE`` option stands for.
     """
 
     backend: str
@@ -55,41 +59,52 @@ class BackendRouteMenu:
     efforts: dict[str, list[RouteOption]] = field(default_factory=dict)
     option_limit: Optional[int] = None
     value_limit: Optional[int] = None
+    stored: RouteDraft = field(default_factory=RouteDraft)
 
     def variant_options(self, current: Optional[str]) -> list[RouteOption]:
-        return self._bounded(self.variants, current)
+        return self._bounded(self.variants, current, self.stored.variant)
 
     def model_options(self, current: Optional[str]) -> list[RouteOption]:
-        return self._bounded(self.models, current)
+        return self._bounded(self.models, current, self.stored.model)
 
     def effort_options(self, model: Optional[str], current: Optional[str]) -> list[RouteOption]:
+        model = self.stored.model if model == STORED_OPTION_VALUE else model
         listed = self.efforts.get(model or "")
-        return self._bounded(self.efforts.get("", []) if listed is None else listed, current)
+        return self._bounded(
+            self.efforts.get("", []) if listed is None else listed, current, self.stored.reasoning_effort
+        )
 
     def fits(self, value: object) -> bool:
         """Whether a select on this platform can carry ``value`` as an option of its own."""
         return (
             isinstance(value, str)
             and bool(value)
-            and value != DEFAULT_OPTION_VALUE
+            and value not in (DEFAULT_OPTION_VALUE, STORED_OPTION_VALUE)
             and (self.value_limit is None or len(value) <= self.value_limit)
         )
 
-    def _bounded(self, options: list[RouteOption], current: Optional[str]) -> list[RouteOption]:
+    def shown_value(self, current: Optional[str]) -> str:
+        """The option value a select shows for ``current``."""
+        if not current:
+            return DEFAULT_OPTION_VALUE
+        return current if self.fits(current) or current == STORED_OPTION_VALUE else STORED_OPTION_VALUE
+
+    def _bounded(self, options: list[RouteOption], current: Optional[str], stored: Optional[str]) -> list[RouteOption]:
         """``options`` within one select's cap, keeping ``current`` shown, listed or not.
 
         Saving a form unchanged then never drops a stored choice: one the list omits (a catalog that changed, an
-        effort Model Hub now refuses) or one past the cap stays selectable.
+        effort Model Hub now refuses), one past the cap, or one the platform cannot carry stays selectable.
         """
         room = None if self.option_limit is None else max(self.option_limit - 1, 0)
         kept = [option for option in options if self.fits(option.value)]
-        shown = kept if room is None else kept[:room]
-        if self.fits(current) and all(option.value != current for option in shown):
-            label = next((option.label for option in kept if option.value == current), str(current))
-            kept = [option for option in kept if option.value != current]
+        shown = self.shown_value(current)
+        if shown != DEFAULT_OPTION_VALUE and all(option.value != shown for option in kept[:room]):
+            named = stored if current == STORED_OPTION_VALUE else current
+            label = next((option.label for option in options if option.value == named), str(named or current))
+            kept = [option for option in kept if option.value != shown]
             if room is not None:
                 kept = kept[: max(room - 1, 0)]
-            kept.append(RouteOption(str(current), label))
+            kept.append(RouteOption(shown, label))
         return kept if room is None else kept[:room]
 
 
@@ -103,7 +118,7 @@ class RoutingModalData:
     menus: dict[str, BackendRouteMenu] = field(default_factory=dict)
 
     def menu(self, backend: str) -> BackendRouteMenu:
-        return self.menus.get(backend) or BackendRouteMenu(backend)
+        return self.menus.get(backend) or BackendRouteMenu(backend, stored=self.stored_draft(backend))
 
     def stored_draft(self, backend: str) -> RouteDraft:
         """The stored route as one backend's form shows it before any change.

@@ -1588,7 +1588,7 @@ class DiscordBot(BaseIMClient):
                     self.drafts[backend] = routing.stored_draft(backend)
                 return self.drafts[backend]
 
-            def _select(self, placeholder: str, prefix: str, options, current, *, effort=False):
+            def _select(self, placeholder: str, prefix: str, options, shown: str, *, effort=False):
                 default = RouteOption(DEFAULT_OPTION_VALUE, "")
                 return discord.ui.Select(
                     placeholder=placeholder,
@@ -1596,7 +1596,7 @@ class DiscordBot(BaseIMClient):
                         discord.SelectOption(
                             label=_prefixed_label(prefix, route_option_label(self.outer._t, option, effort=effort)),
                             value=option.value,
-                            default=option.value == (current or DEFAULT_OPTION_VALUE),
+                            default=option.value == shown,
                         )
                         for option in [default, *options]
                     ],
@@ -1639,7 +1639,7 @@ class DiscordBot(BaseIMClient):
                         t("modal.routing.selectBackendAgent", backend=backend_name),
                         t("discord.labels.backendAgent", backend=backend_name),
                         variants,
-                        draft.variant,
+                        menu.shown_value(draft.variant),
                     )
 
                     async def variant_callback(select_interaction: discord.Interaction):
@@ -1651,7 +1651,10 @@ class DiscordBot(BaseIMClient):
                     self.add_item(variant_select)
 
                 model_select = self._select(
-                    t("modal.routing.selectModel"), t("discord.labels.model"), menu.model_options(draft.model), draft.model
+                    t("modal.routing.selectModel"),
+                    t("discord.labels.model"),
+                    menu.model_options(draft.model),
+                    menu.shown_value(draft.model),
                 )
 
                 async def model_callback(select_interaction: discord.Interaction):
@@ -1666,7 +1669,7 @@ class DiscordBot(BaseIMClient):
                     t("modal.routing.selectReasoningEffort"),
                     t("discord.labels.reasoningEffort"),
                     menu.effort_options(draft.model, draft.reasoning_effort),
-                    draft.reasoning_effort,
+                    menu.shown_value(draft.reasoning_effort),
                     effort=True,
                 )
 

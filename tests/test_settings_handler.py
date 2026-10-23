@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from config.v2_settings import RoutingSettings
 from core.handlers.settings_handler import SettingsHandler
-from core.modals import RouteOption, RoutingModalData, RoutingModalSelection
+from core.modals import BackendRouteMenu, RouteOption, RoutingModalData, RoutingModalSelection
 from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
 from modules.im import MessageContext
 
@@ -279,6 +279,39 @@ def test_handle_routing_update_saves_vibey_model_and_effort_on_the_vibey_route()
     assert (saved.agent_name, saved.model, saved.reasoning_effort) == ("vibey-agent", "claude-opus-5-5", "xhigh")
     text = send_message.await_args.args[1]
     assert "claude-opus-5-5" in text and "xhigh" in text
+
+
+def test_saving_an_unchanged_slack_form_keeps_a_stored_model_slack_cannot_show() -> None:
+    """A Web-set model id past Slack's 150-character option values must survive saving the Slack form."""
+    from config.v2_config import SlackConfig
+    from modules.im.slack import SlackBot
+
+    long_id = "vendor/" + "x" * 160
+    settings_manager = _StubSettingsManager(RoutingSettings(agent_name="vibey", model=long_id, reasoning_effort="high"))
+    handler, _ = _make_handler(settings_manager)
+    handler.controller.vibe_agent_store = SimpleNamespace(routing_name_for_backend=lambda backend: backend)
+    bot = SlackBot(SlackConfig(bot_token="fixture-token"))
+    bot._on_routing_update = handler.handle_routing_update
+    data = RoutingModalData(["vibey"], "vibey", settings_manager.routing)
+    data.menus["vibey"] = BackendRouteMenu(
+        "vibey",
+        models=[RouteOption("model-a", "Model A")],
+        efforts={"": [RouteOption("high", "High")]},
+        option_limit=bot.route_option_limit,
+        value_limit=bot.route_option_value_limit,
+        stored=data.stored_draft("vibey"),
+    )
+    view = bot._build_routing_modal_view(channel_id="-100123", routing=data)
+    view["state"] = {"values": {
+        block["block_id"]: {block["element"]["action_id"]: {"selected_option": block["element"]["initial_option"]}}
+        for block in view["blocks"] if block["type"] == "input"
+    }}
+
+    with patch.object(handler, "_routing_update_needs_new_session_hint", return_value=False):
+        asyncio.run(bot._handle_view_submission({"view": view, "user": {"id": "42"}}))
+
+    saved = settings_manager.saved_routing
+    assert (saved.agent_name, saved.model, saved.reasoning_effort) == ("vibey", long_id, "high")
 
 
 def test_handle_routing_update_warns_flat_scope_with_existing_backend_session() -> None:

@@ -6,7 +6,7 @@ unchanged on some surfaces and not others.
 """
 
 from config.v2_settings import RoutingSettings
-from core.modals import BackendRouteMenu, RouteDraft, RouteOption, RoutingModalData
+from core.modals import STORED_OPTION_VALUE, BackendRouteMenu, RouteDraft, RouteOption, RoutingModalData
 
 
 def _options(*values):
@@ -28,11 +28,18 @@ def test_a_select_keeps_the_current_choice_within_its_cap_listed_or_not():
     assert _values(menu.model_options("m3")) == [f"m{i}" for i in range(24)]  # already shown: order unchanged
 
 
-def test_a_select_carries_only_values_its_platform_can_hold():
-    menu = BackendRouteMenu("any", models=_options("ok", "x" * 101, "__default__"), value_limit=100)
+def test_a_select_carries_only_values_its_platform_can_hold_and_stands_in_for_a_stored_one():
+    long_id = "x" * 101
+    menu = BackendRouteMenu(
+        "any", models=_options("ok", long_id, "__default__"), value_limit=100, stored=RouteDraft(model=long_id)
+    )
 
     assert _values(menu.model_options(None)) == ["ok"]
-    assert _values(menu.model_options("x" * 101)) == ["ok"]
+    # The stored choice stays shown through a stand-in option, named after it; saving that keeps it.
+    for current in (long_id, STORED_OPTION_VALUE):
+        assert menu.model_options(current) == [RouteOption("ok", "OK"), RouteOption(STORED_OPTION_VALUE, long_id.upper())]
+        assert menu.shown_value(current) == STORED_OPTION_VALUE
+    assert (menu.shown_value(None), menu.shown_value("ok")) == ("__default__", "ok")
 
 
 def test_efforts_follow_the_model_and_keep_a_stored_effort_the_menu_omits():
