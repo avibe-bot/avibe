@@ -1,5 +1,5 @@
 import asyncio
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend
+from modules.agents.catalog import NATIVE_CLI_BACKENDS, display_name_for_backend
 import hashlib
 import json
 import logging
@@ -42,22 +42,19 @@ from .formatters import (
 from .slack_modal import parse_routing_modal_selection
 from vibe.i18n import get_supported_languages, t as i18n_t
 from vibe.proxy import resolve_proxy
-from modules.agents.opencode.utils import (
-    build_claude_reasoning_options,
-    build_opencode_model_option_items,
-    build_codex_reasoning_options,
-    format_claude_model_label,
-    build_reasoning_effort_options,
-    resolve_model_reasoning_options,
-    resolve_opencode_allowed_providers,
-    resolve_opencode_provider_preferences,
+from core.modals import (
+    DEFAULT_OPTION_VALUE,
+    BackendRouteMenu,
+    RouteDraft,
+    RouteOption,
+    RoutingModalData,
+    route_option_label,
 )
 from modules.agents.native_sessions.display import format_display_summary, format_display_time
 from modules.agents.native_sessions.types import NativeResumeSession
 
 logger = logging.getLogger(__name__)
 
-_UNSET = object()
 _SLACK_SECTION_TEXT_LIMIT = 3000
 _SLACK_MARKDOWN_TEXT_LIMIT = 12000
 _BARE_HTTP_URL_RE = re.compile(r"https?://[^\s<>\|]+")
@@ -92,6 +89,10 @@ def _shown_in_mrkdwn(character: str) -> str:
 
 class SlackBot(BaseIMClient):
     """Slack implementation of the IM client"""
+
+    # A static select holds at most 100 options, each value at most 150 characters.
+    route_option_limit = 100
+    route_option_value_limit = 150
 
     def __init__(self, config: SlackConfig):
         super().__init__(config)
@@ -2538,32 +2539,17 @@ class SlackBot(BaseIMClient):
 
                         await self.on_callback_query_callback(context, callback_data)
                 elif action_type in {"static_select", "external_select"}:
-                    action_id = action.get("action_id")
-                    # Trigger modal update for backend selection and all backend-specific selectors
-                    routing_modal_actions = {
-                        "backend_select",
-                        "opencode_agent_select",
-                        "opencode_model_select",
-                        "claude_agent_select",
-                        "claude_model_select",
-                        "codex_model_select",
-                        "vibey_model_select",
-                    }
-                    # Also check for prefixed action IDs (reasoning selects have unique suffixes)
-                    should_update = (
-                        action_id in routing_modal_actions
-                        or (action_id and action_id.startswith("opencode_reasoning_select"))
-                        or (action_id and action_id.startswith("codex_reasoning_select"))
+                    # A routing form refreshes when the backend or the model changes: each decides what the
+                    # fields below it offer.
+                    should_update = view.get("callback_id") == "routing_modal" and (
+                        action.get("action_id") == "backend_select"
+                        or str(action.get("block_id") or "").startswith("route_model:")
                     )
                     if should_update:
                         if hasattr(self, "_on_routing_modal_update"):
                             channel_from_view = view.get("private_metadata")
                             effective_channel = channel_from_view or channel_id
-                            selection = parse_routing_modal_selection(
-                                view=view,
-                                action=action,
-                                fallback_selected_backend="",
-                            )
+                            selection = parse_routing_modal_selection(view=view, action=action)
                             await self._on_routing_modal_update(
                                 user_id=user.get("id"),
                                 channel_id=effective_channel,
@@ -2760,123 +2746,18 @@ class SlackBot(BaseIMClient):
                 )
 
         elif callback_id == "routing_modal":
-            # Handle routing modal submission
             user_id = payload.get("user", {}).get("id")
-            values = view.get("state", {}).get("values", {})
             channel_id = view.get("private_metadata")
-
-            # Extract backend
-            backend_data = values.get("backend_block", {}).get("backend_select", {})
-            backend = backend_data.get("selected_option", {}).get("value")
-
-            # Extract OpenCode agent (optional)
-            oc_agent_data = values.get("opencode_agent_block", {}).get("opencode_agent_select", {})
-            oc_agent = oc_agent_data.get("selected_option", {}).get("value")
-            if oc_agent == "__default__":
-                oc_agent = None
-
-            # Extract OpenCode model (optional)
-            oc_model_data = values.get("opencode_model_block", {}).get("opencode_model_select", {})
-            oc_model = oc_model_data.get("selected_option", {}).get("value")
-            if oc_model == "__default__":
-                oc_model = None
-
-            # Extract OpenCode reasoning effort (optional)
-            oc_reasoning = None
-            reasoning_block = values.get("opencode_reasoning_block", {})
-            if isinstance(reasoning_block, dict):
-                for action_id, action_data in reasoning_block.items():
-                    if (
-                        isinstance(action_id, str)
-                        and action_id.startswith("opencode_reasoning_select")
-                        and isinstance(action_data, dict)
-                    ):
-                        oc_reasoning = action_data.get("selected_option", {}).get("value")
-                        break
-            if oc_reasoning == "__default__":
-                oc_reasoning = None
-
-            # Extract require_mention (optional)
-            require_mention_data = values.get("require_mention_block", {}).get("require_mention_select", {})
-            require_mention_value = require_mention_data.get("selected_option", {}).get("value")
-            # Convert to Optional[bool]: "__default__" -> None, "true" -> True, "false" -> False
-            if require_mention_value == "__default__":
-                require_mention = None
-            elif require_mention_value == "true":
-                require_mention = True
-            elif require_mention_value == "false":
-                require_mention = False
-            else:
-                require_mention = None
-
-            # Extract Claude agent (optional)
-            claude_agent_data = values.get("claude_agent_block", {}).get("claude_agent_select", {})
-            claude_agent = claude_agent_data.get("selected_option", {}).get("value")
-            if claude_agent == "__default__":
-                claude_agent = None
-
-            # Extract Claude model (optional)
-            claude_model_data = values.get("claude_model_block", {}).get("claude_model_select", {})
-            claude_model = claude_model_data.get("selected_option", {}).get("value")
-            if claude_model == "__default__":
-                claude_model = None
-
-            # Extract Claude reasoning effort (optional)
-            claude_reasoning_data = values.get("claude_reasoning_block", {}).get("claude_reasoning_select", {})
-            claude_reasoning = claude_reasoning_data.get("selected_option", {}).get("value")
-            if claude_reasoning == "__default__":
-                claude_reasoning = None
-
-            # Extract Codex model (optional)
-            codex_agent_data = values.get("codex_agent_block", {}).get("codex_agent_select", {})
-            codex_agent = codex_agent_data.get("selected_option", {}).get("value")
-            if codex_agent == "__default__":
-                codex_agent = None
-
-            # Extract Codex model (optional)
-            codex_model_data = values.get("codex_model_block", {}).get("codex_model_select", {})
-            codex_model = codex_model_data.get("selected_option", {}).get("value")
-            if codex_model == "__default__":
-                codex_model = None
-
-            # Extract Codex reasoning effort (optional)
-            codex_reasoning = None
-            codex_reasoning_block = values.get("codex_reasoning_block", {})
-            if isinstance(codex_reasoning_block, dict):
-                for action_id, action_data in codex_reasoning_block.items():
-                    if (
-                        isinstance(action_id, str)
-                        and action_id.startswith("codex_reasoning_select")
-                        and isinstance(action_data, dict)
-                    ):
-                        codex_reasoning = action_data.get("selected_option", {}).get("value")
-                        break
-            if codex_reasoning == "__default__":
-                codex_reasoning = None
-
-            vibey_selection = parse_routing_modal_selection(
-                view=view,
-                action={},
-                fallback_selected_backend=backend or "",
-            )
-
-            # Update routing via callback
+            selection = parse_routing_modal_selection(view=view, action={})
+            draft = selection.draft or RouteDraft()
             if hasattr(self, "_on_routing_update"):
                 await self._on_routing_update(
                     user_id=user_id,
                     channel_id=channel_id,
-                    backend=backend,
-                    opencode_agent=oc_agent,
-                    opencode_model=oc_model,
-                    opencode_reasoning_effort=oc_reasoning,
-                    claude_agent=claude_agent,
-                    claude_model=claude_model,
-                    claude_reasoning_effort=claude_reasoning,
-                    codex_agent=codex_agent,
-                    codex_model=codex_model,
-                    codex_reasoning_effort=codex_reasoning,
-                    vibey_model=vibey_selection.selected_vibey_model,
-                    vibey_reasoning_effort=vibey_selection.selected_vibey_reasoning,
+                    backend=selection.selected_backend,
+                    variant=draft.variant,
+                    model=draft.model,
+                    reasoning_effort=draft.reasoning_effort,
                     is_dm=isinstance(channel_id, str) and channel_id.startswith("D"),
                 )
 
@@ -3562,71 +3443,39 @@ class SlackBot(BaseIMClient):
     def _build_routing_modal_view(
         self,
         channel_id: str,
-        registered_backends: list,
-        current_backend: str,
-        current_routing,
-        opencode_agents: list,
-        opencode_models: dict,
-        opencode_default_config: dict,
-        claude_agents: list = None,
-        claude_models: list = None,
-        codex_agents: list = None,
-        codex_models: list = None,
-        backend_reasoning_options: dict = None,
-        vibey_models: list = None,
-        selected_backend: object = _UNSET,
-        selected_opencode_agent: object = _UNSET,
-        selected_opencode_model: object = _UNSET,
-        selected_opencode_reasoning: object = _UNSET,
-        selected_claude_agent: object = _UNSET,
-        selected_claude_model: object = _UNSET,
-        selected_claude_reasoning: object = _UNSET,
-        selected_codex_agent: object = _UNSET,
-        selected_codex_model: object = _UNSET,
-        selected_codex_reasoning: object = _UNSET,
-        selected_vibey_model: object = _UNSET,
-        selected_vibey_reasoning: object = _UNSET,
+        routing: RoutingModalData,
+        selected_backend: Optional[str] = None,
+        draft: Optional[RouteDraft] = None,
     ) -> dict:
-        """Build modal view for agent/model routing settings."""
-        # Build backend options
-        backend_display_names = {
-            backend: display_name_for_backend(backend) for backend in AGENT_BACKENDS
-        }
-        backend_options = []
-        for backend in registered_backends:
-            display_name = backend_display_names.get(backend, backend.capitalize())
-            backend_options.append(
-                {
-                    "text": {"type": "plain_text", "text": display_name},
-                    "value": backend,
-                }
-            )
+        """Build the routing modal: the backend select, then the shown backend's route section.
 
-        # Find initial backend option
-        selected_backend_value = current_backend if selected_backend is _UNSET else selected_backend
-        initial_backend = None
-        for option in backend_options:
-            if option["value"] == selected_backend_value:
-                initial_backend = option
-                break
-        if initial_backend is None and backend_options:
-            initial_backend = backend_options[0]
-
+        ``draft`` is the shown backend's choices; without one the section shows the stored route.
+        """
+        registered_backends = routing.registered_backends
+        current_backend = routing.current_backend
+        backend_options = [
+            {"text": {"type": "plain_text", "text": display_name_for_backend(backend)}, "value": backend}
+            for backend in registered_backends
+        ]
+        shown_backend = selected_backend if selected_backend in registered_backends else current_backend
+        if shown_backend not in registered_backends:
+            shown_backend = registered_backends[0] if registered_backends else None
         backend_select = {
             "type": "static_select",
             "action_id": "backend_select",
             "placeholder": {"type": "plain_text", "text": self._t("modal.routing.selectBackend")},
             "options": backend_options,
-            "initial_option": initial_backend,
         }
+        initial_backend = next((option for option in backend_options if option["value"] == shown_backend), None)
+        if initial_backend is not None:
+            backend_select["initial_option"] = initial_backend
 
-        # Build modal blocks
         blocks = [
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*{self._t('modal.routing.currentBackend')}* {backend_display_names.get(current_backend, current_backend)}",
+                    "text": f"*{self._t('modal.routing.currentBackend')}* {display_name_for_backend(current_backend)}",
                 },
             },
             {"type": "divider"},
@@ -3638,690 +3487,20 @@ class SlackBot(BaseIMClient):
                 "label": {"type": "plain_text", "text": self._t("modal.routing.backend")},
             },
         ]
-
-        # Determine effective backend for showing backend-specific options
-        effective_backend = selected_backend_value or current_backend or "opencode"
-        canonical_model = getattr(current_routing, "model", None) if current_routing else None
-        canonical_reasoning = getattr(current_routing, "reasoning_effort", None) if current_routing else None
-
-        def _canonical_applies_to_backend(backend: str) -> bool:
-            return backend == (current_backend or "opencode")
-
-        def _current_model_for_backend(field_name: str, backend: str) -> Optional[str]:
-            value = getattr(current_routing, field_name, None) if current_routing else None
-            if value is not None:
-                return value
-            if effective_backend == backend and _canonical_applies_to_backend(backend):
-                return canonical_model
-            return None
-
-        def _current_reasoning_for_backend(field_name: str, backend: str) -> Optional[str]:
-            value = getattr(current_routing, field_name, None) if current_routing else None
-            if value is not None:
-                return value
-            if effective_backend == backend and _canonical_applies_to_backend(backend):
-                return canonical_reasoning
-            return None
-
-        # OpenCode-specific options (only if opencode is selected)
-        if effective_backend == "opencode" and "opencode" in registered_backends:
-            # Get current opencode settings
-            if selected_opencode_agent is _UNSET:
-                current_oc_agent = current_routing.opencode_agent if current_routing else None
-            else:
-                current_oc_agent = selected_opencode_agent
-
-            if selected_opencode_model is _UNSET:
-                current_oc_model = _current_model_for_backend("opencode_model", "opencode")
-            else:
-                current_oc_model = selected_opencode_model
-
-            if selected_opencode_reasoning is _UNSET:
-                current_oc_reasoning = _current_reasoning_for_backend("opencode_reasoning_effort", "opencode")
-            else:
-                current_oc_reasoning = selected_opencode_reasoning
-
-            # Build agent options
-            agent_options = [
-                {"text": {"type": "plain_text", "text": self._t("common.default")}, "value": "__default__"}
-            ]
-            for agent in opencode_agents:
-                agent_name = agent.get("name", "")
-                if agent_name:
-                    agent_options.append(
-                        {
-                            "text": {"type": "plain_text", "text": agent_name},
-                            "value": agent_name,
-                        }
-                    )
-
-            # Find initial agent
-            initial_agent = agent_options[0]  # Default
-            if current_oc_agent:
-                for opt in agent_options:
-                    if opt["value"] == current_oc_agent:
-                        initial_agent = opt
-                        break
-
-            agent_select = {
-                "type": "static_select",
-                "action_id": "opencode_agent_select",
-                "placeholder": {"type": "plain_text", "text": self._t("modal.routing.selectOpencodeAgent")},
-                "options": agent_options,
-                "initial_option": initial_agent,
-            }
-
-            # Build model options
-            default_label = self._t("common.default")
-            model_options = [{"text": {"type": "plain_text", "text": default_label}, "value": "__default__"}]
-
-            # Add models from providers (sorted, filtered, truncated)
-            preferred_providers = resolve_opencode_provider_preferences(
-                opencode_default_config,
-                current_oc_model,
-            )
-            allowed_providers = resolve_opencode_allowed_providers(
-                opencode_default_config,
-                opencode_models,
-            )
-            model_entries = build_opencode_model_option_items(
-                opencode_models,
-                max_total=99,
-                preferred_providers=preferred_providers,
-                allowed_providers=allowed_providers,
-            )
-            for entry in model_entries:
-                label = entry.get("label", "")
-                value = entry.get("value", "")
-                if not label or not value:
-                    continue
-                model_options.append(
-                    {
-                        "text": {"type": "plain_text", "text": label[:75]},  # Slack limit
-                        "value": value,
-                    }
-                )
-
-            # Find initial model
-            initial_model = model_options[0]  # Default
-            if current_oc_model:
-                for opt in model_options:
-                    if opt["value"] == current_oc_model:
-                        initial_model = opt
-                        break
-
-            model_select = {
-                "type": "static_select",
-                "action_id": "opencode_model_select",
-                "placeholder": {"type": "plain_text", "text": self._t("modal.routing.selectModel")},
-                "options": model_options,
-                "initial_option": initial_model,
-            }
-
-            # Build reasoning effort options dynamically based on model variants
-            target_model = current_oc_model
-
-            reasoning_model_key = target_model or "__default__"
-            reasoning_action_id = (
-                "opencode_reasoning_select__" + hashlib.sha1(reasoning_model_key.encode("utf-8")).hexdigest()[:8]
-            )
-
-            reasoning_entries = build_reasoning_effort_options(opencode_models, target_model)
-            reasoning_effort_options = []
-            for entry in reasoning_entries:
-                value = entry.get("value")
-                if not value:
-                    continue
-                if value == "__default__":
-                    label = self._t("common.default")
-                else:
-                    translated = self._t(f"reasoning.{value}")
-                    label = translated if translated != f"reasoning.{value}" else entry.get("label", value)
-                reasoning_effort_options.append(
-                    {
-                        "text": {"type": "plain_text", "text": label},
-                        "value": value,
-                    }
-                )
-
-            # Find initial reasoning effort
-            initial_reasoning = reasoning_effort_options[0]  # Default
-            if current_oc_reasoning:
-                for opt in reasoning_effort_options:
-                    if opt["value"] == current_oc_reasoning:
-                        initial_reasoning = opt
-                        break
-
-            reasoning_select = {
-                "type": "static_select",
-                "action_id": reasoning_action_id,
-                "placeholder": {"type": "plain_text", "text": self._t("modal.routing.selectReasoningEffort")},
-                "options": reasoning_effort_options,
-                "initial_option": initial_reasoning,
-            }
-
-            # Add OpenCode section
+        if shown_backend:
             blocks.extend(
-                [
-                    {"type": "divider"},
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"*{self._t('modal.routing.opencodeSettings')}*",
-                        },
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "opencode_agent_block",
-                        "optional": True,
-                        "dispatch_action": True,
-                        "element": agent_select,
-                        "label": {"type": "plain_text", "text": self._t("modal.routing.opencodeAgent")},
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "opencode_model_block",
-                        "optional": True,
-                        "dispatch_action": True,
-                        "element": model_select,
-                        "label": {"type": "plain_text", "text": self._t("modal.routing.model")},
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "opencode_reasoning_block",
-                        "optional": True,
-                        "element": reasoning_select,
-                        "label": {"type": "plain_text", "text": self._t("modal.routing.reasoningEffort")},
-                    },
-                ]
-            )
-
-        # Claude-specific options (only if claude is selected)
-        if effective_backend == "claude" and "claude" in registered_backends:
-            claude_agents = claude_agents or []
-            claude_models = claude_models or []
-
-            # Get current claude settings
-            if selected_claude_agent is _UNSET:
-                current_cl_agent = current_routing.claude_agent if current_routing else None
-            else:
-                current_cl_agent = selected_claude_agent
-
-            if selected_claude_model is _UNSET:
-                current_cl_model = _current_model_for_backend("claude_model", "claude")
-            else:
-                current_cl_model = selected_claude_model
-
-            if selected_claude_reasoning is _UNSET:
-                current_cl_reasoning = _current_reasoning_for_backend("claude_reasoning_effort", "claude")
-            else:
-                current_cl_reasoning = selected_claude_reasoning
-
-            # Build agent options
-            cl_agent_options = [
-                {"text": {"type": "plain_text", "text": self._t("common.default")}, "value": "__default__"}
-            ]
-            for agent in claude_agents:
-                agent_id = agent.get("id", "")
-                agent_name = agent.get("name", agent_id)
-                if agent_id:
-                    cl_agent_options.append(
-                        {
-                            "text": {"type": "plain_text", "text": agent_name[:75]},
-                            "value": agent_id,
-                        }
-                    )
-
-            # Find initial agent
-            initial_cl_agent = cl_agent_options[0]
-            if current_cl_agent:
-                for opt in cl_agent_options:
-                    if opt["value"] == current_cl_agent:
-                        initial_cl_agent = opt
-                        break
-
-            cl_agent_select = {
-                "type": "static_select",
-                "action_id": "claude_agent_select",
-                "placeholder": {"type": "plain_text", "text": self._t("modal.routing.selectClaudeAgent")},
-                "options": cl_agent_options,
-                "initial_option": initial_cl_agent,
-            }
-
-            # Build model options
-            cl_model_options = [
-                {"text": {"type": "plain_text", "text": self._t("common.default")}, "value": "__default__"}
-            ]
-            for model in claude_models:
-                if model:
-                    model_label = format_claude_model_label(model)
-                    cl_model_options.append(
-                        {
-                            "text": {"type": "plain_text", "text": model_label[:75]},
-                            "value": model,
-                        }
-                    )
-
-            # Add current model if not in list (preserve custom models)
-            if current_cl_model and not any(opt["value"] == current_cl_model for opt in cl_model_options):
-                model_label = format_claude_model_label(current_cl_model)
-                cl_model_options.append(
-                    {
-                        "text": {"type": "plain_text", "text": model_label[:75]},
-                        "value": current_cl_model,
-                    }
+                self._route_section_blocks(
+                    shown_backend,
+                    routing.menu(shown_backend),
+                    draft if draft is not None else routing.stored_draft(shown_backend),
                 )
-
-            # Limit to 100 options
-            if len(cl_model_options) > 100:
-                cl_model_options = cl_model_options[:100]
-
-            # Find initial model
-            initial_cl_model = cl_model_options[0]
-            if current_cl_model:
-                for opt in cl_model_options:
-                    if opt["value"] == current_cl_model:
-                        initial_cl_model = opt
-                        break
-
-            cl_model_select = {
-                "type": "static_select",
-                "action_id": "claude_model_select",
-                "placeholder": {"type": "plain_text", "text": self._t("modal.routing.selectModel")},
-                "options": cl_model_options,
-                "initial_option": initial_cl_model,
-            }
-
-            cl_reasoning_entries = resolve_model_reasoning_options(
-                (backend_reasoning_options or {}).get("claude"),
-                current_cl_model,
-                build_claude_reasoning_options(current_cl_model),
             )
-            selected_cl_reasoning = (
-                current_cl_reasoning if current_cl_reasoning not in (None, "__default__") else "__default__"
-            )
-            available_cl_reasoning = {entry.get("value") for entry in cl_reasoning_entries}
-            if selected_cl_reasoning not in available_cl_reasoning:
-                selected_cl_reasoning = "__default__"
-
-            cl_reasoning_options = []
-            for entry in cl_reasoning_entries:
-                value = entry.get("value")
-                if not value:
-                    continue
-                if value == "__default__":
-                    label = self._t("common.default")
-                else:
-                    translated = self._t(f"reasoning.{value}")
-                    label = translated if translated != f"reasoning.{value}" else entry.get("label", value)
-                cl_reasoning_options.append(
-                    {
-                        "text": {"type": "plain_text", "text": label},
-                        "value": value,
-                    }
-                )
-
-            initial_cl_reasoning = next(
-                (opt for opt in cl_reasoning_options if opt["value"] == selected_cl_reasoning),
-                cl_reasoning_options[0],
-            )
-
-            cl_reasoning_select = {
-                "type": "static_select",
-                "action_id": "claude_reasoning_select",
-                "placeholder": {"type": "plain_text", "text": self._t("modal.routing.selectReasoningEffort")},
-                "options": cl_reasoning_options,
-                "initial_option": initial_cl_reasoning,
-            }
-
-            # Add Claude section
-            blocks.extend(
-                [
-                    {"type": "divider"},
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"*{self._t('modal.routing.claudeSettings')}*",
-                        },
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "claude_agent_block",
-                        "optional": True,
-                        "element": cl_agent_select,
-                        "label": {"type": "plain_text", "text": self._t("modal.routing.claudeAgent")},
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "claude_model_block",
-                        "optional": True,
-                        "dispatch_action": True,
-                        "element": cl_model_select,
-                        "label": {"type": "plain_text", "text": self._t("modal.routing.model")},
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "claude_reasoning_block",
-                        "optional": True,
-                        "element": cl_reasoning_select,
-                        "label": {"type": "plain_text", "text": self._t("modal.routing.reasoningEffort")},
-                    },
-                ]
-            )
-
-        # Codex-specific options (only if codex is selected)
-        if effective_backend == "codex" and "codex" in registered_backends:
-            codex_agents = codex_agents or []
-            codex_models = codex_models or []
-
-            # Get current codex settings
-            if selected_codex_agent is _UNSET:
-                current_cx_agent = getattr(current_routing, "codex_agent", None) if current_routing else None
-            else:
-                current_cx_agent = selected_codex_agent
-
-            if selected_codex_model is _UNSET:
-                current_cx_model = _current_model_for_backend("codex_model", "codex")
-            else:
-                current_cx_model = selected_codex_model
-
-            if selected_codex_reasoning is _UNSET:
-                current_cx_reasoning = _current_reasoning_for_backend("codex_reasoning_effort", "codex")
-            else:
-                current_cx_reasoning = selected_codex_reasoning
-
-            cx_agent_options = [
-                {"text": {"type": "plain_text", "text": self._t("common.default")}, "value": "__default__"}
-            ]
-            for agent in codex_agents:
-                agent_id = agent.get("id", "")
-                agent_name = agent.get("name", agent_id)
-                if agent_id:
-                    cx_agent_options.append(
-                        {
-                            "text": {"type": "plain_text", "text": agent_name[:75]},
-                            "value": agent_id,
-                        }
-                    )
-
-            initial_cx_agent = cx_agent_options[0]
-            if current_cx_agent:
-                for opt in cx_agent_options:
-                    if opt["value"] == current_cx_agent:
-                        initial_cx_agent = opt
-                        break
-
-            cx_agent_select = {
-                "type": "static_select",
-                "action_id": "codex_agent_select",
-                "placeholder": {"type": "plain_text", "text": self._t("modal.routing.selectCodexAgent")},
-                "options": cx_agent_options,
-                "initial_option": initial_cx_agent,
-            }
-
-            # Build model options
-            cx_model_options = [
-                {"text": {"type": "plain_text", "text": self._t("common.default")}, "value": "__default__"}
-            ]
-            for model in codex_models:
-                if model:
-                    cx_model_options.append(
-                        {
-                            "text": {"type": "plain_text", "text": model[:75]},
-                            "value": model,
-                        }
-                    )
-
-            # Add current model if not in list (preserve custom models)
-            if current_cx_model and not any(opt["value"] == current_cx_model for opt in cx_model_options):
-                cx_model_options.append(
-                    {
-                        "text": {"type": "plain_text", "text": current_cx_model[:75]},
-                        "value": current_cx_model,
-                    }
-                )
-
-            # Limit to 100 options
-            if len(cx_model_options) > 100:
-                cx_model_options = cx_model_options[:100]
-
-            # Find initial model
-            initial_cx_model = cx_model_options[0]
-            if current_cx_model:
-                for opt in cx_model_options:
-                    if opt["value"] == current_cx_model:
-                        initial_cx_model = opt
-                        break
-
-            cx_model_select = {
-                "type": "static_select",
-                "action_id": "codex_model_select",
-                "placeholder": {"type": "plain_text", "text": self._t("modal.routing.selectModel")},
-                "options": cx_model_options,
-                "initial_option": initial_cx_model,
-            }
-
-            # Build reasoning effort options from centralized Codex definition
-            codex_reasoning_entries = resolve_model_reasoning_options(
-                (backend_reasoning_options or {}).get("codex"),
-                current_cx_model,
-                build_codex_reasoning_options(),
-            )
-            selected_cx_reasoning = (
-                current_cx_reasoning if current_cx_reasoning not in (None, "__default__") else "__default__"
-            )
-            available_cx_reasoning = {entry.get("value") for entry in codex_reasoning_entries}
-            if selected_cx_reasoning not in available_cx_reasoning:
-                selected_cx_reasoning = "__default__"
-
-            cx_reasoning_options = []
-            for entry in codex_reasoning_entries:
-                value = entry.get("value")
-                if not value:
-                    continue
-                if value == "__default__":
-                    label = self._t("common.default")
-                else:
-                    translated = self._t(f"reasoning.{value}")
-                    label = translated if translated != f"reasoning.{value}" else entry.get("label", value)
-                cx_reasoning_options.append(
-                    {
-                        "text": {"type": "plain_text", "text": label},
-                        "value": value,
-                    }
-                )
-
-            # Find initial reasoning
-            initial_cx_reasoning = next(
-                (opt for opt in cx_reasoning_options if opt["value"] == selected_cx_reasoning),
-                cx_reasoning_options[0],
-            )
-
-            cx_reasoning_select = {
-                "type": "static_select",
-                "action_id": "codex_reasoning_select",
-                "placeholder": {"type": "plain_text", "text": self._t("modal.routing.selectReasoningEffort")},
-                "options": cx_reasoning_options,
-                "initial_option": initial_cx_reasoning,
-            }
-
-            # Add Codex section
-            blocks.extend(
-                [
-                    {"type": "divider"},
-                    {
-                        "type": "section",
-                        "text": {
-                            "type": "mrkdwn",
-                            "text": f"*{self._t('modal.routing.codexSettings')}*",
-                        },
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "codex_agent_block",
-                        "optional": True,
-                        "element": cx_agent_select,
-                        "label": {"type": "plain_text", "text": self._t("modal.routing.codexAgent")},
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "codex_model_block",
-                        "optional": True,
-                        "element": cx_model_select,
-                        "label": {"type": "plain_text", "text": self._t("modal.routing.model")},
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "codex_reasoning_block",
-                        "optional": True,
-                        "element": cx_reasoning_select,
-                        "label": {"type": "plain_text", "text": self._t("modal.routing.codexReasoningEffort")},
-                    },
-                ]
-            )
-
-        # Vibey options: its Model Hub models and each model's efforts (only if vibey is selected)
-        if effective_backend == "vibey" and "vibey" in registered_backends:
-            if selected_vibey_model is _UNSET:
-                current_vb_model = canonical_model if _canonical_applies_to_backend("vibey") else None
-            else:
-                current_vb_model = selected_vibey_model
-
-            if selected_vibey_reasoning is _UNSET:
-                current_vb_reasoning = canonical_reasoning if _canonical_applies_to_backend("vibey") else None
-            else:
-                current_vb_reasoning = selected_vibey_reasoning
-
-            def _slack_option_value(value: object) -> bool:
-                # A Slack option value holds at most 150 characters, and the Default option owns "__default__".
-                return isinstance(value, str) and 0 < len(value) <= 150 and value != "__default__"
-
-            vb_entries = [
-                (str(entry.get("label") or entry["value"]), entry["value"])
-                for entry in vibey_models or []
-                if _slack_option_value(entry.get("value"))
-            ]
-            # Keep the shown model, listed or not, inside Slack's 100-option cap (Default takes one), so saving
-            # the modal unchanged never drops it.
-            if _slack_option_value(current_vb_model) and all(
-                value != current_vb_model for _, value in vb_entries[:99]
-            ):
-                label = next((label for label, value in vb_entries if value == current_vb_model), current_vb_model)
-                vb_entries = [entry for entry in vb_entries if entry[1] != current_vb_model][:98]
-                vb_entries.append((label, current_vb_model))
-            vb_model_options = [
-                {"text": {"type": "plain_text", "text": self._t("common.default")}, "value": "__default__"}
-            ] + [
-                {"text": {"type": "plain_text", "text": label[:75]}, "value": value}
-                for label, value in vb_entries[:99]
-            ]
-            initial_vb_model = next(
-                (opt for opt in vb_model_options if opt["value"] == current_vb_model),
-                vb_model_options[0],
-            )
-
-            vb_reasoning_entries = resolve_model_reasoning_options(
-                (backend_reasoning_options or {}).get("vibey"),
-                current_vb_model,
-                build_codex_reasoning_options([]),
-            )
-            def _vb_effort_label(value: str, fallback: str) -> str:
-                if value == "__default__":
-                    return self._t("common.default")
-                translated = self._t(f"reasoning.{value}")
-                return translated if translated != f"reasoning.{value}" else fallback
-
-            vb_reasoning_options = [
-                {
-                    "text": {
-                        "type": "plain_text",
-                        "text": _vb_effort_label(entry["value"], entry.get("label", entry["value"])),
-                    },
-                    "value": entry["value"],
-                }
-                for entry in vb_reasoning_entries
-                if entry.get("value")
-            ]
-            # A model change clears the effort, so one the menu does not list is the stored route's (Model Hub may
-            # refuse it now): keep it shown and selected, so saving the modal unchanged does not drop it.
-            if _slack_option_value(current_vb_reasoning) and all(
-                opt["value"] != current_vb_reasoning for opt in vb_reasoning_options
-            ):
-                vb_reasoning_options.append(
-                    {
-                        "text": {
-                            "type": "plain_text",
-                            "text": _vb_effort_label(current_vb_reasoning, current_vb_reasoning),
-                        },
-                        "value": current_vb_reasoning,
-                    }
-                )
-            initial_vb_reasoning = next(
-                (opt for opt in vb_reasoning_options if opt["value"] == (current_vb_reasoning or "__default__")),
-                vb_reasoning_options[0],
-            )
-            # Slack keeps an input's state across views.update while its action_id stays the same, so the
-            # effort select is keyed by model: a model change then offers that model's efforts afresh.
-            vb_reasoning_action_id = (
-                "vibey_reasoning_select__"
-                + hashlib.sha1((current_vb_model or "__default__").encode("utf-8")).hexdigest()[:8]
-            )
-
-            blocks.extend(
-                [
-                    {"type": "divider"},
-                    {
-                        "type": "section",
-                        "text": {"type": "mrkdwn", "text": f"*{self._t('modal.routing.vibeySettings')}*"},
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "vibey_model_block",
-                        "optional": True,
-                        "dispatch_action": True,
-                        "element": {
-                            "type": "static_select",
-                            "action_id": "vibey_model_select",
-                            "placeholder": {"type": "plain_text", "text": self._t("modal.routing.selectModel")},
-                            "options": vb_model_options,
-                            "initial_option": initial_vb_model,
-                        },
-                        "label": {"type": "plain_text", "text": self._t("modal.routing.model")},
-                    },
-                    {
-                        "type": "input",
-                        "block_id": "vibey_reasoning_block",
-                        "optional": True,
-                        "element": {
-                            "type": "static_select",
-                            "action_id": vb_reasoning_action_id,
-                            "placeholder": {
-                                "type": "plain_text",
-                                "text": self._t("modal.routing.selectReasoningEffort"),
-                            },
-                            "options": vb_reasoning_options,
-                            "initial_option": initial_vb_reasoning,
-                        },
-                        "label": {"type": "plain_text", "text": self._t("modal.routing.reasoningEffort")},
-                    },
-                ]
-            )
-
-        # Add tip
         blocks.append(
             {
                 "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"_💡 {self._t('modal.routing.tip')}_",
-                    }
-                ],
+                "elements": [{"type": "mrkdwn", "text": f"_💡 {self._t('modal.routing.tip')}_"}],
             }
         )
-
         return {
             "type": "modal",
             "callback_id": "routing_modal",
@@ -4331,6 +3510,87 @@ class SlackBot(BaseIMClient):
             "close": {"type": "plain_text", "text": self._t("common.cancel")},
             "blocks": blocks,
         }
+
+    def _route_section_blocks(self, backend: str, menu: BackendRouteMenu, draft: RouteDraft) -> list[dict]:
+        """One backend's route fields, keyed by backend so a backend switch never carries another's input.
+
+        Slack keeps an input's state across ``views.update`` while its block stays the same, so the effort block
+        is also keyed by model: a model change then offers that model's efforts afresh.
+        """
+        backend_name = display_name_for_backend(backend)
+        default = RouteOption(DEFAULT_OPTION_VALUE, "")
+
+        def _select(block_id, label, placeholder, options, current, *, effort=False, dispatch=False) -> dict:
+            slack_options = [
+                {
+                    "text": {"type": "plain_text", "text": route_option_label(self._t, option, effort=effort)[:75]},
+                    "value": option.value,
+                }
+                for option in [default, *options]
+            ]
+            block = {
+                "type": "input",
+                "block_id": block_id,
+                "optional": True,
+                "element": {
+                    "type": "static_select",
+                    "action_id": block_id.split(":", 1)[0],
+                    "placeholder": {"type": "plain_text", "text": placeholder},
+                    "options": slack_options,
+                    "initial_option": next(
+                        (option for option in slack_options if option["value"] == (current or DEFAULT_OPTION_VALUE)),
+                        slack_options[0],
+                    ),
+                },
+                "label": {"type": "plain_text", "text": label},
+            }
+            if dispatch:
+                block["dispatch_action"] = True
+            return block
+
+        blocks: list[dict] = [
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*{self._t('modal.routing.backendSettings', backend=backend_name)}*",
+                },
+            },
+        ]
+        variants = menu.variant_options(draft.variant)
+        if variants:
+            blocks.append(
+                _select(
+                    f"route_variant:{backend}",
+                    self._t("modal.routing.backendAgent", backend=backend_name),
+                    self._t("modal.routing.selectBackendAgent", backend=backend_name),
+                    variants,
+                    draft.variant,
+                )
+            )
+        blocks.append(
+            _select(
+                f"route_model:{backend}",
+                self._t("modal.routing.model"),
+                self._t("modal.routing.selectModel"),
+                menu.model_options(draft.model),
+                draft.model,
+                dispatch=True,
+            )
+        )
+        effort_key = hashlib.sha1((draft.model or DEFAULT_OPTION_VALUE).encode("utf-8")).hexdigest()[:8]
+        blocks.append(
+            _select(
+                f"route_effort:{backend}:{effort_key}",
+                self._t("modal.routing.reasoningEffort"),
+                self._t("modal.routing.selectReasoningEffort"),
+                menu.effort_options(draft.model, draft.reasoning_effort),
+                draft.reasoning_effort,
+                effort=True,
+            )
+        )
+        return blocks
 
     async def open_question_modal(
         self,
@@ -4474,42 +3734,10 @@ class SlackBot(BaseIMClient):
 
         await self.web_client.views_open(trigger_id=trigger_id, view=view)
 
-    async def open_routing_modal(
-        self,
-        trigger_id: str,
-        channel_id: str,
-        registered_backends: list,
-        current_backend: str,
-        current_routing,  # Optional[ChannelRouting]
-        opencode_agents: list,
-        opencode_models: dict,
-        opencode_default_config: dict,
-        claude_agents: list = None,
-        claude_models: list = None,
-        codex_agents: list = None,
-        codex_models: list = None,
-        backend_reasoning_options: dict = None,
-        vibey_models: list = None,
-    ):
+    async def open_routing_modal(self, trigger_id: str, channel_id: str, routing: RoutingModalData):
         """Open a modal dialog for agent/model routing settings"""
         self._ensure_clients()
-
-        view = self._build_routing_modal_view(
-            channel_id=channel_id,
-            registered_backends=registered_backends,
-            current_backend=current_backend,
-            current_routing=current_routing,
-            opencode_agents=opencode_agents,
-            opencode_models=opencode_models,
-            opencode_default_config=opencode_default_config,
-            claude_agents=claude_agents,
-            claude_models=claude_models,
-            codex_agents=codex_agents,
-            codex_models=codex_models,
-            backend_reasoning_options=backend_reasoning_options,
-            vibey_models=vibey_models,
-        )
-
+        view = self._build_routing_modal_view(channel_id=channel_id, routing=routing)
         try:
             await self.web_client.views_open(trigger_id=trigger_id, view=view)
         except SlackApiError as e:
@@ -4521,63 +3749,15 @@ class SlackBot(BaseIMClient):
         view_id: str,
         view_hash: str,
         channel_id: str,
-        registered_backends: list,
-        current_backend: str,
-        current_routing,
-        opencode_agents: list,
-        opencode_models: dict,
-        opencode_default_config: dict,
-        claude_agents: list = None,
-        claude_models: list = None,
-        codex_agents: list = None,
-        codex_models: list = None,
-        backend_reasoning_options: dict = None,
-        vibey_models: list = None,
+        routing: RoutingModalData,
         selected_backend: Optional[str] = None,
-        # An omitted selection shows the stored route's value, as when the modal opens.
-        selected_opencode_agent: object = _UNSET,
-        selected_opencode_model: object = _UNSET,
-        selected_opencode_reasoning: object = _UNSET,
-        selected_claude_agent: object = _UNSET,
-        selected_claude_model: object = _UNSET,
-        selected_claude_reasoning: object = _UNSET,
-        selected_codex_agent: object = _UNSET,
-        selected_codex_model: object = _UNSET,
-        selected_codex_reasoning: object = _UNSET,
-        selected_vibey_model: object = _UNSET,
-        selected_vibey_reasoning: object = _UNSET,
+        draft: Optional[RouteDraft] = None,
     ) -> None:
         """Update routing modal when selections change."""
         self._ensure_clients()
-
         view = self._build_routing_modal_view(
-            channel_id=channel_id,
-            registered_backends=registered_backends,
-            current_backend=current_backend,
-            current_routing=current_routing,
-            opencode_agents=opencode_agents,
-            opencode_models=opencode_models,
-            opencode_default_config=opencode_default_config,
-            claude_agents=claude_agents,
-            claude_models=claude_models,
-            codex_agents=codex_agents,
-            codex_models=codex_models,
-            backend_reasoning_options=backend_reasoning_options,
-            vibey_models=vibey_models,
-            selected_backend=selected_backend,
-            selected_opencode_agent=selected_opencode_agent,
-            selected_opencode_model=selected_opencode_model,
-            selected_opencode_reasoning=selected_opencode_reasoning,
-            selected_claude_agent=selected_claude_agent,
-            selected_claude_model=selected_claude_model,
-            selected_claude_reasoning=selected_claude_reasoning,
-            selected_codex_agent=selected_codex_agent,
-            selected_codex_model=selected_codex_model,
-            selected_codex_reasoning=selected_codex_reasoning,
-            selected_vibey_model=selected_vibey_model,
-            selected_vibey_reasoning=selected_vibey_reasoning,
+            channel_id=channel_id, routing=routing, selected_backend=selected_backend, draft=draft
         )
-
         try:
             await self.web_client.views_update(view_id=view_id, hash=view_hash, view=view)
         except SlackApiError as e:

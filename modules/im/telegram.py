@@ -6,7 +6,7 @@ import logging
 import re
 import tempfile
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
@@ -18,7 +18,7 @@ from core.message_context import resolve_context_scope_settings_key, resolve_con
 from vibe.i18n import get_supported_languages, t as i18n_t
 from vibe.proxy import resolve_proxy
 from modules.agents.native_sessions import AgentNativeSessionService, NativeResumeSession
-from modules.agents.opencode.utils import format_claude_model_label
+from core.modals import RouteDraft, RoutingModalData, route_option_label
 
 from .base import (
     BaseIMClient,
@@ -70,28 +70,21 @@ class _TelegramRoutingState:
     thread_id: Optional[str]
     user_id: str
     is_dm: bool
-    registered_backends: list[str]
-    opencode_agents: list[Any]
-    opencode_models: dict[str, Any]
-    opencode_default_config: dict[str, Any]
-    claude_agents: list[Any]
-    claude_models: list[Any]
-    codex_models: list[Any]
-    backend_reasoning_options: dict[str, dict[str, list[dict[str, str]]]]
-    vibey_models: list[dict[str, str]]
+    routing: RoutingModalData
     backend: str
-    opencode_agent: Optional[str] = None
-    opencode_model: Optional[str] = None
-    opencode_reasoning_effort: Optional[str] = None
-    claude_agent: Optional[str] = None
-    claude_model: Optional[str] = None
-    claude_reasoning_effort: Optional[str] = None
-    codex_model: Optional[str] = None
-    codex_reasoning_effort: Optional[str] = None
-    vibey_model: Optional[str] = None
-    vibey_reasoning_effort: Optional[str] = None
+    # Each backend keeps its own choices while the form is open; one not yet shown starts from the stored route.
+    drafts: dict[str, RouteDraft] = field(default_factory=dict)
     picker_field: Optional[str] = None
     picker_page: int = 0
+
+    @property
+    def registered_backends(self) -> list[str]:
+        return self.routing.registered_backends
+
+    def draft(self) -> RouteDraft:
+        if self.backend not in self.drafts:
+            self.drafts[self.backend] = self.routing.stored_draft(self.backend)
+        return self.drafts[self.backend]
 
 
 @dataclass
@@ -124,6 +117,8 @@ class TelegramBot(BaseIMClient):
     """Telegram adapter using Bot API long polling."""
 
     _MAX_IN_FLIGHT_UPDATE_TASKS = 100
+    # The routing picker pages its options; this bounds how many pages one list may take.
+    route_option_limit = 100
     _MAX_IN_FLIGHT_MESSAGE_CALLBACK_TASKS = 100
     _COMMAND_MENU = (
         ("start", "telegram.commandMenu.start"),
@@ -1715,68 +1710,24 @@ class TelegramBot(BaseIMClient):
             platform="telegram",
         )
 
-    async def open_routing_modal(self, trigger_id: Any, channel_id: str, **kwargs):
+    async def open_routing_modal(self, trigger_id: Any, channel_id: str, routing: RoutingModalData):
         context = trigger_id if isinstance(trigger_id, MessageContext) else None
         if context is None:
             raise ValueError("Telegram routing flow requires a message context")
-        current_routing = kwargs.get("current_routing")
-        current_backend = kwargs.get("current_backend") or "opencode"
-        backend = current_backend or "opencode"
-        current_model = getattr(current_routing, "model", None)
-        current_effort = getattr(current_routing, "reasoning_effort", None)
+        registered = routing.registered_backends
         state = _TelegramRoutingState(
             message_id="",
             channel_id=channel_id,
             thread_id=resolve_context_thread_id(context),
             user_id=context.user_id,
             is_dm=bool((context.platform_specific or {}).get("is_dm")),
-            registered_backends=list(kwargs.get("registered_backends") or []),
-            opencode_agents=list(kwargs.get("opencode_agents") or []),
-            opencode_models=dict(kwargs.get("opencode_models") or {}),
-            opencode_default_config=dict(kwargs.get("opencode_default_config") or {}),
-            claude_agents=list(kwargs.get("claude_agents") or []),
-            claude_models=list(kwargs.get("claude_models") or []),
-            codex_models=list(kwargs.get("codex_models") or []),
-            backend_reasoning_options=dict(kwargs.get("backend_reasoning_options") or {}),
-            backend=backend,
-            opencode_agent=getattr(current_routing, "opencode_agent", None),
-            opencode_model=current_model if backend == "opencode" else None,
-            opencode_reasoning_effort=current_effort if backend == "opencode" else None,
-            claude_agent=getattr(current_routing, "claude_agent", None),
-            claude_model=current_model if backend == "claude" else None,
-            claude_reasoning_effort=current_effort if backend == "claude" else None,
-            codex_model=current_model if backend == "codex" else None,
-            codex_reasoning_effort=current_effort if backend == "codex" else None,
-            vibey_models=list(kwargs.get("vibey_models") or []),
-            vibey_model=current_model if backend == "vibey" else None,
-            vibey_reasoning_effort=current_effort if backend == "vibey" else None,
+            routing=routing,
+            backend=(
+                routing.current_backend
+                if routing.current_backend in registered
+                else (registered[0] if registered else routing.current_backend)
+            ),
         )
-        # Vibey keeps a stored effort its menu no longer lists (Model Hub may refuse it now), so saving unchanged
-        # does not drop it; its picker lists it.
-        if backend in {"claude", "codex"}:
-            from modules.agents.opencode.utils import (
-                build_claude_reasoning_options,
-                build_codex_reasoning_options,
-                resolve_model_reasoning_options,
-            )
-
-            target_model = state.claude_model if backend == "claude" else state.codex_model
-            fallback = (
-                build_claude_reasoning_options(target_model)
-                if backend == "claude"
-                else build_codex_reasoning_options()
-            )
-            available_efforts = {
-                entry.get("value")
-                for entry in resolve_model_reasoning_options(
-                    state.backend_reasoning_options.get(backend),
-                    target_model,
-                    fallback,
-                )
-            }
-            effort_field = f"{backend}_reasoning_effort"
-            if getattr(state, effort_field) not in available_efforts:
-                setattr(state, effort_field, None)
         text, keyboard = self._render_routing_state(state)
         message_id = await self.send_message_with_buttons(context, text, keyboard)
         state.message_id = message_id
@@ -1809,38 +1760,6 @@ class TelegramBot(BaseIMClient):
 
     def _get_backend_label(self, backend: str) -> str:
         return display_name_for_backend(backend)
-
-    def _option_label(self, value: Optional[str], default_label: Optional[str] = None) -> str:
-        if not value:
-            return self._t("common.default")
-        if value in {"none", "minimal", "low", "medium", "high", "xhigh", "max"}:
-            translated = self._t(f"reasoning.{value}")
-            if translated != f"reasoning.{value}":
-                return translated
-        return default_label or value
-
-    def _routing_field_label(self, field: Optional[str]) -> str:
-        mapping = {
-            "backend": self._t("routing.label.backend"),
-            "opencode_agent": self._t("routing.label.agent"),
-            "opencode_model": self._t("routing.label.model"),
-            "opencode_reasoning_effort": self._t("routing.label.reasoningEffort"),
-            "claude_agent": self._t("routing.label.agent"),
-            "claude_model": self._t("routing.label.model"),
-            "claude_reasoning_effort": self._t("routing.label.reasoningEffort"),
-            "codex_model": self._t("routing.label.model"),
-            "codex_reasoning_effort": self._t("routing.label.reasoningEffort"),
-            "vibey_model": self._t("routing.label.model"),
-            "vibey_reasoning_effort": self._t("routing.label.reasoningEffort"),
-        }
-        return mapping.get(field or "", field or "")
-
-    @staticmethod
-    def _vibey_model_label(state: _TelegramRoutingState) -> Optional[str]:
-        return next(
-            (str(entry.get("label") or "") for entry in state.vibey_models if entry.get("value") == state.vibey_model),
-            None,
-        ) or None
 
     def _question_definition(self, question: Any) -> tuple[str, str, list[tuple[str, str]], bool]:
         if isinstance(question, dict):
@@ -1972,180 +1891,65 @@ class TelegramBot(BaseIMClient):
             synthetic_payload = f"{state.callback_prefix}:modal:{json.dumps(answers_payload, ensure_ascii=True)}"
             await self.on_callback_query_callback(context, synthetic_payload)
 
+    def _routing_field_label(self, field: Optional[str]) -> str:
+        mapping = {
+            "backend": self._t("routing.label.backend"),
+            "variant": self._t("routing.label.agent"),
+            "model": self._t("routing.label.model"),
+            "reasoning_effort": self._t("routing.label.reasoningEffort"),
+        }
+        return mapping.get(field or "", field or "")
+
+    def _routing_fields(self, state: _TelegramRoutingState) -> list[tuple[str, str]]:
+        """The shown backend's fields as ``(field, current value's text)``; the agent only where it has one."""
+        draft = state.draft()
+        fields = [("model", draft.model), ("reasoning_effort", draft.reasoning_effort)]
+        if state.routing.menu(state.backend).variant_options(draft.variant):
+            fields.insert(0, ("variant", draft.variant))
+        shown = []
+        for name, value in fields:
+            options = self._routing_picker_options(state, name)
+            shown.append((name, next((text for text, option in options if option == value), value or "")))
+        return shown
+
     def _routing_summary_lines(self, state: _TelegramRoutingState) -> list[str]:
         lines = [
             f"🤖 {self._t('telegram.routingTitle')}",
             "",
             f"{self._t('routing.label.backend')}: {self._get_backend_label(state.backend)}",
         ]
-        if state.backend == "opencode":
-            lines.append(
-                f"{self._t('routing.label.agent')}: {self._option_label(state.opencode_agent)}"
-            )
-            lines.append(
-                f"{self._t('routing.label.model')}: {self._option_label(state.opencode_model)}"
-            )
-            lines.append(
-                f"{self._t('routing.label.reasoningEffort')}: {self._option_label(state.opencode_reasoning_effort)}"
-            )
-        elif state.backend == "claude":
-            lines.append(
-                f"{self._t('routing.label.agent')}: {self._option_label(state.claude_agent)}"
-            )
-            lines.append(
-                f"{self._t('routing.label.model')}: {self._option_label(state.claude_model)}"
-            )
-            lines.append(
-                f"{self._t('routing.label.reasoningEffort')}: {self._option_label(state.claude_reasoning_effort)}"
-            )
-        elif state.backend == "codex":
-            lines.append(
-                f"{self._t('routing.label.model')}: {self._option_label(state.codex_model)}"
-            )
-            lines.append(
-                f"{self._t('routing.label.reasoningEffort')}: {self._option_label(state.codex_reasoning_effort)}"
-            )
-        elif state.backend == "vibey":
-            lines.append(
-                f"{self._t('routing.label.model')}: "
-                f"{self._option_label(state.vibey_model, self._vibey_model_label(state))}"
-            )
-            lines.append(
-                f"{self._t('routing.label.reasoningEffort')}: {self._option_label(state.vibey_reasoning_effort)}"
-            )
+        lines.extend(f"{self._routing_field_label(name)}: {text}" for name, text in self._routing_fields(state))
         return lines
 
-    def _routing_picker_options(self, state: _TelegramRoutingState) -> list[tuple[str, Optional[str]]]:
-        from modules.agents.opencode.utils import (
-            build_claude_reasoning_options,
-            build_codex_reasoning_options,
-            build_opencode_model_option_items,
-            build_reasoning_effort_options,
-            resolve_model_reasoning_options,
-            resolve_opencode_allowed_providers,
-            resolve_opencode_provider_preferences,
-        )
-
-        field = state.picker_field
-        if field == "backend":
+    def _routing_picker_options(
+        self, state: _TelegramRoutingState, field_name: Optional[str] = None
+    ) -> list[tuple[str, Optional[str]]]:
+        field_name = field_name or state.picker_field
+        if field_name == "backend":
             return [(self._get_backend_label(backend), backend) for backend in state.registered_backends]
-        if field == "opencode_agent":
-            names = []
-            for item in state.opencode_agents:
-                if isinstance(item, dict):
-                    name = str(item.get("name") or "").strip()
-                else:
-                    name = str(item).strip()
-                if name and name not in names:
-                    names.append(name)
-            return [(self._t("common.default"), None)] + [(name, name) for name in names]
-        if field == "opencode_model":
-            target_model = state.opencode_model
-            preferred = resolve_opencode_provider_preferences(state.opencode_default_config, target_model)
-            allowed = resolve_opencode_allowed_providers(state.opencode_default_config, state.opencode_models)
-            entries = build_opencode_model_option_items(
-                state.opencode_models,
-                max_total=24,
-                preferred_providers=preferred,
-                allowed_providers=allowed,
-            )
-            options = [(self._t("common.default"), None)]
-            options.extend((str(entry.get("label")), str(entry.get("value"))) for entry in entries if entry.get("value"))
-            return options
-        if field == "opencode_reasoning_effort":
-            target_model = state.opencode_model
-            return [
-                (
-                    self._option_label(None if entry.get("value") == "__default__" else str(entry.get("value"))),
-                    None if entry.get("value") == "__default__" else str(entry.get("value")),
-                )
-                for entry in build_reasoning_effort_options(state.opencode_models, target_model)
-                if entry.get("value")
-            ]
-        if field == "claude_agent":
-            names = []
-            for item in state.claude_agents:
-                if isinstance(item, dict):
-                    name = str(item.get("name") or "").strip()
-                else:
-                    name = str(item).strip()
-                if name and name not in names:
-                    names.append(name)
-            return [(self._t("common.default"), None)] + [(name, name) for name in names]
-        if field == "claude_model":
-            return [(self._t("common.default"), None)] + [
-                (format_claude_model_label(model), str(model)) for model in state.claude_models
-            ]
-        if field == "claude_reasoning_effort":
-            return [
-                (
-                    self._option_label(None if entry.get("value") == "__default__" else str(entry.get("value"))),
-                    None if entry.get("value") == "__default__" else str(entry.get("value")),
-                )
-                for entry in resolve_model_reasoning_options(
-                    state.backend_reasoning_options.get("claude"),
-                    state.claude_model,
-                    build_claude_reasoning_options(state.claude_model),
-                )
-                if entry.get("value")
-            ]
-        if field == "codex_model":
-            return [(self._t("common.default"), None)] + [(str(model), str(model)) for model in state.codex_models]
-        if field == "codex_reasoning_effort":
-            return [
-                (
-                    self._option_label(
-                        None if entry.get("value") == "__default__" else str(entry.get("value")),
-                        str(entry.get("label") or entry.get("value") or ""),
-                    ),
-                    None if entry.get("value") == "__default__" else str(entry.get("value")),
-                )
-                for entry in resolve_model_reasoning_options(
-                    state.backend_reasoning_options.get("codex"),
-                    state.codex_model,
-                    build_codex_reasoning_options(),
-                )
-                if entry.get("value")
-            ]
-        if field == "vibey_model":
-            return [(self._t("common.default"), None)] + [
-                (str(entry.get("label") or entry["value"]), str(entry["value"]))
-                for entry in state.vibey_models
-                if entry.get("value")
-            ]
-        if field == "vibey_reasoning_effort":
-            options = [
-                (
-                    self._option_label(None if entry.get("value") == "__default__" else str(entry.get("value"))),
-                    None if entry.get("value") == "__default__" else str(entry.get("value")),
-                )
-                for entry in resolve_model_reasoning_options(
-                    state.backend_reasoning_options.get("vibey"),
-                    state.vibey_model,
-                    build_codex_reasoning_options([]),
-                )
-                if entry.get("value")
-            ]
-            # A model change clears the effort, so one the menu does not list is the stored route's.
-            stored = state.vibey_reasoning_effort
-            if stored and all(value != stored for _, value in options):
-                options.append((self._option_label(stored), stored))
-            return options
-        return []
+        menu = state.routing.menu(state.backend)
+        draft = state.draft()
+        if field_name == "variant":
+            options = menu.variant_options(draft.variant)
+        elif field_name == "model":
+            options = menu.model_options(draft.model)
+        elif field_name == "reasoning_effort":
+            options = menu.effort_options(draft.model, draft.reasoning_effort)
+        else:
+            return []
+        effort = field_name == "reasoning_effort"
+        return [(self._t("common.default"), None)] + [
+            (route_option_label(self._t, option, effort=effort), option.value) for option in options
+        ]
 
     def _apply_routing_option(self, state: _TelegramRoutingState, value: Optional[str]) -> None:
-        field = state.picker_field
-        if not field:
-            return
-        setattr(state, field, value)
-        if field == "claude_model" and value is None:
-            state.claude_reasoning_effort = None
-        if field == "claude_model" and value is not None:
-            state.claude_reasoning_effort = None
-        if field == "codex_model":
-            state.codex_reasoning_effort = None
-        if field == "vibey_model":
-            state.vibey_reasoning_effort = None
+        draft = state.draft()
+        if state.picker_field == "model":
+            state.drafts[state.backend] = draft.with_model(value)
+        elif state.picker_field == "variant":
+            state.drafts[state.backend] = replace(draft, variant=value)
+        elif state.picker_field == "reasoning_effort":
+            state.drafts[state.backend] = replace(draft, reasoning_effort=value)
         state.picker_field = None
         state.picker_page = 0
 
@@ -2175,103 +1979,15 @@ class TelegramBot(BaseIMClient):
                     )
                 ]
             )
-
-        if state.backend == "opencode":
-            rows.append(
-                [
-                    InlineButton(
-                        text=f"{self._t('routing.label.agent')}: {self._option_label(state.opencode_agent)}"[:40],
-                        callback_data="tg_route:field:opencode_agent",
-                    )
-                ]
-            )
-            rows.append(
-                [
-                    InlineButton(
-                        text=f"{self._t('routing.label.model')}: {self._option_label(state.opencode_model)}"[:40],
-                        callback_data="tg_route:field:opencode_model",
-                    )
-                ]
-            )
-            rows.append(
-                [
-                    InlineButton(
-                        text=f"{self._t('routing.label.reasoningEffort')}: {self._option_label(state.opencode_reasoning_effort)}"[
-                            :40
-                        ],
-                        callback_data="tg_route:field:opencode_reasoning_effort",
-                    )
-                ]
-            )
-        elif state.backend == "claude":
-            rows.append(
-                [
-                    InlineButton(
-                        text=f"{self._t('routing.label.agent')}: {self._option_label(state.claude_agent)}"[:40],
-                        callback_data="tg_route:field:claude_agent",
-                    )
-                ]
-            )
-            rows.append(
-                [
-                    InlineButton(
-                        text=f"{self._t('routing.label.model')}: {self._option_label(state.claude_model)}"[:40],
-                        callback_data="tg_route:field:claude_model",
-                    )
-                ]
-            )
-            rows.append(
-                [
-                    InlineButton(
-                        text=f"{self._t('routing.label.reasoningEffort')}: {self._option_label(state.claude_reasoning_effort)}"[
-                            :40
-                        ],
-                        callback_data="tg_route:field:claude_reasoning_effort",
-                    )
-                ]
-            )
-        elif state.backend == "codex":
-            rows.append(
-                [
-                    InlineButton(
-                        text=f"{self._t('routing.label.model')}: {self._option_label(state.codex_model)}"[:40],
-                        callback_data="tg_route:field:codex_model",
-                    )
-                ]
-            )
-            rows.append(
-                [
-                    InlineButton(
-                        text=f"{self._t('routing.label.reasoningEffort')}: {self._option_label(state.codex_reasoning_effort)}"[
-                            :40
-                        ],
-                        callback_data="tg_route:field:codex_reasoning_effort",
-                    )
-                ]
-            )
-        elif state.backend == "vibey":
-            rows.append(
-                [
-                    InlineButton(
-                        text=(
-                            f"{self._t('routing.label.model')}: "
-                            f"{self._option_label(state.vibey_model, self._vibey_model_label(state))}"
-                        )[:40],
-                        callback_data="tg_route:field:vibey_model",
-                    )
-                ]
-            )
-            rows.append(
-                [
-                    InlineButton(
-                        text=f"{self._t('routing.label.reasoningEffort')}: {self._option_label(state.vibey_reasoning_effort)}"[
-                            :40
-                        ],
-                        callback_data="tg_route:field:vibey_reasoning_effort",
-                    )
-                ]
-            )
-
+        rows.extend(
+            [
+                InlineButton(
+                    text=f"{self._routing_field_label(name)}: {value_text}"[:40],
+                    callback_data=f"tg_route:field:{name}",
+                )
+            ]
+            for name, value_text in self._routing_fields(state)
+        )
         rows.append(
             [
                 InlineButton(text=f"💾 {self._t('common.save')}", callback_data="tg_route:save"),
@@ -2327,20 +2043,14 @@ class TelegramBot(BaseIMClient):
                 await self.send_message(context, f"❌ {self._t('error.routingModalFailed')}")
                 return
             await self._delete_interaction_message(context, state.message_id)
+            draft = state.draft()
             routing_update = {
                 "user_id": state.user_id,
                 "channel_id": state.channel_id,
                 "backend": state.backend,
-                "opencode_agent": state.opencode_agent,
-                "opencode_model": state.opencode_model,
-                "opencode_reasoning_effort": state.opencode_reasoning_effort,
-                "claude_agent": state.claude_agent,
-                "claude_model": state.claude_model,
-                "claude_reasoning_effort": state.claude_reasoning_effort,
-                "codex_model": state.codex_model,
-                "codex_reasoning_effort": state.codex_reasoning_effort,
-                "vibey_model": state.vibey_model,
-                "vibey_reasoning_effort": state.vibey_reasoning_effort,
+                "variant": draft.variant,
+                "model": draft.model,
+                "reasoning_effort": draft.reasoning_effort,
                 "is_dm": state.is_dm,
                 "platform": "telegram",
             }

@@ -1,11 +1,12 @@
 import asyncio
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend
+from modules.agents.catalog import NATIVE_CLI_BACKENDS, display_name_for_backend
 import io
 import json
 import logging
 import os
 import threading
 import time
+from dataclasses import replace
 from typing import Dict, Any, Optional, Callable, List
 
 import aiohttp
@@ -28,19 +29,9 @@ from .download_target import open_download_target
 from config.v2_config import DiscordConfig
 from .formatters import DiscordFormatter
 from vibe.i18n import get_supported_languages, t as i18n_t
-from modules.agents.opencode.utils import (
-    build_claude_reasoning_options,
-    build_opencode_model_option_items,
-    build_codex_reasoning_options,
-    format_claude_model_label,
-    build_reasoning_effort_options,
-    resolve_model_reasoning_options,
-    resolve_opencode_allowed_providers,
-    resolve_opencode_provider_preferences,
-)
+from core.modals import DEFAULT_OPTION_VALUE, RouteDraft, RouteOption, RoutingModalData, route_option_label
 from modules.agents.native_sessions.display import format_display_summary, format_display_time
 from modules.agents.native_sessions.types import NativeResumeSession
-from vibe.claude_model_catalog import DEFAULT_CLAUDE_MODEL_ALIASES
 
 logger = logging.getLogger(__name__)
 
@@ -53,26 +44,16 @@ _RUNTIME_RETRY_INITIAL_SECONDS = 1.0
 _RUNTIME_RETRY_MAX_SECONDS = 30.0
 
 
-def _prioritize_claude_model_choices(models: List[str], current_model: Optional[str]) -> List[str]:
-    """Order Claude model ids so the active selection and the canonical bare
-    aliases (opus/sonnet/haiku) survive Discord's 25-option select-menu cap.
-
-    ``api.claude_models()`` appends the bare aliases after the full catalog, so a
-    plain truncation silently drops the most useful, always-valid picks — and the
-    user's current selection. Surfacing them first means the cap only trims the
-    long tail of dated snapshots instead.
-    """
-    priority: List[str] = []
-    seen: set[str] = set()
-    for candidate in (current_model, *DEFAULT_CLAUDE_MODEL_ALIASES):
-        if candidate and candidate in models and candidate not in seen:
-            priority.append(candidate)
-            seen.add(candidate)
-    return priority + [model for model in models if model not in seen]
+def _choice(value: Optional[str]) -> Optional[str]:
+    return None if value in (None, DEFAULT_OPTION_VALUE) else value
 
 
 class DiscordBot(BaseIMClient):
     """Discord implementation of the IM client."""
+
+    # A select menu holds at most 25 options, each value at most 100 characters.
+    route_option_limit = 25
+    route_option_value_limit = 100
 
     def __init__(self, config: DiscordConfig):
         super().__init__(config)
@@ -1579,119 +1560,63 @@ class DiscordBot(BaseIMClient):
                 raise RuntimeError("Discord channel not found")
             await channel.send(intro_text, view=view)
 
-    async def open_routing_modal(
-        self,
-        trigger_id: Any,
-        channel_id: str,
-        registered_backends: list,
-        current_backend: str,
-        current_routing: Any,
-        opencode_agents: list,
-        opencode_models: dict,
-        opencode_default_config: dict,
-        claude_agents: list,
-        claude_models: list,
-        codex_agents: list,
-        codex_models: list,
-        backend_reasoning_options: Optional[dict] = None,
-        vibey_models: Optional[list] = None,
-    ):
+    async def open_routing_modal(self, trigger_id: Any, channel_id: str, routing: RoutingModalData):
         interaction = trigger_id if isinstance(trigger_id, discord.Interaction) else None
 
-        backend_display_names = {
-            backend: display_name_for_backend(backend) for backend in AGENT_BACKENDS
-        }
-
-        def _prefixed_label(prefix_key: str, label: str, limit: int = 100) -> str:
-            prefix = self._t(prefix_key)
+        def _prefixed_label(prefix: str, label: str, limit: int = 100) -> str:
             combined = f"{prefix}: {label}" if prefix else label
-            if len(combined) > limit:
-                return combined[:limit]
-            return combined
-
-        def _normalize_agent_name(agent: Any) -> Optional[str]:
-            if isinstance(agent, str):
-                return agent
-            if isinstance(agent, dict):
-                for key in ("name", "id", "label", "agent"):
-                    value = agent.get(key)
-                    if isinstance(value, str) and value:
-                        return value
-            return None
-
-        def _unique_agent_names(agents: list) -> list:
-            seen = set()
-            names = []
-            for agent in agents or []:
-                name = _normalize_agent_name(agent)
-                if not name or name in seen:
-                    continue
-                seen.add(name)
-                names.append(name)
-            return names
+            return combined[:limit]
 
         class RoutingView(discord.ui.View):
             def __init__(self, outer: DiscordBot, owner_id: Optional[str]):
                 super().__init__(timeout=900)
                 self.outer = outer
                 self.owner_id = owner_id
-                self.step = "backend"
-                self.selected_backend = current_backend or (
-                    registered_backends[0] if registered_backends else "opencode"
+                registered = routing.registered_backends
+                self.selected_backend = (
+                    routing.current_backend
+                    if routing.current_backend in registered
+                    else (registered[0] if registered else routing.current_backend)
                 )
-                canonical_model = getattr(current_routing, "model", None) if current_routing else None
-                canonical_reasoning = getattr(current_routing, "reasoning_effort", None) if current_routing else None
-
-                def _canonical_applies_to_backend(backend: str) -> bool:
-                    return backend == (current_backend or "opencode")
-
-                def _current_model(field_name: str, backend: str) -> Optional[str]:
-                    value = getattr(current_routing, field_name, None) if current_routing else None
-                    if value is not None:
-                        return value
-                    if self.selected_backend == backend and _canonical_applies_to_backend(backend):
-                        return canonical_model
-                    return None
-
-                def _current_reasoning(field_name: str, backend: str) -> Optional[str]:
-                    value = getattr(current_routing, field_name, None) if current_routing else None
-                    if value is not None:
-                        return value
-                    if self.selected_backend == backend and _canonical_applies_to_backend(backend):
-                        return canonical_reasoning
-                    return None
-
-                self.oc_agent = getattr(current_routing, "opencode_agent", None) if current_routing else None
-                self.oc_model = _current_model("opencode_model", "opencode")
-                self.oc_reasoning = _current_reasoning("opencode_reasoning_effort", "opencode")
-                self.claude_agent = getattr(current_routing, "claude_agent", None) if current_routing else None
-                self.claude_model = _current_model("claude_model", "claude")
-                self.claude_reasoning = _current_reasoning("claude_reasoning_effort", "claude")
-                self.codex_agent = getattr(current_routing, "codex_agent", None) if current_routing else None
-                self.codex_model = _current_model("codex_model", "codex")
-                self.codex_reasoning = _current_reasoning("codex_reasoning_effort", "codex")
-                self.vibey_model = _current_model("vibey_model", "vibey")
-                self.vibey_reasoning = _current_reasoning("vibey_reasoning_effort", "vibey")
+                # Each backend keeps its own choices while the view is open; one not yet shown starts stored.
+                self.drafts: dict[str, RouteDraft] = {}
                 self._render()
+
+            def _draft(self) -> RouteDraft:
+                backend = self.selected_backend
+                if backend not in self.drafts:
+                    self.drafts[backend] = routing.stored_draft(backend)
+                return self.drafts[backend]
+
+            def _select(self, placeholder: str, prefix: str, options, current, *, effort=False):
+                default = RouteOption(DEFAULT_OPTION_VALUE, "")
+                return discord.ui.Select(
+                    placeholder=placeholder,
+                    options=[
+                        discord.SelectOption(
+                            label=_prefixed_label(prefix, route_option_label(self.outer._t, option, effort=effort)),
+                            value=option.value,
+                            default=option.value == (current or DEFAULT_OPTION_VALUE),
+                        )
+                        for option in [default, *options]
+                    ],
+                    min_values=1,
+                    max_values=1,
+                )
 
             def _render(self):
                 self.clear_items()
-                options = []
-                for backend in registered_backends:
-                    display = backend_display_names.get(backend, backend.capitalize())
-                    label = _prefixed_label("discord.labels.backend", display)
-                    options.append(
+                t = self.outer._t
+                backend_select = discord.ui.Select(
+                    placeholder=t("modal.routing.selectBackend"),
+                    options=[
                         discord.SelectOption(
-                            label=label,
+                            label=_prefixed_label(t("discord.labels.backend"), display_name_for_backend(backend)),
                             value=backend,
                             default=backend == self.selected_backend,
                         )
-                    )
-                if len(options) > 25:
-                    options = options[:25]
-                backend_select = discord.ui.Select(
-                    placeholder=self.outer._t("modal.routing.selectBackend"),
-                    options=options,
+                        for backend in routing.registered_backends[:25]
+                    ],
                     min_values=1,
                     max_values=1,
                 )
@@ -1699,493 +1624,78 @@ class DiscordBot(BaseIMClient):
                 async def backend_callback(select_interaction: discord.Interaction):
                     if backend_select.values:
                         self.selected_backend = backend_select.values[0]
-                    self._render()
-                    updated_embed = discord.Embed(
-                        title=self._content(),
-                        description=self.outer._t("discord.routingSubtitle"),
-                    )
-                    await select_interaction.response.edit_message(embed=updated_embed, view=self)
+                    await self._refresh(select_interaction)
 
                 backend_select.callback = backend_callback
                 self.add_item(backend_select)
 
-                if self.selected_backend == "opencode":
-                    opencode_agent_names = _unique_agent_names(opencode_agents)
-                    target_model = self.oc_model if self.oc_model not in (None, "__default__") else None
-                    preferred_providers = resolve_opencode_provider_preferences(
-                        opencode_default_config,
-                        target_model,
-                    )
-                    allowed_providers = resolve_opencode_allowed_providers(
-                        opencode_default_config,
-                        opencode_models,
-                    )
-                    agent_options = [
-                        discord.SelectOption(
-                            label=_prefixed_label(
-                                "discord.labels.opencodeAgent",
-                                self.outer._t("common.default"),
-                            ),
-                            value="__default__",
-                            default=self.oc_agent in (None, "__default__"),
-                        )
-                    ]
-                    agent_options += [
-                        discord.SelectOption(
-                            label=_prefixed_label("discord.labels.opencodeAgent", a),
-                            value=a,
-                            default=a == self.oc_agent,
-                        )
-                        for a in opencode_agent_names
-                    ]
-                    if len(agent_options) > 25:
-                        agent_options = agent_options[:25]
-                    agent_select = discord.ui.Select(
-                        placeholder=self.outer._t("modal.routing.selectOpencodeAgent"),
-                        options=agent_options,
-                        min_values=1,
-                        max_values=1,
+                backend = self.selected_backend
+                menu = routing.menu(backend)
+                draft = self._draft()
+                backend_name = display_name_for_backend(backend)
+                variants = menu.variant_options(draft.variant)
+                if variants:
+                    variant_select = self._select(
+                        t("modal.routing.selectBackendAgent", backend=backend_name),
+                        t("discord.labels.backendAgent", backend=backend_name),
+                        variants,
+                        draft.variant,
                     )
 
-                    async def agent_callback(select_interaction: discord.Interaction):
-                        if agent_select.values:
-                            self.oc_agent = agent_select.values[0]
+                    async def variant_callback(select_interaction: discord.Interaction):
+                        if variant_select.values:
+                            self.drafts[backend] = replace(self._draft(), variant=_choice(variant_select.values[0]))
                         await select_interaction.response.defer()
 
-                    agent_select.callback = agent_callback
-                    self.add_item(agent_select)
+                    variant_select.callback = variant_callback
+                    self.add_item(variant_select)
 
-                    default_label = self.outer._t("common.default")
-                    model_options = [
-                        discord.SelectOption(
-                            label=_prefixed_label("discord.labels.model", default_label),
-                            value="__default__",
-                            default=self.oc_model in (None, "__default__"),
-                        )
-                    ]
-                    model_entries = build_opencode_model_option_items(
-                        opencode_models,
-                        max_total=24,
-                        preferred_providers=preferred_providers,
-                        allowed_providers=allowed_providers,
-                    )
-                    for entry in model_entries:
-                        label = entry.get("label", "")
-                        value = entry.get("value", "")
-                        if not label or not value:
-                            continue
-                        model_options.append(
-                            discord.SelectOption(
-                                label=_prefixed_label("discord.labels.model", label),
-                                value=value,
-                                default=value == self.oc_model,
-                            )
-                        )
-                    model_select = discord.ui.Select(
-                        placeholder=self.outer._t("modal.routing.selectModel"),
-                        options=model_options,
-                        min_values=1,
-                        max_values=1,
-                    )
-
-                    async def model_callback(select_interaction: discord.Interaction):
-                        if model_select.values:
-                            self.oc_model = model_select.values[0]
-                        self._render()
-                        updated_embed = discord.Embed(
-                            title=self._content(),
-                            description=self.outer._t("discord.routingSubtitle"),
-                        )
-                        await select_interaction.response.edit_message(embed=updated_embed, view=self)
-
-                    model_select.callback = model_callback
-                    self.add_item(model_select)
-
-                    reasoning_entries = build_reasoning_effort_options(opencode_models, target_model)
-                    selected_reasoning = (
-                        self.oc_reasoning if self.oc_reasoning not in (None, "__default__") else "__default__"
-                    )
-                    available_reasoning = {entry.get("value") for entry in reasoning_entries}
-                    if selected_reasoning not in available_reasoning:
-                        selected_reasoning = "__default__"
-                    reasoning_options = []
-                    for entry in reasoning_entries:
-                        value = entry.get("value")
-                        if not value:
-                            continue
-                        if value == "__default__":
-                            label = self.outer._t("common.default")
-                        else:
-                            translated = self.outer._t(f"reasoning.{value}")
-                            label = translated if translated != f"reasoning.{value}" else entry.get("label", value)
-                        reasoning_options.append(
-                            discord.SelectOption(
-                                label=_prefixed_label("discord.labels.reasoningEffort", label),
-                                value=value,
-                                default=value == selected_reasoning,
-                            )
-                        )
-                    reasoning_select = discord.ui.Select(
-                        placeholder=self.outer._t("modal.routing.selectReasoningEffort"),
-                        options=reasoning_options,
-                        min_values=1,
-                        max_values=1,
-                    )
-
-                    async def reasoning_callback(select_interaction: discord.Interaction):
-                        if reasoning_select.values:
-                            self.oc_reasoning = reasoning_select.values[0]
-                        await select_interaction.response.defer()
-
-                    reasoning_select.callback = reasoning_callback
-                    self.add_item(reasoning_select)
-
-                if self.selected_backend == "claude":
-                    claude_agent_names = _unique_agent_names(claude_agents)
-                    agent_options = [
-                        discord.SelectOption(
-                            label=_prefixed_label(
-                                "discord.labels.claudeAgent",
-                                self.outer._t("common.default"),
-                            ),
-                            value="__default__",
-                            default=self.claude_agent in (None, "__default__"),
-                        )
-                    ]
-                    agent_options += [
-                        discord.SelectOption(label=a, value=a, default=a == self.claude_agent)
-                        for a in claude_agent_names
-                    ]
-                    if len(agent_options) > 25:
-                        agent_options = agent_options[:25]
-                    agent_select = discord.ui.Select(
-                        placeholder=self.outer._t("modal.routing.selectClaudeAgent"),
-                        options=agent_options,
-                        min_values=1,
-                        max_values=1,
-                    )
-
-                    async def claude_agent_callback(select_interaction: discord.Interaction):
-                        if agent_select.values:
-                            self.claude_agent = agent_select.values[0]
-                        await select_interaction.response.defer()
-
-                    agent_select.callback = claude_agent_callback
-                    self.add_item(agent_select)
-
-                    model_options = [
-                        discord.SelectOption(
-                            label=_prefixed_label("discord.labels.model", self.outer._t("common.default")),
-                            value="__default__",
-                            default=self.claude_model in (None, "__default__"),
-                        )
-                    ]
-                    # Discord select menus cap at 25 options; prioritize the active
-                    # pick and the bare aliases so the truncation below only trims the
-                    # long tail of dated snapshots (see _prioritize_claude_model_choices).
-                    model_options += [
-                        discord.SelectOption(
-                            label=_prefixed_label("discord.labels.model", format_claude_model_label(m)),
-                            value=m,
-                            default=m == self.claude_model,
-                        )
-                        for m in _prioritize_claude_model_choices(claude_models, self.claude_model)
-                    ]
-                    if len(model_options) > 25:
-                        model_options = model_options[:25]
-                    model_select = discord.ui.Select(
-                        placeholder=self.outer._t("modal.routing.selectModel"),
-                        options=model_options,
-                        min_values=1,
-                        max_values=1,
-                    )
-
-                    async def claude_model_callback(select_interaction: discord.Interaction):
-                        if model_select.values:
-                            self.claude_model = model_select.values[0]
-                            self.claude_reasoning = None
-                        self._render()
-                        updated_embed = discord.Embed(
-                            title=self._content(),
-                            description=self.outer._t("discord.routingSubtitle"),
-                        )
-                        await select_interaction.response.edit_message(embed=updated_embed, view=self)
-
-                    model_select.callback = claude_model_callback
-                    self.add_item(model_select)
-
-                    target_claude_model = (
-                        self.claude_model if self.claude_model not in (None, "__default__") else None
-                    )
-                    claude_reasoning_entries = resolve_model_reasoning_options(
-                        (backend_reasoning_options or {}).get("claude"),
-                        target_claude_model,
-                        build_claude_reasoning_options(target_claude_model),
-                    )
-                    selected_cl_reasoning = (
-                        self.claude_reasoning if self.claude_reasoning not in (None, "__default__") else "__default__"
-                    )
-                    available_cl_reasoning = {entry.get("value") for entry in claude_reasoning_entries}
-                    if selected_cl_reasoning not in available_cl_reasoning:
-                        selected_cl_reasoning = "__default__"
-                        self.claude_reasoning = None
-                    reasoning_options = []
-                    for entry in claude_reasoning_entries:
-                        value = entry.get("value")
-                        if not value:
-                            continue
-                        if value == "__default__":
-                            label = self.outer._t("common.default")
-                        else:
-                            translated = self.outer._t(f"reasoning.{value}")
-                            label = translated if translated != f"reasoning.{value}" else entry.get("label", value)
-                        reasoning_options.append(
-                            discord.SelectOption(
-                                label=_prefixed_label("discord.labels.reasoningEffort", label),
-                                value=value,
-                                default=value == selected_cl_reasoning,
-                            )
-                        )
-                    reasoning_select = discord.ui.Select(
-                        placeholder=self.outer._t("modal.routing.selectReasoningEffort"),
-                        options=reasoning_options,
-                        min_values=1,
-                        max_values=1,
-                    )
-
-                    async def claude_reasoning_callback(select_interaction: discord.Interaction):
-                        if reasoning_select.values:
-                            self.claude_reasoning = reasoning_select.values[0]
-                        await select_interaction.response.defer()
-
-                    reasoning_select.callback = claude_reasoning_callback
-                    self.add_item(reasoning_select)
-
-                if self.selected_backend == "codex":
-                    codex_agent_names = _unique_agent_names(codex_agents)
-                    agent_options = [
-                        discord.SelectOption(
-                            label=_prefixed_label(
-                                "discord.labels.codexAgent",
-                                self.outer._t("common.default"),
-                            ),
-                            value="__default__",
-                            default=self.codex_agent in (None, "__default__"),
-                        )
-                    ]
-                    agent_options += [
-                        discord.SelectOption(label=a, value=a, default=a == self.codex_agent)
-                        for a in codex_agent_names
-                    ]
-                    if len(agent_options) > 25:
-                        agent_options = agent_options[:25]
-                    agent_select = discord.ui.Select(
-                        placeholder=self.outer._t("modal.routing.selectCodexAgent"),
-                        options=agent_options,
-                        min_values=1,
-                        max_values=1,
-                    )
-
-                    async def codex_agent_callback(select_interaction: discord.Interaction):
-                        if agent_select.values:
-                            self.codex_agent = agent_select.values[0]
-                        await select_interaction.response.defer()
-
-                    agent_select.callback = codex_agent_callback
-                    self.add_item(agent_select)
-
-                    model_options = [
-                        discord.SelectOption(
-                            label=_prefixed_label("discord.labels.model", self.outer._t("common.default")),
-                            value="__default__",
-                            default=self.codex_model in (None, "__default__"),
-                        )
-                    ]
-                    model_options += [
-                        discord.SelectOption(
-                            label=_prefixed_label("discord.labels.model", m),
-                            value=m,
-                            default=m == self.codex_model,
-                        )
-                        for m in codex_models
-                    ]
-                    if len(model_options) > 25:
-                        model_options = model_options[:25]
-                    model_select = discord.ui.Select(
-                        placeholder=self.outer._t("modal.routing.selectModel"),
-                        options=model_options,
-                        min_values=1,
-                        max_values=1,
-                    )
-
-                    async def codex_model_callback(select_interaction: discord.Interaction):
-                        if model_select.values:
-                            self.codex_model = model_select.values[0]
-                            self.codex_reasoning = None
-                        self._render()
-                        updated_embed = discord.Embed(
-                            title=self._content(),
-                            description=self.outer._t("discord.routingSubtitle"),
-                        )
-                        await select_interaction.response.edit_message(embed=updated_embed, view=self)
-
-                    model_select.callback = codex_model_callback
-                    self.add_item(model_select)
-
-                    target_codex_model = (
-                        self.codex_model if self.codex_model not in (None, "__default__") else None
-                    )
-                    codex_reasoning_entries = resolve_model_reasoning_options(
-                        (backend_reasoning_options or {}).get("codex"),
-                        target_codex_model,
-                        build_codex_reasoning_options(),
-                    )
-                    selected_cx_reasoning = (
-                        self.codex_reasoning if self.codex_reasoning not in (None, "__default__") else "__default__"
-                    )
-                    available_cx_reasoning = {entry.get("value") for entry in codex_reasoning_entries}
-                    if selected_cx_reasoning not in available_cx_reasoning:
-                        selected_cx_reasoning = "__default__"
-                        self.codex_reasoning = None
-                    reasoning_options = []
-                    for entry in codex_reasoning_entries:
-                        value = entry.get("value")
-                        if not value:
-                            continue
-                        if value == "__default__":
-                            label = self.outer._t("common.default")
-                        else:
-                            translated = self.outer._t(f"reasoning.{value}")
-                            label = translated if translated != f"reasoning.{value}" else entry.get("label", value)
-                        reasoning_options.append(
-                            discord.SelectOption(
-                                label=_prefixed_label("discord.labels.reasoningEffort", label),
-                                value=value,
-                                default=value == selected_cx_reasoning,
-                            )
-                        )
-                    reasoning_select = discord.ui.Select(
-                        placeholder=self.outer._t("modal.routing.selectReasoningEffort"),
-                        options=reasoning_options,
-                        min_values=1,
-                        max_values=1,
-                    )
-
-                    async def codex_reasoning_callback(select_interaction: discord.Interaction):
-                        if reasoning_select.values:
-                            self.codex_reasoning = reasoning_select.values[0]
-                        await select_interaction.response.defer()
-
-                    reasoning_select.callback = codex_reasoning_callback
-                    self.add_item(reasoning_select)
-
-                if self.selected_backend == "vibey":
-                    model_options = [
-                        discord.SelectOption(
-                            label=_prefixed_label("discord.labels.model", self.outer._t("common.default")),
-                            value="__default__",
-                            default=self.vibey_model in (None, "__default__"),
-                        )
-                    ]
-                    # A Discord option value holds at most 100 characters, and the Default option owns "__default__".
-                    vibey_entries = [
-                        entry
-                        for entry in vibey_models or []
-                        if isinstance(entry.get("value"), str)
-                        and 0 < len(entry["value"]) <= 100
-                        and entry["value"] != "__default__"
-                    ]
-                    # Discord caps a select at 25 options; keep the active pick inside the cap.
-                    vibey_entries.sort(key=lambda entry: entry.get("value") != self.vibey_model)
-                    model_options += [
-                        discord.SelectOption(
-                            label=_prefixed_label("discord.labels.model", str(entry.get("label") or entry["value"])),
-                            value=entry["value"],
-                            default=entry["value"] == self.vibey_model,
-                        )
-                        for entry in vibey_entries
-                    ]
-                    model_select = discord.ui.Select(
-                        placeholder=self.outer._t("modal.routing.selectModel"),
-                        options=model_options[:25],
-                        min_values=1,
-                        max_values=1,
-                    )
-
-                    async def vibey_model_callback(select_interaction: discord.Interaction):
-                        if model_select.values:
-                            self.vibey_model = model_select.values[0]
-                            self.vibey_reasoning = None
-                        self._render()
-                        updated_embed = discord.Embed(
-                            title=self._content(),
-                            description=self.outer._t("discord.routingSubtitle"),
-                        )
-                        await select_interaction.response.edit_message(embed=updated_embed, view=self)
-
-                    model_select.callback = vibey_model_callback
-                    self.add_item(model_select)
-
-                    vibey_reasoning_entries = resolve_model_reasoning_options(
-                        (backend_reasoning_options or {}).get("vibey"),
-                        self.vibey_model if self.vibey_model not in (None, "__default__") else None,
-                        build_codex_reasoning_options([]),
-                    )
-                    vibey_reasoning_entries = [entry for entry in vibey_reasoning_entries if entry.get("value")]
-                    # A model change clears the effort, so one the menu does not list is the stored route's (Model
-                    # Hub may refuse it now): keep it shown and selected, so saving unchanged does not drop it.
-                    if self.vibey_reasoning not in (None, "__default__") and all(
-                        entry["value"] != self.vibey_reasoning for entry in vibey_reasoning_entries
-                    ):
-                        vibey_reasoning_entries.append({"value": self.vibey_reasoning, "label": self.vibey_reasoning})
-                    reasoning_options = []
-                    for entry in vibey_reasoning_entries:
-                        value = entry.get("value")
-                        if not value:
-                            continue
-                        if value == "__default__":
-                            label = self.outer._t("common.default")
-                        else:
-                            translated = self.outer._t(f"reasoning.{value}")
-                            label = translated if translated != f"reasoning.{value}" else entry.get("label", value)
-                        reasoning_options.append(
-                            discord.SelectOption(
-                                label=_prefixed_label("discord.labels.reasoningEffort", label),
-                                value=value,
-                                default=value == (self.vibey_reasoning or "__default__"),
-                            )
-                        )
-                    reasoning_select = discord.ui.Select(
-                        placeholder=self.outer._t("modal.routing.selectReasoningEffort"),
-                        options=reasoning_options,
-                        min_values=1,
-                        max_values=1,
-                    )
-
-                    async def vibey_reasoning_callback(select_interaction: discord.Interaction):
-                        if reasoning_select.values:
-                            self.vibey_reasoning = reasoning_select.values[0]
-                        await select_interaction.response.defer()
-
-                    reasoning_select.callback = vibey_reasoning_callback
-                    self.add_item(reasoning_select)
-
-                save_button = discord.ui.Button(
-                    label=self.outer._t("common.save"),
-                    style=discord.ButtonStyle.primary,
+                model_select = self._select(
+                    t("modal.routing.selectModel"), t("discord.labels.model"), menu.model_options(draft.model), draft.model
                 )
+
+                async def model_callback(select_interaction: discord.Interaction):
+                    if model_select.values:
+                        self.drafts[backend] = self._draft().with_model(_choice(model_select.values[0]))
+                    await self._refresh(select_interaction)
+
+                model_select.callback = model_callback
+                self.add_item(model_select)
+
+                effort_select = self._select(
+                    t("modal.routing.selectReasoningEffort"),
+                    t("discord.labels.reasoningEffort"),
+                    menu.effort_options(draft.model, draft.reasoning_effort),
+                    draft.reasoning_effort,
+                    effort=True,
+                )
+
+                async def effort_callback(select_interaction: discord.Interaction):
+                    if effort_select.values:
+                        self.drafts[backend] = replace(
+                            self._draft(), reasoning_effort=_choice(effort_select.values[0])
+                        )
+                    await select_interaction.response.defer()
+
+                effort_select.callback = effort_callback
+                self.add_item(effort_select)
+
+                save_button = discord.ui.Button(label=t("common.save"), style=discord.ButtonStyle.primary)
                 save_button.callback = self._on_save
                 self.add_item(save_button)
+
+            async def _refresh(self, select_interaction: discord.Interaction):
+                self._render()
+                updated_embed = discord.Embed(
+                    title=self._content(),
+                    description=self.outer._t("discord.routingSubtitle"),
+                )
+                await select_interaction.response.edit_message(embed=updated_embed, view=self)
 
             def _content(self) -> str:
                 return f"🤖 {self.outer._t('modal.routing.title')}"
 
             async def _on_save(self, interaction: discord.Interaction):
-                def _normalize(value: Optional[str]) -> Optional[str]:
-                    if value in (None, "__default__"):
-                        return None
-                    return value
-
                 try:
                     await interaction.response.defer()
                     # Re-check auth before saving (defense-in-depth)
@@ -2204,21 +1714,14 @@ class DiscordBot(BaseIMClient):
                         return
 
                     if hasattr(self.outer, "_on_routing_update"):
+                        draft = self._draft()
                         await self.outer._on_routing_update(
                             user_id=str(interaction.user.id),
                             channel_id=channel_id,
                             backend=self.selected_backend,
-                            opencode_agent=_normalize(self.oc_agent),
-                            opencode_model=_normalize(self.oc_model),
-                            opencode_reasoning_effort=_normalize(self.oc_reasoning),
-                            claude_agent=_normalize(self.claude_agent),
-                            claude_model=_normalize(self.claude_model),
-                            claude_reasoning_effort=_normalize(self.claude_reasoning),
-                            codex_agent=_normalize(self.codex_agent),
-                            codex_model=_normalize(self.codex_model),
-                            codex_reasoning_effort=_normalize(self.codex_reasoning),
-                            vibey_model=_normalize(self.vibey_model),
-                            vibey_reasoning_effort=_normalize(self.vibey_reasoning),
+                            variant=draft.variant,
+                            model=draft.model,
+                            reasoning_effort=draft.reasoning_effort,
                             notify_user=True,
                             is_dm=interaction.guild is None,
                         )

@@ -8,9 +8,13 @@ from unittest.mock import patch
 
 from config.v2_settings import RoutingSettings
 from core.handlers.settings_handler import SettingsHandler
-from core.modals import RoutingModalSelection
+from core.modals import RouteOption, RoutingModalData, RoutingModalSelection
 from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
 from modules.im import MessageContext
+
+
+def _values(options) -> list[str]:
+    return [option.value for option in options]
 
 
 class _StubSettingsManager:
@@ -154,12 +158,8 @@ def test_handle_routing_update_preserves_existing_codex_agent_when_omitted() -> 
             user_id="42",
             channel_id="-100123",
             backend="codex",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model=None,
-            codex_model="gpt-5.4",
-            codex_reasoning_effort="high",
+            model="gpt-5.4",
+            reasoning_effort="high",
             notify_user=False,
             platform="telegram",
         )
@@ -190,13 +190,9 @@ def test_handle_routing_update_allows_explicit_codex_agent_clear() -> None:
             user_id="42",
             channel_id="-100123",
             backend="codex",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model=None,
-            codex_agent=None,
-            codex_model="gpt-5.4",
-            codex_reasoning_effort="high",
+            variant=None,
+            model="gpt-5.4",
+            reasoning_effort="high",
             notify_user=False,
             platform="telegram",
         )
@@ -219,12 +215,8 @@ def test_handle_routing_update_handles_first_codex_save_without_existing_routing
             user_id="42",
             channel_id="-100123",
             backend="codex",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model=None,
-            codex_model="gpt-5.4",
-            codex_reasoning_effort="high",
+            model="gpt-5.4",
+            reasoning_effort="high",
             notify_user=False,
             platform="telegram",
         )
@@ -253,11 +245,9 @@ def test_handle_routing_update_preserves_catalog_claude_effort() -> None:
                 user_id="42",
                 channel_id="-100123",
                 backend="claude",
-                opencode_agent=None,
-                opencode_model=None,
-                claude_agent="reviewer",
-                claude_model="claude-future-6",
-                claude_reasoning_effort="ultra",
+                variant="reviewer",
+                model="claude-future-6",
+                reasoning_effort="ultra",
                 notify_user=False,
                 platform="telegram",
             )
@@ -279,10 +269,8 @@ def test_handle_routing_update_saves_vibey_model_and_effort_on_the_vibey_route()
             user_id="42",
             channel_id="-100123",
             backend="vibey",
-            opencode_agent=None,
-            opencode_model="openai/gpt-5",
-            vibey_model="claude-opus-5-5",
-            vibey_reasoning_effort="xhigh",
+            model="claude-opus-5-5",
+            reasoning_effort="xhigh",
             platform="telegram",
         )
     )
@@ -301,10 +289,8 @@ def test_handle_routing_update_warns_flat_scope_with_existing_backend_session() 
             user_id="58181121",
             channel_id="58181121",
             backend="claude",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model=None,
+            variant=None,
+            model=None,
             platform="telegram",
             is_dm=True,
         )
@@ -324,10 +310,8 @@ def test_handle_routing_update_warns_wechat_flat_scope_with_existing_backend_ses
             user_id="58181121",
             channel_id="58181121",
             backend="claude",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model=None,
+            variant=None,
+            model=None,
             platform="wechat",
             is_dm=True,
         )
@@ -354,10 +338,8 @@ def test_handle_routing_update_does_not_warn_flat_scope_same_backend_model_chang
             user_id="58181121",
             channel_id="58181121",
             backend="claude",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model="claude-opus-4-1",
+            variant=None,
+            model="claude-opus-4-1",
             platform="telegram",
             is_dm=True,
         )
@@ -384,11 +366,9 @@ def test_handle_routing_update_does_not_warn_flat_scope_same_backend_reasoning_c
             user_id="58181121",
             channel_id="58181121",
             backend="claude",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model="claude-sonnet-4-5",
-            claude_reasoning_effort="high",
+            variant=None,
+            model="claude-sonnet-4-5",
+            reasoning_effort="high",
             platform="telegram",
             is_dm=True,
         )
@@ -415,10 +395,8 @@ def test_handle_routing_update_does_not_warn_flat_scope_same_session_target() ->
             user_id="58181121",
             channel_id="58181121",
             backend="claude",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model="claude-sonnet-4-5",
+            variant=None,
+            model="claude-sonnet-4-5",
             platform="telegram",
             is_dm=True,
         )
@@ -437,10 +415,8 @@ def test_handle_routing_update_does_not_warn_when_flat_scope_has_no_session() ->
             user_id="58181121",
             channel_id="58181121",
             backend="claude",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model=None,
+            variant=None,
+            model=None,
             platform="telegram",
             is_dm=True,
         )
@@ -460,10 +436,8 @@ def test_handle_routing_update_does_not_warn_threaded_scope() -> None:
             user_id="U123",
             channel_id="D123",
             backend="claude",
-            opencode_agent=None,
-            opencode_model=None,
-            claude_agent=None,
-            claude_model=None,
+            variant=None,
+            model=None,
             platform="slack",
             is_dm=True,
         )
@@ -594,8 +568,8 @@ def test_gather_routing_modal_data_fetches_selected_backend_on_modal_update() ->
         data = asyncio.run(handler._gather_routing_modal_data(context, selected_backend="claude"))
 
     assert data.current_backend == "opencode"
-    assert data.claude_agents == [{"id": "reviewer"}]
-    assert data.claude_models == ["claude-sonnet-4-6"]
+    assert _values(data.menus["claude"].variants) == ["reviewer"]
+    assert _values(data.menus["claude"].models) == ["claude-sonnet-4-6"]
     assert server.calls == []
 
 
@@ -607,7 +581,8 @@ def test_gather_routing_modal_data_prefetches_all_backends_when_requested() -> N
         "vibe.api.claude_models",
         return_value={
             "ok": True,
-            "models": ["claude-sonnet-4-6"],
+            # claude_models() appends the bare aliases after the dated catalog.
+            "models": ["claude-sonnet-4-6", "opus"],
             "reasoning_options": {"claude-sonnet-4-6": [{"value": "max", "label": "Max"}]},
         },
     ), patch("vibe.api.codex_agents", return_value={"ok": True, "agents": [{"id": "builder"}]}), patch(
@@ -621,15 +596,16 @@ def test_gather_routing_modal_data_prefetches_all_backends_when_requested() -> N
         data = asyncio.run(handler._gather_routing_modal_data(context, include_all_backend_data=True))
 
     assert data.registered_backends == list(AGENT_BACKENDS)
-    assert data.opencode_agents == [{"name": "build"}]
-    assert data.claude_agents == [{"id": "reviewer"}]
-    assert data.claude_models == ["claude-sonnet-4-6"]
-    assert data.codex_agents == [{"id": "builder"}]
-    assert data.codex_models == ["gpt-5.4"]
-    assert data.backend_reasoning_options == {
-        "claude": {"claude-sonnet-4-6": [{"value": "max", "label": "Max"}]},
-        "codex": {"gpt-5.4": [{"value": "ultra", "label": "Ultra"}]},
+    menus = data.menus
+    assert {backend: _values(menu.variants) for backend, menu in menus.items()} == {
+        "vibey": [], "opencode": ["build"], "claude": ["reviewer"], "codex": ["builder"],
     }
+    # The always-valid bare aliases lead, so a capped select trims dated snapshots first.
+    assert _values(menus["claude"].models) == ["opus", "claude-sonnet-4-6"]
+    assert _values(menus["codex"].models) == ["gpt-5.4"]
+    # Each model's catalog efforts, not a backend-wide ladder.
+    assert _values(menus["claude"].efforts["claude-sonnet-4-6"]) == ["max"]
+    assert _values(menus["codex"].efforts["gpt-5.4"]) == ["ultra"]
     assert server.calls == [
         "current_server",
         "agents:/tmp/workspace",
@@ -659,13 +635,13 @@ def test_gather_routing_modal_data_reads_vibey_menu_from_model_hub() -> None:
 
     read_agent_sources.assert_awaited_once_with("vibey")
     assert data.current_backend == "vibey"
-    assert data.vibey_models == [{"value": "model-a", "label": "Model A"}, {"value": "model-b", "label": "model-b"}]
-    efforts = {model: [entry["value"] for entry in entries] for model, entries in data.backend_reasoning_options["vibey"].items()}
+    menu = data.menus["vibey"]
+    assert menu.models == [RouteOption("model-a", "Model A"), RouteOption("model-b", "model-b")]
     # Model Hub's omitted efforts are not offered; a route without its own model inherits the Vibey Agent's.
-    assert efforts == {
-        "model-a": ["__default__", "low", "high"],
-        "model-b": ["__default__"],
-        "": ["__default__", "low", "high"],
+    assert {model: _values(efforts) for model, efforts in menu.efforts.items()} == {
+        "model-a": ["low", "high"],
+        "model-b": [],
+        "": ["low", "high"],
     }
     assert server.calls == []
 
@@ -703,7 +679,7 @@ def test_gather_routing_modal_data_falls_back_to_visible_backend_when_current_is
     # Listed first, the built-in backend is still not the fallback while another is enabled.
     assert data.current_backend == "opencode"
     assert data.registered_backends == ["vibey", "opencode", "codex"]
-    assert data.opencode_agents == [{"name": "build"}]
+    assert _values(data.menus["opencode"].variants) == ["build"]
     assert server.calls == [
         "current_server",
         "agents:/tmp/workspace",
@@ -735,8 +711,8 @@ def test_slack_backend_switch_back_shows_the_stored_route_not_blanks() -> None:
     handler._get_im_client = lambda context: bot
     # The modal as Slack holds it after a switch to OpenCode: it has no Vibey controls.
     view = bot._build_routing_modal_view(
-        channel_id="D0APS47LPU2", registered_backends=["vibey", "opencode"], current_backend="vibey",
-        current_routing=routing, opencode_agents=[], opencode_models={}, opencode_default_config={},
+        channel_id="D0APS47LPU2",
+        routing=RoutingModalData(registered_backends=["vibey", "opencode"], current_backend="vibey", current_routing=routing),
         selected_backend="opencode",
     )
     view["state"] = {"values": {
@@ -745,9 +721,7 @@ def test_slack_backend_switch_back_shows_the_stored_route_not_blanks() -> None:
     }}
     view["state"]["values"]["backend_block"]["backend_select"] = {"selected_option": {"value": "vibey"}}
     selection = parse_routing_modal_selection(
-        view=view,
-        action={"action_id": "backend_select", "selected_option": {"value": "vibey"}},
-        fallback_selected_backend="",
+        view=view, action={"action_id": "backend_select", "selected_option": {"value": "vibey"}}
     )
 
     asyncio.run(
@@ -759,10 +733,11 @@ def test_slack_backend_switch_back_shows_the_stored_route_not_blanks() -> None:
 
     updated = bot.web_client.views_update.await_args.kwargs["view"]
     shown = {
-        block["block_id"]: block["element"]["initial_option"]["value"]
+        block["block_id"].rsplit(":", 1)[0] if block["block_id"].startswith("route_effort:") else block["block_id"]:
+        block["element"]["initial_option"]["value"]
         for block in updated["blocks"] if block["type"] == "input"
     }
-    assert (shown["vibey_model_block"], shown["vibey_reasoning_block"]) == ("model-b", "high")
+    assert (shown["route_model:vibey"], shown["route_effort:vibey"]) == ("model-b", "high")
 
 
 def test_handle_routing_modal_update_uses_visible_current_backend() -> None:
@@ -789,5 +764,5 @@ def test_handle_routing_modal_update_uses_visible_current_backend() -> None:
     )
 
     assert len(update_calls) == 1
-    assert update_calls[0]["current_backend"] == "opencode"
+    assert update_calls[0]["routing"].current_backend == "opencode"
     assert update_calls[0]["selected_backend"] == "opencode"
