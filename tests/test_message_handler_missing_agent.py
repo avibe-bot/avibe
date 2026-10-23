@@ -230,17 +230,22 @@ def test_an_agent_that_cannot_run_holds_its_input_only_where_it_can_be_retried()
     handler = MessageHandler(controller)
     disabled = AgentUnavailableError("agent 'codex' is disabled", agent_name="codex", reason="disabled")
 
-    def failed(platform, phase, *, delivered=True):
+    def failed(platform, phase, *, delivered=True, settle_raises=False):
         context = MessageContext(user_id="U1", channel_id="ses-1", platform=platform)
         set_dispatch_phase(context, phase)
 
         async def notify(*_args, delivery=None, **_kwargs):
             if delivered and delivery is not None:
                 delivery.delivered_id = "notice-1"
+            if settle_raises:
+                raise RuntimeError("turn settlement failed")
             return False
 
         with patch.dict(MessageHandler._emit_agent_cannot_run.__globals__, emit_backend_failure=notify):
-            anyio.run(handler._emit_agent_dispatch_failure, context, None, disabled)
+            try:
+                anyio.run(handler._emit_agent_dispatch_failure, context, None, disabled)
+            except RuntimeError:
+                assert settle_raises
         return context
 
     workbench = failed("avibe", DISPATCH_PHASE_PREWRITE)
@@ -254,6 +259,11 @@ def test_an_agent_that_cannot_run_holds_its_input_only_where_it_can_be_retried()
     assert prewrite_failure_evidence(chat_app) == {"reason": "agent_unavailable", "retire_input": True}
     # Not told to send it again, so the input is left to the ordinary retries.
     assert prewrite_failure_evidence(failed("telegram", DISPATCH_PHASE_PREWRITE, delivered=False)) == {}
+    # Told, then settling the turn raised: still retired, or it would run twice.
+    assert prewrite_failure_evidence(failed("telegram", DISPATCH_PHASE_PREWRITE, settle_raises=True)) == {
+        "reason": "agent_unavailable",
+        "retire_input": True,
+    }
     for platform in ("avibe", "telegram"):
         assert prewrite_failure_evidence(failed(platform, DISPATCH_PHASE_ATTEMPTING)) == {}
 

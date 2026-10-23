@@ -1005,21 +1005,24 @@ class MessageHandler(BaseHandler):
             next_step = "error.continueOnVibey.im" if offer else "error.agentUnavailable.resendLater"
             text = f"{text}\n{self._t(next_step)}"
         delivery = DeliveryEvidence() if chat_input else None
-        await emit_backend_failure(
-            self.controller,
-            context,
-            str(failing_backend or getattr(request, "vibe_agent_backend", None) or "agent"),
-            text,
-            display_text=text,
-            request=request,
-            output=output,
-            delivery=delivery,
-            cause=cause,
-        )
-        # A chat app's input is retired only once the user was told to send it again;
-        # an undelivered notice leaves it to the ordinary startup retries.
-        if delivery is not None and delivery.delivered:
-            mark_prewrite_input_retired(context, "agent_unavailable")
+        try:
+            await emit_backend_failure(
+                self.controller,
+                context,
+                str(failing_backend or getattr(request, "vibe_agent_backend", None) or "agent"),
+                text,
+                display_text=text,
+                request=request,
+                output=output,
+                delivery=delivery,
+                cause=cause,
+            )
+        finally:
+            # A chat app's input is retired only once the user was told to send it
+            # again, even if settling the turn then raised; an undelivered notice
+            # leaves it to the ordinary startup retries.
+            if delivery is not None and delivery.delivered:
+                mark_prewrite_input_retired(context, "agent_unavailable")
 
     def _builtin_vibey_available(self) -> bool:
         """Whether a continuation on Vibey could run now: its built-in Agent exists and
