@@ -1751,20 +1751,20 @@ class TelegramBot(BaseIMClient):
             vibey_model=current_model if backend == "vibey" else None,
             vibey_reasoning_effort=current_effort if backend == "vibey" else None,
         )
-        if backend in {"claude", "codex", "vibey"}:
+        # Vibey keeps a stored effort its menu no longer lists (Model Hub may refuse it now), so saving unchanged
+        # does not drop it; its picker lists it.
+        if backend in {"claude", "codex"}:
             from modules.agents.opencode.utils import (
                 build_claude_reasoning_options,
                 build_codex_reasoning_options,
                 resolve_model_reasoning_options,
             )
 
-            target_model = getattr(state, f"{backend}_model")
+            target_model = state.claude_model if backend == "claude" else state.codex_model
             fallback = (
                 build_claude_reasoning_options(target_model)
                 if backend == "claude"
                 else build_codex_reasoning_options()
-                if backend == "codex"
-                else build_codex_reasoning_options([])
             )
             available_efforts = {
                 entry.get("value")
@@ -2114,7 +2114,7 @@ class TelegramBot(BaseIMClient):
                 if entry.get("value")
             ]
         if field == "vibey_reasoning_effort":
-            return [
+            options = [
                 (
                     self._option_label(None if entry.get("value") == "__default__" else str(entry.get("value"))),
                     None if entry.get("value") == "__default__" else str(entry.get("value")),
@@ -2126,6 +2126,11 @@ class TelegramBot(BaseIMClient):
                 )
                 if entry.get("value")
             ]
+            # A model change clears the effort, so one the menu does not list is the stored route's.
+            stored = state.vibey_reasoning_effort
+            if stored and all(value != stored for _, value in options):
+                options.append((self._option_label(stored), stored))
+            return options
         return []
 
     def _apply_routing_option(self, state: _TelegramRoutingState, value: Optional[str]) -> None:

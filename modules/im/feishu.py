@@ -3003,8 +3003,10 @@ class FeishuBot(BaseIMClient):
                 build_codex_reasoning_options([]),
             )
             vb_current_re = _routing_value("vibey_reasoning_effort")
-            if vb_current_re not in {item["value"] for item in vb_re_defs}:
-                vb_current_re = None
+            # A model change clears the effort, so one the menu does not list is the stored route's (Model Hub may
+            # refuse it now): keep it shown and selected, so saving unchanged does not drop it.
+            if vb_current_re and vb_current_re not in {item["value"] for item in vb_re_defs}:
+                vb_re_defs = [*vb_re_defs, {"value": vb_current_re, "label": vb_current_re}]
             vb_re_options = []
             for item in vb_re_defs:
                 value = item["value"]

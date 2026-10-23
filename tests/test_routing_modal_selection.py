@@ -56,3 +56,23 @@ def test_parse_routing_modal_selection_applies_codex_action_override():
     assert selection.selected_backend == "codex"
     assert selection.selected_codex_agent == "reviewer"
     assert selection.selected_codex_model == "gpt-5.4-mini"
+
+
+def test_parse_routing_modal_selection_vibey_model_change_clears_its_effort():
+    # The effort shown beside the old model is not a pick for the new one; a stored effort the menu omits is
+    # kept visible on the assumption that only an unchanged model carries one.
+    view = {
+        "state": {
+            "values": {
+                "backend_block": {"backend_select": {"selected_option": {"value": "vibey"}}},
+                "vibey_model_block": {"vibey_model_select": {"selected_option": {"value": "model-a"}}},
+                "vibey_reasoning_block": {"vibey_reasoning_select__1a2b3c4d": {"selected_option": {"value": "max"}}},
+            }
+        }
+    }
+    action = {"action_id": "vibey_model_select", "selected_option": {"value": "model-b"}}
+
+    selection = parse_routing_modal_selection(view=view, action=action, fallback_selected_backend="")
+
+    assert (selection.selected_vibey_model, selection.selected_vibey_reasoning) == ("model-b", None)
+    assert selection.backend_switched is False

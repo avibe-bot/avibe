@@ -4194,24 +4194,29 @@ class SlackBot(BaseIMClient):
             else:
                 current_vb_reasoning = selected_vibey_reasoning
 
+            def _slack_option_value(value: object) -> bool:
+                # A Slack option value holds at most 150 characters, and the Default option owns "__default__".
+                return isinstance(value, str) and 0 < len(value) <= 150 and value != "__default__"
+
+            vb_entries = [
+                (str(entry.get("label") or entry["value"]), entry["value"])
+                for entry in vibey_models or []
+                if _slack_option_value(entry.get("value"))
+            ]
+            # Keep the shown model, listed or not, inside Slack's 100-option cap (Default takes one), so saving
+            # the modal unchanged never drops it.
+            if _slack_option_value(current_vb_model) and all(
+                value != current_vb_model for _, value in vb_entries[:99]
+            ):
+                label = next((label for label, value in vb_entries if value == current_vb_model), current_vb_model)
+                vb_entries = [entry for entry in vb_entries if entry[1] != current_vb_model][:98]
+                vb_entries.append((label, current_vb_model))
             vb_model_options = [
                 {"text": {"type": "plain_text", "text": self._t("common.default")}, "value": "__default__"}
+            ] + [
+                {"text": {"type": "plain_text", "text": label[:75]}, "value": value}
+                for label, value in vb_entries[:99]
             ]
-            for entry in vibey_models or []:
-                value = entry.get("value")
-                if value:
-                    vb_model_options.append(
-                        {
-                            "text": {"type": "plain_text", "text": str(entry.get("label") or value)[:75]},
-                            "value": value,
-                        }
-                    )
-            # Keep a stored model the menu no longer lists, so saving does not silently drop it.
-            if current_vb_model and not any(opt["value"] == current_vb_model for opt in vb_model_options):
-                vb_model_options.append(
-                    {"text": {"type": "plain_text", "text": current_vb_model[:75]}, "value": current_vb_model}
-                )
-            vb_model_options = vb_model_options[:100]
             initial_vb_model = next(
                 (opt for opt in vb_model_options if opt["value"] == current_vb_model),
                 vb_model_options[0],
@@ -4222,23 +4227,39 @@ class SlackBot(BaseIMClient):
                 current_vb_model,
                 build_codex_reasoning_options([]),
             )
-            available_vb_reasoning = {entry.get("value") for entry in vb_reasoning_entries}
-            selected_vb_reasoning = (
-                current_vb_reasoning if current_vb_reasoning in available_vb_reasoning else "__default__"
-            )
-            vb_reasoning_options = []
-            for entry in vb_reasoning_entries:
-                value = entry.get("value")
-                if not value:
-                    continue
+            def _vb_effort_label(value: str, fallback: str) -> str:
                 if value == "__default__":
-                    label = self._t("common.default")
-                else:
-                    translated = self._t(f"reasoning.{value}")
-                    label = translated if translated != f"reasoning.{value}" else entry.get("label", value)
-                vb_reasoning_options.append({"text": {"type": "plain_text", "text": label}, "value": value})
+                    return self._t("common.default")
+                translated = self._t(f"reasoning.{value}")
+                return translated if translated != f"reasoning.{value}" else fallback
+
+            vb_reasoning_options = [
+                {
+                    "text": {
+                        "type": "plain_text",
+                        "text": _vb_effort_label(entry["value"], entry.get("label", entry["value"])),
+                    },
+                    "value": entry["value"],
+                }
+                for entry in vb_reasoning_entries
+                if entry.get("value")
+            ]
+            # A model change clears the effort, so one the menu does not list is the stored route's (Model Hub may
+            # refuse it now): keep it shown and selected, so saving the modal unchanged does not drop it.
+            if _slack_option_value(current_vb_reasoning) and all(
+                opt["value"] != current_vb_reasoning for opt in vb_reasoning_options
+            ):
+                vb_reasoning_options.append(
+                    {
+                        "text": {
+                            "type": "plain_text",
+                            "text": _vb_effort_label(current_vb_reasoning, current_vb_reasoning),
+                        },
+                        "value": current_vb_reasoning,
+                    }
+                )
             initial_vb_reasoning = next(
-                (opt for opt in vb_reasoning_options if opt["value"] == selected_vb_reasoning),
+                (opt for opt in vb_reasoning_options if opt["value"] == (current_vb_reasoning or "__default__")),
                 vb_reasoning_options[0],
             )
             # Slack keeps an input's state across views.update while its action_id stays the same, so the
@@ -4513,17 +4534,18 @@ class SlackBot(BaseIMClient):
         backend_reasoning_options: dict = None,
         vibey_models: list = None,
         selected_backend: Optional[str] = None,
-        selected_opencode_agent: Optional[str] = None,
-        selected_opencode_model: Optional[str] = None,
-        selected_opencode_reasoning: Optional[str] = None,
-        selected_claude_agent: Optional[str] = None,
-        selected_claude_model: Optional[str] = None,
-        selected_claude_reasoning: Optional[str] = None,
-        selected_codex_agent: Optional[str] = None,
-        selected_codex_model: Optional[str] = None,
-        selected_codex_reasoning: Optional[str] = None,
-        selected_vibey_model: Optional[str] = None,
-        selected_vibey_reasoning: Optional[str] = None,
+        # An omitted selection shows the stored route's value, as when the modal opens.
+        selected_opencode_agent: object = _UNSET,
+        selected_opencode_model: object = _UNSET,
+        selected_opencode_reasoning: object = _UNSET,
+        selected_claude_agent: object = _UNSET,
+        selected_claude_model: object = _UNSET,
+        selected_claude_reasoning: object = _UNSET,
+        selected_codex_agent: object = _UNSET,
+        selected_codex_model: object = _UNSET,
+        selected_codex_reasoning: object = _UNSET,
+        selected_vibey_model: object = _UNSET,
+        selected_vibey_reasoning: object = _UNSET,
     ) -> None:
         """Update routing modal when selections change."""
         self._ensure_clients()

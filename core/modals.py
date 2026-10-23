@@ -59,3 +59,5 @@ class RoutingModalSelection:
     selected_codex_reasoning: Optional[str] = None
     selected_vibey_model: Optional[str] = None
     selected_vibey_reasoning: Optional[str] = None
+    # A backend switch: the newly shown backend had no controls, so it starts from the stored route.
+    backend_switched: bool = False

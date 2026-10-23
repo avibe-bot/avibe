@@ -3253,6 +3253,28 @@ def test_retired_builtins_leave_the_picker_but_stay_routeable(monkeypatch, tmp_p
     ]
 
 
+def test_read_agent_sources_reads_recovery_state_on_the_owning_loop(tmp_path):
+    """Recovery annotations may wake loop-owned waiters, so a loop caller reads them on that loop."""
+    service, store, _adapter = _service(tmp_path)
+    store.config.agents["vibey"].models = [ModelHubBackendModelConfig(id="vibey-model", origin="user")]
+    annotations = service.recovery.annotations
+    threads = []
+
+    def recorded(config):
+        threads.append(threading.get_ident())
+        return annotations(config)
+
+    service.recovery.annotations = recorded
+
+    async def read():
+        return threading.get_ident(), await service.read_agent_sources("vibey")
+
+    loop_thread, payload = asyncio.run(read())
+
+    assert threads == [loop_thread]
+    assert payload == service.get_agent_sources("vibey")
+
+
 def test_compatibility_projections_hide_retired_builtins_unless_requested(tmp_path):
     service, store, _adapter = _service(tmp_path)
     store.config.agents["claude"].models = [

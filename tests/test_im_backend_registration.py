@@ -86,14 +86,24 @@ def _efforts(*values):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("platform", ["slack", "discord", "telegram", "feishu"])
 async def test_vibey_route_offers_its_models_and_efforts_and_saves_the_choice(platform):
-    """A channel routed to Vibey can see and keep its model and effort in every IM routing UI."""
+    """A channel routed to Vibey can see and keep its model and effort in every IM routing UI.
+
+    The stored model sits past every platform's option cap, and Model Hub no longer offers the stored effort:
+    saving unchanged must still keep both.
+    """
+    long_id = "vendor/" + "x" * 160  # longer than a Slack or Discord option value may be
     routing = dict(
         registered_backends=["vibey", "codex"], current_backend="vibey",
         current_routing=RoutingSettings(agent_name="vibey", model="model-b", reasoning_effort="max"),
         opencode_agents=[], opencode_models={}, opencode_default_config={},
         claude_agents=[], claude_models=[], codex_agents=[], codex_models=[],
-        vibey_models=[{"value": "model-a", "label": "Model A"}, {"value": "model-b", "label": "Model B"}],
-        backend_reasoning_options={"vibey": {"model-a": _efforts("low"), "model-b": _efforts("high", "max")}},
+        vibey_models=[
+            {"value": "model-a", "label": "Model A"},
+            *({"value": f"filler-{i}", "label": f"Filler {i}"} for i in range(120)),
+            {"value": long_id, "label": "Long"},
+            {"value": "model-b", "label": "Model B"},
+        ],
+        backend_reasoning_options={"vibey": {"model-a": _efforts("low"), "model-b": _efforts("high")}},
     )
     context = MessageContext(user_id="42", channel_id="fixture-channel", message_id="88", platform=platform,
                              platform_specific={"is_dm": False})
@@ -156,6 +166,8 @@ async def test_vibey_route_offers_its_models_and_efforts_and_saves_the_choice(pl
     assert {"model-a", "model-b", "high", "max"} <= values
     assert "low" not in values  # model-a's efforts are not model-b's
     assert "Model B" in json.dumps(offered)
+    if platform in {"slack", "discord"}:
+        assert long_id not in values  # one such id must not make the whole view invalid
     saved.assert_awaited_once()
     assert saved.await_args.kwargs["backend"] == "vibey"
     assert (saved.await_args.kwargs["vibey_model"], saved.await_args.kwargs["vibey_reasoning_effort"]) == (

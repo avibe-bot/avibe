@@ -2087,7 +2087,14 @@ class DiscordBot(BaseIMClient):
                             default=self.vibey_model in (None, "__default__"),
                         )
                     ]
-                    vibey_entries = [entry for entry in vibey_models or [] if entry.get("value")]
+                    # A Discord option value holds at most 100 characters, and the Default option owns "__default__".
+                    vibey_entries = [
+                        entry
+                        for entry in vibey_models or []
+                        if isinstance(entry.get("value"), str)
+                        and 0 < len(entry["value"]) <= 100
+                        and entry["value"] != "__default__"
+                    ]
                     # Discord caps a select at 25 options; keep the active pick inside the cap.
                     vibey_entries.sort(key=lambda entry: entry.get("value") != self.vibey_model)
                     model_options += [
@@ -2124,9 +2131,13 @@ class DiscordBot(BaseIMClient):
                         self.vibey_model if self.vibey_model not in (None, "__default__") else None,
                         build_codex_reasoning_options([]),
                     )
-                    available_vb_reasoning = {entry.get("value") for entry in vibey_reasoning_entries}
-                    if self.vibey_reasoning not in available_vb_reasoning:
-                        self.vibey_reasoning = None
+                    vibey_reasoning_entries = [entry for entry in vibey_reasoning_entries if entry.get("value")]
+                    # A model change clears the effort, so one the menu does not list is the stored route's (Model
+                    # Hub may refuse it now): keep it shown and selected, so saving unchanged does not drop it.
+                    if self.vibey_reasoning not in (None, "__default__") and all(
+                        entry["value"] != self.vibey_reasoning for entry in vibey_reasoning_entries
+                    ):
+                        vibey_reasoning_entries.append({"value": self.vibey_reasoning, "label": self.vibey_reasoning})
                     reasoning_options = []
                     for entry in vibey_reasoning_entries:
                         value = entry.get("value")

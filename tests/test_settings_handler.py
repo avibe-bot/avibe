@@ -648,9 +648,8 @@ def test_gather_routing_modal_data_reads_vibey_menu_from_model_hub() -> None:
          "reasoning_efforts": ["low"], "effort_menu": {"omitted": [], "not_on": {}}},
         {"id": "selector", "routeable": False, "reasoning_efforts": []},
     ]
-    handler.controller.model_hub_service = SimpleNamespace(
-        get_agent_sources=lambda backend: {"backend": backend, "catalog_models": catalog},
-    )
+    read_agent_sources = AsyncMock(return_value={"backend": "vibey", "catalog_models": catalog})
+    handler.controller.model_hub_service = SimpleNamespace(read_agent_sources=read_agent_sources)
     handler.controller.vibe_agent_store = SimpleNamespace(
         get_builtin_default_agent_for_backend=lambda backend, enabled_only=True: SimpleNamespace(model="model-a"),
     )
@@ -658,6 +657,7 @@ def test_gather_routing_modal_data_reads_vibey_menu_from_model_hub() -> None:
 
     data = asyncio.run(handler._gather_routing_modal_data(context))
 
+    read_agent_sources.assert_awaited_once_with("vibey")
     assert data.current_backend == "vibey"
     assert data.vibey_models == [{"value": "model-a", "label": "Model A"}, {"value": "model-b", "label": "model-b"}]
     efforts = {model: [entry["value"] for entry in entries] for model, entries in data.backend_reasoning_options["vibey"].items()}
@@ -710,6 +710,59 @@ def test_gather_routing_modal_data_falls_back_to_visible_backend_when_current_is
         "models:/tmp/workspace",
         "config:/tmp/workspace",
     ]
+
+
+def test_slack_backend_switch_back_shows_the_stored_route_not_blanks() -> None:
+    """Switching the Slack modal away from the stored backend and back must not blank what saving would persist."""
+    from config.v2_config import SlackConfig
+    from modules.im.slack import SlackBot
+    from modules.im.slack_modal import parse_routing_modal_selection
+
+    handler, _server = _make_routing_handler()
+    routing = RoutingSettings(agent_name="vibey", model="model-b", reasoning_effort="high")
+    handler.settings_manager = SimpleNamespace(get_channel_routing=lambda settings_key: routing)
+    handler.controller.resolve_agent_for_context = lambda context: "vibey"
+    catalog = [
+        {"id": model_id, "routeable": True, "reasoning_efforts": ["low", "high"], "effort_menu": {"omitted": []}}
+        for model_id in ("model-a", "model-b")
+    ]
+    handler.controller.model_hub_service = SimpleNamespace(
+        read_agent_sources=AsyncMock(return_value={"catalog_models": catalog}),
+    )
+    bot = SlackBot(SlackConfig(bot_token="fixture-token"))
+    bot._ensure_clients = lambda: None
+    bot.web_client = SimpleNamespace(views_update=AsyncMock())
+    handler._get_im_client = lambda context: bot
+    # The modal as Slack holds it after a switch to OpenCode: it has no Vibey controls.
+    view = bot._build_routing_modal_view(
+        channel_id="D0APS47LPU2", registered_backends=["vibey", "opencode"], current_backend="vibey",
+        current_routing=routing, opencode_agents=[], opencode_models={}, opencode_default_config={},
+        selected_backend="opencode",
+    )
+    view["state"] = {"values": {
+        block["block_id"]: {block["element"]["action_id"]: {"selected_option": block["element"]["initial_option"]}}
+        for block in view["blocks"] if block["type"] == "input"
+    }}
+    view["state"]["values"]["backend_block"]["backend_select"] = {"selected_option": {"value": "vibey"}}
+    selection = parse_routing_modal_selection(
+        view=view,
+        action={"action_id": "backend_select", "selected_option": {"value": "vibey"}},
+        fallback_selected_backend="",
+    )
+
+    asyncio.run(
+        handler.handle_routing_modal_update(
+            user_id="U1", channel_id="D0APS47LPU2", view_id="view-1", view_hash="hash-1",
+            selection=selection, platform="slack",
+        )
+    )
+
+    updated = bot.web_client.views_update.await_args.kwargs["view"]
+    shown = {
+        block["block_id"]: block["element"]["initial_option"]["value"]
+        for block in updated["blocks"] if block["type"] == "input"
+    }
+    assert (shown["vibey_model_block"], shown["vibey_reasoning_block"]) == ("model-b", "high")
 
 
 def test_handle_routing_modal_update_uses_visible_current_backend() -> None:

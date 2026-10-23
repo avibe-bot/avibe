@@ -83,6 +83,8 @@ def parse_routing_modal_selection(
             codex_reasoning = selected_value
         elif selected_action_id == "vibey_model_select":
             vibey_model = selected_value
+            # A model change offers that model's efforts afresh.
+            vibey_reasoning = None
         elif selected_action_id.startswith("vibey_reasoning_select"):
             vibey_reasoning = selected_value
 
@@ -99,4 +101,5 @@ def parse_routing_modal_selection(
         selected_codex_reasoning=_normalize_default(codex_reasoning),
         selected_vibey_model=_normalize_default(vibey_model),
         selected_vibey_reasoning=_normalize_default(vibey_reasoning),
+        backend_switched=selected_action_id == "backend_select",
     )
