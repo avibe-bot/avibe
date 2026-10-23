@@ -6421,29 +6421,22 @@ def _review_request(created_at, comment_id=650):
         # Running on the current head past the window: stalled.
         ([_codex_summary(COALESCED_HEAD, status="running", updated_at="2026-10-23T03:00:00Z")], 31, -120, True),
         ([_codex_summary(COALESCED_HEAD, status="running", updated_at="2026-10-23T03:00:00Z")], 29, -120, False),
-        # Concluded on the current head.
+        # Concluded on the current head, or describing another head.
         ([_codex_summary(COALESCED_HEAD, status="completed", updated_at="2026-10-23T03:00:00Z")], 300, -120, False),
-        # Never picked up since the push this watch saw.
-        ([_codex_summary("b" * 40, status="completed", updated_at="2026-10-23T02:00:00Z")], 31, 0, True),
-        ([_codex_summary("b" * 40, status="running", updated_at="2026-10-23T02:00:00Z")], 20, 0, False),
-        # A request no summary update answered...
-        ([_codex_summary("b" * 40, status="completed", updated_at="2026-10-23T02:00:00Z"),
-          _review_request("2026-10-23T03:00:00Z")], 31, -120, True),
-        # ...counts only from when this head appeared: one made for an earlier head
-        # does not make a just-pushed head look stuck.
-        ([_codex_summary("b" * 40, status="completed", updated_at="2026-10-23T02:00:00Z"),
-          _review_request("2026-10-23T02:10:00Z")], 20, 0, False),
-        # A fresh request restarts the clock of a running review.
+        ([_codex_summary("b" * 40, status="running", updated_at="2026-10-23T03:00:00Z")], 300, -120, False),
+        # A re-request restarts the clock; one left unanswered is caught a window later.
         ([_codex_summary(COALESCED_HEAD, status="running", updated_at="2026-10-23T02:00:00Z"),
           _review_request("2026-10-23T03:00:00Z")], 20, -120, False),
+        ([_codex_summary(COALESCED_HEAD, status="running", updated_at="2026-10-23T02:00:00Z"),
+          _review_request("2026-10-23T03:00:00Z")], 31, -120, True),
     ],
 )
 def test_a_codex_review_that_never_concludes_is_reported_as_stalled(comments, minutes, head_seen, stalled):
-    """A Codex review stuck at "running", a ``@codex review`` request nobody answered,
-    or a head never picked up produced no GitHub event at all, so a watch waiting for
-    its verdict stayed silent for hours. Past the stall window it is reported, with a
-    key that changes each further window so a review that stays stuck is reported
-    again. ``head_seen`` is minutes from 03:00 when the watch first saw the head."""
+    """A Codex review stuck at "running" produced no GitHub event at all, so a watch
+    waiting for its verdict stayed silent for hours. Past the stall window it is
+    reported, with a key that changes each further window so a review that stays
+    stuck is reported again. ``head_seen`` is minutes from 03:00 when the watch first
+    saw the head."""
     from datetime import datetime, timedelta, timezone
 
     module = _load_module()
@@ -6464,12 +6457,9 @@ def test_a_codex_review_that_never_concludes_is_reported_as_stalled(comments, mi
         assert "@codex review" in report
         later = stall(state, minutes + 30)
         assert later is not None and later[0] != key
-    for change in ("closed", "draft"):
-        other = _success_state(issue_comments=comments)
-        other["pull_request"]["state" if change == "closed" else "draft"] = "closed" if change == "closed" else True
-        found_other = stall(other, minutes)
-        # A draft is reviewed when asked, never expected to be picked up on its own.
-        assert found_other is None or (change == "draft" and found is not None and "not started" not in found_other[1])
+    closed = _success_state(issue_comments=comments)
+    closed["pull_request"]["state"] = "closed"
+    assert stall(closed, minutes) is None
 
 
 def test_a_managed_watch_reports_a_stalled_review_once_per_window(tmp_path):
@@ -6507,19 +6497,20 @@ def test_a_managed_watch_reports_a_stalled_review_once_per_window(tmp_path):
     assert rc == 0 and "Codex review stalled" in output
 
 
-def test_only_a_standalone_request_restarts_or_opens_a_stall():
+def test_only_a_standalone_request_restarts_the_stall_clock():
     """A comment that merely mentions the trigger is not a request for a review."""
     from datetime import datetime, timedelta, timezone
 
     module = _load_module()
     mention = {**_review_request("2026-10-23T03:00:00Z"), "body": "Don't post `@codex review` while one is running."}
     state = _success_state(issue_comments=[
-        _codex_summary(COALESCED_HEAD, status="completed", updated_at="2026-10-23T02:00:00Z"), mention,
+        _codex_summary(COALESCED_HEAD, status="running", updated_at="2026-10-23T02:00:00Z"), mention,
     ])
     base = datetime(2026, 10, 23, 3, 0, tzinfo=timezone.utc)
     assert module._codex_review_stall(
-        state, repo="example/repo", stall_seconds=1800, now=base + timedelta(minutes=90), head_seen_at=base,
-    ) is None
+        state, repo="example/repo", stall_seconds=1800, now=base + timedelta(minutes=20),
+        head_seen_at=base - timedelta(hours=2),
+    ) is not None
 
 
 @pytest.mark.parametrize("value", ["nan", "inf", "-1"])
@@ -6534,17 +6525,17 @@ def test_a_stall_window_that_is_not_a_finite_duration_is_refused_up_front(tmp_pa
 
 
 def test_a_draft_marked_ready_restarts_the_stall_clock(tmp_path):
-    """A draft is not expected to be reviewed; once marked ready (same head), Codex gets a
-    full window from then before the head counts as never picked up."""
+    """A review left running while the PR was a draft counts only from when it was
+    marked ready (same head): Codex gets a full window from then."""
     from datetime import datetime, timedelta, timezone
 
     module = _load_module()
     path = tmp_path / "ci.json"
     pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
-    older = [_codex_summary("b" * 40, status="completed", updated_at="2026-10-23T02:00:00Z")]
-    draft = _success_state(pending, issue_comments=older)
+    running = [_codex_summary(COALESCED_HEAD, status="running", updated_at="2026-10-23T03:00:00Z")]
+    draft = _success_state(pending, issue_comments=running)
     draft["pull_request"]["draft"] = True
-    ready = _success_state(pending, issue_comments=older)
+    ready = _success_state(pending, issue_comments=running)
     _managed_state(module, path, "wat_9", **_complete_pr_baseline_fields(module, draft),
                    actions=module.normalize_selected_runs({"CI": [pending]}))
     base = datetime(2026, 10, 23, 3, 0, tzinfo=timezone.utc)
@@ -6559,39 +6550,40 @@ def test_a_draft_marked_ready_restarts_the_stall_clock(tmp_path):
     rc, output, _ = cycle(61, ready, delivery="2")
     assert "Codex review stalled" not in output
     rc, output, _ = cycle(95, ready, delivery="3")
-    assert rc == 0 and "has not started reviewing this head" in output
+    assert rc == 0 and "has shown the review of this head as running" in output
 
 
-@pytest.mark.parametrize("answer", ["verdict_comment", "review", "pass_reaction"])
-def test_any_codex_answer_concludes_a_request_or_a_new_head(answer):
-    """Codex may conclude through a verdict comment, a review, or its pass reaction
-    without touching its summary; each answers the request and the head."""
+@pytest.mark.parametrize(("answer", "for_head", "concluded"), [
+    ("verdict_comment", True, True),
+    ("review", True, True),
+    # A delayed answer for an earlier head says nothing about this one.
+    ("verdict_comment", False, False),
+    ("review", False, False),
+])
+def test_a_codex_answer_for_the_head_concludes_its_running_review(answer, for_head, concluded):
+    """Codex may conclude through a verdict comment or a review without touching its
+    summary; only an answer that names the current head concludes its review."""
     from datetime import datetime, timedelta, timezone
 
     module = _load_module()
     base = datetime(2026, 10, 23, 3, 0, tzinfo=timezone.utc)
-    older_summary = _codex_summary("b" * 40, status="completed", updated_at="2026-10-23T02:00:00Z")
-    items = {"issue_comments": [older_summary, _review_request("2026-10-23T03:00:00Z")]}
+    reviewed = COALESCED_HEAD if for_head else "b" * 40
+    items = {"issue_comments": [_codex_summary(COALESCED_HEAD, status="running", updated_at="2026-10-23T03:00:00Z")]}
     if answer == "verdict_comment":
         items["issue_comments"].append({
-            **_clean_codex_comment(602, head=COALESCED_HEAD),
+            **_clean_codex_comment(602, head=reviewed),
             "created_at": "2026-10-23T03:05:00Z", "updated_at": "2026-10-23T03:05:00Z",
         })
-    elif answer == "review":
+    else:
         items["reviews"] = [{
-            "id": 9, "state": "COMMENTED", "body": "findings", "commit_id": COALESCED_HEAD,
+            "id": 9, "state": "COMMENTED", "body": "findings", "commit_id": reviewed,
             "submitted_at": "2026-10-23T03:05:00Z", "user": {"login": "chatgpt-codex-connector[bot]"},
         }]
-    else:
-        items["reactions"] = [{
-            "id": 701, "content": "+1", "created_at": "2026-10-23T03:05:00Z",
-            "user": {"login": "chatgpt-codex-connector[bot]"},
-        }]
-    state = _success_state(**items)
-    assert module._codex_review_stall(
-        state, repo="example/repo", stall_seconds=1800, now=base + timedelta(minutes=90),
-        head_seen_at=base - timedelta(minutes=5),
-    ) is None
+    stall = module._codex_review_stall(
+        _success_state(**items), repo="example/repo", stall_seconds=1800,
+        now=base + timedelta(minutes=90), head_seen_at=base - timedelta(minutes=5),
+    )
+    assert (stall is None) is concluded
 
 
 def test_a_running_review_counts_only_from_when_the_pr_became_reviewable():

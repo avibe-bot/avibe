@@ -545,41 +545,29 @@ def _codex_review_stall(
     now: datetime,
     head_seen_at: datetime,
 ) -> tuple[str, str] | None:
-    """A Codex review of the current head that should have concluded by now: (key, report).
+    """A Codex review of the current head stuck at "running": (key, report), else ``None``.
 
-    Three shapes, each measured from when it began and never before this watch saw
-    the current head become reviewable (``head_seen_at``: the head appeared, or the PR
-    became open), so nothing that predates the head or a draft counts:
-
-    - Codex's summary says the review of the current head is running and no other
-      Codex answer came since: since the summary's last update, or a later ``@codex
-      review`` request, which restarts it;
-    - a ``@codex review`` request has no answer: neither the summary nor any other
-      Codex answer (a review, a verdict comment, the pass reaction) came after it;
-    - the current head was never picked up: no summary and no Codex answer of it. A
-      draft is not expected to be reviewed.
-
-    ``key`` changes every further ``stall_seconds`` the stall lasts, so a still-stuck
-    review is reported again rather than once and forgotten. ``None`` once the review
-    concludes or the PR is not open.
+    The one shape observed live: Codex's summary names the current head as being
+    reviewed, and no Codex answer naming that head (a review of its commit, or a
+    verdict comment for it) came since. It counts from the latest of the summary's
+    last update, a later standalone ``@codex review`` request (a re-request restarts
+    it, and one left unanswered is caught a window later), and when this watch saw
+    the head become reviewable (``head_seen_at``: pushed, reopened, or marked ready).
+    A head Codex never started on is the pickup check ``pr-delivery-loop`` already
+    owns after each push. ``key`` changes every further ``stall_seconds`` the stall
+    lasts, so a still-stuck review is reported again rather than once and forgotten.
     """
 
     pr = state.get("pull_request")
     head = _current_pr_head_sha(pr)
-    status = _current_pr_status(pr)
-    if stall_seconds <= 0 or not head or status not in {"open", "draft"}:
+    # Only an open, ready PR is expected to be reviewed through; a draft or a closed
+    # PR restarts the clock when it becomes one (``head_seen_at``).
+    if stall_seconds <= 0 or not head or _current_pr_status(pr) != "open":
         return None
     summary_at: datetime | None = None
     code_review: dict[str, Any] = {}
     request_at: datetime | None = None
-    # Any other Codex answer: a review, a verdict comment, or the pass reaction. Codex
-    # may conclude through one of these without touching its summary.
-    answer_at: datetime | None = None
-    head_answered = False
-
-    def _later(current: datetime | None, stamp: datetime | None) -> datetime | None:
-        return stamp if current is None or (stamp is not None and stamp > current) else current
-
+    answered_at: datetime | None = None
     for comment in state.get("issue_comments") or []:
         body = str(comment.get("body") or "")
         stamp = _github_time(comment.get("updated_at") or comment.get("created_at"))
@@ -590,35 +578,29 @@ def _codex_review_stall(
             if parsed is not None:
                 if summary_at is None or stamp > summary_at:
                     summary_at, code_review = stamp, parsed
-            else:
-                answer_at = _later(answer_at, stamp)
-                head_answered = head_answered or _is_codex_clean_pass(comment, head)
+            elif _is_codex_clean_pass(comment, head) and (answered_at is None or stamp > answered_at):
+                answered_at = stamp
         elif CODEX_REVIEW_REQUEST.fullmatch(body):
-            request_at = _later(request_at, _github_time(comment.get("created_at")) or stamp)
+            created = _github_time(comment.get("created_at")) or stamp
+            request_at = created if request_at is None or created > request_at else request_at
     for review in state.get("reviews") or []:
-        if _is_codex_item(review):
-            answer_at = _later(answer_at, _github_time(review.get("submitted_at")))
-            head_answered = head_answered or str(review.get("commit_id") or "").casefold() == head.casefold()
-    for reaction in state.get("reactions") or []:
-        if _is_codex_pass_reaction(reaction):
-            stamp = _github_time(reaction.get("created_at"))
-            answer_at = _later(answer_at, stamp)
-            # The pass reaction names no commit: it answers the head it followed.
-            head_answered = head_answered or (stamp is not None and stamp >= head_seen_at)
-    summary_head = str(code_review.get("commit_sha") or "").casefold() == head.casefold()
-    reviewing_head = summary_head and str(code_review.get("status") or "").casefold() in _CODEX_REVIEW_IN_PROGRESS
-    answered = _later(summary_at, answer_at)
-    if reviewing_head and summary_at is not None and (answer_at is None or answer_at <= summary_at):
-        since = max(summary_at, request_at or summary_at, head_seen_at)
-        shape = "has shown the review of this head as running"
-    elif request_at is not None and (answered is None or request_at > answered):
-        since = max(request_at, head_seen_at)
-        shape = "has not answered the last `@codex review` request"
-    elif not summary_head and not head_answered and status == "open":
-        since = head_seen_at
-        shape = "has not started reviewing this head"
-    else:
+        stamp = _github_time(review.get("submitted_at"))
+        if (
+            stamp is not None
+            and _is_codex_item(review)
+            and str(review.get("commit_id") or "").casefold() == head.casefold()
+            and (answered_at is None or stamp > answered_at)
+        ):
+            answered_at = stamp
+    if (
+        summary_at is None
+        or str(code_review.get("commit_sha") or "").casefold() != head.casefold()
+        or str(code_review.get("status") or "").casefold() not in _CODEX_REVIEW_IN_PROGRESS
+        or (answered_at is not None and answered_at >= summary_at)
+    ):
         return None
+    since = max(summary_at, request_at or summary_at, head_seen_at)
+    shape = "has shown the review of this head as running"
     elapsed = (now - since).total_seconds()
     if elapsed < stall_seconds:
         return None
