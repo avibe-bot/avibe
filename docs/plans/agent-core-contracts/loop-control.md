@@ -82,8 +82,7 @@ with pending steer/follow-up keep continuing normally; a tool-free one that
 replies and did not stop at its output limit is a completed reply that the
 pending input superseded, which the loop passes to `append_response` as
 `superseded`, so it commits as `result`, a reply like a final, in the same
-transaction (released versions committed it as `output`). A truncated one stays narration, as it would fail as a final. Truncated tool calls keep the existing bounded reissue
-path without executing their partial arguments.
+transaction (released versions committed it as `output`). A truncated one stays narration, as it would fail as a final. Truncated tool calls keep the existing bounded reissue path without executing their partial arguments. A strict malformed final tool-argument error is different: the adapter preserves every call with safe `{}` arguments and marks only malformed identities; the loop commits the assistant row, records an explicit error result for each malformed call, executes valid siblings once, and permits Vibey's bounded transcript-only continuation. It never guesses or persists the malformed bytes.
 
 A final response with `stop_reason` `refusal` or `safety` and no text is still committed as the final
 response, typed `error` ([`transcript.md`](transcript.md) §1); its commit-time display text is the localized

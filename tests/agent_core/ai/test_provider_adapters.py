@@ -21,6 +21,7 @@ from core.agent_core.ai.openai_responses import OpenAIResponsesAdapter, build_re
 from core.agent_core.ai.provider import (
     BlockEnd,
     Done,
+    MalformedToolCall,
     MediaLoader,
     ModelEndpoint,
     ModelRequest,
@@ -2381,7 +2382,7 @@ async def test_chat_late_tool_id_matches_tool_call_start_id() -> None:
 async def test_chat_malformed_tool_arguments_keep_text_and_usage_in_partial() -> None:
     body = (
         'data: {"choices":[{"delta":{"content":"before "}}]}\n\n'
-        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read","arguments":"not-json"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}\n\n'
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_good","function":{"name":"read","arguments":"{\\"path\\":\\"x\\"}"}},{"index":1,"id":"call_bad","function":{"name":"read","arguments":"not-json"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}\n\n'
         "data: [DONE]\n\n"
     )
 
@@ -2396,7 +2397,14 @@ async def test_chat_malformed_tool_arguments_keep_text_and_usage_in_partial() ->
     assert error.kind == "invalid_request"
     assert error.partial is not None
     assert error.partial.usage == Usage(input_tokens=3, output_tokens=2)
-    assert error.partial.content == (TextBlock("before "),)
+    assert error.partial.content == (
+        TextBlock("before "),
+        ToolCallBlock(id="call_good", name="read", arguments={"path": "x"}, native_id="call_good"),
+        ToolCallBlock(id="call_bad", name="read", arguments={}, native_id="call_bad"),
+    )
+    assert error.partial.error_message == "malformed tool arguments: expected a JSON object"
+    assert error.continuable is True
+    assert error.malformed_tool_calls == (MalformedToolCall(id="call_bad", name="read"),)
 
 
 @pytest.mark.asyncio

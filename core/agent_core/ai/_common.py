@@ -53,6 +53,7 @@ from core.agent_core.ai.provider import (
     Done,
     HostedToolRoute,
     MediaLoader,
+    MalformedToolCall,
     ModelEndpoint,
     ModelRequest,
     OpaquePayload,
@@ -1095,6 +1096,7 @@ class StreamAssembler:
             for key, state in self._tools.items()
             if "content_index" in state
         }
+        malformed: list[MalformedToolCall] = []
         for index, block in enumerate(self.content):
             if not isinstance(block, ToolCallBlock):
                 final.append(block)
@@ -1107,10 +1109,7 @@ class StreamAssembler:
                 arguments = parsed_arguments(raw_arguments, tool_name=block.name)
             if isinstance(arguments, ProviderError):
                 if stop_reason == "tool_use":
-                    return self.error(
-                        arguments.message,
-                        kind="invalid_request",
-                    )
+                    malformed.append(MalformedToolCall(id=block.id, name=block.name))
                 # A length, safety, refusal, or error stop must still carry
                 # every model-emitted call so the loop can settle it as an
                 # unsuccessful tool result. The arguments are incomplete and
@@ -1125,6 +1124,26 @@ class StreamAssembler:
                     arguments=arguments,
                     signature=state.get("signature") or block.signature,
                 )
+            )
+        if malformed:
+            message = "malformed tool arguments: expected a JSON object"
+            partial = assistant_message(
+                final,
+                origin=self.origin,
+                stop_reason="error",
+                usage=self.usage,
+                error_message=message,
+                verified_origin=self.verified_origin,
+                hosted_summary=self._hosted_summary(final),
+                source_identity=self.source_identity,
+            )
+            return ProviderError(
+                kind="invalid_request",
+                message=message,
+                retryable=False,
+                partial=partial,
+                continuable=True,
+                malformed_tool_calls=tuple(malformed),
             )
         return assistant_message(
             final,

@@ -751,7 +751,20 @@ _CASES = (
             "outcome": "error",
             "kind": "invalid_request",
             "retryable": False,
-            "partial": {"stop_reason": "error", "content": [], "usage": None},
+            "partial": {
+                "stop_reason": "error",
+                "content": [
+                    {
+                        "type": "tool",
+                        "id": "call_1",
+                        "native_id": "call_1",
+                        "name": "read",
+                        "arguments": {},
+                        "signature": None,
+                    }
+                ],
+                "usage": None,
+            },
         },
     },
     {
