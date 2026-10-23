@@ -323,6 +323,14 @@ scenarios:
       - tests/test_hosted_activity.py::test_the_im_line_says_a_reason_avibe_worded_in_the_readers_language
       - tests/test_hosted_activity.py::test_every_known_hosted_error_code_has_copy_on_every_surface
       - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-015
+  - id: MH-HOSTED-UI-016
+    name: Foreground and background Sessions preserve the same rich hosted card payload and response ordering, while background delivery remains suppressed
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_vibey_agent.py::test_native_search_card_survives_the_delivery_policy
+    related_tests:
+      - tests/test_agent_activity_service.py::test_a_native_hosted_card_sorts_before_the_response_that_carried_it
   - id: MH-EFFORT-MENU-001
     name: The model picker leaves out an effort every hop refuses and keeps, with its refusing Sources, one the other hops serve
     status: covered

@@ -3580,6 +3580,104 @@ async def test_anthropic_deferred_search_shows_only_its_completion_live_and_on_r
 
 
 
+@pytest.mark.parametrize("platform", ["avibe", "telegram"])
+@pytest.mark.parametrize("background", [False, True], ids=["foreground", "background"])
+@pytest.mark.parametrize("deferred", [False, True], ids=["ordinary", "deferred"])
+async def test_native_search_card_survives_the_delivery_policy(
+    engine, session, tmp_path, published, monkeypatch, platform, background, deferred
+):
+    """MH-HOSTED-UI-016: background probes retain the same rich card as ordinary searches.
+
+    Real Anthropic wire -> Agent loop -> dispatcher -> mirror, with only HTTP and
+    the client tool faked. Background suppresses delivery, never the card's data
+    or its response anchor when the Session is subsequently opened on Web.
+    """
+    import httpx
+
+    from modules.agents.vibey.models import registry_providers
+    from storage import agent_activity_service
+    from tests.agent_core.ai.test_anthropic_deferred import USE, RESULT, _sse
+    from tests.test_model_hub_l3 import _source
+
+    monkeypatch.setattr("core.message_mirror._activity_streaming_enabled", lambda: True)
+    sources = [{"url": f"https://example.test/{index}", "title": f"Result {index}"} for index in range(9)]
+    completion = {**RESULT, "content": [
+        {**source, "type": "web_search_result", "encrypted_content": "opaque"} for source in sources
+    ]}
+    client_call = {"type": "tool_use", "id": "toolu_client", "name": "bash", "input": {"command": "echo probe"}}
+    sent = []
+    served = {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": "src_served00001"}
+
+    def gateway(wire):
+        sent.append(json.loads(wire.content))
+        if deferred and len(sent) == 1:
+            body = _sse([USE, client_call])
+        else:
+            body = _sse([*([USE] if not deferred else []), completion, {"type": "text", "text": "Result 0"}],
+                        stop="end_turn", searches=1)
+        return httpx.Response(200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": json.dumps(served)},
+                              text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(engine, tmp_path, platform, [], tools=[FakeTool("bash")],
+                           providers=registry_providers(media_loader=None, client=client))
+        harness.controller.hub_source_id = served["source"]
+        harness.controller.hub_sources = [_source(served["source"], "Search source")]
+        harness.controller.hub_hosted_tools = {"web_search": {
+            "native": "assumed", "declaration": {"type": "web_search_20250305", "name": "web_search"},
+            "include": [], "replay": "unsupported",
+        }}
+        harness.controller.im_client.supports_message_editing = lambda context=None: False
+        request = harness.request("search")
+        request.context.platform_specific["suppress_delivery"] = background
+        await harness.agent.handle_message(request)
+
+    rows = await harness.context_rows()
+    responses = [row for row in rows if row.kind == "response"]
+    assert len(responses) == len(sent) == (2 if deferred else 1)
+    final = responses[-1]
+    if deferred:
+        [pending] = [block for block in responses[0].message.content if isinstance(block, HostedToolBlock)]
+        assert pending.record.status == "pending" and pending.native.payload == (USE,)
+        [finished] = [block for block in final.message.content if isinstance(block, HostedToolBlock)]
+        assert finished.native.payload == (completion,)
+        assert not responses[0].message.hosted_summary.counts
+    assert final.message.hosted_summary.counts == {"web_search_requests": 1}
+
+    with engine.connect() as conn:
+        traces = conn.execute(select(agent_events).where(
+            agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call"
+        ).order_by(agent_events.c.created_at, agent_events.c.id)).mappings().all()
+        groups = agent_activity_service.list_turn_groups(conn, session_id=SESSION)["groups"]
+        details = [agent_activity_service.get_turn_group(conn, session_id=SESSION, group_id=group["id"]) for group in groups]
+    assert len(traces) == (2 if deferred else 1)  # no pending search card
+    event = traces[-1]
+    expected = {
+        "version": 1, "call_id": USE["id"], "tool": "web_search", "mode": "native", "status": "completed",
+        "subject": USE["input"]["query"], "action": "search", "provider": served["provider"],
+        "source_id": served["source"], "source_name": "Search source", "model": served["model"],
+        "sources": sources, "images": [], "response_id": final.row_id,
+    }
+    assert json.loads(event["content_json"])["hosted"] == expected
+    assert json.loads(event["metadata_json"])["precedes_message_id"] == final.row_id
+    [owner] = [detail for detail in details if any(row["id"] == event["id"] for row in detail["rows"])]
+    assert (owner["anchor_message_id"], owner["anchor_position"]) == (final.row_id, "before")
+    assert owner["rows"][-1]["hosted"] == expected
+
+    live = [payload for name, payload in published if name == "message.new"]
+    search_events = [item for item in live if (item.get("content") or {}).get("hosted")]
+    if platform == "avibe" and not background:
+        assert [item["content"]["hosted"] for item in search_events] == [expected]
+        assert search_events[0]["metadata"]["precedes_message_id"] == final.row_id
+    else:
+        assert not search_events
+    lines = [line for line in harness.controller.im_client.sent if "avibe release" in line]
+    if background:
+        assert not live and not harness.controller.im_client.sent
+    else:
+        assert lines == [event["content_text"]]  # the same ordinary hosted line, including on IM
+
+
 @pytest.mark.parametrize("client_finished", [False, True])
 @pytest.mark.parametrize("case", ["continue", "stopped", "preflight_failed", "partial_failure"])
 async def test_restart_defers_accepted_steer_until_native_search_continuation(

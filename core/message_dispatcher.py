@@ -3489,6 +3489,7 @@ class ConsolidatedMessageDispatcher:
                         native_message_id=native_output_id,
                         citations=citations,
                         existing_row_id=existing_row_id,
+                        hosted=hosted if canonical_type == "toolcall" else None,
                         presentation=decision,
                     )
                 # The return value is the delivery evidence, and a background output's
