@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal
-from email.utils import format_datetime
+from email.utils import format_datetime, parsedate_to_datetime
 from typing import Any, AsyncIterator, BinaryIO, Literal, Mapping, TypeVar, cast
 
 import aiohttp
@@ -24,6 +24,7 @@ import ijson
 
 from config.v2_config import normalize_model_hub_base_url
 from core.handlers.model_hub.adapter import (
+    CLAUDE_UNIFIED_RATE_LIMIT_HEADER_NAMES,
     DiscoveredModel,
     ENGINE_TRANSPORT_TIMEOUT_SECONDS,
     InvokeCancelledError,
@@ -101,6 +102,28 @@ _OFFICIAL_BASE_URLS = official_api_key_base_urls()
 logger = logging.getLogger(__name__)
 _ProjectedJSON = TypeVar("_ProjectedJSON")
 
+_ENGINE_HEADER_VALUE_MAX_LENGTH = 128
+_RETRY_AFTER_MS_MAX = 365 * 24 * 60 * 60 * 1000
+_CLAUDE_RATE_LIMIT_STATUS_VALUES = frozenset({"allowed", "allowed_warning", "rejected"})
+_CLAUDE_RATE_LIMIT_STATUS_HEADERS = frozenset({
+    "anthropic-ratelimit-unified-status",
+    "anthropic-ratelimit-unified-5h-status",
+    "anthropic-ratelimit-unified-7d-status",
+    "anthropic-ratelimit-unified-7d_oi-status",
+    "anthropic-ratelimit-unified-overage-status",
+})
+_CLAUDE_RATE_LIMIT_RESET_HEADERS = frozenset({
+    "anthropic-ratelimit-unified-5h-reset",
+    "anthropic-ratelimit-unified-7d-reset",
+    "anthropic-ratelimit-unified-7d_oi-reset",
+    "anthropic-ratelimit-unified-reset",
+    "anthropic-ratelimit-unified-overage-reset",
+})
+_CLAUDE_RATE_LIMIT_UTILIZATION_HEADERS = frozenset({
+    "anthropic-ratelimit-unified-5h-utilization",
+    "anthropic-ratelimit-unified-7d-utilization",
+})
+
 # The engine forwards an upstream's response headers (``passthrough-headers``),
 # minus hop-by-hop ones, and on errors it filters nothing. Avibe reads only these
 # allowlisted names and builds every gateway response from its own headers, so no
@@ -109,14 +132,102 @@ _ProjectedJSON = TypeVar("_ProjectedJSON")
 # again by ``sanitize_response_correlation_ids`` before they cross the outcome
 # boundary.
 ENGINE_RESPONSE_HEADER_ALLOW_LIST: frozenset[str] = frozenset(
-    {"retry-after", *RESPONSE_CORRELATION_HEADER_NAMES}
+    {
+        "retry-after",
+        "retry-after-ms",
+        *RESPONSE_CORRELATION_HEADER_NAMES,
+        *CLAUDE_UNIFIED_RATE_LIMIT_HEADER_NAMES,
+    }
 )
 
 
 def _allowed_engine_header(headers: Mapping[str, str], name: str) -> str | None:
-    """An engine response header Avibe reads; one off the allow-list reads as absent."""
+    """Read one exact allowlisted engine header case-insensitively."""
 
-    return headers.get(name) if name.lower() in ENGINE_RESPONSE_HEADER_ALLOW_LIST else None
+    normalized_name = name.lower()
+    if normalized_name not in ENGINE_RESPONSE_HEADER_ALLOW_LIST:
+        return None
+    for header_name, value in headers.items():
+        if isinstance(header_name, str) and header_name.lower() == normalized_name:
+            return value if isinstance(value, str) else None
+    return None
+
+
+def _bounded_ascii_header_value(value: object) -> str | None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > _ENGINE_HEADER_VALUE_MAX_LENGTH
+        or not value.isascii()
+        or any(ord(char) < 0x20 or ord(char) == 0x7F for char in value)
+    ):
+        return None
+    return value.strip() or None
+
+
+def _retry_after_ms_value(headers: Mapping[str, str]) -> int | None:
+    raw = _bounded_ascii_header_value(_allowed_engine_header(headers, "Retry-After-Ms"))
+    if raw is None or not raw.isdecimal():
+        return None
+    try:
+        milliseconds = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return milliseconds if milliseconds <= _RETRY_AFTER_MS_MAX else None
+
+
+def _normalize_claude_rate_limit_header(name: str, value: object) -> str | None:
+    normalized = _bounded_ascii_header_value(value)
+    if normalized is None:
+        return None
+    if name in _CLAUDE_RATE_LIMIT_STATUS_HEADERS:
+        normalized = normalized.lower()
+        return normalized if normalized in _CLAUDE_RATE_LIMIT_STATUS_VALUES else None
+    if name in _CLAUDE_RATE_LIMIT_RESET_HEADERS:
+        try:
+            numeric = Decimal(normalized)
+            if numeric.is_finite() and numeric > 0:
+                return normalized
+        except (ArithmeticError, ValueError):
+            pass
+        try:
+            parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+            if parsed.tzinfo is not None:
+                return normalized
+        except ValueError:
+            pass
+        try:
+            parsed = parsedate_to_datetime(normalized)
+            if parsed.tzinfo is not None:
+                return normalized
+        except (TypeError, ValueError, IndexError, OverflowError):
+            pass
+        return None
+    if name in _CLAUDE_RATE_LIMIT_UTILIZATION_HEADERS:
+        try:
+            numeric = Decimal(normalized)
+        except (ArithmeticError, ValueError):
+            return None
+        return normalized if numeric.is_finite() and numeric >= 0 else None
+    return normalized
+
+
+def _allowed_claude_rate_limit_headers(
+    headers: Mapping[str, str],
+) -> tuple[tuple[str, str], ...]:
+    """Project only validated, exact Claude unified rate-limit fields."""
+
+    retained: dict[str, str] = {}
+    for raw_name, raw_value in headers.items():
+        if not isinstance(raw_name, str):
+            continue
+        name = raw_name.lower()
+        if name not in CLAUDE_UNIFIED_RATE_LIMIT_HEADER_NAMES or name in retained:
+            continue
+        value = _normalize_claude_rate_limit_header(name, raw_value)
+        if value is not None:
+            retained[name] = value
+    return tuple(sorted(retained.items()))
 
 
 def upstream_api_url(root: str, path: str) -> str:
@@ -565,8 +676,10 @@ class EngineClient:
         session = aiohttp.ClientSession(timeout=timeout, trust_env=False, trace_configs=trace_configs)
         response: aiohttp.ClientResponse | None = None
         retry_after: str | None = None
+        retry_after_ms: int | None = None
         response_received_at: datetime | None = None
         response_correlation_ids: tuple[tuple[str, str], ...] = ()
+        claude_rate_limit_headers: tuple[tuple[str, str], ...] = ()
         first_received = False
         model_output_started = False
         ownership_transferred = False
@@ -597,7 +710,9 @@ class EngineClient:
                 outcome = replace(
                     outcome,
                     retry_after=retry_after,
+                    retry_after_ms=retry_after_ms,
                     response_received_at=response_received_at,
+                    claude_rate_limit_headers=claude_rate_limit_headers,
                 )
             return completed_handle(outcome)
 
@@ -623,8 +738,13 @@ class EngineClient:
             if response.status >= 300:
                 response_received_at = datetime.now(timezone.utc)
                 retry_after = _allowed_engine_header(response.headers, "Retry-After")
-                if retry_after is not None and (len(retry_after) > 128 or not retry_after.isascii()):
+                retry_after_ms = _retry_after_ms_value(response.headers)
+                if retry_after is not None and (
+                    len(retry_after) > _ENGINE_HEADER_VALUE_MAX_LENGTH or not retry_after.isascii()
+                ):
                     retry_after = None
+                if source.vendor == "anthropic":
+                    claude_rate_limit_headers = _allowed_claude_rate_limit_headers(response.headers)
                 error_body = _StreamPrelude()
                 try:
                     await asyncio.wait_for(

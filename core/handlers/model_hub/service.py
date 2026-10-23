@@ -10280,6 +10280,7 @@ class ModelHubService:
                         current, event_reason,
                         generation=generation,
                         retry_after=outcome.retry_after if outcome is not None else None,
+                        retry_after_ms=getattr(outcome, "retry_after_ms", None) if outcome is not None else None,
                         response_received_at=outcome.response_received_at if outcome is not None else None,
                     )
                 if not changed:

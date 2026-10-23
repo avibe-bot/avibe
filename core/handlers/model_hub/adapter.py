@@ -32,6 +32,24 @@ SEARCH_TRANSPORT_TIMEOUT_SECONDS: Final = 30.0
 # Response correlation is a diagnostic fact, not a header-forwarding surface. These
 # are the only upstream response header names allowed to cross the engine boundary.
 RESPONSE_CORRELATION_HEADER_NAMES: Final = frozenset({"request-id", "x-request-id"})
+# Claude's future subscription-cap classifier consumes this closed set. Keep the
+# names lowercase here; the engine/client boundary matches them case-insensitively.
+CLAUDE_UNIFIED_RATE_LIMIT_HEADER_NAMES: Final = frozenset({
+    "anthropic-ratelimit-unified-status",
+    "anthropic-ratelimit-unified-5h-status",
+    "anthropic-ratelimit-unified-7d-status",
+    "anthropic-ratelimit-unified-7d_oi-status",
+    "anthropic-ratelimit-unified-overage-status",
+    "anthropic-ratelimit-unified-overage-disabled-reason",
+    "anthropic-ratelimit-unified-representative-claim",
+    "anthropic-ratelimit-unified-5h-utilization",
+    "anthropic-ratelimit-unified-7d-utilization",
+    "anthropic-ratelimit-unified-5h-reset",
+    "anthropic-ratelimit-unified-7d-reset",
+    "anthropic-ratelimit-unified-7d_oi-reset",
+    "anthropic-ratelimit-unified-reset",
+    "anthropic-ratelimit-unified-overage-reset",
+})
 RESPONSE_CORRELATION_ID_MAX_LENGTH: Final = 256
 RESPONSE_CORRELATION_ID_MAX_ITEMS: Final = len(RESPONSE_CORRELATION_HEADER_NAMES)
 _CORRELATION_ID_CREDENTIAL_PATTERN = re.compile(
@@ -261,8 +279,15 @@ class RawCallOutcome:
     # from the error envelope in that header's syntax. L2 owns validation and
     # the resulting retry policy.
     retry_after: str | None = None
+    # Validated Retry-After-Ms advice. It stays separate from ``retry_after`` so
+    # a millisecond count can never reach code that interprets numeric advice as
+    # whole seconds.
+    retry_after_ms: int | None = field(default=None, repr=False)
     # Aware UTC receipt time of those headers, before reading the error body.
     response_received_at: datetime | None = None
+    # Exact, bounded Claude unified rate-limit facts for the future #2530
+    # classifier. These never reach an outward response or persisted event.
+    claude_rate_limit_headers: tuple[tuple[str, str], ...] = field(default=(), repr=False)
     # Recognized model output or protocol success, independently of permissive
     # forwarding. An unrecognized HTTP 200 alone cannot prove Source recovery.
     recovery_verified: bool = False

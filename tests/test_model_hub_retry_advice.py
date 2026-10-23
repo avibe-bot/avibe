@@ -11,6 +11,7 @@ from aiohttp import web
 import pytest
 
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind
+from core.handlers.model_hub.retry import retry_after_deadline
 from core.handlers.model_hub.stream_wire import ProtocolUsageReport
 from vibe.model_hub_runtime import client as client_module
 from vibe.model_hub_runtime.client import EngineClient, EngineConnection
@@ -46,10 +47,10 @@ ERROR_BODY = (
 )
 
 
-def _source(protocol: str) -> SourceRecord:
+def _source(protocol: str, *, vendor: str = "custom") -> SourceRecord:
     return SourceRecord(
         source_id="src_retryadvice",
-        vendor="custom",
+        vendor=vendor,
         protocol=protocol,
         base_url="https://unused.example.test",
         credential_ref="cred_retryadvice",
@@ -83,13 +84,21 @@ async def _engine(respond, *, timeout: float = 2):
         await runner.cleanup()
 
 
-async def _invoke(client: EngineClient, protocol: str, stream: bool):
+async def _invoke(
+    client: EngineClient,
+    protocol: str,
+    stream: bool,
+    *,
+    vendor: str = "custom",
+    request_protocol: str | None = None,
+):
     cleanups = []
     handle = await client.invoke(
-        _source(protocol),
+        _source(protocol, vendor=vendor),
         "model-a",
         {},
         stream=stream,
+        request_protocol=request_protocol or protocol,
         on_transport_done=lambda: cleanups.append(True),
     )
     try:
@@ -226,6 +235,123 @@ async def test_only_a_usage_cap_turns_its_body_reset_into_advice(status: int, er
 
     assert (outcome.http_status, outcome.error_type) == (status, error_type)
     assert outcome.retry_after is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        pytest.param("1500", 1500, id="milliseconds"),
+        pytest.param("0", 0, id="zero"),
+        pytest.param("-1", None, id="negative"),
+        pytest.param("1.5", None, id="fraction"),
+        pytest.param("１２", None, id="nonascii"),
+        pytest.param("9" * 129, None, id="oversized"),
+        pytest.param("9" * 128, None, id="overflow"),
+        pytest.param("", None, id="empty"),
+    ],
+)
+async def test_retry_after_ms_is_validated_without_becoming_retry_after_seconds(raw: str, expected: int | None) -> None:
+    async def respond(_request: web.Request) -> web.Response:
+        return web.Response(
+            status=429,
+            body=ERROR_BODY,
+            headers={"rEtRy-AfTeR-Ms": raw},
+            content_type="application/json",
+        )
+
+    async with _engine(respond) as (client, _requests):
+        outcome, _body = await _invoke(client, "anthropic", False)
+
+    assert outcome.retry_after is None
+    assert outcome.retry_after_ms == expected
+    if expected is not None:
+        assert outcome.response_received_at is not None
+        deadline = retry_after_deadline(
+            None, outcome.response_received_at, milliseconds=expected,
+        )
+        assert deadline is not None
+        assert (deadline - outcome.response_received_at).total_seconds() == expected / 1000
+
+
+async def test_retry_after_and_retry_after_ms_use_the_later_valid_deadline() -> None:
+    async def respond(_request: web.Request) -> web.Response:
+        return web.Response(
+            status=429,
+            body=ERROR_BODY,
+            headers={"Retry-After": "1", "Retry-After-Ms": "2500"},
+            content_type="application/json",
+        )
+
+    async with _engine(respond) as (client, _requests):
+        outcome, _body = await _invoke(client, "anthropic", False)
+
+    assert outcome.retry_after == "1"
+    assert outcome.retry_after_ms == 2500
+    assert outcome.response_received_at is not None
+    deadline = retry_after_deadline(
+        outcome.retry_after,
+        outcome.response_received_at,
+        milliseconds=outcome.retry_after_ms,
+    )
+    assert deadline is not None
+    assert (deadline - outcome.response_received_at).total_seconds() == 2.5
+
+
+async def test_failed_claude_response_carries_only_bounded_unified_headers() -> None:
+    async def respond(_request: web.Request) -> web.Response:
+        return web.Response(
+            status=429,
+            body=ERROR_BODY,
+            headers={
+                "Anthropic-Ratelimit-Unified-Status": "rejected",
+                "Anthropic-Ratelimit-Unified-5h-Reset": "1797000000",
+                "Anthropic-Ratelimit-Unified-Representative-Claim": "5h",
+                "Anthropic-Ratelimit-Unified-7d-Status": "bad",
+                "Anthropic-Ratelimit-Unified-Unknown": "private",
+                "Set-Cookie": "session=secret",
+            },
+            content_type="application/json",
+        )
+
+    async with _engine(respond) as (client, _requests):
+        outcome, _body = await _invoke(
+            client,
+            "anthropic",
+            False,
+            vendor="anthropic",
+            request_protocol="openai_responses",
+        )
+
+    assert outcome.claude_rate_limit_headers == (
+        ("anthropic-ratelimit-unified-5h-reset", "1797000000"),
+        ("anthropic-ratelimit-unified-representative-claim", "5h"),
+        ("anthropic-ratelimit-unified-status", "rejected"),
+    )
+    assert "Set-Cookie" not in repr(outcome)
+
+
+async def test_non_claude_source_does_not_project_unified_headers_for_claude_caller() -> None:
+    async def respond(_request: web.Request) -> web.Response:
+        return web.Response(
+            status=429,
+            body=ERROR_BODY,
+            headers={
+                "Anthropic-Ratelimit-Unified-Status": "rejected",
+                "Anthropic-Ratelimit-Unified-5h-Reset": "1797000000",
+            },
+            content_type="application/json",
+        )
+
+    async with _engine(respond) as (client, _requests):
+        outcome, _body = await _invoke(
+            client,
+            "anthropic",
+            False,
+            vendor="custom",
+            request_protocol="anthropic",
+        )
+
+    assert outcome.claude_rate_limit_headers == ()
 
 
 @pytest.mark.parametrize("protocol", WIRE)

@@ -50,27 +50,36 @@ def source_identity(source: ModelHubSourceConfig) -> tuple:
     )
 
 
-def retry_after_deadline(value: str | None, received_at: datetime) -> datetime | None:
-    """Validate the bounded advice without reflecting its contents in diagnostics."""
+def retry_after_deadline(
+    value: str | None,
+    received_at: datetime,
+    *,
+    milliseconds: int | None = None,
+) -> datetime | None:
+    """Validate bounded advice and choose the later valid upstream deadline."""
 
-    if value is None:
-        return None
-    try:
-        if not isinstance(value, str) or len(value) > 128 or not value.isascii():
-            raise ValueError
-        value = value.strip()
-        if value.isdecimal():
-            deadline = received_at + timedelta(seconds=int(value))
-        else:
-            deadline = parsedate_to_datetime(value)
-            if deadline.tzinfo is None:
+    deadlines: list[datetime] = []
+    if value is not None:
+        try:
+            if not isinstance(value, str) or len(value) > 128 or not value.isascii():
                 raise ValueError
-        if deadline < received_at:
-            raise ValueError
-        return deadline
-    except (ValueError, TypeError, OverflowError):
-        logger.debug("Ignored invalid or past Model Hub Retry-After advice")
-        return None
+            value = value.strip()
+            if value.isdecimal():
+                deadlines.append(received_at + timedelta(seconds=int(value)))
+            else:
+                deadline = parsedate_to_datetime(value)
+                if deadline.tzinfo is None:
+                    raise ValueError
+                deadlines.append(deadline)
+        except (ValueError, TypeError, OverflowError):
+            logger.debug("Ignored invalid or past Model Hub Retry-After advice")
+    if type(milliseconds) is int and milliseconds >= 0:
+        try:
+            deadlines.append(received_at + timedelta(milliseconds=milliseconds))
+        except (OverflowError, ValueError):
+            logger.debug("Ignored invalid Model Hub Retry-After-Ms advice")
+    future = [deadline for deadline in deadlines if deadline >= received_at]
+    return max(future) if future else None
 
 
 @dataclass
@@ -251,6 +260,7 @@ class RecoveryPolicy:
         *,
         generation: int,
         retry_after: str | None = None,
+        retry_after_ms: int | None = None,
         response_received_at: datetime | None = None,
     ) -> tuple[datetime, bool]:
         state = self._state(source)
@@ -264,7 +274,11 @@ class RecoveryPolicy:
         received = response_received_at
         if received is None or received.tzinfo is None:
             received = now
-        upstream = retry_after_deadline(retry_after, received)
+        upstream = retry_after_deadline(
+            retry_after,
+            received,
+            milliseconds=retry_after_ms,
+        )
         deadline = max(now + timedelta(seconds=local), upstream or now)
         eligible_at = mono + (deadline - now).total_seconds()
         if state is not None:
