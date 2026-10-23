@@ -983,7 +983,15 @@ to {
   transform:rotate(180deg)}
 .pet-mini-stage[data-edge=top] .pet-mini-reply-toggle[aria-expanded=true] svg {
   transform:none}
-/* While the shell drags the pet, the window is only the strip around Vibey
-   and the dock (§9.1); the column comes back with the full window. */
-.pet-mini-stage[data-dragging] .pet-mini-column {
+/* A window only as tall as the strip around Vibey and the dock (163px: the
+   shell's drag, §9.1) has no room for the column, which would show as a
+   sliver at its edge. It comes back with the full window. */
+@media (max-height:163.5px) {
+  .pet-mini-column {
+  visibility:hidden}
+}
+/* Under a shell that owns the layout, nothing is drawn until its first
+   snapshot says which edge (spec §9.1), so a flipped pet never shows a frame
+   in the other layout as it loads. */
+.pet-mini-stage[data-layout-pending] {
   visibility:hidden}

@@ -17,8 +17,8 @@ use std::time::Duration;
 use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
     area_for, clamp_anchor, default_anchor, frame_at, hovering, place_moved, rescale, shortcut_label, valid_session_id,
-    HitRect, LogicalRect, PetAnchor, PetBinding, PetFrame, PetIntent, PetLayout, PetReady, PetStore, WorkArea,
-    SHORTCUT_PRESETS,
+    FrameState, FrameStep, HitRect, LayoutSnapshot, LogicalRect, PetAnchor, PetBinding, PetFrame, PetIntent, PetLayout,
+    PetReady, PetStore, WorkArea, SHORTCUT_PRESETS,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
@@ -42,6 +42,11 @@ const LAYOUT_EVENT: &str = "avibe:pet-layout";
 const MOVE_SETTLE: Duration = Duration::from_millis(400);
 /// How often a drag checks whether the button is still down.
 const DRAG_POLL: Duration = Duration::from_millis(16);
+/// Tells the page, before its scripts run, that this shell drags the pet
+/// itself (`pet_drag`), so the page chooses the drag path the moment it is
+/// pressed. Older shells have no marker and the page uses `start_dragging`.
+pub const PET_DRAG_MARKER: &str =
+    "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_PET_DRAG__', { value: true });";
 /// How long a dropped pet waits for its page to draw the chosen layout before
 /// the shell restores the full window on its own.
 const SETTLE_TIMEOUT: Duration = Duration::from_millis(1000);
@@ -68,29 +73,8 @@ fn native_pet_catalog() -> NativePetCatalog {
 #[derive(Clone, Copy)]
 struct Frame {
     expanded: bool,
-    /// The window as it is now: the settled frame, or the strip while dragged.
-    current: PetFrame,
-    /// Set from the start of a drag until the full window is back.
-    dragging: bool,
-    /// The frame a drop chose and the anchor in window points, waiting for the
-    /// page to draw its layout (`pet_settle`).
-    pending: Option<(PetFrame, (f64, f64))>,
-}
-
-impl Frame {
-    fn new(current: PetFrame) -> Self {
-        Self {
-            expanded: false,
-            current,
-            dragging: false,
-            pending: None,
-        }
-    }
-
-    /// The layout the page should draw: a drop's choice once it is made.
-    fn layout(&self) -> PetLayout {
-        self.pending.map_or(self.current, |(frame, _)| frame).layout
-    }
+    /// The native frame and the layout the page draws (`FrameState`).
+    state: FrameState,
 }
 
 pub struct Pet {
@@ -102,7 +86,7 @@ pub struct Pet {
     /// The accelerator the OS refused, shown in the tray until a registration succeeds.
     shortcut_error: Mutex<Option<String>>,
     move_generation: Arc<AtomicU64>,
-    /// Advances with every drag or re-placement, so a stale one's steps
+    /// Advances with every drag and every new window, so a stale drag's steps
     /// change nothing.
     drag_generation: AtomicU64,
     /// Whether the page draws the top layout (`pet_ready` says so).
@@ -117,7 +101,10 @@ impl Pet {
         Self {
             store: Mutex::new(PetStore::load(path)),
             window_origin: Mutex::new(None),
-            frame: Mutex::new(Frame::new(PetFrame::default())),
+            frame: Mutex::new(Frame {
+                expanded: false,
+                state: FrameState::new(PetFrame::default()),
+            }),
             shortcut_error: Mutex::new(None),
             move_generation: Arc::new(AtomicU64::new(0)),
             drag_generation: AtomicU64::new(0),
@@ -368,12 +355,17 @@ fn build_window(app: &AppHandle, origin: &LoopbackOrigin) -> Option<WebviewWindo
     let unit = area_for(&areas, at).map_or(1.0, |area| area.unit);
     let frame = frame_at(at, &areas);
     pet.drag_generation.fetch_add(1, Ordering::SeqCst);
-    *lock(&pet.frame) = Frame::new(frame);
+    {
+        let mut current = lock(&pet.frame);
+        current.expanded = false;
+        current.state.rebuild(frame);
+    }
     let (width, height) = frame.size();
     let (x, y) = frame.origin(at, unit);
     pet.page_loading();
     let builder = WebviewWindowBuilder::new(app, PET_WINDOW, WebviewUrl::External(url))
         .initialization_script(DESKTOP_SHELL_MARKER)
+        .initialization_script(PET_DRAG_MARKER)
         .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
         .title("Avibe")
         .inner_size(width, height)
@@ -521,16 +513,18 @@ pub fn window_moved(app: &AppHandle) {
     });
 }
 
-/// Puts the window where `place_moved` says for its spot now. A layout change
-/// waits for the page to draw it (`pet_settle`), as after a drop; a page that
-/// cannot draw the top layout only ever gets the upward window, at once.
+/// Puts the window where `place_moved` says for its spot now, through
+/// `FrameState::follow`: the same layout applies at once, another one waits
+/// for the page to draw it.
 fn follow_move(app: &AppHandle, window: &WebviewWindow) {
     let pet = app.state::<Pet>();
-    let mut frame = lock(&pet.frame);
-    if frame.dragging || frame.pending.is_some() {
-        return;
-    }
-    let current = frame.current;
+    let current = {
+        let frame = lock(&pet.frame);
+        if frame.state.busy() {
+            return;
+        }
+        frame.state.current()
+    };
     let (Some(at), Ok(window_scale)) = (window_anchor(window, current), window.scale_factor()) else {
         return;
     };
@@ -543,50 +537,48 @@ fn follow_move(app: &AppHandle, window: &WebviewWindow) {
         monitor: anchor.monitor.clone(),
     });
     let held = rescale((anchor.x, anchor.y), scale, window_scale);
-    if page_layouts && next.layout != current.layout {
-        let generation = pet.drag_generation.fetch_add(1, Ordering::SeqCst) + 1;
-        drop(frame);
-        hold_for_page(app, window, next, held, generation);
-        return;
-    }
+    // A window this shell just placed comes back here: sub-point differences
+    // are its own rounding, not a move.
     let close = |a: f64, b: f64| (a - b).abs() < 0.5;
-    if next.layout != current.layout
-        || !close(next.height, current.height)
-        || !close(held.0, at.0)
-        || !close(held.1, at.1)
-    {
-        set_frame(window, next.origin(held, 1.0), next.size());
-        frame.current = next;
-    }
+    let moved = !close(held.0, at.0) || !close(held.1, at.1);
+    let next = if close(next.height, current.height) {
+        PetFrame {
+            height: current.height,
+            ..next
+        }
+    } else {
+        next
+    };
+    let step = lock(&pet.frame).state.follow(next, held, moved, page_layouts);
+    perform(app, window, step);
 }
 
-/// The one way a new layout reaches the page: the frame waits (`pending`)
-/// while the document showing now, whichever started the change, is told to
-/// draw it and then calls `pet_settle`; a document that loads meanwhile reads
-/// it from `pet_ready`. It settles on its own after `SETTLE_TIMEOUT`.
-fn hold_for_page(app: &AppHandle, window: &WebviewWindow, next: PetFrame, held: (f64, f64), generation: u64) {
-    let pet = app.state::<Pet>();
-    lock(&pet.frame).pending = Some((next, held));
-    if pet.page_layouts.load(Ordering::SeqCst) {
-        dispatch(window, LAYOUT_EVENT, &serde_json::json!({ "layout": next.layout }));
-    }
-    settle_later(app, generation);
-}
-
-/// Settles a waiting frame on its own if its page has not after `SETTLE_TIMEOUT`.
-fn settle_later(app: &AppHandle, generation: u64) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(SETTLE_TIMEOUT).await;
-        let _ = on_main_thread(&app, move |app| {
-            if app.state::<Pet>().drag_generation.load(Ordering::SeqCst) == generation {
-                if let Some(window) = app.get_webview_window(PET_WINDOW) {
-                    settle(&window);
-                }
+/// Carries out a `FrameStep`: moves the window now, or publishes the layout
+/// to the document showing now, whichever document started the change. A
+/// published frame applies on that revision's `pet_settle`, or on its own
+/// after `SETTLE_TIMEOUT`.
+fn perform(app: &AppHandle, window: &WebviewWindow, step: FrameStep) {
+    match step {
+        FrameStep::Keep => {}
+        FrameStep::Apply { frame, anchor } => set_frame(window, frame.origin(anchor, 1.0), frame.size()),
+        FrameStep::Publish(snapshot) => {
+            if app.state::<Pet>().page_layouts.load(Ordering::SeqCst) {
+                dispatch(window, LAYOUT_EVENT, &serde_json::json!(snapshot));
             }
-        })
-        .await;
-    });
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(SETTLE_TIMEOUT).await;
+                let _ = on_main_thread(&app, move |app| {
+                    let Some(window) = app.get_webview_window(PET_WINDOW) else {
+                        return;
+                    };
+                    let step = lock(&app.state::<Pet>().frame).state.expire(snapshot.revision);
+                    perform(app, &window, step);
+                })
+                .await;
+            });
+        }
+    }
 }
 
 /// The anchor of `window` drawn as `frame`, in the window's logical points.
@@ -690,8 +682,10 @@ fn is_workbench_caller(label: &str, active: Option<&LoopbackOrigin>, url: &Url) 
 pub struct ReadyResult {
     #[serde(flatten)]
     ready: PetReady,
-    /// The side the page opens its column on. Absent from older shells.
+    /// The layout to draw and its revision (absent from older shells), the
+    /// same snapshot the layout event carries.
     layout: PetLayout,
+    layout_revision: u64,
 }
 
 /// Called once the `/pet` page has its listeners installed. `layouts` says
@@ -703,6 +697,8 @@ pub fn pet_ready(window: WebviewWindow, layouts: Option<bool>) -> Result<ReadyRe
     let pet = window.state::<Pet>();
     pet.page_layouts.store(layouts == Some(true), Ordering::SeqCst);
     if layouts != Some(true) {
+        // An older page draws only the upward layout and never acknowledges
+        // one: it gets the upward window.
         follow_move(window.app_handle(), &window);
     }
     // A new document starts collapsed, so the frame does too.
@@ -718,8 +714,12 @@ pub fn pet_ready(window: WebviewWindow, layouts: Option<bool>) -> Result<ReadyRe
         pet.poll_wake.notify_one();
         let _ = window.set_focus();
     }
-    let layout = lock(&pet.frame).layout();
-    Ok(ReadyResult { ready, layout })
+    let snapshot = lock(&pet.frame).state.snapshot();
+    Ok(ReadyResult {
+        ready,
+        layout: snapshot.layout,
+        layout_revision: snapshot.revision,
+    })
 }
 
 /// Records the page state without moving or resizing the fixed mini window.
@@ -733,21 +733,24 @@ fn set_expanded(window: &WebviewWindow, expanded: bool) -> Result<PetLayout, Str
     let pet = window.state::<Pet>();
     let mut frame = lock(&pet.frame);
     frame.expanded = expanded;
-    Ok(frame.layout())
+    // Older pages read the layout here; current ones take it only from the
+    // revisioned snapshot.
+    Ok(frame.state.snapshot().layout)
 }
 
-/// Drags the pet with the pointer and answers, once the button is released,
-/// with the layout for where it was dropped (decision 2026-10-23).
+/// Drags the pet with the pointer (decision 2026-10-23) and returns once the
+/// drop has been placed.
 ///
 /// The window shrinks to the strip around Vibey and the dock for the drag, so
 /// Vibey can reach the top of the work area (macOS keeps a window below the
 /// menu bar), and both layouts draw Vibey at the same place in it. On release
-/// the shell keeps the pet whole on a display, chooses the frame there
-/// (`settle_frame`) and saves the anchor; the window stays the strip until the
-/// page has drawn the answered layout and calls `pet_settle`, or for
-/// `SETTLE_TIMEOUT`, so the full window never shows the other layout.
+/// the shell keeps the pet whole on a display, chooses the frame there and
+/// saves the anchor. A page that draws layouts gets the drop's revisioned
+/// snapshot through the layout event, and the full window comes back on that
+/// revision's `pet_settle` (or after `SETTLE_TIMEOUT`); the reply carries no
+/// layout, so the page has one source for it.
 #[tauri::command]
-pub async fn pet_drag(window: WebviewWindow) -> Result<PetLayout, String> {
+pub async fn pet_drag(window: WebviewWindow) -> Result<(), String> {
     ensure_pet_page(&window)?;
     let app = window.app_handle().clone();
     let generation = on_main_thread(&app, {
@@ -763,12 +766,21 @@ pub async fn pet_drag(window: WebviewWindow) -> Result<PetLayout, String> {
     .await?
 }
 
-/// Restores the full window for a dropped pet once its page draws the layout
-/// `pet_drag` answered. Without a drop waiting, it changes nothing.
+/// The page drew the layout of `revision`. That revision's waiting frame (if
+/// it is still the waiting one) comes back now; any other acknowledgement
+/// changes nothing. Answers with the snapshot the page should now draw.
 #[tauri::command]
-pub fn pet_settle(window: WebviewWindow) -> Result<PetLayout, String> {
+pub fn pet_settle(window: WebviewWindow, revision: u64) -> Result<LayoutSnapshot, String> {
     ensure_pet_page(&window)?;
-    Ok(settle(&window))
+    let app = window.app_handle();
+    let pet = window.state::<Pet>();
+    let (step, snapshot) = {
+        let mut frame = lock(&pet.frame);
+        let step = frame.state.ack(revision);
+        (step, frame.state.snapshot())
+    };
+    perform(app, &window, step);
+    Ok(snapshot)
 }
 
 async fn on_main_thread<T: Send + 'static>(
@@ -787,26 +799,18 @@ async fn on_main_thread<T: Send + 'static>(
 fn begin_drag(app: &AppHandle, window: &WebviewWindow) -> Result<u64, String> {
     let pet = app.state::<Pet>();
     let mut frame = lock(&pet.frame);
-    // A drop still waiting for its page is the strip already; grabbing it
-    // again simply starts another drag from there.
-    if frame.dragging && frame.pending.is_none() {
-        return Err("The desktop pet is already being dragged.".to_owned());
-    }
-    let before = frame.current;
+    let before = frame.state.current();
     let anchor = window_anchor(window, before).ok_or(WINDOW_GONE)?;
-    let strip = PetFrame::dragging(before.layout);
+    let Some(strip) = frame.state.begin_drag() else {
+        return Err("The desktop pet is already being placed.".to_owned());
+    };
     set_frame(window, strip.origin(anchor, 1.0), strip.size());
-    frame.current = strip;
-    frame.dragging = true;
-    frame.pending = None;
     let generation = pet.drag_generation.fetch_add(1, Ordering::SeqCst) + 1;
     drop(frame);
     if let Err(error) = start_drag(window) {
         // No drag will end: put the window back as it was.
-        let mut frame = lock(&pet.frame);
+        lock(&pet.frame).state.cancel_drag(before);
         set_frame(window, before.origin(anchor, 1.0), before.size());
-        frame.current = before;
-        frame.dragging = false;
         pet.drag_generation.fetch_add(1, Ordering::SeqCst);
         return Err(error);
     }
@@ -839,12 +843,12 @@ async fn wait_for_release(app: &AppHandle, generation: u64) {
     }
 }
 
-fn end_drag(app: &AppHandle, window: &WebviewWindow, generation: u64) -> Result<PetLayout, String> {
+fn end_drag(app: &AppHandle, window: &WebviewWindow, generation: u64) -> Result<(), String> {
     let pet = app.state::<Pet>();
     if pet.drag_generation.load(Ordering::SeqCst) != generation {
         return Err(WINDOW_GONE.to_owned());
     }
-    let strip = lock(&pet.frame).current;
+    let strip = lock(&pet.frame).state.current();
     let (Some(dropped), Ok(window_scale)) = (window_anchor(window, strip), window.scale_factor()) else {
         return Err(WINDOW_GONE.to_owned());
     };
@@ -863,20 +867,9 @@ fn end_drag(app: &AppHandle, window: &WebviewWindow, generation: u64) -> Result<
     if held != dropped {
         set_frame(window, strip.origin(held, 1.0), strip.size());
     }
-    hold_for_page(app, window, next, held, generation);
-    Ok(next.layout)
-}
-
-/// Puts back the full window a drop chose, if one is waiting.
-fn settle(window: &WebviewWindow) -> PetLayout {
-    let pet = window.state::<Pet>();
-    let mut frame = lock(&pet.frame);
-    if let Some((next, anchor)) = frame.pending.take() {
-        set_frame(window, next.origin(anchor, 1.0), next.size());
-        frame.current = next;
-        frame.dragging = false;
-    }
-    frame.layout()
+    let step = lock(&pet.frame).state.end_drag(next, held, page_layouts);
+    perform(app, window, step);
+    Ok(())
 }
 
 #[tauri::command]

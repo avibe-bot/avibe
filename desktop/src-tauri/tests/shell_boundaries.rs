@@ -660,6 +660,36 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
 }
 
 #[test]
+fn the_pet_learns_the_shell_drags_it_from_one_top_level_marker() {
+    let source = shipping_source("src/pet.rs");
+    let builder = source
+        .split("fn build_window(")
+        .nth(1)
+        .expect("pet window builder")
+        .split("\n}\n")
+        .next()
+        .expect("builder body");
+    assert!(
+        builder.contains(".initialization_script(PET_DRAG_MARKER)"),
+        "the pet window must define the drag marker before its scripts run"
+    );
+    let marker = source
+        .split("const PET_DRAG_MARKER: &str =")
+        .nth(1)
+        .expect("marker script")
+        .split("\";\n")
+        .next()
+        .expect("marker literal");
+    assert!(marker.contains("if (window.self === window.top)"));
+    assert!(marker.contains("Object.defineProperty(window, '__AVIBE_PET_DRAG__', { value: true })"));
+    let reader = read_to_string(&crate_dir().join("../../ui/src/pet/petBridge.ts"));
+    assert!(
+        reader.contains("__AVIBE_PET_DRAG__ === true"),
+        "the pet page must read the same marker the shell defines"
+    );
+}
+
+#[test]
 fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     let source = shipping_source("src/lib.rs");
     let builder = source

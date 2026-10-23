@@ -1,11 +1,12 @@
 import { useEffect, useSyncExternalStore } from 'react';
 
-import { onPetEvents, petBridge, type PetBinding, type PetIntent, type PetLayout } from './petBridge';
+import { onPetEvents, petBridge, type LayoutSnapshot, type PetBinding, type PetIntent } from './petBridge';
 import { petPanel } from './petPanel';
 import type { PetSurfaceEpoch } from './usePetSession';
 
 /** Document-local main resolution and pending summons. Legacy shell bindings
  * remain readable for compatibility, but never select the conversation. */
+const FIRST_LAYOUT_TIMEOUT_MS = 4000;
 let binding: string | null = null;
 let legacyBinding: PetBinding | null = null;
 let pendingSummon: PetIntent | null = null;
@@ -44,24 +45,40 @@ const start = () => {
       liveSummons += 1;
       noteSummon(intent);
     },
-    // The shell chose another layout (a drop, even one this document did not
-    // start, or a display change): draw it, then let the shell settle.
-    layout: drawLayout,
+    // The shell chose a layout (a drop, even one another document started, or
+    // a display change).
+    layout: drawSnapshot,
   });
   const liveSummonsAtRequest = liveSummons;
+  // The page draws nothing until the shell's first layout; if that never
+  // comes, it draws the default one after FIRST_LAYOUT_TIMEOUT.
+  const waiting = window.setTimeout(petPanel.stopWaiting, FIRST_LAYOUT_TIMEOUT_MS);
   readyPromise = petBridge.ready().then((ready) => {
+    window.clearTimeout(waiting);
     legacyBinding = ready;
     readyLoaded = true;
-    // A frame may already be waiting for this document (it loaded mid-drop).
-    if (ready.layout) drawLayout(ready.layout);
+    // A frame may already be waiting for this document (it loaded mid-drop);
+    // a new window is shown once this first snapshot is drawn.
+    if (ready.snapshot) drawSnapshot(ready.snapshot);
+    else petPanel.stopWaiting();
     if (ready.summon_pending && liveSummons === liveSummonsAtRequest) noteSummon(ready.summon_pending.intent);
-  }).catch(() => undefined);
+  }).catch(() => {
+    window.clearTimeout(waiting);
+    petPanel.stopWaiting();
+  });
 };
 
-/** Draws a layout the shell chose, then lets it bring the window that fits. */
-const drawLayout = (next: PetLayout) => {
-  petPanel.setLayout(next);
-  requestAnimationFrame(() => requestAnimationFrame(() => { void petBridge.settle().catch(() => undefined); }));
+/**
+ * Draws a newer layout snapshot, then tells the shell this revision is drawn
+ * so a frame waiting for it comes back. The shell answers with its latest
+ * snapshot, which is drawn in turn if it is newer still (an event that never
+ * reached this document).
+ */
+const drawSnapshot = (snapshot: LayoutSnapshot) => {
+  if (!petPanel.applySnapshot(snapshot)) return;
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    void petBridge.settle(snapshot.revision).then((latest) => { if (latest) drawSnapshot(latest); }).catch(() => undefined);
+  }));
 };
 
 const setDismissed = (ids: string[]) => {

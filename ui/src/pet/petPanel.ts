@@ -1,6 +1,6 @@
 import { useCallback, useSyncExternalStore } from 'react';
 
-import { petBridge, type PetLayout } from './petBridge';
+import { petBridge, type LayoutSnapshot, type PetLayout } from './petBridge';
 
 const DEFAULT_LAYOUT: PetLayout = { panel_side: 'left', panel_edge: 'bottom' };
 
@@ -17,6 +17,11 @@ const DEFAULT_LAYOUT: PetLayout = { panel_side: 'left', panel_edge: 'bottom' };
  */
 let expanded = false;
 let layout: PetLayout = DEFAULT_LAYOUT;
+// The revision of `layout` (0: none from the shell yet).
+let layoutRevision = 0;
+// Under a shell that owns the layout, nothing is drawn until its first
+// snapshot arrives, or until waiting for it is given up (`stopWaiting`).
+let waitingGivenUp = false;
 let requestId = 0;
 let wantExpanded = false;
 let confirmedExpanded = false;
@@ -34,21 +39,39 @@ export const petPanel = {
   current: (): boolean => expanded,
   want: (): boolean => wantExpanded,
   layout: (): PetLayout => layout,
-  /** The shell chose a layout (on load, or where a drag dropped the pet). */
-  setLayout: (next: PetLayout) => {
-    if (next.panel_edge === layout.panel_edge && next.panel_side === layout.panel_side) return;
-    layout = next;
+  /** Waiting for the shell's first layout: draw nothing yet (spec §9.1). */
+  awaitingLayout: (): boolean => layoutRevision === 0 && !waitingGivenUp && petBridge.shellDrags(),
+  /** `pet_ready` failed or never answered: draw the default layout. */
+  stopWaiting: () => {
+    if (waitingGivenUp || layoutRevision > 0) return;
+    waitingGivenUp = true;
     notify();
+  },
+  /**
+   * The shell's layout, its only source (spec §9.1). Only a newer revision is
+   * drawn; answers whether it was.
+   */
+  applySnapshot: (snapshot: LayoutSnapshot): boolean => {
+    if (snapshot.revision <= layoutRevision) return false;
+    layoutRevision = snapshot.revision;
+    if (snapshot.layout.panel_edge !== layout.panel_edge || snapshot.layout.panel_side !== layout.panel_side) {
+      layout = snapshot.layout;
+      notify();
+    }
+    return true;
   },
 };
 
 export function usePetPanel(): {
   expanded: boolean;
   layout: PetLayout;
+  /** Nothing is drawn while the shell's first layout is on its way. */
+  awaiting: boolean;
   setPanel: (next: boolean) => Promise<void>;
 } {
   const currentExpanded = useSyncExternalStore(subscribe, () => expanded);
   const currentLayout = useSyncExternalStore(subscribe, () => layout);
+  const awaiting = useSyncExternalStore(subscribe, petPanel.awaitingLayout);
   const setPanel = useCallback(async (next: boolean) => {
     wantExpanded = next;
     const request = ++requestId;
@@ -58,11 +81,10 @@ export function usePetPanel(): {
     }
     const run = async () => {
       try {
-        const applied = await petBridge.setExpanded(next);
+        await petBridge.setExpanded(next);
         if (request !== requestId) return;
         confirmedExpanded = next;
-        // Only the shell chooses a layout; outside it there is none to apply.
-        if (petBridge.native()) layout = applied;
+        // The reply's layout is for older pages; this one draws snapshots only.
         expanded = next;
         notify();
       } catch {
@@ -76,5 +98,5 @@ export function usePetPanel(): {
     chain = wait.then(() => undefined, () => undefined);
     await wait;
   }, []);
-  return { expanded: currentExpanded, layout: currentLayout, setPanel };
+  return { expanded: currentExpanded, layout: currentLayout, awaiting, setPanel };
 }

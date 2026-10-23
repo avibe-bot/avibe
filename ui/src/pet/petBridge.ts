@@ -18,16 +18,22 @@ export type PetBinding = {
   revision: number;
 };
 
+/** The layout to draw and its revision; the shell is its only source. */
+export type LayoutSnapshot = {
+  revision: number;
+  layout: PetLayout;
+};
+
 export type PetReady = PetBinding & {
   summon_pending: { intent: PetIntent } | null;
-  /** Which side the column opens on; only shells that drag the pet send it. */
-  layout?: PetLayout;
+  /** Only shells that drag the pet send one. */
+  snapshot?: LayoutSnapshot;
 };
 
 export const PET_SUMMON_EVENT = 'avibe:pet-summon';
 export const PET_BOUND_EVENT = 'avibe:pet-bound';
 export const PET_HOVER_EVENT = 'avibe:pet-hover';
-/** The shell moved the pet (a display change) to a spot with another layout. */
+/** The shell's layout snapshot `{ revision, layout }`: the page draws it. */
 export const PET_LAYOUT_EVENT = 'avibe:pet-layout';
 
 /** A window-local rect that takes the mouse; `hover` marks Vibey's hover zone. */
@@ -56,12 +62,13 @@ const parseLayout = (value: unknown): PetLayout => {
   };
 };
 
-// Whether the shell drags the pet itself (`pet_drag`), learned from
-// `pet_ready`: older shells only offer the window's own `start_dragging`.
-// Until that answer arrives a drag waits for it (`negotiated`) rather than
-// guessing the older path.
-let shellDrags = false;
-let negotiated: Promise<void> | null = null;
+const parseSnapshot = (value: unknown): LayoutSnapshot | null => {
+  const snapshot = value as { revision?: unknown; layout?: unknown } | null;
+  const revision = snapshot?.revision;
+  return typeof revision === 'number' && Number.isInteger(revision) && revision >= 0
+    ? { revision, layout: parseLayout(snapshot?.layout) }
+    : null;
+};
 
 const parseBinding = (value: unknown): PetBinding => {
   const result = value as { binding?: unknown; revision?: unknown } | null;
@@ -91,22 +98,27 @@ export const petBridge = {
   /** True inside the native pet window. */
   native: (): boolean => shellInvoke() !== null,
 
-  /** Whether `drag` goes through the shell (which shrinks the window to Vibey). */
-  shellDrags: (): boolean => shellInvoke() !== null && shellDrags,
+  /**
+   * Whether `drag` goes through the shell, which shrinks the window to Vibey.
+   * The shell says so before any page script runs (`__AVIBE_PET_DRAG__`), so
+   * a press knows at once; older shells have no marker.
+   */
+  shellDrags: (): boolean => shellInvoke() !== null
+    && (window as unknown as { __AVIBE_PET_DRAG__?: unknown }).__AVIBE_PET_DRAG__ === true,
 
   ready: async (): Promise<PetReady> => {
     const invoke = shellInvoke();
     if (!invoke) return { ...readDevBinding(), summon_pending: null };
     // `layouts`: this page draws the column below Vibey (`panel_edge: top`).
-    const answer = invoke('pet_ready', { layouts: true }) as Promise<{ summon_pending?: { intent?: unknown } | null; layout?: unknown } | null>;
-    negotiated = answer.then(() => undefined, () => undefined);
-    const result = await answer;
+    const result = (await invoke('pet_ready', { layouts: true })) as {
+      summon_pending?: { intent?: unknown } | null; layout?: unknown; layout_revision?: unknown;
+    } | null;
     const pending = result?.summon_pending;
-    shellDrags = Boolean(result?.layout);
+    const snapshot = parseSnapshot({ revision: result?.layout_revision, layout: result?.layout });
     return {
       ...parseBinding(result),
       summon_pending: pending && isIntent(pending.intent) ? { intent: pending.intent } : null,
-      ...(result?.layout ? { layout: parseLayout(result.layout) } : {}),
+      ...(snapshot ? { snapshot } : {}),
     };
   },
 
@@ -136,27 +148,28 @@ export const petBridge = {
   },
 
   /**
-   * Moves the native window with the pointer. A shell that drags the pet
-   * itself answers, once the button is released, with the layout for where it
-   * was dropped; the page draws it and then calls `settle`. Otherwise (an
-   * older shell, or outside one) this resolves to null.
+   * Moves the native window with the pointer: through the shell when it drags
+   * the pet (resolves once the drop is placed; its layout arrives as a
+   * snapshot), else with the window's own `start_dragging`.
    */
-  drag: async (): Promise<PetLayout | null> => {
+  drag: async (): Promise<void> => {
     const invoke = shellInvoke();
-    if (!invoke) return null;
-    if (negotiated) await negotiated;
-    if (!shellDrags) {
+    if (!invoke) return;
+    if (!petBridge.shellDrags()) {
       void invoke('plugin:window|start_dragging');
-      return null;
+      return;
     }
-    return parseLayout(await invoke('pet_drag'));
+    await invoke('pet_drag');
   },
 
-  /** Restores the full window around a dropped pet, in the layout it drew. */
-  settle: async (): Promise<PetLayout> => {
+  /**
+   * Tells the shell this page drew `revision`; a frame waiting for it comes
+   * back. Answers with the snapshot the page should draw now.
+   */
+  settle: async (revision: number): Promise<LayoutSnapshot | null> => {
     const invoke = shellInvoke();
-    if (!invoke) return DEFAULT_LAYOUT;
-    return parseLayout(await invoke('pet_settle'));
+    if (!invoke) return null;
+    return parseSnapshot(await invoke('pet_settle', { revision }));
   },
 
   /** Opens an `avibe://` link in the main window. */
@@ -193,14 +206,15 @@ export const onPetHover = (handler: (hover: boolean) => void): (() => void) => {
 /** Subscribe to shell events; returns the unsubscribe function. */
 export const onPetEvents = (handlers: {
   summon?: (intent: PetIntent) => void;
-  layout?: (layout: PetLayout) => void;
+  layout?: (snapshot: LayoutSnapshot) => void;
 }): (() => void) => {
   const summon = (event: Event) => {
     const intent = (event as CustomEvent<{ intent?: unknown }>).detail?.intent;
     handlers.summon?.(isIntent(intent) ? intent : 'show');
   };
   const layout = (event: Event) => {
-    handlers.layout?.(parseLayout((event as CustomEvent<{ layout?: unknown }>).detail?.layout));
+    const snapshot = parseSnapshot((event as CustomEvent<unknown>).detail);
+    if (snapshot) handlers.layout?.(snapshot);
   };
   window.addEventListener(PET_SUMMON_EVENT, summon);
   window.addEventListener(PET_LAYOUT_EVENT, layout);

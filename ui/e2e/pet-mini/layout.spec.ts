@@ -1408,3 +1408,17 @@ for (const theme of ['light', 'dark']) {
     expect(await avatar.boundingBox()).toEqual(anchor);
   });
 }
+
+// Spec §9.1: while the shell drags, the window is only the strip around Vibey
+// and the dock; the column has no room there and must not show as a sliver.
+test('the column hides while the window is only the drag strip, and returns with the full window', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=3&queued=1');
+  await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+  await page.setViewportSize({ width: 460, height: 163 });
+  await expect(page.locator('.pet-mini-column')).toHaveCSS('visibility', 'hidden');
+  const avatar = (await page.locator('.pet-mini-avatar-button').boundingBox())!;
+  expect(avatar.y).toBeCloseTo(12, 0);
+  await expect.poll(() => page.evaluate(() => window.petLayoutHitRegions.every((rect) => rect.y >= 0 && rect.y + rect.height <= 163))).toBe(true);
+  await page.setViewportSize({ width: 460, height: 600 });
+  await expect(page.locator('.pet-mini-column')).toHaveCSS('visibility', 'visible');
+});

@@ -663,6 +663,171 @@ pub fn place_moved(moved: (f64, f64), areas: &[WorkArea], page_layouts: bool) ->
     (anchor, frame)
 }
 
+/// The layout the page should draw, and its revision. The shell is its only
+/// source (spec §9.1): the page reads it from `pet_ready` and from the layout
+/// event, keeps only a newer revision, and acknowledges each one it draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct LayoutSnapshot {
+    pub revision: u64,
+    pub layout: PetLayout,
+}
+
+/// What the shell does with the native window after a `FrameState` step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FrameStep {
+    /// The window stays as it is.
+    Keep,
+    /// Put the window at `anchor` (window points) as `frame`, now.
+    Apply { frame: PetFrame, anchor: (f64, f64) },
+    /// Tell the page to draw `snapshot`; its frame waits for the page's
+    /// acknowledgement of that revision (or `expire`).
+    Publish(LayoutSnapshot),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Held {
+    frame: PetFrame,
+    anchor: (f64, f64),
+    revision: u64,
+}
+
+/// The pet window's frame, owned by the shell, and the layout its page must
+/// draw. A change of layout is never shown in the full window before the page
+/// has drawn it: the frame is held until the page acknowledges that revision.
+/// A frame change that keeps the layout applies at once.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameState {
+    current: PetFrame,
+    dragging: bool,
+    held: Option<Held>,
+    snapshot: LayoutSnapshot,
+}
+
+impl FrameState {
+    pub fn new(frame: PetFrame) -> Self {
+        Self {
+            current: frame,
+            dragging: false,
+            held: None,
+            snapshot: LayoutSnapshot {
+                revision: 1,
+                layout: frame.layout,
+            },
+        }
+    }
+
+    /// A new window. Revisions keep growing, so an answer meant for the old
+    /// window can never match the new one.
+    pub fn rebuild(&mut self, frame: PetFrame) {
+        let revision = self.snapshot.revision + 1;
+        *self = Self::new(frame);
+        self.snapshot.revision = revision;
+    }
+
+    pub fn current(&self) -> PetFrame {
+        self.current
+    }
+
+    pub fn snapshot(&self) -> LayoutSnapshot {
+        self.snapshot
+    }
+
+    /// The shell's own drag, or a frame waiting for its page: both place the
+    /// window themselves, so nothing else may.
+    pub fn busy(&self) -> bool {
+        self.dragging || self.held.is_some()
+    }
+
+    /// Starts the shell's drag: returns the strip to apply, or `None` while
+    /// another drag runs or a frame waits for its page.
+    pub fn begin_drag(&mut self) -> Option<PetFrame> {
+        if self.busy() {
+            return None;
+        }
+        self.dragging = true;
+        self.current = PetFrame::dragging(self.current.layout);
+        Some(self.current)
+    }
+
+    /// The native drag did not start: the window goes back to `before`.
+    pub fn cancel_drag(&mut self, before: PetFrame) {
+        self.current = before;
+        self.dragging = false;
+    }
+
+    /// The drag ended with the pet at `anchor`, framed `next`. A page that
+    /// draws layouts draws the drop's revision before its window comes back;
+    /// for one that does not, the (upward) window comes back at once.
+    pub fn end_drag(&mut self, next: PetFrame, anchor: (f64, f64), page_layouts: bool) -> FrameStep {
+        self.dragging = false;
+        if page_layouts {
+            self.hold(next, anchor)
+        } else {
+            self.apply(next, anchor)
+        }
+    }
+
+    /// Something other than the shell's drag moved the window; `next` is the
+    /// window for where it now is. Ignored while the shell places it itself.
+    pub fn follow(&mut self, next: PetFrame, anchor: (f64, f64), moved: bool, page_layouts: bool) -> FrameStep {
+        if self.busy() {
+            return FrameStep::Keep;
+        }
+        if page_layouts && next.layout != self.current.layout {
+            return self.hold(next, anchor);
+        }
+        if !moved && next == self.current {
+            return FrameStep::Keep;
+        }
+        self.apply(next, anchor)
+    }
+
+    /// The page drew `revision`. Only the waiting frame's own revision
+    /// releases it; any other acknowledgement changes nothing.
+    pub fn ack(&mut self, revision: u64) -> FrameStep {
+        match self.held {
+            Some(held) if held.revision == revision => {
+                self.held = None;
+                self.current = held.frame;
+                FrameStep::Apply {
+                    frame: held.frame,
+                    anchor: held.anchor,
+                }
+            }
+            _ => FrameStep::Keep,
+        }
+    }
+
+    /// No acknowledgement of `revision` came in time: its frame applies anyway.
+    pub fn expire(&mut self, revision: u64) -> FrameStep {
+        self.ack(revision)
+    }
+
+    fn hold(&mut self, frame: PetFrame, anchor: (f64, f64)) -> FrameStep {
+        self.snapshot = LayoutSnapshot {
+            revision: self.snapshot.revision + 1,
+            layout: frame.layout,
+        };
+        self.held = Some(Held {
+            frame,
+            anchor,
+            revision: self.snapshot.revision,
+        });
+        FrameStep::Publish(self.snapshot)
+    }
+
+    fn apply(&mut self, frame: PetFrame, anchor: (f64, f64)) -> FrameStep {
+        if frame.layout != self.snapshot.layout {
+            self.snapshot = LayoutSnapshot {
+                revision: self.snapshot.revision + 1,
+                layout: frame.layout,
+            };
+        }
+        self.current = frame;
+        FrameStep::Apply { frame, anchor }
+    }
+}
+
 /// Window-local logical coordinates; shadows deliberately do not enlarge these.
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub struct HitRect {
@@ -1210,6 +1375,259 @@ mod tests {
         assert!(window.y >= short.area.y && window.bottom() <= short.area.bottom());
         assert!(anchor.x + PET_SIZE <= short.area.right());
         assert_eq!(anchor.monitor.as_deref(), Some("short"));
+    }
+
+    /// A page in the model: the document now showing, and what it drew.
+    #[derive(Clone, Copy)]
+    struct Page {
+        document: u32,
+        drawn: Option<LayoutSnapshot>,
+    }
+
+    enum Message {
+        /// Shell to page: a snapshot (layout event or `pet_ready` reply),
+        /// for the document it was sent to.
+        Snapshot(u32, LayoutSnapshot),
+        /// Page to shell: `pet_settle(revision)` for the layout it drew.
+        Ack(u64, PetLayout),
+    }
+
+    #[test]
+    fn a_held_frame_comes_back_only_in_the_layout_its_page_drew_whatever_the_interleaving() {
+        let frames = [
+            PetFrame::default(),
+            PetFrame {
+                layout: PetLayout::edge(PanelEdge::Top),
+                height: WINDOW_HEIGHT,
+            },
+            PetFrame {
+                layout: PetLayout::default(),
+                height: 420.0,
+            },
+            PetFrame {
+                layout: PetLayout::edge(PanelEdge::Top),
+                height: 300.0,
+            },
+        ];
+        // A small deterministic generator: many seeds, no shared randomness.
+        for seed in 1..400u64 {
+            let mut next = seed;
+            let mut roll = |n: u64| {
+                next = next.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (next >> 33) % n
+            };
+            let mut state = FrameState::new(frames[0]);
+            let mut page = Page {
+                document: 0,
+                drawn: None,
+            };
+            let mut queue: Vec<Message> = vec![Message::Snapshot(0, state.snapshot())];
+            let mut published = vec![state.snapshot().revision];
+            let mut before_drag = None;
+            for _ in 0..60 {
+                let revision = state.snapshot().revision;
+                let step = match roll(8) {
+                    0 => {
+                        let before = state.current();
+                        let strip = state.begin_drag();
+                        if strip.is_some() {
+                            before_drag = Some(before);
+                        }
+                        assert_eq!(strip.is_some(), before_drag.is_some() && strip == Some(state.current()));
+                        FrameStep::Keep
+                    }
+                    1 => match before_drag.take() {
+                        Some(before) if roll(4) == 0 => {
+                            state.cancel_drag(before);
+                            FrameStep::Keep
+                        }
+                        Some(_) => state.end_drag(frames[roll(4) as usize], (0.0, 0.0), true),
+                        None => FrameStep::Keep,
+                    },
+                    2 => state.follow(frames[roll(4) as usize], (0.0, 0.0), roll(2) == 0, true),
+                    3 => {
+                        // The document reloads; the new one reads `pet_ready`.
+                        page = Page {
+                            document: page.document + 1,
+                            drawn: None,
+                        };
+                        queue.push(Message::Snapshot(page.document, state.snapshot()));
+                        FrameStep::Keep
+                    }
+                    4 => {
+                        let stale = published[roll(published.len() as u64) as usize];
+                        state.expire(stale)
+                    }
+                    _ => {
+                        if queue.is_empty() {
+                            FrameStep::Keep
+                        } else {
+                            match queue.remove(roll(queue.len() as u64) as usize) {
+                                Message::Snapshot(document, snapshot) => {
+                                    let newer = page.drawn.is_none_or(|drawn| snapshot.revision > drawn.revision);
+                                    if document == page.document && newer {
+                                        page.drawn = Some(snapshot);
+                                        queue.push(Message::Ack(snapshot.revision, snapshot.layout));
+                                    }
+                                    FrameStep::Keep
+                                }
+                                Message::Ack(acked, drawn) => {
+                                    let before = state;
+                                    let step = state.ack(acked);
+                                    if let FrameStep::Apply { frame, .. } = step {
+                                        assert_eq!(
+                                            frame.layout, drawn,
+                                            "seed {seed}: a held frame came back in another layout"
+                                        );
+                                    } else {
+                                        assert_eq!(
+                                            state, before,
+                                            "seed {seed}: a stale acknowledgement changed something"
+                                        );
+                                    }
+                                    step
+                                }
+                            }
+                        }
+                    }
+                };
+                if let FrameStep::Publish(snapshot) = step {
+                    queue.push(Message::Snapshot(page.document, snapshot));
+                    published.push(snapshot.revision);
+                }
+                assert!(
+                    state.snapshot().revision >= revision,
+                    "seed {seed}: revisions only grow"
+                );
+                if !state.busy() {
+                    assert_eq!(state.snapshot().layout, state.current().layout, "seed {seed}");
+                }
+            }
+            // Quiescence: finish any drag, deliver everything, and the page
+            // draws exactly the layout of the window the shell shows.
+            if let Some(before) = before_drag {
+                state.cancel_drag(before);
+            }
+            while !queue.is_empty() {
+                match queue.remove(0) {
+                    Message::Snapshot(document, snapshot) => {
+                        let newer = page.drawn.is_none_or(|drawn| snapshot.revision > drawn.revision);
+                        if document == page.document && newer {
+                            page.drawn = Some(snapshot);
+                            queue.push(Message::Ack(snapshot.revision, snapshot.layout));
+                        }
+                    }
+                    Message::Ack(acked, _) => {
+                        state.ack(acked);
+                    }
+                }
+            }
+            assert!(
+                !state.busy(),
+                "seed {seed}: a frame is still held after its page answered"
+            );
+            let drawn = page.drawn.expect("the current document read a snapshot");
+            assert_eq!(drawn, state.snapshot(), "seed {seed}");
+            assert_eq!(drawn.layout, state.current().layout, "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn a_frame_change_waits_for_its_page_only_when_the_layout_changes() {
+        let top = PetFrame {
+            layout: PetLayout::edge(PanelEdge::Top),
+            height: WINDOW_HEIGHT,
+        };
+        let mut state = FrameState::new(PetFrame::default());
+        // A shorter window in the same layout applies at once.
+        let shorter = PetFrame {
+            height: 420.0,
+            ..PetFrame::default()
+        };
+        assert_eq!(
+            state.follow(shorter, (1.0, 2.0), true, true),
+            FrameStep::Apply {
+                frame: shorter,
+                anchor: (1.0, 2.0)
+            }
+        );
+        assert_eq!(state.snapshot().revision, 1);
+        // Another layout is held and published.
+        let FrameStep::Publish(snapshot) = state.follow(top, (1.0, 2.0), true, true) else {
+            panic!()
+        };
+        assert_eq!(
+            snapshot,
+            LayoutSnapshot {
+                revision: 2,
+                layout: top.layout
+            }
+        );
+        assert!(state.busy());
+        assert_eq!(
+            state.follow(PetFrame::default(), (0.0, 0.0), true, true),
+            FrameStep::Keep,
+            "held: nothing else places it"
+        );
+        assert_eq!(state.begin_drag(), None, "no drag while a frame waits for its page");
+        assert_eq!(state.ack(1), FrameStep::Keep);
+        assert_eq!(
+            state.ack(2),
+            FrameStep::Apply {
+                frame: top,
+                anchor: (1.0, 2.0)
+            }
+        );
+        assert_eq!(
+            state.ack(2),
+            FrameStep::Keep,
+            "a duplicate acknowledgement changes nothing"
+        );
+        // Every drop is held for a page that draws layouts, even in the same
+        // layout, so its full window returns only after the page has drawn.
+        let strip = state.begin_drag().unwrap();
+        assert_eq!(strip.height, DRAG_HEIGHT);
+        assert_eq!(state.begin_drag(), None);
+        assert!(matches!(
+            state.end_drag(top, (3.0, 4.0), true),
+            FrameStep::Publish(LayoutSnapshot { revision: 3, .. })
+        ));
+        assert_eq!(
+            state.expire(3),
+            FrameStep::Apply {
+                frame: top,
+                anchor: (3.0, 4.0)
+            }
+        );
+        // An older page never holds anything.
+        state.begin_drag();
+        assert_eq!(
+            state.end_drag(PetFrame::default(), (5.0, 6.0), false),
+            FrameStep::Apply {
+                frame: PetFrame::default(),
+                anchor: (5.0, 6.0)
+            }
+        );
+        assert_eq!(
+            state.snapshot(),
+            LayoutSnapshot {
+                revision: 4,
+                layout: PetLayout::default()
+            }
+        );
+        // A failed drag start puts the window back; a new window keeps revisions growing.
+        let before = state.current();
+        state.begin_drag();
+        state.cancel_drag(before);
+        assert_eq!((state.current(), state.busy()), (before, false));
+        state.rebuild(top);
+        assert_eq!(
+            state.snapshot(),
+            LayoutSnapshot {
+                revision: 5,
+                layout: top.layout
+            }
+        );
     }
 
     #[test]

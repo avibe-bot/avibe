@@ -52,7 +52,7 @@ window.petFixtureStops = [];
 window.petFixtureMarkReads = [];
 petBridge.open = async (link) => { window.petFixtureOpens.push(link); };
 // `edge=top`: the layout a shell chooses near the top of the display (§9.1).
-if (params.get('edge') === 'top') petPanel.setLayout({ panel_side: 'left', panel_edge: 'top' });
+if (params.get('edge') === 'top') petPanel.applySnapshot({ revision: 1, layout: { panel_side: 'left', panel_edge: 'top' } });
 const hasMain = params.get('main') !== 'false';
 const layers = Number(params.get('layers') ?? 3);
 const personal = params.get('scenario') === 'personal';

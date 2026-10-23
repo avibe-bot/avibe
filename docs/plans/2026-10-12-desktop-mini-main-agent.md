@@ -646,43 +646,56 @@ already communicate activity. Keep the upper-right red unread badge.
     side of its toggle row with Open in Avibe on the far corner, the bubble's
     tail points at Vibey, and content enters moving toward Vibey. Focus order
     is unchanged.
+- **The shell owns the frame and the layout (decision 2026-10-23, after the
+  #2945 breaker).** One state machine in the shell (`FrameState`) holds the
+  window frame and the layout snapshot `{revision, layout}`, the page's only
+  source for which edge to draw. A frame change that keeps the layout applies
+  at once. One that changes it, and every drop, gets a new revision and waits.
+  The shell publishes the snapshot to the document showing now
+  (`avibe:pet-layout`), whichever document started the change; a document
+  that loads reads the same snapshot from `pet_ready`. The page draws only a
+  newer revision, then acknowledges it (`pet_settle(revision)`), and the
+  waiting frame comes back only on its own revision. Stale acknowledgements
+  change nothing; after 1s without one the frame applies anyway. No reply
+  carries a layout to current pages (`pet_set_expanded` still answers one for
+  older pages).
 - **Dragging.** A 600px window cannot take Vibey near the menu bar, so the
   drag goes through the shell (`pet_drag`): it shrinks the window to the
   **drag strip** around Vibey and the dock (12px above the image, 36px below
   it: 163px at full width), keeping Vibey under the pointer, and starts the
-  native drag. Both layouts draw Vibey at the same place in the strip.
+  native drag. Both layouts draw Vibey at the same place in the strip, and the
+  page hides the column in any window that short (a sliver otherwise). If the
+  native drag cannot start, the window goes back as it was.
+  - The shell says it drags the pet before any page script runs: an
+    initialization script defines `window.__AVIBE_PET_DRAG__`, so a press
+    picks its drag path at once and nothing waits on `pet_ready`. Shells
+    without the marker keep the page's old `start_dragging` path.
   - On release (the shell reads the buttons: no button down in
     `pressedMouseButtons` on macOS, whose bits are physical and whose primary
     side can be the right one; the primary button in `GetAsyncKeyState` on
     Windows; where it cannot, a drag ends once the window has not moved for
-    400ms), the shell keeps the pet whole on a
-    display (as on restore), chooses the window for that spot, saves the
-    anchor and answers the page with the layout. The page draws it and calls
-    `pet_settle`; only then does the full window come back, so the other
-    layout is never shown at full size. Without that call the shell settles
-    on its own after one second.
-  - **One hand-off for every layout change.** A drop or a move to another
-    layout holds the new window until the document showing *now* has drawn
-    it: the shell tells that document (`avibe:pet-layout`), whichever
-    document started the change, and a document that loads meanwhile reads
-    the waiting layout from `pet_ready`, draws it and calls `pet_settle`.
-  - Shells that predate this (no `layout` in `pet_ready`) keep the page's old
-    `start_dragging` path. A drag that starts before `pet_ready` has answered
-    waits for the answer rather than guessing the older path. A page that predates it (the shell can adopt an
-    older running Runtime) does not declare `layouts` in `pet_ready`; the
-    shell then gives it the upward window at the same spot, as tall as the
-    room above allows, so Vibey stays put and nothing is mis-drawn.
-  - While the shell drags, the page hides the column; it returns with the
-    full window. If the native drag cannot start, the window goes back as it
-    was.
+    400ms), the shell keeps the pet whole on a display (as on restore),
+    chooses the window for that spot, saves the anchor and publishes the drop
+    as above.
+  - A page that predates the top layout (the shell can adopt an older running
+    Runtime) does not declare `layouts` in `pet_ready`; it only ever gets the
+    upward window at the same spot, as tall as the room above allows, so
+    Vibey stays put and nothing is mis-drawn.
+- **Nothing is drawn before the layout is known.** Under a shell with the
+  marker, the page keeps its stage invisible (and so reports no hit regions)
+  until it has the shell's first snapshot from `pet_ready`, so a pet restored
+  in the top layout never shows a frame in the other one as it loads. If
+  `pet_ready` fails or has not answered after 4s, the page draws the default
+  layout anyway. The window itself is created and shown as before: a hidden
+  macOS window would pause the page's animation frames, and with them its
+  first acknowledgement. Older pages, which do not read the marker, draw at
+  once as before.
 - **Every other move gets the window for its spot.** When the platform moves
   the window (a display is removed, a work area or scale changes) or an older
   page drags it natively, the shell, once the move settles for 400ms, keeps
-  the pet whole on a display and applies the window for that spot as above.
-  A layout change is announced to the page (`avibe:pet-layout`), which draws
-  it and calls `pet_settle` as after a drop; a page without the top layout
-  only ever gets the upward window. An older page still cannot drag Vibey
-  above the 600px window's reach: only the shell's drag shrinks the window.
+  the pet whole on a display and applies the window for that spot through the
+  same state machine. An older page still cannot drag Vibey above the 600px
+  window's reach: only the shell's drag shrinks the window.
 - **What must stay on a display.** Restore on launch, a dropped pet and a
   display or scale change keep the drag strip inside a connected work area:
   at the window's width on a display that fits the full 460 × 600 window,
