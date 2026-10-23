@@ -1061,7 +1061,6 @@ def test_persist_agent_records_the_agent_that_wrote_the_reply(isolated_state):
         channel_id="C_general",
         platform="slack",
         platform_specific={
-            "vibe_agent_name": "Atlas",
             "agent_session_target": {"agent_id": "agt-routed", "agent_backend": "claude"},
             "resolved_vibe_agent": {"id": "agt-atlas", "name": "Atlas", "backend": "codex"},
         },
@@ -1074,6 +1073,8 @@ def test_persist_agent_records_the_agent_that_wrote_the_reply(isolated_state):
         agent_row = conn.execute(
             select(messages).where(messages.c.author == "agent")
         ).mappings().first()
+    # A new chat-app session may name its Agent only in the resolved selection.
+    assert agent_row["author_name"] == "Atlas"
     assert json.loads(agent_row["metadata_json"]) == {
         "author_agent_id": "agt-atlas",
         "author_backend": "codex",

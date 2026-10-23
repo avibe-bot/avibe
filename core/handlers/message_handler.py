@@ -12,7 +12,12 @@ from core.audio_asr import (
     format_audio_transcript_echo,
 )
 from core.agent_input import AgentInputMetadata, harness_label
-from core.backend_failure import CONTINUE_ON_VIBEY_NEXT_STEP, emit_backend_failure, output_with_next_step
+from core.backend_failure import (
+    CONTINUE_ON_VIBEY_NEXT_STEP,
+    emit_backend_failure,
+    harness_run_identity,
+    output_with_next_step,
+)
 from core.delivery_target import routed_delivery_context
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
 from core.session_handoff import BACKEND_HANDOFF_TURN_KEY
@@ -976,10 +981,13 @@ class MessageHandler(BaseHandler):
         the backend waits for its owner in the Workbench: continue on Vibey, or Retry
         once it is back. A chat app has no Retry, so once its notice (which says to
         send the message again) is delivered, its input is retired instead of holding
-        every later message behind it.
+        every later message behind it. A Harness run's input is its Run's to settle,
+        and resending a generated prompt by hand would run it outside its Run, so a
+        chat app is told only that the Agent cannot run.
         """
         target = routed_delivery_context(context)
         workbench = resolve_context_platform(target) == "avibe"
+        chat_input = not workbench and not harness_run_identity(context, request)
         if workbench:
             mark_prewrite_recovery_required(context, "agent_unavailable")
         if not workbench and escape_reason:
@@ -988,12 +996,13 @@ class MessageHandler(BaseHandler):
         offer = failing_backend != "vibey" and await asyncio.to_thread(self._builtin_vibey_available)
         output = output_with_next_step(request, CONTINUE_ON_VIBEY_NEXT_STEP) if offer and workbench else None
         text = f"❌ {reason}"
-        if offer:
-            text = f"{text}\n{self._t('error.continueOnVibey.workbench' if workbench else 'error.continueOnVibey.im')}"
-        elif not workbench:
-            # Its input was retired above, so it will not run once the Agent is back.
-            text = f"{text}\n{self._t('error.agentUnavailable.resendLater')}"
-        delivery = None if workbench else DeliveryEvidence()
+        if offer and workbench:
+            text = f"{text}\n{self._t('error.continueOnVibey.workbench')}"
+        elif chat_input:
+            # Its input is retired below, so it will not run once the Agent is back.
+            next_step = "error.continueOnVibey.im" if offer else "error.agentUnavailable.resendLater"
+            text = f"{text}\n{self._t(next_step)}"
+        delivery = DeliveryEvidence() if chat_input else None
         await emit_backend_failure(
             self.controller,
             context,

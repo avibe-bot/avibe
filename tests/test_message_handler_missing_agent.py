@@ -282,3 +282,41 @@ def test_a_chat_app_is_told_to_resend_when_vibey_is_not_offered():
     assert calls["telegram"].endswith(f"\n{resend}")
     # The Workbench holds the input for Retry, so it says nothing of the kind.
     assert resend not in calls["avibe"]
+
+
+def test_a_harness_run_in_a_chat_app_is_not_told_to_resend_its_prompt():
+    """A scheduled task, Watch, or Agent run settles its own input: its chat-app notice
+    names only the Agent that cannot run, and its input is not retired by the notice."""
+    from unittest.mock import patch
+
+    from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, prewrite_failure_evidence, set_dispatch_phase
+    from core.vibe_agents import AgentUnavailableError
+
+    controller = _StubController()
+    controller.im_client.formatter = SimpleNamespace(escape_special_chars=lambda text: text)
+    vibey = SimpleNamespace(name="vibey")
+    for available in (vibey, None):
+        controller.vibe_agent_store = SimpleNamespace(
+            get=lambda _name: None, get_builtin_default_agent_for_backend=lambda backend, a=available: a
+        )
+        handler = MessageHandler(controller)
+        context = MessageContext(
+            user_id="U1", channel_id="C1", platform="telegram",
+            platform_specific={"task_execution_id": "run-1", "task_trigger_kind": "scheduled"},
+        )
+        set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+        seen = {}
+
+        async def notify(*_args, delivery=None, display_text=None, **_kwargs):
+            seen["text"] = display_text
+            if delivery is not None:
+                delivery.delivered_id = "notice-1"
+            return False
+
+        disabled = AgentUnavailableError("agent 'codex' is disabled", agent_name="codex", reason="disabled")
+        with patch("modules.agents.model_hub.hub_supply_refusal", lambda _controller, _backend, _lang: None), patch.dict(
+            MessageHandler._emit_agent_cannot_run.__globals__, emit_backend_failure=notify
+        ):
+            anyio.run(handler._emit_agent_dispatch_failure, context, None, disabled)
+        assert seen["text"] == f"❌ {handler._t('error.agentUnavailable.disabled', agent='Codex')}"
+        assert prewrite_failure_evidence(context) == {}

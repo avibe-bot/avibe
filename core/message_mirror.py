@@ -325,7 +325,16 @@ def _is_tool_call_type(canonical_type: str | None) -> bool:
 def _agent_provenance_from_context(context: MessageContext, session_row: Optional[dict] = None) -> tuple[Optional[str], Optional[str]]:
     spec = context.platform_specific or {}
     target = spec.get("agent_session_target") or {}
-    agent_name = spec.get("vibe_agent_name") or target.get("agent_name") or (session_row or {}).get("agent_name")
+    # The Agent that ran, when routing resolved one (a new chat-app session may name
+    # its Agent nowhere else).
+    resolved = spec.get("resolved_vibe_agent")
+    resolved = resolved if isinstance(resolved, dict) else {}
+    agent_name = (
+        spec.get("vibe_agent_name")
+        or resolved.get("name")
+        or target.get("agent_name")
+        or (session_row or {}).get("agent_name")
+    )
     backend = spec.get("vibe_agent_backend") or target.get("agent_backend") or (session_row or {}).get("agent_backend")
     return agent_name, backend
 
