@@ -3184,11 +3184,14 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_drag'));
     expect(invoke.mock.calls.some(([command]) => command === 'plugin:window|start_dragging')).toBe(false);
     expect(edge()).toBe('bottom');
-    expect(invoke.mock.calls.some(([command]) => command === 'pet_settle')).toBe(false);
     // The column waits out the drag: the window is only the strip around Vibey.
     expect(document.querySelector('.pet-mini-stage')?.hasAttribute('data-dragging')).toBe(true);
+    // (Loading settled once already, with nothing waiting.) After the drop,
+    // the shell is asked to settle only once the new layout is drawn.
+    edgeAtSettle.length = 0;
     await act(async () => dropped.resolve({ panel_side: 'left', panel_edge: 'top' }));
-    await waitFor(() => expect(edgeAtSettle).toEqual(['top']));
+    await waitFor(() => expect(edgeAtSettle.length).toBeGreaterThan(0));
+    expect(new Set(edgeAtSettle)).toEqual(new Set(['top']));
     expect(edge()).toBe('top');
     await waitFor(() => expect(document.querySelector('.pet-mini-stage')?.hasAttribute('data-dragging')).toBe(false));
     // The drag was not a click: the history stays closed.
@@ -3229,6 +3232,38 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     await waitFor(() => expect(edgeAtSettle.length).toBeGreaterThan(0));
     expect(new Set(edgeAtSettle)).toEqual(new Set(['top']));
     expect(edge()).toBe('top');
+  });
+
+  it('a drag that starts before the shell has answered waits for it and drags through the shell', async () => {
+    const ready = deferred<unknown>();
+    const invoke = vi.fn((command: string) => {
+      if (command === 'pet_ready') return ready.promise;
+      if (command === 'pet_drag') return new Promise(() => {});
+      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
+    });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_ready', { layouts: true }));
+    drag(screen.getByLabelText('pet.recentTurns'));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(invoke.mock.calls.some(([command]) => command === 'plugin:window|start_dragging' || command === 'pet_drag')).toBe(false);
+    await act(async () => ready.resolve({ binding: 'S', revision: 1, summon_pending: null, layout: { panel_side: 'left', panel_edge: 'bottom' } }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_drag'));
+    expect(invoke.mock.calls.some(([command]) => command === 'plugin:window|start_dragging')).toBe(false);
+  });
+
+  it('a document that loads while a drop waits draws its layout, then lets the shell settle', async () => {
+    const edgeAtSettle: (string | null | undefined)[] = [];
+    shell(vi.fn(async (command: string) => {
+      if (command === 'pet_ready') return { binding: 'S', revision: 1, summon_pending: null, layout: { panel_side: 'left', panel_edge: 'top' } };
+      if (command === 'pet_settle') { edgeAtSettle.push(edge()); return { panel_side: 'left', panel_edge: 'top' }; }
+      return { panel_side: 'left', panel_edge: 'top' };
+    }));
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    await waitFor(() => expect(edgeAtSettle.length).toBeGreaterThan(0));
+    expect(new Set(edgeAtSettle)).toEqual(new Set(['top']));
   });
 
   it('peeks the stack layers out toward Vibey in either layout', async () => {

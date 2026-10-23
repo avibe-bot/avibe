@@ -1,6 +1,6 @@
 import { useEffect, useSyncExternalStore } from 'react';
 
-import { onPetEvents, petBridge, type PetBinding, type PetIntent } from './petBridge';
+import { onPetEvents, petBridge, type PetBinding, type PetIntent, type PetLayout } from './petBridge';
 import { petPanel } from './petPanel';
 import type { PetSurfaceEpoch } from './usePetSession';
 
@@ -44,20 +44,24 @@ const start = () => {
       liveSummons += 1;
       noteSummon(intent);
     },
-    // The shell moved the pet to a spot with the other layout: draw it, then
-    // let the shell bring the window that fits it (as after a drop).
-    layout: (next) => {
-      petPanel.setLayout(next);
-      requestAnimationFrame(() => requestAnimationFrame(() => { void petBridge.settle().catch(() => undefined); }));
-    },
+    // The shell chose another layout (a drop, even one this document did not
+    // start, or a display change): draw it, then let the shell settle.
+    layout: drawLayout,
   });
   const liveSummonsAtRequest = liveSummons;
   readyPromise = petBridge.ready().then((ready) => {
     legacyBinding = ready;
     readyLoaded = true;
-    if (ready.layout) petPanel.setLayout(ready.layout);
+    // A frame may already be waiting for this document (it loaded mid-drop).
+    if (ready.layout) drawLayout(ready.layout);
     if (ready.summon_pending && liveSummons === liveSummonsAtRequest) noteSummon(ready.summon_pending.intent);
   }).catch(() => undefined);
+};
+
+/** Draws a layout the shell chose, then lets it bring the window that fits. */
+const drawLayout = (next: PetLayout) => {
+  petPanel.setLayout(next);
+  requestAnimationFrame(() => requestAnimationFrame(() => { void petBridge.settle().catch(() => undefined); }));
 };
 
 const setDismissed = (ids: string[]) => {

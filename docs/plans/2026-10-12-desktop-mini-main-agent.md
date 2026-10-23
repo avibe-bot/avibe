@@ -661,8 +661,14 @@ already communicate activity. Keep the upper-right red unread badge.
     `pet_settle`; only then does the full window come back, so the other
     layout is never shown at full size. Without that call the shell settles
     on its own after one second.
+  - **One hand-off for every layout change.** A drop or a move to another
+    layout holds the new window until the document showing *now* has drawn
+    it: the shell tells that document (`avibe:pet-layout`), whichever
+    document started the change, and a document that loads meanwhile reads
+    the waiting layout from `pet_ready`, draws it and calls `pet_settle`.
   - Shells that predate this (no `layout` in `pet_ready`) keep the page's old
-    `start_dragging` path. A page that predates it (the shell can adopt an
+    `start_dragging` path. A drag that starts before `pet_ready` has answered
+    waits for the answer rather than guessing the older path. A page that predates it (the shell can adopt an
     older running Runtime) does not declare `layouts` in `pet_ready`; the
     shell then gives it the upward window at the same spot, as tall as the
     room above allows, so Vibey stays put and nothing is mis-drawn.

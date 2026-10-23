@@ -58,7 +58,10 @@ const parseLayout = (value: unknown): PetLayout => {
 
 // Whether the shell drags the pet itself (`pet_drag`), learned from
 // `pet_ready`: older shells only offer the window's own `start_dragging`.
+// Until that answer arrives a drag waits for it (`negotiated`) rather than
+// guessing the older path.
 let shellDrags = false;
+let negotiated: Promise<void> | null = null;
 
 const parseBinding = (value: unknown): PetBinding => {
   const result = value as { binding?: unknown; revision?: unknown } | null;
@@ -95,7 +98,9 @@ export const petBridge = {
     const invoke = shellInvoke();
     if (!invoke) return { ...readDevBinding(), summon_pending: null };
     // `layouts`: this page draws the column below Vibey (`panel_edge: top`).
-    const result = (await invoke('pet_ready', { layouts: true })) as { summon_pending?: { intent?: unknown } | null; layout?: unknown } | null;
+    const answer = invoke('pet_ready', { layouts: true }) as Promise<{ summon_pending?: { intent?: unknown } | null; layout?: unknown } | null>;
+    negotiated = answer.then(() => undefined, () => undefined);
+    const result = await answer;
     const pending = result?.summon_pending;
     shellDrags = Boolean(result?.layout);
     return {
@@ -139,6 +144,7 @@ export const petBridge = {
   drag: async (): Promise<PetLayout | null> => {
     const invoke = shellInvoke();
     if (!invoke) return null;
+    if (negotiated) await negotiated;
     if (!shellDrags) {
       void invoke('plugin:window|start_dragging');
       return null;

@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
-    area_for, clamp_anchor, default_anchor, frame_at, hovering, place_dropped, place_moved, rescale, shortcut_label,
-    valid_session_id, HitRect, LogicalRect, PetAnchor, PetBinding, PetFrame, PetIntent, PetLayout, PetReady, PetStore,
-    WorkArea, SHORTCUT_PRESETS,
+    area_for, clamp_anchor, default_anchor, frame_at, hovering, place_moved, rescale, shortcut_label, valid_session_id,
+    HitRect, LogicalRect, PetAnchor, PetBinding, PetFrame, PetIntent, PetLayout, PetReady, PetStore, WorkArea,
+    SHORTCUT_PRESETS,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
@@ -544,11 +544,9 @@ fn follow_move(app: &AppHandle, window: &WebviewWindow) {
     });
     let held = rescale((anchor.x, anchor.y), scale, window_scale);
     if page_layouts && next.layout != current.layout {
-        frame.pending = Some((next, held));
         let generation = pet.drag_generation.fetch_add(1, Ordering::SeqCst) + 1;
         drop(frame);
-        dispatch(window, LAYOUT_EVENT, &serde_json::json!({ "layout": next.layout }));
-        settle_later(app, generation);
+        hold_for_page(app, window, next, held, generation);
         return;
     }
     let close = |a: f64, b: f64| (a - b).abs() < 0.5;
@@ -560,6 +558,19 @@ fn follow_move(app: &AppHandle, window: &WebviewWindow) {
         set_frame(window, next.origin(held, 1.0), next.size());
         frame.current = next;
     }
+}
+
+/// The one way a new layout reaches the page: the frame waits (`pending`)
+/// while the document showing now, whichever started the change, is told to
+/// draw it and then calls `pet_settle`; a document that loads meanwhile reads
+/// it from `pet_ready`. It settles on its own after `SETTLE_TIMEOUT`.
+fn hold_for_page(app: &AppHandle, window: &WebviewWindow, next: PetFrame, held: (f64, f64), generation: u64) {
+    let pet = app.state::<Pet>();
+    lock(&pet.frame).pending = Some((next, held));
+    if pet.page_layouts.load(Ordering::SeqCst) {
+        dispatch(window, LAYOUT_EVENT, &serde_json::json!({ "layout": next.layout }));
+    }
+    settle_later(app, generation);
 }
 
 /// Settles a waiting frame on its own if its page has not after `SETTLE_TIMEOUT`.
@@ -745,13 +756,11 @@ pub async fn pet_drag(window: WebviewWindow) -> Result<PetLayout, String> {
     })
     .await??;
     wait_for_release(&app, generation).await;
-    let layout = on_main_thread(&app, {
+    on_main_thread(&app, {
         let window = window.clone();
         move |app| end_drag(app, &window, generation)
     })
-    .await??;
-    settle_later(&app, generation);
-    Ok(layout)
+    .await?
 }
 
 /// Restores the full window for a dropped pet once its page draws the layout
@@ -841,7 +850,9 @@ fn end_drag(app: &AppHandle, window: &WebviewWindow, generation: u64) -> Result<
     };
     let scale = anchor_scale(app, Some(window_scale));
     let saved = rescale(dropped, window_scale, scale);
-    let (anchor, next) = place_dropped(saved, &work_areas(app, scale));
+    // The document may have reloaded during the drag; it is the one that draws.
+    let page_layouts = pet.page_layouts.load(Ordering::SeqCst);
+    let (anchor, next) = place_moved(saved, &work_areas(app, scale), page_layouts);
     let at = (anchor.x, anchor.y);
     pet.store().set_anchor(PetAnchor {
         x: anchor.x.round(),
@@ -852,7 +863,7 @@ fn end_drag(app: &AppHandle, window: &WebviewWindow, generation: u64) -> Result<
     if held != dropped {
         set_frame(window, strip.origin(held, 1.0), strip.size());
     }
-    lock(&pet.frame).pending = Some((next, held));
+    hold_for_page(app, window, next, held, generation);
     Ok(next.layout)
 }
 
