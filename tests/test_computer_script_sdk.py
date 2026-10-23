@@ -77,18 +77,20 @@ def _fake_controller(
     windows: list[dict] | None = None,
     launch_pid: int | None = 41,
     interaction_errors: dict[str, str] | None = None,
+    observation_screenshot_modes: list[str] | None = None,
 ) -> Iterator[tuple[ThreadingHTTPServer, list[dict]]]:
     requests: list[dict] = []
     observations = 0
     clicks = 0
     app_lookups = 0
     connection_ids: set[int] = set()
+    driver_has_screenshot = False
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def do_POST(self) -> None:  # noqa: N802
-            nonlocal observations, clicks, app_lookups
+            nonlocal observations, clicks, app_lookups, driver_has_screenshot
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length))
             connection_ids.add(id(self.connection))
@@ -301,13 +303,58 @@ def _fake_controller(
                         is False
                     ):
                         elements = None
+                    observation = {
+                        "pid": 41,
+                        "window_id": 9,
+                        **({"elements": elements} if elements is not None else {}),
+                    }
+                    if observation_screenshot_modes is not None:
+                        mode = observation_screenshot_modes[
+                            min(observations - 1, len(observation_screenshot_modes) - 1)
+                        ]
+                    elif payload["arguments"].get("screenshot_out_file"):
+                        mode = "file"
+                    elif payload["arguments"].get("include_screenshot") is False:
+                        mode = "tree"
+                    else:
+                        mode = "image"
+                    if mode == "file":
+                        observation["screenshot_file_path"] = payload["arguments"].get(
+                            "screenshot_out_file", "/tmp/fixture-window.png"
+                        )
+                    elif mode == "invalid":
+                        observation.update(
+                            {
+                                "screenshot_frame_valid": False,
+                                "screenshot_width": 800,
+                                "screenshot_height": 600,
+                            }
+                        )
+                    driver_has_screenshot = mode in {"image", "file"}
+                    body = _result(
+                        observation,
+                        image=mode in {"image", "invalid"},
+                    )
+                elif tool in {
+                    "click",
+                    "double_click",
+                    "right_click",
+                    "drag",
+                    "scroll",
+                    "type_text",
+                    "press_key",
+                    "hotkey",
+                } and any(
+                    field in payload["arguments"]
+                    for field in ("x", "y", "from_x", "from_y", "to_x", "to_y")
+                ) and not driver_has_screenshot:
                     body = _result(
                         {
-                            "pid": 41,
-                            "window_id": 9,
-                            **({"elements": elements} if elements is not None else {}),
+                            "code": "screenshot_context_missing",
+                            "params": {},
+                            "dispatched": False,
                         },
-                        image=True,
+                        is_error=True,
                     )
                 elif tool == "click":
                     clicks += 1
@@ -400,6 +447,7 @@ def _run_node_script(
     windows: list[dict] | None = None,
     launch_pid: int | None = 41,
     interaction_errors: dict[str, str] | None = None,
+    observation_screenshot_modes: list[str] | None = None,
 ) -> tuple[dict, ThreadingHTTPServer, list[dict]]:
     if NODE is None:
         pytest.skip("Node.js is unavailable")
@@ -430,6 +478,7 @@ def _run_node_script(
         windows=windows,
         launch_pid=launch_pid,
         interaction_errors=interaction_errors,
+        observation_screenshot_modes=observation_screenshot_modes,
     ) as (server, requests):
         request = {
             "script_url": script.resolve().as_uri(),
@@ -884,6 +933,7 @@ import { computer } from "@avibe/computer";
 export default async () => {
   const mail = await computer.app({ bundleId: "com.apple.mail" });
   const window = await mail.window({ labelContains: "New Message" });
+  await window.observe();
   await window.element({ role: "button", label: "Missing" }).click();
   return {};
 };
@@ -2323,6 +2373,7 @@ import { computer } from "@avibe/computer";
 export default async () => {
   const mail = await computer.app({ bundleId: "com.apple.mail" });
   const window = await mail.window({ labelContains: "New Message" });
+  await window.observe();
   await window.element({ role: "button", label: "Send", index: 0 }).click();
 };
 """,
@@ -2336,7 +2387,7 @@ export default async () => {
     try:
         assert screenshot.read_bytes() == b"png-fixture"
         assert error.details["step"] == "element.click"
-        assert error.details["last_completed_step"] == "app.window"
+        assert error.details["last_completed_step"] == "window.observe"
         assert error.details["ambiguous"] is True
         assert any(
             request["payload"].get("tool") == "click"
@@ -2810,3 +2861,126 @@ export default async () => {
         ("drag", None),
         ("drag", None),
     ]
+
+
+def test_sdk_tree_only_requested_capture_recaptures_before_pixel_input(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ label: "New Message" });
+  await window.observe({ include_screenshot: true });
+  await window.drag({ from_x: 10, from_y: 20, to_x: 30, to_y: 40 });
+};
+""",
+        observation_screenshot_modes=["tree", "image"],
+    )
+
+    assert payload == {"ok": True, "result": None}
+    assert [tool for tool, _arguments in _tool_requests(requests) if tool in {"get_window_state", "drag"}] == [
+        "get_window_state",
+        "get_window_state",
+        "drag",
+    ]
+
+
+def test_sdk_invalid_screenshot_frame_is_not_reused_for_pixel_input(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ label: "New Message" });
+  await window.observe({ include_screenshot: true });
+  await window.drag({ from_x: 10, from_y: 20, to_x: 30, to_y: 40 });
+};
+""",
+        observation_screenshot_modes=["invalid", "image"],
+    )
+
+    assert payload == {"ok": True, "result": None}
+    sequence = [
+        (tool, arguments.get("include_screenshot"))
+        for tool, arguments in _tool_requests(requests)
+        if tool in {"get_window_state", "drag"}
+    ]
+    assert sequence == [
+        ("get_window_state", True),
+        ("get_window_state", None),
+        ("drag", None),
+    ]
+
+
+@pytest.mark.parametrize("observation_mode", ["tree", "invalid"])
+def test_sdk_missing_screenshots_retry_once_per_pixel_action_and_stay_bounded(
+    tmp_path: Path,
+    observation_mode: str,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ label: "New Message" });
+  await window.observe({ include_screenshot: true });
+  const errors = [];
+  for (const x of [10, 11]) {
+    try {
+      await window.drag({ from_x: x, from_y: 20, to_x: 30, to_y: 40 });
+    } catch (error) {
+      errors.push(error.code);
+    }
+  }
+  return { errors };
+};
+""",
+        observation_screenshot_modes=[observation_mode] * 3,
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {"errors": ["screenshot_context_missing", "screenshot_context_missing"]},
+    }
+    sequence = [tool for tool, _arguments in _tool_requests(requests) if tool in {"get_window_state", "drag"}]
+    assert sequence == [
+        "get_window_state",
+        "get_window_state",
+        "drag",
+        "get_window_state",
+        "drag",
+    ]
+
+
+def test_sdk_file_screenshot_output_is_reused_for_pixel_input(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ label: "New Message" });
+  await window.observe({ screenshot_out_file: "/tmp/fixture-window.png" });
+  await window.drag({ from_x: 10, from_y: 20, to_x: 30, to_y: 40 });
+  await window.drag({ from_x: 11, from_y: 21, to_x: 31, to_y: 41 });
+};
+""",
+        observation_screenshot_modes=["file"],
+    )
+
+    assert payload == {"ok": True, "result": None}
+    sequence = [tool for tool, _arguments in _tool_requests(requests) if tool in {"get_window_state", "drag"}]
+    assert sequence == ["get_window_state", "drag", "drag"]
