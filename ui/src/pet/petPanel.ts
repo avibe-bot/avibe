@@ -56,8 +56,10 @@ export const petPanel = {
     layoutRevision = snapshot.revision;
     if (snapshot.layout.panel_edge !== layout.panel_edge || snapshot.layout.panel_side !== layout.panel_side) {
       layout = snapshot.layout;
-      notify();
     }
+    // Every accepted revision: what subscribers read also depends on it
+    // (`awaitingLayout`), not only on the layout.
+    notify();
     return true;
   },
 };

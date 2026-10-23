@@ -1048,6 +1048,11 @@ function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>, epoch?: 
     const observe = () => { resize?.disconnect(); resize?.observe(root); root.querySelectorAll<HTMLElement>('[data-pet-hit]').forEach((node) => resize?.observe(node)); motion(); };
     const mutations = new MutationObserver(observe);
     mutations.observe(root, { subtree: true, childList: true, attributes: true, attributeFilter: ['class', 'style', 'inert'] });
+    // Any attribute of the stage itself can move or show what is drawn (the
+    // layout's `data-edge`, `data-layout-pending`), without a resize. Reports
+    // stay one per frame (`schedule`) and are sent only when they change.
+    const stage = new MutationObserver(schedule);
+    stage.observe(root, { attributes: true });
     root.addEventListener('scroll', schedule, true);
     root.addEventListener('transitionrun', motion);
     root.addEventListener('pointerover', motion);
@@ -1055,7 +1060,7 @@ function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>, epoch?: 
     observe();
     return () => {
       active = false;
-      cancelAnimationFrame(frame); resize?.disconnect(); mutations.disconnect();
+      cancelAnimationFrame(frame); resize?.disconnect(); mutations.disconnect(); stage.disconnect();
       root.removeEventListener('scroll', schedule, true);
       root.removeEventListener('transitionrun', motion);
       root.removeEventListener('pointerover', motion);

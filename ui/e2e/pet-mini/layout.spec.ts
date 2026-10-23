@@ -1422,3 +1422,38 @@ test('the column hides while the window is only the drag strip, and returns with
   await page.setViewportSize({ width: 460, height: 600 });
   await expect(page.locator('.pet-mini-column')).toHaveCSS('visibility', 'visible');
 });
+
+// Spec §9.1: a layout flip moves Vibey and the column without resizing
+// anything, and the desktop's input regions must follow; frequent stage
+// attribute changes (busy, state) must not flood the shell with reports.
+test('a layout flip re-reports the input regions, and stage attribute churn stays coalesced', async ({ page }) => {
+  // No card stack and no transitions: the flip changes nothing but the
+  // stage's own attribute.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=0');
+  await expect(page.locator('.pet-mini-avatar-button')).toBeVisible();
+  await settleMotion(page);
+  await page.waitForTimeout(700);
+  const vibey = () => page.evaluate(() => {
+    const box = document.querySelector('.pet-mini-avatar-button')!.getBoundingClientRect();
+    return window.petLayoutHitRegions.some((rect) => Math.abs(rect.y - box.top) <= 1 && Math.abs(rect.height - box.height) <= 1);
+  });
+  await expect.poll(vibey).toBe(true);
+  await page.evaluate(() => window.petFixtureLayout(2, 'top'));
+  await expect(page.locator('.pet-mini-stage')).toHaveAttribute('data-edge', 'top');
+  expect((await page.locator('.pet-mini-avatar-button').boundingBox())!.y).toBeCloseTo(12, 0);
+  await expect.poll(vibey).toBe(true);
+  // A burst of stage attribute changes that move nothing sends no report.
+  await settleMotion(page);
+  await page.waitForTimeout(700);
+  const before = await page.evaluate(() => window.petHitReports);
+  await page.evaluate(async () => {
+    const stage = document.querySelector('.pet-mini-stage')!;
+    for (let frame = 0; frame < 10; frame += 1) {
+      for (let i = 0; i < 20; i += 1) stage.setAttribute('data-probe', String(frame * 20 + i));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+  });
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => window.petHitReports)).toBe(before);
+});

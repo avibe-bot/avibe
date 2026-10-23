@@ -31,6 +31,8 @@ const pinnedPose = requestedPose && PINNED_POSES.includes(requestedPose as PetPo
 declare global {
   interface Window {
     petLayoutHitRegions: Parameters<typeof petBridge.setHitRegions>[0];
+    petHitReports: number;
+    petFixtureLayout: (revision: number, edge: 'top' | 'bottom') => void;
     setPetLayoutVisible: (visible: boolean) => void;
     petFixtureSends: { sessionId: string; payload: unknown }[];
     petFixtureOpens: string[];
@@ -45,7 +47,10 @@ declare global {
   }
 }
 window.petLayoutHitRegions = [];
-petBridge.setHitRegions = async (rects) => { window.petLayoutHitRegions = rects; };
+window.petHitReports = 0;
+petBridge.setHitRegions = async (rects) => { window.petLayoutHitRegions = rects; window.petHitReports += 1; };
+// Apply a layout snapshot the way the shell's event does.
+window.petFixtureLayout = (revision, edge) => { petPanel.applySnapshot({ revision, layout: { panel_side: 'left', panel_edge: edge } }); };
 window.petFixtureSends = [];
 window.petFixtureOpens = [];
 window.petFixtureStops = [];

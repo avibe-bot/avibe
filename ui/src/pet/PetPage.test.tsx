@@ -3188,7 +3188,7 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     expect(invoke).toHaveBeenCalledWith('pet_ready', { layouts: true });
   });
 
-  it('draws nothing until the shell\'s first snapshot, and the default layout if pet_ready fails', async () => {
+  it('draws nothing until the shell\'s first snapshot, whichever layout it is, and the default one if pet_ready fails', async () => {
     const readyAnswer = deferred<unknown>();
     shell(vi.fn((command: string) => command === 'pet_ready' ? readyAnswer.promise : Promise.resolve({ revision: 2, layout: top })));
     mainSession('S'); render(<PetPage />);
@@ -3198,6 +3198,24 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     await act(async () => readyAnswer.resolve(ready(top, 2)));
     await waitFor(() => expect(pending()).toBe(false));
     expect(edge()).toBe('top');
+
+    // A first snapshot in the default layout shows the stage as well, even on
+    // a surface that nothing else re-renders (setup pending).
+    cleanup();
+    vi.resetModules();
+    ({ PetPage } = await import('./PetPage'));
+    setupDone = false;
+    const defaultAnswer = deferred<unknown>();
+    shell(vi.fn((command: string) => command === 'pet_ready' ? defaultAnswer.promise : Promise.resolve({ revision: 1, layout: bottom })));
+    render(<PetPage />);
+    await screen.findByText('pet.setupPending');
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(pending()).toBe(true);
+    await act(async () => defaultAnswer.resolve(ready(bottom, 1)));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(pending()).toBe(false);
+    expect(edge()).toBe('bottom');
+    setupDone = true;
 
     cleanup();
     vi.resetModules();
