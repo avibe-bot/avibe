@@ -6390,3 +6390,104 @@ def test_state_file_lock_serializes_the_ownership_decision(tmp_path) -> None:
 
     # The state file was replaced; the lock's identity survived it.
     assert lock_file.stat().st_ino == held
+
+
+def _codex_summary(head, *, status, updated_at, comment_id=640):
+    state = json.dumps({"code_review": {"commit_sha": head, "status": status}})
+    return {
+        "id": comment_id,
+        "body": f"<!-- codex-pull-request-review-summary -->\n<!-- codex-review-state:v1 {state} -->\n## Codex Review Summary",
+        "user": {"login": "chatgpt-codex-connector[bot]"},
+        "created_at": "2026-10-23T01:00:00Z",
+        "updated_at": updated_at,
+        "html_url": f"https://github.com/example/repo/pull/153#issuecomment-{comment_id}",
+    }
+
+
+def _review_request(created_at, comment_id=650):
+    return {
+        "id": comment_id,
+        "body": "@codex review",
+        "user": {"login": "cyhhao"},
+        "created_at": created_at,
+        "updated_at": created_at,
+        "html_url": f"https://github.com/example/repo/pull/153#issuecomment-{comment_id}",
+    }
+
+
+@pytest.mark.parametrize(
+    ("comments", "minutes", "stalled"),
+    [
+        # Running on the current head past the window: stalled.
+        ([_codex_summary(COALESCED_HEAD, status="running", updated_at="2026-10-23T03:00:00Z")], 31, True),
+        ([_codex_summary(COALESCED_HEAD, status="running", updated_at="2026-10-23T03:00:00Z")], 29, False),
+        # Concluded, or still describing an older head with nothing requested since.
+        ([_codex_summary(COALESCED_HEAD, status="completed", updated_at="2026-10-23T03:00:00Z")], 300, False),
+        ([_codex_summary("b" * 40, status="running", updated_at="2026-10-23T03:00:00Z")], 300, False),
+        # A request no summary update answered.
+        ([_codex_summary("b" * 40, status="completed", updated_at="2026-10-23T02:00:00Z"),
+          _review_request("2026-10-23T03:00:00Z")], 31, True),
+        # A fresh request restarts the clock of a running review.
+        ([_codex_summary(COALESCED_HEAD, status="running", updated_at="2026-10-23T02:00:00Z"),
+          _review_request("2026-10-23T03:00:00Z")], 20, False),
+    ],
+)
+def test_a_codex_review_that_never_concludes_is_reported_as_stalled(comments, minutes, stalled):
+    """A Codex review stuck at "running", or a ``@codex review`` request nobody answered,
+    produced no GitHub event at all, so a watch waiting for its verdict stayed silent for
+    hours. Past the stall window it is reported, with a key that changes each further
+    window so a review that stays stuck is reported again."""
+    from datetime import datetime, timedelta, timezone
+
+    module = _load_module()
+    state = _success_state(issue_comments=comments)
+    base = datetime(2026, 10, 23, 3, 0, tzinfo=timezone.utc)
+    stall = module._codex_review_stall(
+        state, repo="example/repo", stall_seconds=1800, now=base + timedelta(minutes=minutes)
+    )
+    assert (stall is not None) is stalled
+    if stalled:
+        key, report = stall
+        assert report.startswith(f"Codex review stalled for example/repo#153@{COALESCED_HEAD[:12]}")
+        assert "@codex review" in report
+        later = module._codex_review_stall(
+            state, repo="example/repo", stall_seconds=1800, now=base + timedelta(minutes=minutes + 30)
+        )
+        assert later is not None and later[0] != key
+    closed = _success_state(issue_comments=comments)
+    closed["pull_request"]["state"] = "closed"
+    assert module._codex_review_stall(
+        closed, repo="example/repo", stall_seconds=1800, now=base + timedelta(minutes=minutes)
+    ) is None
+
+
+def test_a_managed_watch_reports_a_stalled_review_once_per_window(tmp_path):
+    """The stall rides the watch's normal staged delivery: reported once, not again while
+    the same window lasts, and again once the review has stayed stuck another window."""
+    from datetime import datetime, timedelta, timezone
+
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    running = _success_state(
+        pending,
+        issue_comments=[_codex_summary(COALESCED_HEAD, status="running", updated_at="2026-10-23T03:00:00Z")],
+    )
+    _managed_state(module, path, "wat_9", **_complete_pr_baseline_fields(module, running),
+                   actions=module.normalize_selected_runs({"CI": [pending]}))
+    options = ("--coalesce-success",)
+    base = datetime(2026, 10, 23, 3, 0, tzinfo=timezone.utc)
+
+    def cycle(minutes, delivery):
+        with patch.object(module, "_utc_now", return_value=base + timedelta(minutes=minutes)):
+            return _ci_cycle(module, path, [running], delivery=delivery, extra_args=options)
+
+    rc, output, _ = cycle(10, "1")
+    assert (rc, output) == (124, "")
+    rc, output, payload = cycle(35, "1")
+    assert rc == 0 and "Codex review stalled" in output
+    assert payload[module.STAGED_KEY]["cursors"][module.REVIEW_STALL_KEY]
+    rc, output, _ = cycle(50, "2")
+    assert (rc, output) == (124, "")
+    rc, output, _ = cycle(65, "2")
+    assert rc == 0 and "Codex review stalled" in output

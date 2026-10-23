@@ -402,6 +402,16 @@ review-thread status. A thread becoming unresolved or resolved remains an
 independent wake signal because thread state is a separate mutable resource and
 may later be changed by a different actor.
 
+A review can stall after Codex picks it up: its summary keeps saying "running"
+and GitHub emits nothing more, so a loop waiting for the verdict would stay silent.
+`wait_pr.py --pr` therefore reports `Codex review stalled` when the current head's
+review has shown running, or the last `@codex review` request has gone unanswered,
+for `--review-stall-minutes` (default 30; `0` disables). The clock starts at the
+later of the summary's last update and the last request, so a re-request restarts
+it, and a review still stuck a window later is reported again. The report rides the
+same staged delivery as any other event. Only a non-default window is part of the
+watch identity, so existing state files keep working.
+
 `--settle <seconds>` is worth setting on any review loop. A bot review arrives as a
 burst of inline comments plus an envelope, so the poll that happens to catch the
 first fragment would otherwise report it alone and the rest would arrive as a second
