@@ -984,6 +984,15 @@ fn arm_setup_resume(state_dir: &Path, now: SystemTime) -> io::Result<()> {
     std::fs::write(state_dir.join(SETUP_RESUME_FILE), unix_seconds(now).to_string())
 }
 
+/// Whether a marker's contents name a request inside its window at `now`.
+fn setup_resume_in_window(contents: &str, now: SystemTime) -> bool {
+    let Ok(armed_at) = contents.trim().parse::<u64>() else {
+        return false;
+    };
+    let now = unix_seconds(now);
+    armed_at <= now && now - armed_at <= SETUP_RESUME_WINDOW.as_secs()
+}
+
 /// Consumes the marker a guide-driven Screen Recording request left, and says
 /// whether this launch is that request's relaunch. A marker is read once:
 /// stale or not, it never steers a second launch.
@@ -993,16 +1002,25 @@ fn take_setup_resume_at(state_dir: &Path, now: SystemTime) -> bool {
         return false;
     };
     let _ = std::fs::remove_file(&path);
-    let Ok(armed_at) = contents.trim().parse::<u64>() else {
-        return false;
-    };
-    let now = unix_seconds(now);
-    armed_at <= now && now - armed_at <= SETUP_RESUME_WINDOW.as_secs()
+    setup_resume_in_window(&contents, now)
+}
+
+/// Whether a guide-driven Screen Recording request is still waiting on its
+/// relaunch, so a quit now is most likely macOS's "Quit & Reopen". The marker
+/// stays for the relaunched shell to consume.
+fn setup_resume_pending_at(state_dir: &Path, now: SystemTime) -> bool {
+    std::fs::read_to_string(state_dir.join(SETUP_RESUME_FILE))
+        .is_ok_and(|contents| setup_resume_in_window(&contents, now))
 }
 
 /// Whether this launch should reopen the Computer Use guide.
 pub(crate) fn take_setup_resume(app: &AppHandle) -> bool {
     state_dir(app).is_ok_and(|dir| take_setup_resume_at(&dir, SystemTime::now()))
+}
+
+/// Whether a quit now is the relaunch the Computer Use guide is waiting on.
+pub(crate) fn setup_resume_pending(app: &AppHandle) -> bool {
+    state_dir(app).is_ok_and(|dir| setup_resume_pending_at(&dir, SystemTime::now()))
 }
 
 fn restored_lifecycle(stored: &StoredComputerUseState, assets_valid: bool) -> ComputerUseLifecycle {
@@ -2964,6 +2982,40 @@ done
         std::fs::write(dir.join(SETUP_RESUME_FILE), "not a time").unwrap();
         assert!(!take_setup_resume_at(dir, armed));
         assert!(!dir.join(SETUP_RESUME_FILE).exists());
+    }
+
+    /// macOS's Screen Recording "Quit & Reopen" arrives as an ordinary quit.
+    /// While the guide's marker is armed and inside its window, that quit keeps
+    /// the Runtime without asking, so the relaunched shell can adopt it; any
+    /// other quit asks as before. Deciding never consumes the marker.
+    #[test]
+    fn a_pending_setup_resume_keeps_the_runtime_on_quit_without_asking() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let dir = temporary.path();
+        let armed = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let quit_at = |now| crate::unasked_quit_choice(setup_resume_pending_at(dir, now));
+
+        assert_eq!(quit_at(armed), None, "no marker: the quit question is asked");
+
+        arm_setup_resume(dir, armed).unwrap();
+        for now in [armed, armed + SETUP_RESUME_WINDOW] {
+            assert_eq!(quit_at(now), Some(crate::QuitChoice::Keep));
+        }
+        assert!(
+            take_setup_resume_at(dir, armed + SETUP_RESUME_WINDOW),
+            "the relaunched shell still finds the marker the quit read"
+        );
+        assert_eq!(quit_at(armed), None, "a consumed marker no longer skips the question");
+
+        for (now, label) in [
+            (armed + SETUP_RESUME_WINDOW + Duration::from_secs(1), "expired"),
+            (armed - Duration::from_secs(1), "from the future"),
+        ] {
+            arm_setup_resume(dir, armed).unwrap();
+            assert_eq!(quit_at(now), None, "an {label} marker behaves as no marker");
+        }
+        std::fs::write(dir.join(SETUP_RESUME_FILE), "not a time").unwrap();
+        assert_eq!(quit_at(armed), None, "an unreadable marker behaves as no marker");
     }
 
     #[test]

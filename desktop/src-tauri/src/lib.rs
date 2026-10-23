@@ -845,6 +845,41 @@ fn stop_for_session_end(app: &AppHandle) -> Option<impl std::future::Future<Outp
     })
 }
 
+/// The answer a quit gets without the question, if any. The Computer Use
+/// guide's Screen Recording step ends in macOS's "Quit & Reopen", which reaches
+/// the shell as an ordinary quit; the relaunched shell adopts a Runtime that
+/// kept running, so stopping it would only interrupt every Agent turn in
+/// flight. While that relaunch is pending, a quit keeps the Runtime.
+fn unasked_quit_choice(setup_relaunch_pending: bool) -> Option<QuitChoice> {
+    setup_relaunch_pending.then_some(QuitChoice::Keep)
+}
+
+fn setup_relaunch_pending(app: &AppHandle) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        computer_use::setup_resume_pending(app)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        false
+    }
+}
+
+fn carry_out_quit(app: &AppHandle, choice: QuitChoice) {
+    match choice {
+        QuitChoice::Stop => stop_runtime(app.clone(), true),
+        QuitChoice::Keep => {
+            if claim_runtime_stop(&app.state::<Shell>().activity) {
+                exit_shell(app);
+            } else {
+                show_lifecycle_busy(app);
+            }
+        }
+        QuitChoice::Cancel => {}
+    }
+}
+
 fn request_runtime_lifecycle(app: AppHandle, quit: bool) {
     let shell = app.state::<Shell>();
     if !matches!(shell.activity.load(Ordering::SeqCst), ACTIVITY_IDLE | ACTIVITY_MONITOR) {
@@ -867,6 +902,13 @@ fn request_runtime_lifecycle(app: AppHandle, quit: bool) {
         shell.dialog_pending.store(false, Ordering::SeqCst);
         return;
     }
+    if quit {
+        if let Some(choice) = unasked_quit_choice(setup_relaunch_pending(&app)) {
+            carry_out_quit(&app, choice);
+            shell.dialog_pending.store(false, Ordering::SeqCst);
+            return;
+        }
+    }
     let catalog = native_tray_catalog();
     if quit {
         let callback_app = app.clone();
@@ -875,17 +917,7 @@ fn request_runtime_lifecycle(app: AppHandle, quit: bool) {
             .title(catalog.quit_title.clone())
             .buttons(quit_dialog_buttons(&catalog))
             .show_with_result(move |result| {
-                match quit_choice(result, &catalog) {
-                    QuitChoice::Stop => stop_runtime(callback_app.clone(), true),
-                    QuitChoice::Keep => {
-                        if claim_runtime_stop(&callback_app.state::<Shell>().activity) {
-                            exit_shell(&callback_app);
-                        } else {
-                            show_lifecycle_busy(&callback_app);
-                        }
-                    }
-                    QuitChoice::Cancel => {}
-                }
+                carry_out_quit(&callback_app, quit_choice(result, &catalog));
                 callback_app
                     .state::<Shell>()
                     .dialog_pending
