@@ -7322,12 +7322,12 @@ def test_accepted_steer_after_target_terminal_attaches_exact_terminal_turn(manag
 
 
 @pytest.mark.parametrize("activity_blocks_settlement", [False, True])
-@pytest.mark.parametrize("terminal_contended", [False, True])
+@pytest.mark.parametrize("terminal_contended", [False, True, "expired", "expired_unknown"])
 def test_late_accepted_agent_run_settles_from_terminal_turn_snapshot(
     managers,
     monkeypatch,
     activity_blocks_settlement: bool,
-    terminal_contended: bool,
+    terminal_contended: bool | str,
 ) -> None:
     from core.scheduled_tasks import ScheduledTaskService, TaskExecutionStore
     from storage.background import SQLiteBackgroundTaskStore
@@ -7347,6 +7347,9 @@ def test_late_accepted_agent_run_settles_from_terminal_turn_snapshot(
     )
 
     async def run() -> tuple[str, str, str]:
+        expires = isinstance(terminal_contended, str)
+        if expires:
+            monkeypatch.setattr(manager, "TERMINAL_WRITE_RETRY_SECONDS", 0)
         turn_id, active_context = await _activate(manager)
         run_id = "run-late-terminal-steer"
         now = "2026-08-01T00:00:00Z"
@@ -7435,10 +7438,40 @@ def test_late_accepted_agent_run_settles_from_terminal_turn_snapshot(
                 await asyncio.wait_for(receipt_arrived.wait(), 5)
                 with engine.connect() as conn:
                     assert delivery_store.get_turn(conn, turn_id)["state"] == "active"
-                assert not promoted.done()
+                if expires:
+                    deferred = await asyncio.wait_for(promoted, 5)
+                    assert deferred.state == "reconciling_steer"
+                    assert deferred.reason == "terminal_commit_pending"
+                else:
+                    assert not promoted.done()
                 blocker.rollback()
-            accepted_delivery = await promoted
-        assert accepted_delivery.state == "accepted"
+            if expires:
+                if terminal_contended == "expired_unknown":
+                    # Recovery can have saved UNKNOWN before the authoritative
+                    # acceptance lands. Definitive proof must upgrade that fence.
+                    with engine.begin() as conn:
+                        assert delivery_store.mark_attempt_receipt_batch(
+                            conn, leader_delivery_id=str(queued.delivery_id), outcome="unknown",
+                            receipt={"reason": "backend_has_no_durable_reconciliation"},
+                        )
+                await manager._join_session_terminal("ses_fsm")
+                with engine.connect() as conn:
+                    fenced = delivery_store.get_delivery(conn, str(queued.delivery_id))
+                assert fenced["current_receipt_outcome"] == "accepted"
+                assert fenced["state"] == "reconciling_steer"
+                # A fresh manager needs neither the in-memory latch nor the
+                # backend's receipt cache to materialize and settle this Run.
+                _terminal_manager.controller.scheduled_task_service = scheduled
+                _terminal_manager._reconcile_steer_attempt = AsyncMock(
+                    side_effect=AssertionError("accepted proof must not ask the backend"),
+                )
+                observations, _ = _terminal_manager.scan_runtime_delivery_recovery(limit=10, occupied=frozenset())
+                observation = next(item for item in observations if item.delivery_id == str(queued.delivery_id))
+                assert await _terminal_manager.recover_runtime_delivery_observation(observation)
+                _terminal_manager._reconcile_steer_attempt.assert_not_awaited()
+            else:
+                accepted_delivery = await promoted
+                assert accepted_delivery.state == "accepted"
         return turn_id, run_id, str(queued.delivery_id)
 
     try:

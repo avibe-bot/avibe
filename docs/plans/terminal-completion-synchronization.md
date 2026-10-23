@@ -89,11 +89,16 @@ which does not prove delivery reached the terminal block.
 
 - `deliver` and `cancel` await the Session's pending completion before observing
   ownership. Their wait is cancellable without canceling the completion owner.
-- A late steer receipt joins its exact target Turn's pending completion before
-  accepting the receipt. Otherwise it could accept while the row was still active,
-  miss the terminal snapshot, and leave its Run without the already recorded result.
-  A caught cancellation is rearmed after this join, so the synchronous receipt write
-  still precedes that caller's next suspension, as before.
+- A late accepted steer receipt joins its exact target Turn's pending write before
+  materializing acceptance. Otherwise it could miss the terminal snapshot and leave
+  its Run without the already recorded result. Before yielding, the pending owner
+  latches the receipt by exact Delivery/attempt. If the join expires, B's eventual
+  transaction also stores that accepted recovery fence. A fresh manager can then
+  materialize acceptance and settle from the snapshot without asking the ended
+  backend. Definitive acceptance can upgrade an earlier UNKNOWN fence, never the
+  reverse. Once the terminal snapshot is committed, the receipt needs no further
+  wait for B's resultless tail. Negative/UNKNOWN receipts keep their existing path.
+  A caught cancellation is rearmed after the join.
 - Queue drain, linked-control resume and persisted native start do not enter while
   the Session has pending completion work. In particular, a committed successor
   cannot start while the post-commit Run settlement is still pending. These gates
@@ -169,7 +174,9 @@ Owning-boundary evidence:
 - `test_admission_joins_delivered_terminal_instead_of_the_ended_native`: concurrent
   P1 starts as new input after B; Stop does not target the ended native.
 - The existing late-accepted Run/Activity settlement test now also runs under B
-  contention, with the receipt arriving before the writer is released.
+  contention, with the receipt arriving before the writer is released. Expiry cases
+  let the caller return before B commits, then prove a fresh manager consumes the
+  accepted recovery fence without backend reconciliation, including after UNKNOWN.
 - `test_pending_terminal_evidence_survives_timeout_and_competing_terminalizer`:
   native terminal, absent-start proof, refresh and shutdown cannot replace B's
   evidence, including after a bounded attempt expires.

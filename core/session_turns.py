@@ -668,6 +668,9 @@ class _PendingDurableTerminal:
     result: dict[str, Any] | None = None
     settle_runs: Callable[[], list[str]] | None = None
     publish: Callable[[], None] | None = None
+    # Accepted receipts must survive a bounded join that returns before B lands.
+    # Key by the exact attempt, never merely the Delivery that may be reused.
+    accepted_steers: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -3540,9 +3543,15 @@ class SessionTurnManager:
             with self._sqlite_engine().connect() as conn:
                 observed = delivery_store.get_delivery(conn, delivery_id)
             pending = self._pending_terminals.get(str((observed or {}).get("current_target_turn_id") or ""))
-            if pending is not None:
+            if pending is not None and pending.result is None and outcome_value == SteerOutcome.ACCEPTED.value:
                 from core.runtime_work import land_step, rearm_caught_cancellation
 
+                attempt_id = str((observed or {}).get("current_attempt_id") or "")
+                if attempt_id and (expected_attempt_id is None or expected_attempt_id == attempt_id):
+                    # Retain proof before yielding. If this join expires, B writes
+                    # the accepted recovery fence in its eventual transaction;
+                    # recovery need not ask an ended native Turn to remember it.
+                    pending.accepted_steers.setdefault((delivery_id, attempt_id), body)
                 step, cancelled = await land_step(self._ensure_terminal_completion(pending))
                 step.result()
                 if cancelled:
@@ -5201,7 +5210,9 @@ class SessionTurnManager:
         linked_activation_deferred = False
         with self._sqlite_engine().connect() as conn:
             observed_turn = delivery_store.get_turn(conn, turn_id)
-        if observed_turn is None or observed_turn["state"] == "terminal":
+        if observed_turn is None or (
+            observed_turn["state"] == "terminal" and not (pending is not None and pending.accepted_steers)
+        ):
             if pending is not None:
                 pending.result = {"changed": False, "defer_queue_resume": False}
                 self._pending_terminals.pop(turn_id, None)
@@ -5231,6 +5242,18 @@ class SessionTurnManager:
                     return {"changed": False, "contended": True, "defer_queue_resume": True}
             else:
                 reserve_write_lock(conn)
+            if pending is not None:
+                for (delivery_id, attempt_id), receipt in pending.accepted_steers.items():
+                    delivery = delivery_store.get_delivery(conn, delivery_id)
+                    if (
+                        delivery is not None
+                        and delivery.get("current_attempt_id") == attempt_id
+                        and delivery.get("current_target_turn_id") == turn_id
+                    ):
+                        delivery_store.mark_attempt_receipt_batch(
+                            conn, leader_delivery_id=delivery_id,
+                            outcome="accepted", receipt=receipt,
+                        )
             turn = delivery_store.get_turn(conn, turn_id)
             if (
                 turn is None
