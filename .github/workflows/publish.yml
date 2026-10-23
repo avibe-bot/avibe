@@ -181,6 +181,10 @@ jobs:
             scripts/show_runtime_manifest_asset.py
             scripts/build_retired_companion.py
             scripts/release_package_version.py
+            scripts/ci_scenario_evidence.py
+            scripts/pytest_collection.py
+            .github/workflows/publish.yml
+            tests/scenarios/**/catalog.yaml
             tests/test_distribution_artifacts.py
             tests/__init__.py
             tests/e2e/test_retired_updater_bridge.py
@@ -360,7 +364,18 @@ jobs:
           PY
           )"
           if [ "$UPGRADE_DIRECTION" = forward ]; then
-            (cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py -v)
+            mkdir -p "$RUNNER_TEMP/retired-updater-junit"
+            pytest_status=0
+            (cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py -v \
+              --junitxml="$RUNNER_TEMP/retired-updater-junit/retired-updater-bridge.xml") || pytest_status=$?
+            evidence_status=0
+            (cd release-automation && python scripts/ci_scenario_evidence.py --release \
+              "$RUNNER_TEMP/retired-updater-junit" \
+              --workflow .github/workflows/publish.yml \
+              --pytest-root . \
+              --pytest-command-index 1) || evidence_status=$?
+            if [ "$pytest_status" -ne 0 ]; then exit "$pytest_status"; fi
+            exit "$evidence_status"
           else
             echo "No forward Memory retirement upgrade from v3.1.0 to $RELEASE_TAG"
           fi
