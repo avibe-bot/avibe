@@ -272,14 +272,32 @@ const PetSurface: React.FC = () => {
   // A Vibey click (§5.1) is about Vibey's own conversation: it collapses an
   // expanded card list, else closes an open history, else opens the history.
   // The collapsed stack is the only way to expand the cards (§3.3). Every
-  // branch leaves the shell's panel state matching what is drawn.
+  // branch leaves the shell's panel state matching what is drawn. Typing and
+  // dictation stay as they are: the history opens above the input.
   const toggleVibey = () => {
     if (cardsListed) { void setPanel(false); return; }
     if (historyOpen) { setDetailOpen(false); void setPanel(false); return; }
-    // Typing and dictation keep the speech slot, and the draft, as they are.
-    if (composing || voice.busy) return;
     if (!binding || resolvingMain || (data.messages.length === 0 && !optimisticTitle)) return;
     openHistory();
+  };
+  // A double-click (§5.1) opens Vibey's conversation in the main window. Its
+  // first click already acted, so the second puts the history and the cards
+  // back as they were before it.
+  const vibeyBefore = useRef<{ detailOpen: boolean; expanded: boolean } | null>(null);
+  const clickVibey = () => {
+    vibeyBefore.current = { detailOpen, expanded: petPanel.want() };
+    toggleVibey();
+  };
+  const doubleClickVibey = () => {
+    const before = vibeyBefore.current;
+    vibeyBefore.current = null;
+    if (before?.detailOpen) {
+      if (!detailOpen) openHistory();
+    } else if (before) {
+      setDetailOpen(false);
+      if (petPanel.want() !== before.expanded) void setPanel(before.expanded);
+    }
+    if (binding) void petBridge.open(sessionLink(binding)).catch(() => undefined);
   };
   const [composing, setComposing] = useState(false);
   const [presentations, setPresentations] = useState<Record<string, CardPresentation>>({});
@@ -298,7 +316,9 @@ const PetSurface: React.FC = () => {
   const [orderedIds, setOrderedIds] = useState<string[]>([]);
   const stopTimers = useRef<Record<string, number>>({});
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const pressRef = useRef<{ held: boolean; dragged: boolean; x: number; y: number; timer: number } | null>(null);
+  // `clicks` is the platform's click count for this press (its mousedown
+  // `detail`): 2 is the second press of a double-click.
+  const pressRef = useRef<{ held: boolean; dragged: boolean; clicks: number; x: number; y: number; timer: number } | null>(null);
   const dismissTimers = useRef<Record<string, number>>({});
   const updatePresentation = useCallback((key: string, patch: CardPresentation | null) => {
     const next = { ...presentationNow.current };
@@ -459,9 +479,9 @@ const PetSurface: React.FC = () => {
     setComposing(false);
     setDraft('');
   }, [setDraft]);
+  // An open history stays open: the input takes its place below it (§5.2).
   const openComposer = useCallback((text = '', selected?: SessionReference[]) => {
     if (!epoch.isCurrent()) return;
-    setDetailOpen(false);
     setDraft(text, selected);
     setComposing(true);
     window.setTimeout(() => { if (epoch.isCurrent()) inputRef.current?.focus(); }, 0);
@@ -603,7 +623,9 @@ const PetSurface: React.FC = () => {
     const onKey = (event: KeyboardEvent) => {
       // Escape also dismisses an IME candidate list; that one is not ours.
       if (event.key !== 'Escape' || isComposingKey(event)) return;
-      if (voice.busy) voice.cancel();
+      // A history opened above the input closes before the input does.
+      if (detailOpen && (voice.busy || composing)) { setDetailOpen(false); void setPanel(false); }
+      else if (voice.busy) voice.cancel();
       else if (composing) closeComposer();
       else if (detailOpen) { setDetailOpen(false); void setPanel(false); }
       else void setPanel(false);
@@ -621,6 +643,17 @@ const PetSurface: React.FC = () => {
 
   const rootRef = useRef<HTMLDivElement>(null);
   useHitRegions(rootRef, epoch);
+  // The input (or marquee) below an open history: its height leaves the
+  // history less room in the fixed window.
+  const [inputHeight, setInputHeight] = useState(0);
+  const inputAreaRef = useCallback((node: HTMLDivElement | null) => {
+    if (!node) return undefined;
+    const measure = () => setInputHeight(node.offsetHeight);
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    observer?.observe(node);
+    return () => observer?.disconnect();
+  }, []);
   const collapsedRef = useRef<HTMLDivElement>(null);
   const [collapsedHeight, setCollapsedHeight] = useState(0);
   // One card is always drawn in its full form (spec §3.3): there is no stack to
@@ -698,10 +731,12 @@ const PetSurface: React.FC = () => {
   }
   if (watched !== turnWatch) setTurnWatch(watched);
   const lingerReply = turnReply && !watched.seen.has(turnReply.id) ? turnReply : null;
-  // The bubble is drawn: the speech slot shows it rather than the input or the
-  // dictation marquee. Every input to the linger (time, pointer) means
-  // something only while this holds.
-  const bubbleDrawn = hasBubbleContent && Boolean(binding) && !voice.busy && !(composing && canChat && !uncertain);
+  // The input or the dictation marquee holds the bottom of the speech slot.
+  const inputShown = voice.busy || (composing && canChat && !uncertain);
+  // The bubble is drawn: the speech slot shows it, alone or, while its history
+  // is open or asked for, above the input or the marquee (§5.2). Every input
+  // to the linger (time, pointer) means something only while this holds.
+  const bubbleDrawn = hasBubbleContent && Boolean(binding) && (!inputShown || detailOpen);
   // The reply is on screen: the bubble is drawn and its summary row is the
   // reply (not "thinking" while the turn still runs, nor a failure notice).
   // Only then does the linger spend its time.
@@ -711,14 +746,15 @@ const PetSurface: React.FC = () => {
   const bubbleRef = useRef<HTMLDivElement | null>(null);
   const avatarRef = useRef<HTMLButtonElement>(null);
   // Focus inside a bubble that is replaced (by the input, the dictation
-  // marquee, or a loading notice) moves to Vibey rather than to nowhere. The
-  // node is checked as it detaches, while it still holds the focus.
+  // marquee, or a loading notice) moves to Vibey rather than to nowhere, or to
+  // the input when the bubble closes above it. The node is checked as it
+  // detaches, while it still holds the focus.
   const attachBubble = useCallback((node: HTMLDivElement | null) => {
     bubbleRef.current = node;
     if (!node) return undefined;
     return () => {
       if (bubbleRef.current === node) bubbleRef.current = null;
-      if (node.contains(document.activeElement)) avatarRef.current?.focus();
+      if (node.contains(document.activeElement)) (inputRef.current ?? avatarRef.current)?.focus();
     };
   }, []);
   const { lingeringId, keepAtLeast } = useReplyLinger({
@@ -770,7 +806,7 @@ const PetSurface: React.FC = () => {
           if (event.button !== 0) return;
           const target = event.currentTarget;
           const pointerId = event.pointerId;
-          pressRef.current = { held: false, dragged: false, x: event.clientX, y: event.clientY, timer: window.setTimeout(() => {
+          pressRef.current = { held: false, dragged: false, clicks: 1, x: event.clientX, y: event.clientY, timer: window.setTimeout(() => {
             if (!epoch.isCurrent()) return;
             const press = pressRef.current;
             if (!press) return;
@@ -781,6 +817,11 @@ const PetSurface: React.FC = () => {
             if (voice.available) voice.start();
             else openComposer(draft);
           }, HOLD_MS) };
+        }}
+        onMouseDown={(event) => {
+          if (pressRef.current) pressRef.current.clicks = event.detail;
+          // The input keeps its focus and caret: a Vibey click is not leaving it.
+          if (inputRef.current && document.activeElement === inputRef.current) event.preventDefault();
         }}
         onPointerMove={(event) => {
           const press = pressRef.current;
@@ -793,6 +834,7 @@ const PetSurface: React.FC = () => {
         onPointerCancel={() => {
           const press = pressRef.current;
           pressRef.current = null;
+          vibeyBefore.current = null;
           if (press) window.clearTimeout(press.timer);
           if (press?.held) voice.stop(true);
         }}
@@ -801,14 +843,20 @@ const PetSurface: React.FC = () => {
           pressRef.current = null;
           if (!press) return;
           window.clearTimeout(press.timer);
+          // Only a click right after a click on Vibey is its double-click; a
+          // hold, a drag or a cancelled press in between starts over.
+          if (press.held || press.dragged || press.clicks > 2) vibeyBefore.current = null;
           if (press.held) voice.stop(true);
-          else if (!press.dragged) toggleVibey();
+          else if (press.dragged || press.clicks > 2) return;
+          else if (press.clicks === 2 && vibeyBefore.current) doubleClickVibey();
+          else clickVibey();
         }}
         onPointerLeave={() => {
           const press = pressRef.current;
           if (press && !press.held) {
             window.clearTimeout(press.timer);
             pressRef.current = null;
+            vibeyBefore.current = null;
           }
         }}
         onContextMenu={(event) => event.preventDefault()}
@@ -835,7 +883,7 @@ const PetSurface: React.FC = () => {
 
   return (
     <div ref={rootRef} className="pet-mini-stage" data-pet-root data-busy={busy} data-state={state}>
-      <div className={clsx('pet-mini-column', voice.busy && 'is-voice-active')} style={{ '--pet-collapsed-height': `${collapsedHeight}px` } as CSSProperties}>
+      <div className={clsx('pet-mini-column', voice.busy && 'is-voice-active')} style={{ '--pet-collapsed-height': `${collapsedHeight}px`, '--pet-input-space': bubbleDrawn && inputShown ? `calc(${inputHeight}px + var(--pet-input-gap))` : '0px' } as CSSProperties}>
         <div className={clsx('pet-mini-cards', voice.busy && 'is-hidden')} inert={voice.busy || undefined} aria-label={cardsExpanded ? t('pet.panel') : undefined} style={{ height: cardsListed ? (visibleCards.length > 0 ? STACK_HEIGHT : 'auto') : collapsedHeight }}>
           <div ref={collapsedRef} key={singleCard ? 'single' : cardsExpanded ? 'expanded' : 'collapsed'} className="pet-mini-swap is-switching" onAnimationEnd={(event) => { if (event.target === event.currentTarget) event.currentTarget.classList.remove('is-switching'); }}>
           {visibleCards.length > 0 && (
@@ -857,7 +905,51 @@ const PetSurface: React.FC = () => {
           </div>
         </div>
         <SpeechSlot open={voice.busy || composing || showReplyBubble || resolvingMain || !binding}>
-          {voice.busy ? <Marquee text={voice.finishing ? '' : voice.preview} listeningLabel={t(voice.finishing ? 'pet.voice.finishing' : 'pet.voice.listening')} /> : composing && canChat && !uncertain ? (
+          {bubbleDrawn && binding ? (
+            // Still drawn while the slot closes, so it fades out rather than vanishing.
+            <div
+              // Its own identity, so a notice drawn in the same place replaces
+              // it (and runs the focus handoff) instead of reusing this node.
+              key="vibey-bubble"
+              ref={attachBubble}
+              className={clsx(inputShown && 'pet-mini-bubble-over-input')}
+              onPointerEnter={() => setPointerOverBubble(true)}
+              onPointerLeave={() => {
+                // Leaving gives the reader a moment before it goes.
+                keepAtLeast(REPLY_LINGER_RESUME_MS);
+                setPointerOverBubble(false);
+              }}
+            >
+            <MainReplyBubble
+              open={historyOpen}
+              onToggle={toggleHistory}
+              pinnedReply={lingeringId !== null ? lingerReply : null}
+              epoch={epoch}
+              voiceNeedsCloud={voice.cloudRequired}
+              canChat={canChat}
+              binding={binding}
+              exchange={exchange}
+              messages={data.messages}
+              failure={data.running ? null : failure}
+              running={data.running}
+              queued={(data.turn?.pending_input_count ?? 0) > 0}
+              markRead={inbox.markRead}
+              onRead={data.refreshTail}
+              vaultRequestIds={vaultRequests.map((request) => request.id)}
+              quickReplies={quickReplies}
+              onChoose={choose}
+              uncertain={uncertain}
+              reducedMotion={reducedMotion}
+              onInspect={() => { void petBridge.open(sessionLink(binding)).then(() => { if (epoch.isCurrent()) setUncertain(binding, false); }).catch(() => undefined); }}
+            />
+            </div>
+          ) : !inputShown && (resolvingMain || !binding) ? (
+            <div className="pet-mini-reply-bubble pet-mini-detail-inner" data-pet-hit role="status">
+              <p className="pet-mini-detail-muted">{t(data.canChat === null ? 'common.loading' : 'pet.vibeyUnavailable')}</p>
+              <Button variant="link" size="sm" className="px-0" onClick={() => void petBridge.open('avibe://settings')}>{t('pet.openInAvibe')}</Button>
+            </div>
+          ) : null}
+          {inputShown && <div ref={inputAreaRef}>{voice.busy ? <Marquee text={voice.finishing ? '' : voice.preview} listeningLabel={t(voice.finishing ? 'pet.voice.finishing' : 'pet.voice.listening')} /> : (
           <>
           {voice.error && <p className="pet-mini-input-note" role="status">{t(`pet.voice.${voice.error}`)}</p>}
           <form className="pet-mini-input" data-pet-hit onSubmit={(event) => { event.preventDefault(); void submit(); }}>
@@ -887,48 +979,7 @@ const PetSurface: React.FC = () => {
             </div>
           </form>
           </>
-          ) : hasBubbleContent && binding ? (
-            // Still drawn while the slot closes, so it fades out rather than vanishing.
-            <div
-              // Its own identity, so a notice drawn in the same place replaces
-              // it (and runs the focus handoff) instead of reusing this node.
-              key="vibey-bubble"
-              ref={attachBubble}
-              onPointerEnter={() => setPointerOverBubble(true)}
-              onPointerLeave={() => {
-                // Leaving gives the reader a moment before it goes.
-                keepAtLeast(REPLY_LINGER_RESUME_MS);
-                setPointerOverBubble(false);
-              }}
-            >
-            <MainReplyBubble
-              open={historyOpen}
-              onToggle={toggleHistory}
-              pinnedReply={lingeringId !== null ? lingerReply : null}
-              epoch={epoch}
-              voiceNeedsCloud={voice.cloudRequired}
-              canChat={canChat}
-              binding={binding}
-              exchange={exchange}
-              messages={data.messages}
-              failure={data.running ? null : failure}
-              running={data.running}
-              queued={(data.turn?.pending_input_count ?? 0) > 0}
-              markRead={inbox.markRead}
-              onRead={data.refreshTail}
-              vaultRequestIds={vaultRequests.map((request) => request.id)}
-              quickReplies={quickReplies}
-              onChoose={choose}
-              uncertain={uncertain}
-              onInspect={() => { void petBridge.open(sessionLink(binding)).then(() => { if (epoch.isCurrent()) setUncertain(binding, false); }).catch(() => undefined); }}
-            />
-            </div>
-          ) : resolvingMain || !binding ? (
-            <div className="pet-mini-reply-bubble pet-mini-detail-inner" data-pet-hit role="status">
-              <p className="pet-mini-detail-muted">{t(data.canChat === null ? 'common.loading' : 'pet.vibeyUnavailable')}</p>
-              <Button variant="link" size="sm" className="px-0" onClick={() => void petBridge.open('avibe://settings')}>{t('pet.openInAvibe')}</Button>
-            </div>
-          ) : null}
+          )}</div>}
         </SpeechSlot>
       </div>
       {avatar}
@@ -1287,22 +1338,78 @@ const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, op
 
 type MainDetailProps = { epoch: PetSurfaceEpoch; voiceNeedsCloud: boolean; canChat: boolean; visible: boolean; binding: string; exchange: ReturnType<typeof latestExchange>; messages: WorkbenchMessage[]; failure: WorkbenchMessage | null; running: boolean; queued: boolean; markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>; onRead: () => void; vaultRequestIds: string[]; quickReplies: ReturnType<typeof openQuickReplies>; onChoose: (message: WorkbenchMessage, choice: string) => Promise<boolean>; uncertain: boolean; onInspect: () => void };
 
-const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boolean; onToggle: () => void; pinnedReply?: WorkbenchMessage | null }> = ({ open, onToggle, pinnedReply, ...props }) => {
+/**
+ * Animates a box between two widths CSS cannot interpolate (its content's width
+ * and the column's): from the width last drawn to the new one, then hands the
+ * width back to CSS. Reduced motion switches at once.
+ */
+function useWidthMorph(key: unknown, reducedMotion: boolean) {
+  const ref = useRef<HTMLDivElement>(null);
+  const drawn = useRef<number | null>(null);
+  const previous = useRef(key);
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(() => { drawn.current = node.getBoundingClientRect().width; });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node) return undefined;
+    const changed = previous.current !== key;
+    previous.current = key;
+    const from = drawn.current;
+    // Every width set here applies at once: only the last one is animated. A
+    // width CSS can interpolate would otherwise start its own transition from
+    // whatever was computed in between.
+    const settle = (width: string) => {
+      node.style.transition = 'none';
+      node.style.width = width;
+      void node.offsetWidth;
+      node.style.transition = '';
+    };
+    // Whatever was moving lands at once when there is nothing to animate.
+    settle('');
+    if (!changed || reducedMotion) return undefined;
+    const to = node.getBoundingClientRect().width;
+    if (from === null || Math.abs(from - to) < 1) return undefined;
+    settle(`${from}px`);
+    node.style.width = `${to}px`;
+    const release = (event: TransitionEvent) => {
+      if (event.target === node && event.propertyName === 'width') settle('');
+    };
+    node.addEventListener('transitionend', release);
+    node.addEventListener('transitioncancel', release);
+    return () => {
+      node.removeEventListener('transitionend', release);
+      node.removeEventListener('transitioncancel', release);
+    };
+  }, [key, reducedMotion]);
+  return ref;
+}
+
+const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boolean; onToggle: () => void; pinnedReply?: WorkbenchMessage | null; reducedMotion: boolean }> = ({ open, onToggle, pinnedReply, reducedMotion, ...props }) => {
   const { t } = useTranslation();
   // A lingering reply keeps its summary even if a later result (a background
   // completion) arrives while it lingers.
   const last = pinnedReply ?? props.exchange.results.at(-1);
+  const reply = last?.text?.trim() ?? '';
   const summary = props.running ? t('pet.thinking')
     : props.failure ? `${t('pet.failedPrefix')} ${props.failure.text.trim()}`
-        : last?.text?.trim() ? t('pet.repliedPrefix', { text: last.text.trim() })
+        : reply ? t('pet.repliedPrefix', { text: reply })
           : t('pet.waiting');
+  // A status word alone ("thinking", "waiting") sizes the bubble to its
+  // content (§4.2); a reply, a failure or the open history take the column.
+  const compact = !open && (props.running || (!props.failure && !reply));
+  const bubbleRef = useWidthMorph(compact, reducedMotion);
   const detailId = useId();
   const { ref: fadeRef, measure: measureFade, style: fadeStyle } = useScrollEdgeFade(open, HISTORY_FADE);
   // The toggle stays first in the DOM, so focus order is unchanged, but the
   // bubble lays out bottom-up: the toggle keeps its place at the bottom and
   // the history opens above it, so expanding never moves what was clicked.
   return (
-    <div className="pet-mini-reply-bubble is-main" data-pet-hit>
+    <div ref={bubbleRef} className={clsx('pet-mini-reply-bubble is-main', compact && 'is-compact')} data-pet-hit>
       <button type="button" className="pet-mini-reply-toggle" onClick={onToggle} aria-expanded={open} aria-controls={detailId}>
         <span className="pet-mini-bubble-speaker">{t('pet.mainAgent')}<span>{t(open ? 'pet.collapseHistory' : 'pet.recentTurns')}<ChevronUp size={11} /></span></span>
         <p title={summary}>{props.running && <span className="pet-mini-running-dot" aria-hidden />}<span className="pet-mini-reply-summary">{summary}</span></p>
@@ -1335,9 +1442,17 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
     const inner = innerRef.current;
     const history = inner?.closest<HTMLElement>('.pet-mini-bubble-history');
     if (!inner || !history) return undefined;
-    const toBottom = () => { history.scrollTop = history.scrollHeight - history.clientHeight; };
+    // The box also shrinks while open (the input below it grows). The scroll
+    // event of a pin arrives a frame later, read against a box that may have
+    // shrunk since; it is the pin's own, not a reader scrolling up.
+    let own = -1;
+    const toBottom = () => { history.scrollTop = history.scrollHeight - history.clientHeight; own = history.scrollTop; };
     let pinned = true;
-    const onScroll = () => { pinned = history.scrollHeight - history.clientHeight - history.scrollTop <= HISTORY_STICK_PX; };
+    const onScroll = () => {
+      if (history.scrollTop === own) return;
+      own = -1;
+      pinned = history.scrollHeight - history.clientHeight - history.scrollTop <= HISTORY_STICK_PX;
+    };
     toBottom();
     history.addEventListener('scroll', onScroll);
     const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(() => { if (pinned) toBottom(); });

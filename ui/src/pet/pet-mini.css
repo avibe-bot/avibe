@@ -14,6 +14,8 @@
   --pet-dismiss-hover:#4a4a50}
 
 .pet-mini-column {
+  /* Between Vibey's bubble and the input below it: room for the bubble's tail. */
+  --pet-input-gap:14px;
   position:absolute;
   left:50%;
   bottom:147px;
@@ -791,7 +793,24 @@ to {
    mask, so it stays crisp and collapses away with the detail. */
 .pet-mini-reply-bubble.is-main {
   display:flex;
-  flex-direction:column-reverse}
+  flex-direction:column-reverse;
+  /* Centred on Vibey at every width; at full width the margins are zero. */
+  margin-inline:auto;
+  /* Runs only while useWidthMorph sets an inline width (§4.2). */
+  transition:width 300ms var(--settle)}
+/* A status word alone (thinking, waiting) sizes the bubble to its content,
+   centred on Vibey like the column, so it grows from the centre and its tail
+   never moves. The closed history must not lend it its own text's width. */
+.pet-mini-reply-bubble.is-main.is-compact {
+  width:fit-content;
+  min-width:min(160px,100%);
+  max-width:100%}
+.pet-mini-reply-bubble.is-main.is-compact > .pet-mini-detail {
+  contain:inline-size}
+/* With the input or the marquee below it, the open history leaves room for
+   the bubble's tail before the input. */
+.pet-mini-bubble-over-input {
+  margin-bottom:var(--pet-input-gap)}
 .pet-mini-reply-bubble.is-main .pet-mini-detail-clip {
   position:relative}
 .pet-mini-reply-bubble.is-main .pet-mini-detail-clip:after {
@@ -815,6 +834,7 @@ to {
   display:flex;
   align-items:center;
   justify-content:space-between;
+  gap:12px;
   color:var(--mint-ink);
   font-size:11px;
   line-height:16px;
@@ -847,8 +867,9 @@ to {
   z-index:1;
   border-radius:21px 21px 0 0;
   /* Share the list's 292px box, bounded by the fixed avatar/dock reservation
-     (147px), bubble header (62px), top inset (16px), and measured stack. */
-  max-height:min(292px,max(0px,calc(100dvh - 225px - var(--pet-collapsed-height,0px))));
+     (147px), bubble header (62px), top inset (16px), the measured stack, and
+     the measured input below an open history (with its gap). */
+  max-height:min(292px,max(0px,calc(100dvh - 225px - var(--pet-collapsed-height,0px) - var(--pet-input-space,0px))));
   overflow:auto;
   overscroll-behavior:contain;
   /* Hidden like the card list (§3.2); the edge fades show there is more. */
