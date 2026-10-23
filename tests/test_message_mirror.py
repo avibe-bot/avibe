@@ -1053,6 +1053,34 @@ def test_persist_agent_sets_source_and_agent_name(isolated_state):
     assert agent_row["author_name"] == "Atlas"
 
 
+def test_persist_agent_records_the_agent_that_wrote_the_reply(isolated_state):
+    """A session can switch Agents; each reply keeps the id and backend of the Agent
+    that ran it, preferring that over the session's routing."""
+    ctx = MessageContext(
+        user_id="U",
+        channel_id="C_general",
+        platform="slack",
+        platform_specific={
+            "vibe_agent_name": "Atlas",
+            "agent_session_target": {"agent_id": "agt-routed", "agent_backend": "claude"},
+            "resolved_vibe_agent": {"id": "agt-atlas", "name": "Atlas", "backend": "codex"},
+        },
+    )
+    mirror_inbound(ctx, "ping")
+    persist_agent_message(ctx, "result", "pong", metadata={"turn_id": "trn-1"})
+
+    engine = create_sqlite_engine()
+    with engine.connect() as conn:
+        agent_row = conn.execute(
+            select(messages).where(messages.c.author == "agent")
+        ).mappings().first()
+    assert json.loads(agent_row["metadata_json"]) == {
+        "author_agent_id": "agt-atlas",
+        "author_backend": "codex",
+        "turn_id": "trn-1",
+    }
+
+
 def test_harness_inbound_avibe_session_scoped(isolated_state):
     """A scheduled/watch turn on an avibe session lands an author/type='harness'
     row attributed to the session — with author_name = the trigger kind and

@@ -20,6 +20,7 @@ from core.message_context import (
     resolve_context_platform,
     resolve_context_thread_id,
 )
+from core.delivery_evidence import DeliveryEvidence
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
     mark_prewrite_input_retired,
@@ -973,15 +974,14 @@ class MessageHandler(BaseHandler):
         Nothing is offered when Vibey is what cannot run, or is not available.
         Retrying on its own would fail the same way, so an input that never reached
         the backend waits for its owner in the Workbench: continue on Vibey, or Retry
-        once it is back. A chat app has no Retry, so its input is retired instead of
-        holding every later message behind it; the user sends again once switched.
+        once it is back. A chat app has no Retry, so once its notice (which says to
+        send the message again) is delivered, its input is retired instead of holding
+        every later message behind it.
         """
         target = routed_delivery_context(context)
         workbench = resolve_context_platform(target) == "avibe"
         if workbench:
             mark_prewrite_recovery_required(context, "agent_unavailable")
-        else:
-            mark_prewrite_input_retired(context, "agent_unavailable")
         if not workbench and escape_reason:
             reason = self._get_formatter(target).escape_special_chars(reason)
         # Catalog and Model Hub reads: off the controller loop.
@@ -993,6 +993,7 @@ class MessageHandler(BaseHandler):
         elif not workbench:
             # Its input was retired above, so it will not run once the Agent is back.
             text = f"{text}\n{self._t('error.agentUnavailable.resendLater')}"
+        delivery = None if workbench else DeliveryEvidence()
         await emit_backend_failure(
             self.controller,
             context,
@@ -1001,8 +1002,13 @@ class MessageHandler(BaseHandler):
             display_text=text,
             request=request,
             output=output,
+            delivery=delivery,
             cause=cause,
         )
+        # A chat app's input is retired only once the user was told to send it again;
+        # an undelivered notice leaves it to the ordinary startup retries.
+        if delivery is not None and delivery.delivered:
+            mark_prewrite_input_retired(context, "agent_unavailable")
 
     def _builtin_vibey_available(self) -> bool:
         """Whether a continuation on Vibey could run now: its built-in Agent exists and

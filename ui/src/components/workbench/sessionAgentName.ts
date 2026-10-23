@@ -3,8 +3,7 @@
 // under the current display name while a stale catalog entry cannot claim it.
 // Pure so the precedence is asserted without mounting the page
 // (see ChatArchivedReadOnly.test.tsx).
-import type { VibeAgentBrief, WorkbenchSession } from '../../context/ApiContext';
-import { BACKEND_CATALOG } from '../../lib/agentBackendCatalog.generated';
+import type { VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 
 export function sessionAgentDisplayName(
   session: Pick<WorkbenchSession, 'agent_id' | 'agent_name'>,
@@ -38,22 +37,27 @@ export function sessionAgentBackend(
 
 // Which Agent wrote one reply, when that is not the session's Agent: a session switched
 // to another Agent (say from Codex to Vibey) keeps its earlier replies under the Agent
-// that wrote them. ``authorName`` is the Agent name recorded with the reply. A name no
-// Agent carries any more (renamed or archived) reads as the session's own Agent, as
-// before, unless it names a built-in backend Agent, whose name never changes.
-// ``null`` means the session's Agent.
+// that wrote them. A reply records that Agent's id and backend (``author_agent_id``,
+// ``author_backend`` in its metadata); the name comes from the catalog by that id, else
+// the name recorded with the reply, so a reused name or an empty catalog (a read-only
+// viewer) cannot misattribute it. A reply that records neither, or the session's own
+// Agent and backend, is the session's. ``null`` means the session's Agent.
 export function messageAuthorAgent(
-  authorName: string | null | undefined,
-  session: Pick<WorkbenchSession, 'agent_id' | 'agent_name'>,
+  message: Pick<WorkbenchMessage, 'author_name' | 'metadata'>,
+  session: Pick<WorkbenchSession, 'agent_id'>,
+  sessionBackend: string | null,
   agents: VibeAgentBrief[],
-): { displayName: string; backend: string } | null {
-  const name = authorName?.trim();
-  if (!name || name === session.agent_name?.trim()) return null;
-  const agent = agents.find((candidate) => candidate.name === name);
-  if (agent) {
-    return agent.id === session.agent_id
-      ? null
-      : { displayName: agent.display_name?.trim() || agent.name, backend: agent.backend };
-  }
-  return BACKEND_CATALOG.some((backend) => backend.id === name) ? { displayName: name, backend: name } : null;
+): { displayName: string; backend: string | null } | null {
+  const metadata = (message.metadata ?? {}) as Record<string, unknown>;
+  const text = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
+  const agentId = text(metadata.author_agent_id);
+  const backend = text(metadata.author_backend);
+  const otherAgent = Boolean(agentId && session.agent_id && agentId !== session.agent_id);
+  const otherBackend = Boolean(backend && sessionBackend && backend !== sessionBackend);
+  if (!otherAgent && !otherBackend) return null;
+  const agent = agentId ? agents.find((candidate) => candidate.id === agentId) : undefined;
+  return {
+    displayName: agent?.display_name?.trim() || text(message.author_name) || agent?.name || backend,
+    backend: backend || agent?.backend || null,
+  };
 }

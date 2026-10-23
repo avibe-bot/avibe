@@ -330,6 +330,23 @@ def _agent_provenance_from_context(context: MessageContext, session_row: Optiona
     return agent_name, backend
 
 
+def _author_identity(context: MessageContext, session_row: Optional[dict] = None) -> dict[str, str]:
+    """The Agent that wrote a reply, recorded with it (``metadata``): a session can
+    switch Agents, and its earlier replies keep the one that wrote them. The Agent that
+    ran (``resolved_vibe_agent``) is preferred over the session's routing."""
+    spec = context.platform_specific or {}
+    resolved = spec.get("resolved_vibe_agent")
+    resolved = resolved if isinstance(resolved, dict) else {}
+    target = spec.get("agent_session_target")
+    target = target if isinstance(target, dict) else {}
+    _name, routed_backend = _agent_provenance_from_context(context, session_row)
+    identity = {
+        "author_agent_id": resolved.get("id") or target.get("agent_id") or (session_row or {}).get("agent_id"),
+        "author_backend": resolved.get("backend") or routed_backend,
+    }
+    return {key: str(value) for key, value in identity.items() if isinstance(value, str) and value.strip()}
+
+
 def _trace_ids_from_context(context: MessageContext) -> tuple[Optional[str], Optional[str]]:
     spec = context.platform_specific or {}
     trigger_kind = str(spec.get("task_trigger_kind") or "").strip()
@@ -527,6 +544,7 @@ def persist_agent_message(
                 # survives reload because it lives on the row, not in the delivery.
                 if citation_rows:
                     content = {**(content or {}), "citations": citation_rows}
+                metadata = {**_author_identity(context, session_row), **(metadata or {})}
                 if existing_row_id:
                     appended_row = _write_committed_row(
                         conn,

@@ -211,9 +211,10 @@ def test_an_agent_that_cannot_run_offers_to_continue_on_vibey(monkeypatch):
 def test_an_agent_that_cannot_run_holds_its_input_only_where_it_can_be_retried():
     """Retrying on its own would fail the same way. In the Workbench an input that never
     reached the backend is held for an explicit retry: continue on Vibey, or Retry once
-    the Agent is back. A chat app has no Retry, so its input is retired rather than
-    holding every later message behind it. One that reached the backend is left alone."""
-    from unittest.mock import AsyncMock, patch
+    the Agent is back. A chat app has no Retry, so once its notice is delivered its
+    input is retired rather than holding every later message behind it. One that
+    reached the backend is left alone."""
+    from unittest.mock import patch
 
     from core.native_dispatch_phase import (
         DISPATCH_PHASE_ATTEMPTING,
@@ -229,10 +230,16 @@ def test_an_agent_that_cannot_run_holds_its_input_only_where_it_can_be_retried()
     handler = MessageHandler(controller)
     disabled = AgentUnavailableError("agent 'codex' is disabled", agent_name="codex", reason="disabled")
 
-    def failed(platform, phase):
+    def failed(platform, phase, *, delivered=True):
         context = MessageContext(user_id="U1", channel_id="ses-1", platform=platform)
         set_dispatch_phase(context, phase)
-        with patch.dict(MessageHandler._emit_agent_cannot_run.__globals__, emit_backend_failure=AsyncMock()):
+
+        async def notify(*_args, delivery=None, **_kwargs):
+            if delivered and delivery is not None:
+                delivery.delivered_id = "notice-1"
+            return False
+
+        with patch.dict(MessageHandler._emit_agent_cannot_run.__globals__, emit_backend_failure=notify):
             anyio.run(handler._emit_agent_dispatch_failure, context, None, disabled)
         return context
 
@@ -241,6 +248,8 @@ def test_an_agent_that_cannot_run_holds_its_input_only_where_it_can_be_retried()
     assert prewrite_failure_evidence(workbench) == {"reason": "agent_unavailable", "requires_explicit_retry": True}
     chat_app = failed("telegram", DISPATCH_PHASE_PREWRITE)
     assert prewrite_failure_evidence(chat_app) == {"reason": "agent_unavailable", "retire_input": True}
+    # Not told to send it again, so the input is left to the ordinary retries.
+    assert prewrite_failure_evidence(failed("telegram", DISPATCH_PHASE_PREWRITE, delivered=False)) == {}
     for platform in ("avibe", "telegram"):
         assert prewrite_failure_evidence(failed(platform, DISPATCH_PHASE_ATTEMPTING)) == {}
 

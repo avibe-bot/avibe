@@ -4575,7 +4575,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
             const before = activity?.enabled ? activity.beforeAnchor.get(message.id) : undefined;
             const after = activity?.enabled ? activity.afterAnchor.get(message.id) : undefined;
             // A reply another Agent wrote before the session switched keeps its author.
-            const author = message.author === 'agent' ? messageAuthorAgent(message.author_name, session, agents) : null;
+            const author = message.author === 'agent' ? messageAuthorAgent(message, session, agentBackend, agents) : null;
             return (
               <Fragment key={message.id}>
                 {before?.map((group) => renderActivityChip(group))}
@@ -4583,7 +4583,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
                   message={message}
                   session={session}
                   agentDisplayName={author ? author.displayName : agentDisplayName}
-                  agentBackend={author ? author.backend : agentBackend}
+                  agentBackend={author?.backend ?? agentBackend}
                   messageFontSize={messageFontSize}
                   onQuickReply={onQuickReply}
                   onFailureRetry={onFailureRetry}

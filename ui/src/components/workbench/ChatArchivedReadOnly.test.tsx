@@ -274,16 +274,23 @@ describe('chat avatars', () => {
   it('keeps a reply under the Agent that wrote it after the session switches', () => {
     const reviewer = { ...archivedPm, id: 'agt-reviewer', name: 'reviewer', display_name: 'Reviewer', backend: 'claude' };
     const switched = session({ agent_id: vibey.id, agent_name: 'vibey', agent_backend: 'vibey' });
-    expect(messageAuthorAgent('vibey', switched, [vibey, reviewer])).toBeNull();
-    expect(messageAuthorAgent(null, switched, [vibey, reviewer])).toBeNull();
-    expect(messageAuthorAgent('reviewer', switched, [vibey, reviewer])).toEqual({ displayName: 'Reviewer', backend: 'claude' });
-    // A built-in backend Agent keeps its name, so it resolves before the catalog loads.
-    expect(messageAuthorAgent('codex', switched, [])).toEqual({ displayName: 'codex', backend: 'codex' });
-    // A name no Agent carries any more (renamed, archived) reads as the session's Agent.
-    expect(messageAuthorAgent('old-name', switched, [vibey, reviewer])).toBeNull();
-    // The session's own Agent under a name it no longer has in this row.
-    const renamed = session({ agent_id: reviewer.id, agent_name: 'reviewer-2', agent_backend: 'claude' });
-    expect(messageAuthorAgent('reviewer', renamed, [reviewer])).toBeNull();
+    const reply = (author_name: string | null, metadata: Record<string, unknown> = {}) => ({ author_name, metadata });
+    // The session's own Agent and backend, or a reply that records neither.
+    expect(messageAuthorAgent(reply('vibey', { author_agent_id: vibey.id, author_backend: 'vibey' }), switched, 'vibey', [vibey])).toBeNull();
+    expect(messageAuthorAgent(reply('codex'), switched, 'vibey', [vibey])).toBeNull();
+    // Named from the catalog by the recorded id, drawn with the recorded backend.
+    expect(messageAuthorAgent(reply('reviewer', { author_agent_id: reviewer.id, author_backend: 'claude' }), switched, 'vibey', [vibey, reviewer]))
+      .toEqual({ displayName: 'Reviewer', backend: 'claude' });
+    // No catalog (a read-only viewer), or a new Agent that took the old name: the
+    // recorded name and backend still stand.
+    const taker = { ...reviewer, id: 'agt-new', display_name: 'Someone else', backend: 'opencode' };
+    for (const agents of [[], [vibey, taker]]) {
+      expect(messageAuthorAgent(reply('reviewer', { author_agent_id: reviewer.id, author_backend: 'claude' }), switched, 'vibey', agents))
+        .toEqual({ displayName: 'reviewer', backend: 'claude' });
+    }
+    // The same Agent, renamed or archived since, is the session's.
+    const archived = session({ agent_id: reviewer.id, agent_name: '_reviewer-1a2b', agent_backend: 'claude' });
+    expect(messageAuthorAgent(reply('reviewer', { author_agent_id: reviewer.id, author_backend: 'claude' }), archived, 'claude', [])).toBeNull();
   });
 
   it('draws Vibey in the thinking and transcript bubbles of a session that inherits it', () => {
