@@ -17,7 +17,7 @@ import type {
 
 import { ApiError } from '@/context/ApiContext';
 
-import { PET_BOUND_EVENT, PET_HOVER_EVENT, PET_SUMMON_EVENT } from './petBridge';
+import { PET_BOUND_EVENT, PET_HOVER_EVENT, PET_LAYOUT_EVENT, PET_SUMMON_EVENT } from './petBridge';
 import { SEND_GRACE_MS } from './usePetSession';
 
 vi.mock('react-i18next', () => ({
@@ -3210,6 +3210,25 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     expect(edge()).toBe('bottom');
     // The window keeps its size in this drag, so the column stays drawn.
     expect(document.querySelector('.pet-mini-stage')?.hasAttribute('data-dragging')).toBe(false);
+  });
+
+  it('draws a layout the shell moved it into before the shell brings the window that fits it', async () => {
+    const edgeAtSettle: (string | null | undefined)[] = [];
+    const invoke = vi.fn(async (command: string) => {
+      if (command === 'pet_ready') return { binding: 'S', revision: 1, summon_pending: null, layout: { panel_side: 'left', panel_edge: 'bottom' } };
+      if (command === 'pet_settle') { edgeAtSettle.push(edge()); return { panel_side: 'left', panel_edge: 'top' }; }
+      return { panel_side: 'left', panel_edge: 'bottom' };
+    });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_ready', { layouts: true }));
+    act(() => { window.dispatchEvent(new CustomEvent(PET_LAYOUT_EVENT, { detail: { layout: { panel_side: 'left', panel_edge: 'top' } } })); });
+    // Every settle (earlier tests' documents still listen in this window)
+    // comes after the new layout is drawn.
+    await waitFor(() => expect(edgeAtSettle.length).toBeGreaterThan(0));
+    expect(new Set(edgeAtSettle)).toEqual(new Set(['top']));
+    expect(edge()).toBe('top');
   });
 
   it('peeks the stack layers out toward Vibey in either layout', async () => {

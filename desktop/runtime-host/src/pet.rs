@@ -649,6 +649,20 @@ pub fn place_dropped(dropped: (f64, f64), areas: &[WorkArea]) -> (PetAnchor, Pet
     (anchor, frame)
 }
 
+/// Where a pet moved by something other than the shell's own drag comes to
+/// rest, and its window: the platform after a display change, or an older
+/// page dragging the window natively. Like a drop (`place_dropped`), except
+/// that a page without the top layout always gets the upward window.
+pub fn place_moved(moved: (f64, f64), areas: &[WorkArea], page_layouts: bool) -> (PetAnchor, PetFrame) {
+    let (anchor, frame) = place_dropped(moved, areas);
+    if page_layouts {
+        return (anchor, frame);
+    }
+    let at = (anchor.x, anchor.y);
+    let frame = area_for(areas, at).map_or_else(PetFrame::default, |area| upward_frame(at, area));
+    (anchor, frame)
+}
+
 /// Window-local logical coordinates; shadows deliberately do not enlarge these.
 #[derive(Clone, Copy, Debug, Deserialize)]
 pub struct HitRect {
@@ -1163,6 +1177,39 @@ mod tests {
             settle_frame((600.0, 433.0), &laptop),
             upward_frame((600.0, 433.0), &laptop)
         );
+    }
+
+    #[test]
+    fn a_pet_moved_outside_a_shell_drag_gets_the_window_for_where_it_now_is() {
+        let laptop = area("laptop", 0.0, 33.0, 1470.0, 923.0);
+        let short = area("short", 0.0, 0.0, 1093.0, 574.0);
+        // An older page dragged its strip-high window down: the upward
+        // window grows back to its full height.
+        let (anchor, frame) = place_moved((600.0, 700.0), std::slice::from_ref(&laptop), false);
+        assert_eq!((anchor.x, anchor.y), (600.0, 700.0));
+        assert_eq!(frame, PetFrame::default());
+        // Near the top an older page still opens upward; a current one flips.
+        assert_eq!(
+            place_moved((600.0, 45.0), std::slice::from_ref(&laptop), false)
+                .1
+                .layout,
+            PetLayout::default()
+        );
+        assert_eq!(
+            place_moved((600.0, 45.0), std::slice::from_ref(&laptop), true)
+                .1
+                .layout
+                .panel_edge,
+            PanelEdge::Top
+        );
+        // The display it was on is gone: it lands whole on the remaining one,
+        // in a window that fits its height (a display narrower than the full
+        // window keeps Vibey, not the transparent sides, inside).
+        let (anchor, frame) = place_moved((3000.0, 900.0), std::slice::from_ref(&short), true);
+        let window = short.window_rect((anchor.x, anchor.y), frame);
+        assert!(window.y >= short.area.y && window.bottom() <= short.area.bottom());
+        assert!(anchor.x + PET_SIZE <= short.area.right());
+        assert_eq!(anchor.monitor.as_deref(), Some("short"));
     }
 
     #[test]

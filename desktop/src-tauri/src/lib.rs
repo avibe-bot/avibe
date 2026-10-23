@@ -2191,7 +2191,7 @@ pub fn run() {
                     }
                     if let RunEvent::WindowEvent {
                         label,
-                        event: WindowEvent::Moved(_),
+                        event: WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. },
                         ..
                     } = event
                     {

@@ -27,6 +27,8 @@ export type PetReady = PetBinding & {
 export const PET_SUMMON_EVENT = 'avibe:pet-summon';
 export const PET_BOUND_EVENT = 'avibe:pet-bound';
 export const PET_HOVER_EVENT = 'avibe:pet-hover';
+/** The shell moved the pet (a display change) to a spot with another layout. */
+export const PET_LAYOUT_EVENT = 'avibe:pet-layout';
 
 /** A window-local rect that takes the mouse; `hover` marks Vibey's hover zone. */
 export type PetHitRect = { x: number; y: number; width: number; height: number; hover?: boolean };
@@ -185,13 +187,19 @@ export const onPetHover = (handler: (hover: boolean) => void): (() => void) => {
 /** Subscribe to shell events; returns the unsubscribe function. */
 export const onPetEvents = (handlers: {
   summon?: (intent: PetIntent) => void;
+  layout?: (layout: PetLayout) => void;
 }): (() => void) => {
   const summon = (event: Event) => {
     const intent = (event as CustomEvent<{ intent?: unknown }>).detail?.intent;
     handlers.summon?.(isIntent(intent) ? intent : 'show');
   };
+  const layout = (event: Event) => {
+    handlers.layout?.(parseLayout((event as CustomEvent<{ layout?: unknown }>).detail?.layout));
+  };
   window.addEventListener(PET_SUMMON_EVENT, summon);
+  window.addEventListener(PET_LAYOUT_EVENT, layout);
   return () => {
     window.removeEventListener(PET_SUMMON_EVENT, summon);
+    window.removeEventListener(PET_LAYOUT_EVENT, layout);
   };
 };

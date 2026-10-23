@@ -651,9 +651,11 @@ already communicate activity. Keep the upper-right red unread badge.
   **drag strip** around Vibey and the dock (12px above the image, 36px below
   it: 163px at full width), keeping Vibey under the pointer, and starts the
   native drag. Both layouts draw Vibey at the same place in the strip.
-  - On release (the shell reads the primary button: `pressedMouseButtons` on
-    macOS, `GetAsyncKeyState` on Windows; where it cannot, a drag ends once
-    the window has not moved for 400ms), the shell keeps the pet whole on a
+  - On release (the shell reads the buttons: no button down in
+    `pressedMouseButtons` on macOS, whose bits are physical and whose primary
+    side can be the right one; the primary button in `GetAsyncKeyState` on
+    Windows; where it cannot, a drag ends once the window has not moved for
+    400ms), the shell keeps the pet whole on a
     display (as on restore), chooses the window for that spot, saves the
     anchor and answers the page with the layout. The page draws it and calls
     `pet_settle`; only then does the full window come back, so the other
@@ -665,7 +667,16 @@ already communicate activity. Keep the upper-right red unread badge.
     shell then gives it the upward window at the same spot, as tall as the
     room above allows, so Vibey stays put and nothing is mis-drawn.
   - While the shell drags, the page hides the column; it returns with the
-    full window.
+    full window. If the native drag cannot start, the window goes back as it
+    was.
+- **Every other move gets the window for its spot.** When the platform moves
+  the window (a display is removed, a work area or scale changes) or an older
+  page drags it natively, the shell, once the move settles for 400ms, keeps
+  the pet whole on a display and applies the window for that spot as above.
+  A layout change is announced to the page (`avibe:pet-layout`), which draws
+  it and calls `pet_settle` as after a drop; a page without the top layout
+  only ever gets the upward window. An older page still cannot drag Vibey
+  above the 600px window's reach: only the shell's drag shrinks the window.
 - **What must stay on a display.** Restore on launch, a dropped pet and a
   display or scale change keep the drag strip inside a connected work area:
   at the window's width on a display that fits the full 460 × 600 window,

@@ -4,13 +4,15 @@
 
 use tauri::WebviewWindow;
 
-/// Whether the primary button is down, or `None` where the shell cannot tell.
-/// A native window drag swallows the button's release, so the page never sees
-/// it; this is how the shell learns the drag is over.
+/// Whether the button holding a drag is still down, or `None` where the
+/// shell cannot tell. A native window drag swallows the button's release, so
+/// the page never sees it; this is how the shell learns the drag is over.
 pub fn primary_button_down() -> Option<bool> {
+    // AppKit reports physical buttons, and a Mac mouse can make its right side
+    // the primary one: the drag is over once no button is down.
     #[cfg(target_os = "macos")]
     {
-        Some(objc2_app_kit::NSEvent::pressedMouseButtons() & 1 != 0)
+        Some(objc2_app_kit::NSEvent::pressedMouseButtons() != 0)
     }
     #[cfg(windows)]
     {

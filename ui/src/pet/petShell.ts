@@ -44,6 +44,12 @@ const start = () => {
       liveSummons += 1;
       noteSummon(intent);
     },
+    // The shell moved the pet to a spot with the other layout: draw it, then
+    // let the shell bring the window that fits it (as after a drop).
+    layout: (next) => {
+      petPanel.setLayout(next);
+      requestAnimationFrame(() => requestAnimationFrame(() => { void petBridge.settle().catch(() => undefined); }));
+    },
   });
   const liveSummonsAtRequest = liveSummons;
   readyPromise = petBridge.ready().then((ready) => {
