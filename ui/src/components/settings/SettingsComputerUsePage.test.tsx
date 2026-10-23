@@ -1,6 +1,6 @@
 /* @vitest-environment jsdom */
 
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -181,6 +181,47 @@ describe('SettingsComputerUsePage', () => {
     }
   });
 
+  it('converges when every read is slower than the refresh interval, with one read at a time', async () => {
+    enterActionableShell();
+    const bodies = [
+      { supported: true, status: 'off', reason: 'never_enabled' },
+      { supported: true, status: 'needs_permission', reason: 'accessibility' },
+      { supported: true, status: 'needs_permission', reason: 'screen_recording' },
+      { supported: true, status: 'ready', reason: null },
+    ];
+    let index = 0;
+    let open = 0;
+    let maxOpen = 0;
+    // `ready` can wait up to 2 s on the Controller: make every read take 2 s.
+    apiFetch.mockImplementation(() => {
+      open += 1;
+      maxOpen = Math.max(maxOpen, open);
+      const body = bodies[Math.min(index++, bodies.length - 1)];
+      return new Promise((resolve) => {
+        window.setTimeout(() => {
+          open -= 1;
+          resolve(statusResponse(body));
+        }, 2_000);
+      });
+    });
+    vi.useFakeTimers();
+
+    render(<SettingsComputerUsePage />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_000); });
+    expect(stepStates().enable).toBe('current');
+    // Rechecking and focusing mid-read join the read already in flight.
+    await act(async () => { await vi.advanceTimersByTimeAsync(2_500); });
+    act(() => {
+      fireEvent.click(screen.getByRole('button', { name: /settings\.computerUse\.recheck/ }));
+      window.dispatchEvent(new Event('focus'));
+    });
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(20_000); });
+    expect(Object.values(stepStates())).toEqual(['complete', 'complete', 'complete']);
+    expect(screen.getByTestId('computer-use-guide-status').getAttribute('data-computer-use-status')).toBe('ready');
+    expect(maxOpen).toBe(1);
+  });
+
   it('stops polling while the page is hidden and reads again when it returns', async () => {
     enterActionableShell();
     statusSequence({ supported: true, status: 'needs_permission', reason: 'accessibility' });
@@ -229,6 +270,23 @@ describe('SettingsComputerUsePage', () => {
 
     expect(await screen.findByTestId('computer-use-action-failed')).toBeTruthy();
     expect(stepStates().accessibility).toBe('current');
+  });
+
+  it('keeps a failed action on its own step once the guide moves on', async () => {
+    enterActionableShell(vi.fn(async () => { throw new Error('denied'); }));
+    statusSequence({ supported: true, status: 'needs_permission', reason: 'accessibility' });
+    const user = userEvent.setup();
+
+    render(<SettingsComputerUsePage />);
+    await user.click(await screen.findByTestId('computer-use-action-accessibility'));
+    expect(await screen.findByTestId('computer-use-action-failed')).toBeTruthy();
+
+    // The user grants Accessibility another way; the next step never failed.
+    statusSequence({ supported: true, status: 'needs_permission', reason: 'screen_recording' });
+    await user.click(screen.getByRole('button', { name: /settings\.computerUse\.recheck/ }));
+    await waitFor(() => expect(stepStates().screenRecording).toBe('current'));
+    expect(screen.getByTestId('computer-use-action-screenRecording')).toBeTruthy();
+    expect(screen.queryByTestId('computer-use-action-failed')).toBeNull();
   });
 
   it('follows the live status read-only in a browser, pointing to the desktop app on the Mac', async () => {

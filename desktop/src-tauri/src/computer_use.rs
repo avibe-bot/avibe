@@ -217,14 +217,22 @@ impl Controller {
     /// Turns Computer Use on exactly as the tray toggle does, and does nothing
     /// when it is already on: a page acting on a stale status must not turn it
     /// off.
-    pub(crate) fn turn_on(&self) {
-        let _ = self.sender.send(Event::Enable);
+    pub(crate) fn turn_on(&self) -> Result<(), String> {
+        self.request(Event::Enable)
     }
 
     /// Asks macOS for `pane`'s grant where it allows a prompt, then opens the
     /// pane in System Settings.
-    pub(crate) fn open_permission(&self, pane: PermissionPane) {
-        let _ = self.sender.send(Event::OpenPermission(pane));
+    pub(crate) fn open_permission(&self, pane: PermissionPane) -> Result<(), String> {
+        self.request(Event::OpenPermission(pane))
+    }
+
+    /// Hands a page request to the lifecycle. A degraded controller has no
+    /// lifecycle task, so the page is told the request went nowhere.
+    fn request(&self, event: Event) -> Result<(), String> {
+        self.sender
+            .send(event)
+            .map_err(|_| "Computer Use is unavailable.".to_owned())
     }
 
     pub(crate) fn runtime_ready(&self, origin: LoopbackOrigin, adoption: bool) {
@@ -2879,6 +2887,23 @@ done
             configured_path_with_value(bundled, Some(injected.clone().into_os_string()), true),
             injected
         );
+    }
+
+    #[test]
+    fn a_degraded_controller_reports_that_page_requests_went_nowhere() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let controller = Controller {
+            sender,
+            view: Arc::new(Mutex::new(MenuView::default())),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+            shutdown_started: AtomicBool::new(false),
+        };
+        assert!(controller.turn_on().is_ok());
+        assert!(controller.open_permission(PermissionPane::Accessibility).is_ok());
+        // `RuntimeState::new` failing drops the receiver; nothing will run.
+        drop(receiver);
+        assert!(controller.turn_on().is_err());
+        assert!(controller.open_permission(PermissionPane::ScreenRecording).is_err());
     }
 
     #[test]

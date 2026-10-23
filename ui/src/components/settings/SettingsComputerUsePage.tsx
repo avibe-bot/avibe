@@ -94,78 +94,94 @@ export const SettingsComputerUsePage: FC = () => {
   const [read, setRead] = useState<ComputerUseStatusRead | null>(null);
   const [checking, setChecking] = useState(false);
   const [runningStep, setRunningStep] = useState<ComputerUseGuideStep | null>(null);
-  const [actionFailed, setActionFailed] = useState(false);
+  const [failedStep, setFailedStep] = useState<ComputerUseGuideStep | null>(null);
   const [screenRecordingRequested, setScreenRecordingRequested] = useState(false);
-  // A poll that started before a Recheck must not overwrite the newer answer.
-  const latestRequest = useRef(0);
-
-  // Resolves to the read, or `undefined` once a newer read has started.
-  const readLatest = useCallback(async (): Promise<ComputerUseStatusRead | null | undefined> => {
-    const request = ++latestRequest.current;
-    const next = await readComputerUseStatus();
-    return request === latestRequest.current ? next : undefined;
-  }, []);
+  // At most one status read is in flight. Every caller shares it rather than
+  // starting a newer one: a read is never invalidated, so even reads slower
+  // than the refresh interval (`ready` can wait on the Controller) land.
+  const inFlight = useRef<Promise<void> | null>(null);
+  const mounted = useRef(true);
 
   // A transient failure (`null`) keeps the last observed state.
-  const poll = useCallback(() => {
-    void readLatest().then((next) => {
-      if (next) setRead(next);
-    });
-  }, [readLatest]);
+  const readStatus = useCallback((): Promise<void> => {
+    if (!inFlight.current) {
+      inFlight.current = readComputerUseStatus()
+        .then((next) => {
+          if (mounted.current && next) setRead(next);
+        })
+        .finally(() => {
+          inFlight.current = null;
+        });
+    }
+    return inFlight.current;
+  }, []);
 
   const recheck = () => {
     setChecking(true);
-    void readLatest().then((next) => {
-      setChecking(false);
-      if (next) setRead(next);
+    void readStatus().then(() => {
+      if (mounted.current) setChecking(false);
     });
   };
 
   useEffect(() => {
-    // Polls only while the page is on screen; returning to it reads at once,
-    // since granting happens in System Settings.
-    let interval: number | undefined;
-    const stop = () => {
-      window.clearInterval(interval);
-      interval = undefined;
-    };
-    const start = () => {
-      if (interval !== undefined) return;
-      poll();
-      interval = window.setInterval(poll, COMPUTER_USE_GUIDE_REFRESH_INTERVAL_MS);
+    mounted.current = true;
+    // One polling chain while the page is visible: the next read is scheduled
+    // only after the current one settles. `chained` is true while the chain
+    // owns either a pending timer or a read it is waiting for.
+    let active = true;
+    let chained = false;
+    let timer: number | undefined;
+    const visible = () => document.visibilityState !== 'hidden';
+    const step = () => {
+      timer = undefined;
+      chained = true;
+      void readStatus().then(() => {
+        if (!active || !visible()) {
+          chained = false;
+          return;
+        }
+        timer = window.setTimeout(step, COMPUTER_USE_GUIDE_REFRESH_INTERVAL_MS);
+      });
     };
     const onVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') stop();
-      else start();
+      if (visible()) {
+        // Returning reads at once, since granting happens in System Settings.
+        if (!chained) step();
+      } else if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+        chained = false;
+      }
     };
-    if (document.visibilityState === 'hidden') poll();
-    else start();
-    window.addEventListener('focus', poll);
+    const onFocus = () => void readStatus();
+    if (visible()) step();
+    else void readStatus();
+    window.addEventListener('focus', onFocus);
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
-      // Invalidate a read still in flight so it lands nowhere.
-      latestRequest.current += 1;
-      stop();
-      window.removeEventListener('focus', poll);
+      active = false;
+      mounted.current = false;
+      window.clearTimeout(timer);
+      window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [poll]);
+  }, [readStatus]);
 
   const runStep = (step: ComputerUseGuideStep) => {
     if (!actions) return;
     const pane = STEP_PANE[step];
     setRunningStep(step);
-    setActionFailed(false);
+    setFailedStep(null);
     void (pane ? actions.openPermission(pane) : actions.enable())
       .then(
         () => {
           if (step === 'screenRecording') setScreenRecordingRequested(true);
         },
-        () => setActionFailed(true),
+        () => setFailedStep(step),
       )
       .finally(() => {
         setRunningStep(null);
-        poll();
+        void readStatus();
       });
   };
 
@@ -277,7 +293,7 @@ export const SettingsComputerUsePage: FC = () => {
                   <p className="max-w-2xl text-[12px] leading-relaxed text-muted">
                     {t(STEP_COPY[step].detail)}
                   </p>
-                  {actionable && actionFailed && (
+                  {actionable && failedStep === step && (
                     <GuideNote testId="computer-use-action-failed" tone="destructive">
                       {t('settings.computerUse.actionFailed')}
                     </GuideNote>

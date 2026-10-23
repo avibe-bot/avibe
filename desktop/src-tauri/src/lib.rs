@@ -1176,7 +1176,7 @@ fn open_install_docs(window: WebviewWindow) -> Result<(), String> {
 fn computer_use_enable(window: WebviewWindow) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        computer_use_guide_controller(&window).map(|controller| controller.turn_on())
+        computer_use_guide_controller(&window)?.turn_on()
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1193,7 +1193,7 @@ fn computer_use_open_permission(window: WebviewWindow, pane: String) -> Result<(
     #[cfg(target_os = "macos")]
     {
         let pane = computer_use::PermissionPane::parse(&pane).ok_or_else(|| "Not a permission pane.".to_owned())?;
-        computer_use_guide_controller(&window).map(|controller| controller.open_permission(pane))
+        computer_use_guide_controller(&window)?.open_permission(pane)
     }
     #[cfg(not(target_os = "macos"))]
     {
