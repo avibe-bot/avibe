@@ -743,7 +743,7 @@ class EngineClient:
                     len(retry_after) > _ENGINE_HEADER_VALUE_MAX_LENGTH or not retry_after.isascii()
                 ):
                     retry_after = None
-                if request_protocol == "anthropic":
+                if source.vendor == "anthropic":
                     claude_rate_limit_headers = _allowed_claude_rate_limit_headers(response.headers)
                 error_body = _StreamPrelude()
                 try:

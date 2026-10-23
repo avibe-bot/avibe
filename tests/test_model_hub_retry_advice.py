@@ -47,10 +47,10 @@ ERROR_BODY = (
 )
 
 
-def _source(protocol: str) -> SourceRecord:
+def _source(protocol: str, *, vendor: str = "custom") -> SourceRecord:
     return SourceRecord(
         source_id="src_retryadvice",
-        vendor="custom",
+        vendor=vendor,
         protocol=protocol,
         base_url="https://unused.example.test",
         credential_ref="cred_retryadvice",
@@ -84,13 +84,21 @@ async def _engine(respond, *, timeout: float = 2):
         await runner.cleanup()
 
 
-async def _invoke(client: EngineClient, protocol: str, stream: bool):
+async def _invoke(
+    client: EngineClient,
+    protocol: str,
+    stream: bool,
+    *,
+    vendor: str = "custom",
+    request_protocol: str | None = None,
+):
     cleanups = []
     handle = await client.invoke(
-        _source(protocol),
+        _source(protocol, vendor=vendor),
         "model-a",
         {},
         stream=stream,
+        request_protocol=request_protocol or protocol,
         on_transport_done=lambda: cleanups.append(True),
     )
     try:
@@ -306,7 +314,13 @@ async def test_failed_claude_response_carries_only_bounded_unified_headers() -> 
         )
 
     async with _engine(respond) as (client, _requests):
-        outcome, _body = await _invoke(client, "anthropic", False)
+        outcome, _body = await _invoke(
+            client,
+            "anthropic",
+            False,
+            vendor="anthropic",
+            request_protocol="openai_responses",
+        )
 
     assert outcome.claude_rate_limit_headers == (
         ("anthropic-ratelimit-unified-5h-reset", "1797000000"),
@@ -314,6 +328,30 @@ async def test_failed_claude_response_carries_only_bounded_unified_headers() -> 
         ("anthropic-ratelimit-unified-status", "rejected"),
     )
     assert "Set-Cookie" not in repr(outcome)
+
+
+async def test_non_claude_source_does_not_project_unified_headers_for_claude_caller() -> None:
+    async def respond(_request: web.Request) -> web.Response:
+        return web.Response(
+            status=429,
+            body=ERROR_BODY,
+            headers={
+                "Anthropic-Ratelimit-Unified-Status": "rejected",
+                "Anthropic-Ratelimit-Unified-5h-Reset": "1797000000",
+            },
+            content_type="application/json",
+        )
+
+    async with _engine(respond) as (client, _requests):
+        outcome, _body = await _invoke(
+            client,
+            "anthropic",
+            False,
+            vendor="custom",
+            request_protocol="anthropic",
+        )
+
+    assert outcome.claude_rate_limit_headers == ()
 
 
 @pytest.mark.parametrize("protocol", WIRE)
