@@ -47,9 +47,12 @@ as a manual fallback. Accessibility comes first because the managed driver
 checks it before Screen Recording.
 
 If macOS asks to **Quit & Reopen** after the Screen Recording grant, choose it.
-When the request came from this page, the relaunched app opens the Settings
-guide again by itself (within 15 minutes of the request), and the page picks up
-the new status. A later launch is not redirected.
+When the request came from this page, the app quits without asking whether to
+stop the Runtime: the Runtime keeps running, so Agent turns in flight are not
+interrupted, and the relaunched app reconnects to it. It then opens the
+Settings guide again by itself (within 15 minutes of the request), and the page
+picks up the new status. Outside that window, Quit asks as usual, and a later
+launch is not redirected.
 
 The Settings entry appears only in the Avibe desktop app. A browser tab or
 phone that opens `/settings/computer-use` directly sees the same live steps

@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Run durable `vibe watch` waits for PR reviews, CI, files or external signals, then resume the Agent in the right Session.
-version: 0.18.1
+version: 0.19.0
 ---
 
 # Background Watch Hook
@@ -53,6 +53,10 @@ immediately seed/arm. Keep the same Watch and cursor across all later rounds.
 - `--actionable-only` drops review triggers and empty envelopes; `--settle 20`
   batches review bursts. New CI failures bypass settle. Final gates belong to
   `pr-delivery-loop`, including the stricter qualification of Codex reactions.
+- A Codex review of the current head that stays running for
+  `--review-stall-minutes` (default 30, `0` disables) is reported
+  as `Codex review stalled`, again each further window it lasts; the follow-up
+  re-requests the review as `pr-delivery-loop` says.
 - Set `--timeout 0` on both sides of the `--` command separator; six quiet hours
   is not a PR failure. Verify workflow names: missing CI is never green.
 - Never reseed or replace its state between rounds. Filters/reporting modes are

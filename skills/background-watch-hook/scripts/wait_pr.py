@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -13,6 +14,7 @@ import tempfile
 import time
 import urllib.parse
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Any, Iterator, NamedTuple
@@ -124,6 +126,20 @@ PR_SNAPSHOT_KEY = "snapshot"
 ACTIONS_SNAPSHOT_KEY = "actions"
 ACTIONS_OBSERVED_KEY = "actions_observed"
 SUCCESS_BATCH_KEY = "success_batch"
+# The last Codex review stall this watch reported (``_codex_review_stall``), and when
+# this watch first saw the current head, which no stall of that head may predate.
+REVIEW_STALL_KEY = "review_stall_reported"
+REVIEW_STALL_HEAD_KEY = "review_stall_head"
+CODEX_SUMMARY_MARKER = "<!-- codex-pull-request-review-summary -->"
+# A review request is a comment that is the trigger command and nothing else, the same
+# anchored shape ``DEFAULT_NOISE_COMMENT_PATTERNS`` treats as a trigger; a sentence that
+# merely mentions it is not one.
+CODEX_REVIEW_REQUEST = re.compile(r"\s*@codex\s+review\s*", re.IGNORECASE)
+# Codex reviews almost always conclude within minutes: over 68 reviews on
+# avibe-bot/avibe the median was 3.5 min, p90 15 min and p95 39 min, while a stuck one
+# can sit at "running" for hours. Past this, the review is treated as stalled.
+DEFAULT_REVIEW_STALL_MINUTES = 30.0
+_CODEX_REVIEW_IN_PROGRESS = frozenset({"queued", "pending", "running", "in_progress"})
 
 
 class PRReport(NamedTuple):
@@ -491,6 +507,112 @@ def _is_codex_progress(item: dict[str, Any]) -> bool:
         )
         for status in statuses
     )
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _github_time(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _codex_summary_code_review(body: str) -> dict[str, Any] | None:
+    """The ``code_review`` object of a Codex summary's machine-readable state line."""
+
+    for line in body.splitlines():
+        match = re.fullmatch(r"<!-- codex-review-state:v1 (.+) -->", line.strip())
+        if not match:
+            continue
+        try:
+            state = json.loads(match.group(1))
+        except json.JSONDecodeError:
+            return None
+        code_review = state.get("code_review") if isinstance(state, dict) else None
+        return code_review if isinstance(code_review, dict) else None
+    return None
+
+
+def _codex_review_stall(
+    state: dict[str, Any],
+    *,
+    repo: str,
+    stall_seconds: float,
+    now: datetime,
+    head_seen_at: datetime,
+) -> tuple[str, str] | None:
+    """A Codex review of the current head stuck at "running": (key, report), else ``None``.
+
+    The one shape observed live: Codex's summary names the current head as being
+    reviewed, and no Codex answer naming that head (a review of its commit, or a
+    verdict comment for it) came since. It counts from the latest of the summary's
+    last update, a later standalone ``@codex review`` request (a re-request restarts
+    it, and one left unanswered is caught a window later), and when this watch saw
+    the head become reviewable (``head_seen_at``: pushed, reopened, or marked ready).
+    A head Codex never started on is the pickup check ``pr-delivery-loop`` already
+    owns after each push. ``key`` changes every further ``stall_seconds`` the stall
+    lasts, so a still-stuck review is reported again rather than once and forgotten.
+    """
+
+    pr = state.get("pull_request")
+    head = _current_pr_head_sha(pr)
+    # Only an open, ready PR is expected to be reviewed through; a draft or a closed
+    # PR restarts the clock when it becomes one (``head_seen_at``).
+    if stall_seconds <= 0 or not head or _current_pr_status(pr) != "open":
+        return None
+    summary_at: datetime | None = None
+    code_review: dict[str, Any] = {}
+    request_at: datetime | None = None
+    answered_at: datetime | None = None
+    for comment in state.get("issue_comments") or []:
+        body = str(comment.get("body") or "")
+        stamp = _github_time(comment.get("updated_at") or comment.get("created_at"))
+        if stamp is None:
+            continue
+        if _is_codex_item(comment):
+            parsed = _codex_summary_code_review(body) if CODEX_SUMMARY_MARKER in body else None
+            if parsed is not None:
+                if summary_at is None or stamp > summary_at:
+                    summary_at, code_review = stamp, parsed
+            elif _is_codex_clean_pass(comment, head) and (answered_at is None or stamp > answered_at):
+                answered_at = stamp
+        elif CODEX_REVIEW_REQUEST.fullmatch(body):
+            created = _github_time(comment.get("created_at")) or stamp
+            request_at = created if request_at is None or created > request_at else request_at
+    for review in state.get("reviews") or []:
+        stamp = _github_time(review.get("submitted_at"))
+        if (
+            stamp is not None
+            and _is_codex_item(review)
+            and str(review.get("commit_id") or "").casefold() == head.casefold()
+            and (answered_at is None or stamp > answered_at)
+        ):
+            answered_at = stamp
+    if (
+        summary_at is None
+        or str(code_review.get("commit_sha") or "").casefold() != head.casefold()
+        or str(code_review.get("status") or "").casefold() not in _CODEX_REVIEW_IN_PROGRESS
+        or (answered_at is not None and answered_at >= summary_at)
+    ):
+        return None
+    since = max(summary_at, request_at or summary_at, head_seen_at)
+    shape = "has shown the review of this head as running"
+    elapsed = (now - since).total_seconds()
+    if elapsed < stall_seconds:
+        return None
+    rounds = int(elapsed // stall_seconds)
+    number = (pr or {}).get("number")
+    report = (
+        f"Codex review stalled for {repo}#{number}@{head[:12]}\n"
+        f"- Codex {shape} for {int(elapsed // 60)} min (since {since.strftime('%Y-%m-%dT%H:%M:%SZ')}).\n"
+        "  Re-request it with `@codex review` and verify that Codex reacts to that comment.\n"
+        f"  {(pr or {}).get('html_url') or ''}".rstrip()
+    )
+    return f"{head.casefold()}:{since.isoformat()}:{rounds}", report
 
 
 def _quiet_success_snapshot(value: dict[str, Any], *, defer_reactions: bool) -> dict[str, Any]:
@@ -1345,6 +1467,10 @@ def _watch_identity(
             material_fields["ci_sha"] = legacy_ci_sha
     if args.coalesce_success:
         material_fields["coalesce_success"] = True
+    # Only a non-default stall window is material, so watches seeded before the stall
+    # report existed keep their identity.
+    if getattr(args, "review_stall_minutes", DEFAULT_REVIEW_STALL_MINUTES) != DEFAULT_REVIEW_STALL_MINUTES:
+        material_fields["review_stall_minutes"] = args.review_stall_minutes
     material = json.dumps(material_fields, sort_keys=True)
     return hashlib.sha256(f"wait_pr/{STATE_FILE_VERSION}/{material}".encode()).hexdigest()[:16]
 
@@ -2358,6 +2484,17 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--review-stall-minutes",
+        type=float,
+        default=DEFAULT_REVIEW_STALL_MINUTES,
+        help=(
+            "PR mode: report when Codex's summary has shown the current head's review running "
+            "this many minutes on an open PR (a re-request restarts the clock), and again each "
+            "further interval while it stays stuck; 0 disables. A head Codex never started on "
+            "is not detected. Default 30."
+        ),
+    )
+    parser.add_argument(
         "--max-pages",
         type=int,
         default=3,
@@ -2385,6 +2522,9 @@ def main() -> int:
     ci_error = _validate_ci_args(args)
     if ci_error is not None:
         print(ci_error, file=sys.stderr)
+        return 2
+    if not math.isfinite(args.review_stall_minutes) or args.review_stall_minutes < 0:
+        print("--review-stall-minutes must be 0 (off) or a finite positive number", file=sys.stderr)
         return 2
     ci_enabled = _ci_enabled(args)
     success_conclusions = _parse_success_conclusions(args.success_conclusion)
@@ -2624,6 +2764,21 @@ def main() -> int:
     saved_pr_cursor = None if args.catch_up else _saved_int(saved, "pr_cursor")
     since_pr_id = args.since_pr_id if args.since_pr_id is not None else saved_pr_cursor
     tracked_head_sha = _saved_str(saved, "head_sha")
+    # A state file from before the stall report has none, which reads as nothing
+    # reported yet: a review already stuck then is reported on the first cycle.
+    reported_stall = (_saved_str(saved, REVIEW_STALL_KEY) or "") if resumed else ""
+    saved_stall_head = saved.get(REVIEW_STALL_HEAD_KEY) if resumed else None
+    stall_head: dict[str, str] = (
+        {
+            "sha": str(saved_stall_head["sha"]),
+            "at": str(saved_stall_head["at"]),
+            "status": str(saved_stall_head.get("status") or ""),
+        }
+        if isinstance(saved_stall_head, dict)
+        and isinstance(saved_stall_head.get("sha"), str)
+        and _github_time(saved_stall_head.get("at")) is not None
+        else {}
+    )
     review_fingerprints = _saved_fingerprints(saved, REVIEW_FINGERPRINTS_KEY)
     review_comment_fingerprints = _saved_fingerprints(saved, REVIEW_COMMENT_FINGERPRINTS_KEY)
     issue_comment_fingerprints = _saved_fingerprints(saved, ISSUE_COMMENT_FINGERPRINTS_KEY)
@@ -3044,6 +3199,39 @@ def main() -> int:
                 return False
             return actions_output is None
 
+        def _with_review_stall(output: str | None) -> str | None:
+            """Add a Codex review stall not yet reported to this cycle's output.
+
+            Called after the cycle's ``pre_event_fields`` were taken, so a staged report
+            keeps the previous stall key committed until its delivery is confirmed.
+            """
+            nonlocal reported_stall, stall_head
+            now = _utc_now()
+            head = _current_pr_head_sha(state.get("pull_request"))
+            pr_status = _current_pr_status(state.get("pull_request"))
+            # The clock of a head starts when the head appears, and again when the PR
+            # becomes reviewable (draft or closed to open): a review is expected only from then.
+            if head and (
+                stall_head.get("sha", "").casefold() != head.casefold()
+                or (pr_status == "open" and stall_head.get("status") != "open")
+            ):
+                stall_head = {"sha": head, "at": now.isoformat(), "status": pr_status}
+            elif head:
+                stall_head = {**stall_head, "status": pr_status}
+            if args.seed_state or args.catch_up or explicit_replay or not head:
+                return output
+            stall = _codex_review_stall(
+                state,
+                repo=args.repo,
+                stall_seconds=args.review_stall_minutes * 60,
+                now=now,
+                head_seen_at=_github_time(stall_head["at"]) or now,
+            )
+            if stall is None or stall[0] == reported_stall:
+                return output
+            reported_stall = stall[0]
+            return stall[1] if output is None else f"{output}\n\n{stall[1]}"
+
         def _adopt_report(report: PRReport) -> None:
             nonlocal review_cursor, review_comment_cursor, issue_comment_cursor, reaction_cursor, pr_status
             nonlocal observed_head_sha, snapshot, success_batch
@@ -3084,6 +3272,8 @@ def main() -> int:
                 ISSUE_COMMENT_FINGERPRINTS_KEY: dict(issue_comment_fingerprints),
                 REVIEW_THREAD_STATES_KEY: dict(review_thread_states),
                 PR_SNAPSHOT_KEY: snapshot or {},
+                REVIEW_STALL_KEY: reported_stall,
+                REVIEW_STALL_HEAD_KEY: dict(stall_head),
             }
             if ci_enabled:
                 fields[ACTIONS_SNAPSHOT_KEY] = actions_snapshot or {workflow: [] for workflow in args.workflow}
@@ -3241,6 +3431,7 @@ def main() -> int:
             initial_result = _settle(initial_result, pending_cursors)
         initial_output = initial_result.output
         _adopt_report(initial_result)
+        initial_output = _with_review_stall(initial_output)
         if initial_output is None:
             # Persisted even with nothing to report: the baseline this cycle
             # established is exactly what the next cycle must resume from.
@@ -3406,6 +3597,7 @@ def main() -> int:
                 result = _settle(result, pending_cursors)
             output = result.output
             _adopt_report(result)
+            output = _with_review_stall(output)
             if output is None:
                 # Cursors also move when everything new was filtered out, and that
                 # progress has to survive the cycle or the next one re-examines it.

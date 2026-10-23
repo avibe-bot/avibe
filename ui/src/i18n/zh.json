@@ -2854,6 +2854,8 @@
     "session_archived": "该会话已归档，无法修改它的展示页面。",
     "backend_locked": "这个会话现在不能切换到该后端：正在运行的回合需要先结束，Vibey 会话只能留在 Vibey。",
     "backend_busy": "这个会话在当前后端上还有后台任务在运行，等它结束后再切换。",
+    "controller_unavailable": "暂时连不上 Avibe 服务，请稍后再试。",
+    "continue_agent_unavailable": "Vibey 现在用不了，这个会话暂时没法切换过去。",
     "reserved_session": "该会话由 Avibe 管理，只接收工作区通知。",
     "invalid_icon_type": "图标必须是 SVG、PNG、ICO、JPEG 或 WebP 图片。",
     "icon_too_large": "图标太大了，请使用不超过 2 MiB 的图片。",
@@ -4940,7 +4942,9 @@
     "retryRequested": "已请求重试",
     "failureNextStep": {
       "openModels": "打开「模型」页",
-      "askAdmin": "请联系 Avibe 管理员在「模型」页处理。"
+      "askAdmin": "请联系 Avibe 管理员在「模型」页处理。",
+      "continueOnVibey": "切换到 Vibey 继续",
+      "continuedOnVibey": "已切换到 Vibey"
     },
     "retryFailed": "未能提交重试，可以再次点击。",
     "collapse": "收起",

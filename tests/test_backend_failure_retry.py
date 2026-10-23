@@ -1333,3 +1333,117 @@ def test_stale_retry_releases_a_newer_input_waiting_behind_its_reservation(manag
     asyncio.run(admit())
     assert len(starts) == 1
     assert starts[0][1] == "new task"
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_continue_on_vibey_moves_the_session_and_runs_the_unwritten_message(isolated_state, tmp_path, monkeypatch, bound):
+    """A message that never reached its disabled Agent continues on the built-in Vibey
+    Agent: one request moves the session (the same switch, with its handoff when the
+    session had a conversation) and runs that exact message there. The move and the
+    retry commit together, so a notice whose input did reach the old backend refuses
+    both and leaves the session where it was."""
+    from core.vibe_agents import VibeAgentStore
+    from vibe.ui_server import app
+
+    # The Model Hub supplies Vibey a model unless a step below says otherwise.
+    monkeypatch.setattr("vibe.ui_server._backend_supply_blocked", lambda _backend: False)
+    store = VibeAgentStore()
+    try:
+        vibey = store.ensure_builtin_default_agent(backend="vibey")
+    finally:
+        store.close()
+    session_id, notice, _turn, _inputs = _retry_notice(tmp_path, backend="codex", not_written=True)
+    if bound:
+        with create_sqlite_engine().begin() as conn:
+            conn.execute(
+                update(agent_sessions).where(agent_sessions.c.id == session_id).values(native_session_id="codex-thread")
+            )
+    client = app.test_client()
+    headers = csrf_headers(client)
+    url = f"/api/sessions/{session_id}/messages"
+    idle = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": False}})
+
+    assert client.post(url, headers=headers, json={"continue_on_backend": "vibey", "text": "x"}).status_code == 400
+    continue_body = {"retry_for": notice["id"], "continue_on_backend": "vibey"}
+    from core.vibe_agents import VibeAgentAccessError
+
+    with patch("core.vibe_agents.ensure_agent_selection_access", side_effect=VibeAgentAccessError("denied")):
+        assert client.post(url, headers=headers, json=continue_body).status_code == 403
+    # A notice offered while Vibey could run may be clicked after it no longer can.
+    with patch("vibe.ui_server._backend_supply_blocked", return_value=True):
+        stale = client.post(url, headers=headers, json=continue_body)
+    assert (stale.status_code, stale.get_json()["code"]) == (409, "continue_agent_unavailable")
+    # Without the controller there is nothing to run the input: nothing moves.
+    from vibe import internal_client
+
+    with patch("vibe.internal_client.turn_state", AsyncMock(side_effect=internal_client.InternalServerUnavailable("down"))):
+        offline = client.post(url, headers=headers, json=continue_body)
+    assert (offline.status_code, offline.get_json()["code"]) == (503, "controller_unavailable")
+    with create_sqlite_engine().connect() as conn:
+        assert conn.execute(
+            select(agent_sessions.c.agent_backend).where(agent_sessions.c.id == session_id)
+        ).scalar_one() == "codex"
+    dispatch = AsyncMock(return_value={"status_code": 202, "body": {"delivery_state": "queued", "queued": True}})
+    with (
+        patch("vibe.internal_client.turn_state", idle),
+        patch("vibe.internal_client.dispatch_async", dispatch),
+        # The session's own Agent may be deleted and unusable by this caller: the
+        # continuation never runs it, so only the target Agent's access counts.
+        patch("core.vibe_agents.ensure_session_agent_access", side_effect=PermissionError("deleted Agent")),
+    ):
+        response = client.post(url, headers=headers, json=continue_body)
+    assert response.status_code == 202
+    assert dispatch.await_args.args[0]["message_id"] == _inputs[0]["id"]
+    assert dispatch.await_args.args[0]["text"] == "检查这张图"
+    with create_sqlite_engine().connect() as conn:
+        session = conn.execute(select(agent_sessions).where(agent_sessions.c.id == session_id)).mappings().one()
+    assert (session["agent_backend"], session["agent_name"]) == ("vibey", vibey.name)
+    assert ("backend_handoff" in json.loads(session["metadata_json"])) is bound
+
+    # A repeated click resolves to that retry and does not move the session again,
+    # even after the user picked another Vibey Agent.
+    with create_sqlite_engine().begin() as conn:
+        conn.execute(update(agent_sessions).where(agent_sessions.c.id == session_id).values(agent_name="vibey-helper"))
+    with patch("vibe.internal_client.turn_state", idle), patch("vibe.internal_client.dispatch_async", dispatch):
+        again = client.post(url, headers=headers, json=continue_body)
+    assert again.status_code in {201, 202}
+    with create_sqlite_engine().connect() as conn:
+        assert conn.execute(
+            select(agent_sessions.c.agent_name).where(agent_sessions.c.id == session_id)
+        ).scalar_one() == "vibey-helper"
+    # Already on the target backend, the action still needs the controller.
+    with patch("vibe.internal_client.turn_state", AsyncMock(side_effect=internal_client.InternalServerUnavailable("down"))):
+        same_backend = client.post(url, headers=headers, json=continue_body)
+    assert (same_backend.status_code, same_backend.get_json()["code"]) == (503, "controller_unavailable")
+
+
+def test_continue_on_vibey_refuses_a_message_the_old_backend_already_ran(isolated_state, tmp_path, monkeypatch):
+    """The move and the retry commit together: a continuation of a turn that reached
+    the old backend belongs to it, so both are refused and the session stays put."""
+    from core.vibe_agents import VibeAgentStore
+    from vibe.ui_server import app
+
+    monkeypatch.setattr("vibe.ui_server._backend_supply_blocked", lambda _backend: False)
+    store = VibeAgentStore()
+    try:
+        store.ensure_builtin_default_agent(backend="vibey")
+    finally:
+        store.close()
+    failed_session, failed_notice, _turn, _inputs = _retry_notice(tmp_path, backend="codex")
+    client = app.test_client()
+    headers = csrf_headers(client)
+    idle = AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": False}})
+    with patch("vibe.internal_client.turn_state", idle), patch("vibe.internal_client.dispatch_async", AsyncMock()) as never:
+        refused = client.post(
+            f"/api/sessions/{failed_session}/messages",
+            headers=headers,
+            json={"retry_for": failed_notice["id"], "continue_on_backend": "vibey"},
+        )
+    assert refused.status_code == 409
+    assert refused.get_json()["code"] == "retry_not_available"
+    never.assert_not_awaited()
+    with create_sqlite_engine().connect() as conn:
+        unchanged = conn.execute(
+            select(agent_sessions.c.agent_backend).where(agent_sessions.c.id == failed_session)
+        ).scalar_one()
+    assert unchanged == "codex"

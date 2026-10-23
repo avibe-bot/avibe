@@ -1358,15 +1358,15 @@ def test_sessions_patch_bound_backend_switch_waits_for_the_old_runtime(monkeypat
         return AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": False, **body}})
 
     refusals = (
-        turn_state(background_activities=[{"item_kind": "backend_activity", "id": "act-1"}]),
-        turn_state(pending_activity_output_count=1),
-        AsyncMock(side_effect=internal_client.InternalServerUnavailable("down")),
+        (turn_state(background_activities=[{"item_kind": "backend_activity", "id": "act-1"}]), 409, "backend_busy"),
+        (turn_state(pending_activity_output_count=1), 409, "backend_busy"),
+        (AsyncMock(side_effect=internal_client.InternalServerUnavailable("down")), 503, "controller_unavailable"),
     )
-    for probe in refusals:
+    for probe, status, code in refusals:
         with patch("vibe.internal_client.turn_state", probe):
             refused = client.patch(f"/api/sessions/{sid}", json={"agent_name": "reviewer"}, headers=headers)
-        assert refused.status_code == 409
-        assert refused.get_json()["code"] == "backend_busy"
+        assert refused.status_code == status
+        assert refused.get_json()["code"] == code
 
     settled = turn_state(background_activities=[{"item_kind": "watch", "id": "watch-1"}])
     with patch("vibe.internal_client.turn_state", settled):

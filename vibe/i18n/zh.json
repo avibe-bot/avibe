@@ -12,7 +12,9 @@
     "modelsNextStepImUrl": "管理这个 Avibe 的人可以在「模型」页处理：{url}",
     "modelsNextStepIm": "管理这个 Avibe 的人可以在 Avibe 工作台的「模型」页处理。",
     "opencodeModelProviderRequired": "请在 Avibe 中选择带供应商的 OpenCode 模型，或配置它的 Model Hub 路由。",
-    "sessionBackendBusy": "这个会话在当前后端上还有后台任务在运行，等它结束后再切换。"
+    "sessionBackendBusy": "这个会话在当前后端上还有后台任务在运行，等它结束后再切换。",
+    "sessionControllerUnavailable": "暂时连不上 Avibe 服务，请稍后再试。",
+    "sessionContinueAgentUnavailable": "{backend} 现在用不了，这个会话暂时没法切换过去。"
   },
   "status": {
     "backendUnresponsive": "后端无响应",
@@ -465,6 +467,14 @@
       "generic": "请在 Agent 设置里选择一个已启用的 Agent，或启用该 Agent 使用的 backend。"
     },
     "processMessageFailed": "出错：{error}",
+    "agentUnavailable": {
+      "disabled": "{agent} 已停用，这个会话没法再用它继续。",
+      "missing": "{agent} 已被删除，这个会话没法再用它继续。"
+    },
+    "continueOnVibey": {
+      "workbench": "可以一键切换到 Vibey，无缝接着做。",
+      "im": "可以在 Avibe 工作台打开这个会话，切换到 Vibey 接着做。"
+    },
     "streamTurnInProgress": "⚠️ 这个会话已经有一条回复在生成中，请等它完成后再试。",
     "sessionReset": "检测到会话错误。会话已重置，请重试。",
     "sessionConnectionLost": "与 Claude 的连接已断开，请重试。",

@@ -6,6 +6,11 @@ import type { WorkbenchMessage } from '../../context/ApiContext';
 import { ADMITTED_RETRY_STATES, isRetryableFailureNotice } from '../../lib/chatMessageTypes';
 import { Button } from '../ui/button';
 
+/** What a notice-bound Retry may also do: continue on another backend's built-in Agent. */
+export interface FailureRetryOptions {
+  continueOnBackend?: string;
+}
+
 export function FailureRetry({
   message,
   readOnly,

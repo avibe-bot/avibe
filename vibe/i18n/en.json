@@ -12,7 +12,9 @@
     "modelsNextStepImUrl": "Someone who manages this Avibe can fix it in Models: {url}",
     "modelsNextStepIm": "Someone who manages this Avibe can fix it in Models, in the Avibe Workbench.",
     "opencodeModelProviderRequired": "Select an OpenCode model with a provider in Avibe, or configure its Model Hub route.",
-    "sessionBackendBusy": "This session still has background work running on its current backend. Switch after it finishes."
+    "sessionBackendBusy": "This session still has background work running on its current backend. Switch after it finishes.",
+    "sessionControllerUnavailable": "Avibe's service isn't reachable right now. Try again in a moment.",
+    "sessionContinueAgentUnavailable": "{backend} isn't available right now, so this session can't switch to it."
   },
   "status": {
     "backendUnresponsive": "backend not responding",
@@ -465,6 +467,14 @@
       "generic": "Choose an enabled Agent in Agent settings, or enable the backend this Agent uses."
     },
     "processMessageFailed": "Error: {error}",
+    "agentUnavailable": {
+      "disabled": "{agent} is turned off, so this session can't continue on it.",
+      "missing": "{agent} was deleted, so this session can't continue on it."
+    },
+    "continueOnVibey": {
+      "workbench": "Switch to Vibey to pick up right where you left off.",
+      "im": "Open this session in the Avibe Workbench and switch it to Vibey to keep going."
+    },
     "streamTurnInProgress": "⚠️ A reply is already streaming for this session — wait for it to finish, then try again.",
     "sessionReset": "Session error detected. Session has been reset. Please try your message again.",
     "sessionConnectionLost": "Connection to Claude was lost. Please try your message again.",
