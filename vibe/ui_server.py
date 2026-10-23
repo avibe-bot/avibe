@@ -10092,8 +10092,11 @@ async def sessions_bootstrap(session_id: str):
     agents_payload = {"agents": [], "default_agent_name": None}
     if can_chat:
         try:
+            # Disabled and archived Agents too: a reply keeps the name of the Agent
+            # that wrote it, which may have been disabled since. Pickers offer only
+            # enabled ones.
             agents_payload = vibe_api.get_vibe_agents(
-                include_disabled=False,
+                include_disabled=True,
                 include_archived=True,
             )
         except Exception:

@@ -13,7 +13,7 @@ import type { VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession }
 import { ToastProvider } from '../../context/ToastProvider';
 import { isVoiceControlDisabled } from '../../lib/voiceRecording';
 import { ChatHeaderBar, MessageRow, ThinkingBubble } from './ChatPage';
-import { sessionAgentBackend, sessionAgentDisplayName } from './sessionAgentName';
+import { messageAuthorAgent, sessionAgentBackend, sessionAgentDisplayName } from './sessionAgentName';
 import { BACKEND_BRAND_MARKS } from '../visual/backendBrandMarks';
 import { Composer } from './Composer';
 import { QuickReplies } from './QuickReplies';
@@ -269,6 +269,25 @@ describe('chat avatars', () => {
     expect(sessionAgentBackend(inherits, [claude, vibey], null)).toBeNull();
     expect(sessionAgentBackend(session({ agent_id: vibey.id, agent_name: 'vibey', agent_backend: null }), [claude, vibey], 'claude')).toBe('vibey');
     expect(sessionAgentBackend(session({ agent_backend: 'claude' }), [claude, vibey], 'vibey')).toBe('claude');
+  });
+
+  it('keeps a reply under the Agent that wrote it after the session switches', () => {
+    const reviewer = { ...archivedPm, id: 'agt-reviewer', name: 'reviewer', display_name: 'Reviewer', backend: 'claude' };
+    const reply = (author_name: string | null, metadata: Record<string, unknown> = {}) => ({ author_name, metadata });
+    const byReviewer = reply('reviewer', { author_agent_id: reviewer.id, author_backend: 'claude' });
+    // A reply that records no Agent (written before replies did) reads as the session's.
+    expect(messageAuthorAgent(reply('codex'), [vibey])).toBeNull();
+    // Named from the catalog by the recorded id, drawn with the recorded backend.
+    expect(messageAuthorAgent(byReviewer, [vibey, reviewer])).toEqual({ displayName: 'Reviewer', backend: 'claude' });
+    // No catalog (a read-only viewer, whatever the session routes to now), or a new
+    // Agent that took the old name: the recorded name and backend still stand.
+    const taker = { ...reviewer, id: 'agt-new', display_name: 'Someone else', backend: 'opencode' };
+    for (const agents of [[], [vibey, taker]]) {
+      expect(messageAuthorAgent(byReviewer, agents)).toEqual({ displayName: 'reviewer', backend: 'claude' });
+    }
+    // The session's own Agent resolves to the same name the session shows.
+    expect(messageAuthorAgent(reply('vibey', { author_agent_id: vibey.id, author_backend: 'vibey' }), [vibey]))
+      .toEqual({ displayName: 'vibey', backend: 'vibey' });
   });
 
   it('draws Vibey in the thinking and transcript bubbles of a session that inherits it', () => {

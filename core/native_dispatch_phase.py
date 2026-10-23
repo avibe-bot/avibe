@@ -82,6 +82,19 @@ def mark_prewrite_recovery_required(context: Any, reason: str) -> None:
     evidence["failure"] = {"reason": reason, "requires_explicit_retry": True}
 
 
+def mark_prewrite_input_retired(context: Any, reason: str) -> None:
+    """Retire a definitive startup failure's input where nothing can retry it.
+
+    A chat app has no Retry: a held input would wait at the head of the session's
+    queue, and every later message behind it, until someone retried it elsewhere.
+    """
+
+    if backend_dispatch_attempted(context) is not False:
+        return
+    evidence = set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+    evidence["failure"] = {"reason": reason, "retire_input": True}
+
+
 def prewrite_failure_evidence(context: Any) -> dict[str, Any]:
     """Copy adapter-owned failure evidence into the durable start receipt."""
 

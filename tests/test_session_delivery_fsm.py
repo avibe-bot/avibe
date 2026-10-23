@@ -19,6 +19,7 @@ from core.services.dispatch import TurnDispatchOutcome
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_ATTEMPTING,
     DISPATCH_PHASE_PREWRITE,
+    mark_prewrite_input_retired,
     mark_prewrite_recovery_required,
     prewrite_user_stop_requested,
     set_dispatch_phase,
@@ -5213,17 +5214,18 @@ def test_definite_handler_prewrite_exit_requeues_through_terminal_boundary(
     assert turn["settled_by"] == "no_terminal_result"
 
 
-@pytest.mark.parametrize("held", [True, False])
+@pytest.mark.parametrize("input_fate", ["held", "requeued", "retired"])
 def test_a_prewrite_failure_notice_settles_its_turn_as_unwritten(
     managers,
     monkeypatch,
-    held,
+    input_fate,
 ) -> None:
     """A failure reported before the backend was reached (its Agent is disabled) ends
     with a failure notice, whose terminal write cannot land on a start never accepted.
     The Turn still settles as unwritten: left open, it showed the session running and
     re-ran the input on every recovery pass. An input that needs its owner's decision
-    is held for an explicit retry rather than retried on its own."""
+    is held for an explicit retry rather than retried on its own; one whose surface
+    cannot retry it (a chat app) is retired, so it holds no later input behind it."""
     manager, _other, engine, _engine_b, _starts = managers
     manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
     delivery_id = delivery_store.new_delivery_id()
@@ -5257,8 +5259,10 @@ def test_a_prewrite_failure_notice_settles_its_turn_as_unwritten(
 
     async def failure_notice_before_backend(_controller, context, *_args, **_kwargs):
         set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
-        if held:
+        if input_fate == "held":
             mark_prewrite_recovery_required(context, "agent_unavailable")
+        elif input_fate == "retired":
+            mark_prewrite_input_retired(context, "agent_unavailable")
         # What the notice's terminal emit hands its runner.
         context.platform_specific[TERMINAL_COMMIT_KEY] = {
             "settled_by": SETTLED_BY_TERMINAL_RESULT,
@@ -5274,6 +5278,8 @@ def test_a_prewrite_failure_notice_settles_its_turn_as_unwritten(
         "core.session_turns.dispatch_turn_with_outcome",
         failure_notice_before_backend,
     )
+    queue_updates: list[str] = []
+    monkeypatch.setattr(SessionTurnManager, "_publish_queue_update", staticmethod(queue_updates.append))
 
     async def run() -> None:
         await manager._run(
@@ -5289,8 +5295,84 @@ def test_a_prewrite_failure_notice_settles_its_turn_as_unwritten(
     asyncio.run(run())
 
     row = _row(engine, delivery_id)
-    assert row["state"] == "queued"
-    assert delivery_store.requires_explicit_start_retry(row) is held
+    assert row["state"] == ("retired" if input_fate == "retired" else "queued")
+    # An open Workbench view drops a retired input from its queue strip.
+    if input_fate == "retired":
+        assert "ses_fsm" in queue_updates
+    assert delivery_store.requires_explicit_start_retry(row) is (input_fate == "held")
+    with engine.connect() as conn:
+        turn = delivery_store.get_turn(conn, turn_id)
+    assert turn is not None
+    assert (turn["state"], turn["terminal_outcome"]) == ("terminal", "not_written")
+
+
+@pytest.mark.parametrize("with_terminal_commit", [True, False])
+def test_an_input_the_user_was_told_to_resend_is_retired_when_its_runner_is_cancelled(
+    managers,
+    monkeypatch,
+    with_terminal_commit,
+) -> None:
+    """A chat app's notice told the user to send the message again, then the runner was
+    cancelled (a shutdown) before the Turn settled. The input is retired all the same:
+    left for restart to replay, it could run twice."""
+    manager, _other, engine, _engine_b, _starts = managers
+    manager._run = SessionTurnManager._run.__get__(manager, SessionTurnManager)
+    delivery_id = delivery_store.new_delivery_id()
+    turn_id = delivery_store.new_turn_id()
+    with engine.begin() as conn:
+        delivery = delivery_store.insert_delivery(
+            conn,
+            delivery_id=delivery_id,
+            session_id="ses_fsm",
+            priority="p3",
+            state="queued",
+            snapshot=delivery_store.message_snapshot(
+                scope_id=None,
+                session_id="ses_fsm",
+                platform="slack",
+                author="user",
+                source="user",
+                message_type="user",
+                text="hello",
+            ),
+            dispatch_text="hello",
+        )
+        delivery_store.claim_start_batch(
+            conn,
+            turn_id=turn_id,
+            session_id="ses_fsm",
+            backend="codex",
+            deliveries=[delivery],
+            dispatch_text="hello",
+        )
+
+    async def told_then_cancelled(_controller, context, *_args, **_kwargs):
+        set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+        mark_prewrite_input_retired(context, "agent_unavailable")
+        if with_terminal_commit:
+            context.platform_specific[TERMINAL_COMMIT_KEY] = {
+                "settled_by": SETTLED_BY_TERMINAL_RESULT,
+                "evidence": {"result_text": "", "terminal_error": "agent 'codex' is disabled"},
+            }
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr("core.session_turns.dispatch_turn_with_outcome", told_then_cancelled)
+
+    async def run() -> None:
+        await manager._run(
+            "ses_fsm",
+            _context(),
+            "hello",
+            logical_turn_id=turn_id,
+            delivery_id=delivery_id,
+            durable_preallocated=True,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await manager.in_flight["ses_fsm"].task
+
+    asyncio.run(run())
+
+    assert _row(engine, delivery_id)["state"] == "retired"
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, turn_id)
     assert turn is not None

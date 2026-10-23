@@ -283,6 +283,7 @@ def _session_row(conn, session_id: str) -> Optional[dict]:
     row = conn.execute(
         select(
             agent_sessions.c.scope_id,
+            agent_sessions.c.agent_id,
             agent_sessions.c.agent_name,
             agent_sessions.c.agent_backend,
             agent_sessions.c.visibility,
@@ -325,9 +326,35 @@ def _is_tool_call_type(canonical_type: str | None) -> bool:
 def _agent_provenance_from_context(context: MessageContext, session_row: Optional[dict] = None) -> tuple[Optional[str], Optional[str]]:
     spec = context.platform_specific or {}
     target = spec.get("agent_session_target") or {}
-    agent_name = spec.get("vibe_agent_name") or target.get("agent_name") or (session_row or {}).get("agent_name")
+    # The Agent that ran, when routing resolved one (a new chat-app session may name
+    # its Agent nowhere else).
+    resolved = spec.get("resolved_vibe_agent")
+    resolved = resolved if isinstance(resolved, dict) else {}
+    agent_name = (
+        spec.get("vibe_agent_name")
+        or resolved.get("name")
+        or target.get("agent_name")
+        or (session_row or {}).get("agent_name")
+    )
     backend = spec.get("vibe_agent_backend") or target.get("agent_backend") or (session_row or {}).get("agent_backend")
     return agent_name, backend
+
+
+def _author_identity(context: MessageContext, session_row: Optional[dict] = None) -> dict[str, str]:
+    """The Agent that wrote a reply, recorded with it (``metadata``): a session can
+    switch Agents, and its earlier replies keep the one that wrote them. The Agent that
+    ran (``resolved_vibe_agent``) is preferred over the session's routing."""
+    spec = context.platform_specific or {}
+    resolved = spec.get("resolved_vibe_agent")
+    resolved = resolved if isinstance(resolved, dict) else {}
+    target = spec.get("agent_session_target")
+    target = target if isinstance(target, dict) else {}
+    _name, routed_backend = _agent_provenance_from_context(context, session_row)
+    identity = {
+        "author_agent_id": resolved.get("id") or target.get("agent_id") or (session_row or {}).get("agent_id"),
+        "author_backend": resolved.get("backend") or routed_backend,
+    }
+    return {key: str(value) for key, value in identity.items() if isinstance(value, str) and value.strip()}
 
 
 def _trace_ids_from_context(context: MessageContext) -> tuple[Optional[str], Optional[str]]:
@@ -527,6 +554,7 @@ def persist_agent_message(
                 # survives reload because it lives on the row, not in the delivery.
                 if citation_rows:
                     content = {**(content or {}), "citations": citation_rows}
+                metadata = {**_author_identity(context, session_row), **(metadata or {})}
                 if existing_row_id:
                     appended_row = _write_committed_row(
                         conn,

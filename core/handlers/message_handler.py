@@ -12,7 +12,12 @@ from core.audio_asr import (
     format_audio_transcript_echo,
 )
 from core.agent_input import AgentInputMetadata, harness_label
-from core.backend_failure import CONTINUE_ON_VIBEY_NEXT_STEP, emit_backend_failure, output_with_next_step
+from core.backend_failure import (
+    CONTINUE_ON_VIBEY_NEXT_STEP,
+    emit_backend_failure,
+    harness_run_identity,
+    output_with_next_step,
+)
 from core.delivery_target import routed_delivery_context
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
 from core.session_handoff import BACKEND_HANDOFF_TURN_KEY
@@ -20,8 +25,10 @@ from core.message_context import (
     resolve_context_platform,
     resolve_context_thread_id,
 )
+from core.delivery_evidence import DeliveryEvidence
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
+    mark_prewrite_input_retired,
     mark_prewrite_recovery_required,
     set_dispatch_phase,
 )
@@ -971,29 +978,54 @@ class MessageHandler(BaseHandler):
         chat app cannot change the session's Agent, so its notice says where to.
         Nothing is offered when Vibey is what cannot run, or is not available.
         Retrying on its own would fail the same way, so an input that never reached
-        the backend waits for its owner: continue on Vibey, or Retry once it is back.
+        the backend waits for its owner in the Workbench: continue on Vibey, or Retry
+        once it is back. A chat app has no Retry, so once its notice (which says to
+        send the message again) is delivered, its input is retired instead of holding
+        every later message behind it. A Harness run's input is its Run's to settle,
+        and resending a generated prompt by hand would run it outside its Run, so a
+        chat app is told only that the Agent cannot run.
         """
-        mark_prewrite_recovery_required(context, "agent_unavailable")
         target = routed_delivery_context(context)
         workbench = resolve_context_platform(target) == "avibe"
+        # A background session's notice stays in its local history: it is read in the
+        # Workbench, where the input waits like a Workbench one.
+        background = bool((context.platform_specific or {}).get("suppress_delivery"))
+        chat_input = not workbench and not background and not harness_run_identity(context, request)
         if not workbench and escape_reason:
             reason = self._get_formatter(target).escape_special_chars(reason)
         # Catalog and Model Hub reads: off the controller loop.
         offer = failing_backend != "vibey" and await asyncio.to_thread(self._builtin_vibey_available)
+        if workbench or background:
+            # The held input's hint names the notice's button only when there is one;
+            # otherwise the notice offers Retry, which the general hint already names.
+            mark_prewrite_recovery_required(context, "agent_unavailable" if offer else "agent_unavailable_no_alternative")
         output = output_with_next_step(request, CONTINUE_ON_VIBEY_NEXT_STEP) if offer and workbench else None
         text = f"❌ {reason}"
-        if offer:
-            text = f"{text}\n{self._t('error.continueOnVibey.workbench' if workbench else 'error.continueOnVibey.im')}"
-        await emit_backend_failure(
-            self.controller,
-            context,
-            str(failing_backend or getattr(request, "vibe_agent_backend", None) or "agent"),
-            text,
-            display_text=text,
-            request=request,
-            output=output,
-            cause=cause,
-        )
+        if offer and workbench:
+            text = f"{text}\n{self._t('error.continueOnVibey.workbench')}"
+        elif chat_input:
+            # Its input is retired below, so it will not run once the Agent is back.
+            next_step = "error.continueOnVibey.im" if offer else "error.agentUnavailable.resendLater"
+            text = f"{text}\n{self._t(next_step)}"
+        delivery = DeliveryEvidence() if chat_input else None
+        try:
+            await emit_backend_failure(
+                self.controller,
+                context,
+                str(failing_backend or getattr(request, "vibe_agent_backend", None) or "agent"),
+                text,
+                display_text=text,
+                request=request,
+                output=output,
+                delivery=delivery,
+                cause=cause,
+            )
+        finally:
+            # A chat app's input is retired only once the user was told to send it
+            # again, even if settling the turn then raised; an undelivered notice
+            # leaves it to the ordinary startup retries.
+            if delivery is not None and delivery.delivered:
+                mark_prewrite_input_retired(context, "agent_unavailable")
 
     def _builtin_vibey_available(self) -> bool:
         """Whether a continuation on Vibey could run now: its built-in Agent exists and

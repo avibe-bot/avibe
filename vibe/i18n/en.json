@@ -469,11 +469,12 @@
     "processMessageFailed": "Error: {error}",
     "agentUnavailable": {
       "disabled": "{agent} is turned off, so this session can't continue on it.",
-      "missing": "{agent} was deleted, so this session can't continue on it."
+      "missing": "{agent} was deleted, so this session can't continue on it.",
+      "resendLater": "This message won't run later; send it again once the Agent is back."
     },
     "continueOnVibey": {
       "workbench": "Switch to Vibey to pick up right where you left off.",
-      "im": "Open this session in the Avibe Workbench and switch it to Vibey to keep going."
+      "im": "Switch this session to Vibey in the Avibe Workbench, then send this message again."
     },
     "streamTurnInProgress": "⚠️ A reply is already streaming for this session — wait for it to finish, then try again.",
     "sessionReset": "Session error detected. Session has been reset. Please try your message again.",
