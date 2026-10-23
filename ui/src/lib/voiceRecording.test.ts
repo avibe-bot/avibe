@@ -4,6 +4,7 @@ import {
   claimVoiceCapture,
   deleteMapValueIfCurrent,
   isVoiceControlDisabled,
+  prewarmVoiceCapture,
   VOICE_CAPTURE_STOP_TIMEOUT_MS,
   VOICE_MIN_SEGMENT_MS,
   voicePcmDeliverySamples,
@@ -346,6 +347,82 @@ describe('VoiceRecordingPipeline', () => {
 
     await expect(starting).resolves.toBe(false);
     expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 0 });
+  });
+
+  it('reuses a prewarmed audio context and retries gesture-gated resume', async () => {
+    const addModule = vi.fn(async () => undefined);
+    class FakeAudioContext {
+      static instance: FakeAudioContext | null = null;
+      state = 'suspended';
+      readonly audioWorklet = { addModule };
+      readonly destination = {};
+      readonly close = vi.fn(async () => {
+        this.state = 'closed';
+      });
+      readonly resume = vi.fn(async () => undefined);
+      readonly createMediaStreamSource = vi.fn(() => ({
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+      }));
+
+      constructor() {
+        FakeAudioContext.instance = this;
+      }
+    }
+    class FakeAudioWorkletNode {
+      static instance: FakeAudioWorkletNode | null = null;
+      readonly port = {
+        onmessage: null as ((event: {
+          data: { type?: string; samples?: ArrayBuffer };
+        }) => void) | null,
+        postMessage: vi.fn(),
+        close: vi.fn(),
+      };
+      onprocessorerror: (() => void) | null = null;
+      readonly connect = vi.fn();
+      readonly disconnect = vi.fn();
+
+      constructor() {
+        FakeAudioWorkletNode.instance = this;
+      }
+    }
+    const track = new EventTarget() as EventTarget & {
+      readyState: MediaStreamTrackState;
+      stop: ReturnType<typeof vi.fn>;
+    };
+    track.readyState = 'live';
+    track.stop = vi.fn();
+    const stream = { getTracks: () => [track] } as unknown as MediaStream;
+    const onStopped = vi.fn();
+    vi.stubGlobal('AudioContext', FakeAudioContext);
+    vi.stubGlobal('AudioWorkletNode', FakeAudioWorkletNode);
+    vi.stubGlobal('URL', {
+      createObjectURL: vi.fn(() => 'blob:voice-worklet'),
+      revokeObjectURL: vi.fn(),
+    });
+
+    await prewarmVoiceCapture();
+    expect(FakeAudioContext.instance?.resume).toHaveBeenCalledOnce();
+    await prewarmVoiceCapture();
+    expect(FakeAudioContext.instance?.resume).toHaveBeenCalledTimes(2);
+    const pipeline = new VoiceRecordingPipeline({
+      stream,
+      segmentMs: 1000,
+      onSegment: vi.fn(),
+      onStopped,
+    });
+    await pipeline.start();
+
+    expect(FakeAudioContext.instance).not.toBeNull();
+    expect(addModule).toHaveBeenCalledOnce();
+    expect(FakeAudioContext.instance?.createMediaStreamSource).toHaveBeenCalledOnce();
+
+    pipeline.abort();
+    FakeAudioWorkletNode.instance?.port.onmessage?.({ data: { type: 'stopped' } });
+    expect(onStopped).toHaveBeenCalledWith('abort', { pendingSegmentCount: 0 });
+    // The real worklet acknowledges stop through its message port. The test
+    // drives that boundary so the shared context can be closed cleanly.
+    await FakeAudioContext.instance?.close();
   });
 
   it('observes a microphone track ending while the worklet module loads', async () => {

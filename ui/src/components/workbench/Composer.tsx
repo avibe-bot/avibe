@@ -47,6 +47,7 @@ import {
   claimVoiceCapture,
   deleteMapValueIfCurrent,
   isVoiceControlDisabled,
+  prewarmVoiceCapture,
   type VoiceCaptureClaim,
   VoiceRecordingPipeline,
 } from '../../lib/voiceRecording';
@@ -586,6 +587,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // paired + enabled), so it never dead-ends on click.
   useEffect(() => {
     if (!mediaEnabled) return;
+    // Prepare the AudioWorklet while the Chat page is idle. No microphone is
+    // opened here; this only removes worklet compilation from the first word.
+    void prewarmVoiceCapture().catch(() => undefined);
     let alive = true;
     apiFetch('/api/asr/status')
       .then((res) => (res.ok ? res.json() : null))
@@ -1082,6 +1086,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
       };
     }
     const reply = readLatestAgentReply?.();
+    // Start compiling the capture graph in parallel with the permission and
+    // lock steps. The microphone is still requested only by getUserMedia below.
+    void prewarmVoiceCapture().catch(() => undefined);
     recordingStartRef.current = true;
     setRecordingStarting(true);
     let stream: MediaStream | null = null;
@@ -1631,6 +1638,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 variant="ghost"
                 size="icon"
                 onPointerDown={() => {
+                  void prewarmVoiceCapture().catch(() => undefined);
                   pendingVoiceInsertionRef.current = captureVoiceInsertion();
                 }}
                 onPointerCancel={() => {

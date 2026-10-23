@@ -143,6 +143,120 @@ registerProcessor('${PCM_WORKLET_NAME}', AvibeVoicePcmCapture);
 
 export const voicePcmWorkletSource = PCM_WORKLET_SOURCE;
 
+type AudioContextConstructor = new () => AudioContext;
+
+let prewarmedAudioContext: AudioContext | null = null;
+let prewarmedAudioContextConstructor: AudioContextConstructor | null = null;
+let prewarmPromise: Promise<void> | null = null;
+
+const audioContextConstructor = (): AudioContextConstructor | null => {
+  const constructor = globalThis.AudioContext;
+  return typeof constructor === 'function' ? constructor : null;
+};
+
+const clearPrewarmedAudioContext = (context: AudioContext): void => {
+  if (prewarmedAudioContext !== context) return;
+  prewarmedAudioContext = null;
+  prewarmedAudioContextConstructor = null;
+  prewarmPromise = null;
+};
+
+const closePrewarmedAudioContext = (context: AudioContext): void => {
+  clearPrewarmedAudioContext(context);
+  if (context.state !== 'closed') void context.close().catch(() => undefined);
+};
+
+const loadVoicePcmWorklet = async (context: AudioContext): Promise<void> => {
+  const moduleUrl = URL.createObjectURL(
+    new Blob([PCM_WORKLET_SOURCE], { type: 'text/javascript' }),
+  );
+  try {
+    await context.audioWorklet.addModule(moduleUrl);
+  } finally {
+    URL.revokeObjectURL(moduleUrl);
+  }
+};
+
+const requestAudioContextResume = (context: AudioContext): void => {
+  if (context.state === 'running') return;
+  try {
+    // Invoke resume synchronously from the microphone pointer/shortcut handler.
+    // The promise may settle later, but the browser's transient activation is
+    // attached to this call itself.
+    void context.resume().catch(() => undefined);
+  } catch {
+    // start() retries resume after the worklet and stream are connected.
+  }
+};
+
+/**
+ * Compile the capture worklet before the user presses the microphone button.
+ * This does not request microphone permission or connect a MediaStream; it only
+ * keeps the audio graph ready so the first spoken words do not race worklet
+ * compilation and AudioContext startup.
+ */
+export const prewarmVoiceCapture = (): Promise<void> => {
+  const constructor = audioContextConstructor();
+  if (!constructor) return Promise.resolve();
+
+  if (
+    prewarmedAudioContext
+    && (
+      prewarmedAudioContextConstructor !== constructor
+      || prewarmedAudioContext.state === 'closed'
+    )
+  ) {
+    closePrewarmedAudioContext(prewarmedAudioContext);
+  }
+  if (prewarmPromise) {
+    if (prewarmedAudioContext) requestAudioContextResume(prewarmedAudioContext);
+    return prewarmPromise;
+  }
+
+  let context: AudioContext;
+  try {
+    context = new constructor();
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  prewarmedAudioContext = context;
+  prewarmedAudioContextConstructor = constructor;
+  requestAudioContextResume(context);
+  prewarmPromise = (async () => {
+    try {
+      await loadVoicePcmWorklet(context);
+    } catch (error) {
+      closePrewarmedAudioContext(context);
+      throw error;
+    }
+  })();
+  return prewarmPromise;
+};
+
+const acquireAudioContext = async (): Promise<{
+  context: AudioContext;
+  prewarmed: boolean;
+}> => {
+  const constructor = audioContextConstructor();
+  if (!constructor) throw new Error('AudioContext unavailable');
+
+  if (
+    prewarmedAudioContext
+    && prewarmedAudioContextConstructor !== constructor
+  ) {
+    closePrewarmedAudioContext(prewarmedAudioContext);
+  }
+  if (prewarmPromise) await prewarmPromise.catch(() => undefined);
+  if (
+    prewarmedAudioContext
+    && prewarmedAudioContextConstructor === constructor
+    && prewarmedAudioContext.state !== 'closed'
+  ) {
+    return { context: prewarmedAudioContext, prewarmed: true };
+  }
+  return { context: new constructor(), prewarmed: false };
+};
+
 type VoicePcmCaptureHandlers = {
   onSamples: (samples: Int16Array<ArrayBuffer>) => void;
   onStopped: () => void;
@@ -169,6 +283,7 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
   private readonly handlers: VoicePcmCaptureHandlers;
   private readonly stopTimeoutMs: number;
   private context: AudioContext | null = null;
+  private sharedContext = false;
   private source: MediaStreamAudioSourceNode | null = null;
   private node: AudioWorkletNode | null = null;
   private stopTimer: ReturnType<typeof setTimeout> | null = null;
@@ -191,63 +306,75 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
   }
 
   async start(): Promise<void> {
-    const context = new AudioContext();
-    this.context = context;
-    this.stream.getTracks().forEach((track) => {
-      track.addEventListener('ended', this.handleTrackEnded, { once: true });
-    });
-    if (this.stream.getTracks().some((track) => track.readyState === 'ended')) {
-      this.stop();
-    }
-    let moduleUrl: string | null = null;
+    let context: AudioContext | null = null;
     try {
-      moduleUrl = URL.createObjectURL(
-        new Blob([PCM_WORKLET_SOURCE], { type: 'text/javascript' }),
-      );
-      await context.audioWorklet.addModule(moduleUrl);
-      if (this.stopping) {
-        await context.close();
-        this.finish();
-        return;
-      }
-
-      const node = new AudioWorkletNode(context, PCM_WORKLET_NAME, {
-        numberOfInputs: 1,
-        numberOfOutputs: 1,
-        outputChannelCount: [1],
-        processorOptions: {
-          targetSampleRate: this.sampleRate,
-          // File-sized segments are assembled on the main thread. Deliver
-          // smaller chunks so a processor failure cannot erase a whole segment.
-          chunkSamples: voicePcmDeliverySamples(this.sampleRate, this.segmentSamples),
-        },
+      const acquired = await acquireAudioContext();
+      context = acquired.context;
+      this.context = context;
+      this.sharedContext = acquired.prewarmed;
+      this.stream.getTracks().forEach((track) => {
+        track.addEventListener('ended', this.handleTrackEnded, { once: true });
       });
-      node.port.onmessage = (event: MessageEvent<{
-        type?: string;
-        samples?: ArrayBuffer;
-      }>) => {
-        if (event.data.type === 'samples' && event.data.samples) {
-          this.handlers.onSamples(new Int16Array(event.data.samples));
-        } else if (event.data.type === 'stopped') {
-          this.finish();
+      if (this.stream.getTracks().some((track) => track.readyState === 'ended')) {
+        this.stop();
+      }
+      let moduleUrl: string | null = null;
+      try {
+        if (!acquired.prewarmed) {
+          moduleUrl = URL.createObjectURL(
+            new Blob([PCM_WORKLET_SOURCE], { type: 'text/javascript' }),
+          );
+          await context.audioWorklet.addModule(moduleUrl);
         }
-      };
-      node.onprocessorerror = () => {
-        this.reportFailure(new Error('voice PCM processor stopped unexpectedly'));
-        this.finish();
-      };
-      this.node = node;
-      this.source = context.createMediaStreamSource(this.stream);
-      this.source.connect(node);
-      node.connect(context.destination);
-      await context.resume();
+        if (this.stopping) {
+          this.finish();
+          return;
+        }
+
+        const node = new AudioWorkletNode(context, PCM_WORKLET_NAME, {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+          processorOptions: {
+            targetSampleRate: this.sampleRate,
+            // File-sized segments are assembled on the main thread. Deliver
+            // smaller chunks so a processor failure cannot erase a whole segment.
+            chunkSamples: voicePcmDeliverySamples(this.sampleRate, this.segmentSamples),
+          },
+        });
+        node.port.onmessage = (event: MessageEvent<{
+          type?: string;
+          samples?: ArrayBuffer;
+        }>) => {
+          if (event.data.type === 'samples' && event.data.samples) {
+            this.handlers.onSamples(new Int16Array(event.data.samples));
+          } else if (event.data.type === 'stopped') {
+            this.finish();
+          }
+        };
+        node.onprocessorerror = () => {
+          this.reportFailure(new Error('voice PCM processor stopped unexpectedly'));
+          this.finish();
+        };
+        this.node = node;
+        this.source = context.createMediaStreamSource(this.stream);
+        this.source.connect(node);
+        node.connect(context.destination);
+        await context.resume();
+      } finally {
+        if (moduleUrl) URL.revokeObjectURL(moduleUrl);
+      }
     } catch (error) {
       this.detachNodes();
       this.context = null;
-      if (context.state !== 'closed') await context.close().catch(() => undefined);
+      const failedContext = context;
+      const sharedContext = this.sharedContext;
+      this.sharedContext = false;
+      if (failedContext) {
+        if (sharedContext) closePrewarmedAudioContext(failedContext);
+        else if (failedContext.state !== 'closed') await failedContext.close().catch(() => undefined);
+      }
       throw error;
-    } finally {
-      if (moduleUrl) URL.revokeObjectURL(moduleUrl);
     }
   }
 
@@ -282,8 +409,12 @@ class AudioWorkletPcmCapture implements VoicePcmCapture {
     this.stopTimer = null;
     this.detachNodes();
     const context = this.context;
+    const sharedContext = this.sharedContext;
     this.context = null;
-    if (context && context.state !== 'closed') void context.close().catch(() => undefined);
+    this.sharedContext = false;
+    if (context && !sharedContext && context.state !== 'closed') {
+      void context.close().catch(() => undefined);
+    }
     this.handlers.onStopped();
   }
 
