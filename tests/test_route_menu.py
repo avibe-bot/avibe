@@ -119,3 +119,5 @@ def test_the_agent_select_keeps_the_scopes_agent_within_its_cap():
     shown = data.agent_options()
     assert len(shown) == 25 and shown[-1].id == "a29"
     assert data.shown_agent("missing") == "a29" and data.shown_agent("a3") == "a3"
+    # Agent names have no length bound; the label every platform shows does.
+    assert len(AgentChoice("a", "n" * 5000, "vibey").label) < 100

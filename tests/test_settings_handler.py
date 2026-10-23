@@ -417,6 +417,24 @@ def test_handle_routing_update_warns_wechat_flat_scope_with_existing_backend_ses
     assert sessions.calls == [("wechat::user::58181121", "wechat_58181121")]
 
 
+def test_handle_routing_update_warns_flat_scope_switching_to_another_agent_on_the_same_backend() -> None:
+    handler, send_message, _sessions = _make_flat_scope_handler(
+        row={"agent_name": "claude", "agent_backend": "claude", "agent_variant": "claude", "model": "", "reasoning_effort": ""}
+    )
+    handler.controller.vibe_agent_store.agents.append(
+        SimpleNamespace(id="id-pm", name="pm-claude", backend="claude", model=None, reasoning_effort=None, enabled=True)
+    )
+
+    asyncio.run(
+        handler.handle_routing_update(
+            user_id="58181121", channel_id="58181121", agent_id="id-pm", platform="telegram", is_dm=True,
+        )
+    )
+
+    # The scope's session keeps the Agent it started with, so the new one needs /new.
+    assert "请使用 /new 命令创建新会话" in send_message.await_args.args[1]
+
+
 def test_handle_routing_update_does_not_warn_flat_scope_same_backend_model_change() -> None:
     handler, send_message, sessions = _make_flat_scope_handler(
         row={
@@ -727,6 +745,12 @@ def test_opencode_route_menu_fits_the_platforms_cap_and_is_whole_without_one() -
         }
         for p in range(30)
     ]
+    # An OpenCode Agent whose own model sits past Discord's cap, with efforts of its own.
+    providers[29]["models"]["m2"]["variants"] = {"max": {}}
+    handler.controller.vibe_agent_store.agents.append(
+        SimpleNamespace(id="id-planner", name="planner", backend="opencode", model="p29/m2", reasoning_effort=None,
+                        enabled=True)
+    )
     server.get_available_models = AsyncMock(return_value={"providers": providers})
     context = MessageContext(user_id="U1", channel_id="D0APS47LPU2", platform="discord")
     menus = {}
@@ -738,6 +762,13 @@ def test_opencode_route_menu_fits_the_platforms_cap_and_is_whole_without_one() -
 
     capped = menus[25].model_options(None)
     assert len(capped) == 24 and all("/m" in option.value for option in capped)
+    assert "p29/m2" not in {option.value for option in capped}
+    # Its Default still offers that model's efforts, not a generic ladder.
+    planner = RoutingModalData(
+        agents=[AgentChoice("id-planner", "planner", "opencode", model="p29/m2")], current_agent="id-planner",
+        current_routing=None, menus={"opencode": menus[25]},
+    )
+    assert _values(planner.menu("id-planner").effort_options(None, None)) == ["max"]
     assert len(menus[None].model_options(None)) == 270
 
 

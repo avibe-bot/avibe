@@ -41,7 +41,9 @@ class AgentChoice:
 
     @property
     def label(self) -> str:
-        return f"{self.name} · {display_name_for_backend(self.backend)}"
+        # Agent names have no length bound, and every platform caps the text it shows.
+        name = self.name if len(self.name) <= 80 else f"{self.name[:79]}…"
+        return f"{name} · {display_name_for_backend(self.backend)}"
 
 
 @dataclass(frozen=True)

@@ -524,19 +524,24 @@ class SettingsHandler(BaseHandler):
             stored_model = (
                 data.stored_draft(current_agent.id).model if current_agent and current_agent.backend == backend else None
             )
+            # Efforts are built for every model a form on this backend can show or inherit, listed or not.
+            wanted = {model for model in (stored_model, *(a.model for a in agents if a.backend == backend)) if model}
             loader = self._route_menu_loaders.get(backend)
             if loader is not None:
                 try:
-                    await loader(self, context, menu, stored_model)
+                    await loader(self, context, menu, stored_model, wanted)
                 except Exception as e:
                     logger.warning("Failed to load %s routing options: %s", backend, e)
             data.menus[backend] = menu
         return data
 
     # Where each backend's route lists come from: the only backend-specific part of the routing form. Each
-    # loader fills ``menu`` in place; ``stored_model`` is the stored route's model when this is its backend.
+    # loader fills ``menu`` in place; ``stored_model`` is the stored route's model when this is its backend, and
+    # ``wanted`` every model a form on this backend can show or inherit, whose efforts it needs.
 
-    async def _load_opencode_route_menu(self, context, menu: BackendRouteMenu, stored_model: Optional[str]) -> None:
+    async def _load_opencode_route_menu(
+        self, context, menu: BackendRouteMenu, stored_model: Optional[str], wanted: set[str]
+    ) -> None:
         from modules.agents.opencode.utils import (
             build_opencode_model_option_items,
             build_reasoning_effort_options,
@@ -570,10 +575,12 @@ class SettingsHandler(BaseHandler):
             keep=menu.fits,
         )
         menu.models = [RouteOption(str(entry["value"]), str(entry["label"])) for entry in entries if entry.get("value")]
-        for model in {"", *(option.value for option in menu.models), stored_model or ""}:
+        for model in {"", *(option.value for option in menu.models), *wanted}:
             menu.efforts[model] = _effort_options(build_reasoning_effort_options(models, model or None))
 
-    async def _load_claude_route_menu(self, context, menu: BackendRouteMenu, stored_model: Optional[str]) -> None:
+    async def _load_claude_route_menu(
+        self, context, menu: BackendRouteMenu, stored_model: Optional[str], wanted: set[str]
+    ) -> None:
         from modules.agents.opencode.utils import (
             build_claude_reasoning_options,
             format_claude_model_label,
@@ -595,12 +602,14 @@ class SettingsHandler(BaseHandler):
         menu.models = [RouteOption(model, format_claude_model_label(model)) for model in ordered]
         catalog = models_result.get("reasoning_options")
         catalog = catalog if isinstance(catalog, dict) else None
-        for model in {"", *ordered, stored_model or ""}:
+        for model in {"", *ordered, *wanted}:
             menu.efforts[model] = _effort_options(
                 resolve_model_reasoning_options(catalog, model, build_claude_reasoning_options(model or None))
             )
 
-    async def _load_codex_route_menu(self, context, menu: BackendRouteMenu, stored_model: Optional[str]) -> None:
+    async def _load_codex_route_menu(
+        self, context, menu: BackendRouteMenu, stored_model: Optional[str], wanted: set[str]
+    ) -> None:
         from modules.agents.opencode.utils import build_codex_reasoning_options, resolve_model_reasoning_options
         from vibe.api import codex_agents as get_codex_agents, codex_models as get_codex_models
 
@@ -614,12 +623,14 @@ class SettingsHandler(BaseHandler):
         menu.models = [RouteOption(model, model) for model in models]
         catalog = models_result.get("reasoning_options")
         catalog = catalog if isinstance(catalog, dict) else None
-        for model in {"", *models, stored_model or ""}:
+        for model in {"", *models, *wanted}:
             menu.efforts[model] = _effort_options(
                 resolve_model_reasoning_options(catalog, model, build_codex_reasoning_options())
             )
 
-    async def _load_vibey_route_menu(self, context, menu: BackendRouteMenu, stored_model: Optional[str]) -> None:
+    async def _load_vibey_route_menu(
+        self, context, menu: BackendRouteMenu, stored_model: Optional[str], wanted: set[str]
+    ) -> None:
         """Vibey's menu from Model Hub, as the Web route picker reads it.
 
         An effort Model Hub's ``effort_menu`` omits would only fail, so it is not offered.
@@ -711,9 +722,13 @@ class SettingsHandler(BaseHandler):
             return False
         current_target = self._routing_target_from_row(row)
         next_target = self._routing_target_from_settings(routing)
-        current_backend = current_target[1]
-        next_backend = next_target[1]
-        return bool(current_backend and next_backend and current_backend != next_backend)
+        current_agent, current_backend = current_target[0], current_target[1]
+        next_agent, next_backend = next_target[0], next_target[1]
+        if current_backend and next_backend and current_backend != next_backend:
+            return True
+        # The scope's session keeps the Agent it started with, so another Agent, even on the same backend, takes
+        # a new session to run.
+        return bool(current_agent and next_agent and current_agent != next_agent)
 
     async def handle_settings_update(
         self,
