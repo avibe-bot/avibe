@@ -22,6 +22,7 @@ from core.message_context import (
 )
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
+    mark_prewrite_recovery_required,
     set_dispatch_phase,
 )
 from modules.agents.base import AgentRequest
@@ -969,7 +970,10 @@ class MessageHandler(BaseHandler):
         the session to the built-in Vibey Agent and runs the failed input there. A
         chat app cannot change the session's Agent, so its notice says where to.
         Nothing is offered when Vibey is what cannot run, or is not available.
+        Retrying on its own would fail the same way, so an input that never reached
+        the backend waits for its owner: continue on Vibey, or Retry once it is back.
         """
+        mark_prewrite_recovery_required(context, "agent_unavailable")
         target = routed_delivery_context(context)
         workbench = resolve_context_platform(target) == "avibe"
         if not workbench and escape_reason:
