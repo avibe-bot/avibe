@@ -376,7 +376,7 @@
       "react-hooks/set-state-in-effect": 1
     },
     "src/pet/PetPage.tsx": {
-      "react-hooks/preserve-manual-memoization": 3,
+      "react-hooks/preserve-manual-memoization": 2,
       "react-hooks/set-state-in-effect": 6
     }
   },
