@@ -295,6 +295,37 @@ def test_a_workbench_hold_records_whether_vibey_was_offered():
     assert reasons[False] == {"reason": "agent_unavailable_no_alternative", "requires_explicit_retry": True}
 
 
+def test_a_background_chat_app_session_holds_its_input_without_a_resend_promise():
+    """A background session's notice is never sent out, only kept in its history, so
+    its input waits for a retry as a Workbench one does and nothing says to resend."""
+    from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, prewrite_failure_evidence, set_dispatch_phase
+    from core.vibe_agents import AgentUnavailableError
+    from unittest.mock import patch
+
+    controller = _StubController()
+    controller.im_client.formatter = SimpleNamespace(escape_special_chars=lambda text: text)
+    handler = MessageHandler(controller)
+    context = MessageContext(
+        user_id="U1", channel_id="C1", platform="telegram", platform_specific={"suppress_delivery": True}
+    )
+    set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+    seen = {}
+
+    async def notify(*_args, delivery=None, display_text=None, **_kwargs):
+        seen.update(text=display_text, delivery=delivery)
+        return False
+
+    disabled = AgentUnavailableError("agent 'codex' is disabled", agent_name="codex", reason="disabled")
+    with patch.dict(MessageHandler._emit_agent_cannot_run.__globals__, emit_backend_failure=notify):
+        anyio.run(handler._emit_agent_dispatch_failure, context, None, disabled)
+    assert seen["text"] == f"❌ {handler._t('error.agentUnavailable.disabled', agent='Codex')}"
+    assert seen["delivery"] is None
+    assert prewrite_failure_evidence(context) == {
+        "reason": "agent_unavailable_no_alternative",
+        "requires_explicit_retry": True,
+    }
+
+
 def test_a_chat_app_is_told_to_resend_when_vibey_is_not_offered():
     """Its input is retired, so with nothing to continue on it must be sent again."""
     from unittest.mock import AsyncMock, patch

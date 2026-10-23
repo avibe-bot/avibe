@@ -159,7 +159,7 @@ import {
 } from '../../lib/agentActivity';
 import { errorMessage } from '@/lib/errorMessage';
 import { pendingInitialMessageHandoff } from '@/lib/chatInitialMessage';
-import { messageAuthorAgent, sessionAgentBackend, sessionAgentDisplayName, sessionAgentId } from './sessionAgentName';
+import { messageAuthorAgent, sessionAgentBackend, sessionAgentDisplayName } from './sessionAgentName';
 import { useModelHubRecovery } from '../../lib/modelHubRecovery';
 import { getBackendUiMeta } from '@/lib/agentBackends';
 
@@ -2874,7 +2874,6 @@ export const ChatPage: React.FC = () => {
   const agentDisplayName = sessionAgentDisplayName(session, agents);
   // A runtime-owned row never inherits the default Agent, so it borrows no avatar from it.
   const agentBackend = sessionAgentBackend(session, agents, readOnlyReason === 'system' ? null : defaultAgentName);
-  const agentId = sessionAgentId(session, agents, readOnlyReason === 'system' ? null : defaultAgentName);
 
   return (
     // Fill the viewport so the transcript is the only scrolling region and
@@ -2994,7 +2993,6 @@ export const ChatPage: React.FC = () => {
           session={session}
           agentDisplayName={agentDisplayName}
           agentBackend={agentBackend}
-          agentId={agentId}
           agents={agents}
           working={working}
           modelRecovery={runtimeState.model_recovery}
@@ -3969,8 +3967,6 @@ interface TranscriptProps {
   agentDisplayName: string | null;
   /** The backend the replies come from, resolved through an inherited default. */
   agentBackend?: string | null;
-  /** The session's effective Agent id, inherited default included (``sessionAgentId``). */
-  agentId?: string | null;
   /** The Agents a reply's recorded author is resolved against (``messageAuthorAgent``). */
   agents?: VibeAgentBrief[];
   working: boolean;
@@ -4038,7 +4034,6 @@ export const Transcript: React.FC<TranscriptProps> = ({
   session,
   agentDisplayName,
   agentBackend = null,
-  agentId = null,
   agents = NO_AGENTS,
   working,
   modelRecovery,
@@ -4580,8 +4575,8 @@ export const Transcript: React.FC<TranscriptProps> = ({
             // just below the turn's trigger).
             const before = activity?.enabled ? activity.beforeAnchor.get(message.id) : undefined;
             const after = activity?.enabled ? activity.afterAnchor.get(message.id) : undefined;
-            // A reply another Agent wrote before the session switched keeps its author.
-            const author = message.author === 'agent' ? messageAuthorAgent(message, agentId, agentBackend, agents) : null;
+            // A reply keeps the Agent that wrote it, which a switch may have replaced.
+            const author = message.author === 'agent' ? messageAuthorAgent(message, agents) : null;
             return (
               <Fragment key={message.id}>
                 {before?.map((group) => renderActivityChip(group))}
