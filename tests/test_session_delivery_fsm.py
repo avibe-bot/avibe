@@ -8843,30 +8843,50 @@ async def test_resultless_terminal_run_settlement_lands_off_loop_before_completi
     managers, monkeypatch,
 ):
     """The resultless B tail is a second writer, not covered by its zero-wait BEGIN."""
-    from core.scheduled_tasks import ScheduledTaskService, TaskExecutionStore
+    from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
     from storage.background import SQLiteBackgroundTaskStore
 
     manager, _other, engine, engine_b, _starts = managers
     run_store = SQLiteBackgroundTaskStore(Path(str(engine.url.database)))
     requests = TaskExecutionStore(root=Path(str(engine.url.database)).parent / "unused")
     requests._sqlite = run_store
-    service = ScheduledTaskService.__new__(ScheduledTaskService)
-    service.controller, service.request_store, service._drain_dirty = manager.controller, requests, False
+    definitions = ScheduledTaskStore(path=Path(str(engine.url.database)).parent / "unused.json")
+    definitions._sqlite = run_store
+    service = ScheduledTaskService(controller=manager.controller, store=definitions, request_store=requests)
     manager.controller.scheduled_task_service = service
+    definition = definitions.add_task(
+        session_id="ses_fsm", session_key="", prompt="primary", schedule_type="at",
+        run_at="2030-08-01T00:00:00+00:00", timezone_name="UTC",
+    )
+    request = requests.enqueue_task_run(
+        definition.id, source_kind="scheduler", task=definition,
+        expected_run_at=definition.run_at, expected_timezone=definition.timezone,
+        expected_job_id="resultless-job",
+    )
+    assert request is not None
+    definitions.load()
+    service.scheduler.add_job(lambda: None, "date", run_date=definition.run_at, id="resultless-job")
+    service._job_ids[definition.id] = "resultless-job"
     turn_id, _context_value = await _activate(manager)
     with engine.begin() as conn:
         initial = delivery_store.initial_deliveries_for_turn(conn, turn_id)[0]
         conn.execute(update(agent_sessions).where(agent_sessions.c.id == "ses_fsm").values(agent_status="running"))
-        conn.execute(agent_runs.insert().values(
-            id="resultless-run", run_type="agent_run", status="running", cancel_requested=0,
-            session_id="ses_fsm", delivery_id=initial["id"], metadata_json="{}",
-            created_at="2026-08-01T00:00:00Z", updated_at="2026-08-01T00:00:00Z",
+        conn.execute(update(agent_runs).where(agent_runs.c.id == request.id).values(
+            status="running", delivery_id=initial["id"],
         ))
     worker_entered = asyncio.Event()
     loop = asyncio.get_running_loop()
     loop_thread = threading.get_ident()
     original_settle = manager._settle_agent_run_ids_from_terminal_turn
+    original_retire = service._retire_one_shot_job
+    retirement_threads = []
     events = []
+
+    def retire(task_id):
+        retirement_threads.append(threading.get_ident())
+        return original_retire(task_id)
+
+    monkeypatch.setattr(service, "_retire_one_shot_job", retire)
 
     def settle(*args, **kwargs):
         assert threading.get_ident() != loop_thread
@@ -8887,17 +8907,84 @@ async def test_resultless_terminal_run_settlement_lands_off_loop_before_completi
             assert not pending.task.done()
             assert "session.status" not in events
             with engine.connect() as conn:
-                assert conn.execute(select(agent_runs.c.status).where(agent_runs.c.id == "resultless-run")).scalar_one() == "running"
+                assert conn.execute(select(agent_runs.c.status).where(agent_runs.c.id == request.id)).scalar_one() == "running"
             pending.task.cancel()  # An owned store step still has to land.
             blocker.rollback()
             await asyncio.wait_for(pending.task, 5)
         with engine.connect() as conn:
-            assert conn.execute(select(agent_runs.c.status).where(agent_runs.c.id == "resultless-run")).scalar_one() == "canceled"
+            assert conn.execute(select(agent_runs.c.status).where(agent_runs.c.id == request.id)).scalar_one() == "canceled"
             assert delivery_store.get_turn(conn, turn_id)["terminal_outcome"] == "canceled"
         assert events.count("session.status") == 1
+        assert retirement_threads == [loop_thread]
+        assert service.scheduler.get_job("resultless-job") is None
+        assert definition.id not in service._job_ids
         assert not manager._pending_terminals
     finally:
         run_store.close()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("gate", ["start", "drain", "linked"])
+async def test_recovery_redrives_a_failed_post_commit_terminal_tail(managers, monkeypatch, gate):
+    """A retained committed tail must recover without a new user admission.
+
+    Existing contention cases never fail after the transaction has selected a
+    successor; a failed executor admission used to leave that successor fenced forever.
+    """
+    manager, _other, engine, _engine_b, starts = managers
+    turn_id, context = await _activate(manager)
+    queued = await manager.deliver(
+        DeliveryRequest(session_id="ses_fsm", priority="p3", content="next"), context=_context(),
+    )
+    with engine.begin() as conn:
+        initial = delivery_store.initial_deliveries_for_turn(conn, turn_id)[0]
+        conn.execute(agent_runs.insert().values(
+            id="tail-run", run_type="agent_run", status="running", cancel_requested=0,
+            session_id="ses_fsm", delivery_id=initial["id"], metadata_json="{}",
+            created_at="2026-08-01T00:00:00Z", updated_at="2026-08-01T00:00:00Z",
+        ))
+    original = manager._run_off_loop
+    attempts = []
+
+    async def worker(operation):
+        attempts.append(operation)
+        if len(attempts) == 1:
+            raise RuntimeError("executor temporarily unavailable")
+        return await original(operation)
+
+    publication_attempts = []
+    publish_terminal = manager._publish_terminal_inbox_update
+
+    def publish(session_id):
+        publication_attempts.append(session_id)
+        return publish_terminal(session_id)
+
+    monkeypatch.setattr(manager, "_run_off_loop", worker)
+    monkeypatch.setattr(manager, "_publish_terminal_inbox_update", publish)
+    manager._finish_durable_terminal_result(
+        "ses_fsm", turn_id, is_error=True, settled_by=SETTLED_BY_STOPPED,
+        terminal_evidence={"settles_run": False, "result_text": ""},
+    )
+    pending = manager._pending_terminals[turn_id]
+    first = pending.task
+    assert (await first)["defer_queue_resume"]
+    assert pending.result["changed"] and not publication_attempts
+    with engine.connect() as conn:
+        successor = delivery_store.get_delivery(conn, str(queued.delivery_id))["turn_id"]
+    if gate == "start":
+        assert not await manager._start_persisted_turn(successor)
+    elif gate == "drain":
+        assert not await manager.drain_delivery_queue("ses_fsm")
+    else:
+        assert not await manager._resume_linked_control_successor("ses_fsm", turn_id)
+    assert pending.task is not first, "recovery left a failed completion permanently fenced"
+    await asyncio.wait_for(pending.task, 5)
+    # The completion owns the resume; yield to that real continuation once.
+    await asyncio.sleep(0)
+    assert not manager._pending_terminals
+    assert len(attempts) == 2
+    assert publication_attempts == ["ses_fsm"]
+    assert [text for _, text in starts] == ["primary", "next"]
 
 
 @pytest.mark.anyio
@@ -8967,7 +9054,10 @@ async def test_pending_terminal_evidence_survives_timeout_and_competing_terminal
         if resume is not None:
             await resume
     elif competitor == "absent_start":
-        assert not manager.reconcile_start_attempt_not_written(turn_id, "stale-attempt", backend="codex")
+        with engine.connect() as conn:
+            attempt_id = delivery_store.get_turn(conn, turn_id)["start_attempt_id"]
+        assert attempt_id
+        assert not manager.reconcile_start_attempt_not_written(turn_id, attempt_id, backend="codex")
     elif competitor == "refresh":
         await manager.release_for_backend_refresh(backend="codex", base_session_ids={"ses_fsm"})
     else:
@@ -8981,6 +9071,56 @@ async def test_pending_terminal_evidence_survives_timeout_and_competing_terminal
     assert turn["terminal_evidence_kind"] == "terminal_result"
     assert json.loads(turn["terminal_evidence_json"]) == evidence
     assert successor["state"] == ("queued" if competitor == "shutdown" else "claimed")
+    assert not manager._pending_terminals
+
+
+@pytest.mark.anyio
+async def test_refresh_does_not_relabel_delivered_evidence_after_retry_expiry(managers, monkeypatch):
+    """An expired pending write still decides the projected Turn's outcome.
+
+    Existing refresh cases release SQLite before the join finishes, so they cannot
+    catch a spurious refresh notice when the sink is gone but B is still pending.
+    """
+    from core.session_turns import Turn
+
+    manager, _other, engine, engine_b, _starts = managers
+    turn_id, context = await _activate(manager)
+    monkeypatch.setattr(manager, "TERMINAL_WRITE_RETRY_SECONDS", 0)
+    notices = Mock()
+    monkeypatch.setattr(manager, "_notify_backend_refresh", notices)
+    entered = asyncio.Event()
+    with engine_b.connect() as blocker:
+        async def projected_runner():
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                # Release only after refresh has chosen whether it owns the
+                # outcome, not during its bounded pending-completion join.
+                blocker.rollback()
+
+        task = asyncio.create_task(projected_runner())
+        projected = Turn(task=task, context=context, started_at="2026-08-01T00:00:00Z", logical_turn_id=turn_id)
+        manager.in_flight["ses_fsm"] = projected
+        await entered.wait()
+        blocker.exec_driver_sql("BEGIN IMMEDIATE")
+        manager.on_terminal_result(context, is_error=False, terminal_evidence={"result_text": "delivered"})
+        manager.on_terminal_delivery_complete(context)
+        pending = manager._pending_terminals[turn_id]
+        assert (await pending.task)["defer_queue_resume"]
+        assert not manager._turn_outcome_decided(projected)
+        try:
+            await manager.release_for_backend_refresh(backend="codex", base_session_ids={"ses_fsm"})
+            await pending.task
+        finally:
+            blocker.rollback()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            manager.in_flight.pop("ses_fsm", None)
+    assert projected.cancel_settled_by is None
+    notices.assert_not_called()
+    with engine.connect() as conn:
+        assert delivery_store.get_turn(conn, turn_id)["terminal_evidence_kind"] == "terminal_result"
     assert not manager._pending_terminals
 
 

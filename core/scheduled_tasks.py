@@ -9693,7 +9693,8 @@ class ScheduledTaskService:
         execution_ids: Sequence[str],
         *,
         settled_by: str,
-    ) -> None:
+        retire_job: bool = True,
+    ) -> list[str]:
         """Settle runs whose turn ended without a terminal result, on the TURN lane.
 
         ``_execute_agent_run`` can only settle the runs it dispatched itself. An
@@ -9703,9 +9704,11 @@ class ScheduledTaskService:
         i18n text as the drain lane — the only difference is who noticed.
 
         A settled run's terminal callback is delivered by the drain, so mark it dirty
-        rather than waiting up to a full tick.
+        rather than waiting up to a full tick. Executor callers pass ``retire_job=False``
+        and retire the returned definition ids on the loop after this store step lands.
         """
 
+        retired_jobs: list[str] = []
         settled_any = False
         error_text = self._t(
             SETTLEMENT_I18N_KEYS.get(settled_by, SETTLEMENT_I18N_KEYS[SETTLED_BY_NO_TERMINAL_RESULT])
@@ -9722,17 +9725,21 @@ class ScheduledTaskService:
             if settled is None:
                 continue
             settled_any = True
-            self._project_terminal_definition_result(
+            retired = self._project_terminal_definition_result(
                 self.request_store.get_run(execution_id),
                 execution_id=execution_id,
                 expected_status=settled,
+                retire_job=retire_job,
             )
+            if retired is not None:
+                retired_jobs.append(retired)
         if settled_any:
             self._wake_runtime_work(
                 RuntimeWorkLane.REQUESTS,
                 RuntimeWorkLane.RUN_CALLBACKS,
                 RuntimeWorkLane.FAILURE_NOTICES,
             )
+        return retired_jobs
 
     def settle_agent_runs_from_terminal_turn(
         self,
@@ -9743,18 +9750,25 @@ class ScheduledTaskService:
         settled_by: str | None,
         evidence_kind: str | None,
         evidence: Mapping[str, Any],
-    ) -> None:
-        """Settle late accepted Runs from their immutable Turn snapshot."""
+        retire_job: bool = True,
+    ) -> list[str]:
+        """Settle late accepted Runs from their immutable Turn snapshot.
 
+        With ``retire_job=False``, return one-shot ids for loop-owned job retirement.
+        Only the resultless branch is safe on a worker: output evidence also consults
+        the loop-owned Activity registry.
+        """
+
+        retired_jobs: list[str] = []
         if settled_by in SETTLEMENTS_WITHOUT_RESULT:
             normalized_settlement = str(settled_by)
             store = self.request_store.sqlite_backend
             if store is None:
-                self.settle_agent_runs_without_result(
+                return self.settle_agent_runs_without_result(
                     execution_ids,
                     settled_by=normalized_settlement,
+                    retire_job=retire_job,
                 )
-                return
             normalized_execution_ids = list(
                 dict.fromkeys(
                     execution_id
@@ -9807,34 +9821,37 @@ class ScheduledTaskService:
                 transitioned = True
                 run = result.get("run")
                 expected_status = str((run or {}).get("status") or terminal_status)
-                self._project_terminal_definition_result(
+                retired = self._project_terminal_definition_result(
                     run,
                     execution_id=execution_id,
                     expected_status=expected_status,
+                    retire_job=retire_job,
                 )
+                if retired is not None:
+                    retired_jobs.append(retired)
             if transitioned or repaired_ids:
                 self._wake_runtime_work(
                     RuntimeWorkLane.REQUESTS,
                     RuntimeWorkLane.RUN_CALLBACKS,
                     RuntimeWorkLane.FAILURE_NOTICES,
                 )
-            return
+            return retired_jobs
         if evidence.get("settles_run") is not True:
-            return
+            return []
         store = self.request_store.sqlite_backend
         if store is None:
             logger.warning(
                 "cannot settle late accepted Agent Runs for Turn=%s without SQLite",
                 turn_id,
             )
-            return
+            return []
         terminal_status = {
             "completed": "succeeded",
             "failed": "failed",
             "canceled": "canceled",
         }.get(outcome)
         if terminal_status is None:
-            return
+            return []
         result_text = str(evidence.get("result_text") or "")
         terminal_error = evidence.get("terminal_error")
         message_id = str(evidence.get("message_id") or "").strip() or None
@@ -9890,6 +9907,7 @@ class ScheduledTaskService:
                 RuntimeWorkLane.RUN_CALLBACKS,
                 RuntimeWorkLane.FAILURE_NOTICES,
             )
+        return retired_jobs
 
     def _retract_escalation_of_stopped_fire(self, execution_id: str) -> None:
         """Take back the Agent turn a fire queued, once the user stops that fire.

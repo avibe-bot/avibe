@@ -76,7 +76,9 @@ second resume. This matters for synchronous boolean-returning callers that have
 no resume tail of their own. If a live runner/agent-initiated holder still owns the
 Turn, the completion Task does not resume: the runner/holder is the complementary
 owner. The holder now keeps `in_flight` until after the terminal commit, like the
-ordinary runner.
+ordinary runner. The ordinary runner also keeps its projection through a fallback
+write after Hub finalization, so an expired early retry cannot give both the runner
+and completion Task the resume decision.
 
 The existing sink-to-dispatch-context `TERMINAL_COMMIT_KEY` handoff remains. It
 covers a B attempt that fails before creating the pending record, and cancellation
@@ -94,7 +96,9 @@ which does not prove delivery reached the terminal block.
   still precedes that caller's next suspension, as before.
 - Queue drain, linked-control resume and persisted native start do not enter while
   the Session has pending completion work. In particular, a committed successor
-  cannot start while the post-commit Run settlement is still pending.
+  cannot start while the post-commit Run settlement is still pending. These gates
+  re-drive a finished/deferred completion Task before refusing the start, so a
+  transient executor/read failure does not strand an already claimed successor.
 - Terminal/no-op prechecks from B step 1 remain unchanged when no completion is pending.
 
 ### Resultless Run settlement and publication
@@ -105,7 +109,9 @@ tail through `_run_off_loop` (the runtime-work door, with the existing test fall
 `land_step` keeps the store step owned through cancellation. The activation boundary
 has already been released. The resultless settlement branch does not take the
 Activity registry lock; the ordinary positive-result/late-Activity behavior is not
-moved here.
+moved here. The worker requests `retire_job=False` and returns any one-shot
+scheduler ids; the completion owner retires those jobs on the loop, before events
+or fence release. Scheduler maps and APScheduler job mutation never move to the worker.
 
 Only after that step lands does the owner publish inbox/status events, clear the
 pending fence and permit resume. Existing guarded settlement methods continue to
@@ -132,7 +138,9 @@ existing gap between path A and B. The in-memory latch is not a new crash journa
 Backend refresh snapshots the generation's durable and projected owners before
 joining pending completions. A successor selected during that join is not silently
 added to the old generation's teardown set. A delivered predecessor does not gain
-a spurious refresh interruption notice.
+a spurious refresh interruption notice, including when its join exhausts the retry
+budget and the durable row has not landed yet. A refresh without a drain also
+excludes the successor from its pre-join ownership snapshot.
 
 Shutdown marks pending completions and their projected runners as queue-deferred
 before flushing them with a bounded wait. It does not restore a synchronous writer
@@ -171,6 +179,15 @@ Owning-boundary evidence:
 - `test_resultless_terminal_run_settlement_lands_off_loop_before_completion`: a
   competing writer at the *second* transaction leaves the loop responsive and the
   completion fence in place; an owned worker survives cancellation and settles the Run.
+  A real one-shot definition proves its store projection is off-loop but scheduler
+  job retirement returns to the loop.
+- `test_recovery_redrives_a_failed_post_commit_terminal_tail`: each runtime start,
+  drain and linked-resume gate re-arms a failed tail without a new user admission.
+- `test_refresh_does_not_relabel_delivered_evidence_after_retry_expiry`: the sink
+  is absent and B remains busy through refresh's join, but no interruption replaces
+  the delivered result or produces a notice.
+- `test_expired_terminal_retries_keep_the_runner_as_the_only_resume_owner`: two
+  exhausted pre-Hub attempts followed by a successful fallback still resume once.
 
 Existing FSM, Model Hub finalization, synchronous emit ordering, no-op writer,
 unknown-start, restart and delivery-recovery tests remain part of validation.

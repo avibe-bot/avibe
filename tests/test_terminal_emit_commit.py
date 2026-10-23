@@ -146,7 +146,7 @@ async def _blocked_at(dispatcher, monkeypatch, name: str) -> asyncio.Event:
 
 
 @pytest.mark.parametrize("owner", ["runner", "agent_initiated"])
-@pytest.mark.parametrize("interruption", ["none", "cancel", "refresh", "shutdown"])
+@pytest.mark.parametrize("interruption", ["none", "cancel", "refresh", "refresh_no_drain", "shutdown"])
 @pytest.mark.parametrize("backlog", [False, True])
 def test_contended_terminal_keeps_cleanup_fenced_until_evidence_commits(
     managers, monkeypatch, owner, interruption, backlog,
@@ -228,7 +228,7 @@ def test_contended_terminal_keeps_cleanup_fenced_until_evidence_commits(
                     task.cancel()
                     # A second cancellation must not cancel the pending write.
                     asyncio.get_running_loop().call_soon(task.cancel)
-                elif interruption in {"refresh", "shutdown"}:
+                elif interruption in {"refresh", "refresh_no_drain", "shutdown"}:
                     transition_waiting = asyncio.Event()
                     ensure = manager._ensure_terminal_completion
 
@@ -239,8 +239,9 @@ def test_contended_terminal_keeps_cleanup_fenced_until_evidence_commits(
                         return result
 
                     monkeypatch.setattr(manager, "_ensure_terminal_completion", joined)
-                    if interruption == "refresh":
-                        manager.begin_backend_drain("codex")
+                    if interruption in {"refresh", "refresh_no_drain"}:
+                        if interruption == "refresh":
+                            manager.begin_backend_drain("codex")
                         transition = asyncio.create_task(manager.release_for_backend_refresh(
                             backend="codex", base_session_ids={"ses_fsm"},
                         ))
@@ -655,6 +656,60 @@ def test_the_agent_initiated_holder_publishes_turn_end_after_its_terminal_write(
 def harness_state(engine, turn_id: str) -> str:
     with engine.connect() as conn:
         return str(delivery_store.get_turn(conn, turn_id)["state"])
+
+
+def test_expired_terminal_retries_keep_the_runner_as_the_only_resume_owner(managers, monkeypatch):
+    """Post-Hub fallback must retain the projection until pending completion lands.
+
+    Ordinary contention tests finish B before Hub. Two expired attempts used to
+    drop the projection first and let both the retry task and runner resume.
+    """
+    manager, _other, engine, engine_b, _starts = managers
+    harness = _Harness(manager, engine, monkeypatch)
+    monkeypatch.setattr(manager, "TERMINAL_WRITE_RETRY_SECONDS", 0)
+    resumes = []
+    launched = []
+    original_resume = manager._resume_post_terminal
+    original_terminalize = manager._terminalize_durable_turn
+
+    async def resume(session_id):
+        resumes.append(session_id)
+        await original_resume(session_id)
+
+    async def launch(candidate, **_kwargs):
+        launched.append(candidate)
+        return True
+
+    monkeypatch.setattr(manager, "_resume_post_terminal", resume)
+
+    async def exercise():
+        turn_id, context = await _activate(manager)
+        monkeypatch.setattr(manager, "_start_persisted_turn", launch)
+        queued = await manager.deliver(
+            DeliveryRequest(session_id="ses_fsm", priority="p3", content="next"), context=_context(),
+        )
+        first = True
+        with engine_b.connect() as blocker:
+            def terminalize(candidate, outcome, **kwargs):
+                nonlocal first
+                if first and candidate == turn_id and kwargs.get("evidence_kind") == "terminal_result":
+                    first = False
+                    blocker.exec_driver_sql("BEGIN IMMEDIATE")
+                return original_terminalize(candidate, outcome, **kwargs)
+
+            monkeypatch.setattr(manager, "_terminalize_durable_turn", terminalize)
+            monkeypatch.setattr(manager, "_settle_model_hub_turn", lambda *_args: blocker.rollback())
+            runner = await harness.start(turn_id, context)
+            await asyncio.wait_for(runner, WAIT_S)
+            await asyncio.wait_for(asyncio.gather(*harness.receivers), WAIT_S)
+        assert harness.turn(turn_id)["terminal_evidence_kind"] == "terminal_result"
+        with engine.connect() as conn:
+            successor = delivery_store.get_delivery(conn, str(queued.delivery_id))["turn_id"]
+        assert resumes == ["ses_fsm"]
+        assert launched == [successor]
+        assert not manager._pending_terminals
+
+    asyncio.run(exercise())
 
 
 def test_a_fallback_write_that_fails_again_is_retried_after_hub_finalization(managers, monkeypatch) -> None:
