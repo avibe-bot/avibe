@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from typing import Any, Callable, Literal, Mapping, Optional
 
+from core.agent_core.hosted_continuations import pending_hosted
 from core.agent_core.messages import (
     HOSTED_ERROR_CODES,
     AssistantMessage,
@@ -304,7 +305,10 @@ def native_activities(
     reports X-search results only as citations on the answer).
     """
 
-    blocks = [block for block in message.content if isinstance(block, HostedToolBlock)]
+    # A deferred call has not run. It produces no card on either surface; its later
+    # result fragment is an ordinary hosted block at that response's own position.
+    deferred = pending_hosted(message)
+    blocks = [block for block in message.content if isinstance(block, HostedToolBlock) and block.id not in deferred]
     if not blocks:
         return []
     summary = message.hosted_summary

@@ -148,6 +148,7 @@ from core.agent_core.harness.projection import (
     validate_message_append,
 )
 from core.agent_core.harness.store import ContextEntry, EntryKind, TranscriptStore
+from core.agent_core.hosted_continuations import pending_hosted
 from core.agent_core.messages import (
     AssistantMessage,
     HostedImage,
@@ -449,6 +450,7 @@ class Agent:
         *,
         turn_id: str,
         turn_inputs: Iterable[int] | None = None,
+        pending_inputs: Iterable[AgentInput] = (),
     ) -> AsyncIterator[AgentEvent]:
         """Continue from the committed transcript without consuming another input row.
 
@@ -456,7 +458,8 @@ class Agent:
         unchanged; it is a control value, not a second transcript message. A fresh
         Agent can provide the source Turn's input sequence numbers so compaction
         pins only that Turn's inputs. Within the same Turn, newly admitted inputs
-        extend the existing pins rather than replacing them.
+        extend the existing pins rather than replacing them. ``pending_inputs`` restores
+        accepted but unconsumed steers behind the next response, not into its request.
         """
         input = deepcopy(input)
         resume_turn_inputs = None if turn_inputs is None else set(turn_inputs)
@@ -465,6 +468,7 @@ class Agent:
             lambda emit: self._drive(emit, input, consume=False),
             preserve_turn_inputs=True,
             resume_turn_inputs=resume_turn_inputs,
+            pending_inputs=deepcopy(tuple(pending_inputs)),
         )
 
     async def _pump(
@@ -474,6 +478,7 @@ class Agent:
         *,
         preserve_turn_inputs: bool = False,
         resume_turn_inputs: set[int] | None = None,
+        pending_inputs: tuple[AgentInput, ...] = (),
     ) -> AsyncIterator[AgentEvent]:
         previous_turn_inputs = set(self._turn_inputs)
         previous_seq = self._seq
@@ -482,6 +487,7 @@ class Agent:
                 raise RuntimeError("this Agent already has an active run")
             if self._steers or self._follow_ups:
                 raise RuntimeError("return unconsumed inputs with take_pending_inputs() before starting another run")
+            self._steers.extend(pending_inputs)
             continuing_turn = preserve_turn_inputs and self._ctx.turn_id == turn_id
             self._running = True
             self._open = True
@@ -1205,7 +1211,10 @@ class Agent:
                 return "ended_by_hook"
             if terminate:
                 return "completed"
-            await self._drain_steers(emit)
+            # Anthropic has not run these server tools yet. A steer after the client results would end its open
+            # turn (and produce a 400), so admit it after the deferred result, not inside this continuation.
+            if not pending_hosted(message):
+                await self._drain_steers(emit)
 
     async def _drain_steers(self, emit: Callable[..., Awaitable[None]]) -> None:
         applied = []

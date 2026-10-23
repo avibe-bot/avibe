@@ -58,6 +58,11 @@ and usage) or
   the response's identity after restart. Legacy responses without it retain the input-order fallback.
 - A response row is inserted at `message_end` with both `content_json.model` and its commit-time display
   `content_text`.
+- A deferred hosted use produces no activity card on Web or IM. Its completion fragment uses the ordinary hosted-card path at the completion response's own position. A deferred use that never completes has no card; old trace cards for that exact shape are hidden at read time. Other pending blocks retain interrupted rendering. There is no cross-response Web merge or extra delivery guarantee.
+- An Anthropic server call deferred behind client tools finishes in a later response (C-1 `cross-provider.md`,
+  2026-10-22). Both existing v1 hosted-block fragments are appended in the provider's real response order; neither
+  response row changes. C-1 request conversion joins the logical call for portable replay, while display joins
+  append-only trace cards by owning durable Turn and call id. Usage remains on the reporting response.
 - A tool result row is inserted at `tool_finished`. The `tool_call` trace row is inserted at tool start without a
   `context_seq`.
 - Each commit is one SQLite transaction. The adapter delivers a row to surfaces only after it commits, through the

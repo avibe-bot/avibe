@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping
 
+from core.agent_core.hosted_continuations import effective_deferred_history, hosted_completions, result_fragment
 from core.agent_core.ai.hosted import portable_hosted
 from core.agent_core.ai.provider import ModelEndpoint, OpaquePayload
 from core.agent_core.messages import (
@@ -83,9 +84,18 @@ def transform_messages(
     """
 
     target_protocol = protocol or target.api
+    # Failed Anthropic attempts and their owned client results are audit facts, not request history. All three
+    # continuation decisions below use this same effective view; raw positions are retained by the helper for callers
+    # such as the provider adapter that must address the original request tuple.
+    effective = effective_deferred_history(messages)
+    raw_live = in_flight_position(messages)
+    live = next((index for index, (raw, _) in enumerate(effective) if raw == raw_live), None)
+    messages = tuple(message for _, message in effective)
     # The response the request continues within its turn keeps its hosted calls in place, verbatim or as text (§4.4);
     # every earlier one goes back verbatim with replay evidence or as a synthetic call and result (§5).
-    live = in_flight_position(messages)
+    messages, portable_pairs, parallel_groups, continuing_pairs = _complete_hosted_history(
+        messages, live=live, endpoint=endpoint, target=target, protocol=target_protocol
+    )
     id_map: dict[str, str] = {}
     used_tool_ids: set[str] = set()
     tool_id_occurrences: dict[str, int] = {}
@@ -132,8 +142,13 @@ def transform_messages(
         content: list[AssistantContent] = []
         turn_tool_ids: dict[str, list[str]] = {}
         in_flight = position == live
-        verbatim = native_replay(message, in_flight=in_flight, endpoint=endpoint, target=target, protocol=target_protocol)
-        hosted = {} if verbatim else portable_hosted(message, in_flight=in_flight, interrupted=SYNTHETIC_TOOL_RESULT)
+        verbatim = position not in portable_pairs and native_replay(
+            message, in_flight=in_flight or position in continuing_pairs,
+            endpoint=endpoint, target=target, protocol=target_protocol
+        )
+        hosted = {} if verbatim else portable_hosted(
+            message, in_flight=in_flight, interrupted=SYNTHETIC_TOOL_RESULT, parallel_group=position in parallel_groups
+        )
         # The synthetic results of the current run of hosted calls, and the assistant parts they split off.
         results: list[ToolResultMessage] = []
         parts: list[Message] = []
@@ -141,7 +156,7 @@ def transform_messages(
 
         def split() -> None:
             nonlocal content, results
-            if results:
+            if results and position not in parallel_groups:
                 parts.append(_assistant_part(message, content, stop_reason="tool_use"))
                 parts.extend(results)
                 content, results = [], []
@@ -222,9 +237,70 @@ def transform_messages(
         # sent as an empty assistant message; one that was empty as served (a refusal) still goes, as before.
         if content or not (parts or foreign_thinking):
             transformed.append(_assistant_part(message, content, stop_reason=message.stop_reason))
+        if position in parallel_groups:
+            transformed.extend(results)
 
     transformed = _insert_synthetic_results(transformed)
     return TransformResult(messages=tuple(transformed), tool_call_id_map=dict(id_map))
+
+
+def _complete_hosted_history(
+    messages: list[Message] | tuple[Message, ...], *, live: int | None, endpoint: ModelEndpoint | None,
+    target: Origin, protocol: str,
+) -> tuple[tuple[Message, ...], set[int], set[int], set[int]]:
+    """Join deferred records for eligibility/portable replay, not for native wire ordering (C-1).
+
+    Both halves must be native or neither may be: a result-only native fragment cannot follow a synthetic call.
+    Portable calls remain in the original parallel group and are settled alongside its client results.
+    """
+    pairs = hosted_completions(messages)
+    paired = {(pair.result_position, id(pair.result)) for pair in pairs}
+    orphaned = {
+        position for position, message in enumerate(messages)
+        if isinstance(message, AssistantMessage) and message.origin.api == "anthropic"
+        for block in message.content if isinstance(block, HostedToolBlock) and result_fragment(block)
+        and (position, id(block)) not in paired
+    }
+    if not pairs:
+        return tuple(messages), orphaned, set(), set()
+    continuing = {live} if live is not None else set()
+    for pair in reversed(pairs):
+        if pair.result_position in continuing:
+            continuing.add(pair.use_position)
+    resolved = list(messages)
+    for pair in pairs:
+        message = resolved[pair.use_position]
+        resolved[pair.use_position] = replace(message, content=tuple(
+            replace(block, record=pair.result.record) if block is pair.call else block for block in message.content
+        ))
+    blocked = orphaned | {
+        position for pair in pairs for position in (pair.use_position, pair.result_position)
+        if resolved[position].stop_reason in {"aborted", "error"}
+        or not native_replay(resolved[position], in_flight=position in continuing, endpoint=endpoint,
+                             target=target, protocol=protocol)
+    }
+    # A response can finish a previous group and open another one. Admission is message-wide, so refusal propagates
+    # through that connected exchange rather than leaving an orphan native fragment at either end.
+    while True:
+        expanded = blocked | {
+            position for pair in pairs if pair.use_position in blocked or pair.result_position in blocked
+            for position in (pair.use_position, pair.result_position)
+        }
+        if expanded == blocked:
+            break
+        blocked = expanded
+    parallel = set()
+    for pair in pairs:
+        if pair.use_position not in blocked:
+            continue
+        parallel.add(pair.use_position)
+        message = resolved[pair.result_position]
+        content = tuple(block for block in message.content if block is not pair.result)
+        resolved[pair.result_position] = replace(
+            message, content=content,
+            hosted_summary=message.hosted_summary if any(isinstance(b, HostedToolBlock) for b in content) else None,
+        )
+    return tuple(resolved), blocked, parallel, continuing
 
 
 def _assistant_part(message: AssistantMessage, content: list[AssistantContent], *, stop_reason: str) -> AssistantMessage:
@@ -240,19 +316,20 @@ def _assistant_part(message: AssistantMessage, content: list[AssistantContent], 
 
 
 def in_flight_position(messages: list[Message] | tuple[Message, ...]) -> int | None:
-    """The position of the response a request continues within its turn (§4.4), or None.
+    """The raw position of the response a request continues within its turn (§4.4), or None.
 
-    It is the request's last assistant message, stopped for tools, with nothing after it but tool results (a
-    ``pause_turn`` continuation has none). A user message after it means its turn ended, as one may right after its
-    tool results, so a later turn never counts as continuing it.
+    The effective deferred-exchange history is shared with pairing and wire compilation: failed Anthropic attempts and
+    their owned client results disappear before this tail check, while the returned position remains an index into the
+    caller's original message sequence.
     """
-
-    last = max((i for i, m in enumerate(messages) if isinstance(m, AssistantMessage)), default=None)
-    if last is None or messages[last].stop_reason != "tool_use":  # type: ignore[union-attr]
-        return None
-    if any(not isinstance(message, ToolResultMessage) for message in messages[last + 1 :]):
-        return None
-    return last
+    history = effective_deferred_history(messages)
+    for raw_position, message in reversed(history):
+        if isinstance(message, ToolResultMessage):
+            continue
+        if not isinstance(message, AssistantMessage) or message.stop_reason != "tool_use":
+            return None
+        return raw_position
+    return None
 
 
 def _opaque_admitted(message: AssistantMessage, endpoint: ModelEndpoint | None, payload: OpaquePayload) -> bool:

@@ -437,7 +437,7 @@ scenarios:
       - tests/agent_core/ai/test_hosted_replay.py::test_a_hosted_call_goes_back_verbatim_and_pinned_only_to_its_own_source_with_replay_evidence
       - tests/agent_core/ai/test_hosted_replay.py::test_a_continuation_goes_back_verbatim_only_to_the_hop_that_served_it
   - id: MH-HOSTED-VIBEY-006
-    name: An Anthropic pause_turn continues as one response pinned to its Source and model, with the final request's usage and summed hosted counters, pending calls finalized by id, at most five continuations, ending interrupted when its Source cannot continue it, and verified only when every response was from one origin
+    name: Anthropic server-tool continuations carry pending calls by id; pause_turn stays one pinned response with bounded continuations, while a mixed client/server group appends a same-id completion after client results, replays once, and displays one completed card without rewriting context or charging twice
     status: covered
     kind: contract
     layer: contract
@@ -447,6 +447,19 @@ scenarios:
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_paused_response_its_source_cannot_continue_ends_interrupted_and_keeps_what_it_has
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_continued_response_is_verified_only_when_every_response_in_it_was_from_one_origin
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_counter_past_the_bound_in_any_pause_stays_absent_and_the_response_completes
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_mixed_pause_preserves_exact_assistant_and_result_only_user_group
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_orphan_result_finishes_prior_call_without_repeating_use_and_keeps_usage_here
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_later_replay_pairs_once_but_preserves_native_response_boundaries
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_a_result_from_another_source_cannot_complete_the_previous_sources_call
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_deferred_completion_never_invents_a_charge_from_a_result_block
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_a_steer_waits_until_the_deferred_result_and_never_enters_the_tool_result_user_message
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_deferred_result_then_pause_turn_keeps_the_native_exchange_without_replay_evidence
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_partial_deferred_failure_retries_the_open_exchange_and_pairs_only_the_valid_result
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_failed_deferred_attempt_does_not_cross_a_closed_or_different_exchange
+      - tests/test_vibey_agent.py::test_anthropic_deferred_search_shows_only_its_completion_live_and_on_reload
+      - tests/test_vibey_agent.py::test_restart_defers_accepted_steer_until_native_search_continuation
+      - tests/test_hosted_activity.py::test_deferred_search_has_no_card_or_share_of_an_earlier_search_cost
+      - tests/test_agent_activity_service.py::test_reload_omits_only_old_deferred_search_cards
   - id: MH-HOSTED-VIBEY-007
     name: An image_generate call goes to the gateway's image endpoint with its arguments alone, after the turn's frozen models accept every argument and its reference images are read as read reads them; the images it returns are saved through the media sink and its record names those files; no base64 enters history, and a call that saved no file is a failed record with its code
     status: covered

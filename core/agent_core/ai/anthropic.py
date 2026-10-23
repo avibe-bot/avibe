@@ -56,6 +56,8 @@ from core.agent_core.ai.provider import (
     MediaLoader,
 )
 from core.agent_core.cancel import CancelToken
+from core.agent_core.hosted_continuations import pending_hosted
+from core.agent_core.ai.transform import in_flight_position, native_replay
 from core.agent_core.messages import (
     MAX_HOSTED_COUNT,
     AssistantMessage,
@@ -272,6 +274,16 @@ class AnthropicAdapter(ProviderAdapter):
         hosted = frozenset(native_hosted_tools(request))
         # Each hosted call's ``server_tool_use`` by stream index; its input JSON streams into the assembler.
         uses: dict[int, dict[str, Any]] = {}
+        # A mixed group crosses a committed response boundary. Carry only calls actually sent natively on this hop;
+        # their result-only fragments belong to this response, never a rewrite of the earlier pending row.
+        live = in_flight_position(request.messages)
+        previous = request.messages[live] if live is not None else None
+        deferred = (
+            pending_hosted(previous)
+            if isinstance(previous, AssistantMessage)
+            and native_replay(previous, in_flight=True, endpoint=request.endpoint, target=target, protocol=self.protocol)
+            else {}
+        )
         # A paused response continues as the same one (§4.3): a continuation's blocks follow the paused ones, its hosted
         # counters add to theirs, and its usage, the final request's, stands for the whole response.
         paused = False
@@ -453,12 +465,17 @@ class AnthropicAdapter(ProviderAdapter):
                             continue
                         if kind == "web_search_tool_result":
                             use = next((item for item in uses.values() if item.get("id") == block.get("tool_use_id")), None)
-                            if use is not None and assembler.source_id is not None:
-                                assembler.set_block_kind(index, "hosted_result")
-                                assembler.hosted_block(
-                                    ("hosted", use.get("id")),
-                                    anthropic_hosted_block(use, block, source_id=assembler.source_id),
-                                )
+                            prior = deferred.get(block.get("tool_use_id"))
+                            if use is None and prior is not None and prior.native.source_id == assembler.source_id:
+                                use = prior.native.payload[0]
+                                completed = anthropic_hosted_block(use, block, source_id=assembler.source_id)
+                                completed = replace(completed, native=replace(completed.native, payload=(dict(block),)))
+                            elif use is not None and assembler.source_id is not None:
+                                completed = anthropic_hosted_block(use, block, source_id=assembler.source_id)
+                            else:
+                                continue
+                            assembler.set_block_kind(index, "hosted_result")
+                            assembler.hosted_block(("hosted", use.get("id")), completed)
                             continue
                         if kind == "text":
                             assembler.set_block_kind(index, "text")
@@ -990,7 +1007,15 @@ def build_messages_payload(
             continue
         if converted["role"] == "assistant" and not converted["content"]:
             continue
-        payload_messages.append(converted)
+        if (
+            isinstance(message, ToolResultMessage) and payload_messages
+            and payload_messages[-1]["role"] == "user"
+            and isinstance(payload_messages[-1]["content"], list)
+            and all(block.get("type") == "tool_result" for block in payload_messages[-1]["content"])
+        ):
+            payload_messages[-1]["content"].extend(converted["content"])
+        else:
+            payload_messages.append(converted)
 
     system: Any = request.system
     if request.cache == "default" and request.system:

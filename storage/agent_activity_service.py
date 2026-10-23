@@ -37,14 +37,17 @@ are exactly the ones covered.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import select
 
+from core.agent_core.hosted_continuations import pending_hosted
+from core.agent_core.messages import AssistantMessage, message_from_dict
 from core.backend_failure import is_backend_failure_notification
 from storage import agent_events_service, messages_service
-from storage.models import message_deliveries, session_turns
+from storage.models import message_deliveries, messages, session_turns
 from vibe.message_types import (
     PROMOTED_FROM_KEY,
     PROMOTED_FROM_TYPES,
@@ -247,6 +250,36 @@ def _event_emit_micros(event: dict[str, Any], ts: datetime) -> int:
     return anchor - 1 if isinstance(precedes, str) and precedes else anchor
 
 
+def _without_deferred_traces(conn, session_id: str, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Old releases emitted interrupted cards for calls Anthropic deferred, which never ran.
+
+    Suppress only that exact shape, using each trace's own response. No fragment
+    merging or position changes; every other pending/terminal card stays as written.
+    """
+    candidates = {}
+    for event in events:
+        card = (event.get("content") or {}).get("hosted")
+        if isinstance(card, dict) and card.get("mode") == "native" and card.get("status") == "pending":
+            response_id = card.get("response_id") or (event.get("metadata") or {}).get("precedes_message_id")
+            if isinstance(response_id, str) and response_id:
+                candidates[event["id"]] = (response_id, card.get("call_id"))
+    if not candidates:
+        return events
+    deferred = set()
+    for row_id, owner_session, raw in conn.execute(select(messages.c.id, messages.c.session_id, messages.c.content_json).where(
+        messages.c.id.in_({owner for owner, _ in candidates.values()})
+    )):
+        if owner_session != session_id:
+            continue
+        try:
+            message = message_from_dict(json.loads(raw or "{}")["model"]["message"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if isinstance(message, AssistantMessage):
+            deferred.update((row_id, call_id) for call_id in pending_hosted(message))
+    return [event for event in events if candidates.get(event["id"]) not in deferred]
+
+
 def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, Any]]:
     """Merge the recent tail of relevant messages + tool-call events into one
     chronologically-ordered list of classified items."""
@@ -264,6 +297,7 @@ def _timeline(conn, session_id: str, *, include_text: bool) -> list[dict[str, An
         limit=EVENT_SCAN_LIMIT,
         newest_first=True,
     )
+    events = _without_deferred_traces(conn, session_id, events)
     message_ids = tuple(
         str(message["id"])
         for message in msgs
