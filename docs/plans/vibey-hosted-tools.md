@@ -835,6 +835,12 @@ when metered, sources, failure reason); citations through the existing citation 
 `🔎 Web search "query" · native (xAI) · 6 sources · $0.01`. The image card shows the prompt, the image, the model
 used and the cost; IM attaches the file.
 
+Delivery suppression does not degrade these records: a background Session's tool trace retains the same
+`content.hosted` payload as a foreground Session. Native cards retain `response_id` and the mirror's
+`precedes_message_id`, so opening the Session places the rich card above its owning response, including a
+mixed-search completion at response 2 (§4.3). Suppression still prevents outward IM delivery and live Web
+publication; no pending card, replay, backfill, or delivery receipt is added.
+
 Who ran a call is its vendor's catalog label. A Source whose vendor the catalog does not name, as a compatible
 endpoint's `custom` does not, is named by its Source name in the vendor's place on both surfaces, and is not repeated
 beside it (amended 2026-10-20, #2873).
