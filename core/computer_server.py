@@ -1431,9 +1431,15 @@ class ComputerUseServer:
             if self._session_locks.get(normalized) is not expected_lock:
                 return result
             current_state = self._sessions.get(normalized)
-            if current_state is not None and current_state is not expected_state:
+            if (
+                expected_state is not None
+                and current_state is not None
+                and current_state is not expected_state
+            ):
                 return result
-            if current_state is expected_state:
+            if current_state is not None:
+                # When no state existed at the archive boundary, this is the
+                # state created by a call that was admitted before the fence.
                 self._sessions.pop(normalized, None)
             # ``end_session`` may already have removed the expected state.
             self._session_locks.pop(normalized, None)

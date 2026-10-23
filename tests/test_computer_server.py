@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import threading
 from typing import Any, Callable, Mapping
 
 import pytest
@@ -1788,6 +1789,44 @@ async def test_retire_session_releases_session_state_and_lock(tmp_path: Path) ->
         "list_apps",
         "end_session",
     ]
+
+
+@pytest.mark.asyncio
+async def test_retire_session_reclaims_state_created_by_admitted_call(
+    tmp_path: Path,
+) -> None:
+    """Archive cleanup waits for an admitted call that has not created state yet."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    status_entered = threading.Event()
+    release_status = threading.Event()
+
+    def status_reader() -> ComputerUseStatus:
+        status_entered.set()
+        assert release_status.wait(5)
+        return ComputerUseStatus("ready", None, state)
+
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=status_reader,
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+    call = asyncio.create_task(server.call_tool("list_apps", {"session": "ses-a"}))
+    await _wait_until(status_entered.is_set)
+    assert "ses-a" in server._session_locks
+    assert "ses-a" not in server._sessions
+
+    cleanup = asyncio.create_task(server.retire_session("ses-a"))
+    await asyncio.sleep(0)
+    release_status.set()
+    called = await call
+    retired = await cleanup
+
+    assert called.get("isError") is not True
+    assert retired.get("isError") is not True
+    assert "ses-a" not in server._sessions
+    assert "ses-a" not in server._session_locks
 
 
 @pytest.mark.asyncio
