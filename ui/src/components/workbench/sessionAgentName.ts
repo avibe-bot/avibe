@@ -35,6 +35,18 @@ export function sessionAgentBackend(
   return agent?.backend ?? null;
 }
 
+// The id of the Agent a session's replies come from: its own, else (while it inherits
+// the global default) the default Agent's. ``null`` when neither is known.
+export function sessionAgentId(
+  session: Pick<WorkbenchSession, 'agent_id' | 'agent_name'>,
+  agents: VibeAgentBrief[],
+  defaultAgentName: string | null,
+): string | null {
+  if (session.agent_id) return session.agent_id;
+  const name = session.agent_name?.trim() || defaultAgentName;
+  return (name ? agents.find((candidate) => candidate.name === name)?.id : undefined) ?? null;
+}
+
 // Which Agent wrote one reply, when that is not the session's Agent: a session switched
 // to another Agent (say from Codex to Vibey) keeps its earlier replies under the Agent
 // that wrote them. A reply records that Agent's id and backend (``author_agent_id``,
@@ -42,9 +54,10 @@ export function sessionAgentBackend(
 // the name recorded with the reply, so a reused name or an empty catalog (a read-only
 // viewer) cannot misattribute it. A reply that records neither, or the session's own
 // Agent and backend, is the session's. ``null`` means the session's Agent.
+// ``currentAgentId`` is the session's effective Agent (``sessionAgentId``).
 export function messageAuthorAgent(
   message: Pick<WorkbenchMessage, 'author_name' | 'metadata'>,
-  session: Pick<WorkbenchSession, 'agent_id'>,
+  currentAgentId: string | null,
   sessionBackend: string | null,
   agents: VibeAgentBrief[],
 ): { displayName: string; backend: string | null } | null {
@@ -52,7 +65,7 @@ export function messageAuthorAgent(
   const text = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
   const agentId = text(metadata.author_agent_id);
   const backend = text(metadata.author_backend);
-  const otherAgent = Boolean(agentId && session.agent_id && agentId !== session.agent_id);
+  const otherAgent = Boolean(agentId && currentAgentId && agentId !== currentAgentId);
   const otherBackend = Boolean(backend && sessionBackend && backend !== sessionBackend);
   if (!otherAgent && !otherBackend) return null;
   const agent = agentId ? agents.find((candidate) => candidate.id === agentId) : undefined;

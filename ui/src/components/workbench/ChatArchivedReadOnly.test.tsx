@@ -13,7 +13,7 @@ import type { VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession }
 import { ToastProvider } from '../../context/ToastProvider';
 import { isVoiceControlDisabled } from '../../lib/voiceRecording';
 import { ChatHeaderBar, MessageRow, ThinkingBubble } from './ChatPage';
-import { messageAuthorAgent, sessionAgentBackend, sessionAgentDisplayName } from './sessionAgentName';
+import { messageAuthorAgent, sessionAgentBackend, sessionAgentDisplayName, sessionAgentId } from './sessionAgentName';
 import { BACKEND_BRAND_MARKS } from '../visual/backendBrandMarks';
 import { Composer } from './Composer';
 import { QuickReplies } from './QuickReplies';
@@ -273,24 +273,30 @@ describe('chat avatars', () => {
 
   it('keeps a reply under the Agent that wrote it after the session switches', () => {
     const reviewer = { ...archivedPm, id: 'agt-reviewer', name: 'reviewer', display_name: 'Reviewer', backend: 'claude' };
-    const switched = session({ agent_id: vibey.id, agent_name: 'vibey', agent_backend: 'vibey' });
     const reply = (author_name: string | null, metadata: Record<string, unknown> = {}) => ({ author_name, metadata });
+    const byReviewer = reply('reviewer', { author_agent_id: reviewer.id, author_backend: 'claude' });
     // The session's own Agent and backend, or a reply that records neither.
-    expect(messageAuthorAgent(reply('vibey', { author_agent_id: vibey.id, author_backend: 'vibey' }), switched, 'vibey', [vibey])).toBeNull();
-    expect(messageAuthorAgent(reply('codex'), switched, 'vibey', [vibey])).toBeNull();
+    expect(messageAuthorAgent(reply('vibey', { author_agent_id: vibey.id, author_backend: 'vibey' }), vibey.id, 'vibey', [vibey])).toBeNull();
+    expect(messageAuthorAgent(reply('codex'), vibey.id, 'vibey', [vibey])).toBeNull();
     // Named from the catalog by the recorded id, drawn with the recorded backend.
-    expect(messageAuthorAgent(reply('reviewer', { author_agent_id: reviewer.id, author_backend: 'claude' }), switched, 'vibey', [vibey, reviewer]))
-      .toEqual({ displayName: 'Reviewer', backend: 'claude' });
+    expect(messageAuthorAgent(byReviewer, vibey.id, 'vibey', [vibey, reviewer])).toEqual({ displayName: 'Reviewer', backend: 'claude' });
     // No catalog (a read-only viewer), or a new Agent that took the old name: the
     // recorded name and backend still stand.
     const taker = { ...reviewer, id: 'agt-new', display_name: 'Someone else', backend: 'opencode' };
     for (const agents of [[], [vibey, taker]]) {
-      expect(messageAuthorAgent(reply('reviewer', { author_agent_id: reviewer.id, author_backend: 'claude' }), switched, 'vibey', agents))
-        .toEqual({ displayName: 'reviewer', backend: 'claude' });
+      expect(messageAuthorAgent(byReviewer, vibey.id, 'vibey', agents)).toEqual({ displayName: 'reviewer', backend: 'claude' });
     }
     // The same Agent, renamed or archived since, is the session's.
-    const archived = session({ agent_id: reviewer.id, agent_name: '_reviewer-1a2b', agent_backend: 'claude' });
-    expect(messageAuthorAgent(reply('reviewer', { author_agent_id: reviewer.id, author_backend: 'claude' }), archived, 'claude', [])).toBeNull();
+    expect(messageAuthorAgent(byReviewer, reviewer.id, 'claude', [])).toBeNull();
+    // A session cleared back to an inherited default on the same backend still tells
+    // the earlier Agent's reply apart, through the default's id.
+    const claudeDefault = { ...reviewer, id: 'agt-claude', name: 'claude', display_name: 'claude' };
+    const inherits = session({ agent_id: null, agent_name: null, agent_backend: null });
+    const inheritedId = sessionAgentId(inherits, [reviewer, claudeDefault], 'claude');
+    expect(inheritedId).toBe('agt-claude');
+    expect(messageAuthorAgent(byReviewer, inheritedId, 'claude', [reviewer, claudeDefault])).toEqual({ displayName: 'Reviewer', backend: 'claude' });
+    expect(sessionAgentId(session({ agent_id: 'agt-x', agent_name: 'x' }), [], null)).toBe('agt-x');
+    expect(sessionAgentId(inherits, [], 'claude')).toBeNull();
   });
 
   it('draws Vibey in the thinking and transcript bubbles of a session that inherits it', () => {

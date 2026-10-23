@@ -5588,6 +5588,7 @@ class SessionTurnManager:
         *,
         outcome: str,
         failure_evidence: dict[str, Any] | None = None,
+        resume_successors: bool = True,
     ) -> dict[str, Any]:
         """Settle definitive no-write evidence at the terminal chokepoint.
 
@@ -5615,6 +5616,7 @@ class SessionTurnManager:
             evidence={"reason": outcome, **(failure_evidence or {})},
             retire_unwritten_delivery_ids=retire_ids,
             retire_unwritten_attempt_outcome="not_written",
+            resume_successors=resume_successors,
         )
         if result.get("changed"):
             if retire_ids and retire_session_id:
@@ -5660,6 +5662,9 @@ class SessionTurnManager:
         no-op; when it failed, the runner commits the same thing it would have.
         """
 
+        # The user was told to send this input again (``mark_prewrite_input_retired``),
+        # so however this runner ends, the input is retired rather than replayed.
+        told_to_resend = (failure_evidence or {}).get("retire_input") is True
         try:
             if terminal_commit is not None:
                 committed_settlement = (
@@ -5688,8 +5693,7 @@ class SessionTurnManager:
                 # provably absent, so it settles as such below rather than staying
                 # open, where it showed as running and recovery re-ran its input.
                 if not (
-                    definitive_prewrite_exit
-                    and not cancelled
+                    (told_to_resend or (definitive_prewrite_exit and not cancelled))
                     and result.get("reason") == "start_acceptance_unproven"
                 ):
                     if not resume:
@@ -5701,6 +5705,16 @@ class SessionTurnManager:
                     interruption == SETTLED_BY_STOPPED
                     and not cancel_defers_queue_resume
                 )
+                if told_to_resend:
+                    result = self._settle_durable_prewrite_failure(
+                        turn_id,
+                        outcome=interruption,
+                        failure_evidence=failure_evidence,
+                        resume_successors=resume_after_cancel,
+                    )
+                    if not resume_after_cancel:
+                        result["defer_queue_resume"] = True
+                    return result
                 # Same map as every other Turn-outcome surface. This branch used
                 # to hardcode ``stopped``, so a rolling refresh landed ``failed``
                 # here while ``release_for_backend_refresh`` -- the very caller
