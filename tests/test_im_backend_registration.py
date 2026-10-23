@@ -248,6 +248,8 @@ async def test_a_route_offers_its_backends_menu_and_saving_unchanged_keeps_it(pl
 
     models, efforts = form.offered("model"), form.offered("effort")
     assert {"model-a", "model-b"} <= set(models)
+    if platform == "telegram":
+        assert {f"filler-{i}" for i in range(120)} <= set(models)  # its picker pages, so nothing is cut
     assert efforts == ["__default__", "high", "max"]  # model-b's, plus the stored effort the menu omits
     if platform in {"slack", "discord"}:
         assert form.long_id not in models  # one such id must not make the whole form invalid

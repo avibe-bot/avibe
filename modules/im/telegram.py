@@ -117,8 +117,7 @@ class TelegramBot(BaseIMClient):
     """Telegram adapter using Bot API long polling."""
 
     _MAX_IN_FLIGHT_UPDATE_TASKS = 100
-    # The routing picker pages its options; this bounds how many pages one list may take.
-    route_option_limit = 100
+    # The routing picker pages its options, so a route menu offers its whole list here (no ``route_option_limit``).
     _MAX_IN_FLIGHT_MESSAGE_CALLBACK_TASKS = 100
     _COMMAND_MENU = (
         ("start", "telegram.commandMenu.start"),
