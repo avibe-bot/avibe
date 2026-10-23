@@ -100,10 +100,10 @@ fn the_bootstrap_capability_grants_only_the_three_shell_commands() {
 }
 
 #[test]
-fn the_shell_enables_only_its_four_capabilities() {
+fn the_shell_enables_only_its_five_capabilities() {
     assert_eq!(
         config()["app"]["security"]["capabilities"],
-        serde_json::json!(["bootstrap", "window-drag", "pet", "main-pet-bind"])
+        serde_json::json!(["bootstrap", "window-drag", "pet", "main-pet-bind", "main-computer-use"])
     );
 }
 
@@ -400,6 +400,8 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "bootstrap_status",
         "bootstrap_retry",
         "open_install_docs",
+        "computer_use_enable",
+        "computer_use_open_permission",
         "pet_ready",
         "pet_set_expanded",
         "pet_hit_regions",
@@ -763,7 +765,8 @@ fn native_lifecycle_controls_never_add_a_webview_permission() {
     ] {
         assert!(source.contains(required), "native lifecycle wiring missing {required}");
     }
-    assert_eq!(source.matches("#[tauri::command]").count(), 3);
+    // The three bootstrap commands and the two Computer Use guide actions.
+    assert_eq!(source.matches("#[tauri::command]").count(), 5);
     for permission in capability()["permissions"].as_array().expect("capability permissions") {
         let permission = permission.as_str().expect("string permission");
         assert!(!permission.contains("autostart") && !permission.contains("tray") && !permission.contains("dialog"));
@@ -1081,6 +1084,53 @@ fn loopback_patterns(grant: &Value) -> Vec<tauri::utils::acl::RemoteUrlPattern> 
         .iter()
         .map(|pattern| pattern.as_str().unwrap().parse().unwrap())
         .collect()
+}
+
+#[test]
+fn the_workbench_gets_the_computer_use_guide_actions_only_on_macos_loopback_pages() {
+    let grant = read_json(crate_dir().join("capabilities/main-computer-use.json"));
+    assert_eq!(grant["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert_eq!(grant["local"], false, "the bundled bootstrap page never gets them");
+    assert_eq!(grant["platforms"], serde_json::json!(["macOS"]));
+    assert_eq!(
+        grant["permissions"],
+        serde_json::json!(["allow-computer-use-enable", "allow-computer-use-open-permission"])
+    );
+    let patterns = loopback_patterns(&grant);
+    for allowed in ["http://127.0.0.1:5123/settings/computer-use", "http://[::1]:6174/"] {
+        let url = url::Url::parse(allowed).unwrap();
+        assert!(patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
+    for rejected in [
+        "https://example.com/settings/computer-use",
+        "http://127.0.0.1.example.com/",
+        "http://192.168.1.2:5123/settings/computer-use",
+    ] {
+        let url = url::Url::parse(rejected).unwrap();
+        assert!(!patterns.iter().any(|pattern| pattern.test(&url)), "{url}");
+    }
+    for entry in std::fs::read_dir(crate_dir().join("capabilities")).unwrap() {
+        let path = entry.unwrap().path();
+        if path.file_name().is_some_and(|name| name != "main-computer-use.json") {
+            assert!(
+                !read_to_string(&path).contains("allow-computer-use-"),
+                "{} must not grant Computer Use commands",
+                path.display()
+            );
+        }
+    }
+    // The page names a pane; the shell owns the URLs and re-checks the caller.
+    let source = shipping_source("src/lib.rs");
+    let command = source
+        .split("fn computer_use_open_permission(")
+        .nth(1)
+        .unwrap()
+        .split("\n}\n")
+        .next()
+        .unwrap();
+    assert!(command.contains("PermissionPane::parse(&pane)"));
+    assert!(!command.contains("open_url"));
+    assert!(source.contains("if !pet::is_workbench(window)"));
 }
 
 #[test]

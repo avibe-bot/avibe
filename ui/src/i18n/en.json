@@ -520,13 +520,20 @@
     },
     "computerUse": {
       "title": "Computer Use",
-      "subtitle": "Let Avibe agents see and operate this Mac. Follow the steps in order; this page updates as each one is done.",
+      "subtitle": "Let Avibe agents see and operate this Mac. Follow the steps in order; each one is marked done as soon as macOS reports it.",
       "recheck": "Recheck",
       "checking": "Checking…",
       "loading": "Checking Computer Use status…",
       "stepsTitle": "Setup steps",
       "unsupportedTitle": "Available in the Avibe desktop app",
       "unsupportedDetail": "Computer Use is set up from Avibe Desktop on a Mac. Open the desktop app to continue.",
+      "remoteNotice": "Complete these steps in the Avibe desktop app on the Mac. This page shows their progress.",
+      "actionFailed": "The desktop app did not respond. Try again, or use the Avibe menu bar menu.",
+      "relaunchNotice": "If macOS asks you to Quit & Reopen, choose it. Avibe will reopen and continue this page automatically.",
+      "actions": {
+        "enable": "Turn on",
+        "openSettings": "Open Settings"
+      },
       "stepState": {
         "complete": "done",
         "current": "current step",
@@ -535,19 +542,15 @@
       "steps": {
         "enable": {
           "title": "Turn on Computer Use",
-          "detail": "In the Avibe Desktop menu bar (tray) menu, turn on Computer Use."
+          "detail": "Same as the Computer Use switch in the Avibe menu bar menu."
         },
         "accessibility": {
           "title": "Allow Accessibility",
-          "detail": "In System Settings → Privacy & Security → Accessibility, turn on Avibe. Avibe usually opens this pane for you; if Avibe is not listed, click + and add it."
+          "detail": "In System Settings → Privacy & Security → Accessibility, turn on Avibe. If Avibe is not listed, click + and add it."
         },
         "screenRecording": {
           "title": "Allow Screen & System Audio Recording",
           "detail": "In System Settings → Privacy & Security → Screen & System Audio Recording, authorize the running Avibe Desktop app: click +, or drag Avibe into the list, then turn it on."
-        },
-        "recheck": {
-          "title": "Come back and recheck",
-          "detail": "After you grant Screen Recording, macOS may quit and reopen Avibe. When it reopens, come back here and click Recheck."
         }
       }
     },
@@ -5254,8 +5257,8 @@
       "errorKind": "Failure kind",
       "blockers": "Sources that were unavailable",
       "upstreamNote": "These come from the upstream provider's API. Avibe keeps the status, error code, and the provider's error message with credentials removed, up to 400 characters.",
-        "upstreamDetail": "Upstream said",
-        "connectionDetail": "Connection error",
+      "upstreamDetail": "Upstream said",
+      "connectionDetail": "Connection error",
       "backendDetail": "Agent backend reported",
       "copyRecord": "Copy record",
       "reason": {

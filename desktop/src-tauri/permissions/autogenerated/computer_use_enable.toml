@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-computer-use-enable"
+description = "Enables the computer_use_enable command without any pre-configured scope."
+commands.allow = ["computer_use_enable"]
+
+[[permission]]
+identifier = "deny-computer-use-enable"
+description = "Denies the computer_use_enable command without any pre-configured scope."
+commands.deny = ["computer_use_enable"]

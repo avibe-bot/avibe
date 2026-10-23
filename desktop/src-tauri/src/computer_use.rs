@@ -10,7 +10,7 @@ use std::process::Stdio;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use avibe_runtime_host::computer_use::{
     CapabilityCache, CapabilityProbe, CapabilityVerdict, ComputerUseLifecycle, ComputerUsePhase, ComputerUseRecord,
@@ -51,6 +51,11 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 const PERMISSION_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const PERMISSION_CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 const START_BACKOFF: Duration = Duration::from_secs(1);
+/// Written when the Workbench guide opens Screen Recording, so a macOS
+/// "Quit & Reopen" brings the relaunched shell back to the guide.
+const SETUP_RESUME_FILE: &str = "permission-setup-resume";
+/// How long after that request a launch still counts as its relaunch.
+const SETUP_RESUME_WINDOW: Duration = Duration::from_secs(15 * 60);
 const COMPUTER_USE_SCHEMA: u64 = COMPUTER_USE_SCHEMA_VERSION as u64;
 const DARWIN_SOCKET_PATH_MAX_BYTES: usize = 103;
 const SOCKET_DIRECTORY_MODE: u32 = 0o700;
@@ -131,8 +136,36 @@ impl Default for MenuView {
     }
 }
 
+/// A System Settings privacy pane the Workbench guide may open. The page names
+/// one of these; it never supplies a URL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PermissionPane {
+    Accessibility,
+    ScreenRecording,
+}
+
+impl PermissionPane {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "accessibility" => Some(Self::Accessibility),
+            "screen_recording" => Some(Self::ScreenRecording),
+            _ => None,
+        }
+    }
+
+    /// Checked on macOS 26.2: both land on their Privacy & Security list.
+    fn settings_url(self) -> &'static str {
+        match self {
+            Self::Accessibility => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            Self::ScreenRecording => "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+        }
+    }
+}
+
 enum Event {
     Toggle,
+    Enable,
+    OpenPermission(PermissionPane),
     RuntimeReady { origin: LoopbackOrigin, adoption: bool },
     RuntimeLost,
     RuntimeStopped,
@@ -179,6 +212,27 @@ impl Controller {
 
     pub(crate) fn toggle(&self) {
         let _ = self.sender.send(Event::Toggle);
+    }
+
+    /// Turns Computer Use on exactly as the tray toggle does, and does nothing
+    /// when it is already on: a page acting on a stale status must not turn it
+    /// off.
+    pub(crate) fn turn_on(&self) -> Result<(), String> {
+        self.request(Event::Enable)
+    }
+
+    /// Asks macOS for `pane`'s grant where it allows a prompt, then opens the
+    /// pane in System Settings.
+    pub(crate) fn open_permission(&self, pane: PermissionPane) -> Result<(), String> {
+        self.request(Event::OpenPermission(pane))
+    }
+
+    /// Hands a page request to the lifecycle. A degraded controller has no
+    /// lifecycle task, so the page is told the request went nowhere.
+    fn request(&self, event: Event) -> Result<(), String> {
+        self.sender
+            .send(event)
+            .map_err(|_| "Computer Use is unavailable.".to_owned())
     }
 
     pub(crate) fn runtime_ready(&self, origin: LoopbackOrigin, adoption: bool) {
@@ -355,6 +409,7 @@ struct RuntimeState {
     host_bundle_id: String,
     assets_valid: bool,
     pending_write: Option<ComputerUseRecord>,
+    setup_resume_armed: bool,
     started_at: Instant,
 }
 
@@ -394,6 +449,7 @@ impl RuntimeState {
             host_bundle_id: String::new(),
             assets_valid,
             pending_write: None,
+            setup_resume_armed: false,
             started_at: Instant::now(),
         };
         runtime.host_bundle_id = runtime.app.config().identifier.clone();
@@ -428,6 +484,12 @@ impl RuntimeState {
                     };
                     match event {
                         Event::Toggle => self.toggle().await,
+                        Event::Enable => {
+                            if !self.lifecycle.enabled() {
+                                self.toggle().await;
+                            }
+                        }
+                        Event::OpenPermission(pane) => self.open_permission(pane).await,
                         Event::RuntimeReady { origin, adoption } => {
                             self.runtime_ready(origin, adoption).await;
                         }
@@ -482,6 +544,21 @@ impl RuntimeState {
         }
         let directive = self.lifecycle.toggle_on(self.capabilities.current(), grants);
         self.apply(directive).await;
+    }
+
+    async fn open_permission(&mut self, pane: PermissionPane) {
+        match pane {
+            PermissionPane::Accessibility => request_accessibility_grant(&self.app, &self.diagnostics).await,
+            PermissionPane::ScreenRecording => {
+                // The full request also runs the one-pixel capture, which is
+                // what lists Avibe in the Screen Recording pane.
+                let _ = request_permissions(&self.app, &self.diagnostics).await;
+                self.setup_resume_armed = arm_setup_resume(&self.paths.state_dir, SystemTime::now()).is_ok();
+            }
+        }
+        open_permission_settings(&self.app, pane);
+        self.activated().await;
+        self.settle_setup_resume();
     }
 
     async fn runtime_ready(&mut self, origin: LoopbackOrigin, adoption: bool) {
@@ -661,10 +738,20 @@ impl RuntimeState {
             return false;
         }
         self.publish_view();
+        self.settle_setup_resume();
         if directive.spawn_permission_probe {
             self.start_permission_probe().await;
         }
         true
+    }
+
+    /// Once this process has seen Screen Recording settle either way, no
+    /// relaunch is needed to finish the guide, so the marker goes.
+    fn settle_setup_resume(&mut self) {
+        if self.setup_resume_armed && !awaiting_screen_recording(self.lifecycle.phase(), self.lifecycle.reason()) {
+            let _ = std::fs::remove_file(self.paths.state_dir.join(SETUP_RESUME_FILE));
+            self.setup_resume_armed = false;
+        }
     }
 
     fn invalidate_start_retry(&mut self) {
@@ -883,6 +970,39 @@ impl RuntimeState {
         });
         crate::refresh_computer_use_control(&self.app);
     }
+}
+
+fn awaiting_screen_recording(phase: ComputerUsePhase, reason: Option<&str>) -> bool {
+    phase == ComputerUsePhase::NeedsPermission && reason == Some("screen_recording")
+}
+
+fn unix_seconds(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs())
+}
+
+fn arm_setup_resume(state_dir: &Path, now: SystemTime) -> io::Result<()> {
+    std::fs::write(state_dir.join(SETUP_RESUME_FILE), unix_seconds(now).to_string())
+}
+
+/// Consumes the marker a guide-driven Screen Recording request left, and says
+/// whether this launch is that request's relaunch. A marker is read once:
+/// stale or not, it never steers a second launch.
+fn take_setup_resume_at(state_dir: &Path, now: SystemTime) -> bool {
+    let path = state_dir.join(SETUP_RESUME_FILE);
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let _ = std::fs::remove_file(&path);
+    let Ok(armed_at) = contents.trim().parse::<u64>() else {
+        return false;
+    };
+    let now = unix_seconds(now);
+    armed_at <= now && now - armed_at <= SETUP_RESUME_WINDOW.as_secs()
+}
+
+/// Whether this launch should reopen the Computer Use guide.
+pub(crate) fn take_setup_resume(app: &AppHandle) -> bool {
+    state_dir(app).is_ok_and(|dir| take_setup_resume_at(&dir, SystemTime::now()))
 }
 
 fn restored_lifecycle(stored: &StoredComputerUseState, assets_valid: bool) -> ComputerUseLifecycle {
@@ -1772,6 +1892,30 @@ async fn request_permissions(app: &AppHandle, diagnostics: &BootstrapLog) -> Gra
     result.grants()
 }
 
+/// The Accessibility half of [`request_permissions`]: the system prompt lists
+/// Avibe in the pane, and Screen Recording is left alone.
+async fn request_accessibility_grant(app: &AppHandle, diagnostics: &BootstrapLog) {
+    let (sender, receiver) = oneshot::channel();
+    let dispatched = app.run_on_main_thread(move || {
+        let granted = if MainThreadMarker::new().is_some() {
+            Some(request_accessibility())
+        } else {
+            None
+        };
+        let _ = sender.send(granted);
+    });
+    let outcome = match dispatched {
+        Err(_) => "dispatch_failed".to_owned(),
+        Ok(()) => match timeout(PERMISSION_REQUEST_TIMEOUT, receiver).await {
+            Ok(Ok(Some(granted))) => granted.to_string(),
+            Ok(Ok(None)) => "non_main".to_owned(),
+            Ok(Err(_)) => "dropped".to_owned(),
+            Err(_) => "timed_out".to_owned(),
+        },
+    };
+    diagnostics.record("computer-use.accessibility-request", &[("accessibility", outcome)]);
+}
+
 fn request_accessibility() -> bool {
     // SAFETY: The dictionary contains two process-lifetime CoreFoundation
     // constants. The prompting call does not retain it after returning.
@@ -2040,16 +2184,17 @@ fn record_permission_request(diagnostics: &BootstrapLog, result: &PermissionRequ
 }
 
 fn open_missing_permission_settings(app: &AppHandle, grants: Grants) {
-    let screen_recording_needs_guidance = grants.accessibility && !grants.screen_recording;
-    let url = if !grants.accessibility {
-        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    let pane = if grants.accessibility {
+        PermissionPane::ScreenRecording
     } else {
-        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        PermissionPane::Accessibility
     };
-    if tauri_plugin_opener::open_url(url, None::<&str>).is_err() {
-        let _ = app;
-    }
-    if screen_recording_needs_guidance {
+    open_permission_settings(app, pane);
+}
+
+fn open_permission_settings(app: &AppHandle, pane: PermissionPane) {
+    let _ = tauri_plugin_opener::open_url(pane.settings_url(), None::<&str>);
+    if pane == PermissionPane::ScreenRecording {
         let catalog = crate::native_catalog_for_locales(sys_locale::get_locales()).computer_use;
         app.dialog()
             .message(catalog.screen_recording_guide)
@@ -2742,6 +2887,105 @@ done
             configured_path_with_value(bundled, Some(injected.clone().into_os_string()), true),
             injected
         );
+    }
+
+    #[test]
+    fn a_degraded_controller_reports_that_page_requests_went_nowhere() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let controller = Controller {
+            sender,
+            view: Arc::new(Mutex::new(MenuView::default())),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+            shutdown_started: AtomicBool::new(false),
+        };
+        assert!(controller.turn_on().is_ok());
+        assert!(controller.open_permission(PermissionPane::Accessibility).is_ok());
+        // `RuntimeState::new` failing drops the receiver; nothing will run.
+        drop(receiver);
+        assert!(controller.turn_on().is_err());
+        assert!(controller.open_permission(PermissionPane::ScreenRecording).is_err());
+    }
+
+    #[test]
+    fn the_guide_names_only_the_two_privacy_panes() {
+        assert_eq!(
+            PermissionPane::parse("accessibility"),
+            Some(PermissionPane::Accessibility)
+        );
+        assert_eq!(
+            PermissionPane::parse("screen_recording"),
+            Some(PermissionPane::ScreenRecording)
+        );
+        for rejected in [
+            "",
+            "Accessibility",
+            "screen-recording",
+            "camera",
+            "x-apple.systempreferences:",
+        ] {
+            assert_eq!(PermissionPane::parse(rejected), None, "{rejected}");
+        }
+        assert_eq!(
+            PermissionPane::Accessibility.settings_url(),
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        );
+        assert_eq!(
+            PermissionPane::ScreenRecording.settings_url(),
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        );
+    }
+
+    #[test]
+    fn a_setup_resume_marker_steers_one_launch_inside_its_window() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let dir = temporary.path();
+        let armed = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        assert!(!take_setup_resume_at(dir, armed), "no marker, no resume");
+
+        arm_setup_resume(dir, armed).unwrap();
+        assert!(take_setup_resume_at(dir, armed + SETUP_RESUME_WINDOW));
+        assert!(
+            !take_setup_resume_at(dir, armed + SETUP_RESUME_WINDOW),
+            "a marker is consumed by the launch that reads it"
+        );
+
+        for (now, label) in [
+            (armed + SETUP_RESUME_WINDOW + Duration::from_secs(1), "stale"),
+            (armed - Duration::from_secs(1), "from the future"),
+        ] {
+            arm_setup_resume(dir, armed).unwrap();
+            assert!(!take_setup_resume_at(dir, now), "{label}");
+            assert!(
+                !dir.join(SETUP_RESUME_FILE).exists(),
+                "a {label} marker is still removed"
+            );
+        }
+
+        std::fs::write(dir.join(SETUP_RESUME_FILE), "not a time").unwrap();
+        assert!(!take_setup_resume_at(dir, armed));
+        assert!(!dir.join(SETUP_RESUME_FILE).exists());
+    }
+
+    #[test]
+    fn only_a_pending_screen_recording_grant_keeps_the_resume_marker() {
+        assert!(awaiting_screen_recording(
+            ComputerUsePhase::NeedsPermission,
+            Some("screen_recording")
+        ));
+        assert!(!awaiting_screen_recording(
+            ComputerUsePhase::NeedsPermission,
+            Some("accessibility")
+        ));
+        for phase in [
+            ComputerUsePhase::Off,
+            ComputerUsePhase::Starting,
+            ComputerUsePhase::Ready,
+            ComputerUsePhase::Error,
+            ComputerUsePhase::Stopped,
+            ComputerUsePhase::NeedsRuntime,
+        ] {
+            assert!(!awaiting_screen_recording(phase, Some("screen_recording")), "{phase:?}");
+        }
     }
 
     #[test]

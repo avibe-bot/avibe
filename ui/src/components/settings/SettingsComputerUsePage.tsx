@@ -1,16 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import type { FC } from 'react';
-import { Check, LoaderCircle, Monitor, RotateCw } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { FC, ReactNode } from 'react';
+import { Check, ExternalLink, Info, LoaderCircle, Monitor, Power, RotateCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 
+import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { isDesktopShell } from '@/lib/desktopShell';
+import { computerUseShellActions, isDesktopShell, type ComputerUsePermissionPane } from '@/lib/desktopShell';
 import type { TranslationKey } from '@/i18n/types';
 import { ComputerUseStatusIcon } from '../workbench/ComputerUseStatusLine';
 import {
+  COMPUTER_USE_GUIDE_REFRESH_INTERVAL_MS,
   COMPUTER_USE_GUIDE_STEPS,
-  COMPUTER_USE_REFRESH_INTERVAL_MS,
   computerUseGuideProgress,
   computerUseToneClass,
   readComputerUseStatus,
@@ -35,10 +36,12 @@ const STEP_COPY: Record<ComputerUseGuideStep, { title: TranslationKey; detail: T
     title: 'settings.computerUse.steps.screenRecording.title',
     detail: 'settings.computerUse.steps.screenRecording.detail',
   },
-  recheck: {
-    title: 'settings.computerUse.steps.recheck.title',
-    detail: 'settings.computerUse.steps.recheck.detail',
-  },
+};
+
+/** The privacy pane each permission step opens; `enable` turns the feature on instead. */
+const STEP_PANE: Partial<Record<ComputerUseGuideStep, ComputerUsePermissionPane>> = {
+  accessibility: 'accessibility',
+  screenRecording: 'screen_recording',
 };
 
 const STEP_STATE_LABEL: Record<ComputerUseGuideStepState, TranslationKey> = {
@@ -61,68 +64,128 @@ const StepMarker: FC<{ index: number; state: ComputerUseGuideStepState }> = ({ i
   </span>
 );
 
+const GuideNote: FC<{ testId: string; tone?: 'muted' | 'destructive'; children: ReactNode }> = ({
+  testId,
+  tone = 'muted',
+  children,
+}) => (
+  <p
+    data-testid={testId}
+    className={clsx(
+      'mt-1.5 flex max-w-2xl items-start gap-1.5 text-[12px] leading-relaxed',
+      tone === 'destructive' ? 'text-destructive-ink' : 'text-foreground',
+    )}
+  >
+    <Info className="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+    <span>{children}</span>
+  </p>
+);
+
 /**
  * Settings → Computer Use: the macOS permission setup as one numbered guide
- * whose progress is read from the desktop status endpoint. Only the desktop
- * shell lists this page; any other host reaching it gets a short notice.
+ * whose progress is read from the desktop status endpoint while the page is
+ * visible. Inside the desktop shell each current step carries its action; any
+ * other host follows the same live status read-only.
  */
 export const SettingsComputerUsePage: FC = () => {
   const { t } = useTranslation();
   const desktopShell = isDesktopShell();
+  const actions = useMemo(() => computerUseShellActions(), []);
   const [read, setRead] = useState<ComputerUseStatusRead | null>(null);
   const [checking, setChecking] = useState(false);
-  // A poll that started before a Recheck must not overwrite the newer answer.
-  const latestRequest = useRef(0);
-
-  // Resolves to the read, or `undefined` once a newer read has started.
-  const readLatest = useCallback(async (): Promise<ComputerUseStatusRead | null | undefined> => {
-    const request = ++latestRequest.current;
-    const next = await readComputerUseStatus();
-    return request === latestRequest.current ? next : undefined;
-  }, []);
+  const [runningStep, setRunningStep] = useState<ComputerUseGuideStep | null>(null);
+  const [failedStep, setFailedStep] = useState<ComputerUseGuideStep | null>(null);
+  const [screenRecordingRequested, setScreenRecordingRequested] = useState(false);
+  // At most one status read is in flight. Every caller shares it rather than
+  // starting a newer one: a read is never invalidated, so even reads slower
+  // than the refresh interval (`ready` can wait on the Controller) land.
+  const inFlight = useRef<Promise<void> | null>(null);
+  const mounted = useRef(true);
 
   // A transient failure (`null`) keeps the last observed state.
-  const apply = (next: ComputerUseStatusRead | null | undefined) => {
-    if (next) setRead(next);
-  };
+  const readStatus = useCallback((): Promise<void> => {
+    if (!inFlight.current) {
+      inFlight.current = readComputerUseStatus()
+        .then((next) => {
+          if (mounted.current && next) setRead(next);
+        })
+        .finally(() => {
+          inFlight.current = null;
+        });
+    }
+    return inFlight.current;
+  }, []);
 
   const recheck = () => {
     setChecking(true);
-    void readLatest().then((next) => {
-      setChecking(false);
-      apply(next);
+    void readStatus().then(() => {
+      if (mounted.current) setChecking(false);
     });
   };
 
   useEffect(() => {
-    if (!desktopShell) return undefined;
-    const poll = () => {
-      void readLatest().then((next) => {
-        if (next) setRead(next);
+    mounted.current = true;
+    // One polling chain while the page is visible: the next read is scheduled
+    // only after the current one settles. `chained` is true while the chain
+    // owns either a pending timer or a read it is waiting for.
+    let active = true;
+    let chained = false;
+    let timer: number | undefined;
+    const visible = () => document.visibilityState !== 'hidden';
+    const step = () => {
+      timer = undefined;
+      chained = true;
+      void readStatus().then(() => {
+        if (!active || !visible()) {
+          chained = false;
+          return;
+        }
+        timer = window.setTimeout(step, COMPUTER_USE_GUIDE_REFRESH_INTERVAL_MS);
       });
     };
-    poll();
-    const interval = window.setInterval(poll, COMPUTER_USE_REFRESH_INTERVAL_MS);
-    // Granting a permission happens in System Settings; returning to the
-    // window is the moment the answer is most likely to have changed.
     const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') poll();
+      if (visible()) {
+        // Returning reads at once, since granting happens in System Settings.
+        if (!chained) step();
+      } else if (timer !== undefined) {
+        window.clearTimeout(timer);
+        timer = undefined;
+        chained = false;
+      }
     };
-    window.addEventListener('focus', poll);
+    const onFocus = () => void readStatus();
+    if (visible()) step();
+    else void readStatus();
+    window.addEventListener('focus', onFocus);
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => {
-      // Invalidate a read still in flight so it lands nowhere.
-      latestRequest.current += 1;
-      window.clearInterval(interval);
-      window.removeEventListener('focus', poll);
+      active = false;
+      mounted.current = false;
+      window.clearTimeout(timer);
+      window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
-  }, [desktopShell, readLatest]);
+  }, [readStatus]);
 
-  const unsupported = !desktopShell || read?.kind === 'unsupported';
-  const status = read?.kind === 'status' ? read.status : null;
+  const runStep = (step: ComputerUseGuideStep) => {
+    if (!actions) return;
+    const pane = STEP_PANE[step];
+    setRunningStep(step);
+    setFailedStep(null);
+    void (pane ? actions.openPermission(pane) : actions.enable())
+      .then(
+        () => {
+          if (step === 'screenRecording') setScreenRecordingRequested(true);
+        },
+        () => setFailedStep(step),
+      )
+      .finally(() => {
+        setRunningStep(null);
+        void readStatus();
+      });
+  };
 
-  if (unsupported) {
+  if (read?.kind === 'unsupported') {
     return (
       <SettingsPageShell
         activeTab="computer-use"
@@ -146,6 +209,7 @@ export const SettingsComputerUsePage: FC = () => {
     );
   }
 
+  const status = read?.kind === 'status' ? read.status : null;
   const copy = status ? computerUseStatusCopy(status, (key: ComputerUseCopyKey) => t(key)) : null;
   const progress = status ? computerUseGuideProgress(status) : null;
 
@@ -157,7 +221,7 @@ export const SettingsComputerUsePage: FC = () => {
       actions={
         <Button
           type="button"
-          variant="secondary"
+          variant="ghost"
           size="xs"
           disabled={checking}
           onClick={recheck}
@@ -167,6 +231,15 @@ export const SettingsComputerUsePage: FC = () => {
         </Button>
       }
     >
+      {!desktopShell && (
+        <SettingsPanel variant="preference">
+          <div className="flex items-start gap-3" data-testid="computer-use-remote-notice">
+            <Monitor className="mt-0.5 size-5 shrink-0 text-muted" aria-hidden="true" />
+            <p className="text-[13px] font-medium text-foreground">{t('settings.computerUse.remoteNotice')}</p>
+          </div>
+        </SettingsPanel>
+      )}
+
       <div
         role="status"
         aria-live="polite"
@@ -190,6 +263,8 @@ export const SettingsComputerUsePage: FC = () => {
         <ol className="flex flex-col" data-testid="computer-use-steps">
           {COMPUTER_USE_GUIDE_STEPS.map((step, index) => {
             const state = progress?.[step] ?? 'pending';
+            const actionable = actions !== null && state === 'current';
+            const running = runningStep === step;
             return (
               <li
                 key={step}
@@ -202,20 +277,53 @@ export const SettingsComputerUsePage: FC = () => {
                 )}
               >
                 <StepMarker index={index} state={state} />
-                <div className="flex min-w-0 flex-col gap-0.5">
+                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                   <p
                     className={clsx(
-                      'text-[13px] font-medium',
+                      'flex items-center gap-2 text-[13px] font-medium',
                       state === 'pending' ? 'text-muted' : 'text-foreground',
                     )}
                   >
                     {t(STEP_COPY[step].title)}
+                    {state === 'complete' && (
+                      <Badge variant="success" aria-hidden="true">{t(STEP_STATE_LABEL.complete)}</Badge>
+                    )}
                     <span className="sr-only">{` — ${t(STEP_STATE_LABEL[state])}`}</span>
                   </p>
                   <p className="max-w-2xl text-[12px] leading-relaxed text-muted">
                     {t(STEP_COPY[step].detail)}
                   </p>
+                  {actionable && failedStep === step && (
+                    <GuideNote testId="computer-use-action-failed" tone="destructive">
+                      {t('settings.computerUse.actionFailed')}
+                    </GuideNote>
+                  )}
+                  {step === 'screenRecording' && screenRecordingRequested && state !== 'complete' && (
+                    <GuideNote testId="computer-use-relaunch-notice">
+                      {t('settings.computerUse.relaunchNotice')}
+                    </GuideNote>
+                  )}
                 </div>
+                {actionable && (
+                  <Button
+                    type="button"
+                    variant={step === 'enable' ? 'default' : 'secondary'}
+                    size="xs"
+                    className="shrink-0"
+                    disabled={runningStep !== null}
+                    onClick={() => runStep(step)}
+                    data-testid={`computer-use-action-${step}`}
+                  >
+                    {running
+                      ? <LoaderCircle className="animate-spin" aria-hidden="true" />
+                      : step === 'enable'
+                        ? <Power aria-hidden="true" />
+                        : <ExternalLink aria-hidden="true" />}
+                    {step === 'enable'
+                      ? t('settings.computerUse.actions.enable')
+                      : t('settings.computerUse.actions.openSettings')}
+                  </Button>
+                )}
               </li>
             );
           })}

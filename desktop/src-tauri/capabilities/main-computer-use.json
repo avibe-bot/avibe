@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main-computer-use",
+  "description": "The Workbench's Computer Use guide: turn Computer Use on, and ask for one named privacy permission and open its System Settings pane. Granted to the main window for the loopback Runtime origin only, on macOS only, never to the bundled bootstrap page.",
+  "platforms": ["macOS"],
+  "local": false,
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*", "http://[\\:\\:1]:*/*"]
+  },
+  "permissions": ["allow-computer-use-enable", "allow-computer-use-open-permission"]
+}
