@@ -2488,9 +2488,10 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_REVIEW_STALL_MINUTES,
         help=(
-            "PR mode: report when the current head's Codex review has stayed running, or a "
-            "`@codex review` request unanswered, this many minutes, and again each further "
-            "interval while it stays stuck; 0 disables. Default 30."
+            "PR mode: report when Codex's summary has shown the current head's review running "
+            "this many minutes on an open PR (a re-request restarts the clock), and again each "
+            "further interval while it stays stuck; 0 disables. A head Codex never started on "
+            "is not detected. Default 30."
         ),
     )
     parser.add_argument(
