@@ -660,7 +660,12 @@ already communicate activity. Keep the upper-right red unread badge.
     layout is never shown at full size. Without that call the shell settles
     on its own after one second.
   - Shells that predate this (no `layout` in `pet_ready`) keep the page's old
-    `start_dragging` path.
+    `start_dragging` path. A page that predates it (the shell can adopt an
+    older running Runtime) does not declare `layouts` in `pet_ready`; the
+    shell then gives it the upward window at the same spot, as tall as the
+    room above allows, so Vibey stays put and nothing is mis-drawn.
+  - While the shell drags, the page hides the column; it returns with the
+    full window.
 - **What must stay on a display.** Restore on launch, a dropped pet and a
   display or scale change keep the drag strip inside a connected work area:
   at the window's width on a display that fits the full 460 × 600 window,

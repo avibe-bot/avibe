@@ -520,14 +520,23 @@ pub fn settle_frame(anchor: (f64, f64), area: &WorkArea) -> PetFrame {
     let above = (anchor.1 - area.area.y) / unit;
     let below = (area.area.bottom() - anchor.1) / unit - PET_AND_DOCK_HEIGHT;
     let full_above = WINDOW_HEIGHT - PET_BOTTOM - PET_SIZE;
-    let (panel_edge, height) = if above >= full_above || above >= below {
-        (PanelEdge::Bottom, above + PET_SIZE + PET_BOTTOM)
-    } else {
-        (PanelEdge::Top, PET_TOP + PET_AND_DOCK_HEIGHT + below)
-    };
+    if above >= full_above || above >= below {
+        return upward_frame(anchor, area);
+    }
     PetFrame {
-        layout: PetLayout::edge(panel_edge),
-        height: height.clamp(DRAG_HEIGHT, WINDOW_HEIGHT),
+        layout: PetLayout::edge(PanelEdge::Top),
+        height: (PET_TOP + PET_AND_DOCK_HEIGHT + below).clamp(DRAG_HEIGHT, WINDOW_HEIGHT),
+    }
+}
+
+/// The window with the column opening upward whatever the room, as tall as
+/// the room above Vibey allows: for a page that predates the top layout (a
+/// shell can adopt an older running Runtime). Vibey still stays put.
+pub fn upward_frame(anchor: (f64, f64), area: &WorkArea) -> PetFrame {
+    let above = (anchor.1 - area.area.y) / area.unit;
+    PetFrame {
+        layout: PetLayout::default(),
+        height: (above + PET_SIZE + PET_BOTTOM).clamp(DRAG_HEIGHT, WINDOW_HEIGHT),
     }
 }
 
@@ -1134,6 +1143,26 @@ mod tests {
             )
         );
         assert_eq!(settle_frame((anchor.x, anchor.y), &laptop), PetFrame::default());
+    }
+
+    #[test]
+    fn a_page_without_the_top_layout_gets_an_upward_window_that_keeps_vibey_put() {
+        let laptop = area("laptop", 0.0, 33.0, 1470.0, 923.0);
+        for y in [45.0, 200.0, 433.0, 700.0] {
+            let frame = upward_frame((600.0, y), &laptop);
+            assert_eq!(frame.layout, PetLayout::default());
+            let window = laptop.window_rect((600.0, y), frame);
+            assert!(laptop.area.contains(&window), "{y}: {window:?}");
+            assert_eq!(frame.anchor(frame.origin((600.0, y), 1.0), 1.0), (600.0, y));
+        }
+        // Near the top the window is only the strip; with room it is whole.
+        assert_eq!(upward_frame((600.0, 45.0), &laptop).height, DRAG_HEIGHT);
+        assert_eq!(upward_frame((600.0, 700.0), &laptop), PetFrame::default());
+        // Where the column opens upward anyway, both choices agree.
+        assert_eq!(
+            settle_frame((600.0, 433.0), &laptop),
+            upward_frame((600.0, 433.0), &laptop)
+        );
     }
 
     #[test]

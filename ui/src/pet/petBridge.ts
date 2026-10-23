@@ -92,7 +92,8 @@ export const petBridge = {
   ready: async (): Promise<PetReady> => {
     const invoke = shellInvoke();
     if (!invoke) return { ...readDevBinding(), summon_pending: null };
-    const result = (await invoke('pet_ready')) as { summon_pending?: { intent?: unknown } | null; layout?: unknown } | null;
+    // `layouts`: this page draws the column below Vibey (`panel_edge: top`).
+    const result = (await invoke('pet_ready', { layouts: true })) as { summon_pending?: { intent?: unknown } | null; layout?: unknown } | null;
     const pending = result?.summon_pending;
     shellDrags = Boolean(result?.layout);
     return {

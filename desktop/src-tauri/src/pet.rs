@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
-    area_for, clamp_anchor, default_anchor, frame_at, hovering, place_dropped, rescale, shortcut_label,
-    valid_session_id, HitRect, LogicalRect, PetAnchor, PetBinding, PetFrame, PetIntent, PetLayout, PetReady, PetStore,
-    WorkArea, SHORTCUT_PRESETS,
+    area_for, clamp_anchor, default_anchor, frame_at, hovering, place_dropped, rescale, shortcut_label, upward_frame,
+    valid_session_id, HitRect, LogicalRect, PanelEdge, PetAnchor, PetBinding, PetFrame, PetIntent, PetLayout, PetReady,
+    PetStore, WorkArea, SHORTCUT_PRESETS,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
@@ -634,11 +634,16 @@ pub struct ReadyResult {
     layout: PetLayout,
 }
 
-/// Called once the `/pet` page has its listeners installed.
+/// Called once the `/pet` page has its listeners installed. `layouts` says
+/// the page draws the top layout; a page that predates it (a shell can adopt
+/// an older running Runtime) gets the upward window at the same spot.
 #[tauri::command]
-pub fn pet_ready(window: WebviewWindow) -> Result<ReadyResult, String> {
+pub fn pet_ready(window: WebviewWindow, layouts: Option<bool>) -> Result<ReadyResult, String> {
     ensure_pet_page(&window)?;
     let pet = window.state::<Pet>();
+    if layouts != Some(true) {
+        reframe_upward(&window);
+    }
     // A new document starts collapsed, so the frame does too.
     let expanded = lock(&pet.frame).expanded;
     if expanded {
@@ -801,6 +806,24 @@ fn end_drag(app: &AppHandle, window: &WebviewWindow, generation: u64) -> Result<
     }
     lock(&pet.frame).pending = Some((next, held));
     Ok(next.layout)
+}
+
+fn reframe_upward(window: &WebviewWindow) {
+    let app = window.app_handle();
+    let pet = app.state::<Pet>();
+    let mut frame = lock(&pet.frame);
+    if frame.dragging || frame.current.layout.panel_edge == PanelEdge::Bottom {
+        return;
+    }
+    let (Some(at), Ok(window_scale)) = (window_anchor(window, frame.current), window.scale_factor()) else {
+        return;
+    };
+    let scale = anchor_scale(app, Some(window_scale));
+    let saved = rescale(at, window_scale, scale);
+    let next =
+        area_for(&work_areas(app, scale), saved).map_or_else(PetFrame::default, |area| upward_frame(saved, area));
+    set_frame(window, next.origin(at, 1.0), next.size());
+    frame.current = next;
 }
 
 /// Puts back the full window a drop chose, if one is waiting.

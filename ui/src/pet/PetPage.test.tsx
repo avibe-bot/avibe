@@ -3178,7 +3178,7 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     shell(invoke);
     mainSession('S'); render(<PetPage />);
     await screen.findByText('Session S');
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_ready'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_ready', { layouts: true }));
     await act(async () => {});
     drag(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_drag'));
@@ -3202,7 +3202,7 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     shell(invoke);
     mainSession('S'); render(<PetPage />);
     await screen.findByText('Session S');
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_ready'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_ready', { layouts: true }));
     await act(async () => {});
     drag(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('plugin:window|start_dragging'));
