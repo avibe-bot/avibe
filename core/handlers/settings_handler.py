@@ -18,6 +18,7 @@ from config.v2_settings import normalize_routing_settings
 from core.modals import (
     DEFAULT_OPTION_VALUE,
     STORED_OPTION_VALUE,
+    AgentChoice,
     BackendRouteMenu,
     RouteOption,
     RoutingModalData,
@@ -480,56 +481,67 @@ class SettingsHandler(BaseHandler):
     async def _gather_routing_modal_data(
         self,
         context: MessageContext,
-        selected_backend: Optional[str] = None,
+        selected_agent: Optional[str] = None,
         include_all_backend_data: bool = False,
     ) -> RoutingModalData:
-        """Collect each shown backend's route menu for the routing form renderers."""
+        """Collect the Agents a route can name and the menus of their backends for the routing form renderers."""
         settings_key = self._get_settings_key(context)
         current_routing = self._get_settings_manager(context).get_channel_routing(settings_key)
 
-        all_backends = list(self.controller.agent_service.agents.keys())
-        current_backend = self.controller.resolve_agent_for_context(context)
-        enabled_backends = [backend for backend in all_backends if self._is_backend_enabled(backend)]
-        if not enabled_backends and current_backend:
-            enabled_backends = [current_backend]
-        # Catalog order, the built-in backend first. As for the default Agent, the fallback
-        # selection is the built-in backend only when no other backend is enabled.
+        # The Agents the Web route picker lists, on a backend this runtime can run.
+        runnable = {backend for backend in self.controller.agent_service.agents if self._is_backend_enabled(backend)}
+        store = self.controller.vibe_agent_store
+        listed = await asyncio.to_thread(store.list_agents, include_disabled=False)
         catalog_order = {backend: index for index, backend in enumerate(AGENT_BACKENDS)}
-        registered_backends = sorted(enabled_backends, key=lambda x: catalog_order.get(x, len(catalog_order)))
-        active_backend = min(registered_backends, key=implicit_default_rank, default=current_backend)
-        if current_backend in registered_backends:
-            active_backend = current_backend
-        if selected_backend in registered_backends:
-            active_backend = selected_backend
-        visible_current_backend = current_backend if current_backend in registered_backends else active_backend
-        backends_to_load = registered_backends if include_all_backend_data else [active_backend]
-
-        data = RoutingModalData(
-            registered_backends=registered_backends,
-            current_backend=visible_current_backend,
-            current_routing=current_routing,
-        )
+        agents = [
+            AgentChoice(agent.id, agent.name, agent.backend, agent.model, agent.reasoning_effort)
+            for agent in listed
+            if agent.backend in runnable
+        ]
+        current = self.controller.resolve_vibe_agent_for_context(context, required=False)
         im_client = self._get_im_client(context)
-        for backend in backends_to_load:
+        data = RoutingModalData(
+            agents=agents,
+            current_agent=current.id if current is not None else "",
+            current_routing=current_routing,
+            agent_option_limit=getattr(im_client, "route_option_limit", None),
+        )
+        if data.agent(data.current_agent) is None and agents:
+            # The scope's Agent cannot run here. As for a default Agent, the built-in backend's is the
+            # replacement only when no other Agent is listed.
+            data.current_agent = min(agents, key=lambda agent: implicit_default_rank(agent.backend)).id
+        current_agent = data.agent(data.current_agent)
+        shown = data.agent(data.shown_agent(selected_agent))
+        # A form refreshed per change loads only the shown Agent's backend; the others load every listed one.
+        backends = {agent.backend for agent in agents} if include_all_backend_data else {shown.backend} if shown else set()
+        for backend in sorted(backends, key=lambda name: catalog_order.get(name, len(catalog_order))):
             menu = BackendRouteMenu(
                 backend,
                 option_limit=getattr(im_client, "route_option_limit", None),
                 value_limit=getattr(im_client, "route_option_value_limit", None),
-                stored=data.stored_draft(backend),
             )
+            # The stored route's model leads the provider order of the backend it runs on.
+            stored_model = (
+                data.stored_draft(current_agent.id).model if current_agent and current_agent.backend == backend else None
+            )
+            # Efforts are built for every model a form on this backend can show or inherit, listed or not.
+            wanted = {model for model in (stored_model, *(a.model for a in agents if a.backend == backend)) if model}
             loader = self._route_menu_loaders.get(backend)
             if loader is not None:
                 try:
-                    await loader(self, context, menu, menu.stored.model)
+                    await loader(self, context, menu, stored_model, wanted)
                 except Exception as e:
                     logger.warning("Failed to load %s routing options: %s", backend, e)
             data.menus[backend] = menu
         return data
 
     # Where each backend's route lists come from: the only backend-specific part of the routing form. Each
-    # loader fills ``menu`` in place; ``stored_model`` is the stored route's model when this is its backend.
+    # loader fills ``menu`` in place; ``stored_model`` is the stored route's model when this is its backend, and
+    # ``wanted`` every model a form on this backend can show or inherit, whose efforts it needs.
 
-    async def _load_opencode_route_menu(self, context, menu: BackendRouteMenu, stored_model: Optional[str]) -> None:
+    async def _load_opencode_route_menu(
+        self, context, menu: BackendRouteMenu, stored_model: Optional[str], wanted: set[str]
+    ) -> None:
         from modules.agents.opencode.utils import (
             build_opencode_model_option_items,
             build_reasoning_effort_options,
@@ -563,10 +575,12 @@ class SettingsHandler(BaseHandler):
             keep=menu.fits,
         )
         menu.models = [RouteOption(str(entry["value"]), str(entry["label"])) for entry in entries if entry.get("value")]
-        for model in {"", *(option.value for option in menu.models), stored_model or ""}:
+        for model in {"", *(option.value for option in menu.models), *wanted}:
             menu.efforts[model] = _effort_options(build_reasoning_effort_options(models, model or None))
 
-    async def _load_claude_route_menu(self, context, menu: BackendRouteMenu, stored_model: Optional[str]) -> None:
+    async def _load_claude_route_menu(
+        self, context, menu: BackendRouteMenu, stored_model: Optional[str], wanted: set[str]
+    ) -> None:
         from modules.agents.opencode.utils import (
             build_claude_reasoning_options,
             format_claude_model_label,
@@ -588,12 +602,14 @@ class SettingsHandler(BaseHandler):
         menu.models = [RouteOption(model, format_claude_model_label(model)) for model in ordered]
         catalog = models_result.get("reasoning_options")
         catalog = catalog if isinstance(catalog, dict) else None
-        for model in {"", *ordered, stored_model or ""}:
+        for model in {"", *ordered, *wanted}:
             menu.efforts[model] = _effort_options(
                 resolve_model_reasoning_options(catalog, model, build_claude_reasoning_options(model or None))
             )
 
-    async def _load_codex_route_menu(self, context, menu: BackendRouteMenu, stored_model: Optional[str]) -> None:
+    async def _load_codex_route_menu(
+        self, context, menu: BackendRouteMenu, stored_model: Optional[str], wanted: set[str]
+    ) -> None:
         from modules.agents.opencode.utils import build_codex_reasoning_options, resolve_model_reasoning_options
         from vibe.api import codex_agents as get_codex_agents, codex_models as get_codex_models
 
@@ -607,16 +623,17 @@ class SettingsHandler(BaseHandler):
         menu.models = [RouteOption(model, model) for model in models]
         catalog = models_result.get("reasoning_options")
         catalog = catalog if isinstance(catalog, dict) else None
-        for model in {"", *models, stored_model or ""}:
+        for model in {"", *models, *wanted}:
             menu.efforts[model] = _effort_options(
                 resolve_model_reasoning_options(catalog, model, build_codex_reasoning_options())
             )
 
-    async def _load_vibey_route_menu(self, context, menu: BackendRouteMenu, stored_model: Optional[str]) -> None:
+    async def _load_vibey_route_menu(
+        self, context, menu: BackendRouteMenu, stored_model: Optional[str], wanted: set[str]
+    ) -> None:
         """Vibey's menu from Model Hub, as the Web route picker reads it.
 
-        An effort Model Hub's ``effort_menu`` omits would only fail, so it is not offered. A route without its
-        own model inherits the built-in Vibey Agent's, so ``""`` holds that model's efforts.
+        An effort Model Hub's ``effort_menu`` omits would only fail, so it is not offered.
         """
         model_hub_service = getattr(self.controller, "model_hub_service", None)
         if model_hub_service is None:
@@ -637,15 +654,6 @@ class SettingsHandler(BaseHandler):
                     if effort not in omitted
                 ]
             )
-        store = getattr(self.controller, "vibe_agent_store", None)
-        agent = (
-            await asyncio.to_thread(store.get_builtin_default_agent_for_backend, "vibey", enabled_only=False)
-            if store
-            else None
-        )
-        inherited = menu.efforts.get(str(getattr(agent, "model", None) or "").strip())
-        if inherited is not None:
-            menu.efforts[""] = inherited
 
     _route_menu_loaders = {
         "opencode": _load_opencode_route_menu,
@@ -661,11 +669,6 @@ class SettingsHandler(BaseHandler):
         if backend_config is None:
             return False
         return bool(getattr(backend_config, "enabled", True))
-
-    def _routing_agent_name(self, backend: str) -> str:
-        """A backend choice routes to that backend's built-in Agent, under whatever name the row holds."""
-        store = getattr(self.controller, "vibe_agent_store", None)
-        return store.routing_name_for_backend(backend) if store is not None else backend
 
     def _resolve_route_backend(self, agent_name: Optional[str]) -> Optional[str]:
         if not agent_name:
@@ -719,9 +722,13 @@ class SettingsHandler(BaseHandler):
             return False
         current_target = self._routing_target_from_row(row)
         next_target = self._routing_target_from_settings(routing)
-        current_backend = current_target[1]
-        next_backend = next_target[1]
-        return bool(current_backend and next_backend and current_backend != next_backend)
+        current_agent, current_backend = current_target[0], current_target[1]
+        next_agent, next_backend = next_target[0], next_target[1]
+        if current_backend and next_backend and current_backend != next_backend:
+            return True
+        # The scope's session keeps the Agent it started with, so another Agent, even on the same backend, takes
+        # a new session to run.
+        return bool(current_agent and next_agent and current_agent != next_agent)
 
     async def handle_settings_update(
         self,
@@ -825,14 +832,8 @@ class SettingsHandler(BaseHandler):
             )
             im_client = self._get_im_client(context)
 
-            resolved_backend = self.controller.resolve_agent_for_context(context)
-            selected_backend = selection.selected_backend or resolved_backend
-            routing_data = await self._gather_routing_modal_data(context, selected_backend=selected_backend)
-            visible_selected_backend = (
-                selected_backend
-                if selected_backend in routing_data.registered_backends
-                else routing_data.current_backend
-            )
+            routing_data = await self._gather_routing_modal_data(context, selected_agent=selection.selected_agent)
+            shown_agent = routing_data.shown_agent(selection.selected_agent)
 
             if hasattr(im_client, "update_routing_modal"):
                 await im_client.update_routing_modal(  # type: ignore[attr-defined]
@@ -840,9 +841,9 @@ class SettingsHandler(BaseHandler):
                     view_hash=view_hash,
                     channel_id=resolved_channel_id,
                     routing=routing_data,
-                    selected_backend=visible_selected_backend,
-                    # A backend switch shows a section the form had no controls for: the stored route, not blanks.
-                    draft=selection.draft if visible_selected_backend == selected_backend else None,
+                    selected_agent=shown_agent,
+                    # An Agent switch shows a section the form had no controls for: the stored route, not blanks.
+                    draft=selection.draft if shown_agent == selection.selected_agent else None,
                 )
         except Exception as e:
             logger.error(f"Error updating routing modal: {e}", exc_info=True)
@@ -851,7 +852,7 @@ class SettingsHandler(BaseHandler):
         self,
         user_id: str,
         channel_id: str,
-        backend: str,
+        agent_id: str,
         *,
         variant: object = _UNSET,
         model: Optional[str] = None,
@@ -861,10 +862,10 @@ class SettingsHandler(BaseHandler):
         is_dm: bool = False,
         platform: Optional[str] = None,
     ):
-        """Save a routing form's choices for one backend.
+        """Save a routing form's choices: the Agent the scope runs, and its overrides.
 
-        ``variant`` is the backend's native agent; omitted, the stored one stays. Other backends' native agents
-        always stay, so switching back finds them.
+        ``variant`` is the Agent's backend's native agent; omitted, the stored one stays. Other backends' native
+        agents always stay, so switching back finds them.
         """
         from config.v2_settings import RoutingSettings
         from modules.agents.opencode.utils import normalize_claude_reasoning_effort
@@ -880,12 +881,14 @@ class SettingsHandler(BaseHandler):
             settings_key = self._get_settings_key(context)
             im_client = self._get_im_client(context)
             settings_manager = self._get_settings_manager(context)
+            agent = self.controller.vibe_agent_store.require_reference_by_id(agent_id)
+            backend = agent.backend
             existing_routing = settings_manager.get_channel_routing(settings_key)
             # A platform shows a stored choice it cannot carry as its own option value through a stand-in option;
-            # saving that option keeps the stored choice. It stands for this backend's route only: one changed to
-            # another backend since the form rendered has no such choice, so the stand-in saves as Default.
+            # saving that option keeps the stored choice. It stands for this Agent's route only: one changed to
+            # another Agent since the form rendered has no such choice, so the stand-in saves as Default.
             stored = normalize_routing_settings(existing_routing)
-            if self._resolve_route_backend(stored.agent_name) != backend:
+            if stored.agent_name != agent.name:
                 stored = normalize_routing_settings(None)
             if model == STORED_OPTION_VALUE:
                 model = stored.model
@@ -901,14 +904,15 @@ class SettingsHandler(BaseHandler):
                 variants[backend] = variant
             if backend == "claude":
                 # Claude Code rejects an effort its model does not support.
+                effective_model = model or agent.model
                 reasoning_effort = normalize_claude_reasoning_effort(
-                    model,
+                    effective_model,
                     reasoning_effort,
-                    backend_model_catalog.catalog_reasoning_efforts_for_model("claude", model),
+                    backend_model_catalog.catalog_reasoning_efforts_for_model("claude", effective_model),
                 )
 
             routing = RoutingSettings(
-                agent_name=self._routing_agent_name(backend),
+                agent_name=agent.name,
                 model=model,
                 reasoning_effort=reasoning_effort,
                 **{f"{native}_agent": value for native, value in variants.items()},
@@ -917,16 +921,18 @@ class SettingsHandler(BaseHandler):
             settings_manager.set_channel_routing(settings_key, routing)
             needs_new_session_hint = self._routing_update_needs_new_session_hint(context, routing)
 
-            parts = [f"{self._t('routing.label.backend')}: **{display_name_for_backend(backend)}**"]
-            for label_key, value in (
-                ("routing.label.agent", variants.get(backend)),
-                ("routing.label.model", model),
-                ("routing.label.reasoningEffort", reasoning_effort),
+            backend_name = display_name_for_backend(backend)
+            parts = []
+            for label, value in (
+                (self._t("routing.label.agent"), f"{agent.name} · {backend_name}"),
+                (self._t("modal.routing.backendAgent", backend=backend_name), variants.get(backend)),
+                (self._t("routing.label.model"), model),
+                (self._t("routing.label.reasoningEffort"), reasoning_effort),
             ):
                 if value:
                     # Route values are opaque and unbounded; a confirmation must fit any platform's message.
                     shown = value if len(value) <= 100 else f"{value[:99]}…"
-                    parts.append(f"{self._t(label_key)}: **{shown}**")
+                    parts.append(f"{label}: **{shown}**")
             if needs_new_session_hint:
                 parts.extend(["", self._t("success.routingUpdateNeedsNewSession")])
 
@@ -938,7 +944,7 @@ class SettingsHandler(BaseHandler):
                 )
 
             logger.info(
-                f"Routing updated for {settings_key}: backend={backend}, variant={variants.get(backend)}, "
+                f"Routing updated for {settings_key}: agent={agent.name}, variant={variants.get(backend)}, "
                 f"model={model}, reasoning_effort={reasoning_effort}"
             )
 

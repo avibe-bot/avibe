@@ -12,7 +12,7 @@ import pytest
 
 from config.v2_config import DiscordConfig, LarkConfig, SlackConfig, TelegramConfig
 from config.v2_settings import RoutingSettings
-from core.modals import STORED_OPTION_VALUE, BackendRouteMenu, RouteOption, RoutingModalData
+from core.modals import STORED_OPTION_VALUE, AgentChoice, BackendRouteMenu, RouteOption, RoutingModalData
 from modules.agents.catalog import display_name_for_backend
 from modules.im import MessageContext
 from modules.im.discord import DiscordBot
@@ -39,7 +39,11 @@ def _options(payload):
 async def test_agent_picker_includes_vibey_but_native_resume_excludes_it(platform):
     routing = dict(
         channel_id="fixture-channel",
-        routing=RoutingModalData(registered_backends=["codex", "vibey"], current_backend="vibey", current_routing=None),
+        routing=RoutingModalData(
+            agents=[AgentChoice("id-codex", "codex", "codex"), AgentChoice("id-vibey", "vibey", "vibey")],
+            current_agent="id-vibey",
+            current_routing=None,
+        ),
     )
     if platform == "slack":
         bot = SlackBot(SlackConfig(bot_token="fixture-token"))
@@ -61,8 +65,8 @@ async def test_agent_picker_includes_vibey_but_native_resume_excludes_it(platfor
         bot._send_card_to_channel = AsyncMock()
         await bot.open_routing_modal(trigger_id=None, **routing)
         options = list(_options(bot._send_card_to_channel.await_args.args[1]))
-    vibey = next(option for option in options if option["value"] == "vibey")
-    assert "Vibey" in json.dumps(vibey)
+    vibey = next(option for option in options if option["value"] == "id-vibey")
+    assert "Vibey" in json.dumps(vibey, ensure_ascii=False)
 
     bot._controller = SimpleNamespace(agent_service=SimpleNamespace(agents={"codex": object(), "vibey": object()}))
     await bot.open_resume_session_modal(
@@ -110,15 +114,16 @@ def _route(bot, backend, stored_model="model-b"):
         codex_agent="reviewer" if backend == "codex" else None,
     )
     data = RoutingModalData(
-        registered_backends=[backend, "opencode"], current_backend=backend, current_routing=stored,
+        agents=[AgentChoice(f"id-{backend}", backend, backend), AgentChoice("id-opencode", "opencode", "opencode")],
+        current_agent=f"id-{backend}",
+        current_routing=stored,
         menus={backend: menu},
     )
-    menu.stored = data.stored_draft(backend)  # as the settings handler sets it
     return data, long_id
 
 
 class _Form:
-    """Drive one platform's routing form through its own entry points: open, change the model, save."""
+    """Drive one platform's routing form through its own entry points: open, switch Agent, change model, save."""
 
     def __init__(self, platform, backend, stored_model="model-b"):
         self.platform = platform
@@ -135,6 +140,7 @@ class _Form:
         else:
             self.bot = FeishuBot(LarkConfig(app_id="fixture-app", app_secret="fixture-secret"))
         self.data, self.long_id = _route(self.bot, backend, stored_model)
+        self.agent_id = f"id-{backend}"
 
     async def open(self):
         bot, context = self.bot, self.context
@@ -155,8 +161,48 @@ class _Form:
         else:
             bot._send_card_to_channel = AsyncMock()
             await bot.open_routing_modal(trigger_id=context, channel_id=context.channel_id, routing=self.data)
-            await bot._handle_routing_backend_select(context, {"backend": self.backend})
+            await bot._handle_routing_backend_select(context, {"agent": self.agent_id})
             self.card = bot._send_card_to_channel.await_args.args[1]
+
+    async def switch_agent(self, agent_id):
+        bot, context = self.bot, self.context
+        self.agent_id = agent_id
+        self.backend = self.data.agent(agent_id).backend
+        if self.platform == "slack":
+            self.view["state"] = _shown_state(self.view)
+            self.view["state"]["values"]["agent_block"]["agent_select"] = {"selected_option": {"value": agent_id}}
+            selection = parse_routing_modal_selection(
+                view=self.view, action={"action_id": "agent_select", "selected_option": {"value": agent_id}}
+            )
+            self.view = bot._build_routing_modal_view(
+                channel_id=context.channel_id, routing=self.data,
+                selected_agent=selection.selected_agent, draft=selection.draft,
+            )
+        elif self.platform == "discord":
+            select = next(c for c in self.view.children if getattr(c, "placeholder", None) == bot._t("modal.routing.selectAgent"))
+            select._values = [agent_id]
+            await select.callback(SimpleNamespace(response=SimpleNamespace(edit_message=AsyncMock())))
+        elif self.platform == "telegram":
+            index = [agent.id for agent in self.data.agent_options()].index(agent_id)
+            await bot._handle_routing_callback(context, f"tg_route:agent:{index}")
+        else:
+            await bot._handle_routing_backend_select(context, {"agent": agent_id})
+            self.card = bot._send_card_to_channel.await_args.args[1]
+
+    def default_text(self, field):
+        """The text of the Default option the form shows for ``field``."""
+        if self.platform == "slack":
+            block = next(b for b in self.view["blocks"] if str(b.get("block_id", "")).startswith(f"route_{field}:"))
+            return block["element"]["options"][0]["text"]["text"]
+        if self.platform == "discord":
+            key = {"model": "selectModel", "effort": "selectReasoningEffort"}[field]
+            select = next(c for c in self.view.children if getattr(c, "placeholder", None) == self.bot._t(f"modal.routing.{key}"))
+            return select.options[0].label
+        if self.platform == "telegram":
+            state = self.bot._routing_states[self.bot._interaction_scope_key(self.context)]
+            return self.bot._routing_picker_options(state, {"effort": "reasoning_effort"}.get(field, field))[0][0]
+        select = next(e for e in self.card["body"]["elements"][0]["elements"] if e.get("name") == f"route_{field}:{self.agent_id}")
+        return select["options"][0]["text"]["content"]
 
     def offered(self, field):
         """The option values the form offers for ``field`` (variant, model or effort) right now."""
@@ -172,7 +218,7 @@ class _Form:
             state = self.bot._routing_states[self.bot._interaction_scope_key(self.context)]
             name = {"effort": "reasoning_effort"}.get(field, field)
             return [value or "__default__" for _, value in self.bot._routing_picker_options(state, name)]
-        name = f"route_{field}:{self.backend}"
+        name = f"route_{field}:{self.agent_id}"
         select = next(e for e in self.card["body"]["elements"][0]["elements"] if e.get("name") == name)
         return [option["value"] for option in select["options"]]
 
@@ -184,12 +230,12 @@ class _Form:
             model_block = next(key for key in self.view["state"]["values"] if key.startswith("route_model:"))
             self.view["state"]["values"][model_block]["route_model"] = {"selected_option": {"value": model}}
             selection = parse_routing_modal_selection(view=self.view, action={
-                "action_id": "route_model", "block_id": f"route_model:{self.backend}",
+                "action_id": "route_model", "block_id": f"route_model:{self.agent_id}",
                 "selected_option": {"value": model},
             })
             self.view = bot._build_routing_modal_view(
                 channel_id=context.channel_id, routing=self.data,
-                selected_backend=selection.selected_backend, draft=selection.draft,
+                selected_agent=selection.selected_agent, draft=selection.draft,
             )
         elif self.platform == "discord":
             prefix = bot._t("modal.routing.selectModel")
@@ -204,7 +250,7 @@ class _Form:
         else:
             bot._patch_card_message = AsyncMock()
             assert await bot._handle_routing_select_change(
-                context, {"name": f"route_model:{self.backend}", "option": model}
+                context, {"name": f"route_model:{self.agent_id}", "option": model}
             )
             self.card = bot._patch_card_message.await_args.args[1]
 
@@ -236,7 +282,7 @@ class _Form:
             )
         self.saved.assert_awaited_once()
         kwargs = self.saved.await_args.kwargs
-        return kwargs["backend"], kwargs["variant"], kwargs["model"], kwargs["reasoning_effort"]
+        return kwargs["agent_id"], kwargs["variant"], kwargs["model"], kwargs["reasoning_effort"]
 
 
 def _shown_state(view):
@@ -264,7 +310,7 @@ async def test_a_route_offers_its_backends_menu_and_saving_unchanged_keeps_it(pl
     if backend == "codex":
         assert form.offered("variant") == ["__default__", "builder", "reviewer"]
     stored_variant = "reviewer" if backend == "codex" else None
-    assert await form.save() == (backend, stored_variant, "model-b", "max")
+    assert await form.save() == (f"id-{backend}", stored_variant, "model-b", "max")
 
 
 @pytest.mark.asyncio
@@ -276,7 +322,7 @@ async def test_a_model_change_offers_that_models_efforts_and_clears_the_effort(p
     await form.change_model("model-a")
 
     assert form.offered("effort") == ["__default__", "low"]
-    assert await form.save() == ("vibey", None, "model-a", None)
+    assert await form.save() == ("id-vibey", None, "model-a", None)
 
 
 @pytest.mark.asyncio
@@ -286,8 +332,26 @@ async def test_reselecting_a_stored_model_the_platform_cannot_carry_keeps_its_ef
     form = _Form(platform, "vibey", stored_model=long_id)
     await form.open()
 
-    await form.change_model(form.data.menu("vibey").shown_value(long_id))
+    await form.change_model(form.data.menu(form.agent_id).shown_value(long_id))
 
     # Slack hands the stand-in to the settings handler, which resolves it to the stored model.
     saved_model = STORED_OPTION_VALUE if platform == "slack" else long_id
-    assert await form.save() == ("vibey", None, saved_model, "max")
+    assert await form.save() == ("id-vibey", None, saved_model, "max")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", PLATFORMS)
+async def test_a_route_names_the_chosen_agent_and_default_is_that_agents_own_model(platform):
+    """The form lists Agents as the Web does, including a user Agent that shares a built-in Agent's backend."""
+    form = _Form(platform, "codex")
+    form.data.agents.append(AgentChoice("id-reviewer", "reviewer", "codex", model="model-a"))
+    await form.open()
+
+    await form.switch_agent("id-reviewer")
+
+    assert form.default_text("model").endswith("Model A")  # Default · the reviewer Agent's own model
+    assert form.offered("effort") == ["__default__", "low"]  # model-a's efforts, inherited with it
+    # The stored model and effort were the codex Agent's; the reviewer starts at its own Defaults.
+    agent_id, variant, model, effort = await form.save()
+    assert (agent_id, model, effort) == ("id-reviewer", None, None)
+    assert variant == "reviewer"  # Codex's native agent is stored per backend, so it carries over

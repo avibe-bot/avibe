@@ -6,7 +6,15 @@ unchanged on some surfaces and not others.
 """
 
 from config.v2_settings import RoutingSettings
-from core.modals import STORED_OPTION_VALUE, BackendRouteMenu, RouteDraft, RouteOption, RoutingModalData
+from core.modals import (
+    STORED_OPTION_VALUE,
+    AgentChoice,
+    BackendRouteMenu,
+    RouteDraft,
+    RouteOption,
+    RoutingModalData,
+    route_option_label,
+)
 
 
 def _options(*values):
@@ -60,14 +68,56 @@ def test_efforts_follow_the_model_and_keep_a_stored_effort_the_menu_omits():
     assert draft.with_model("a") == draft  # picking the shown model again keeps its effort
 
 
-def test_the_stored_route_shows_only_on_its_own_backend():
-    routing = RoutingSettings(agent_name="codex", model="gpt-5.4", reasoning_effort="high", claude_agent="helper")
-    data = RoutingModalData(registered_backends=["claude", "codex", "vibey"], current_backend="codex", current_routing=routing)
+def _agents():
+    return [
+        AgentChoice("a-codex", "codex", "codex", model="gpt-5.4", reasoning_effort="medium"),
+        AgentChoice("a-reviewer", "reviewer", "codex", model="gpt-5.5"),
+        AgentChoice("a-claude", "claude", "claude"),
+        AgentChoice("a-vibey", "vibey", "vibey"),
+    ]
 
-    assert data.stored_draft("codex") == RouteDraft(None, "gpt-5.4", "high")
-    # Another backend keeps its own native agent but not the stored backend's model or effort.
-    assert data.stored_draft("claude") == RouteDraft("helper", None, None)
-    assert data.stored_draft("vibey") == RouteDraft()
+
+def test_the_stored_route_shows_only_on_its_own_agent():
+    routing = RoutingSettings(
+        agent_name="codex", model="gpt-5.6", reasoning_effort="high", codex_agent="builder", claude_agent="helper"
+    )
+    data = RoutingModalData(agents=_agents(), current_agent="a-codex", current_routing=routing)
+
+    assert data.stored_draft("a-codex") == RouteDraft("builder", "gpt-5.6", "high")
+    # Another Agent starts at Default, its own; a backend's native agent is stored per backend.
+    assert data.stored_draft("a-reviewer") == RouteDraft("builder", None, None)
+    assert data.stored_draft("a-claude") == RouteDraft("helper", None, None)
+    assert data.stored_draft("a-vibey") == RouteDraft()
     # A route saved by an older release with backend-specific fields reads the same.
-    legacy = RoutingSettings(agent_name="codex", codex_model="gpt-5.4", codex_reasoning_effort="high")
-    assert RoutingModalData(["codex"], "codex", legacy).stored_draft("codex") == RouteDraft(None, "gpt-5.4", "high")
+    legacy = RoutingSettings(agent_name="codex", codex_model="gpt-5.6", codex_reasoning_effort="high")
+    assert RoutingModalData(_agents(), "a-codex", legacy).stored_draft("a-codex") == RouteDraft(None, "gpt-5.6", "high")
+
+
+def test_default_options_inherit_the_chosen_agents_own_model_and_effort():
+    menu = BackendRouteMenu(
+        "codex",
+        models=[RouteOption("gpt-5.4", "GPT-5.4"), RouteOption("gpt-5.5", "GPT-5.5")],
+        efforts={"gpt-5.4": _options("low", "medium"), "gpt-5.5": _options("high")},
+    )
+    data = RoutingModalData(agents=_agents(), current_agent="a-codex", current_routing=None, menus={"codex": menu})
+    translate = {"common.default": "Default", "reasoning.medium": "Medium"}.get
+
+    codex, reviewer = data.menu("a-codex"), data.menu("a-reviewer")
+    # Each Agent on one backend shares its lists, but Default means that Agent's own choice.
+    assert route_option_label(translate, codex.default_option("model")) == "Default · GPT-5.4"
+    assert route_option_label(translate, codex.default_option("reasoning_effort"), effort=True) == "Default · Medium"
+    assert route_option_label(translate, reviewer.default_option("model")) == "Default · GPT-5.5"
+    assert reviewer.default_option("reasoning_effort").label == ""
+    assert _values(codex.effort_options(None, None)) == ["low", "medium"]
+    assert _values(reviewer.effort_options(None, None)) == ["high"]
+
+
+def test_the_agent_select_keeps_the_scopes_agent_within_its_cap():
+    agents = [AgentChoice(f"a{i}", f"agent-{i:02}", "vibey") for i in range(30)]
+    data = RoutingModalData(agents=agents, current_agent="a29", current_routing=None, agent_option_limit=25)
+
+    shown = data.agent_options()
+    assert len(shown) == 25 and shown[-1].id == "a29"
+    assert data.shown_agent("missing") == "a29" and data.shown_agent("a3") == "a3"
+    # Agent names have no length bound; the label every platform shows does.
+    assert len(AgentChoice("a", "n" * 5000, "vibey").label) < 100

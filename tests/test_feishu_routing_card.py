@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 from config.v2_config import LarkConfig
 from config.v2_settings import RoutingSettings
-from core.modals import BackendRouteMenu, RouteOption, RoutingModalData
+from core.modals import AgentChoice, BackendRouteMenu, RouteOption, RoutingModalData
 from core.auth import AuthResult
 from modules.im.base import MessageContext
 from modules.im.feishu import FeishuBot
@@ -26,8 +26,8 @@ class FeishuRoutingCardTests(unittest.IsolatedAsyncioTestCase):
     def _claude_routing() -> RoutingModalData:
         efforts = [RouteOption("high", "High"), RouteOption("max", "Max")]
         return RoutingModalData(
-            registered_backends=["claude", "codex"],
-            current_backend="claude",
+            agents=[AgentChoice("id-claude", "claude", "claude"), AgentChoice("id-codex", "codex", "codex")],
+            current_agent="id-claude",
             current_routing=RoutingSettings(agent_name="claude", model="claude-sonnet-4-5", claude_agent="helper"),
             menus={
                 "claude": BackendRouteMenu(
@@ -49,17 +49,17 @@ class FeishuRoutingCardTests(unittest.IsolatedAsyncioTestCase):
             return {
                 "operator": {"open_id": "user"},
                 "context": {"open_message_id": "om_123", "open_chat_id": "chat"},
-                "action": {"tag": "select_static", "name": "route_model:claude", "option": {"value": model}},
+                "action": {"tag": "select_static", "name": "route_model:id-claude", "option": {"value": model}},
             }
 
         await bot._async_handle_card_action(_event("claude-sonnet-4-6"))
         await bot._async_handle_card_action(_event("claude-opus-4-6"))
 
         self.assertEqual(bot._patch_card_message.await_count, 2)
-        self.assertEqual(bot._routing_cache["chat:user"]["drafts"]["claude"].model, "claude-opus-4-6")
+        self.assertEqual(bot._routing_cache["chat:user"]["drafts"]["id-claude"].model, "claude-opus-4-6")
         _, latest_card = bot._patch_card_message.await_args.args
         reasoning_values = [
-            option["value"] for option in self._find_select(latest_card, "route_effort:claude")["options"]
+            option["value"] for option in self._find_select(latest_card, "route_effort:id-claude")["options"]
         ]
         self.assertIn("max", reasoning_values)
 
@@ -67,37 +67,37 @@ class FeishuRoutingCardTests(unittest.IsolatedAsyncioTestCase):
         bot = self._make_bot()
         bot._on_routing_update = AsyncMock()
         routing = RoutingModalData(
-            registered_backends=["codex"],
-            current_backend="codex",
+            agents=[AgentChoice("id-codex", "codex", "codex")],
+            current_agent="id-codex",
             current_routing=RoutingSettings(agent_name="codex", model="gpt-5.1", codex_agent="reviewer"),
         )
         bot._routing_cache["chat:user"] = {"routing": routing, "drafts": {}}
         context = MessageContext(user_id="user", channel_id="chat", platform="lark", platform_specific={"is_dm": False})
 
         await bot._handle_routing_form_submit(
-            context, {"route_model:codex": "gpt-5.4", "route_effort:codex": "high"}, "routing_submit:codex"
+            context, {"route_model:id-codex": "gpt-5.4", "route_effort:id-codex": "high"}, "routing_submit:id-codex"
         )
 
         bot._on_routing_update.assert_awaited_once_with(
             user_id="user",
             channel_id="chat",
-            backend="codex",
+            agent_id="id-codex",
             variant="reviewer",
             model="gpt-5.4",
             reasoning_effort="high",
             is_dm=False,
         )
 
-    async def test_an_options_card_saves_its_own_backend_after_another_was_opened(self):
+    async def test_an_options_card_saves_its_own_agent_after_another_was_opened(self):
         bot = self._make_bot()
         bot._send_card_to_channel = AsyncMock()
         bot._on_routing_update = AsyncMock()
         context = MessageContext(user_id="user", channel_id="chat", platform="lark", platform_specific={"is_dm": False})
         await bot.open_routing_modal(trigger_id=context, channel_id="chat", routing=self._claude_routing())
-        # The step-1 card stays active, so it can open a second backend's card before the first is submitted.
-        await bot._handle_routing_backend_select(context, {"backend": "claude"})
+        # The step-1 card stays active, so it can open a second Agent's card before the first is submitted.
+        await bot._handle_routing_backend_select(context, {"agent": "id-claude"})
         claude_card = bot._send_card_to_channel.await_args.args[1]
-        await bot._handle_routing_backend_select(context, {"backend": "codex"})
+        await bot._handle_routing_backend_select(context, {"agent": "id-codex"})
 
         elements = claude_card["body"]["elements"][0]["elements"]
         button = next(element for element in elements if element["tag"] == "button")
@@ -108,7 +108,7 @@ class FeishuRoutingCardTests(unittest.IsolatedAsyncioTestCase):
         )
 
         kwargs = bot._on_routing_update.await_args.kwargs
-        self.assertEqual((kwargs["backend"], kwargs["model"]), ("claude", "claude-sonnet-4-5"))
+        self.assertEqual((kwargs["agent_id"], kwargs["model"]), ("id-claude", "claude-sonnet-4-5"))
 
     async def test_settings_submit_binds_optional_fields_by_name(self):
         bot = self._make_bot()

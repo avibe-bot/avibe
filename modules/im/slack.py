@@ -44,9 +44,9 @@ from vibe.i18n import get_supported_languages, t as i18n_t
 from vibe.proxy import resolve_proxy
 from core.modals import (
     DEFAULT_OPTION_VALUE,
+    AgentChoice,
     BackendRouteMenu,
     RouteDraft,
-    RouteOption,
     RoutingModalData,
     route_option_label,
 )
@@ -2542,7 +2542,7 @@ class SlackBot(BaseIMClient):
                     # A routing form refreshes when the backend or the model changes: each decides what the
                     # fields below it offer.
                     should_update = view.get("callback_id") == "routing_modal" and (
-                        action.get("action_id") == "backend_select"
+                        action.get("action_id") == "agent_select"
                         or str(action.get("block_id") or "").startswith("route_model:")
                     )
                     if should_update:
@@ -2754,7 +2754,7 @@ class SlackBot(BaseIMClient):
                 await self._on_routing_update(
                     user_id=user_id,
                     channel_id=channel_id,
-                    backend=selection.selected_backend,
+                    agent_id=selection.selected_agent,
                     variant=draft.variant,
                     model=draft.model,
                     reasoning_effort=draft.reasoning_effort,
@@ -3444,55 +3444,53 @@ class SlackBot(BaseIMClient):
         self,
         channel_id: str,
         routing: RoutingModalData,
-        selected_backend: Optional[str] = None,
+        selected_agent: Optional[str] = None,
         draft: Optional[RouteDraft] = None,
     ) -> dict:
-        """Build the routing modal: the backend select, then the shown backend's route section.
+        """Build the routing modal: the Agent select, then the shown Agent's route section.
 
-        ``draft`` is the shown backend's choices; without one the section shows the stored route.
+        ``draft`` is the shown Agent's choices; without one the section shows the stored route.
         """
-        registered_backends = routing.registered_backends
-        current_backend = routing.current_backend
-        backend_options = [
-            {"text": {"type": "plain_text", "text": display_name_for_backend(backend)}, "value": backend}
-            for backend in registered_backends
+        shown_id = routing.shown_agent(selected_agent)
+        shown = routing.agent(shown_id)
+        current = routing.agent(routing.current_agent)
+        agent_options = [
+            {"text": {"type": "plain_text", "text": agent.label[:75]}, "value": agent.id}
+            for agent in routing.agent_options()
         ]
-        shown_backend = selected_backend if selected_backend in registered_backends else current_backend
-        if shown_backend not in registered_backends:
-            shown_backend = registered_backends[0] if registered_backends else None
-        backend_select = {
+        agent_select = {
             "type": "static_select",
-            "action_id": "backend_select",
-            "placeholder": {"type": "plain_text", "text": self._t("modal.routing.selectBackend")},
-            "options": backend_options,
+            "action_id": "agent_select",
+            "placeholder": {"type": "plain_text", "text": self._t("modal.routing.selectAgent")},
+            "options": agent_options,
         }
-        initial_backend = next((option for option in backend_options if option["value"] == shown_backend), None)
-        if initial_backend is not None:
-            backend_select["initial_option"] = initial_backend
+        initial_agent = next((option for option in agent_options if option["value"] == shown_id), None)
+        if initial_agent is not None:
+            agent_select["initial_option"] = initial_agent
 
         blocks = [
             {
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
-                    "text": f"*{self._t('modal.routing.currentBackend')}* {display_name_for_backend(current_backend)}",
+                    "text": f"*{self._t('modal.routing.currentAgent')}* {current.label if current else ''}",
                 },
             },
             {"type": "divider"},
             {
                 "type": "input",
-                "block_id": "backend_block",
+                "block_id": "agent_block",
                 "dispatch_action": True,
-                "element": backend_select,
-                "label": {"type": "plain_text", "text": self._t("modal.routing.backend")},
+                "element": agent_select,
+                "label": {"type": "plain_text", "text": self._t("modal.routing.agent")},
             },
         ]
-        if shown_backend:
+        if shown is not None:
             blocks.extend(
                 self._route_section_blocks(
-                    shown_backend,
-                    routing.menu(shown_backend),
-                    draft if draft is not None else routing.stored_draft(shown_backend),
+                    shown,
+                    routing.menu(shown.id),
+                    draft if draft is not None else routing.stored_draft(shown.id),
                 )
             )
         blocks.append(
@@ -3511,22 +3509,22 @@ class SlackBot(BaseIMClient):
             "blocks": blocks,
         }
 
-    def _route_section_blocks(self, backend: str, menu: BackendRouteMenu, draft: RouteDraft) -> list[dict]:
-        """One backend's route fields, keyed by backend so a backend switch never carries another's input.
+    def _route_section_blocks(self, agent: AgentChoice, menu: BackendRouteMenu, draft: RouteDraft) -> list[dict]:
+        """One Agent's route fields, keyed by Agent so an Agent switch never carries another's input.
 
         Slack keeps an input's state across ``views.update`` while its block stays the same, so the effort block
         is also keyed by model: a model change then offers that model's efforts afresh.
         """
-        backend_name = display_name_for_backend(backend)
-        default = RouteOption(DEFAULT_OPTION_VALUE, "")
+        backend_name = display_name_for_backend(agent.backend)
 
-        def _select(block_id, label, placeholder, options, current, *, effort=False, dispatch=False) -> dict:
+        def _select(field, block_id, label, placeholder, options, current, *, dispatch=False) -> dict:
+            effort = field == "reasoning_effort"
             slack_options = [
                 {
                     "text": {"type": "plain_text", "text": route_option_label(self._t, option, effort=effort)[:75]},
                     "value": option.value,
                 }
-                for option in [default, *options]
+                for option in [menu.default_option(field), *options]
             ]
             block = {
                 "type": "input",
@@ -3552,17 +3550,15 @@ class SlackBot(BaseIMClient):
             {"type": "divider"},
             {
                 "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*{self._t('modal.routing.backendSettings', backend=backend_name)}*",
-                },
+                "text": {"type": "mrkdwn", "text": f"*{agent.label}*"},
             },
         ]
         variants = menu.variant_options(draft.variant)
         if variants:
             blocks.append(
                 _select(
-                    f"route_variant:{backend}",
+                    "variant",
+                    f"route_variant:{agent.id}",
                     self._t("modal.routing.backendAgent", backend=backend_name),
                     self._t("modal.routing.selectBackendAgent", backend=backend_name),
                     variants,
@@ -3571,7 +3567,8 @@ class SlackBot(BaseIMClient):
             )
         blocks.append(
             _select(
-                f"route_model:{backend}",
+                "model",
+                f"route_model:{agent.id}",
                 self._t("modal.routing.model"),
                 self._t("modal.routing.selectModel"),
                 menu.model_options(draft.model),
@@ -3582,12 +3579,12 @@ class SlackBot(BaseIMClient):
         effort_key = hashlib.sha256((draft.model or DEFAULT_OPTION_VALUE).encode("utf-8")).hexdigest()
         blocks.append(
             _select(
-                f"route_effort:{backend}:{effort_key}",
+                "reasoning_effort",
+                f"route_effort:{agent.id}:{effort_key}",
                 self._t("modal.routing.reasoningEffort"),
                 self._t("modal.routing.selectReasoningEffort"),
                 menu.effort_options(draft.model, draft.reasoning_effort),
                 draft.reasoning_effort,
-                effort=True,
             )
         )
         return blocks
@@ -3750,13 +3747,13 @@ class SlackBot(BaseIMClient):
         view_hash: str,
         channel_id: str,
         routing: RoutingModalData,
-        selected_backend: Optional[str] = None,
+        selected_agent: Optional[str] = None,
         draft: Optional[RouteDraft] = None,
     ) -> None:
         """Update routing modal when selections change."""
         self._ensure_clients()
         view = self._build_routing_modal_view(
-            channel_id=channel_id, routing=routing, selected_backend=selected_backend, draft=draft
+            channel_id=channel_id, routing=routing, selected_agent=selected_agent, draft=draft
         )
         try:
             await self.web_client.views_update(view_id=view_id, hash=view_hash, view=view)

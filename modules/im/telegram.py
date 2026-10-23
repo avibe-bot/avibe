@@ -71,20 +71,16 @@ class _TelegramRoutingState:
     user_id: str
     is_dm: bool
     routing: RoutingModalData
-    backend: str
-    # Each backend keeps its own choices while the form is open; one not yet shown starts from the stored route.
+    agent: str
+    # Each Agent keeps its own choices while the form is open; one not yet shown starts from the stored route.
     drafts: dict[str, RouteDraft] = field(default_factory=dict)
     picker_field: Optional[str] = None
     picker_page: int = 0
 
-    @property
-    def registered_backends(self) -> list[str]:
-        return self.routing.registered_backends
-
     def draft(self) -> RouteDraft:
-        if self.backend not in self.drafts:
-            self.drafts[self.backend] = self.routing.stored_draft(self.backend)
-        return self.drafts[self.backend]
+        if self.agent not in self.drafts:
+            self.drafts[self.agent] = self.routing.stored_draft(self.agent)
+        return self.drafts[self.agent]
 
 
 @dataclass
@@ -1713,7 +1709,6 @@ class TelegramBot(BaseIMClient):
         context = trigger_id if isinstance(trigger_id, MessageContext) else None
         if context is None:
             raise ValueError("Telegram routing flow requires a message context")
-        registered = routing.registered_backends
         state = _TelegramRoutingState(
             message_id="",
             channel_id=channel_id,
@@ -1721,11 +1716,7 @@ class TelegramBot(BaseIMClient):
             user_id=context.user_id,
             is_dm=bool((context.platform_specific or {}).get("is_dm")),
             routing=routing,
-            backend=(
-                routing.current_backend
-                if routing.current_backend in registered
-                else (registered[0] if registered else routing.current_backend)
-            ),
+            agent=routing.shown_agent(routing.current_agent) or "",
         )
         text, keyboard = self._render_routing_state(state)
         message_id = await self.send_message_with_buttons(context, text, keyboard)
@@ -1757,8 +1748,10 @@ class TelegramBot(BaseIMClient):
         else:
             state.message_id = await self.send_message_with_buttons(target_context, text, keyboard)
 
-    def _get_backend_label(self, backend: str) -> str:
-        return display_name_for_backend(backend)
+    @staticmethod
+    def _agent_label(state: _TelegramRoutingState, agent_id: str) -> str:
+        agent = state.routing.agent(agent_id)
+        return agent.label if agent else agent_id
 
     def _question_definition(self, question: Any) -> tuple[str, str, list[tuple[str, str]], bool]:
         if isinstance(question, dict):
@@ -1890,19 +1883,22 @@ class TelegramBot(BaseIMClient):
             synthetic_payload = f"{state.callback_prefix}:modal:{json.dumps(answers_payload, ensure_ascii=True)}"
             await self.on_callback_query_callback(context, synthetic_payload)
 
-    def _routing_field_label(self, field: Optional[str]) -> str:
+    def _routing_field_label(self, state: _TelegramRoutingState, field: Optional[str]) -> str:
+        agent = state.routing.agent(state.agent)
         mapping = {
-            "backend": self._t("routing.label.backend"),
-            "variant": self._t("routing.label.agent"),
+            "agent": self._t("routing.label.agent"),
+            "variant": self._t(
+                "modal.routing.backendAgent", backend=display_name_for_backend(agent.backend) if agent else ""
+            ),
             "model": self._t("routing.label.model"),
             "reasoning_effort": self._t("routing.label.reasoningEffort"),
         }
         return mapping.get(field or "", field or "")
 
     def _routing_fields(self, state: _TelegramRoutingState) -> list[tuple[str, str]]:
-        """The shown backend's fields as ``(field, current value's text)``; the agent only where it has one."""
+        """The shown Agent's fields as ``(field, current value's text)``; the native agent only where it has one."""
         draft = state.draft()
-        menu = state.routing.menu(state.backend)
+        menu = state.routing.menu(state.agent)
         fields = [("model", draft.model), ("reasoning_effort", draft.reasoning_effort)]
         if menu.variant_options(draft.variant):
             fields.insert(0, ("variant", draft.variant))
@@ -1919,18 +1915,18 @@ class TelegramBot(BaseIMClient):
         lines = [
             f"🤖 {self._t('telegram.routingTitle')}",
             "",
-            f"{self._t('routing.label.backend')}: {self._get_backend_label(state.backend)}",
+            f"{self._t('routing.label.agent')}: {self._agent_label(state, state.agent)}",
         ]
-        lines.extend(f"{self._routing_field_label(name)}: {text}" for name, text in self._routing_fields(state))
+        lines.extend(f"{self._routing_field_label(state, name)}: {text}" for name, text in self._routing_fields(state))
         return lines
 
     def _routing_picker_options(
         self, state: _TelegramRoutingState, field_name: Optional[str] = None
     ) -> list[tuple[str, Optional[str]]]:
         field_name = field_name or state.picker_field
-        if field_name == "backend":
-            return [(self._get_backend_label(backend), backend) for backend in state.registered_backends]
-        menu = state.routing.menu(state.backend)
+        if field_name == "agent":
+            return [(agent.label, agent.id) for agent in state.routing.agent_options()]
+        menu = state.routing.menu(state.agent)
         draft = state.draft()
         if field_name == "variant":
             options = menu.variant_options(draft.variant)
@@ -1941,20 +1937,21 @@ class TelegramBot(BaseIMClient):
         else:
             return []
         effort = field_name == "reasoning_effort"
-        return [(self._t("common.default"), None)] + [
+        default = route_option_label(self._t, menu.default_option(field_name), effort=effort)
+        return [(default, None)] + [
             (route_option_label(self._t, option, effort=effort), option.value) for option in options
         ]
 
     def _apply_routing_option(self, state: _TelegramRoutingState, value: Optional[str]) -> None:
         draft = state.draft()
         if state.picker_field in ("variant", "model", "reasoning_effort"):
-            value = state.routing.menu(state.backend).chosen(state.picker_field, value)
+            value = state.routing.menu(state.agent).chosen(state.picker_field, value)
         if state.picker_field == "model":
-            state.drafts[state.backend] = draft.with_model(value)
+            state.drafts[state.agent] = draft.with_model(value)
         elif state.picker_field == "variant":
-            state.drafts[state.backend] = replace(draft, variant=value)
+            state.drafts[state.agent] = replace(draft, variant=value)
         elif state.picker_field == "reasoning_effort":
-            state.drafts[state.backend] = replace(draft, reasoning_effort=value)
+            state.drafts[state.agent] = replace(draft, reasoning_effort=value)
         state.picker_field = None
         state.picker_page = 0
 
@@ -1963,31 +1960,31 @@ class TelegramBot(BaseIMClient):
             return self._render_routing_picker(state)
 
         text = "\n".join(self._routing_summary_lines(state))
-        backend_row = [
+        # Agent names are free text and Telegram callback data holds 64 bytes, so buttons carry list positions.
+        agents = state.routing.agent_options()
+        agent_row = [
             InlineButton(
-                text=(f"☑️ {self._get_backend_label(backend)}" if backend == state.backend else self._get_backend_label(backend))[
-                    :40
-                ],
-                callback_data=f"tg_route:backend:{backend}",
+                text=(f"☑️ {agent.name}" if agent.id == state.agent else agent.name)[:40],
+                callback_data=f"tg_route:agent:{index}",
             )
-            for backend in state.registered_backends[:3]
+            for index, agent in enumerate(agents[:3])
         ]
         rows: list[list[InlineButton]] = []
-        if backend_row:
-            rows.append(backend_row)
-        if len(state.registered_backends) > 3:
+        if agent_row:
+            rows.append(agent_row)
+        if len(agents) > 3:
             rows.append(
                 [
                     InlineButton(
-                        text=f"… {self._t('routing.label.backend')}"[:40],
-                        callback_data="tg_route:field:backend",
+                        text=f"… {self._t('routing.label.agent')}"[:40],
+                        callback_data="tg_route:field:agent",
                     )
                 ]
             )
         rows.extend(
             [
                 InlineButton(
-                    text=f"{self._routing_field_label(name)}: {value_text}"[:40],
+                    text=f"{self._routing_field_label(state, name)}: {value_text}"[:40],
                     callback_data=f"tg_route:field:{name}",
                 )
             ]
@@ -2013,7 +2010,7 @@ class TelegramBot(BaseIMClient):
         lines.extend(
             [
                 "",
-                f"{self._t('telegram.routingChoosePrefix')} {self._routing_field_label(state.picker_field)}",
+                f"{self._t('telegram.routingChoosePrefix')} {self._routing_field_label(state, state.picker_field)}",
             ]
         )
         rows = [
@@ -2052,7 +2049,7 @@ class TelegramBot(BaseIMClient):
             routing_update = {
                 "user_id": state.user_id,
                 "channel_id": state.channel_id,
-                "backend": state.backend,
+                "agent_id": state.agent,
                 "variant": draft.variant,
                 "model": draft.model,
                 "reasoning_effort": draft.reasoning_effort,
@@ -2067,20 +2064,17 @@ class TelegramBot(BaseIMClient):
         if action == "back":
             state.picker_field = None
             state.picker_page = 0
-        elif action == "backend" and len(parts) > 2:
-            backend = parts[2]
-            if backend in state.registered_backends:
-                state.backend = backend
+        elif action == "agent" and len(parts) > 2:
+            agents = state.routing.agent_options()
+            index = int(parts[2]) if parts[2].isdigit() else -1
+            if 0 <= index < len(agents):
+                state.agent = agents[index].id
                 state.picker_field = None
                 state.picker_page = 0
         elif action == "page" and len(parts) > 2:
             state.picker_page += -1 if parts[2] == "prev" else 1
         elif action == "field" and len(parts) > 2:
-            field = parts[2]
-            if field == "backend":
-                state.picker_field = "backend"
-            else:
-                state.picker_field = field
+            state.picker_field = parts[2]
             state.picker_page = 0
         elif action == "option" and len(parts) > 2:
             try:
@@ -2090,8 +2084,8 @@ class TelegramBot(BaseIMClient):
             options = self._routing_picker_options(state)
             if 0 <= option_index < len(options):
                 _, value = options[option_index]
-                if state.picker_field == "backend" and value:
-                    state.backend = value
+                if state.picker_field == "agent" and value:
+                    state.agent = value
                     state.picker_field = None
                     state.picker_page = 0
                 else:
