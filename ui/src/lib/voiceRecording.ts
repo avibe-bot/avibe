@@ -177,6 +177,18 @@ const loadVoicePcmWorklet = async (context: AudioContext): Promise<void> => {
   }
 };
 
+const requestAudioContextResume = (context: AudioContext): void => {
+  if (context.state === 'running') return;
+  try {
+    // Invoke resume synchronously from the microphone pointer/shortcut handler.
+    // The promise may settle later, but the browser's transient activation is
+    // attached to this call itself.
+    void context.resume().catch(() => undefined);
+  } catch {
+    // start() retries resume after the worklet and stream are connected.
+  }
+};
+
 /**
  * Compile the capture worklet before the user presses the microphone button.
  * This does not request microphone permission or connect a MediaStream; it only
@@ -196,7 +208,10 @@ export const prewarmVoiceCapture = (): Promise<void> => {
   ) {
     closePrewarmedAudioContext(prewarmedAudioContext);
   }
-  if (prewarmPromise) return prewarmPromise;
+  if (prewarmPromise) {
+    if (prewarmedAudioContext) requestAudioContextResume(prewarmedAudioContext);
+    return prewarmPromise;
+  }
 
   let context: AudioContext;
   try {
@@ -206,12 +221,10 @@ export const prewarmVoiceCapture = (): Promise<void> => {
   }
   prewarmedAudioContext = context;
   prewarmedAudioContextConstructor = constructor;
+  requestAudioContextResume(context);
   prewarmPromise = (async () => {
     try {
       await loadVoicePcmWorklet(context);
-      // A browser may reject resume outside a user gesture. The worklet is
-      // still useful in that case; start() retries resume from the gesture.
-      await context.resume().catch(() => undefined);
     } catch (error) {
       closePrewarmedAudioContext(context);
       throw error;

@@ -349,11 +349,11 @@ describe('VoiceRecordingPipeline', () => {
     expect(onStopped).toHaveBeenCalledWith('finish', { pendingSegmentCount: 0 });
   });
 
-  it('reuses a prewarmed audio context for the first capture', async () => {
+  it('reuses a prewarmed audio context and retries gesture-gated resume', async () => {
     const addModule = vi.fn(async () => undefined);
     class FakeAudioContext {
       static instance: FakeAudioContext | null = null;
-      state = 'running';
+      state = 'suspended';
       readonly audioWorklet = { addModule };
       readonly destination = {};
       readonly close = vi.fn(async () => {
@@ -402,6 +402,9 @@ describe('VoiceRecordingPipeline', () => {
     });
 
     await prewarmVoiceCapture();
+    expect(FakeAudioContext.instance?.resume).toHaveBeenCalledOnce();
+    await prewarmVoiceCapture();
+    expect(FakeAudioContext.instance?.resume).toHaveBeenCalledTimes(2);
     const pipeline = new VoiceRecordingPipeline({
       stream,
       segmentMs: 1000,
