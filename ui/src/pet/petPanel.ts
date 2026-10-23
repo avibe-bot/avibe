@@ -39,6 +39,8 @@ export const petPanel = {
   current: (): boolean => expanded,
   want: (): boolean => wantExpanded,
   layout: (): PetLayout => layout,
+  /** The revision of the layout drawn (0 before the shell's first). */
+  revision: (): number => layoutRevision,
   /** Waiting for the shell's first layout: draw nothing yet (spec §9.1). */
   awaitingLayout: (): boolean => layoutRevision === 0 && !waitingGivenUp && petBridge.shellDrags(),
   /** `pet_ready` failed or never answered: draw the default layout. */

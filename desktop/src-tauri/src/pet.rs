@@ -16,9 +16,9 @@ use std::time::Duration;
 
 use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
-    area_for, clamp_anchor, default_anchor, frame_at, hovering, place_moved, rescale, shortcut_label, valid_session_id,
-    FrameState, FrameStep, HitRect, LayoutSnapshot, LogicalRect, PetAnchor, PetBinding, PetFrame, PetIntent, PetLayout,
-    PetReady, PetStore, WorkArea, SHORTCUT_PRESETS,
+    area_for, clamp_anchor, default_anchor, frame_at, hovering, place_moved, rescale, shortcut_label, upward_frame,
+    valid_session_id, FrameState, FrameStep, HitRect, LayoutSnapshot, LogicalRect, PageKind, PetAnchor, PetBinding,
+    PetFrame, PetIntent, PetLayout, PetReady, PetStore, WorkArea, SHORTCUT_PRESETS,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
@@ -89,8 +89,6 @@ pub struct Pet {
     /// Advances with every drag and every new window, so a stale drag's steps
     /// change nothing.
     drag_generation: AtomicU64,
-    /// Whether the page draws the top layout (`pet_ready` says so).
-    page_layouts: AtomicBool,
     hit_regions: Mutex<Vec<HitRect>>,
     poll_generation: AtomicU64,
     poll_wake: Arc<tokio::sync::Notify>,
@@ -108,7 +106,6 @@ impl Pet {
             shortcut_error: Mutex::new(None),
             move_generation: Arc::new(AtomicU64::new(0)),
             drag_generation: AtomicU64::new(0),
-            page_layouts: AtomicBool::new(false),
             hit_regions: Mutex::new(Vec::new()),
             poll_generation: AtomicU64::new(0),
             poll_wake: Arc::new(tokio::sync::Notify::new()),
@@ -124,7 +121,7 @@ impl Pet {
     }
 
     fn page_loading(&self) {
-        self.page_layouts.store(false, Ordering::SeqCst);
+        lock(&self.frame).state.page_loading();
         self.store().page_loading();
         lock(&self.hit_regions).clear();
     }
@@ -529,7 +526,7 @@ fn follow_move(app: &AppHandle, window: &WebviewWindow) {
         return;
     };
     let scale = anchor_scale(app, Some(window_scale));
-    let page_layouts = pet.page_layouts.load(Ordering::SeqCst);
+    let page_layouts = lock(&pet.frame).state.draws_layouts();
     let (anchor, next) = place_moved(rescale(at, window_scale, scale), &work_areas(app, scale), page_layouts);
     pet.store().set_anchor(PetAnchor {
         x: anchor.x.round(),
@@ -549,7 +546,7 @@ fn follow_move(app: &AppHandle, window: &WebviewWindow) {
     } else {
         next
     };
-    let step = lock(&pet.frame).state.follow(next, held, moved, page_layouts);
+    let step = lock(&pet.frame).state.follow(next, held, moved);
     perform(app, window, step);
 }
 
@@ -562,9 +559,8 @@ fn perform(app: &AppHandle, window: &WebviewWindow, step: FrameStep) {
         FrameStep::Keep => {}
         FrameStep::Apply { frame, anchor } => set_frame(window, frame.origin(anchor, 1.0), frame.size()),
         FrameStep::Publish(snapshot) => {
-            if app.state::<Pet>().page_layouts.load(Ordering::SeqCst) {
-                dispatch(window, LAYOUT_EVENT, &serde_json::json!(snapshot));
-            }
+            // An older page ignores the event; one still loading may already listen.
+            dispatch(window, LAYOUT_EVENT, &serde_json::json!(snapshot));
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(SETTLE_TIMEOUT).await;
@@ -695,12 +691,12 @@ pub struct ReadyResult {
 pub fn pet_ready(window: WebviewWindow, layouts: Option<bool>) -> Result<ReadyResult, String> {
     ensure_pet_page(&window)?;
     let pet = window.state::<Pet>();
-    pet.page_layouts.store(layouts == Some(true), Ordering::SeqCst);
-    if layouts != Some(true) {
-        // An older page draws only the upward layout and never acknowledges
-        // one: it gets the upward window.
-        follow_move(window.app_handle(), &window);
-    }
+    let kind = if layouts == Some(true) {
+        PageKind::Layouts
+    } else {
+        PageKind::Legacy
+    };
+    page_ready(window.app_handle(), &window, kind);
     // A new document starts collapsed, so the frame does too.
     let expanded = lock(&pet.frame).expanded;
     if expanded {
@@ -759,11 +755,49 @@ pub async fn pet_drag(window: WebviewWindow) -> Result<(), String> {
     })
     .await??;
     wait_for_release(&app, generation).await;
-    on_main_thread(&app, {
+    let placed = on_main_thread(&app, {
         let window = window.clone();
         move |app| end_drag(app, &window, generation)
     })
-    .await?
+    .await;
+    // The one way a drag ends without a placement: whatever failed, it goes
+    // back to the frame and anchor it started from (`FrameState::abort_drag`).
+    if !matches!(placed, Ok(Ok(()))) {
+        let _ = on_main_thread(&app, move |app| abandon_drag(app, generation)).await;
+    }
+    placed?
+}
+
+fn abandon_drag(app: &AppHandle, generation: u64) {
+    let pet = app.state::<Pet>();
+    if pet.drag_generation.load(Ordering::SeqCst) != generation {
+        return;
+    }
+    let step = lock(&pet.frame).state.abort_drag();
+    if let Some(window) = app.get_webview_window(PET_WINDOW) {
+        perform(app, &window, step);
+    }
+}
+
+/// The document said what it draws: the machine decides what that changes
+/// for the window, given where the pet is now and the upward window there.
+fn page_ready(app: &AppHandle, window: &WebviewWindow, kind: PageKind) {
+    let pet = app.state::<Pet>();
+    let current = lock(&pet.frame).state.current();
+    let (Some(at), Ok(window_scale)) = (window_anchor(window, current), window.scale_factor()) else {
+        lock(&pet.frame)
+            .state
+            .page_ready(kind, (0.0, 0.0), |_| PetFrame::default());
+        return;
+    };
+    let scale = anchor_scale(app, Some(window_scale));
+    let areas = work_areas(app, scale);
+    let upward = |anchor: (f64, f64)| {
+        let saved = rescale(anchor, window_scale, scale);
+        area_for(&areas, saved).map_or_else(PetFrame::default, |area| upward_frame(saved, area))
+    };
+    let step = lock(&pet.frame).state.page_ready(kind, at, upward);
+    perform(app, window, step);
 }
 
 /// The page drew the layout of `revision`. That revision's waiting frame (if
@@ -799,19 +833,17 @@ async fn on_main_thread<T: Send + 'static>(
 fn begin_drag(app: &AppHandle, window: &WebviewWindow) -> Result<u64, String> {
     let pet = app.state::<Pet>();
     let mut frame = lock(&pet.frame);
-    let before = frame.state.current();
-    let anchor = window_anchor(window, before).ok_or(WINDOW_GONE)?;
-    let Some(strip) = frame.state.begin_drag() else {
+    let anchor = window_anchor(window, frame.state.current()).ok_or(WINDOW_GONE)?;
+    let Some(strip) = frame.state.begin_drag(anchor) else {
         return Err("The desktop pet is already being placed.".to_owned());
     };
     set_frame(window, strip.origin(anchor, 1.0), strip.size());
     let generation = pet.drag_generation.fetch_add(1, Ordering::SeqCst) + 1;
     drop(frame);
     if let Err(error) = start_drag(window) {
-        // No drag will end: put the window back as it was.
-        lock(&pet.frame).state.cancel_drag(before);
-        set_frame(window, before.origin(anchor, 1.0), before.size());
-        pet.drag_generation.fetch_add(1, Ordering::SeqCst);
+        // No drag will end: the drag finaliser puts the window back.
+        let step = lock(&pet.frame).state.abort_drag();
+        perform(app, window, step);
         return Err(error);
     }
     Ok(generation)
@@ -854,8 +886,9 @@ fn end_drag(app: &AppHandle, window: &WebviewWindow, generation: u64) -> Result<
     };
     let scale = anchor_scale(app, Some(window_scale));
     let saved = rescale(dropped, window_scale, scale);
-    // The document may have reloaded during the drag; it is the one that draws.
-    let page_layouts = pet.page_layouts.load(Ordering::SeqCst);
+    // The document may have reloaded during the drag: the machine knows what
+    // the one showing now draws (or that it is still loading).
+    let page_layouts = lock(&pet.frame).state.draws_layouts();
     let (anchor, next) = place_moved(saved, &work_areas(app, scale), page_layouts);
     let at = (anchor.x, anchor.y);
     pet.store().set_anchor(PetAnchor {
@@ -867,7 +900,7 @@ fn end_drag(app: &AppHandle, window: &WebviewWindow, generation: u64) -> Result<
     if held != dropped {
         set_frame(window, strip.origin(held, 1.0), strip.size());
     }
-    let step = lock(&pet.frame).state.end_drag(next, held, page_layouts);
+    let step = lock(&pet.frame).state.end_drag(next, held);
     perform(app, window, step);
     Ok(())
 }

@@ -658,7 +658,20 @@ already communicate activity. Keep the upper-right red unread badge.
   waiting frame comes back only on its own revision. Stale acknowledgements
   change nothing; after 1s without one the frame applies anyway. No reply
   carries a layout to current pages (`pet_set_expanded` still answers one for
-  older pages).
+  older pages). The page always acknowledges the snapshot in its `pet_ready`
+  reply, even a revision it already drew from an event.
+  - The machine also knows what the document draws: *loading* (from the
+    moment a document starts loading until its `pet_ready`), *layouts*, or
+    *legacy*. While it is loading nothing held is released, expiry included;
+    when it is ready, a page that draws layouts gets the held snapshot again,
+    and an older page gets the upward window at once, in place of a held frame
+    or a current one in the top layout (mid-drag, in place of the frame a
+    failed drag returns to).
+  - Every drag ends idle or holding: one that does not end with a placement
+    (the native drag did not start, the window could not be read on release,
+    the window was replaced, the release could not be handled) goes back to
+    the frame and anchor it started from, held like any other change of layout
+    if that layout is no longer the one the page draws.
 - **Dragging.** A 600px window cannot take Vibey near the menu bar, so the
   drag goes through the shell (`pet_drag`): it shrinks the window to the
   **drag strip** around Vibey and the dock (12px above the image, 36px below

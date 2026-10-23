@@ -57,10 +57,13 @@ const start = () => {
     window.clearTimeout(waiting);
     legacyBinding = ready;
     readyLoaded = true;
-    // A frame may already be waiting for this document (it loaded mid-drop);
-    // a new window is shown once this first snapshot is drawn.
-    if (ready.snapshot) drawSnapshot(ready.snapshot);
-    else petPanel.stopWaiting();
+    // A frame may already be waiting for this document (it loaded mid-drop).
+    // The reply is always acknowledged, even for a revision this document
+    // already drew from an event: the shell may have taken it for loading then.
+    if (ready.snapshot) {
+      if (petPanel.applySnapshot(ready.snapshot)) acknowledge(ready.snapshot.revision);
+      else acknowledge(petPanel.revision());
+    } else petPanel.stopWaiting();
     if (ready.summon_pending && liveSummons === liveSummonsAtRequest) noteSummon(ready.summon_pending.intent);
   }).catch(() => {
     window.clearTimeout(waiting);
@@ -75,9 +78,13 @@ const start = () => {
  * reached this document).
  */
 const drawSnapshot = (snapshot: LayoutSnapshot) => {
-  if (!petPanel.applySnapshot(snapshot)) return;
+  if (petPanel.applySnapshot(snapshot)) acknowledge(snapshot.revision);
+};
+
+/** After the drawn revision has been painted, tell the shell. */
+const acknowledge = (revision: number) => {
   requestAnimationFrame(() => requestAnimationFrame(() => {
-    void petBridge.settle(snapshot.revision).then((latest) => { if (latest) drawSnapshot(latest); }).catch(() => undefined);
+    void petBridge.settle(revision).then((latest) => { if (latest) drawSnapshot(latest); }).catch(() => undefined);
   }));
 };
 

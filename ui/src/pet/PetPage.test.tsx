@@ -3242,6 +3242,19 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     expect(settles(invoke).map(([revision]) => revision)).not.toContain(2);
   });
 
+  it('acknowledges the pet_ready snapshot even when an event already drew that revision', async () => {
+    const readyAnswer = deferred<unknown>();
+    const invoke = recording((command, args) => command === 'pet_ready' ? readyAnswer.promise : { revision: args?.revision ?? 3, layout: top });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    // The shell published revision 3 while it still took this document for loading.
+    await publish(3, top);
+    await waitFor(() => expect(settles(invoke)).toEqual([[3, 'top']]));
+    await act(async () => readyAnswer.resolve(ready(top, 3)));
+    await waitFor(() => expect(settles(invoke)).toEqual([[3, 'top'], [3, 'top']]));
+  });
+
   it('draws a newer snapshot the shell answers with, when its event never arrived', async () => {
     const invoke = recording((command) => command === 'pet_ready' ? ready() : { revision: 5, layout: top });
     shell(invoke);
