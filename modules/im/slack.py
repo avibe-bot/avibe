@@ -3579,7 +3579,7 @@ class SlackBot(BaseIMClient):
                 dispatch=True,
             )
         )
-        effort_key = hashlib.sha1((draft.model or DEFAULT_OPTION_VALUE).encode("utf-8")).hexdigest()[:8]
+        effort_key = hashlib.sha256((draft.model or DEFAULT_OPTION_VALUE).encode("utf-8")).hexdigest()
         blocks.append(
             _select(
                 f"route_effort:{backend}:{effort_key}",

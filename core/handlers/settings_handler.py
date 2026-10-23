@@ -553,25 +553,16 @@ class SettingsHandler(BaseHandler):
         menu.variants = _unique_options(
             agent.get("name") if isinstance(agent, dict) else agent for agent in agents or []
         )
-        def _entries(max_total: int) -> list[RouteOption]:
-            return [
-                RouteOption(str(entry["value"]), str(entry["label"]))
-                for entry in build_opencode_model_option_items(
-                    models,
-                    max_total=max_total,
-                    preferred_providers=resolve_opencode_provider_preferences(default_config, stored_model),
-                    allowed_providers=resolve_opencode_allowed_providers(default_config, models),
-                )
-                if entry.get("value")
-            ]
-
-        # A platform without a cap (a paged picker) gets every model. With a cap, OpenCode spreads it over its
-        # providers, so the list is built for the select, with room for the entries the platform cannot carry.
-        every = _entries(sys.maxsize)
-        if menu.option_limit:
-            unfit = sum(1 for option in every if not menu.fits(option.value))
-            every = _entries(menu.option_limit - 1 + unfit)
-        menu.models = [option for option in every if menu.fits(option.value)]
+        # OpenCode spreads a select's cap over its providers, so the list is built for the select that shows it,
+        # without the values it cannot carry; a platform without a cap (a paged picker) gets every model.
+        entries = build_opencode_model_option_items(
+            models,
+            max_total=(menu.option_limit - 1) if menu.option_limit else sys.maxsize,
+            preferred_providers=resolve_opencode_provider_preferences(default_config, stored_model),
+            allowed_providers=resolve_opencode_allowed_providers(default_config, models),
+            keep=menu.fits,
+        )
+        menu.models = [RouteOption(str(entry["value"]), str(entry["label"])) for entry in entries if entry.get("value")]
         for model in {"", *(option.value for option in menu.models), stored_model or ""}:
             menu.efforts[model] = _effort_options(build_reasoning_effort_options(models, model or None))
 

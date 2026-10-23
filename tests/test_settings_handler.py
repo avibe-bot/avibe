@@ -673,12 +673,19 @@ def test_gather_routing_modal_data_prefetches_all_backends_when_requested() -> N
 
 def test_opencode_route_menu_fits_the_platforms_cap_and_is_whole_without_one() -> None:
     handler, server = _make_routing_handler()
-    # Newer models sort first; these are too long for a Discord option value.
-    overlong = {f"{'x' * 120}-{i}": {"name": f"Long {i}", "release_date": "2026-09-01"} for i in range(30)}
-    usable = {f"m{i}": {"name": f"M{i}", "release_date": "2026-01-01"} for i in range(250)}
-    server.get_available_models = AsyncMock(
-        return_value={"providers": [{"id": "relay", "name": "Relay", "models": {**overlong, **usable}}]}
-    )
+    # More providers than the select has slots, each leading (newest first) with ids too long for Discord.
+    providers = [
+        {
+            "id": f"p{p}",
+            "name": f"P{p}",
+            "models": {
+                **{f"{'x' * 120}-{i}": {"name": f"Long {i}", "release_date": "2026-09-01"} for i in range(6)},
+                **{f"m{i}": {"name": f"M{i}", "release_date": "2026-01-01"} for i in range(3)},
+            },
+        }
+        for p in range(30)
+    ]
+    server.get_available_models = AsyncMock(return_value={"providers": providers})
     context = MessageContext(user_id="U1", channel_id="D0APS47LPU2", platform="discord")
     menus = {}
     for limit, value_limit in ((25, 100), (None, None)):  # Discord's select; Telegram's paged picker
@@ -688,8 +695,8 @@ def test_opencode_route_menu_fits_the_platforms_cap_and_is_whole_without_one() -
         menus[limit] = asyncio.run(handler._gather_routing_modal_data(context)).menus["opencode"]
 
     capped = menus[25].model_options(None)
-    assert len(capped) == 24 and all(option.value.startswith("relay/m") for option in capped)
-    assert len(menus[None].model_options(None)) == 280
+    assert len(capped) == 24 and all("/m" in option.value for option in capped)
+    assert len(menus[None].model_options(None)) == 270
 
 
 def test_gather_routing_modal_data_reads_vibey_menu_from_model_hub() -> None:
