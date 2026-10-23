@@ -5223,7 +5223,7 @@
     "queue": {
       "retryRequired": "等待手动重试 · {{count}}",
       "retryHint": "启动失败，自动重试已停止，原输入已保留。排查错误后，点击“立即发送”或失败提示上的“重试”。",
-      "retryHintAgentUnavailable": "Agent 无法运行，原输入已保留。可以用失败提示上的按钮继续，或在 Agent 恢复后点“立即发送”。",
+      "retryHintAgentUnavailable": "Agent 无法运行，原输入已保留。可以点失败提示上的“切换到 Vibey 继续”，或在 Agent 恢复后点“立即发送”。",
       "title": "排队中 · {{count}}",
       "sendNow": "立即发送",
       "sendingNow": "发送中…",

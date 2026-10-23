@@ -988,12 +988,14 @@ class MessageHandler(BaseHandler):
         target = routed_delivery_context(context)
         workbench = resolve_context_platform(target) == "avibe"
         chat_input = not workbench and not harness_run_identity(context, request)
-        if workbench:
-            mark_prewrite_recovery_required(context, "agent_unavailable")
         if not workbench and escape_reason:
             reason = self._get_formatter(target).escape_special_chars(reason)
         # Catalog and Model Hub reads: off the controller loop.
         offer = failing_backend != "vibey" and await asyncio.to_thread(self._builtin_vibey_available)
+        if workbench:
+            # The held input's hint names the notice's button only when there is one;
+            # otherwise the notice offers Retry, which the general hint already names.
+            mark_prewrite_recovery_required(context, "agent_unavailable" if offer else "agent_unavailable_no_alternative")
         output = output_with_next_step(request, CONTINUE_ON_VIBEY_NEXT_STEP) if offer and workbench else None
         text = f"❌ {reason}"
         if offer and workbench:

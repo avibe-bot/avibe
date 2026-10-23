@@ -1082,6 +1082,35 @@ def test_persist_agent_records_the_agent_that_wrote_the_reply(isolated_state):
     }
 
 
+def test_persist_agent_falls_back_to_the_session_agent_id(isolated_state):
+    """An output persisted with only its session (an Agent-initiated or detached one)
+    still records the session's Agent, so a later same-backend switch tells it apart."""
+    engine = create_sqlite_engine()
+    now = "2026-05-30T12:00:00Z"
+    session_id = "ses_author"
+    with engine.begin() as conn:
+        scope_id = upsert_scope(conn, platform="avibe", scope_type="project", native_id="proj_author", now=now)
+        conn.execute(
+            agent_sessions.insert().values(
+                id=session_id, scope_id=scope_id, agent_id="agt-first", agent_name="first",
+                agent_backend="vibey", agent_variant="default", session_anchor="anchor_ses_author",
+                native_session_id="", title="Author", status="active", metadata_json="{}",
+                created_at=now, updated_at=now, last_active_at=now,
+            )
+        )
+    ctx = MessageContext(
+        user_id="U", channel_id=session_id, platform="avibe",
+        platform_specific={"agent_session_id": session_id},
+    )
+    persist_agent_message(ctx, "result", "done")
+    with engine.connect() as conn:
+        agent_row = conn.execute(
+            select(messages).where(messages.c.author == "agent", messages.c.session_id == session_id)
+        ).mappings().first()
+    metadata = json.loads(agent_row["metadata_json"])
+    assert (metadata["author_agent_id"], metadata["author_backend"]) == ("agt-first", "vibey")
+
+
 def test_harness_inbound_avibe_session_scoped(isolated_state):
     """A scheduled/watch turn on an avibe session lands an author/type='harness'
     row attributed to the session — with author_name = the trigger kind and

@@ -5278,6 +5278,8 @@ def test_a_prewrite_failure_notice_settles_its_turn_as_unwritten(
         "core.session_turns.dispatch_turn_with_outcome",
         failure_notice_before_backend,
     )
+    queue_updates: list[str] = []
+    monkeypatch.setattr(SessionTurnManager, "_publish_queue_update", staticmethod(queue_updates.append))
 
     async def run() -> None:
         await manager._run(
@@ -5294,6 +5296,9 @@ def test_a_prewrite_failure_notice_settles_its_turn_as_unwritten(
 
     row = _row(engine, delivery_id)
     assert row["state"] == ("retired" if input_fate == "retired" else "queued")
+    # An open Workbench view drops a retired input from its queue strip.
+    if input_fate == "retired":
+        assert "ses_fsm" in queue_updates
     assert delivery_store.requires_explicit_start_retry(row) is (input_fate == "held")
     with engine.connect() as conn:
         turn = delivery_store.get_turn(conn, turn_id)

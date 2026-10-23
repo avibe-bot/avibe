@@ -283,6 +283,7 @@ def _session_row(conn, session_id: str) -> Optional[dict]:
     row = conn.execute(
         select(
             agent_sessions.c.scope_id,
+            agent_sessions.c.agent_id,
             agent_sessions.c.agent_name,
             agent_sessions.c.agent_backend,
             agent_sessions.c.visibility,

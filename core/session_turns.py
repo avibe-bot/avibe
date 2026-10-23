@@ -5596,9 +5596,12 @@ class SessionTurnManager:
         accepted Turn ignores the late claim, as before.
         """
         retire_ids: set[str] | None = None
+        retire_session_id = ""
         if (failure_evidence or {}).get("retire_input") is True:
             # Its surface cannot retry it (``mark_prewrite_input_retired``).
             with self._sqlite_engine().connect() as conn:
+                turn = delivery_store.get_turn(conn, turn_id)
+                retire_session_id = str((turn or {}).get("session_id") or "")
                 retire_ids = {
                     str(row["id"])
                     for row in delivery_store.initial_deliveries_for_turn(conn, turn_id)
@@ -5614,6 +5617,10 @@ class SessionTurnManager:
             retire_unwritten_attempt_outcome="not_written",
         )
         if result.get("changed"):
+            if retire_ids and retire_session_id:
+                # A retired input leaves the queue without requeueing anything, so
+                # an open Workbench view learns of it here.
+                self._publish_queue_update(retire_session_id)
             return result
         with self._sqlite_engine().connect() as conn:
             turn = delivery_store.get_turn(conn, turn_id)
