@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { ChevronRight, File as FileIcon, Folder, FolderPlus, Loader2, X } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -17,6 +18,7 @@ import {
   type FsEntry,
 } from '../../lib/filesApi';
 import { Button } from '../ui/button';
+import { Dialog, DialogTitle } from '../ui/dialog';
 
 export type FilePickerMode = 'open-directory' | 'save-file';
 
@@ -61,6 +63,7 @@ export const FilePicker: React.FC<{
   const [showHidden, setShowHidden] = useState(false);
 
   const navSeq = useRef(0);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
   const navigate = useCallback(
     (path: string) => {
       const seq = ++navSeq.current;
@@ -167,19 +170,35 @@ export const FilePicker: React.FC<{
   const canConfirm = !!cwd && !submitting && (mode === 'open-directory' || name.trim() !== '');
 
   return (
-    // Scoped to the owning window (absolute, not a body portal) so it inherits the window's theme.
-    <div className="absolute inset-0 z-30 grid place-items-center bg-black/50 p-5" onClick={onCancel} role="presentation">
-      <div
-        className="flex h-[420px] w-[600px] max-w-full max-h-full flex-col overflow-hidden rounded-xl border border-border-strong bg-surface-2 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.7)]"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-      >
-        {/* Title + close */}
-        <div className="flex items-center gap-2 border-b border-border px-3.5 py-2.5">
-          <span className="flex-1 truncate text-[13px] font-semibold text-foreground">
-            {t(mode === 'open-directory' ? 'apps.picker.openFolderTitle' : 'apps.picker.saveFileTitle')}
-          </span>
+    // Scoped to the owning window (not a body portal) so it inherits the window's theme.
+    <Dialog open onOpenChange={(next) => { if (!next) onCancel(); }}>
+      <div className="absolute inset-0 z-30 grid place-items-center bg-black/50 p-5" role="presentation">
+        <DialogPrimitive.Content
+          aria-describedby={undefined}
+          className="relative z-10 flex h-[420px] w-[600px] max-w-full max-h-full flex-col overflow-hidden rounded-xl border border-border-strong bg-surface-2 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.7)] focus:outline-none"
+          onOpenAutoFocus={() => {
+            previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+          }}
+          onCloseAutoFocus={(event) => {
+            const previousFocus = previousFocusRef.current;
+            if (previousFocus?.isConnected) {
+              event.preventDefault();
+              previousFocus.focus();
+            }
+          }}
+          onEscapeKeyDown={(event) => {
+            if (newFolder !== null) {
+              event.preventDefault();
+              setNewFolder(null);
+            }
+          }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Title + close */}
+          <div className="flex items-center gap-2 border-b border-border px-3.5 py-2.5">
+            <DialogTitle className="flex-1 truncate p-0 text-[13px] font-semibold text-foreground">
+              {t(mode === 'open-directory' ? 'apps.picker.openFolderTitle' : 'apps.picker.saveFileTitle')}
+            </DialogTitle>
           <Button type="button" size="icon" variant="ghost" className="size-7 text-muted" aria-label={t('common.close')} onClick={onCancel}>
             <X className="size-4" />
           </Button>
@@ -245,7 +264,11 @@ export const FilePicker: React.FC<{
                 onChange={(e) => setNewFolder(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') void createFolder(newFolder);
-                  else if (e.key === 'Escape') setNewFolder(null);
+                  else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setNewFolder(null);
+                  }
                 }}
                 // Blur abandons the inline input — only Enter creates the folder, so cancelling the
                 // picker (which blurs the input first) can't silently makeDir a folder.
@@ -307,8 +330,9 @@ export const FilePicker: React.FC<{
             {t(mode === 'open-directory' ? 'apps.picker.selectFolder' : 'apps.picker.save')}
           </Button>
         </div>
+        </DialogPrimitive.Content>
       </div>
-    </div>
+    </Dialog>
   );
 };
 

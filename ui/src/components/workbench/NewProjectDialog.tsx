@@ -1,11 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Folder, FolderOpen, Loader2, X } from 'lucide-react';
+import { Folder, FolderOpen, Loader2 } from 'lucide-react';
 
 import type { WorkbenchProject } from '../../context/ApiContext';
 import { useWorkbenchProjectsActions } from '../../context/WorkbenchProjectsContext';
 import { FolderBrowser } from '../ui/folder-browser';
 import { Button } from '../ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '../ui/dialog';
 import { Input } from '../ui/input';
 import { errorMessage } from '@/lib/errorMessage';
 import { useRouteSurfaceActive } from '@/lib/routeSurfaceActivity';
@@ -95,35 +96,21 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
   if (!surfaceActive || completion) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/50 px-4 py-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t('workbench.newProjectDialog.title')}
-      onClick={close}
-    >
-      <div
+    <Dialog open onOpenChange={(next) => { if (!next) close(); }}>
+      <DialogContent
+        closeLabel={t('workbench.newProjectDialog.cancel')}
         className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-md flex-col gap-4 overflow-y-auto rounded-2xl border border-border-strong bg-surface p-5 shadow-[0_24px_64px_-12px_rgba(0,0,0,0.6)]"
-        onClick={(e) => e.stopPropagation()}
       >
         <div className="flex min-w-0 items-start gap-3">
           <div className="flex size-9 items-center justify-center rounded-lg border border-mint/30 bg-mint/[0.08] text-mint-ink">
             <Folder className="size-4" />
           </div>
           <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-            <div className="text-[14px] font-bold text-foreground">{t('workbench.newProjectDialog.title')}</div>
-            <div className="text-[11.5px] leading-relaxed text-muted">
+            <DialogTitle className="text-[14px] font-bold text-foreground">{t('workbench.newProjectDialog.title')}</DialogTitle>
+            <DialogDescription className="text-[11.5px] leading-relaxed text-muted">
               {t('workbench.newProjectDialog.description')}
-            </div>
+            </DialogDescription>
           </div>
-          <button
-            type="button"
-            onClick={close}
-            aria-label={t('workbench.newProjectDialog.cancel')}
-            className="text-muted transition hover:text-foreground"
-          >
-            <X className="size-4" />
-          </button>
         </div>
 
         <div className="flex flex-col gap-1.5">
@@ -190,7 +177,7 @@ export const NewProjectDialog: React.FC<NewProjectDialogProps> = ({ onClose, onC
             )}
           </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 };
