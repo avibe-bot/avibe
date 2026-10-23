@@ -25,24 +25,44 @@ Avibe desktop shell is running.
 ### Settings guide
 
 In the desktop app, **Settings → System → Computer Use** walks through the same
-setup as four numbered steps: turn on Computer Use, allow Accessibility, allow
-Screen & System Audio Recording, then come back and recheck. Each step is
-marked done, current, or not yet done from the live Computer Use status, so the
-page shows which permission is still missing. The page refreshes every five
-seconds, when the window becomes visible or focused, and when you click
-**Recheck**. Accessibility comes first because the managed driver checks it
-before Screen Recording.
+setup as three numbered steps: turn on Computer Use, allow Accessibility, and
+allow Screen & System Audio Recording. Each step is marked done, current, or
+not yet done from the live Computer Use status, and the current step carries
+its action:
 
-The Settings entry appears only in the Avibe desktop app. A browser tab or phone
-that opens `/settings/computer-use` directly sees a short notice that the page
-is available in the desktop app, without the steps.
+- **Turn on** turns Computer Use on, exactly like the tray or application menu
+  switch. It never turns Computer Use off.
+- Accessibility's **Open Settings** asks macOS for the Accessibility grant
+  (the system prompt lists Avibe in the pane) and opens **Privacy & Security →
+  Accessibility**.
+- Screen & System Audio Recording's **Open Settings** runs the same request the
+  tray switch does, which lists Avibe in the pane where macOS allows it, opens
+  **Privacy & Security → Screen & System Audio Recording**, and shows the
+  **+** / drag guidance.
 
-Avibe requests permissions only when you turn the feature on. It does not keep
-showing permission prompts in the background. If the menu still reports that a
-permission is needed, open **System Settings → Privacy & Security**, confirm
-that Avibe is enabled in both permission panes, then use the off/on or
-quit/reopen recovery above. Merely bringing the Avibe window to the front does
-not start a permission retry.
+While the page is visible it reads the status about every 1.5 seconds, so a
+step turns done within seconds of macOS reporting the grant; it stops reading
+while the page is hidden and reads again when it returns. **Recheck** remains
+as a manual fallback. Accessibility comes first because the managed driver
+checks it before Screen Recording.
+
+If macOS asks to **Quit & Reopen** after the Screen Recording grant, choose it.
+When the request came from this page, the relaunched app opens the Settings
+guide again by itself (within 15 minutes of the request), and the page picks up
+the new status. A later launch is not redirected.
+
+The Settings entry appears only in the Avibe desktop app. A browser tab or
+phone that opens `/settings/computer-use` directly sees the same live steps
+with a notice to complete them in the Avibe desktop app on the Mac; the
+actions cannot run from a browser. When the host has no live desktop shell, it
+sees a short notice that the page is available in the desktop app.
+
+Avibe requests permissions only when you turn the feature on or press a
+step's **Open Settings**. It does not keep showing permission prompts in the
+background. If the menu still reports that a permission is needed, open
+**System Settings → Privacy & Security**, confirm that Avibe is enabled in both
+permission panes, then use the off/on or quit/reopen recovery above. Merely
+bringing the Avibe window to the front does not start a permission retry.
 
 The native Computer Use control remains available if its optional state or
 startup initialization cannot be opened. Avibe reports the failure in the

@@ -520,13 +520,20 @@
     },
     "computerUse": {
       "title": "电脑操作",
-      "subtitle": "让 Avibe Agent 查看并操作这台 Mac。请按顺序完成以下步骤，每完成一步本页都会自动更新。",
+      "subtitle": "让 Avibe Agent 查看并操作这台 Mac。请按顺序完成以下步骤，macOS 一确认，对应步骤就会自动标记为完成。",
       "recheck": "重新检查",
       "checking": "检查中…",
       "loading": "正在检查电脑操作状态…",
       "stepsTitle": "设置步骤",
       "unsupportedTitle": "仅桌面端可用",
       "unsupportedDetail": "电脑操作需要在 Mac 上的 Avibe 桌面应用中设置。请打开桌面应用继续。",
+      "remoteNotice": "请在这台 Mac 上的 Avibe 桌面应用中操作。本页会同步显示进度。",
+      "actionFailed": "桌面应用没有响应。请重试，或使用菜单栏中的 Avibe 菜单。",
+      "relaunchNotice": "如果 macOS 提示“退出并重新打开”，请选择它。Avibe 将重新打开，完成后本页会自动继续。",
+      "actions": {
+        "enable": "开启",
+        "openSettings": "去设置"
+      },
       "stepState": {
         "complete": "已完成",
         "current": "当前步骤",
@@ -535,19 +542,15 @@
       "steps": {
         "enable": {
           "title": "开启电脑操作",
-          "detail": "在菜单栏的 Avibe 桌面应用菜单（托盘）中开启“电脑操作”。"
+          "detail": "与菜单栏 Avibe 菜单中的“电脑操作”开关相同。"
         },
         "accessibility": {
           "title": "允许辅助功能",
-          "detail": "在“系统设置 → 隐私与安全性 → 辅助功能”中开启 Avibe。Avibe 通常会自动打开这个页面；如果列表里没有 Avibe，请点击 + 添加。"
+          "detail": "在“系统设置 → 隐私与安全性 → 辅助功能”中开启 Avibe。如果列表里没有 Avibe，请点击 + 添加。"
         },
         "screenRecording": {
           "title": "允许屏幕与系统音频录制",
           "detail": "在“系统设置 → 隐私与安全性 → 屏幕与系统音频录制”中授权正在运行的 Avibe 桌面应用：点击 +，或将 Avibe 拖入列表，然后启用它。"
-        },
-        "recheck": {
-          "title": "返回这里重新检查",
-          "detail": "授权“屏幕录制”后，macOS 可能会退出并重新打开 Avibe。应用重新打开后，请回到本页点击“重新检查”。"
         }
       }
     },
@@ -5254,8 +5257,8 @@
       "errorKind": "失败类型",
       "blockers": "当时不可用的供应商",
       "upstreamNote": "以上内容均由上游供应商的 API 返回。Avibe 会保留状态码、错误码，以及去除凭据后的上游报错信息（最多 400 字）。",
-        "upstreamDetail": "上游返回",
-        "connectionDetail": "连接错误",
+      "upstreamDetail": "上游返回",
+      "connectionDetail": "连接错误",
       "backendDetail": "Agent 后端报告",
       "copyRecord": "复制记录",
       "reason": {

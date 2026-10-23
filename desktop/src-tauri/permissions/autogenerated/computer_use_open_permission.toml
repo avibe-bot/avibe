@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-computer-use-open-permission"
+description = "Enables the computer_use_open_permission command without any pre-configured scope."
+commands.allow = ["computer_use_open_permission"]
+
+[[permission]]
+identifier = "deny-computer-use-open-permission"
+description = "Denies the computer_use_open_permission command without any pre-configured scope."
+commands.deny = ["computer_use_open_permission"]

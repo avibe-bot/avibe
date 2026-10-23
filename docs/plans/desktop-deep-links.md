@@ -40,6 +40,7 @@ spelling (`avibe:session/...`); one form only.
 | `avibe://session/<session_id>`    | `/chat/<session_id>`                         |
 | `avibe://show/<session_id>`       | `/apps/show/<session_id>`                    |
 | `avibe://settings`                | `/settings/general`                          |
+| `avibe://settings/computer-use`   | `/settings/computer-use`                     |
 | `avibe://vaults/request/<request_id>` | `/vaults?request_id=<request_id>`        |
 
 Parse as a URL. Accept only when `scheme == avibe`, `host` is one of

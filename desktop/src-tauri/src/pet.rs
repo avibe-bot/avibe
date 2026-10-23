@@ -584,7 +584,7 @@ fn is_pet_caller(label: &str, built_for: Option<&LoopbackOrigin>, url: &Url) -> 
 }
 
 /// The Workbench in `main`, on the Runtime the shell navigated it to.
-fn is_workbench(window: &WebviewWindow) -> bool {
+pub(crate) fn is_workbench(window: &WebviewWindow) -> bool {
     let Some(shell) = window.try_state::<Shell>() else {
         return false;
     };
