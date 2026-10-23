@@ -125,8 +125,10 @@ PR_SNAPSHOT_KEY = "snapshot"
 ACTIONS_SNAPSHOT_KEY = "actions"
 ACTIONS_OBSERVED_KEY = "actions_observed"
 SUCCESS_BATCH_KEY = "success_batch"
-# The last Codex review stall this watch reported (``_codex_review_stall``).
+# The last Codex review stall this watch reported (``_codex_review_stall``), and when
+# this watch first saw the current head, which no stall of that head may predate.
 REVIEW_STALL_KEY = "review_stall_reported"
+REVIEW_STALL_HEAD_KEY = "review_stall_head"
 CODEX_SUMMARY_MARKER = "<!-- codex-pull-request-review-summary -->"
 CODEX_REVIEW_REQUEST = "@codex review"
 # Codex reviews almost always conclude within minutes: over 68 reviews on
@@ -537,20 +539,29 @@ def _codex_review_stall(
     repo: str,
     stall_seconds: float,
     now: datetime,
+    head_seen_at: datetime,
 ) -> tuple[str, str] | None:
     """A Codex review of the current head that should have concluded by now: (key, report).
 
-    Two shapes, both observed live: Codex's summary says the review of the current
-    head is still running, or a ``@codex review`` request has no answer (the summary
-    was not touched since). The clock starts at the later of the summary's last update
-    and the last request, so a fresh request restarts it. ``key`` changes every further
-    ``stall_seconds`` the stall lasts, so a still-stuck review is reported again rather
-    than once and forgotten. ``None`` once the review concludes or the PR is not open.
+    Three shapes, measured from when they began:
+
+    - Codex's summary says the review of the current head is running: since the
+      summary's last update, or a later ``@codex review`` request, which restarts it;
+    - a ``@codex review`` request has no answer (the summary was not touched since):
+      since that request, but never before this watch first saw the current head
+      (``head_seen_at``), so a request made for an earlier head does not count;
+    - the current head was never picked up (no summary of it, nothing requested since
+      the push): since ``head_seen_at``. A draft is not expected to be reviewed.
+
+    ``key`` changes every further ``stall_seconds`` the stall lasts, so a still-stuck
+    review is reported again rather than once and forgotten. ``None`` once the review
+    concludes or the PR is not open.
     """
 
     pr = state.get("pull_request")
     head = _current_pr_head_sha(pr)
-    if stall_seconds <= 0 or not head or _current_pr_status(pr) not in {"open", "draft"}:
+    status = _current_pr_status(pr)
+    if stall_seconds <= 0 or not head or status not in {"open", "draft"}:
         return None
     summary_at: datetime | None = None
     code_review: dict[str, Any] = {}
@@ -567,16 +578,17 @@ def _codex_review_stall(
         elif CODEX_REVIEW_REQUEST in body.lower():
             created = _github_time(comment.get("created_at")) or stamp
             request_at = created if request_at is None or created > request_at else request_at
-    reviewing_head = (
-        str(code_review.get("commit_sha") or "").casefold() == head.casefold()
-        and str(code_review.get("status") or "").casefold() in _CODEX_REVIEW_IN_PROGRESS
-    )
+    summary_head = str(code_review.get("commit_sha") or "").casefold() == head.casefold()
+    reviewing_head = summary_head and str(code_review.get("status") or "").casefold() in _CODEX_REVIEW_IN_PROGRESS
     if reviewing_head and summary_at is not None:
         since = max(summary_at, request_at) if request_at is not None else summary_at
         shape = "has shown the review of this head as running"
     elif request_at is not None and (summary_at is None or request_at > summary_at):
-        since = request_at
+        since = max(request_at, head_seen_at)
         shape = "has not answered the last `@codex review` request"
+    elif not summary_head and status == "open":
+        since = head_seen_at
+        shape = "has not started reviewing this head"
     else:
         return None
     elapsed = (now - since).total_seconds()
@@ -2744,6 +2756,14 @@ def main() -> int:
     # A state file from before the stall report has none, which reads as nothing
     # reported yet: a review already stuck then is reported on the first cycle.
     reported_stall = (_saved_str(saved, REVIEW_STALL_KEY) or "") if resumed else ""
+    saved_stall_head = saved.get(REVIEW_STALL_HEAD_KEY) if resumed else None
+    stall_head: dict[str, str] = (
+        {"sha": str(saved_stall_head["sha"]), "at": str(saved_stall_head["at"])}
+        if isinstance(saved_stall_head, dict)
+        and isinstance(saved_stall_head.get("sha"), str)
+        and _github_time(saved_stall_head.get("at")) is not None
+        else {}
+    )
     review_fingerprints = _saved_fingerprints(saved, REVIEW_FINGERPRINTS_KEY)
     review_comment_fingerprints = _saved_fingerprints(saved, REVIEW_COMMENT_FINGERPRINTS_KEY)
     issue_comment_fingerprints = _saved_fingerprints(saved, ISSUE_COMMENT_FINGERPRINTS_KEY)
@@ -3170,11 +3190,19 @@ def main() -> int:
             Called after the cycle's ``pre_event_fields`` were taken, so a staged report
             keeps the previous stall key committed until its delivery is confirmed.
             """
-            nonlocal reported_stall
-            if args.seed_state or args.catch_up or explicit_replay:
+            nonlocal reported_stall, stall_head
+            now = _utc_now()
+            head = _current_pr_head_sha(state.get("pull_request"))
+            if head and stall_head.get("sha", "").casefold() != head.casefold():
+                stall_head = {"sha": head, "at": now.isoformat()}
+            if args.seed_state or args.catch_up or explicit_replay or not head:
                 return output
             stall = _codex_review_stall(
-                state, repo=args.repo, stall_seconds=args.review_stall_minutes * 60, now=_utc_now(),
+                state,
+                repo=args.repo,
+                stall_seconds=args.review_stall_minutes * 60,
+                now=now,
+                head_seen_at=_github_time(stall_head["at"]) or now,
             )
             if stall is None or stall[0] == reported_stall:
                 return output
@@ -3222,6 +3250,7 @@ def main() -> int:
                 REVIEW_THREAD_STATES_KEY: dict(review_thread_states),
                 PR_SNAPSHOT_KEY: snapshot or {},
                 REVIEW_STALL_KEY: reported_stall,
+                REVIEW_STALL_HEAD_KEY: dict(stall_head),
             }
             if ci_enabled:
                 fields[ACTIONS_SNAPSHOT_KEY] = actions_snapshot or {workflow: [] for workflow in args.workflow}

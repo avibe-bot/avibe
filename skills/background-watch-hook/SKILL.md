@@ -53,8 +53,9 @@ immediately seed/arm. Keep the same Watch and cursor across all later rounds.
 - `--actionable-only` drops review triggers and empty envelopes; `--settle 20`
   batches review bursts. New CI failures bypass settle. Final gates belong to
   `pr-delivery-loop`, including the stricter qualification of Codex reactions.
-- A Codex review that stays running, or a `@codex review` request left
-  unanswered, for `--review-stall-minutes` (default 30, `0` disables) is reported
+- A Codex review that stays running, a `@codex review` request left unanswered,
+  or a pushed head never picked up, for `--review-stall-minutes` (default 30, `0`
+  disables) is reported
   as `Codex review stalled`, again each further window it lasts; the follow-up
   re-requests the review as `pr-delivery-loop` says.
 - Set `--timeout 0` on both sides of the `--` command separator; six quiet hours
