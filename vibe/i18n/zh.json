@@ -1864,6 +1864,7 @@
       "service_balance": "搜索服务账户余额不足",
       "service_limit": "搜索服务已达到用量上限",
       "service_unavailable": "搜索服务暂时不可用",
+      "service_rate_limited": "搜索服务受到限流，已尝试下一个来源",
       "service_refused": "搜索服务拒绝了这次搜索",
       "service_unreadable": "搜索服务返回了无法读取的结果",
       "search_query_too_long": "搜索词太长，请缩短后重试",
@@ -1917,6 +1918,7 @@
       "service_balance": "余额不足",
       "service_limit": "已达用量上限",
       "service_unavailable": "暂时不可用",
+      "service_rate_limited": "受到限流，已尝试下一个来源",
       "service_refused": "拒绝了这次搜索",
       "service_unreadable": "返回了无法读取的结果"
     },

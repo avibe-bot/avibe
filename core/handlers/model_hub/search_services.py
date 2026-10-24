@@ -14,7 +14,12 @@ from datetime import datetime, timedelta
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
-from config.v2_config import ModelHubConfig, ModelHubSourceConfig
+from config.v2_config import (
+    KEYLESS_EXA_SOURCE_ID,
+    ModelHubConfig,
+    ModelHubSourceConfig,
+    model_hub_keyless_exa_source,
+)
 from core.agent_core.messages import HostedCost
 
 from .adapter import SearchResponse
@@ -207,6 +212,7 @@ class ServiceCooldowns:
 
     def reconcile(self, config: ModelHubConfig) -> None:
         live = {source.id: source_identity(source) for source in config.sources}
+        live[KEYLESS_EXA_SOURCE_ID] = source_identity(model_hub_keyless_exa_source())
         self._states = {key: state for key, state in self._states.items() if live.get(key[0]) == state.identity}
 
     def advance(self, source: ModelHubSourceConfig, service_id: str, *, clear: bool = False) -> int:

@@ -232,5 +232,52 @@
       "billing": {"nonempty_only": false, "unbilled_errors": []},
       "tool_only": true
     }
+  },
+  {
+    "id": "exa-mcp",
+    "label": "Exa (free)",
+    "official_base_url": "https://mcp.exa.ai/mcp",
+    "protocol": "search",
+    "built_in": true,
+    "search": {
+      "service_id": "exa/mcp",
+      "endpoint": "https://mcp.exa.ai/mcp?tools=web_search_advanced_exa,web_fetch_exa",
+      "auth": "none",
+      "request": {
+        "method": "POST",
+        "query": "query",
+        "results": "numResults",
+        "defaults": {
+          "type": "auto",
+          "enableHighlights": true,
+          "highlightsMaxCharacters": 1000,
+          "textMaxCharacters": 1
+        }
+      },
+      "result": {
+        "results": "results",
+        "url": "url",
+        "title": "title",
+        "snippet": "highlights",
+        "page_age": "publishedDate"
+      },
+      "limits": {
+        "results_min": 1,
+        "results_max": 100,
+        "query_max_chars": null
+      },
+      "price": {
+        "unit": "search",
+        "usd_per_1k": 0,
+        "extra": [],
+        "as_of": "2026-10-22",
+        "url": "https://exa.ai/docs/get-started/exa-mcp#authentication"
+      },
+      "free_check": null,
+      "service_refused_statuses": [403],
+      "outcomes": {"credential": [], "balance": [], "limit": []},
+      "billing": {"nonempty_only": false, "unbilled_errors": []},
+      "tool_only": true
+    }
   }
 ]

@@ -36,3 +36,19 @@ export const ACTIVE_SEARCH: HostedWebSearchToolStatus = {
     { id: 'exa', name: 'Exa', results_max: 10, price: price(7), free_tier: null, source_ids: ['src_exa000001'], facts: { tool_only: true, auto_enroll: false, free_check: false } },
   ],
 };
+
+export const KEYLESS_ACTIVE_SEARCH: HostedWebSearchToolStatus = {
+  ...ACTIVE_SEARCH,
+  services: { src_exakeyless: { enabled: true, results: 5 } },
+  effective_order: ['src_tavily001', 'src_exa000001', 'src_deepseek1', 'src_exakeyless', 'src_claude001'],
+  executor_candidates: [
+    ...ACTIVE_SEARCH.executor_candidates.slice(0, 2),
+    { kind: 'service', source_id: 'src_exakeyless', model_id: 'exa/mcp', billing: 'metered', relay: false,
+      price: price(0), settings: { results: 5, enabled: true }, state: { status: 'active' }, trial_pending: false, cooldown_until: null },
+    ...ACTIVE_SEARCH.executor_candidates.slice(2),
+  ],
+  service_vendors: [...ACTIVE_SEARCH.service_vendors!, {
+    id: 'exa-mcp', name: 'Exa (free)', results_max: 100, price: price(0), free_tier: 'Free; IP rate-limited',
+    source_ids: ['src_exakeyless'], facts: { tool_only: true, auto_enroll: false, free_check: false, built_in: true, requires_setup: false },
+  }],
+};

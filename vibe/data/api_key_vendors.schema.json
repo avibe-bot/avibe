@@ -15,6 +15,7 @@
       "label": {"type": "string", "minLength": 1},
       "official_base_url": {"type": "string", "format": "uri", "pattern": "^https://"},
       "protocol": {"enum": ["anthropic", "openai_responses", "openai_chat", "google", "search"]},
+      "built_in": {"type": "boolean"},
       "models_dev_provider": {"type": ["string", "null"]},
       "search": {
         "type": ["object", "null"],
@@ -33,7 +34,7 @@
         "properties": {
           "service_id": {"type": "string", "minLength": 1},
           "endpoint": {"type": "string", "format": "uri", "pattern": "^https://"},
-          "auth": {"enum": ["bearer", "x-api-key"]},
+          "auth": {"enum": ["bearer", "x-api-key", "none"]},
           "request": {"type": "object"},
           "result": {
             "type": "object",

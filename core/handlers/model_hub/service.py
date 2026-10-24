@@ -22,6 +22,8 @@ from config import paths
 from modules.agents.catalog import NATIVE_CLI_BACKENDS
 from config.v2_config import (
     CONFIG_LOCK,
+    KEYLESS_EXA_DISPLAY_NAME,
+    KEYLESS_EXA_SOURCE_ID,
     MODEL_HUB_BACKENDS,
     ModelHubAgentSupplyConfig,
     ModelHubBackendModelConfig,
@@ -42,6 +44,7 @@ from config.v2_config import (
     normalize_storable_backend_model_text,
     normalize_model_hub_base_url,
     normalize_model_hub_vendor_id,
+    model_hub_keyless_exa_source,
     model_hub_search_service,
     normalized_model_hub_override,
     validate_model_hub_protocol_vendor,
@@ -265,7 +268,7 @@ from .usage import (
     local_usage_day,
 )
 
-CONTRACT_VERSION = 20
+CONTRACT_VERSION = 21
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -388,8 +391,8 @@ def _described_as_unfit_for_agent_turns(match: Mapping[str, Any]) -> bool:
     )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 20
-PROBE_RESULT_CONTRACT_VERSION = 20
+AGENT_CHAIN_CONTRACT_VERSION = 21
+PROBE_RESULT_CONTRACT_VERSION = 21
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 # Background inventory refresh. The first tick doubles as the startup delay, so
@@ -1393,7 +1396,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 20,
+        "contract_version": 21,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -1647,6 +1650,12 @@ class ModelHubService:
         if source is None:
             raise ModelHubError("source_not_found", status=404)
         return source
+
+    @staticmethod
+    def _evidence_sources(config: ModelHubConfig) -> list[ModelHubSourceConfig]:
+        """Config Sources plus the stable synthetic identity for evidence joins."""
+
+        return [*config.sources, model_hub_keyless_exa_source()]
 
     @staticmethod
     def _agent(config: ModelHubConfig, backend: str) -> ModelHubAgentSupplyConfig:
@@ -7006,7 +7015,7 @@ class ModelHubService:
         """Clear under the Source mutation lock, so the identities it keeps are the ones the config holds."""
 
         try:
-            await asyncio.to_thread(self.capability_evidence.clear, matches, live=lambda: config.sources)
+            await asyncio.to_thread(self.capability_evidence.clear, matches, live=lambda: self._evidence_sources(config))
         except OSError:
             logger.warning("Model Hub could not persist an evidence clear; nothing changed", exc_info=True)
             raise ModelHubError("state_write_failed", status=500) from None
@@ -7038,7 +7047,7 @@ class ModelHubService:
             await asyncio.to_thread(
                 self.capability_evidence.write_refusals,
                 records,
-                live=lambda: self.store.load().sources,
+                live=lambda: self._evidence_sources(self.store.load()),
                 wire_for=evidence.wire_for,
             )
 
@@ -7058,7 +7067,7 @@ class ModelHubService:
             mode=mode,  # type: ignore[arg-type]
         )
         await asyncio.to_thread(
-            self.capability_evidence.note_success, record, live=lambda: self.store.load().sources, now=record.observed_at,
+            self.capability_evidence.note_success, record, live=lambda: self._evidence_sources(self.store.load()), now=record.observed_at,
         )
 
     def _effort_refused(self, source: ModelHubSourceConfig, model_id: str, request: Any) -> bool:
@@ -7167,7 +7176,7 @@ class ModelHubService:
                 source_identity=identity_digest(source),
                 detail=learned.detail,
             ),
-            live=lambda: self.store.load().sources,
+            live=lambda: self._evidence_sources(self.store.load()),
             wire_for=evidence.wire_for,
         )
         return learned
@@ -7246,19 +7255,30 @@ class ModelHubService:
         return executor_candidate(source, slot.model_id, tool, evidence=self.hosted_evidence(), spec_for=hosted_tool_spec)
 
     def _search_visible_cooldown(self, source_id: str, service_id: str) -> str | None:
-        config = self.store.load()
-        source = next((item for item in config.sources if item.id == source_id), None)
+        source = (
+            model_hub_keyless_exa_source()
+            if source_id == KEYLESS_EXA_SOURCE_ID
+            else next((item for item in self.store.load().sources if item.id == source_id), None)
+        )
         if source is None:
             return None
         until = self._service_cooldowns.until(source, service_id, self.now())
-        return utc_text(until) if until is not None and (until - self.now()).total_seconds() > 60 else None
+        if until is None:
+            return None
+        # Keyless Exa's UI must expose even a short active cooldown so Retry now
+        # remains available for provider rate limits.
+        return utc_text(until) if source_id == KEYLESS_EXA_SOURCE_ID or (until - self.now()).total_seconds() > 60 else None
 
     async def clear_service_cooldown(self, source_id: str, service_id: str | None = None, payload: object = None) -> dict:
         if payload not in (None, {}):
             raise ModelHubError("invalid_parameter", status=400)
         async with self._mutation_lock:
             config = await asyncio.to_thread(self.store.load)
-            source = self._source(config, source_id)
+            source = (
+                model_hub_keyless_exa_source()
+                if source_id == KEYLESS_EXA_SOURCE_ID
+                else self._source(config, source_id)
+            )
             service = model_hub_search_service(source)
             if service is None or (service_id is not None and service["service_id"] != service_id):
                 raise ModelHubError("source_not_found", status=404)
@@ -8636,6 +8656,11 @@ class ModelHubService:
             )
             for source in config.sources
         ]
+        identities.append(SourceIdentity(
+            source_id=KEYLESS_EXA_SOURCE_ID,
+            label=KEYLESS_EXA_DISPLAY_NAME,
+            model_ids=[],
+        ))
         # The release's search services label and value service rows, as the price
         # table values model tokens; a row a later catalog dropped stays unpriced.
         service_catalog = [

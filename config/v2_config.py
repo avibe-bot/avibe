@@ -3131,11 +3131,57 @@ class ModelHubImageModelChoice:
         return {"source_id": self.source_id, "model_id": self.model_id}
 
 
+# Built-in keyless Exa is a dormant reader contract in KEX-1. KEX-3 flips this
+# predicate together with the producer and public disclosure.
+KEYLESS_EXA_ACTIVE = False
+KEYLESS_EXA_SOURCE_ID = "src_exakeyless"
+KEYLESS_EXA_VENDOR_ID = "exa-mcp"
+KEYLESS_EXA_SERVICE_ID = "exa/mcp"
+KEYLESS_EXA_DISPLAY_NAME = "Exa (free)"
+
+
+def is_keyless_exa_source(source: "ModelHubSourceConfig") -> bool:
+    """Whether ``source`` is the credential-free synthetic Exa identity."""
+
+    return (
+        source.id == KEYLESS_EXA_SOURCE_ID
+        and source.vendor == KEYLESS_EXA_VENDOR_ID
+        and source.protocol == "search"
+        and source.supply_channel == "hub"
+        and source.credential_ref is None
+        and source.base_url is None
+    )
+
+
+def model_hub_keyless_exa_source() -> "ModelHubSourceConfig":
+    """The in-memory Source shape used by readers; it is never persisted."""
+
+    return ModelHubSourceConfig(
+        id=KEYLESS_EXA_SOURCE_ID,
+        kind="api_key",
+        vendor=KEYLESS_EXA_VENDOR_ID,
+        display_name=KEYLESS_EXA_DISPLAY_NAME,
+        protocol="search",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="active"),
+        models=[],
+    )
+
+
+def is_keyless_exa_source_id(value: object) -> bool:
+    return value == KEYLESS_EXA_SOURCE_ID
+
+
+
+
 def model_hub_search_service(source: ModelHubSourceConfig) -> Optional[dict[str, Any]]:
-    """Catalog capability, independent of health and opt-in; never a relay or subscription."""
+    """Catalog capability, including the credential-free built-in Exa identity."""
 
     from vibe.model_hub_runtime.api_key_vendors import search_service
 
+    if is_keyless_exa_source(source):
+        return search_service(KEYLESS_EXA_VENDOR_ID, "search", None)
     if source.kind != "api_key" or source.supply_channel != "hub" or not source.credential_ref:
         return None
     return search_service(source.vendor, source.protocol, source.base_url)
@@ -3190,9 +3236,15 @@ def _search_service_settings_from_payload(
     for source_id, raw in payload.items():
         # Removed Sources have no settings. Keep an extant but retargeted/retired Source's choices:
         # forgetting an opt-out would silently re-enrol it if its search capability returns later.
-        if live is not None and source_id not in live:
+        if live is not None and source_id not in live and not is_keyless_exa_source_id(source_id):
             continue
-        service = model_hub_search_service(live[source_id]) if live is not None else None
+        service = (
+            model_hub_search_service(live[source_id])
+            if live is not None and source_id in live
+            else model_hub_search_service(model_hub_keyless_exa_source())
+            if is_keyless_exa_source_id(source_id)
+            else None
+        )
         saved = ModelHubSearchServiceSettings.from_payload(raw)
         # Only the in-memory parse is normalized. V2Config.load never writes it back; an authorized
         # writer later serializes these clamped overrides without freezing any absent default.
@@ -3208,7 +3260,7 @@ def _executor_order_kinds_from_payload(
     if isinstance(payload, dict):
         live = {source.id for source in sources} if sources is not None else None
         named = {key: value for key, value in payload.items()
-                 if key in (order or ()) and (live is None or key in live)}
+                 if key in (order or ()) and (live is None or key in live or is_keyless_exa_source_id(key))}
         if all(isinstance(value, str) and value in {"service", "model"} for value in named.values()):
             return named
     logger.warning("Config 'model_hub.hosted_tools.web_search.executor_order_kinds': ignoring damaged role map")

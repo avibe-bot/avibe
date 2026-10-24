@@ -102,7 +102,7 @@ test('MH-ROUTING-007 follow-defaults switch, undo, cancel, and save preserve exp
       would_remove_hops: [{ backend: gateway.backend, menu_model: gateway.model, ...manual.hops[0], position: 1 }],
       would_interrupt: [],
     };
-    expect(await refused.json()).toMatchObject({ ok: false, contract_version: 20, error: 'source_in_route_chain', ...plan });
+    expect(await refused.json()).toMatchObject({ ok: false, contract_version: 21, error: 'source_in_route_chain', ...plan });
     expect((await api.agentChain(gateway.backend, gateway.model)).manual_override).toEqual(manual);
     // The one question is its own modal over the chain the user was editing.
     const guard = hub.dialogTitled(copy('guard.title.saveRoute', { menuModel: gateway.model }));

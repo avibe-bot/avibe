@@ -16,7 +16,7 @@ import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { ApiCallError, modelsApi } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { readyRegion } from './regionRead';
-import { ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
+import { ACTIVE_SEARCH, KEYLESS_ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourcesCard } from './SourcesCard';
 import { ToolsTab } from './ToolsTab';
@@ -118,6 +118,17 @@ describe('search service activation and mixed order', () => {
     await userEvent.click(screen.getByRole('button', { name: /^Advanced/ }));
     expect(screen.getAllByRole('list', { name: 'Search order' })).toHaveLength(1);
     expect(screen.getByRole('heading', { name: 'Status by Source' })).toBeTruthy();
+  });
+
+  it('renders the built-in keyless Exa row as free and non-addable', async () => {
+    tab(KEYLESS_ACTIVE_SEARCH);
+    expect(screen.getByText('Exa (free)')).toBeTruthy();
+    expect(screen.getByText('Free')).toBeTruthy();
+    const { onOpenSource } = addDialog(KEYLESS_ACTIVE_SEARCH);
+    expect(screen.getByText('Free; IP rate-limited')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Add Exa (free)' })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: 'View search order' }));
+    expect(onOpenSource).toHaveBeenCalledWith('src_exakeyless');
   });
 
   it('keeps keyboard focus on a usable arrow when the last movable row is followed by disabled Sources', async () => {

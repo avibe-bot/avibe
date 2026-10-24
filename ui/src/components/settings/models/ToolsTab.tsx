@@ -240,7 +240,11 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
             <ol ref={list} className="flex flex-col gap-1.5" aria-label={t(activeWeb ? 'settings.models.searchServices.order' : 'settings.models.tools.order.title') as string}>
               {candidates.map((candidate, index) => {
                 const source = lookup.source(candidate.source_id);
-                const name = lookup.name(candidate.source_id);
+                const vendor = candidate.kind === 'service'
+                  ? activeWeb?.service_vendors?.find((item) => item.source_ids.includes(candidate.source_id))
+                  : undefined;
+                const name = source?.display_name
+                  ?? (vendor ? t(`settings.models.searchServices.vendorName.${vendor.id}`, { defaultValue: vendor.name }) as string : lookup.name(candidate.source_id));
                 const disabledService = candidate.kind === 'service' && !candidate.settings.enabled;
                 const arrow = (direction: -1 | 1) => {
                   const blocked = disabledService || (direction === -1 ? index === 0 : index === movable.length - 1);
@@ -270,7 +274,7 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                   <li key={candidate.source_id} className="model-hub-tool-executor-row grid items-center rounded-lg border border-border bg-background" data-executor={candidate.source_id}>
                     <span className={cn('model-hub-order-ordinal', index === 0 && 'is-first')}>{disabledService ? '—' : index + 1}</span>
                     {activeWeb ? <div className="flex min-w-0 items-center gap-3">
-                      {source ? <SearchVendorGlyph vendor={source.vendor} /> : <SourceGlyph source={source} />}
+                      {source ? <SearchVendorGlyph vendor={source.vendor} /> : candidate.kind === 'service' ? <SearchVendorGlyph vendor={vendor?.id ?? candidate.model_id} /> : <SourceGlyph source={source} />}
                       <div className="flex min-w-0 flex-col gap-1">
                         <div className="flex flex-wrap items-center gap-2">
                           {candidate.kind === 'service' ? <button type="button" data-search-source={candidate.source_id} className="truncate text-left font-semibold text-foreground hover:underline" onClick={(event) => onOpenService?.(candidate.source_id, event.currentTarget)}>{name}</button> : <span className="truncate font-semibold text-foreground">{name}</span>}
