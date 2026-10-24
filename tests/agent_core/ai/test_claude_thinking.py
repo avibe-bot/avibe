@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from core.agent_core.ai.claude_thinking import uses_adaptive_thinking
+from core.agent_core.ai.claude_thinking import is_claude_model, uses_adaptive_thinking
 
 
 @pytest.mark.parametrize(("model_id", "adaptive"), [
@@ -30,3 +30,10 @@ from core.agent_core.ai.claude_thinking import uses_adaptive_thinking
 ])
 def test_only_a_claude_version_before_4_6_takes_a_token_budget(model_id, adaptive):
     assert uses_adaptive_thinking(model_id) is adaptive
+
+
+def test_claude_model_detection_uses_the_model_name_not_the_protocol() -> None:
+    assert is_claude_model("claude-sonnet-4-5") is True
+    assert is_claude_model("anthropic/claude-sonnet-4-5") is True
+    assert is_claude_model("grok-4.7") is False
+    assert is_claude_model("relay-claude-opus-5-5") is False
