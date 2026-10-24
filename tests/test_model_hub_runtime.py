@@ -1367,7 +1367,7 @@ def test_manifest_resolution_drives_admission_persistence_and_schema(
         installer=manager,
         state_store=EngineStateStore(tmp_path / "state"),
     )
-    projected = {"contract_version": 20, **supervisor.status()}
+    projected = {"contract_version": 21, **supervisor.status()}
     schema = json.loads(
         Path("docs/plans/model-hub-contracts/runtime-dependency.schema.json").read_text(
             encoding="utf-8"
@@ -2820,7 +2820,7 @@ def test_search_query_limits_use_only_documented_vendor_bounds() -> None:
     assert {
         entry.id: entry.search["limits"]["query_max_chars"]
         for entry in api_key_vendor_catalog() if entry.search is not None
-    } == {"deepseek": 128, "tavily": None, "exa": None}
+    } == {"deepseek": 128, "tavily": None, "exa": None, "exa-mcp": None}
 
 
 def test_only_deepseek_search_auto_enrolls_model_sources() -> None:

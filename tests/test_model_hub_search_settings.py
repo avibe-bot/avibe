@@ -19,7 +19,12 @@ import pytest
 from jsonschema import Draft7Validator, ValidationError
 
 from config import paths
-from config.v2_config import ModelHubConfig, ModelHubSourceStateConfig, V2Config, hosted_tool_setting
+from config.v2_config import (
+    KEYLESS_EXA_SERVICE_ID,
+    KEYLESS_EXA_SOURCE_ID,
+    ModelHubConfig, ModelHubSourceStateConfig, V2Config, hosted_tool_setting,
+    model_hub_keyless_exa_source, model_hub_search_service,
+)
 from core.handlers.model_hub import hosted_tools
 from core.handlers.model_hub.service import ModelHubError, V2ModelHubConfigStore
 from core.services.settings import default_config
@@ -34,6 +39,7 @@ DEEPSEEK = "src_deepseek1"
 MODEL = SOURCE["id"]
 GONE = "src_gone0001"
 CONTRACT = "model-hub/hosted-tools-status.schema.json"
+FIXTURES = Path(__file__).parent / "fixtures" / "model_hub"
 
 
 def _source(source_id, vendor, protocol="search"):
@@ -73,6 +79,59 @@ def _catalog_change(monkeypatch, vendor_id, **changes):
     service.update(changes)
     monkeypatch.setattr(api_key_vendors, "api_key_vendor_entry", lambda key: replace(vendor, search=service)
                         if key == vendor_id else original(key))
+
+
+def test_keyless_catalog_is_built_in_and_credential_free():
+    """KEX-1: the catalog reader exposes the stable free Exa service without a key."""
+    entry = api_key_vendors.api_key_vendor_entry("exa-mcp")
+    assert entry is not None and entry.built_in is True
+    assert entry.search is not None
+    assert entry.search["service_id"] == KEYLESS_EXA_SERVICE_ID
+    assert entry.search["auth"] == "none"
+    assert model_hub_search_service(model_hub_keyless_exa_source()) == entry.search
+
+
+@pytest.mark.parametrize("fixture_name", ["released_search_v20.json", "keyless_exa_v21.json"])
+def test_released_and_keyless_search_settings_read_without_a_migration_write(fixture_name):
+    """KEX-1: both the shipped v20 shape and the future additive v21 shape stay round-trippable."""
+    raw = json.loads((FIXTURES / fixture_name).read_text(encoding="utf-8"))
+    config = _config(raw)
+    setting = config.hosted_tools["web_search"]
+    assert setting.to_payload() == raw
+    assert setting.executor_order == tuple(raw["executor_order"])
+    if KEYLESS_EXA_SOURCE_ID in raw["services"]:
+        assert setting.services[KEYLESS_EXA_SOURCE_ID].to_payload() == {"results": 9, "enabled": False}
+
+
+def test_keyless_candidate_and_catalog_are_dormant_by_default_and_readable_when_enabled(tmp_path, monkeypatch):
+    """KEX-1: the shipped flag-off read is unchanged; a future flip reads the built-in candidate."""
+    config = _config()
+    assert hosted_tools.KEYLESS_EXA_ACTIVE is False
+    assert all(vendor["id"] != "exa-mcp" for vendor in hosted_tools._service_vendors(config))
+    service, _, _ = _disk_service(tmp_path, config)
+    monkeypatch.setattr(hosted_tools, "KEYLESS_EXA_ACTIVE", True)
+    visible = _web(service)
+    assert any(row["source_id"] == KEYLESS_EXA_SOURCE_ID and row["model_id"] == KEYLESS_EXA_SERVICE_ID
+               for row in visible["executor_candidates"])
+    vendor = next(row for row in visible["service_vendors"] if row["id"] == "exa-mcp")
+    assert vendor["facts"] == {"tool_only": True, "auto_enroll": False, "free_check": False,
+                                "built_in": True, "requires_setup": False}
+    assert vendor["source_ids"] == [KEYLESS_EXA_SOURCE_ID]
+
+
+@pytest.mark.asyncio
+async def test_keyless_override_role_and_cooldown_survive_an_unrelated_config_write(tmp_path):
+    """KEX-1: synthetic state is preserved by a later real V2 save, even while dormant."""
+    raw = json.loads((FIXTURES / "keyless_exa_v21.json").read_text(encoding="utf-8"))
+    service, path, _ = _disk_service(tmp_path, _config(raw))
+    source = model_hub_keyless_exa_source()
+    generation = service._service_cooldowns.advance(source, KEYLESS_EXA_SERVICE_ID)
+    await service.set_hosted_tool("x_search", {"enabled": False})
+    saved = json.loads(path.read_text(encoding="utf-8"))["model_hub"]["hosted_tools"]["web_search"]
+    assert saved["executor_order"] == [KEYLESS_EXA_SOURCE_ID, TAVILY]
+    assert saved["executor_order_kinds"][KEYLESS_EXA_SOURCE_ID] == "service"
+    assert saved["services"][KEYLESS_EXA_SOURCE_ID] == {"results": 9, "enabled": False}
+    assert service._service_cooldowns.current(source, KEYLESS_EXA_SERVICE_ID, generation)
 
 
 def test_defaults_follow_catalog_without_freezing_overrides(monkeypatch):

@@ -24,7 +24,7 @@ export const SearchVendorGlyph: React.FC<{ vendor: string }> = ({ vendor }) => (
 export const SearchServicePrice: React.FC<{ price: HostedServiceListPrice }> = ({ price }) => {
   const { t } = useTranslation();
   return <span className="flex flex-col gap-0.5">
-    <span className="font-semibold text-foreground">{t('settings.models.searchServices.price', { usd: formatSmallUsd(price.usd_per_1k) })}</span>
+    <span className="font-semibold text-foreground">{price.usd_per_1k === 0 ? t('settings.models.searchServices.free') : t('settings.models.searchServices.price', { usd: formatSmallUsd(price.usd_per_1k) })}</span>
     <a href={price.url} target="_blank" rel="noopener noreferrer" className="model-hub-tool-cost-note underline underline-offset-2">{t('settings.models.searchServices.priceDate', { date: price.as_of })}</a>
   </span>;
 };
@@ -79,7 +79,8 @@ export const SearchVendorFacts: React.FC<{ vendor: HostedSearchServiceVendor }> 
   return <>
     <p className="model-hub-tool-note">{t(`settings.models.searchServices.vendor.${vendor.id}`, { defaultValue: t(vendor.facts.tool_only ? 'settings.models.searchServices.noModels' : 'settings.models.searchServices.modelsAndSearch') })}</p>
     <span className="model-hub-tool-note flex flex-wrap gap-2">
-      {vendor.free_tier !== null && <span className="model-hub-pill border border-border">{vendor.free_tier}</span>}
+      {vendor.free_tier !== null && <span className="model-hub-pill border border-border">{vendor.facts.built_in ? t('settings.models.searchServices.freeTier') : vendor.free_tier}</span>}
+      {vendor.facts.built_in && <span className="model-hub-pill border border-border">{t('settings.models.searchServices.noSetup')}</span>}
       <span className="model-hub-pill border border-border">{t('settings.models.searchServices.maxResults', { count: vendor.results_max })}</span>
       {vendor.id === 'deepseek' && <span className="model-hub-pill border border-border">{t('settings.models.searchServices.deepseekFacts')}</span>}
     </span>

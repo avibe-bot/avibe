@@ -1864,6 +1864,7 @@
       "service_balance": "the search service account has no balance",
       "service_limit": "the search service limit has been reached",
       "service_unavailable": "the search service is unavailable",
+      "service_rate_limited": "the search service is rate-limited; the next source was tried",
       "service_refused": "the search service refused this query",
       "service_unreadable": "the search service returned an unreadable response",
       "search_query_too_long": "the search query is too long; shorten it and try again",
@@ -1917,6 +1918,7 @@
       "service_balance": "is out of balance",
       "service_limit": "reached its usage limit",
       "service_unavailable": "was unavailable",
+      "service_rate_limited": "was rate-limited; the next source was tried",
       "service_refused": "refused this query",
       "service_unreadable": "returned an unreadable response"
     },

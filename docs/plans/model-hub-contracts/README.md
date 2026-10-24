@@ -1,7 +1,18 @@
 # Model Hub contracts
 
-Status: **contract_version 20**, 2026-10-22: active web-search services (S2b-2).
-`gh-v3.2.3rc1` and `gh-v3.2.3rc2` carry v19, so activation opens v20 rather than
+Status: **contract_version 21**, 2026-10-24: keyless Exa readers (KEX-1).
+`gh-v3.2.3rc3` through `rc6` carry v20, so this dormant reader event opens v21.
+The versioned mirrors advance together; persisted TurnProvenance retains v5–v20 and adds v21.
+KEX-1 adds only optional built-in catalog/read metadata, the synthetic `src_exakeyless`
+Source identity (`exa-mcp` / `exa/mcp`), keyless cooldown retry classification, and
+compatibility-safe readers. `KEYLESS_EXA_ACTIVE = false`; no producer or live Exa call
+ships in this event. A later activation may populate the shape, and an older release
+must ignore the additive fields while retaining ordinary service settings and orders.
+The localized hosted-activity vocabulary adds `service_rate_limited` as a fallback
+reason; it never creates a credential health blocker for the synthetic Source.
+
+It builds on v20 (2026-10-22): active web-search services (S2b-2).
+`gh-v3.2.3rc1` and `gh-v3.2.3rc2` carried v19, so activation opened v20 rather than
 changing the released event. `SEARCH_SERVICES_ACTIVE = True` activates service candidates,
 `service_vendors`, frozen turn settings and the mixed search chain together with S6 disclosure.
 The versioned mirrors advance together; persisted TurnProvenance retains v5–v19 and adds v20.
@@ -345,7 +356,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 20 must coexist in all registered version locations on the same tested head:
+`contract_version` 21 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`

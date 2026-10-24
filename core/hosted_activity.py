@@ -70,6 +70,7 @@ _FAILURE_REASONS = (
     "service_balance",
     "service_limit",
     "service_unavailable",
+    "service_rate_limited",
     "service_refused",
     "service_unreadable",
 )

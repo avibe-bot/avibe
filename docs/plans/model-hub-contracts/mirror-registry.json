@@ -1,5 +1,5 @@
 {
-  "contract_version": 20,
+  "contract_version": 21,
   "input_generation": {
     "mode": "same_run_live_files",
     "external_snapshot": "content_fingerprint_required"

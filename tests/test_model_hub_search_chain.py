@@ -13,7 +13,12 @@ from datetime import timedelta
 
 import pytest
 
-from config.v2_config import ModelHubConfig, ModelHubSourceStateConfig
+from config.v2_config import (
+    KEYLESS_EXA_SERVICE_ID,
+    KEYLESS_EXA_SOURCE_ID,
+    ModelHubConfig, ModelHubSourceStateConfig,
+    model_hub_keyless_exa_source,
+)
 from core.handlers.model_hub import hosted_tools
 from core.handlers.model_hub.adapter import SearchCredentialCheck, SearchResponse
 from core.handlers.model_hub.capability_evidence import EvidenceFeature
@@ -306,6 +311,17 @@ async def test_skip_precedence_terminal_reason_and_attempts_without_execution(tm
     if mix == "long":
         assert "128" in result["record"]["error"]
     _hosted_result("web_search", result)
+
+
+@pytest.mark.asyncio
+async def test_keyless_retry_branch_accepts_the_synthetic_source_while_flag_is_off(tmp_path):
+    """KEX-1: a downgraded reader can clear a built-in cooldown without a Source row or network call."""
+    service = owner(tmp_path, ("exa",))
+    source = model_hub_keyless_exa_source()
+    generation = service._service_cooldowns.advance(source, KEYLESS_EXA_SERVICE_ID)
+    assert service._service_cooldowns.current(source, KEYLESS_EXA_SERVICE_ID, generation)
+    assert await service.clear_service_cooldown(KEYLESS_EXA_SOURCE_ID, KEYLESS_EXA_SERVICE_ID) == {}
+    assert not service._service_cooldowns.current(source, KEYLESS_EXA_SERVICE_ID, generation)
 
 
 @pytest.mark.asyncio
@@ -929,7 +945,7 @@ def test_retry_http_client_rpc_clears_only_the_service_fence_with_plain_success(
     response = client.post(f"/api/models/hosted-tools/web_search/services/{EXA}/retry", json={},
                            headers=csrf_headers(client, "http://127.0.0.1:15131"))
     assert response.status_code == 200
-    assert response.get_json() == {"ok": True, "contract_version": 20}
+    assert response.get_json() == {"ok": True, "contract_version": 21}
     assert calls == [("clear_service_cooldown", {"source_id": EXA, "service_id": None})]
     assert not service._service_cooldowns.current(source, "exa/search", generation)
     assert service.store.load().sources[0].state == source.state

@@ -2540,6 +2540,8 @@
         "addVendor": "Add {{vendor}}",
         "empty": "Add a search service to search before model executors. List prices: {{prices}}. Plans and actual bills may differ.",
         "price": "${{usd}} / 1k searches",
+        "free": "Free",
+        "freeTier": "Free; IP rate-limited",
         "vendorPrice": "{{vendor}} ${{usd}} / 1k searches",
         "priceDate": "API list price · {{date}}",
         "priceNote": "Prices are the catalog's dated API list prices. Free allowances, plans and actual bills may differ.",
@@ -2554,6 +2556,9 @@
         "added": "Added",
         "inOrder": "Already in search order",
         "addedUnused": "Added · not used for search",
+        "builtIn": "Built in · free",
+        "viewOrder": "View search order",
+        "noSetup": "No key or setup required",
         "openDetail": "Manage {{vendor}}",
         "maxResults_one": "Up to {{count}} result",
         "maxResults_other": "Up to {{count}} results",
@@ -2582,10 +2587,14 @@
         "monthEstimate": "API list-price estimate {{usd}}",
         "monthReported": "vendor-reported {{usd}}",
         "openUsage": "View usage",
+        "vendorName": {
+          "exa-mcp": "Exa (free)"
+        },
         "vendor": {
           "deepseek": "Search through the official DeepSeek provider. Only searches with results are billed; empty results, failures and timeouts are not.",
           "tavily": "Basic web search with query-relevant snippets, designed for AI agents.",
-          "exa": "Semantic web search with query-relevant highlights included in the search price."
+          "exa": "Semantic web search with query-relevant highlights included in the search price.",
+          "exa-mcp": "Keyless Exa search. Free and IP rate-limited; no key or setup is required."
         }
       },
       "capability": {
@@ -5105,6 +5114,7 @@
           "service_balance": "The search service account has no balance.",
           "service_limit": "The search service limit has been reached.",
           "service_unavailable": "The search service is unavailable.",
+          "service_rate_limited": "The search service is rate-limited; the next source was tried.",
           "service_refused": "The search service refused this query.",
           "service_unreadable": "The search service returned an unreadable response.",
           "search_query_too_long": "The search query is too long; shorten it and try again.",
@@ -5138,6 +5148,7 @@
           "service_balance": "is out of balance",
           "service_limit": "reached its usage limit",
           "service_unavailable": "was unavailable",
+          "service_rate_limited": "was rate-limited; the next source was tried",
           "service_refused": "refused this query",
           "service_unreadable": "returned an unreadable response"
         },

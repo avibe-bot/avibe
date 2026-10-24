@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "executor_order": ["src_tavily01"],
+  "services": {
+    "src_tavily01": {"results": 7, "enabled": false}
+  }
+}

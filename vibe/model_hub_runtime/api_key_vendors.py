@@ -147,6 +147,8 @@ class APIKeyVendorCatalogEntry:
     # The models.dev provider whose entries describe what this vendor's
     # official endpoint accepts; ``None`` when no mapping has been verified.
     models_dev_provider: str | None = None
+    # Built-ins are catalog rows, not addable API-key vendors.
+    built_in: bool = False
     # Bundled wire metadata, never supplied by a caller or a remote catalog.
     search: dict | None = None
 
@@ -155,7 +157,7 @@ def _catalog_path() -> Path:
     return Path(__file__).resolve().parents[1] / "data" / "api_key_vendors.json"
 
 
-def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] | None:
+def _validate_search_catalog(item: object, *, protocol: str, built_in: bool = False) -> dict[str, Any] | None:
     if item is None:
         return None
     if not isinstance(item, dict):
@@ -170,7 +172,7 @@ def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] |
         raise ValueError("api-key vendor search catalog endpoint is invalid")
     if not isinstance(item.get("service_id"), str) or not item["service_id"].strip():
         raise ValueError("api-key vendor search catalog service id is invalid")
-    if item.get("auth") not in {"bearer", "x-api-key"} or not isinstance(item.get("request"), dict) or not isinstance(item.get("result"), dict) or not isinstance(item.get("limits"), dict):
+    if item.get("auth") not in {"bearer", "x-api-key", "none"} or (item.get("auth") == "none" and not built_in) or not isinstance(item.get("request"), dict) or not isinstance(item.get("result"), dict) or not isinstance(item.get("limits"), dict):
         raise ValueError("api-key vendor search catalog mapping is invalid")
     if "reported_cost" in item["result"]:
         reported_cost = item["result"]["reported_cost"]
@@ -271,7 +273,10 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
             )
         ):
             raise ValueError("api-key vendor catalog is invalid")
-        search = _validate_search_catalog(item.get("search"), protocol=protocol)
+        built_in = item.get("built_in", False)
+        if not isinstance(built_in, bool) or (built_in and protocol != "search"):
+            raise ValueError("api-key vendor catalog is invalid")
+        search = _validate_search_catalog(item.get("search"), protocol=protocol, built_in=built_in)
         if search is not None and search["service_id"] in seen_service_ids:
             raise ValueError("api-key vendor catalog is invalid")
         entries.append(
@@ -282,6 +287,7 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
                 protocol=protocol,
                 models_dev_provider=models_dev_provider.strip() if models_dev_provider else None,
                 search=search,
+                built_in=built_in,
             )
         )
         seen_ids.add(vendor_id)

@@ -1697,14 +1697,15 @@ class VibeyAgent(BaseAgent):
             return {}, None
 
         def read() -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
-            from config.v2_config import hosted_tool_setting
+            from config.v2_config import hosted_tool_setting, model_hub_keyless_exa_source
             from core.handlers.model_hub.hosted_tools import search_service_settings
 
             hub = runtime.snapshot()
             web_search = hosted_tool_setting(hub, "web_search")
-            names = {source.id: source.display_name for source in hub.sources if source.display_name}
+            display_sources = [*hub.sources, model_hub_keyless_exa_source()]
+            names = {source.id: source.display_name for source in display_sources if source.display_name}
             states: dict[str, dict[str, Any]] = {}
-            for source in hub.sources:
+            for source in display_sources:
                 state: dict[str, Any] = {"protocol": source.protocol, "vendor": source.vendor}
                 if source.state.status in ("needs_action", "error"):
                     state["needs_action"] = source.state.detail_key

@@ -79,6 +79,7 @@ HOSTED_ERROR_CODES: tuple[str, ...] = (
     "service_balance",
     "service_limit",
     "service_unavailable",
+    "service_rate_limited",
     "service_refused",
     "service_unreadable",
     "search_query_too_long",

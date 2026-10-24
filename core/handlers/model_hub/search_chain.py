@@ -11,7 +11,13 @@ import asyncio
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable
 
-from config.v2_config import ModelHubSourceStateConfig, model_hub_search_service
+from config.v2_config import (
+    KEYLESS_EXA_ACTIVE,
+    KEYLESS_EXA_SOURCE_ID,
+    ModelHubSourceStateConfig,
+    model_hub_keyless_exa_source,
+    model_hub_search_service,
+)
 
 from .adapter import SearchResponse
 from .async_owner import await_owned_task
@@ -57,7 +63,11 @@ class SearchChain:
         advances any fence. Runs on a worker over the final-admission snapshot.
         """
         owner = self.owner
-        source = next((s for s in config.sources if s.id == slot.source_id), None)
+        source = (
+            model_hub_keyless_exa_source()
+            if slot.source_id == KEYLESS_EXA_SOURCE_ID and KEYLESS_EXA_ACTIVE
+            else next((s for s in config.sources if s.id == slot.source_id), None)
+        )
         fact = {"source_id": slot.source_id, "label": slot.label or slot.source_id, "kind": slot.kind, "outcome": "skipped"}
         unavailable = source is None or identity_digest(source) != slot.identity
         service = None
@@ -65,7 +75,9 @@ class SearchChain:
             fact["label"] = source.display_name[:64]
             if slot.kind == "service":
                 service = model_hub_search_service(source)
-                unavailable = service is None or service["service_id"] != slot.model_id or not source.credential_ref
+                unavailable = service is None or service["service_id"] != slot.model_id or (
+                    not slot.source_id == KEYLESS_EXA_SOURCE_ID and not source.credential_ref
+                )
             else:
                 unavailable = owner._admitted_executor(slot, self.call.tool) is None
         if unavailable:
