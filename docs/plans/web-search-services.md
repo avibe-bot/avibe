@@ -5,8 +5,8 @@ Status: **design**, 2026-10-19. Direction and the six product decisions in §0 a
   unchanged.
 - Extends [`vibey-hosted-tools.md`](vibey-hosted-tools.md) (design v2). Every rule there holds unless this document
   says otherwise; section references like "hosted tools §6" point into it. Phase-2 page reading is specified in
-  [`web-fetch.md`](web-fetch.md), which reuses this plan's Source, usage, failover, and activity conventions where
-  it is more specific.
+  [`web-fetch.md`](web-fetch.md), which reuses these conventions and governs `web_fetch` wherever it is more
+  specific.
 - Replaces the approach of #2854 (not merged): no per-vendor tool names, no environment switch, no requests from the
   agent process.
 - The owner reviewed an interactive draft (a Show Page) on 2026-10-19. Formal frames go to `avibe-docs/design.pen`

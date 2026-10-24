@@ -870,7 +870,7 @@ shared MCP session and cooldown.
 
 The Model Hub master contract is **v20**. It first shipped in prerelease tag
 `gh-v3.2.3rc3` on **2026-10-22**; the latest prerelease is
-`gh-v3.2.3rc6`, published **2026-10-24**, and the checked rc4, rc5, and rc6
+`gh-v3.2.3rc7`, published **2026-10-24**, and the checked rc4, rc5, rc6 and rc7
 contract mirrors still advertise v20. Therefore this keyless-Exa design must
 not append new contract meanings to v20. The implementation lanes must open
 the next coordinated contract event as **v21** for any keyless-Exa shapes.

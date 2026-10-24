@@ -172,10 +172,14 @@ UTS #46 IDNA library, remove fragments, preserve path/query bytes. Deny local
 hostnames and non-global literal IPs. Resolve A/AAAA off-loop with a deadline;
 reject the entire answer set if any address is loopback, private, link-local,
 CGNAT, multicast, unspecified, reserved/documentation, or cloud metadata.
-Unwrap IPv4-mapped IPv6; deny transition/NAT64 ranges that could encode forbidden
-IPv4 destinations. Maintain an explicit address-policy table, not Python-version
-`is_global` alone. No usable DNS answer is `fetch_dns_unverified`: fail closed
-without forwarding, rather than treating an unchecked host as public.
+Unwrap IPv4-mapped IPv6. For DNS64's `64:ff9b::/96`, apply the same policy to
+its embedded IPv4 address before pinning the original IPv6 address; deny other
+special transition/NAT64 ranges that could hide a forbidden destination. Use an
+explicit policy table, not Python-version `is_global` alone. Synthetic proxy
+answers (including `198.18.0.0/15`) remain blocked even with local disabled:
+`fetch_dns_unverified` explains that real public DNS answers are required; never
+allow a public-looking hostname to bypass the gate. No usable DNS answer likewise
+fails closed without forwarding.
 
 Recheck before each remote submission and each local connect/redirect. A local
 redirect to a blocked address terminates the whole call; retain already-reached
@@ -189,32 +193,37 @@ whose resolution is policy-blocked terminates like any other followed target.
 HTTP redirects or ambient proxies, with an 8 MiB response cap. Avibe validates
 the submitted URL but cannot pin a provider's own DNS or internal redirect
 fetches. Its provider-side SSRF controls remain that provider's responsibility.
-Do not claim local pinning applies there. Validate returned URL metadata before
-accepting it; a blocked reported destination is terminal (the provider already
-saw the original URL). Missing final-URL evidence stays unknown, not invented.
+Do not claim local pinning applies there. Validate reported URL metadata without
+resolving or following it: malformed, user-info-bearing, non-HTTP(S), or known
+local/non-global literal metadata becomes null; never fail an otherwise usable
+provider result or run local DNS for its reported host. Other final hosts remain
+provider-reported, not DNS-verified. Missing evidence stays unknown, not invented;
+a local DNS outage cannot invalidate this metadata.
 
 ### 3.2 Pinning on both transports
 
 Native: use a fresh `curl_cffi.requests.Session`/easy handle for each hop,
 `allow_redirects=False`, `trust_env=False`, certificate validation on. Its
 `curl_options` are applied after impersonation. Set `CurlOpt.RESOLVE` to an
-exact non-expiring `host:port:IP` entry (IPv6 address bracketed), no wildcard;
-keep the original hostname in the URL so Host/SNI/certificate checks remain
-correct. Set `PROXY=""`, ignore netrc, `FRESH_CONNECT=1`, `FORBID_REUSE=1`;
+exact non-expiring `host:port:IP[,IP]` entry containing the fully checked answer
+set (IPv6 addresses bracketed), no wildcard; curl may try those addresses within
+the one connect budget. Keep the original hostname for Host/SNI/certificate
+checks. Set `PROXY=""`, ignore netrc, `FRESH_CONNECT=1`, `FORBID_REUSE=1`;
 no shared DNS/connection cache, Alt-Svc, HSTS persistence or HTTP/3. For a literal
-IP use the normalized checked literal. Compare `Response.primary_ip` with the
-pin as a diagnostic before accepting bytes; this **post-send** check is not the
-SSRF defense—the numeric pin and fresh connection are. Handle every redirect
+IP use the normalized checked literal. Check `Response.primary_ip` belongs to
+the checked set as a diagnostic before accepting bytes; this **post-send** check
+is not the SSRF defense—the numeric pins and fresh connection are. Handle every redirect
 in Avibe with a new gate and handle. Never fall back to DNS after a pin fails.
 
 Degraded transport: add HTTP/2 support to the existing `httpx[socks]` dependency
 (`httpx[http2,socks]` / `h2`) and use an HTTPX custom transport backed by
 HTTPcore's public `network_backend`. Its `connect_tcp` accepts only the checked
-host/port, connects to the selected **numeric IP**, verifies `server_addr`
-before returning the stream, and lets HTTPcore start TLS for the original host.
-Reject unknown host/port and Unix-socket paths; no ordinary DNS fallback. Fresh
-hop-scoped pools prevent reuse/coalescing around the new pin. Both transports
-negotiate HTTP/2 for HTTPS; ordinary HTTP/1.1-only servers remain readable.
+host/port, tries only the checked **numeric IPs** within the shared 5-second
+connect budget (both address families, without starving one), verifies `server_addr`
+belongs to that set before returning the stream, and starts TLS for the original
+host. No ordinary DNS fallback or post-send request replay. Fresh hop-scoped pools
+prevent reuse/coalescing around the pins; reject Unix-socket/unknown-host paths.
+Both transports negotiate HTTP/2 for HTTPS and accept HTTP/1.1-only servers.
 
 ### 3.3 Profile and packaging
 
@@ -238,17 +247,22 @@ metadata. Request Markdown first; accept a valid HTML response normally. A
 single cheap same-origin `<link rel="alternate" type="text/markdown">` is
 allowed, with original HTML retained if the alternate is merely unreadable.
 This is deliberate agent content negotiation, not a byte-identical browser request.
+The degraded HTTP/2 path sends `User-Agent: Avibe/<version>`, the negotiated
+`Accept`/`Accept-Encoding`/`Accept-Language` headers, and no `sec-ch-*` or
+`Sec-Fetch-*` fingerprint headers. It cannot impersonate Chrome TLS; its
+`transport_degraded` marker explicitly states that exception and it must not
+silently choose another browser profile.
 
 Repository packaging facts checked at #2924's merge:
 
 | Path / platform | Integration |
 | --- | --- |
-| `pyproject.toml`, `uv.lock` | Python >=3.10; add the pinned native dependency with CPython/platform markers, HTTP/2 and Brotli/Zstandard decoders, `trafilatura` and `pypdf`. Keep core import lazy. |
+| `pyproject.toml`, `uv.lock` | Python >=3.10; add the pinned native dependency with CPython/platform markers, HTTP/2 and Brotli/Zstandard decoders, `trafilatura>=2.3.1` (Apache-2.0) and `pypdf>=6.21.2`; lock the reviewed stable versions. Keep core import lazy. |
 | macOS x86_64 / arm64 | 0.16.3 publishes `cp310-abi3` wheels tagged macOS 10.9+ / 11.0+. |
 | Linux x86_64 / aarch64, including WSL | `cp310-abi3` wheels for glibc 2.17+ and musl 1.2+. No system curl/browser/Homebrew prerequisite. |
 | Windows x86_64 / arm64 | Both wheel families exist; `install.ps1` currently chooses x64 CPython 3.12 on Windows Arm for other dependency constraints. Do not claim full native-Arm support. |
 | `install.sh`, `install.ps1`, `vibe/upgrade.py` | Normal wheel metadata resolves dependencies in the new install generation before launcher activation. Direct `uv tool install`/pip follows the same metadata; no fetch-time package install. |
-| `desktop/scripts/build-runtime-bundle.py`, `desktop/runtime-sources.json` | Existing macOS arm64/x64 and Windows x64 bundles use CPython 3.12.15, frozen hash-checked exports and binary-only dependency install. Lock wheels/native resources before bundle signing; no new Linux desktop bundle is implied. |
+| `desktop/scripts/build-runtime-bundle.py`, `desktop/runtime-sources.json` | Existing macOS arm64/x64 and Windows x64 bundles use CPython 3.12.15, frozen hash-checked exports and binary-only dependency install. Add `lxml` to the bundle's binary-wheel allowlist/check alongside curl resources before bundle signing; no new Linux desktop bundle is implied. |
 
 Use dependency markers for the supported CPython/OS/architecture wheel families;
 other combinations keep base HTTP/2 without trying to compile libcurl. Within
@@ -300,12 +314,14 @@ loading disabled. Unsupported binary/media/archive/office formats fail over.
 ## 4. One result budget and portable evidence
 
 Use **12,000 estimated tokens** for the entire model-facing fetch result,
-regardless of executor/model. Reuse `harness.context.text_tokens`' conservative
-UTF-8-byte count: this is an upper-bound context budget, **not** 48,000 characters
-or an exact provider tokenizer. Reserve frame/metadata/marker space before
+regardless of executor/model. Reuse `harness.context.text_tokens`:
+`ceil(len(text.encode("utf-8", "surrogatepass")) / 4)`, so the whole framed text
+is at most **48,000 UTF-8 bytes**, not 48,000 characters or a guaranteed bound
+on a provider's actual tokens. Reserve frame/metadata/marker space before
 cutting content at a Unicode boundary. Persist the cap method/version so a later
-estimator change cannot silently change historical evidence. Provider character
-limits are transport optimizations; the canonical normalizer enforces the budget.
+estimator change cannot silently change historical evidence. Exa's 48,000-character
+transport bound cannot underfill this byte budget solely because of unit conversion;
+the canonical normalizer, not the provider character limit, owns the final cut.
 
 When Avibe cuts content, append exactly:
 
@@ -313,12 +329,14 @@ When Avibe cuts content, append exactly:
 [Avibe: web_fetch content truncated at the 12,000-token budget; the remainder is not included.]
 ```
 
-When a provider says it truncated, or returns exactly its requested character
-bound with no completeness evidence, set `truncated: true`, reason
+When a provider explicitly says it truncated, set `truncated: true`, reason
 `provider_limit`, and append “`[Avibe: provider-bounded output; the page may be
-incomplete.]`”. Do not label an upstream-limited response complete merely because
-it fits our budget. Reserve marker space in either case. Raw-size overflow is
-an unreadable attempt, not silently successful partial HTML/PDF.
+incomplete.]`”. Do not infer truncation merely because a response equals the
+requested `maxCharacters`: Exa's 48,000-character request is below its documented
+1,000,000-character REST maximum, and an exact-length page may be complete. Do
+not label an explicitly upstream-limited response complete merely because it fits
+our budget. Reserve marker space in either case. Raw-size overflow is an
+unreadable attempt, not silently successful partial HTML/PDF.
 
 Add `WebFetchRecord` as a tool-discriminated variant of `HostedResult.record`;
 search `HostedRecord` stays unchanged. Fields:
@@ -384,7 +402,7 @@ unless the provider supplies one; title may be unavailable.
 ### 5.2 Keyed Exa Contents
 
 `POST https://api.exa.ai/contents`, `x-api-key` or bearer key. The **REST** body
-uses `ids: [url]`, with `text: {maxCharacters: 12000}`; MCP uses `urls` instead.
+uses `ids: [url]`, with `text: {maxCharacters: 48000}`; MCP uses `urls` instead.
 Omit highlights/summary/subpages and leave freshness at the documented cached-
 when-available default. Require the single matching `results` item and its
 `statuses` success; map title, URL and Markdown text. Keep reported final URL
@@ -414,20 +432,26 @@ fetch transient cooldown is not model-routing health.
 
 ### 5.4 Keyless Exa and Jina
 
-**Exa:** reuse #2924 §§3/5/6/9 unchanged for identity, session lock, schema refresh,
-SSE/JSON-RPC parsing, deadlines, admission, errors and shared cooldown. Endpoint
+**Exa:** reuse #2924 §§3/5/6/9 for identity, session lock, schema refresh,
+SSE/JSON-RPC parsing, deadlines, admission and shared cooldown. Fetch-specific
+failure scope in §6 explicitly overrides #2924 §5.3/§6's generic `isError` /
+cooldown classification, not the shared identity or cooldown used for genuine
+service failures.
+Endpoint
 is `https://mcp.exa.ai/mcp?tools=web_search_advanced_exa,web_fetch_exa`; do not
 create another session keyed by tool or revert search to `web_search_exa`.
-Send `web_fetch_exa` with `urls: [url]`, `maxCharacters: 12000`; require those
+Send `web_fetch_exa` with `urls: [url]`, `maxCharacters: 48000`; require those
 controls from `tools/list`, fail unavailable for unknown required inputs.
 Its default 3,000 chars would be too short; explicit bound maps to
 `text.maxCharacters` (REST schema maximum 1,000,000).
 
 One text block contains Markdown and a leading title/URL header. Treat the whole
 body as a single untrusted document; parse only the leading wrapper, never split
-on in-page `URL:`/error-looking text. No-content sentinel is unreadable, not an
-empty success. MCP `isError` and rate-limit/refusal envelopes use #2924's classifier
-before page parsing; malformed/other MCP errors remain `service_unavailable`.
+on in-page `URL:`/error-looking text. Exact wrapper no-content/crawl-error
+responses are target failures (§6); match `CRAWL_UNKNOWN_ERROR` and other
+catalog-named `CRAWL_*` tags only inside an error-shaped envelope. Apply #2924's
+refusal/rate-limit recognition before generic MCP errors, which remain
+`service_unavailable`. Never classify page body phrases as errors.
 Search and fetch share the same per-IP limiter, (`src_exakeyless`, `exa/mcp`)
 cooldown and generation, including retry/reset parsing. No fixed numeric anonymous
 quota is promised. Send `x-exa-source: avibe` and the shared Avibe client identity.
@@ -477,19 +501,32 @@ Policy gates precede skips. For a frozen candidate classify once in order:
 content-type evidence justifies the last skip; a URL suffix is not proof.
 All reached skips/attempts enter the existing ordered `attempts[]` with remedies.
 
+**Failure scope precedes health writes.** A well-formed provider response proving
+the *target* is missing, empty, unsupported, timed out or uncrawlable is
+`fetch_target_unreadable`: record/fail over without a service cooldown. This covers
+Tavily `failed_results`, Exa's exact no-content/crawl-error wrappers, Jina target
+errors and DeepSeek target 404/408. An unclassified transport timeout, protocol
+failure or 5xx is still service-scoped. An explicit target-domain 429 cools only
+`(Source, service, target host)` for a bounded target cooldown; it never changes
+the shared service cooldown. Unknown-scope 429 conservatively cools the service
+(DeepSeek documents both scopes without a discriminator). Never guess from prose
+inside successful content. For both Exa tools, lock-wait expiry before `tools/call`
+is a no-send `service_busy` skip, not a provider fault, cost or shared cooldown.
+
 | Outcome | Chain / settlement |
 | --- | --- |
 | Invalid argument / address refusal / unresolved policy gate | terminal, no third-party forwarding; preserve any earlier sent attempts |
 | Usable content | end with completed record |
 | Local 403/503 challenge, JS shell, empty page, unsupported type | next enabled candidate, no local retry/headless path |
 | Local 404/410, connect/TLS/timeout/server failure | next; bounded host cooldown where transient |
-| Local 401/login wall | refused, next; no credential access |
+| Local 401/login wall | terminal `fetch_refused`, no forwarding or credential access |
 | Configured 401 / catalog credential-403; 402; named spend limit | Source needs-action with existing generation fences, next |
-| Provider URL refusal / per-URL failure | `service_refused` / unreadable respectively, next; no invalid-key inference |
-| 429 | rate-limit attempt + host/service cooldown, next **without sleeping**; server advice never shortened |
+| Provider URL refusal / proven target failure | `service_refused` / `fetch_target_unreadable`, next; no service health write |
+| 429 | rate-limit attempt + scope-specific cooldown above, next **without sleeping**; server advice never shortened |
 | Service redirect, unexpected HTTP error, timeout, malformed/oversized response | existing `service_unavailable`/`service_unreadable`, next |
 
-Use existing stable service codes; add local `fetch_url_blocked`,
+Use existing stable service codes, adding `service_busy` for no-send contention
+and `fetch_target_unreadable` for the target boundary. Local adds `fetch_url_blocked`,
 `fetch_dns_unverified`, `fetch_challenge`, `fetch_js_shell`, `fetch_timeout`,
 `fetch_unsupported_content`, `fetch_refused`, `fetch_unavailable` and terminal
 `fetch_sources_blocked`. Local failures never write Source credential state.
@@ -518,9 +555,13 @@ rows without it read as `web_search`. New rows are keyed by (Source, service, to
 so **`exa/mcp` stays the shared service/cooldown identity** while fetch request
 counts remain distinct from search. Reuse existing list-price revaluation and
 reported-cost lower-bound accounting; record-level costs remain captured facts.
-Readers and mirrors must tolerate the new dimension before writes. Usage UI adds
-网页读取 / Web fetch with sent, successful, failed counts and cost; built-ins do
-not become “removed Source” rows just because no credential row exists.
+Readers and mirrors must tolerate the new dimension before writes. Builds before
+WF-1 can merge shared `exa/mcp` tool rows and strip `tool` when saving; after
+re-upgrade those totals read as `web_search`. This lossy attribution downgrade,
+like lost config overrides, must be disclosed—not described as lossless replay.
+Usage UI adds 网页读取 / Web fetch with existing sent-request and cost counters;
+per-call success/failure stays in activity, not invented aggregate columns.
+Built-ins do not become “removed Source” rows without a credential row.
 
 ## 7. UI and disclosure brief
 
@@ -567,7 +608,7 @@ availability, future-default or legal-compliance promise.
 ## 8. Contracts and delivery phases
 
 Rechecked **2026-10-24**: master contract v20 shipped in `gh-v3.2.3rc3`;
-rc4–rc6 also carry v20. #2924 requires the next event **v21**, not additions to
+rc4–rc7 also carry v20. #2924 requires the next event **v21**, not additions to
 shipped v20. Fetch can join a coordinated **unreleased** v21 event, or open the
 next version if it has shipped first. Recheck tags before each implementation
 push/close-out; this docs-only PR allocates no version or migration itself.
@@ -605,12 +646,14 @@ at the connect boundary, including mixed DNS answers and both transport paths.
   and unrelated health/config saves; fetch/search usage separate, Exa cooldown
   shared, Retry now fenced; Jina catalog-off beats a frozen candidate.
 - **Address boundary:** private/mixed A+AAAA/mapped/CGNAT/metadata/transition IPs,
-  ambiguous numeric hosts, DNS failure/rebinding, redirect-to-private and loops,
-  local disabled/reordered, remote final metadata. Assert forbidden sockets and
+  ambiguous numeric hosts, DNS failure/rebinding, fake-IP fail-closed, public versus
+  private embedded NAT64 IPv4, redirect-to-private and loops, local disabled/reordered,
+  remote URL metadata without DNS. Assert forbidden sockets and
   third-party submissions never occur; post-send peer checks are not the guard.
 - **Transport/packaging:** both pinned backends, no ambient proxy/netrc/user jar,
   valid original SNI/Host, fresh-hop pooling, supported H2/H1, stable profile/header
-  pairing, native load fallback, encoding/size bombs, stop/timeout killing work;
+  pairing (including explicit degraded headers), dual-stack unreachable-first-address
+  failover before send, native load fallback, encoding/size bombs, stop/timeout killing work;
   clean wheel installs and desktop hash/binary gates on supported platforms.
 - **Extraction:** Markdown negotiation/alternate, charset/meta-refresh, title/
   canonical/relative links, challenge/SPA/text/PDF/JSON, unsupported/encrypted/empty
@@ -618,11 +661,14 @@ at the connect boundary, including mixed DNS answers and both transport paths.
 - **Providers:** one-URL mappings, Tavily failed_results/amortized credits, Exa REST
   `ids` versus MCP `urls`, DeepSeek 403/404/timeouts and ambiguous 200, Exa shared
   MCP refresh/error metadata and unescaped body text, Jina JSON/Markdown headers,
-  keyless 429 and kill switch. No phrase matching within valid page content.
+  keyless 429 and kill switch; a dead/slow target and lock contention must not cool
+  unrelated fetches/search, while a genuine service failure does. No phrase matching
+  within valid page content.
 - **Record/replay/UI:** one deterministic budget including markers, Unicode cuts
   and upstream-limited flags, null unknown final URL, complete portable ordinary
   content on a #2920 reader, no network/rebill on replay, exact-zero free requests,
-  uncertain sent costs, localized status/remedies and inert page rendering.
+  uncertain sent costs, lossy pre-WF-1 ledger rewrites, localized status/remedies and
+  inert page rendering.
 
 Known by design: browser-like is not a promise to defeat anti-bot protections;
 remote cached content may differ from local, and provider-side DNS cannot be
