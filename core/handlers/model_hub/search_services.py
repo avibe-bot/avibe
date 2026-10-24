@@ -234,6 +234,11 @@ def map_response(
         or (mcp_result is not None and mcp_result.get("isError") is True)
     ):
         code = "service_unavailable"
+    elif keyless and status in service["service_refused_statuses"]:
+        # Exa's catalog status set is shared with credentialed Exa. For the
+        # keyless path, only the explicit content-filter tags above are a
+        # refusal; an unrecognized HTTP error is an unavailable service.
+        code = "service_unavailable"
     elif status == 200:
         if not isinstance(rows, list) or (rows and not sources):
             code = "service_unreadable"

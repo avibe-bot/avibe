@@ -232,6 +232,7 @@ async def test_keyless_mcp_rejects_a_schema_without_text_bound_before_tools_call
         (200, {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "Unauthorized"}}, {}, "service_unavailable"),
         (401, {"error": {"code": -32000, "message": "Unauthorized"}}, {}, "service_unavailable"),
         (200, {"jsonrpc": "2.0", "id": 1, "error": {"code": "PROHIBITED_CONTENT", "message": "blocked"}}, {}, "service_refused"),
+        (403, {"html": "access denied"}, {}, "service_unavailable"),
     ],
 )
 def test_keyless_outcome_table_never_reports_a_credential_error(status, body, headers, expected) -> None:
