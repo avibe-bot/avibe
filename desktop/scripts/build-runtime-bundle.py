@@ -50,6 +50,7 @@ PROBE_PID_FILES = (
     "runtime/remote-access-cloudflared.pid",
 )
 PROBE_DIAGNOSTIC_TAIL_BYTES = 64 * 1024
+WINDOWS_RENAME_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0, 4.0, 5.0, 5.0, 5.0)
 
 
 def sha256(path: Path) -> str:
@@ -62,6 +63,42 @@ def sha256(path: Path) -> str:
 
 def run(command: list[str], *, cwd: Path = REPO_ROOT, env: dict[str, str] | None = None) -> None:
     subprocess.run(command, cwd=cwd, env=env, check=True)
+
+
+def rename_payload(
+    source: Path,
+    destination: Path,
+    *,
+    os_name: str = os.name,
+    retry_delays: tuple[float, ...] = WINDOWS_RENAME_RETRY_DELAYS,
+) -> None:
+    """Rename a built payload, tolerating transient Windows file locks."""
+
+    total_attempts = len(retry_delays) + 1
+    for attempt in range(1, total_attempts + 1):
+        try:
+            source.rename(destination)
+            return
+        except OSError as error:
+            winerror = getattr(error, "winerror", None)
+            if os_name != "nt" or winerror not in {5, 32}:
+                raise
+            if attempt == total_attempts:
+                print(
+                    f"--- payload rename attempt {attempt}/{total_attempts} failed "
+                    f"with WinError {winerror}; retry budget exhausted ---",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                raise
+            delay = retry_delays[attempt - 1]
+            print(
+                f"--- payload rename attempt {attempt}/{total_attempts} failed "
+                f"with WinError {winerror}; retrying in {delay:g}s ---",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(delay)
 
 
 def download(source: dict[str, str], cache_dir: Path) -> Path:
@@ -883,7 +920,7 @@ def main() -> int:
         # contains spaces (Application Support / AppData). Probe that boundary
         # before hashing the payload, so no install-time repair is necessary.
         installed_payload = work_dir / "relocated runtime"
-        payload.rename(installed_payload)
+        rename_payload(payload, installed_payload)
         payload = installed_payload
         prune_payload(payload)
         private_python = payload / target_config["python_entrypoint"]
