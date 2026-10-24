@@ -145,12 +145,21 @@ def test_disk_load_with_a_broken_hosted_tools_section_keeps_model_hub(monkeypatc
 
 
 def _validate_status(status):
-    from jsonschema import Draft7Validator
+    from jsonschema import Draft7Validator, RefResolver
 
-    schema = json.loads(
-        (Path(__file__).parents[1] / "docs/plans/model-hub-contracts/hosted-tools-status.schema.json").read_text()
+    schema_dir = Path(__file__).parents[1] / "docs/plans/model-hub-contracts"
+    schema = json.loads((schema_dir / "hosted-tools-status.schema.json").read_text())
+    source_schema = json.loads((schema_dir / "source.schema.json").read_text())
+    schema.pop("$id", None)
+    source_schema.pop("$id", None)
+    # The contract files use repository-relative ids; anchor this test resolver at
+    # a synthetic absolute URI so jsonschema does not recursively prefix them.
+    resolver = RefResolver(
+        base_uri="https://schemas.avibe.test/model-hub/",
+        referrer=schema,
+        store={"https://schemas.avibe.test/model-hub/source.schema.json": source_schema},
     )
-    Draft7Validator(schema).validate(status)
+    Draft7Validator(schema, resolver=resolver).validate(status)
 
 
 def _api_service(tmp_path):

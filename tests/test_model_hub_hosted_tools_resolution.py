@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from config.v2_config import (
+    KEYLESS_EXA_SOURCE_ID,
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
     ModelHubHostedToolConfig,
@@ -79,7 +80,7 @@ IMAGE_MODELS = {
 
 
 @pytest.fixture(autouse=True)
-def _overlay(monkeypatch):
+def _overlay(monkeypatch, request):
     monkeypatch.setattr(
         hosted_tools_module, "source_executor_models", lambda vendor, protocol: EXECUTOR_MODELS.get(vendor, ()),
     )
@@ -87,6 +88,18 @@ def _overlay(monkeypatch):
     monkeypatch.setattr(
         hosted_tools_module, "source_image_models", lambda vendor, protocol, listed: IMAGE_MODELS.get(vendor, ()),
     )
+    # These cases pin model-executor priors and ordering. The active keyless Exa
+    # chain is covered by the owning search-chain tests; omit that catalog service
+    # from this model-only fixture without changing the shipped activation predicate.
+    original_service = hosted_tools_module.model_hub_search_service
+
+    def without_keyless(source):
+        if source.id == KEYLESS_EXA_SOURCE_ID:
+            return None
+        return original_service(source)
+
+    hosted_tools_module.model_hub_search_service = without_keyless
+    request.addfinalizer(lambda: setattr(hosted_tools_module, "model_hub_search_service", original_service))
     # The bundled overlay's vendors; which of them list image models is `IMAGE_MODELS`.
     monkeypatch.setattr(hosted_tools_module, "bundled_provider_vendors", lambda: dict.fromkeys(("anthropic", "openai", "xai")))
 
