@@ -7,9 +7,9 @@ import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { ToggleSwitch } from '../SettingsPrimitives';
 import { Field } from './dialogFields';
-import { atLeast, formatCost, formatCount, formatMonthDay, formatSmallUsd, formatUsd } from './format';
+import { atLeast, cooldownTime, formatCost, formatCount, formatMonthDay, formatSmallUsd, formatUsd } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
-import { serviceSettings } from './searchServices';
+import { KEYLESS_EXA_SOURCE_ID, serviceSettings } from './searchServices';
 import { sourceStatePresentation } from './sourceStatePresentation';
 import { usageHasNoPrice, type ServiceMonth } from './usageProjection';
 import { VendorGlyph } from './vendorGlyph';
@@ -38,11 +38,19 @@ export const SearchCandidateStatus: React.FC<{
   const { t, i18n } = useTranslation();
   const state = candidate.kind === 'service' ? candidate.state : source?.state;
   const success = tool.status.verified.find((row) => row.source_id === candidate.source_id && row.model_id === candidate.model_id);
+  const keyless = candidate.kind === 'service' && candidate.source_id === KEYLESS_EXA_SOURCE_ID;
   let text: string | null = null;
   let tone = 'model-hub-status-mint';
+  const until = candidate.kind === 'service' ? candidate.cooldown_until : null;
+  const time = until ? cooldownTime(until, i18n.language) : null;
   if (candidate.kind === 'service' && !candidate.settings.enabled) {
     text = t('settings.models.searchServices.unused');
     tone = 'model-hub-accent-pill--neutral';
+  } else if (keyless) {
+    // The built-in service has no credential health or key repair. Only its
+    // service cooldown and per-row switch can override the free status.
+    text = until ? t('settings.models.searchServices.keylessCooldown') : t('settings.models.searchServices.keylessReady');
+    if (until) tone = 'model-hub-status-gold';
   } else if (state && (state.status === 'needs_action' || state.status === 'error' || state.status === 'cooldown')) {
     const presentation = sourceStatePresentation(state, 'card', i18n.language);
     const reason = candidate.kind === 'service' && state.detail_key === 'models.source.needs_action.credential_revoked'
@@ -50,10 +58,6 @@ export const SearchCandidateStatus: React.FC<{
     text = t('settings.models.searchServices.skipped', { reason });
     tone = 'model-hub-status-gold';
   } else if (candidate.kind === 'service' && candidate.cooldown_until !== null) {
-    const date = new Date(candidate.cooldown_until);
-    const today = new Date();
-    const clock = new Intl.DateTimeFormat(i18n.language, { hour: '2-digit', minute: '2-digit', hour12: false }).format(date);
-    const time = date.toDateString() === today.toDateString() ? clock : `${formatMonthDay(candidate.cooldown_until)} ${clock}`;
     text = t('settings.models.searchServices.cooldown', { time });
     tone = 'model-hub-status-gold';
   } else if (success) {
@@ -89,7 +93,7 @@ export const SearchVendorFacts: React.FC<{ vendor: HostedSearchServiceVendor }> 
 };
 
 /** This month's requests and their list valuation, with the vendors' own figure beside it, never in it. */
-const ServiceMonthLine: React.FC<{ month: RegionRead<ServiceMonth>; onOpenUsage?: () => void }> = ({ month, onOpenUsage }) => {
+const ServiceMonthLine: React.FC<{ month: RegionRead<ServiceMonth>; keyless?: boolean; onOpenUsage?: () => void }> = ({ month, keyless = false, onOpenUsage }) => {
   const { t, i18n } = useTranslation();
   const usage = foldRegionRead<ServiceMonth, ServiceMonth | null>(month, {
     loading: () => null, ready: (data) => data, unread: () => null, degraded: (data) => data,
@@ -103,7 +107,11 @@ const ServiceMonthLine: React.FC<{ month: RegionRead<ServiceMonth>; onOpenUsage?
     // Without a price table the report carries counts only.
     ...(usage.priced ? [usageHasNoPrice(usage.totals)
       ? t('settings.models.usage.cost.noPrice')
-      : t('settings.models.searchServices.monthEstimate', {
+      : keyless && (usage.totals.api_cost_usd ?? 0) === 0
+        && (usage.totals.api_cost_usd !== undefined || usage.totals.requests === 0)
+        && !usage.totals.api_cost_lower_bound && !usage.partial
+        ? t('settings.models.searchServices.free')
+        : t('settings.models.searchServices.monthEstimate', {
         usd: formatCost(usage.totals.api_cost_usd ?? 0, usage.totals.api_cost_lower_bound || usage.partial, i18n.language),
       })] : []),
     ...(usage.priced && usage.totals.reported_requests > 0
@@ -148,6 +156,6 @@ export const SearchServiceSettings: React.FC<{
     </Field>
     <p className="model-hub-tool-note">{t('settings.models.searchServices.settingsNote')}</p>
     <SearchServicePrice price={vendor.price} />
-    {month && <ServiceMonthLine month={month} onOpenUsage={onOpenUsage} />}
+    {month && <ServiceMonthLine month={month} keyless={source.id === KEYLESS_EXA_SOURCE_ID} onOpenUsage={onOpenUsage} />}
   </section>;
 };

@@ -547,14 +547,15 @@ def test_every_known_hosted_error_code_has_copy_on_every_surface(code):
 SERVICE_FIXTURE = json.loads(
     (Path(__file__).resolve().parents[1] / "ui/src/lib/hostedServiceActivity.fixture.json").read_text(encoding="utf-8")
 )
-TAVILY, EXA, DEEPSEEK, CLAUDE = "src_tavily01", "src_exa00001", "src_deepseek1", "src_claude001"
-LABELS = {TAVILY: "Tavily", EXA: "Exa", DEEPSEEK: "DeepSeek", CLAUDE: "Anthropic API key"}
+TAVILY, EXA, KEYLESS, DEEPSEEK, CLAUDE = "src_tavily01", "src_exa00001", "src_exakeyless", "src_deepseek1", "src_claude001"
+LABELS = {TAVILY: "Tavily", EXA: "Exa", KEYLESS: "Exa", DEEPSEEK: "DeepSeek", CLAUDE: "Anthropic API key"}
 NEEDS = "models.source.needs_action."
 KEY, BALANCE, LIMIT = f"{NEEDS}credential_revoked", f"{NEEDS}balance_exhausted", f"{NEEDS}spend_limit_reached"
 # Each Source as Model Hub holds it now, healthy; a test changes what it needs.
 HEALTHY = {
     TAVILY: {"protocol": "search", "vendor": "tavily", "enabled": True},
     EXA: {"protocol": "search", "vendor": "exa", "enabled": True},
+    KEYLESS: {"protocol": "search", "vendor": "exa-mcp", "enabled": True},
     DEEPSEEK: {"protocol": "openai_chat", "vendor": "deepseek", "enabled": True},
     CLAUDE: {"protocol": "anthropic", "vendor": "anthropic"},
 }
@@ -629,6 +630,36 @@ def _chain(attempts, *, status="completed", execution=None, state=HEALTHY, names
         source_names=names.get,
         source_state=state.get if state is not None else None,
     )
+
+
+@pytest.mark.parametrize("lang", ["en", "zh"])
+@pytest.mark.parametrize("outcome", ["success", "rate_limited", "unavailable", "failed"])
+def test_keyless_im_projection_names_free_service_and_network_remedy(lang, outcome):
+    keyless_attempt = _tried(
+        KEYLESS, "completed" if outcome == "success" else "failed", usd=0,
+        **({} if outcome == "success" else {"error_code":
+           "service_unavailable" if outcome == "unavailable" else "service_rate_limited"}),
+    )
+    fallback = outcome in {"rate_limited", "unavailable"}
+    activity = _chain(
+        (keyless_attempt, _tried(DEEPSEEK, "completed", usd=0.00075)) if fallback else (keyless_attempt,),
+        status="failed" if outcome == "failed" else "completed",
+        execution=_service_ran(DEEPSEEK, "deepseek", 0.00075) if fallback else _service_ran(KEYLESS, "exa-mcp", 0),
+        sources=() if outcome == "failed" else RESULTS,
+        error_code="service_rate_limited" if outcome == "failed" else None,
+    )
+    line = hosted_line(activity, lang)
+    assert ("Exa（免费）" if lang == "zh" else "Exa (free)") in line
+    assert not any(word in line.lower() for word in ("密钥", "api key", "credential", "included", "$0 ·"))
+    if outcome == "success":
+        assert ("通过 Exa（免费） · 5 个来源 · 免费" if lang == "zh" else "via Exa (free) · 5 sources · Free") in line
+    elif outcome == "rate_limited":
+        assert ("Exa（免费）限流，已改用 DeepSeek" if lang == "zh" else "Rate-limited: Exa (free); switched to DeepSeek") in line
+    elif outcome == "unavailable":
+        assert ("暂时不可用" if lang == "zh" else "unavailable") in line
+    else:
+        assert ("立即重试" if lang == "zh" else "Retry now") in line
+        assert activity.attempts[0].remedy_key == "repair.retrySearch"
 
 
 SERVICE_CARDS = {
@@ -763,6 +794,36 @@ def test_a_search_services_card_and_line_say_the_same_in_both_languages(case):
             id="an exact zero is never an estimate",
         ),
         pytest.param(
+            (_tried(KEYLESS, "completed", usd=0.0),), _service_ran(KEYLESS, "exa-mcp", 0.0), "completed",
+            {"executor_kind": "service", "source_id": KEYLESS, "source_name": "Exa", "provider": "exa-mcp"},
+            {"basis": "list", "usd": 0, "calls": 1}, "Free",
+            id="keyless exact zero is free",
+        ),
+        pytest.param(
+            (_tried(KEYLESS, error_code="service_rate_limited", usd=0.0), _tried(DEEPSEEK, "completed", kind="model", usd=0.01)),
+            ProxyExecution(
+                executor_origin=Origin(provider="deepseek", api="openai_chat", model="deepseek-chat"),
+                executor_source_id=DEEPSEEK,
+                executor_billing="metered",
+                cost=HostedCost(basis="list", usd=0.01),
+            ), "completed",
+            {"executor_kind": "model", "source_id": DEEPSEEK, "source_name": "DeepSeek", "provider": "deepseek", "model": "deepseek-chat"},
+            {"basis": "list", "usd": 0.01, "calls": 1}, "≈ $0.01",
+            id="keyless rate limit falls back without key wording",
+        ),
+        pytest.param(
+            (_tried(TAVILY, "completed", usd=0.01), _tried(KEYLESS, "completed", usd=0.0)), _service_ran(KEYLESS, "exa-mcp", 0.0), "completed",
+            {"executor_kind": "service", "source_id": KEYLESS, "source_name": "Exa", "provider": "exa-mcp"},
+            {"basis": "list", "usd": 0.01, "calls": 1}, "≈ $0.01",
+            id="keyless after a paid attempt keeps the paid total",
+        ),
+        pytest.param(
+            (_tried(TAVILY, "completed"), _tried(KEYLESS, "completed", usd=0.0)), _service_ran(KEYLESS, "exa-mcp", 0.0), "completed",
+            {"executor_kind": "service", "source_id": KEYLESS, "source_name": "Exa", "provider": "exa-mcp"},
+            {"basis": "list", "usd": 0, "calls": 1, "at_least": True}, "at least $0",
+            id="keyless with an unknown earlier charge is not free",
+        ),
+        pytest.param(
             None, _service_ran(TAVILY, "tavily", 0.008), "completed",
             {"executor_kind": "service", "source_id": TAVILY, "source_name": "Tavily", "provider": "tavily"},
             {"basis": "list", "usd": 0.008, "calls": 1}, "≈ $0.008",
@@ -852,6 +913,12 @@ def test_a_search_chain_alone_says_who_ran_it_and_what_it_cost(attempts, executi
         # Skips that are no failure of the Source's own, and need nothing.
         pytest.param(_skip(TAVILY, "cooling", retry_at="2026-10-21T04:30:00Z"), HEALTHY,
                      ("skip.cooling", None, None), id="cooling"),
+        pytest.param(_skip(KEYLESS, "cooling"), _now({KEYLESS: {"enabled": True}}),
+                     ("skip.cooling", "repair.retrySearch", None), id="keyless cooling: retry search, never credentials"),
+        pytest.param(_tried(KEYLESS, error_code="service_rate_limited", usd=0.0), _now({KEYLESS: {"enabled": True}}),
+                     ("reason.service_rate_limited", "repair.retrySearch", None), id="keyless rate limit: retry search, never credentials"),
+        pytest.param(_skip(KEYLESS, "cooling"), _now({KEYLESS: {"enabled": False}}),
+                     ("skip.cooling", None, None), id="keyless disabled: no credential repair"),
         pytest.param(_skip(DEEPSEEK, "query_too_long"), HEALTHY, ("skip.query_too_long", None, None), id="query too long"),
         pytest.param(_skip(TAVILY, "unavailable"), _now({TAVILY: None}), ("skip.unavailable", None, None), id="unavailable"),
     ],
@@ -920,6 +987,7 @@ ATTEMPT_COPY = (
         "key", "reauthorize", "balance", "balanceReenable", "limit", "limitReenable", "tavilyLimit", "plan",
         "account", "error", "disabled",
     )),
+    "repair.retrySearch",
     "listSeparator",
     "itemSeparator",
     "switch",

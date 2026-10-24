@@ -1836,6 +1836,8 @@
     "mainSessionProtected": "桌宠主会话由 Avibe 管理，不能归档或编辑。"
   },
   "hostedTools": {
+    "keylessExa": "Exa（免费）",
+    "rateLimitSwitch": "{sources}限流，已改用 {provider}。冷却结束后会自动重试，也可在 模型 › 工具 中立即重试。",
     "errorCode": {
       "provider_no_reason": "供应商未说明原因",
       "provider_no_image": "供应商没有返回图片",
@@ -1877,6 +1879,7 @@
     },
     "quoted": "“{subject}”",
     "mode": {
+      "service": "通过 {provider}",
       "native": "原生（{provider}）",
       "proxy": "由 {provider} 代理",
       "proxyModel": "由 {provider} 代理（{model}）",
@@ -1892,6 +1895,7 @@
       "images": "{count} 张"
     },
     "cost": {
+      "free": "免费",
       "included": "订阅内含",
       "list": "≈ ${usd}",
       "reported": "${usd}",
@@ -1899,6 +1903,7 @@
       "atLeast": "至少 {cost}"
     },
     "repair": {
+      "retrySearch": "暂时限流，可稍后重试或在 模型 › 工具 中立即重试",
       "disabled": "需要在 模型 › 工具 中启用网页搜索",
       "key": "需要更换密钥",
       "reauthorize": "需要重新授权登录",
@@ -1918,7 +1923,7 @@
       "service_balance": "余额不足",
       "service_limit": "已达用量上限",
       "service_unavailable": "暂时不可用",
-      "service_rate_limited": "受到限流，已尝试下一个来源",
+      "service_rate_limited": "限流",
       "service_refused": "拒绝了这次搜索",
       "service_unreadable": "返回了无法读取的结果"
     },

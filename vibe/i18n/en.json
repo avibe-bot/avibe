@@ -1836,6 +1836,8 @@
     "mainSessionProtected": "The desktop mini's main session is managed by Avibe and cannot be archived or edited."
   },
   "hostedTools": {
+    "keylessExa": "Exa (free)",
+    "rateLimitSwitch": "Rate-limited: {sources}; switched to {provider}. Retry after the cooldown, or use Retry now in Models › Tools.",
     "errorCode": {
       "provider_no_reason": "the provider gave no reason",
       "provider_no_image": "the provider returned no image",
@@ -1877,6 +1879,7 @@
     },
     "quoted": "“{subject}”",
     "mode": {
+      "service": "via {provider}",
       "native": "native ({provider})",
       "proxy": "via {provider} proxy",
       "proxyModel": "via {provider} proxy ({model})",
@@ -1892,6 +1895,7 @@
       "images": "{count} images"
     },
     "cost": {
+      "free": "Free",
       "included": "included in subscription",
       "list": "≈ ${usd}",
       "reported": "${usd}",
@@ -1899,6 +1903,7 @@
       "atLeast": "at least {cost}"
     },
     "repair": {
+      "retrySearch": "was rate-limited; retry later or use Retry now in Models › Tools",
       "disabled": "needs web search enabled in Models › Tools",
       "key": "needs a replacement key",
       "reauthorize": "needs a new sign-in",
@@ -1918,7 +1923,7 @@
       "service_balance": "is out of balance",
       "service_limit": "reached its usage limit",
       "service_unavailable": "was unavailable",
-      "service_rate_limited": "was rate-limited; the next source was tried",
+      "service_rate_limited": "was rate-limited",
       "service_refused": "refused this query",
       "service_unreadable": "returned an unreadable response"
     },

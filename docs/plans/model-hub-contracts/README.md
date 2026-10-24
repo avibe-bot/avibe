@@ -1,13 +1,15 @@
 # Model Hub contracts
 
-Status: **contract_version 21**, 2026-10-24: keyless Exa readers (KEX-1).
-`gh-v3.2.3rc3` through `rc6` carry v20, so this dormant reader event opens v21.
-The versioned mirrors advance together; persisted TurnProvenance retains v5–v20 and adds v21.
-KEX-1 adds only optional built-in catalog/read metadata, the synthetic `src_exakeyless`
-Source identity (`exa-mcp` / `exa/mcp`), keyless cooldown retry classification, and
-compatibility-safe readers. `KEYLESS_EXA_ACTIVE = false`; no producer or live Exa call
-ships in this event. A later activation may populate the shape, and an older release
-must ignore the additive fields while retaining ordinary service settings and orders.
+Status: **contract_version 21**, 2026-10-24: keyless Exa activation (KEX-3).
+`gh-v3.2.3rc3` through `rc7` carry v20, so the unreleased v21 event now includes
+its coordinated readers, producer, and default-on activation. The versioned
+mirrors advance together; persisted TurnProvenance retains v5–v20 and adds v21.
+KEX-1 and KEX-2 supplied the optional built-in catalog/read metadata, synthetic
+`src_exakeyless` Source identity (`exa-mcp` / `exa/mcp`), keyless MCP producer,
+cooldown classification, and compatibility-safe readers. KEX-3 sets
+`KEYLESS_EXA_ACTIVE = true` for the reader and producer together and ships the
+public disclosure; no live Exa call is used in tests or CI. An older release must
+ignore the additive fields while retaining ordinary service settings and orders.
 The localized hosted-activity vocabulary adds `service_rate_limited` as a fallback
 reason; it never creates a credential health blocker for the synthetic Source.
 

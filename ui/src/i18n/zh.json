@@ -2528,6 +2528,7 @@
         "orderNative": "模型不能自带搜索时，按这个顺序执行；失败后自动换下一个。",
         "orderAll": "所有模型都按这个顺序执行；失败后自动换下一个。",
         "orderAuto": "自动：搜索服务在前，模型代搜在后。",
+        "orderAutoKeyless": "自动：已添加的搜索服务 → 已启用的官方 DeepSeek → Exa（免费） → 模型代搜；可上下调整。",
         "orderCustom": "已手动调整顺序。",
         "kind": "搜索服务",
         "modelKind": "模型代搜",
@@ -2542,13 +2543,19 @@
         "price": "${{usd}} / 千次",
         "free": "免费",
         "freeTier": "免费；按 IP 限流",
+        "keylessReady": "免费 · 无需密钥",
+        "keylessResults_one": "{{count}} 个结果 · 按 IP 限流",
+        "keylessResults_other": "{{count}} 个结果 · 按 IP 限流",
+        "keylessCooldown": "暂时限流 · 稍后重试",
+        "keylessCooldownUntil": "冷却至 {{time}}",
+        "keylessEmpty": "Exa（免费）已内置，无需密钥，在模型代搜之前搜索。添加的搜索服务会排在它前面。标价：{{prices}}。套餐和实际账单可能不同。",
         "vendorPrice": "{{vendor}} ${{usd}} / 千次",
         "priceDate": "API 标价 · {{date}}",
         "priceNote": "价格为目录标注日期的 API 标价，免费额度、套餐与实际账单可能不同。",
         "custody": "搜索服务的密钥和其他供应商一样由网关保管，不会交给模型或 Agent。",
-        "keylessQueryDestination": "查询会从此 Avibe 运行时直接发送到 Exa（mcp.exa.ai）；Exa 可以看到该连接的 IP。",
+        "keylessQueryDestination": "查询会从此 Avibe 运行时直接发送到 Exa（mcp.exa.ai）；Exa 可看到该连接的 IP。",
         "keylessEndpoint": "mcp.exa.ai",
-        "keylessCustody": "Exa（免费）无需密钥，也不会把密钥交给模型或 Agent。",
+        "keylessCustody": "已添加服务的密钥由网关保管；Exa（免费）无需密钥，也不会把密钥交给模型或 Agent。",
         "queryDestination": "搜索词会发送给执行搜索的服务。",
         "queryVendor": "搜索词会发送给 {{vendor}}。",
         "placement": "新增搜索服务会排在模型代搜之前，已保存的顺序也一样；可在 工具 › 网页搜索 中调整顺序。",
@@ -5089,6 +5096,8 @@
     },
     "agentActivity": {
       "hosted": {
+        "keylessExa": "Exa（免费）",
+        "rateLimitSwitch": "{{sources}}限流，已改用 {{provider}}。冷却结束后会自动重试，也可在 模型 › 工具 中立即重试。",
         "errorCode": {
           "provider_no_reason": "供应商未说明原因。",
           "provider_no_image": "供应商没有返回图片。",
@@ -5132,6 +5141,7 @@
           "proxyModel": "由 {{provider}} 代理 · {{model}}"
         },
         "repair": {
+          "retrySearch": "暂时限流，可稍后重试或在 模型 › 工具 中立即重试",
           "disabled": "需要在 模型 › 工具 中启用网页搜索",
           "key": "需要更换密钥",
           "reauthorize": "需要重新授权登录",
@@ -5151,7 +5161,7 @@
           "service_balance": "余额不足",
           "service_limit": "已达用量上限",
           "service_unavailable": "暂时不可用",
-          "service_rate_limited": "受到限流，已尝试下一个来源",
+          "service_rate_limited": "限流",
           "service_refused": "拒绝了这次搜索",
           "service_unreadable": "返回了无法读取的结果"
         },
@@ -5171,6 +5181,7 @@
           "pending": "已中断"
         },
         "cost": {
+          "free": "免费",
           "included": "订阅内含",
           "list": "≈ ${{usd}}",
           "reported": "${{usd}}",
