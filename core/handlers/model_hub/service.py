@@ -1605,6 +1605,7 @@ class ModelHubService:
         self._search_trial_identities: dict[str, tuple] = {}
         self._search_reenable_checks: dict[str, asyncio.Task] = {}
         self._service_cooldowns = ServiceCooldowns()
+        self._keyless_exa_attempt_lock = asyncio.Lock()
         self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
         self._latest_source_attempt_generation: dict[str, int] = {}
         self._source_attempt_identities: dict[str, tuple | None] = {}

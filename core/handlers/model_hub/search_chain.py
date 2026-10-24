@@ -217,6 +217,12 @@ class SearchChain:
         return Failure(self.say("modelHub.hostedTools.noSearchSource"), None)
 
     async def service_attempt(self, slot, source, catalog):
+        if is_keyless_exa_source(source):
+            async with self.owner._keyless_exa_attempt_lock:
+                return await self._service_attempt_locked(slot, source, catalog)
+        return await self._service_attempt_locked(slot, source, catalog)
+
+    async def _service_attempt_locked(self, slot, source, catalog):
         from .service import _ExecutorAttempt
 
         owner = self.owner

@@ -375,6 +375,46 @@ async def test_keyless_rate_limit_settles_service_cooldown_without_persisted_sou
 
 
 @pytest.mark.asyncio
+async def test_keyless_overlapping_searches_settle_rate_limit_before_next_admission(tmp_path, monkeypatch):
+    """KEX-2: a queued keyless turn cannot invalidate the active cooldown generation."""
+    service = owner(
+        tmp_path,
+        (),
+        web={
+            "enabled": True,
+            "executor_order": [KEYLESS_EXA_SOURCE_ID],
+            "executor_order_kinds": {KEYLESS_EXA_SOURCE_ID: "service"},
+            "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
+        },
+    )
+    monkeypatch.setattr(hosted_tools, "KEYLESS_EXA_ACTIVE", True)
+    monkeypatch.setattr(search_chain, "KEYLESS_EXA_ACTIVE", True)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def search(source_id, vendor, service_id, credential_ref, request, *, on_sent):
+        calls.append((source_id, service_id))
+        await on_sent()
+        if len(calls) == 1:
+            entered.set()
+            await release.wait()
+            return wire(429, {"error": {"message": "slow down"}}, headers={"Retry-After": "60"})
+        raise AssertionError("queued keyless search reached the adapter")
+
+    monkeypatch.setattr(service.adapter, "search", search, raising=False)
+    active = asyncio.create_task(run(service))
+    await entered.wait()
+    queued = asyncio.create_task(run(service))
+    await asyncio.sleep(0)
+    release.set()
+    first, second = await asyncio.gather(active, queued)
+    assert calls == [(KEYLESS_EXA_SOURCE_ID, KEYLESS_EXA_SERVICE_ID)]
+    assert first["record"]["attempts"][0]["error_code"] == "service_rate_limited"
+    assert second["record"]["attempts"][0]["skipped"] == "cooling"
+
+
+@pytest.mark.asyncio
 async def test_keyless_retry_branch_accepts_the_synthetic_source_while_flag_is_off(tmp_path):
     """KEX-1: a downgraded reader can clear a built-in cooldown without a Source row or network call."""
     service = owner(tmp_path, ("exa",))
