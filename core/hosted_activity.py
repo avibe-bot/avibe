@@ -40,6 +40,7 @@ from core.agent_core.messages import (
     ProxyExecution,
     ServiceExecutorOrigin,
     ToolCallBlock,
+    WebFetchRecord,
 )
 from core.citations import safe_url
 from core.message_output import plain_untrusted_text
@@ -74,6 +75,16 @@ _FAILURE_REASONS = (
     "service_rate_limited",
     "service_refused",
     "service_unreadable",
+    "service_busy",
+    "fetch_target_unreadable",
+    "fetch_url_blocked",
+    "fetch_dns_unverified",
+    "fetch_challenge",
+    "fetch_js_shell",
+    "fetch_timeout",
+    "fetch_unsupported_content",
+    "fetch_refused",
+    "fetch_unavailable",
 )
 # Each existing Source health detail's repair; any other detail (the generic error) points to the Source.
 _REPAIRS = {
@@ -169,7 +180,8 @@ class HostedActivity:
     # Every candidate a search chain reached (§4.3), as shown now; None for the released shape, which has none.
     attempts: Optional[tuple[HostedAttemptView, ...]] = None
     # Whether a search service or a model executor ran it; None when the record does not say (released records).
-    executor_kind: Optional[Literal["service", "model"]] = None
+    executor_kind: Optional[Literal["service", "model", "local"]] = None
+    fetch: Optional[WebFetchRecord] = None
     switch: Optional[HostedSwitch] = None
 
     @property
@@ -212,6 +224,9 @@ class HostedActivity:
             "executor_kind": self.executor_kind,
         }
         payload.update({key: value for key, value in optional.items() if value is not None})
+        if self.fetch is not None:
+            from core.agent_core.web_fetch import fetch_record_to_dict
+            payload["fetch"] = fetch_record_to_dict(self.fetch)
         if self.extra_queries:
             payload["extra_queries"] = list(self.extra_queries)
         if self.attempts is not None:
@@ -369,7 +384,7 @@ def _repair(detail: str, current: Mapping[str, Any]) -> str:
     return _REPAIRS.get(detail, "repair.error")
 
 
-def _view(attempt: HostedAttempt, source_names: SourceNames, source_state: Optional[SourceState]) -> HostedAttemptView:
+def _view(attempt: HostedAttempt, source_names: SourceNames, source_state: Optional[SourceState], tool: str) -> HostedAttemptView:
     """One entry as shown now. Current state governs every repair, never the record: a Source repaired, re-enabled
     or removed since shows none, and without a Model Hub read nothing is offered at all. Only a failed entry can be
     superseded: explicitly, by a removal, or by a current health other than the one its failure set (§4.3)."""
@@ -402,6 +417,10 @@ def _view(attempt: HostedAttempt, source_names: SourceNames, source_state: Optio
             and current is not None and current.get("enabled") is not False
             and (attempt.error_code == "service_rate_limited" or attempt.skipped == "cooling")):
         remedy = "repair.retrySearch"
+    if tool == "web_fetch":
+        reason = {"skip.disabled": "skip.fetch_disabled", "reason.service_refused": "reason.fetch_refused"}.get(reason, reason)
+        if remedy == "repair.disabled":
+            remedy = "repair.fetch_disabled"
     return HostedAttemptView(
         **{field.name: getattr(attempt, field.name) for field in fields(HostedAttempt)}
         | {"label": source_names(attempt.source_id) or attempt.label, "superseded": superseded or None},
@@ -479,6 +498,13 @@ def proxy_activity(
         (value for name in ("query", "prompt") if isinstance(value := arguments.get(name), str) and value),
         None,
     )
+    fetch = result.record if isinstance(result.record, WebFetchRecord) else None
+    if fetch is not None:
+        from urllib.parse import urlsplit
+        try:
+            subject = urlsplit(fetch.requested_url).hostname or fetch.requested_url
+        except ValueError:
+            subject = fetch.requested_url
     size = arguments.get("size") if isinstance(arguments.get("size"), str) else None
     execution = result.execution
     attempts = None
@@ -487,7 +513,7 @@ def proxy_activity(
     if result.record.attempts is None:
         cost, at_least = _chain_cost(execution)
     else:
-        attempts = tuple(_view(attempt, source_names, source_state) for attempt in result.record.attempts)
+        attempts = tuple(_view(attempt, source_names, source_state, call.name) for attempt in result.record.attempts)
         index = _last_tried(attempts)
         last = attempts[index] if index is not None else None
         if last is None or execution is None or execution.executor_source_id != last.source_id:
@@ -496,7 +522,9 @@ def proxy_activity(
         switch = _switch(result.record.status, attempts, index)
     origin = executor.executor_origin if executor is not None else None
     service = isinstance(origin, ServiceExecutorOrigin)
-    kind = last.kind if last is not None else ("service" if service else None)
+    kind = last.kind if last is not None else (
+        "local" if service and origin.api == "local_fetch" else "service" if service else None
+    )
     # What the executor reports it did (an image's rendered prompt and resolved size and quality), read as a native
     # call's block action is.
     ran = result.action if result.action is not None and result.action.type == "generate" else None
@@ -527,8 +555,8 @@ def proxy_activity(
         source_id=source_id,
         source_name=source_name,
         model=model,
-        sources=tuple(result.record.sources),
-        images=tuple(result.record.images or ()),
+        sources=() if fetch is not None else tuple(result.record.sources),
+        images=() if fetch is not None else tuple(result.record.images or ()),
         size=(ran.size if ran is not None and ran.size else size),
         quality=ran.quality if ran is not None else None,
         revised_prompt=ran.prompt if ran is not None else None,
@@ -542,6 +570,7 @@ def proxy_activity(
         cost_at_least=at_least,
         attempts=attempts,
         executor_kind=kind,
+        fetch=fetch,
         switch=switch,
     )
 
@@ -631,8 +660,8 @@ def _ran(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> l
         mode = _switch_text(activity, lang, escape)
     elif not vendor:
         mode = None
-    elif activity.executor_kind == "service":
-        # Keep the released service labels; the built-in row has no user name.
+    elif activity.executor_kind in {"service", "local"}:
+        # Keep the released service labels; the built-in Exa row has no user name.
         mode = (i18n_t("hostedTools.mode.service", lang, provider=vendor)
                 if activity.source_id == KEYLESS_EXA_SOURCE_ID else vendor)
     elif activity.mode == "proxy" and activity.model:
@@ -643,6 +672,10 @@ def _ran(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> l
 
 
 def _count(activity: HostedActivity, lang: str) -> Optional[str]:
+    if activity.fetch is not None:
+        count = len(activity.fetch.content)
+        size = i18n_t("hostedTools.fetch.characters", lang, count=count)
+        return f"{size} · {i18n_t('hostedTools.fetch.truncated', lang)}" if activity.fetch.truncated else size
     if activity.tool == "image_generate":
         count, unit = len(activity.images), "image"
     elif activity.tool == "x_search":
@@ -685,7 +718,8 @@ def _error_text(activity: HostedActivity, lang: str) -> str:
     """
 
     if activity.error_code in HOSTED_ERROR_CODES:
-        return i18n_t(f"hostedTools.errorCode.{activity.error_code}", lang)
+        namespace = "fetchErrorCode" if activity.tool == "web_fetch" and activity.error_code.startswith("service_") else "errorCode"
+        return i18n_t(f"hostedTools.{namespace}.{activity.error_code}", lang)
     return activity.error or ""
 
 
@@ -734,7 +768,7 @@ def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], 
     query such as ``*domain*`` reads as written rather than as markup.
     """
 
-    emoji = "🖼" if activity.tool == "image_generate" else "🔎"
+    emoji = "🖼" if activity.tool == "image_generate" else "🌐" if activity.tool == "web_fetch" else "🔎"
     parts: list[Optional[str]] = [f"{emoji} {i18n_t(f'hostedTools.tool.{activity.tool}', lang)}"]
     if activity.subject:
         parts[0] += " " + i18n_t("hostedTools.quoted", lang, subject=_untrusted(_clip(activity.subject), escape))

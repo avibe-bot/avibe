@@ -3044,7 +3044,9 @@ class ModelHubAgentSupplyConfig:
 # Model Hub's hosted-tool catalog (vibey-hosted-tools.md §2): two search tools a hop may run natively or
 # through the executor, and the direct image tool.
 MODEL_HUB_SEARCH_TOOLS: tuple[str, ...] = ("web_search", "x_search")
-MODEL_HUB_HOSTED_TOOLS: tuple[str, ...] = (*MODEL_HUB_SEARCH_TOOLS, "image_generate")
+MODEL_HUB_HOSTED_TOOLS: tuple[str, ...] = (*MODEL_HUB_SEARCH_TOOLS, "image_generate", "web_fetch")
+# Readers precede every producer release; activation is coordinated with public disclosure.
+WEB_FETCH_ACTIVE = False
 
 
 def _drop_vibey_client_presets(agent: "ModelHubAgentSupplyConfig") -> None:
@@ -3156,17 +3158,27 @@ def is_keyless_exa_source(source: "ModelHubSourceConfig") -> bool:
 def model_hub_keyless_exa_source() -> "ModelHubSourceConfig":
     """The in-memory Source shape used by readers; it is never persisted."""
 
+    return model_hub_builtin_source(KEYLESS_EXA_SOURCE_ID)
+
+
+def model_hub_builtin_source(source_id: str) -> "ModelHubSourceConfig | None":
+    """Credential-free catalog identity, never a persisted Source or model supplier."""
+    from vibe.model_hub_runtime.fetch_catalog import builtin_tool_identity
+
+    entry = builtin_tool_identity(source_id)
+    if entry is None:
+        return None
     return ModelHubSourceConfig(
-        id=KEYLESS_EXA_SOURCE_ID,
-        kind="api_key",
-        vendor=KEYLESS_EXA_VENDOR_ID,
-        display_name=KEYLESS_EXA_DISPLAY_NAME,
-        protocol="search",
-        supply_channel="hub",
-        billing="metered",
-        state=ModelHubSourceStateConfig(status="active"),
-        models=[],
+        id=entry["source_id"], kind="api_key", vendor=entry["vendor"], display_name=entry["label"],
+        protocol="search", supply_channel="hub", billing="metered",
+        state=ModelHubSourceStateConfig(status="active"), models=[],
     )
+
+
+def model_hub_builtin_sources() -> list["ModelHubSourceConfig"]:
+    from vibe.model_hub_runtime.fetch_catalog import builtin_tool_identities
+
+    return [model_hub_builtin_source(entry["source_id"]) for entry in builtin_tool_identities()]
 
 
 def is_keyless_exa_source_id(value: object) -> bool:
@@ -3252,18 +3264,55 @@ def _search_service_settings_from_payload(
     return settings
 
 
+@dataclass(frozen=True)
+class ModelHubFetchServiceSettings:
+    """Fetch-only partial consent; search settings never authorize a page read."""
+
+    enabled: Optional[bool] = None
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "ModelHubFetchServiceSettings":
+        if not isinstance(payload, dict):
+            raise ValueError("Config web_fetch services entries must be objects")
+        if set(payload) - {"enabled"}:
+            logger.warning("Config web_fetch services ignores unknown fields")
+        if "enabled" in payload and not isinstance(payload["enabled"], bool):
+            raise ValueError("Config web_fetch service enabled must be a boolean")
+        return cls(enabled=payload.get("enabled"))
+
+    def effective(self, service: Mapping[str, Any]) -> dict[str, bool]:
+        return {"enabled": self.enabled if self.enabled is not None else bool(service.get("auto_enroll"))}
+
+    def to_payload(self) -> dict[str, bool]:
+        return {"enabled": self.enabled} if self.enabled is not None else {}
+
+
+def _fetch_service_settings_from_payload(payload: object, sources: Optional[list[ModelHubSourceConfig]]) -> dict:
+    if not isinstance(payload, dict) or any(not is_model_hub_source_id(key) for key in payload):
+        raise ValueError("Config web_fetch services must map Source ids to settings")
+    live = {source.id for source in sources} if sources is not None else None
+    return {
+        sid: ModelHubFetchServiceSettings.from_payload(raw) for sid, raw in payload.items()
+        if live is None or sid in live or model_hub_builtin_source(sid) is not None
+    }
+
+
 def _executor_order_kinds_from_payload(
-    payload: object, order: Optional[tuple[str, ...]], sources: Optional[list[ModelHubSourceConfig]]
+    payload: object, order: Optional[tuple[str, ...]], sources: Optional[list[ModelHubSourceConfig]],
+    *, tool: str = "web_search",
 ) -> Optional[dict[str, str]]:
     # This derived snapshot affects placement, not consent. Damage follows the released missing-map rule;
     # discarding the whole tool entry would erase service opt-outs on the next unrelated config write.
     if isinstance(payload, dict):
         live = {source.id for source in sources} if sources is not None else None
         named = {key: value for key, value in payload.items()
-                 if key in (order or ()) and (live is None or key in live or is_keyless_exa_source_id(key))}
-        if all(isinstance(value, str) and value in {"service", "model"} for value in named.values()):
+                 if key in (order or ()) and (live is None or key in live or (
+                     model_hub_builtin_source(key) is not None if tool == "web_fetch" else is_keyless_exa_source_id(key)
+                 ))}
+        allowed = {"service", "local"} if tool == "web_fetch" else {"service", "model"}
+        if all(isinstance(value, str) and value in allowed for value in named.values()):
             return named
-    logger.warning("Config 'model_hub.hosted_tools.web_search.executor_order_kinds': ignoring damaged role map")
+    logger.warning("Config 'model_hub.hosted_tools.%s.executor_order_kinds': ignoring damaged role map", tool)
     return None
 
 
@@ -3282,7 +3331,7 @@ class ModelHubHostedToolConfig:
     service_order: Optional[tuple[str, ...]] = None
     default_image: Optional[ModelHubImageModelChoice] = None
     prefer_native: bool = True
-    services: Mapping[str, ModelHubSearchServiceSettings] = field(default_factory=dict)
+    services: Mapping[str, ModelHubSearchServiceSettings | ModelHubFetchServiceSettings] = field(default_factory=dict)
     executor_order_kinds: Optional[Mapping[str, str]] = None
 
     @classmethod
@@ -3293,12 +3342,15 @@ class ModelHubHostedToolConfig:
 
         if not isinstance(payload, dict):
             raise ValueError(f"Config 'model_hub.hosted_tools.{tool}' must be an object")
-        known = {"enabled"} | (
-            ({"executor_order", "service_order", "prefer_native", "services", "executor_order_kinds"}
-             if tool == "web_search" else {"executor_order"})
-            if tool in MODEL_HUB_SEARCH_TOOLS
-            else {"default_model"}
-        )
+        known = {"enabled"}
+        if tool == "web_fetch":
+            known |= {"executor_order", "services", "executor_order_kinds"}
+        elif tool == "web_search":
+            known |= {"executor_order", "service_order", "prefer_native", "services", "executor_order_kinds"}
+        elif tool in MODEL_HUB_SEARCH_TOOLS:
+            known.add("executor_order")
+        else:
+            known.add("default_model")
         unknown = set(payload) - known
         if unknown:
             logger.warning("Config 'model_hub.hosted_tools.%s' ignores unknown fields %s", tool, sorted(unknown))
@@ -3320,12 +3372,14 @@ class ModelHubHostedToolConfig:
             service_order=model_hub_service_order(payload["service_order"], tool=tool) if has_service_order else None,
             prefer_native=prefer_native,
             services=(
+                _fetch_service_settings_from_payload(payload["services"], sources)
+                if tool == "web_fetch" and "services" in payload else
                 _search_service_settings_from_payload(payload["services"], sources)
                 if tool == "web_search" and "services" in payload else {}
             ),
             executor_order_kinds=(
-                _executor_order_kinds_from_payload(payload["executor_order_kinds"], order, sources)
-                if tool == "web_search" and "executor_order_kinds" in payload else None
+                _executor_order_kinds_from_payload(payload["executor_order_kinds"], order, sources, tool=tool)
+                if tool in {"web_search", "web_fetch"} and "executor_order_kinds" in payload else None
             ),
             default_image=(
                 ModelHubImageModelChoice.from_payload(payload["default_model"], tool=tool) if has_default else None

@@ -120,6 +120,15 @@ const openAdvanced = async (user: ReturnType<typeof userEvent.setup>, name: stri
 afterEach(() => cleanup());
 
 describe('ToolsTab settings', () => {
+  it('WF-1: does not offer an active fetch card, even while reading future status', () => {
+    renderTab({ tools: [search('web_search'), {
+      name: 'web_fetch', enabled: true, status: run(), executor_order: null, effective_order: ['src_localfetch'],
+      executor_candidates: [], services: {}, service_vendors: [],
+    }] });
+    expect(screen.queryByText('Web fetch')).toBeNull();
+    expect(screen.queryByText('src_localfetch')).toBeNull();
+    screen.getByText('Web search');
+  });
   it('MH-HOSTED-UI-018: shows every tool on by default under its capability, and never locks a switch', () => {
     renderTab({ tools: [search('web_search'), search('x_search'), image()] });
 

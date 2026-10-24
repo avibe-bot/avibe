@@ -136,7 +136,13 @@ readers skip residual unknown ids without a write.
 
 ### 2.3 Read and controls
 
-`GET /api/models/hosted-tools` adds `web_fetch`: saved `services` and
+`GET /api/models/hosted-tools` adds `web_fetch` **only after activation**. WF-1
+sets `WEB_FETCH_ACTIVE = False`: GET has no fetch entry, candidates, declaration
+or active settings UI. V2 and PUT still preserve saved fetch choices, while
+historical records, usage and activity are readable regardless of the flag.
+This dormant-read boundary was approved on 2026-10-25.
+
+Once active, the entry contains saved `services` and
 `executor_order`, resolved `effective_order`, `executor_candidates`, status and
 capability-bearing `service_vendors`. The candidate uses existing service fields:
 `source_id`, `model_id` (service id), `kind`, `billing`, `relay`, dated `price`,
@@ -339,7 +345,9 @@ our budget. Reserve marker space in either case. Raw-size overflow is an
 unreadable attempt, not silently successful partial HTML/PDF.
 
 Add `WebFetchRecord` as a tool-discriminated variant of `HostedResult.record`;
-search `HostedRecord` stays unchanged. Fields:
+search `HostedRecord` stays unchanged. The discriminator is the **outer
+`ToolResultMessage.tool_name: "web_fetch"`**, not a duplicate `tool` field in the
+record (approved 2026-10-25). Fields:
 
 | Field | Rule |
 | --- | --- |
@@ -349,6 +357,22 @@ search `HostedRecord` stays unchanged. Fields:
 | `content`, `size_bytes`, `source_size_bytes` | capped Markdown/text; retained UTF-8 byte count; source bytes nullable, not confused with API JSON size |
 | `truncated`, `truncation_reason`, `retrieved_at` | immutable captured facts, UTC time; upstream fetch/cache age is separate and may be unknown |
 | `attempts`, `budget_method`, local diagnostics | existing attempt fields including label, kind, skips, error code and cost; no raw headers/cookies |
+
+WF-1 fixes `budget_method` to `utf8_bytes_div4_v1` and `truncation_reason` to
+`budget`, `provider_limit` or null; `truncated` is true exactly when the reason
+is non-null. Optional local diagnostics are `transport_degraded` (boolean),
+`transport_degraded_reason` (at most 400 characters, only with degradation), and
+`charset_fallback` (boolean). Nullable facts in the table are explicit nulls in
+the wire record. Unknown MIME values remain null; known MIME strings are bounded
+at 128 characters. `retrieved_at` is an ISO-8601 UTC instant.
+
+Ordinary content is exactly one text block containing `frame(record)`, not a
+preview. `core/agent_core/web_fetch.py` owns this deterministic frame and its
+markers. Readers reject inconsistent ordinary/structured content, byte counts,
+or a whole frame exceeding 48,000 UTF-8 `surrogatepass` bytes; they never cut or
+refetch history. The reader itself is not the WF-2 normalizer. Its Web historical
+card renders the bounded document as inert preformatted text (no active HTML,
+links or remote images), independent of activation.
 
 Reuse `HostedResult.execution`/`ProxyExecution` for selected Source and chain cost;
 add `fetch_api` service origin and `local_fetch` local origin without changing
@@ -612,6 +636,14 @@ rc4–rc7 also carry v20. #2924 requires the next event **v21**, not additions t
 shipped v20. Fetch can join a coordinated **unreleased** v21 event, or open the
 next version if it has shipped first. Recheck tags before each implementation
 push/close-out; this docs-only PR allocates no version or migration itself.
+
+WF-1 implementation joins the still-unreleased v21 reader event. Its downgrade
+fixtures pin `gh-v3.2.3rc4` (`b83d62de60f23e0894f321348400a1b9207f0011`):
+that released #2920 reader retains the complete ordinary quotation but drops
+unknown fetch metadata. Its config rewrite loses fetch choices; its ledger
+projection/key merge shared `exa/mcp` rows and discard `tool`, so re-upgraded
+totals read as search. Tests exercise frozen released boundary functions with
+real serialization and test-owned ledger writes; none calls a provider.
 
 Affected surfaces: V2 settings; Model Hub hosted-tool read/PUT/retry and C-6 turn
 snapshot/declaration; catalog capability and local candidate/attempt kind;

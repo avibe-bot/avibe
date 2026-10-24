@@ -13,7 +13,8 @@
       "items": {
         "oneOf": [
           { "$ref": "#/definitions/SearchTool" },
-          { "$ref": "#/definitions/ImageTool" }
+          { "$ref": "#/definitions/ImageTool" },
+          { "$ref": "#/definitions/FetchTool" }
         ]
       }
     }
@@ -80,7 +81,7 @@
       "required": ["unit", "usd_per_1k", "extra", "as_of", "url"],
       "additionalProperties": false,
       "properties": {
-        "unit": { "enum": ["call", "search", "post", "profile"] },
+        "unit": { "enum": ["call", "search", "post", "profile", "fetch"] },
         "usd_per_1k": { "type": "number", "minimum": 0 },
         "extra": {
           "type": "array",
@@ -89,7 +90,7 @@
             "required": ["unit", "usd_per_1k"],
             "additionalProperties": false,
             "properties": {
-              "unit": { "enum": ["call", "search", "post", "profile"] },
+              "unit": { "enum": ["call", "search", "post", "profile", "fetch"] },
               "usd_per_1k": { "type": "number", "minimum": 0 }
             }
           }
@@ -207,6 +208,51 @@
           "description": "Every eligible executor Source for the tool, in effective order, with its vendor's executor model; a Claude subscription never is one.",
           "items": { "oneOf": [{ "$ref": "#/definitions/ModelExecutor" }, { "$ref": "#/definitions/ServiceExecutor" }] }
         }
+      }
+    },
+    "FetchSettings": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"enabled": {"type": "boolean"}}
+    },
+    "FetchExecutor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "source_id", "model_id", "billing", "relay", "price", "settings", "state", "trial_pending", "cooldown_until"],
+      "properties": {
+        "kind": {"enum": ["local", "service"]},
+        "source_id": {"$ref": "#/definitions/SourceId"},
+        "model_id": {"type": "string", "minLength": 1},
+        "billing": {"const": "metered"}, "relay": {"const": false},
+        "price": {"$ref": "#/definitions/ListPrice"},
+        "settings": {"allOf": [{"$ref": "#/definitions/FetchSettings"}, {"required": ["enabled"]}]},
+        "state": {"$ref": "source.schema.json#/properties/state"},
+        "trial_pending": {"type": "boolean"},
+        "cooldown_until": {"oneOf": [{"type": "null"}, {"$ref": "#/definitions/Moment"}]}
+      }
+    },
+    "FetchVendor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "price", "capabilities", "content_types", "source_ids", "facts"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1},
+        "price": {"$ref": "#/definitions/ListPrice"},
+        "capabilities": {"const": ["web_fetch"]},
+        "content_types": {"type": "array", "items": {"enum": ["html", "pdf", "text", "markdown", "json"]}},
+        "source_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/definitions/SourceId"}},
+        "facts": {"type": "object", "additionalProperties": false, "required": ["built_in", "requires_setup", "auto_enroll"],
+                  "properties": {"built_in": {"type": "boolean"}, "requires_setup": {"type": "boolean"}, "auto_enroll": {"type": "boolean"}}}
+      }
+    },
+    "FetchTool": {
+      "type": "object", "additionalProperties": false,
+      "description": "Hidden while WEB_FETCH_ACTIVE is false. Saved choices remain readable and writable independently of activation.",
+      "required": ["name", "enabled", "status", "executor_order", "effective_order", "executor_candidates", "services", "service_vendors"],
+      "properties": {
+        "name": {"const": "web_fetch"}, "enabled": {"type": "boolean"}, "status": {"$ref": "#/definitions/Status"},
+        "executor_order": {"oneOf": [{"type": "null"}, {"type": "array", "uniqueItems": true, "items": {"$ref": "#/definitions/SourceId"}}]},
+        "effective_order": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/definitions/SourceId"}},
+        "executor_candidates": {"type": "array", "items": {"$ref": "#/definitions/FetchExecutor"}},
+        "services": {"type": "object", "propertyNames": {"$ref": "#/definitions/SourceId"}, "additionalProperties": {"$ref": "#/definitions/FetchSettings"}},
+        "service_vendors": {"type": "array", "items": {"$ref": "#/definitions/FetchVendor"}}
       }
     },
     "ImageTool": {

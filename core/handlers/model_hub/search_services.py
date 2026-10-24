@@ -17,10 +17,9 @@ from urllib.parse import urlsplit
 
 from config.v2_config import (
     KEYLESS_EXA_SERVICE_ID,
-    KEYLESS_EXA_SOURCE_ID,
     ModelHubConfig,
     ModelHubSourceConfig,
-    model_hub_keyless_exa_source,
+    model_hub_builtin_sources,
 )
 from core.agent_core.messages import HostedCost
 
@@ -343,7 +342,7 @@ class ServiceCooldowns:
 
     def reconcile(self, config: ModelHubConfig) -> None:
         live = {source.id: source_identity(source) for source in config.sources}
-        live[KEYLESS_EXA_SOURCE_ID] = source_identity(model_hub_keyless_exa_source())
+        live.update({source.id: source_identity(source) for source in model_hub_builtin_sources()})
         self._states = {key: state for key, state in self._states.items() if live.get(key[0]) == state.identity}
 
     def advance(self, source: ModelHubSourceConfig, service_id: str, *, clear: bool = False) -> int:

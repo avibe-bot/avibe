@@ -138,6 +138,11 @@
       "description": "One entry per hosted tool the turn declares (vibey-hosted-tools.md §3.4). A search tool's entry is the primary hop's facts: `native` is `assumed` when the tool runs on the hop (`runs_on`) and no current negative `call` evidence exists, else `unsupported`; `refused` is `true` exactly when that negative `call` evidence, not `runs_on`, is why; `declaration` and `include` (the overlay's wire declaration and Responses include values) are present exactly when `native` is `assumed`; `replay` is `assumed` when `native` is, the protocol replays natively and no current negative `replay` evidence exists. `image_generate` lists the image models the user's Sources make available, default first, and is absent when the tool is off or no model is available. The turn's first resolution freezes the tool set and the image models; later hops change only `native`, `replay` and `refused`. A request carrying native content is pinned with x-avibe-pin-source: source_id.",
       "additionalProperties": false,
       "properties": {
+        "web_fetch": {
+          "type": "object", "required": ["native", "replay"], "additionalProperties": false,
+          "description": "Function-only fetch; absent while WEB_FETCH_ACTIVE is false.",
+          "properties": {"native": {"const": "unsupported"}, "replay": {"const": "unsupported"}}
+        },
         "web_search": {
           "type": "object",
           "required": [

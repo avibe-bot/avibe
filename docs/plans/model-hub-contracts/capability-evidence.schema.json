@@ -27,10 +27,10 @@
           "additionalProperties": false,
           "properties": {
             "kind": { "const": "hosted_tool" },
-            "name": { "enum": ["web_search", "x_search", "image_generate"] },
+            "name": { "enum": ["web_search", "x_search", "image_generate", "web_fetch"] },
             "aspect": { "enum": ["call", "replay"] }
           },
-          "if": { "properties": { "name": { "const": "image_generate" } } },
+          "if": { "properties": { "name": { "enum": ["image_generate", "web_fetch"] } } },
           "then": { "properties": { "aspect": { "const": "call" } } }
         }
       ]

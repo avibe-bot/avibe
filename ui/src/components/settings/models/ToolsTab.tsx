@@ -41,6 +41,7 @@ type Clear = (tool: HostedToolName, body: HostedToolClear) => void;
 
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {
   web_search: Globe,
+  web_fetch: Globe,
   x_search: AtSign,
   image_generate: ImageIcon,
 };
@@ -650,7 +651,7 @@ export const ToolsTab: React.FC<{
         ? read.kind === 'loading' && <p className="model-hub-usage-pending text-muted">{t('common.loading')}</p>
         : <>
             {TOOL_GROUPS.map((group) => {
-              const tools = group.tools.flatMap((name) => status.tools.filter((tool) => tool.name === name));
+              const tools = group.tools.flatMap((name) => status.tools.filter((tool): tool is HostedToolStatus => tool.name !== 'web_fetch' && tool.name === name));
               if (tools.length === 0) return null;
               return (
                 <section key={group.key} className="model-hub-tool-group flex flex-col" aria-label={t(`settings.models.tools.group.${group.key}`) as string}>

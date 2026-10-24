@@ -457,7 +457,8 @@ def hosted_tools(
     def route() -> ModelEndpoint:
         return router.current.endpoint
 
-    tools: list[Tool] = [HostedTool(hosted_tool_spec(name), route, client) for name in frozen.hosted_tools]
+    # WF-1 reads future hop metadata, but supplies no fetch declaration or producer.
+    tools: list[Tool] = [HostedTool(hosted_tool_spec(name), route, client) for name in frozen.hosted_tools if name != "web_fetch"]
     if frozen.image_models is not None:
         spec = image_generate_spec(frozen.image_models)
         tools.append(ImageGenerateTool(spec, frozen.image_models, route, client, media, language))

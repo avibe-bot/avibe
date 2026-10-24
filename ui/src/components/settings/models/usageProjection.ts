@@ -650,6 +650,7 @@ export type ServiceUsageRow = {
   label: string;
   /** The current catalog's name for the service, else its ID; empty for the removed aggregate. */
   service: string;
+  tool?: 'web_fetch';
   removed: boolean;
   totals: ServiceTotals;
 };
@@ -671,19 +672,22 @@ export function serviceUsageRows(
   const groups = new Map<string, UsageServiceBucketRow[]>();
   for (const row of buckets.flatMap((bucket) => filterBucketRows(bucket, filter)).filter(isServiceRow)) {
     const source = sources.keyOf(row);
-    const key = source === REMOVED_SOURCES_KEY ? source : pairKey(row.source_id, row.service_id);
+    const baseKey = source === REMOVED_SOURCES_KEY ? source : pairKey(row.source_id, row.service_id);
+    const key = row.tool === 'web_fetch' ? `${baseKey}:web_fetch` : baseKey;
     groups.set(key, [...(groups.get(key) ?? []), row]);
   }
   return [...groups].map(([key, rows]) => {
     const [first] = rows;
-    const removed = key === REMOVED_SOURCES_KEY;
+    const removed = sources.keyOf(first) === REMOVED_SOURCES_KEY;
     const catalogLabel = report.services
-      .find((service) => service.source_id === first.source_id && service.service_id === first.service_id)
+      .find((service) => service.source_id === first.source_id && service.service_id === first.service_id
+        && (service.tool ?? 'web_search') === (first.tool ?? 'web_search'))
       ?.service_label?.trim();
     return {
       key,
       label: sources.get(sources.keyOf(first)).label,
       service: removed ? '' : catalogLabel || first.service_id,
+      ...(first.tool === 'web_fetch' ? { tool: 'web_fetch' as const } : {}),
       removed,
       totals: aggregateServiceRows(rows, unpriced),
     };
@@ -705,10 +709,11 @@ export type ServiceMonth = {
  * buckets in the month of `to_day`, the host's local today rather than the
  * browser's. A 60-day report covers every day of any month.
  */
-export function serviceMonthUsage(report: UsageReport, sourceId: string): ServiceMonth {
+export function serviceMonthUsage(report: UsageReport, sourceId: string, tool: 'web_search' | 'web_fetch' = 'web_search'): ServiceMonth {
   const month = report.to_day.slice(0, 7);
   const buckets = report.buckets.filter((bucket) => bucket.key.slice(0, 7) === month);
-  const rows = buckets.flatMap((bucket) => bucket.rows).filter(isServiceRow).filter((row) => row.source_id === sourceId);
+  const rows = buckets.flatMap((bucket) => bucket.rows).filter(isServiceRow)
+    .filter((row) => row.source_id === sourceId && (row.tool ?? 'web_search') === tool);
   return {
     month,
     totals: aggregateServiceRows(rows, unpricedServices(report)),

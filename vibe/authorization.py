@@ -553,7 +553,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("GET", r"^/api/models/hosted-tools$"),
         ("PUT", r"^/api/models/hosted-tools/[^/]+$"),
         ("POST", r"^/api/models/hosted-tools/[^/]+/clear$"),
-        ("POST", r"^/api/models/hosted-tools/web_search/services/[^/]+/retry$"),
+        ("POST", r"^/api/models/hosted-tools/(web_search|web_fetch)/services/[^/]+/retry$"),
         ("POST", r"^/api/models/oauth/(?:start|submit|cancel)$"),
         ("GET", r"^/api/models/oauth/status/[^/]+$"),
         ("POST", r"^/api/models/migration/(?:scan|apply)$"),

@@ -117,6 +117,15 @@
   ],
   "entries": [
     {
+      "id": "M13",
+      "vocabulary": "function-only fetch hop facts",
+      "rule": "equality",
+      "sets": [
+        {"schema": "hop-resolution.schema.json", "paths": ["/properties/hosted_tools/properties/web_fetch/properties/native", "/properties/hosted_tools/properties/web_fetch/properties/replay"]},
+        {"schema": "../agent-core-contracts/hop-resolution.schema.json", "paths": ["/properties/hosted_tools/properties/web_fetch/properties/native", "/properties/hosted_tools/properties/web_fetch/properties/replay"]}
+      ]
+    },
+    {
       "id": "M1",
       "vocabulary": "source state detail keys",
       "rule": "equality",
@@ -414,6 +423,12 @@
     }
   ],
   "decision_tables": [
+    {
+      "id": "D31",
+      "domain": "readable hosted result tools including dormant fetch",
+      "authority": {"kind": "schema_vocabulary", "schema": "capability-evidence.schema.json", "paths": ["/properties/feature/oneOf/1/properties/name"]},
+      "consumers": [{"kind": "typescript_string_union", "file": "ui/src/lib/hostedActivity.ts", "name": "HostedToolName"}]
+    },
     {
       "id": "D28",
       "domain": "recorded-error diagnostic selection",

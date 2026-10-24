@@ -821,7 +821,7 @@ def _normalize_service_row(row: dict) -> Optional[dict]:
     day = _text(row.get("day"))
     source_id = persisted_ledger_key(row.get("source_id"))
     service_id = persisted_ledger_key(row.get("service_id"))
-    if day is None or source_id is None or service_id is None:
+    if day is None or source_id is None or service_id is None or row.get("tool", "web_search") not in ("web_search", "web_fetch"):
         return None
     calendar_day = _calendar_day(day)
     if calendar_day is None:
@@ -834,6 +834,7 @@ def _normalize_service_row(row: dict) -> Optional[dict]:
         "day": calendar_day.isoformat(),
         "source_id": source_id,
         "service_id": service_id,
+        **({"tool": "web_fetch"} if row.get("tool") == "web_fetch" else {}),
         **counters,
         # A broken relation leaves a smaller true statement, so what it values is
         # a floor; so is a request whose billing is unknown.
@@ -1050,17 +1051,18 @@ def _bucket_rows(
 
     published: dict[tuple[str, str], dict] = {}
     costs: dict[tuple[str, str], Cost] = {}
-    services: dict[tuple[str, str], dict] = {}
-    service_costs: dict[tuple[str, str], ServiceCost] = {}
+    services: dict[tuple[str, str, str], dict] = {}
+    service_costs: dict[tuple[str, str, str], ServiceCost] = {}
     for row in rows:
         if _is_service(row):
-            key = (row["source_id"], row["service_id"])
+            key = (row["source_id"], row["service_id"], row.get("tool", "web_search"))
             target = services.setdefault(
                 key,
                 {
                     "kind": "service",
                     "source_id": row["source_id"],
                     "service_id": row["service_id"],
+                    **({"tool": row["tool"]} if "tool" in row else {}),
                     **_empty_totals(service=True),
                 },
             )
@@ -1156,16 +1158,17 @@ def _cache_write_increment(usage: Optional[ProtocolUsageReport]) -> dict[str, in
     }
 
 
-def _row_key(row: dict) -> tuple[str, str, str, int, bool]:
+def _row_key(row: dict) -> tuple[str, str, str, int, bool, str]:
     """A row is one day of one model on one Source, in one context tier.
 
-    Or of one search service on one Source. The last element keeps the two apart,
-    so a model whose ID spells a catalog service id is never folded into it.
+    Or of one hosted service/tool on one Source. The boolean keeps model and
+    service identities apart; the final tool keeps shared Exa search/fetch
+    attribution separate without changing its service/cooldown identity.
     """
 
     if _is_service(row):
-        return (row["day"], row["source_id"], row["service_id"], 0, True)
-    return (row["day"], row["source_id"], row["model_id"], row.get("context_tier", 0), False)
+        return (row["day"], row["source_id"], row["service_id"], 0, True, row.get("tool", "web_search"))
+    return (row["day"], row["source_id"], row["model_id"], row.get("context_tier", 0), False, "")
 
 
 def _empty_totals(*, service: bool = False) -> dict:
@@ -1947,7 +1950,7 @@ class BoundedUsageLedger:
 
         totals = _empty_totals()
         sources: dict[str, dict] = {}
-        services: dict[tuple[str, str], dict] = {}
+        services: dict[tuple[str, str, str], dict] = {}
         by_day: dict[str, dict] = {}
         for row in rows:
             if _is_service(row):
@@ -1961,10 +1964,11 @@ class BoundedUsageLedger:
                 day = by_day.setdefault(row["day"], {"day": row["day"], **_empty_totals()})
                 service_priced(day, service_cost)
                 service = services.setdefault(
-                    (row["source_id"], row["service_id"]),
+                    (row["source_id"], row["service_id"], row.get("tool", "web_search")),
                     {
                         "source_id": row["source_id"],
                         "service_id": row["service_id"],
+                        **({"tool": row["tool"]} if "tool" in row else {}),
                         "label": keyed_source_labels.get(row["source_id"]),
                         "service_label": entry.label if entry is not None else None,
                         **_empty_totals(service=True),
@@ -2223,7 +2227,8 @@ class BoundedUsageLedger:
                     projected = {
                         "day": start_local.date().isoformat(),
                         "source_id": row["source_id"],
-                        **({"service_id": row["service_id"]} if service else {"model_id": row["model_id"]}),
+                        **({"service_id": row["service_id"], **({"tool": row["tool"]} if "tool" in row else {})}
+                           if service else {"model_id": row["model_id"]}),
                         **({"context_tier": row["context_tier"]} if "context_tier" in row else {}),
                         **_empty_totals(service=service),
                         "last_metered_at": None,

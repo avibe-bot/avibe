@@ -1870,13 +1870,36 @@
       "service_refused": "the search service refused this query",
       "service_unreadable": "the search service returned an unreadable response",
       "search_query_too_long": "the search query is too long; shorten it and try again",
-      "search_sources_blocked": "all search sources are blocked or disabled"
+      "search_sources_blocked": "all search sources are blocked or disabled",
+      "service_busy": "the service is busy",
+      "fetch_target_unreadable": "the page could not be read",
+      "fetch_url_blocked": "the URL is blocked by the network safety policy",
+      "fetch_dns_unverified": "the destination address could not be verified",
+      "fetch_challenge": "the page requires a browser challenge",
+      "fetch_js_shell": "the page requires JavaScript",
+      "fetch_timeout": "the page read timed out",
+      "fetch_unsupported_content": "the document type is not supported",
+      "fetch_refused": "the page request was refused",
+      "fetch_unavailable": "the page is unavailable",
+      "fetch_sources_blocked": "all page-reading sources are blocked or disabled"
     },
     "tool": {
       "web_search": "Web search",
+      "web_fetch": "Web fetch",
       "x_search": "X search",
       "image_generate": "Image generation"
     },
+    "fetchErrorCode": {
+      "service_key_invalid": "the page-reading service key is invalid",
+      "service_balance": "the page-reading service account has no balance",
+      "service_limit": "the page-reading service limit has been reached",
+      "service_unavailable": "the page-reading service is unavailable",
+      "service_rate_limited": "the page-reading service is rate-limited",
+      "service_refused": "the page-reading service refused this URL",
+      "service_unreadable": "the page-reading service returned an unreadable response",
+      "service_busy": "the page-reading service is busy"
+    },
+    "fetch": {"characters": "{count} chars", "truncated": "truncated"},
     "quoted": "“{subject}”",
     "mode": {
       "service": "via {provider}",
@@ -1905,6 +1928,7 @@
     "repair": {
       "retrySearch": "was rate-limited; retry later or use Retry now in Models › Tools",
       "disabled": "needs web search enabled in Models › Tools",
+      "fetch_disabled": "needs page reading enabled",
       "key": "needs a replacement key",
       "reauthorize": "needs a new sign-in",
       "balance": "needs an account top-up",
@@ -1925,14 +1949,27 @@
       "service_unavailable": "was unavailable",
       "service_rate_limited": "was rate-limited",
       "service_refused": "refused this query",
-      "service_unreadable": "returned an unreadable response"
+      "service_unreadable": "returned an unreadable response",
+      "service_busy": "was busy",
+      "fetch_target_unreadable": "could not read the page",
+      "fetch_url_blocked": "blocked the URL for network safety",
+      "fetch_dns_unverified": "could not verify the destination address",
+      "fetch_challenge": "encountered a browser challenge",
+      "fetch_js_shell": "requires JavaScript",
+      "fetch_timeout": "timed out",
+      "fetch_unsupported_content": "does not support this document type",
+      "fetch_refused": "refused the request",
+      "fetch_unavailable": "was unavailable"
     },
     "skip": {
       "blocked": "was blocked",
       "disabled": "was not enabled for search",
+      "fetch_disabled": "was not enabled for page reading",
       "cooling": "was waiting to retry",
       "query_too_long": "can't take a query this long",
-      "unavailable": "was unavailable"
+      "unavailable": "was unavailable",
+      "unsupported_type": "does not support this document type",
+      "service_busy": "was busy"
     },
     "listSeparator": ", ",
     "itemSeparator": "; ",

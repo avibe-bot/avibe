@@ -27,6 +27,7 @@ from core.agent_core.messages import (
     HostedImage,
     HostedNative,
     HostedRecord,
+    WebFetchRecord,
     HostedSource,
     HostedToolBlock,
     ToolCallBlock,
@@ -312,7 +313,7 @@ def reported_cost(usage: Any) -> Optional[HostedCost]:
 
 def record_text(
     tool: str,
-    record: HostedRecord,
+    record: HostedRecord | WebFetchRecord,
     *,
     query: Optional[str],
     further_queries: Sequence[str] = (),
@@ -326,6 +327,10 @@ def record_text(
     folded actions, the sources it found (titles, links, excerpts and ages) and the posts its answer cites.
     """
 
+    if isinstance(record, WebFetchRecord):
+        from core.agent_core.web_fetch import frame_fetch_record
+        record.check_tool(tool)
+        return frame_fetch_record(record)
     if record.status in ("failed", "incomplete"):
         lines = [f"[{tool} failed: {record.error}]"]
         if query:

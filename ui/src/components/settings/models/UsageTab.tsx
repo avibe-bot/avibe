@@ -1400,7 +1400,7 @@ export const UsageTab: React.FC<{
                       <tr key={row.key} className={cn(row.removed && 'is-removed')}>
                         <th scope="row">
                           <span className="model-hub-usage-row-name">{row.label}</span>
-                          <span className="model-hub-usage-row-detail">{row.removed ? t('settings.models.usage.removedSourcesHint') : row.service}</span>
+                          <span className="model-hub-usage-row-detail">{row.removed ? t('settings.models.usage.removedSourcesHint') : row.service}{row.tool === 'web_fetch' && ` · ${t('settings.models.tools.tool.web_fetch.name')}`}</span>
                         </th>
                         <td>{count(row.totals.requests)}</td>
                         <td>{serviceBillable(row.totals)}</td>

@@ -33,16 +33,16 @@ _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 #: The tools a provider runs natively, each a ``HostedToolBlock`` in assistant content (``vibey-hosted-tools.md`` §4.2).
 HostedToolName = Literal["web_search", "x_search"]
 HOSTED_TOOLS: tuple[str, ...] = ("web_search", "x_search")
-#: The tools whose ``ToolResultMessage`` carries ``hosted``: a proxied search, and every ``image_generate`` call.
-HOSTED_RESULT_TOOLS: tuple[str, ...] = (*HOSTED_TOOLS, "image_generate")
+#: Tools whose function results carry hosted metadata, including dormant fetch history.
+HOSTED_RESULT_TOOLS: tuple[str, ...] = (*HOSTED_TOOLS, "image_generate", "web_fetch")
 EXECUTION_MODES: tuple[str, ...] = ("proxy", "direct")
 HostedStatus = Literal["completed", "failed", "incomplete", "pending"]
 HOSTED_STATUSES: tuple[str, ...] = ("completed", "failed", "incomplete", "pending")
-HostedAttemptKind = Literal["service", "model"]
+HostedAttemptKind = Literal["service", "model", "local"]
 HostedAttemptOutcome = Literal["completed", "failed", "skipped"]
-HOSTED_ATTEMPT_KINDS: tuple[str, ...] = ("service", "model")
+HOSTED_ATTEMPT_KINDS: tuple[str, ...] = ("service", "model", "local")
 HOSTED_ATTEMPT_OUTCOMES: tuple[str, ...] = ("completed", "failed", "skipped")
-HOSTED_SKIP_REASONS: tuple[str, ...] = ("blocked", "disabled", "cooling", "query_too_long", "unavailable")
+HOSTED_SKIP_REASONS: tuple[str, ...] = ("blocked", "disabled", "cooling", "query_too_long", "unavailable", "unsupported_type", "service_busy")
 HOSTED_ERROR_MAX_CHARS = 400
 #: The largest hosted count a summary holds: the largest integer every JSON reader holds exactly. A provider's count
 #: past it is no count, and no price or display has to survive one.
@@ -84,6 +84,17 @@ HOSTED_ERROR_CODES: tuple[str, ...] = (
     "service_unreadable",
     "search_query_too_long",
     "search_sources_blocked",
+    "service_busy",
+    "fetch_target_unreadable",
+    "fetch_url_blocked",
+    "fetch_dns_unverified",
+    "fetch_challenge",
+    "fetch_js_shell",
+    "fetch_timeout",
+    "fetch_unsupported_content",
+    "fetch_refused",
+    "fetch_unavailable",
+    "fetch_sources_blocked",
 )
 COST_BASES: tuple[str, ...] = ("reported", "list", "included")
 SOURCE_BILLINGS: tuple[str, ...] = ("monthly", "metered")
@@ -480,8 +491,90 @@ class HostedRecord:
             raise ValueError("hosted attempts must be a tuple of HostedAttempt")
 
     def check_tool(self, tool: str) -> None:
+        if tool == "web_fetch":
+            raise ValueError("web_fetch requires a WebFetchRecord")
         if (self.images is not None) != (tool == "image_generate"):
             raise ValueError("a hosted record lists images exactly for image_generate")
+
+
+@dataclass(frozen=True)
+class WebFetchRecord:
+    """Immutable bounded page facts, discriminated by the enclosing tool name.
+
+    The ordinary tool content is the same capped quotation, not a hidden page
+    archive. Search's released HostedRecord is intentionally unchanged.
+    """
+
+    status: Literal["completed", "failed"]
+    requested_url: str
+    content: str
+    size_bytes: int
+    retrieved_at: str
+    truncated: bool = False
+    truncation_reason: Optional[Literal["budget", "provider_limit"]] = None
+    budget_method: str = "utf8_bytes_div4_v1"
+    final_url: Optional[str] = None
+    canonical_url: Optional[str] = None
+    title: Optional[str] = None
+    content_type: Optional[str] = None
+    source_content_type: Optional[str] = None
+    source_size_bytes: Optional[int] = None
+    error: Optional[str] = None
+    error_code: Optional[str] = None
+    attempts: tuple[HostedAttempt, ...] = ()
+    transport_degraded: Optional[bool] = None
+    transport_degraded_reason: Optional[str] = None
+    charset_fallback: Optional[bool] = None
+
+    def __post_init__(self) -> None:
+        from datetime import datetime, timedelta
+        from .web_fetch import frame_fetch_record
+
+        if self.status not in ("completed", "failed"):
+            raise ValueError("fetch status must be completed or failed")
+        for name, bound in (("requested_url", 8192), ("final_url", 8192), ("canonical_url", 8192),
+                            ("title", 300), ("content_type", 128), ("source_content_type", 128),
+                            ("error", 1000), ("transport_degraded_reason", 400)):
+            value = getattr(self, name)
+            _require(value, str, f"fetch {name}", optional=name != "requested_url")
+            if value is not None and len(value) > bound:
+                raise ValueError(f"fetch {name} exceeds {bound} characters")
+        if (self.error is not None) != (self.status == "failed") or self.error == "":
+            raise ValueError("a fetch error is present exactly for failed records")
+        _require(self.error_code, str, "fetch error code", optional=True)
+        if self.error_code is not None and (self.error is None or not _ERROR_CODE_RE.fullmatch(self.error_code)):
+            raise ValueError("a fetch error code is snake_case and comes only with an error")
+        _require(self.content, str, "fetch content")
+        _require(self.size_bytes, int, "fetch size_bytes")
+        if self.size_bytes != len(self.content.encode("utf-8", "surrogatepass")):
+            raise ValueError("fetch size_bytes must equal retained UTF-8 bytes")
+        _require(self.source_size_bytes, int, "fetch source_size_bytes", optional=True)
+        if self.source_size_bytes is not None and not 0 <= self.source_size_bytes <= MAX_HOSTED_COUNT:
+            raise ValueError("fetch source_size_bytes is a nonnegative safe integer")
+        _require(self.truncated, bool, "fetch truncated")
+        if self.truncation_reason not in (None, "budget", "provider_limit") or self.truncated != (self.truncation_reason is not None):
+            raise ValueError("fetch truncation must carry its reason")
+        if self.budget_method != "utf8_bytes_div4_v1":
+            raise ValueError("unknown fetch budget method")
+        _require(self.retrieved_at, str, "fetch retrieved_at")
+        try:
+            instant = datetime.fromisoformat(self.retrieved_at.replace("Z", "+00:00"))
+            if instant.utcoffset() != timedelta(0):
+                raise ValueError
+        except ValueError:
+            raise ValueError("fetch retrieved_at must be UTC") from None
+        if not isinstance(self.attempts, tuple) or not all(isinstance(a, HostedAttempt) for a in self.attempts):
+            raise ValueError("fetch attempts must be a tuple of HostedAttempt")
+        for name in ("transport_degraded", "charset_fallback"):
+            _require(getattr(self, name), bool, f"fetch {name}", optional=True)
+        if self.transport_degraded_reason is not None and self.transport_degraded is not True:
+            raise ValueError("a transport degradation reason needs transport_degraded")
+        if len(frame_fetch_record(self).encode("utf-8", "surrogatepass")) > 48000:
+            raise ValueError("fetch frame exceeds the 48000-byte budget")
+
+    def check_tool(self, tool: str) -> None:
+        if tool != "web_fetch":
+            raise ValueError("WebFetchRecord belongs only to web_fetch")
 
 
 @dataclass(frozen=True)
@@ -646,7 +739,7 @@ class HostedResult:
     ``image_generate``, the model it ran on, the prompt the endpoint revised it to when it did, and the output's
     resolved size and quality when the endpoint reports them."""
 
-    record: HostedRecord
+    record: Union[HostedRecord, WebFetchRecord]
     execution: Optional[ProxyExecution] = None
     action: Optional[HostedAction] = None
     #: A search call that ran as its function only because the turn's own Source refused it natively; absent when it
@@ -654,7 +747,8 @@ class HostedResult:
     fallback_from: Optional[HostedFallback] = None
 
     def __post_init__(self) -> None:
-        _require(self.record, HostedRecord, "hosted record")
+        if not isinstance(self.record, (HostedRecord, WebFetchRecord)):
+            raise ValueError("hosted record must be HostedRecord or WebFetchRecord")
         _require(self.execution, ProxyExecution, "proxy execution", optional=True)
         _require(self.action, HostedAction, "hosted result action", optional=True)
         _require(self.fallback_from, HostedFallback, "hosted fallback", optional=True)
@@ -685,17 +779,17 @@ class Origin:
 
 @dataclass(frozen=True)
 class ServiceExecutorOrigin:
-    """A search service origin, distinct from the four model-wire protocols."""
+    """A hosted service/local origin, distinct from the four assistant-model wire protocols."""
 
     provider: str
-    api: Literal["search_api"]
+    api: Literal["search_api", "fetch_api", "local_fetch"]
     model: str
 
     def __post_init__(self) -> None:
         _require(self.provider, str, "service origin.provider")
         _require(self.api, str, "service origin.api")
-        if self.api != "search_api":
-            raise ValueError("service origin api must be search_api")
+        if self.api not in ("search_api", "fetch_api", "local_fetch"):
+            raise ValueError("service origin api must be search_api, fetch_api or local_fetch")
         _require(self.model, str, "service origin.model")
         if not self.provider or not self.model:
             raise ValueError("a service origin needs a provider and a service id")
@@ -793,6 +887,10 @@ class ToolResultMessage:
             if self.tool_name not in HOSTED_RESULT_TOOLS:
                 raise ValueError(f"{self.tool_name} is not a hosted tool")
             self.hosted.record.check_tool(self.tool_name)
+            if isinstance(self.hosted.record, WebFetchRecord):
+                from .web_fetch import frame_fetch_record
+                if self.content != (TextBlock(text=frame_fetch_record(self.hosted.record)),):
+                    raise ValueError("web_fetch ordinary content must equal the complete capped frame")
             if self.hosted.action is not None and not self.hosted.action.fits(self.tool_name):
                 raise ValueError(f"a {self.hosted.action.type} action does not belong to {self.tool_name}")
             if self.hosted.fallback_from is not None and self.tool_name not in HOSTED_TOOLS:
@@ -873,7 +971,10 @@ def _source_from_dict(data: Any) -> HostedSource:
     return HostedSource(**_read(data, "hosted source", {"url": str}, {"title": str, "snippet": str, "page_age": str}))
 
 
-def _record_to_dict(record: HostedRecord) -> dict[str, Any]:
+def _record_to_dict(record: Union[HostedRecord, WebFetchRecord]) -> dict[str, Any]:
+    if isinstance(record, WebFetchRecord):
+        from .web_fetch import fetch_record_to_dict
+        return fetch_record_to_dict(record)
     out: dict[str, Any] = {"status": record.status}
     _put(out, "error", record.error)
     _put(out, "error_code", record.error_code)
@@ -1164,7 +1265,7 @@ def executor_origin_to_dict(origin: Union[Origin, ServiceExecutorOrigin]) -> dic
 
 def executor_origin_from_dict(data: Any) -> Union[Origin, ServiceExecutorOrigin]:
     fields = _read(data, "executor origin", {"provider": str, "api": str, "model": str})
-    if fields["api"] == "search_api":
+    if fields["api"] in ("search_api", "fetch_api", "local_fetch"):
         return ServiceExecutorOrigin(**fields)
     return Origin(**fields)
 
@@ -1327,8 +1428,13 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
             fallback = None
             if "fallback_from" in h:
                 fallback = HostedFallback(_read(h["fallback_from"], "hosted fallback", {"source_id": str})["source_id"])
+            if f["tool_name"] == "web_fetch":
+                from .web_fetch import fetch_record_from_dict
+                record = fetch_record_from_dict(h["record"])
+            else:
+                record = _record_from_dict(h["record"])
             hosted_result = HostedResult(
-                record=_record_from_dict(h["record"]),
+                record=record,
                 execution=execution,
                 action=_action_from_dict(h["action"]) if "action" in h else None,
                 fallback_from=fallback,

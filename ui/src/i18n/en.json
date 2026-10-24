@@ -2401,6 +2401,7 @@
           "generate": "Generate"
         },
         "tool": {
+          "web_fetch": {"name": "Web fetch", "inline": "web fetch", "description": "Read a web page as a quoted document."},
           "web_search": {
             "name": "Web search",
             "inline": "web search",
@@ -2505,7 +2506,8 @@
             "call": "call",
             "search": "search",
             "post": "post",
-            "profile": "profile"
+            "profile": "profile",
+            "fetch": "fetch"
           },
           "listNote": "At API price",
           "listNoteExtras": "At API price · {{extras}}",
@@ -5098,6 +5100,23 @@
       "hosted": {
         "keylessExa": "Exa (free)",
         "rateLimitSwitch": "Rate-limited: {{sources}}; switched to {{provider}}. Retry after the cooldown, or use Retry now in Models › Tools.",
+        "fetchErrorCode": {
+          "service_key_invalid": "The page-reading service key is invalid.",
+          "service_balance": "The page-reading service account has no balance.",
+          "service_limit": "The page-reading service limit has been reached.",
+          "service_unavailable": "The page-reading service is unavailable.",
+          "service_rate_limited": "The page-reading service is rate-limited.",
+          "service_refused": "The page-reading service refused this URL.",
+          "service_unreadable": "The page-reading service returned an unreadable response.",
+          "service_busy": "The page-reading service is busy."
+        },
+        "fetch": {
+          "characters": "{{count}} chars", "truncated": "Truncated", "degraded": "Transport fallback",
+          "requested_url": "Requested URL", "final_url": "Final URL", "canonical_url": "Canonical URL",
+          "content_type": "Content type", "source_content_type": "Original content type",
+          "size_bytes": "Content bytes", "source_size_bytes": "Source bytes", "retrieved_at": "Retrieved at",
+          "truncation_reason": "Truncation reason"
+        },
         "errorCode": {
           "provider_no_reason": "The provider gave no reason.",
           "provider_no_image": "The provider returned no image.",
@@ -5130,7 +5149,18 @@
           "service_refused": "The search service refused this query.",
           "service_unreadable": "The search service returned an unreadable response.",
           "search_query_too_long": "The search query is too long; shorten it and try again.",
-          "search_sources_blocked": "All search sources are blocked or disabled."
+          "search_sources_blocked": "All search sources are blocked or disabled.",
+          "service_busy": "The service is busy.",
+          "fetch_target_unreadable": "The page could not be read.",
+          "fetch_url_blocked": "The URL is blocked by the network safety policy.",
+          "fetch_dns_unverified": "The destination address could not be verified.",
+          "fetch_challenge": "The page requires a browser challenge.",
+          "fetch_js_shell": "The page requires JavaScript.",
+          "fetch_timeout": "The page read timed out.",
+          "fetch_unsupported_content": "The document type is not supported.",
+          "fetch_refused": "The page request was refused.",
+          "fetch_unavailable": "The page is unavailable.",
+          "fetch_sources_blocked": "All page-reading sources are blocked or disabled."
         },
         "mode": {
           "native": "Native · {{provider}}",
@@ -5143,6 +5173,7 @@
         "repair": {
           "retrySearch": "was rate-limited; retry later or use Retry now in Models › Tools",
           "disabled": "needs web search enabled in Models › Tools",
+          "fetch_disabled": "needs page reading enabled",
           "key": "needs a replacement key",
           "reauthorize": "needs a new sign-in",
           "balance": "needs an account top-up",
@@ -5163,13 +5194,26 @@
           "service_unavailable": "was unavailable",
           "service_rate_limited": "was rate-limited",
           "service_refused": "refused this query",
-          "service_unreadable": "returned an unreadable response"
+          "service_unreadable": "returned an unreadable response",
+          "service_busy": "was busy",
+          "fetch_target_unreadable": "could not read the page",
+          "fetch_url_blocked": "blocked the URL for network safety",
+          "fetch_dns_unverified": "could not verify the destination address",
+          "fetch_challenge": "encountered a browser challenge",
+          "fetch_js_shell": "requires JavaScript",
+          "fetch_timeout": "timed out",
+          "fetch_unsupported_content": "does not support this document type",
+          "fetch_refused": "refused the request",
+          "fetch_unavailable": "was unavailable"
         },
         "skip": {
           "blocked": "was blocked",
           "disabled": "was not enabled for search",
+          "fetch_disabled": "was not enabled for page reading",
           "cooling": "was waiting to retry",
           "query_too_long": "can't take a query this long",
+          "unsupported_type": "does not support this document type",
+          "service_busy": "was busy",
           "unavailable": "was unavailable"
         },
         "listSeparator": ", ",
@@ -5178,6 +5222,8 @@
         "status": {
           "failed": "Failed",
           "incomplete": "Incomplete",
+          "completed": "Completed",
+          "skipped": "Skipped",
           "pending": "Cut off"
         },
         "cost": {

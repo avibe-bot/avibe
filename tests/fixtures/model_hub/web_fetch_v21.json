@@ -1,0 +1,16 @@
+{
+  "hosted_tools": {
+    "web_fetch": {
+      "enabled": true,
+      "executor_order": ["src_jinakeyless", "src_localfetch", "src_exakeyless"],
+      "executor_order_kinds": {"src_jinakeyless": "service", "src_localfetch": "local", "src_exakeyless": "service"},
+      "services": {"src_localfetch": {"enabled": false}, "src_exakeyless": {"enabled": false}, "src_jinakeyless": {"enabled": false}}
+    }
+  },
+  "usage": [
+    {"day": "2026-10-24", "source_id": "src_exakeyless", "service_id": "exa/mcp", "requests": 2,
+     "billable_requests": 0, "uncertain_requests": 0, "reported_requests": 0, "reported_usd": 0.0},
+    {"day": "2026-10-24", "source_id": "src_exakeyless", "service_id": "exa/mcp", "tool": "web_fetch", "requests": 3,
+     "billable_requests": 0, "uncertain_requests": 0, "reported_requests": 0, "reported_usd": 0.0}
+  ]
+}

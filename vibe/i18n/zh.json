@@ -1870,13 +1870,36 @@
       "service_refused": "搜索服务拒绝了这次搜索",
       "service_unreadable": "搜索服务返回了无法读取的结果",
       "search_query_too_long": "搜索词太长，请缩短后重试",
-      "search_sources_blocked": "所有搜索来源都被阻止或停用了"
+      "search_sources_blocked": "所有搜索来源都被阻止或停用了",
+      "service_busy": "服务正忙",
+      "fetch_target_unreadable": "无法读取该网页",
+      "fetch_url_blocked": "网络安全策略阻止了该网址",
+      "fetch_dns_unverified": "无法验证目标地址",
+      "fetch_challenge": "网页需要完成浏览器验证",
+      "fetch_js_shell": "网页需要 JavaScript",
+      "fetch_timeout": "网页读取超时",
+      "fetch_unsupported_content": "不支持此文档类型",
+      "fetch_refused": "网页请求被拒绝",
+      "fetch_unavailable": "网页不可用",
+      "fetch_sources_blocked": "所有网页读取来源都被阻止或停用了"
     },
     "tool": {
       "web_search": "网页搜索",
+      "web_fetch": "网页读取",
       "x_search": "X 搜索",
       "image_generate": "图片生成"
     },
+    "fetchErrorCode": {
+      "service_key_invalid": "网页读取服务的密钥无效",
+      "service_balance": "网页读取服务的账户余额不足",
+      "service_limit": "网页读取服务已达用量上限",
+      "service_unavailable": "网页读取服务不可用",
+      "service_rate_limited": "网页读取服务受到限流",
+      "service_refused": "网页读取服务拒绝了此网址",
+      "service_unreadable": "网页读取服务返回了无法读取的结果",
+      "service_busy": "网页读取服务正忙"
+    },
+    "fetch": {"characters": "{count} 字符", "truncated": "已截断"},
     "quoted": "“{subject}”",
     "mode": {
       "service": "通过 {provider}",
@@ -1905,6 +1928,7 @@
     "repair": {
       "retrySearch": "暂时限流，可稍后重试或在 模型 › 工具 中立即重试",
       "disabled": "需要在 模型 › 工具 中启用网页搜索",
+      "fetch_disabled": "需要启用网页读取",
       "key": "需要更换密钥",
       "reauthorize": "需要重新授权登录",
       "balance": "需要充值",
@@ -1925,13 +1949,26 @@
       "service_unavailable": "暂时不可用",
       "service_rate_limited": "限流",
       "service_refused": "拒绝了这次搜索",
-      "service_unreadable": "返回了无法读取的结果"
+      "service_unreadable": "返回了无法读取的结果",
+      "service_busy": "服务正忙",
+      "fetch_target_unreadable": "无法读取该网页",
+      "fetch_url_blocked": "因网络安全策略阻止了该网址",
+      "fetch_dns_unverified": "无法验证目标地址",
+      "fetch_challenge": "遇到了浏览器验证",
+      "fetch_js_shell": "需要 JavaScript",
+      "fetch_timeout": "读取超时",
+      "fetch_unsupported_content": "不支持此文档类型",
+      "fetch_refused": "拒绝了请求",
+      "fetch_unavailable": "不可用"
     },
     "skip": {
       "blocked": "当时被阻止",
       "disabled": "当时未用于搜索",
+      "fetch_disabled": "当时未用于网页读取",
       "cooling": "当时正在等待重试",
       "query_too_long": "不支持这么长的搜索词",
+      "unsupported_type": "不支持此文档类型",
+      "service_busy": "服务正忙",
       "unavailable": "当时不可用"
     },
     "listSeparator": "、",

@@ -85,6 +85,10 @@ def _hosted_routes(raw: Any) -> tuple[dict[str, HostedToolRoute], Optional[Image
 def _hosted_route(tool: Any, entry: Any) -> HostedToolRoute:
     """One search tool's facts, exactly as the hop schema allows them: declared natively exactly when ``native`` is
     ``assumed`` (§3.4, §4.1)."""
+    if tool == "web_fetch":
+        if entry != {"native": "unsupported", "replay": "unsupported"}:
+            raise ValueError("web_fetch is function-only, with no native replay")
+        return HostedToolRoute(mode="proxy", replay=False)
     if tool not in HOSTED_TOOLS or not isinstance(entry, Mapping):
         raise ValueError("not a search tool entry")
     native, replay = entry.get("native"), entry.get("replay")

@@ -5229,6 +5229,22 @@ async def model_hub_search_service_retry(source_id: str, starlette_request: Fast
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.post("/api/models/hosted-tools/web_fetch/services/{source_id}/retry", include_in_schema=False)
+async def model_hub_fetch_service_retry(source_id: str, starlette_request: FastAPIRequest):
+    async def handler():
+        from core.handlers.model_hub import ModelHubError
+
+        try:
+            if _model_hub_json_object("invalid_parameter"):
+                raise ModelHubError("invalid_parameter", status=400)
+            await _model_hub_service().clear_service_cooldown(source_id, tool="web_fetch")
+            return _model_hub_success()
+        except ModelHubError as exc:
+            return _model_hub_error(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.post("/api/models/sources/{source_id}/evidence/clear", include_in_schema=False)
 async def model_hub_source_evidence_clear(source_id: str, starlette_request: FastAPIRequest):
     async def handler():
