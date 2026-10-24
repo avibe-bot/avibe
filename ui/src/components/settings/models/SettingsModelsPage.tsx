@@ -13,7 +13,7 @@ import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
 import { AddSearchServiceDialog } from './AddSearchServiceDialog';
-import { searchServicesActive, webSearchTool } from './searchServices';
+import { searchServicesActive, webSearchTool, KEYLESS_EXA_SOURCE_ID, keylessExaSource } from './searchServices';
 import { BackendModelCatalogDialog, type CatalogFocus } from './BackendModelCatalogDialog';
 import { OAuthConnectDialog } from './OAuthConnectDialog';
 import { GatewayModule } from './GatewayModule';
@@ -1202,7 +1202,10 @@ export const SettingsModelsPage: React.FC = () => {
       // its own stale treatment and Retry, and raises the page's refresh toast.
     }
   }, [selectSource, showToast, t]);
-  const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
+  const selectedSource = sources.find((source) => source.id === selectedSourceId)
+    ?? (selectedSourceId === KEYLESS_EXA_SOURCE_ID
+      ? { ...keylessExaSource(), display_name: t('settings.models.searchServices.vendorName.exa-mcp') as string }
+      : null);
   // Read while the tab is open, or while a Source's detail shows its capability
   // chips, and again when that Source changes: an edit can change its identity,
   // which drops its evidence on the server.

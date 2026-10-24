@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
 
 from config.v2_config import (
+    KEYLESS_EXA_SERVICE_ID,
     KEYLESS_EXA_SOURCE_ID,
     ModelHubConfig,
     ModelHubSourceConfig,
@@ -34,6 +36,102 @@ BLOCKERS = {
     "service_balance": "models.source.needs_action.balance_exhausted",
     "service_limit": "models.source.needs_action.spend_limit_reached",
 }
+
+
+_KEYLESS_RATE_LIMIT_RE = re.compile(
+    r"(?:rate[- ]?limit|too many requests).{0,160}(?:exceeded|retry|minute|hour|day|free|mcp)?",
+    re.IGNORECASE,
+)
+_KEYLESS_REFUSAL_TAGS = frozenset({"PROHIBITED_CONTENT", "CONTENT_FILTER_ERROR"})
+
+
+def _keyless_mcp_content(body: Mapping[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any] | None]:
+    result = body.get("result")
+    if not isinstance(result, Mapping):
+        return dict(body), None
+    content: Any = result.get("structuredContent")
+    if not isinstance(content, Mapping):
+        raw_content = result.get("content")
+        if isinstance(raw_content, list):
+            first_candidate: Mapping[str, Any] | None = None
+            for item in raw_content[:8]:
+                if not isinstance(item, Mapping) or item.get("type") != "text":
+                    continue
+                text = item.get("text")
+                if not isinstance(text, str) or len(text) > 2 * 1024 * 1024:
+                    continue
+                try:
+                    candidate = json.loads(text)
+                except (ValueError, RecursionError):
+                    continue
+                if not isinstance(candidate, Mapping):
+                    continue
+                first_candidate = first_candidate or candidate
+                if "results" in candidate:
+                    content = candidate
+                    break
+            if not isinstance(content, Mapping):
+                content = first_candidate
+    if not isinstance(content, Mapping):
+        return dict(body), result
+    normalized = dict(content)
+    metadata = result.get("_meta")
+    if isinstance(metadata, Mapping):
+        normalized["_meta"] = dict(metadata)
+    if result.get("isError") is True:
+        normalized["_mcp_is_error"] = True
+    return normalized, result
+
+
+def _keyless_nested_values(value: Any, *, depth: int = 0):
+    if depth > 5:
+        return
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            yield str(key), item
+            yield from _keyless_nested_values(item, depth=depth + 1)
+    elif isinstance(value, list):
+        for item in value[:16]:
+            yield from _keyless_nested_values(item, depth=depth + 1)
+
+
+def _keyless_rate_limited(status: int | None, body: Mapping[str, Any] | None) -> bool:
+    if status == 429 or not isinstance(body, Mapping):
+        return status == 429
+    for key, value in _keyless_nested_values(body):
+        if key.lower() in {"ai.exa/ratelimited", "ratelimited"} and value is True:
+            return True
+    error_shaped = body.get("error") is not None or body.get("_mcp_is_error") is True
+    if not error_shaped:
+        result = body.get("result")
+        error_shaped = isinstance(result, Mapping) and result.get("isError") is True
+    if not error_shaped:
+        return False
+    for key, value in _keyless_nested_values(body):
+        if key.lower() in {"message", "detail", "text"} and isinstance(value, str):
+            if _KEYLESS_RATE_LIMIT_RE.search(value[:512]):
+                return True
+    return False
+
+
+def _keyless_refused(body: Mapping[str, Any] | None) -> bool:
+    if not isinstance(body, Mapping):
+        return False
+    return any(
+        key.lower() in {"tag", "code", "type"} and isinstance(value, str)
+        and value.upper() in _KEYLESS_REFUSAL_TAGS
+        for key, value in _keyless_nested_values(body)
+    )
+
+
+def _rate_limit_reset_deadline(value: str | None, received_at: datetime) -> datetime | None:
+    if not isinstance(value, str) or len(value) > 32 or not value.isascii() or not value.isdecimal():
+        return None
+    try:
+        deadline = datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    return deadline if deadline >= received_at else None
 
 
 def _path(value: Any, path: str) -> Any:
@@ -88,6 +186,10 @@ def map_response(
         except (ValueError, UnicodeError, RecursionError):
             pass
     status = response.http_status
+    keyless = service.get("service_id") == KEYLESS_EXA_SERVICE_ID
+    mcp_result: Mapping[str, Any] | None = None
+    if keyless and isinstance(body, Mapping):
+        body, mcp_result = _keyless_mcp_content(body)
     mapping = service["result"]
     rows = _path(body, mapping["results"])
     sources: list[dict[str, str]] = []
@@ -107,7 +209,9 @@ def map_response(
                 value = _path(row, mapping[field])
                 if field == "snippet" and isinstance(value, list):
                     # Exa's highlights, in rank order, never its page text.
-                    value = "\n".join(part[:bound] for part in value[:bound] if isinstance(part, str))
+                    value = ("\n\n" if keyless else "\n").join(
+                        part[:bound] for part in value[:bound] if isinstance(part, str)
+                    )
                 if isinstance(value, str):
                     item[field] = value[:bound]
             sources.append(item)
@@ -121,6 +225,15 @@ def map_response(
         code = "service_balance"
     elif status in codes["limit"]:
         code = "service_limit"
+    elif keyless and _keyless_rate_limited(status, body if isinstance(body, Mapping) else None):
+        code = "service_rate_limited"
+    elif keyless and _keyless_refused(body if isinstance(body, Mapping) else None):
+        code = "service_refused"
+    elif keyless and (
+        (isinstance(body, Mapping) and body.get("error") is not None)
+        or (mcp_result is not None and mcp_result.get("isError") is True)
+    ):
+        code = "service_unavailable"
     elif status == 200:
         if not isinstance(rows, list) or (rows and not sources):
             code = "service_unreadable"
@@ -139,6 +252,13 @@ def map_response(
         if code == "service_refused":
             # Keep only bounded/redacted provider diagnostics, never a raw response body.
             error = body.get("error") if isinstance(body, dict) else None
+            if error is None and mcp_result is not None:
+                error = mcp_result.get("error")
+                if error is None and mcp_result.get("isError") is True:
+                    content = mcp_result.get("content")
+                    if isinstance(content, list):
+                        error = next((item.get("text") for item in content[:8]
+                                      if isinstance(item, Mapping) and isinstance(item.get("text"), str)), None)
             message = error.get("message") if isinstance(error, dict) else error
             message = message if isinstance(message, str) else body.get("message") if isinstance(body, dict) else None
             if not isinstance(message, str) and isinstance(body, dict):
@@ -157,7 +277,11 @@ def map_response(
 
     billing = service["billing"]
     billable, uncertain = False, False
-    if sent:
+    if sent and keyless:
+        # Keyless Exa's service is free: attempts still enter usage.requests,
+        # but never become billable or carry a provider cost estimate.
+        billable, uncertain = False, False
+    elif sent:
         if status == 200:
             if not billing["nonempty_only"]:
                 billable = True
@@ -186,7 +310,7 @@ def map_response(
     return ServiceResult(
         record, cost, billable, uncertain,
         authenticated=status == 200 or code in {"service_balance", "service_limit"},
-        blocker=BLOCKERS.get(code), cooling=code in {"service_unavailable", "service_unreadable"},
+        blocker=BLOCKERS.get(code), cooling=code in {"service_unavailable", "service_unreadable", "service_rate_limited"},
         reported_usd=reported,
     )
 
@@ -249,9 +373,13 @@ class ServiceCooldowns:
         if result.cooling:
             state.failures = min(state.failures + 1, 5)
             advice = None
-            if response.http_status in {429, 503}:
-                value = next((v for k, v in response.headers.items() if k.lower() == "retry-after"), None)
-                advice = retry_after_deadline(value, response.response_received_at or now)
+            received_at = response.response_received_at or now
+            value = next((v for k, v in response.headers.items() if k.lower() == "retry-after"), None)
+            advice = retry_after_deadline(value, received_at)
+            reset = next((v for k, v in response.headers.items() if k.lower() == "x-ratelimit-reset"), None)
+            reset_deadline = _rate_limit_reset_deadline(reset, received_at)
+            if reset_deadline is not None and (advice is None or reset_deadline > advice):
+                advice = reset_deadline
             state.until = advice if advice is not None else now + timedelta(seconds=min(30 * 2 ** (state.failures - 1), 300))
         elif result.record["status"] == "completed":
             state.failures = 0

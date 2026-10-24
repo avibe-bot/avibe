@@ -19,7 +19,7 @@ from config.v2_config import (
     ModelHubConfig, ModelHubSourceStateConfig,
     model_hub_keyless_exa_source,
 )
-from core.handlers.model_hub import hosted_tools
+from core.handlers.model_hub import hosted_tools, search_chain
 from core.handlers.model_hub.adapter import SearchCredentialCheck, SearchResponse
 from core.handlers.model_hub.capability_evidence import EvidenceFeature
 from tests.test_model_hub_api import _service
@@ -311,6 +311,39 @@ async def test_skip_precedence_terminal_reason_and_attempts_without_execution(tm
     if mix == "long":
         assert "128" in result["record"]["error"]
     _hosted_result("web_search", result)
+
+
+@pytest.mark.asyncio
+async def test_keyless_producer_writes_request_only_zero_cost_usage(tmp_path, monkeypatch):
+    """KEX-2: an admitted keyless call records one request, zero billable requests and zero cost."""
+    service = owner(
+        tmp_path,
+        ("exa",),
+        web={
+            "enabled": True,
+            "executor_order": [KEYLESS_EXA_SOURCE_ID],
+            "executor_order_kinds": {KEYLESS_EXA_SOURCE_ID: "service"},
+            "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
+        },
+    )
+    monkeypatch.setattr(hosted_tools, "KEYLESS_EXA_ACTIVE", True)
+    monkeypatch.setattr(search_chain, "KEYLESS_EXA_ACTIVE", True)
+    body = {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": json.dumps({
+        "results": [{"url": "https://example.test/keyless", "title": "Keyless", "highlights": ["excerpt"]}],
+    })}]}}
+    calls = answers(monkeypatch, service, wire(body=body))
+    result = await run(service)
+    assert calls == [(KEYLESS_EXA_SOURCE_ID, "exa-mcp", KEYLESS_EXA_SERVICE_ID, None, {
+        "type": "auto", "query": "query", "numResults": 3,
+        "enableHighlights": True, "highlightsMaxCharacters": 1000, "textMaxCharacters": 1,
+    })]
+    assert result["record"]["attempts"] == [{
+        "source_id": KEYLESS_EXA_SOURCE_ID, "label": "Exa (free)", "kind": "service",
+        "outcome": "completed", "cost": {"basis": "list", "usd": 0},
+    }]
+    usage = summary(service)
+    assert usage["services"][0]["requests"] == 1
+    assert usage["services"][0]["billable_requests"] == 0
 
 
 @pytest.mark.asyncio

@@ -2546,6 +2546,8 @@
         "priceDate": "API 标价 · {{date}}",
         "priceNote": "价格为目录标注日期的 API 标价，免费额度、套餐与实际账单可能不同。",
         "custody": "搜索服务的密钥和其他供应商一样由网关保管，不会交给模型或 Agent。",
+        "keylessQueryDestination": "查询会从此 Avibe 运行时直接发送到 Exa（mcp.exa.ai）；Exa 可以看到该连接的 IP。",
+        "keylessCustody": "Exa（免费）无需密钥，也不会把密钥交给模型或 Agent。",
         "queryDestination": "搜索词会发送给执行搜索的服务。",
         "queryVendor": "搜索词会发送给 {{vendor}}。",
         "placement": "新增搜索服务会排在模型代搜之前，已保存的顺序也一样；可在 工具 › 网页搜索 中调整顺序。",

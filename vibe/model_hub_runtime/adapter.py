@@ -17,8 +17,12 @@ from enum import Enum
 from typing import Any, Awaitable, Callable, Literal, Mapping, Sequence, TypeVar
 
 import aiohttp
-
-from config.v2_config import normalize_model_hub_base_url
+import config.v2_config as model_hub_config
+from config.v2_config import (
+    KEYLESS_EXA_SERVICE_ID,
+    KEYLESS_EXA_SOURCE_ID,
+    normalize_model_hub_base_url,
+)
 from core.agent_core.ai._common import PROVIDER_SILENCE_TIMEOUT_S
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
@@ -69,6 +73,7 @@ from vibe.model_hub_runtime.api_key_vendors import (
     search_service,
     validate_api_key_auth_scheme,
 )
+from vibe.model_hub_runtime.keyless_exa_mcp import KeylessExaMcpClient
 from vibe.model_hub_runtime.installer import (
     INSTALL_ALREADY_RUNNING_REASON,
     INSTALL_PLATFORM_UNSUPPORTED_REASON,
@@ -153,7 +158,7 @@ _SEARCH_BODY_MAX_BYTES = 8 * 1024 * 1024
 _SEARCH_TIMEOUT_SECONDS = 30.0
 _SEARCH_CHECK_TIMEOUT_SECONDS = 10.0
 _SEARCH_CHECK_CONNECT_TIMEOUT_SECONDS = 5.0
-_SEARCH_RESPONSE_HEADERS = frozenset({"content-type", "retry-after", "date", "content-length"})
+_SEARCH_RESPONSE_HEADERS = frozenset({"content-type", "retry-after", "x-ratelimit-reset", "date", "content-length"})
 
 
 async def _read_bounded_search_body(content: Any) -> tuple[bytes | None, bool]:
@@ -1513,6 +1518,7 @@ class CLIProxyEngineAdapter:
         self._oauth_flows: dict[str, _OAuthFlow] = {}
         self._active_oauth_providers: set[str] = set()
         self._oauth_lock = threading.RLock()
+        self._keyless_exa_client = KeylessExaMcpClient()
 
     async def install(self) -> EngineStatus:
         await self.recover_installation()
@@ -2250,11 +2256,22 @@ class CLIProxyEngineAdapter:
         source_id: str,
         vendor: str,
         service_id: str,
-        credential_ref: str,
+        credential_ref: str | None,
         request: Mapping[str, Any],
         *,
         on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
+        if service_id == KEYLESS_EXA_SERVICE_ID:
+            if (
+                not model_hub_config.KEYLESS_EXA_ACTIVE
+                or source_id != KEYLESS_EXA_SOURCE_ID
+                or vendor != "exa-mcp"
+            ):
+                return SearchResponse(None, {}, None, "invalid_endpoint")
+            service = search_service(vendor, "search")
+            if service is None or service.get("service_id") != service_id:
+                return SearchResponse(None, {}, None, "invalid_endpoint")
+            return await self._keyless_exa_client.search(request, on_sent=on_sent)
         service = search_service(vendor, "search" if vendor in {"tavily", "exa"} else "openai_chat")
         if service is None or service.get("service_id") != service_id:
             return SearchResponse(None, {}, None, "invalid_endpoint")

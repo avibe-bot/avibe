@@ -280,9 +280,15 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                           {candidate.kind === 'service' ? <button type="button" data-search-source={candidate.source_id} className="truncate text-left font-semibold text-foreground hover:underline" onClick={(event) => onOpenService?.(candidate.source_id, event.currentTarget)}>{name}</button> : <span className="truncate font-semibold text-foreground">{name}</span>}
                           <span className={cn('model-hub-pill border', candidate.kind === 'service' ? ACCENT_PILL.cyan : ACCENT_PILL.muted)}>{t(candidate.kind === 'service' ? 'settings.models.searchServices.kind' : 'settings.models.searchServices.modelKind')}</span>
                           <SearchCandidateStatus candidate={candidate} tool={activeWeb} source={source} />
+                          {candidate.kind === 'service' && <ToggleSwitch
+                            enabled={candidate.settings.enabled}
+                            disabled={pending}
+                            label={t('settings.models.searchServices.use') as string}
+                            onClick={() => onSave('web_search', { services: { [candidate.source_id]: { enabled: !candidate.settings.enabled } } })}
+                          />}
                         </div>
                         <span className="model-hub-tool-note">{candidate.kind === 'service'
-                          ? t(source?.protocol === 'search' ? 'settings.models.searchServices.resultCount' : 'settings.models.searchServices.sharedKeyResults', { count: candidate.settings.results, source: name })
+                          ? <>{t(source?.protocol === 'search' ? 'settings.models.searchServices.resultCount' : 'settings.models.searchServices.sharedKeyResults', { count: candidate.settings.results, source: name })}{vendor?.id === 'exa-mcp' && vendor.free_tier ? ` · ${vendor.free_tier}` : null}</>
                           : <span className="font-mono">{candidate.model_id}</span>}</span>
                         {candidate.kind === 'service' && candidate.cooldown_until !== null && <Button variant="outline" size="xs" className="self-start" disabled={pending} onClick={() => onRetryService?.(candidate.source_id)}>{t('settings.models.searchServices.retry')}</Button>}
                       </div>
@@ -539,6 +545,7 @@ type ServiceActions = {
 const WebSearchServices: React.FC<{ tool: HostedWebSearchToolStatus; lookup: SourceLookup; pending: boolean; onSave: Save } & ServiceActions> = ({ tool, lookup, pending, onSave, onAddService, onOpenService, onRetryService }) => {
   const { t, i18n } = useTranslation();
   const noServices = !tool.service_vendors?.some((vendor) => vendor.source_ids.length > 0);
+  const hasKeyless = tool.service_vendors?.some((vendor) => vendor.id === 'exa-mcp') === true;
   return <div className="flex flex-col gap-4 border-t border-border p-4">
     <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-background p-3">
       <div className="flex min-w-0 flex-col gap-1"><h4 className="font-semibold text-foreground">{t('settings.models.searchServices.preferNative')}</h4><p className="model-hub-tool-note">{t(tool.prefer_native ? 'settings.models.searchServices.nativeOn' : 'settings.models.searchServices.nativeOff')}</p></div>
@@ -546,9 +553,10 @@ const WebSearchServices: React.FC<{ tool: HostedWebSearchToolStatus; lookup: Sou
     </div>
     <ExecutorOrder tool={tool} lookup={lookup} pending={pending} onSave={onSave} onOpenService={onOpenService} onRetryService={onRetryService} />
     {noServices && <p className="model-hub-tool-note">{t('settings.models.searchServices.empty', { prices: formatNameList((tool.service_vendors ?? []).map((vendor) => t('settings.models.searchServices.vendorPrice', { vendor: vendor.name, usd: formatSmallUsd(vendor.price.usd_per_1k) })), i18n.language) })}</p>}
+    {hasKeyless && <p className="model-hub-tool-note">{t('settings.models.searchServices.keylessQueryDestination')}</p>}
     <div className="flex flex-wrap items-center justify-between gap-3">
       <Button variant={noServices ? 'default' : 'outline'} size="sm" disabled={pending} onClick={(event) => onAddService?.(event.currentTarget)}><Plus aria-hidden />{t('settings.models.searchServices.add')}</Button>
-      <p className="model-hub-tool-note flex items-start gap-2"><LockKeyhole className="mt-0.5 size-3.5 shrink-0" aria-hidden />{t('settings.models.searchServices.custody')}</p>
+      <p className="model-hub-tool-note flex items-start gap-2"><LockKeyhole className="mt-0.5 size-3.5 shrink-0" aria-hidden />{t(hasKeyless ? 'settings.models.searchServices.keylessCustody' : 'settings.models.searchServices.custody')}</p>
     </div>
   </div>;
 };

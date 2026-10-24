@@ -654,12 +654,16 @@ class EngineAdapter(Protocol):
         source_id: str,
         vendor: str,
         service_id: str,
-        credential_ref: str,
+        credential_ref: str | None,
         request: Mapping[str, Any],
         *,
         on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
         """Make exactly one catalog-host search request from Model Hub custody.
+
+        ``credential_ref`` is an opaque custody handle for credentialed Sources;
+        it is ``None`` for the built-in keyless MCP Source. In both cases the
+        adapter owns the transport and never exposes secret material.
 
         ``on_sent`` fires once after the connection (including TLS) is ready and
         immediately before aiohttp writes this request. A callback failure stops
