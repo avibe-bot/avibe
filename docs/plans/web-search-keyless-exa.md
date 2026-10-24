@@ -637,7 +637,7 @@ Apply services-design §4.2 with the following keyless-specific clarifications:
 | MCP/HTTP result | Chain | State |
 | --- | --- | --- |
 | Valid result, including empty results | Ends with `completed`; cost `$0` | No state change |
-| HTTP 429, or a JSON-RPC error whose code/message matches the bounded Exa free-rate-limit signal | Next candidate; attempt code `service_rate_limited` (operationally a `service_unavailable` cooldown) | Service cooldown; never credential health |
+| Any rate-limit signal from §2.3: HTTP 429, `_meta.ai.exa/rateLimited: true`, or a bounded hosted-MCP rate-limit message in an error-shaped envelope; never JSON-RPC `-32000` alone | Next candidate; attempt code `service_rate_limited` (operationally a `service_unavailable` cooldown) | Service cooldown; never credential health |
 | Stale MCP session-not-found 404 before the tool call is accepted | Reinitialize/list and replay once within the original deadline; if the replay fails, apply its actual outcome | Clear only the in-memory session; no credential health |
 | Timeout, connection/TLS failure, or closed session after the admitted call begins | Next candidate, `service_unavailable` | Service cooldown; no credential health |
 | Any HTTP 5xx or non-rate-limit JSON-RPC/server error | Next candidate, `service_unavailable` | Service cooldown; no credential health |
@@ -865,15 +865,17 @@ reusable; the separate phase-2 lane owns the `web_fetch` product design.
 
 ## 10. Contract version and freeze rule
 
-The Model Hub master contract is **v20**. As of **2026-10-23**, prerelease tag
-`gh-v3.2.3rc4` carries v20, so this keyless-Exa design must not append new
-contract meanings to v20. The implementation lanes must open the next
-coordinated contract event as **v21** for any keyless-Exa shapes. Before every
-push and again before close-out, the lane must re-check tags containing the
-current head and the latest RC/release tags; if v21 becomes shipped before the
-next contract change, that change opens v22 instead. The freeze rule still
-applies: one tested head owns all affected schema mirrors and consumers for a
-version event.
+The Model Hub master contract is **v20**. It first shipped in prerelease tag
+`gh-v3.2.3rc3` on **2026-10-22**; the latest prerelease is
+`gh-v3.2.3rc6`, published **2026-10-24**, and the checked rc4, rc5, and rc6
+contract mirrors still advertise v20. Therefore this keyless-Exa design must
+not append new contract meanings to v20. The implementation lanes must open
+the next coordinated contract event as **v21** for any keyless-Exa shapes.
+Before every push and again before close-out, the lane must re-check tags
+containing the current head and the latest RC/release tags; if v21 becomes
+shipped before the next contract change, that change opens v22 instead. The
+freeze rule still applies: one tested head owns all affected schema mirrors and
+consumers for a version event.
 
 The affected contract surfaces are the existing hosted-tools status/read and
 settings shapes, the built-in Source/candidate discriminator, service catalog
