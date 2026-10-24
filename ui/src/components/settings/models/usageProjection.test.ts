@@ -27,8 +27,8 @@ import {
   type UsageFilter,
 } from './usageProjection';
 
-const TEXT = { unknownModel: 'Unknown model', removedSources: 'Removed providers', searchServices: 'Search services' };
-const TEXT_ZH = { unknownModel: '未知模型', removedSources: '已移除的供应商', searchServices: '搜索服务' };
+const TEXT = { unknownModel: 'Unknown model', removedSources: 'Removed providers', searchServices: 'Search services', webFetch: 'Web fetch' };
+const TEXT_ZH = { unknownModel: '未知模型', removedSources: '已移除的供应商', searchServices: '搜索服务', webFetch: '网页读取' };
 const NO_FILTER = { sourceIds: [], modelKeys: [] };
 
 const counters = (over: Partial<UsageCounters> = {}): UsageCounters => ({
@@ -392,6 +392,8 @@ describe('search-service usage', () => {
     ] };
     expect(serviceUsageRows(value, NO_FILTER, null, TEXT).map((item) => [item.tool ?? 'web_search', item.totals.requests]))
       .toEqual([['web_fetch', 7], ['web_search', 3]]);
+    expect(seriesFor(value, NO_FILTER, 'model', 'cost', TEXT).map((series) => series.label))
+      .toEqual(['Search services', 'Web fetch']);
     value.window_key = '60d'; value.granularity = 'day'; value.to_day = '2026-09-24';
     value.buckets![0]!.key = '2026-09-24';
     expect(serviceMonthUsage(value, 'src_exa').totals.requests).toBe(3);

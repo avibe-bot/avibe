@@ -272,6 +272,7 @@ export const REMOVED_SOURCES_KEY = `${PAIR_SEPARATOR}removed`;
 
 /** Grouped by model, every live Source's search services as one identity: none of them is a model. */
 export const SEARCH_SERVICES_KEY = `${PAIR_SEPARATOR}services`;
+const FETCH_SERVICES_KEY = `${PAIR_SEPARATOR}web_fetch`;
 
 /**
  * The longest ledger key, in code points as the ledger counts them, that is
@@ -283,6 +284,7 @@ export type UsageText = {
   unknownModel: string;
   removedSources: string;
   searchServices: string;
+  webFetch: string;
 };
 
 export type UsageIdentity = {
@@ -370,7 +372,9 @@ export function usageIdentities(report: UsageReport, group: 'model' | 'source', 
   const removed = (sourceId: string) => !live.has(sourceId);
   const keyOf = (row: UsageBucketEntry) => (removed(row.source_id)
     ? REMOVED_SOURCES_KEY
-    : group === 'source' ? row.source_id : isServiceRow(row) ? SEARCH_SERVICES_KEY : pairKey(row.source_id, row.model_id));
+    : group === 'source' ? row.source_id : isServiceRow(row)
+      ? row.tool === 'web_fetch' ? FETCH_SERVICES_KEY : SEARCH_SERVICES_KEY
+      : pairKey(row.source_id, row.model_id));
   const rows = allRows(report);
   const hasRemoved = [...report.sources, ...report.services, ...rows].some((entry) => removed(entry.source_id));
   const removedEntry = hasRemoved ? [[REMOVED_SOURCES_KEY, text.removedSources] as const] : [];
@@ -422,14 +426,10 @@ export function usageIdentities(report: UsageReport, group: 'model' | 'source', 
         unlisted: model.unlisted,
       });
     }
-    if (rows.some((row) => isServiceRow(row) && !removed(row.source_id))) {
-      identities.set(SEARCH_SERVICES_KEY, {
-        key: SEARCH_SERVICES_KEY,
-        label: text.searchServices,
-        sourceLabel: '',
-        removed: false,
-        unlisted: false,
-      });
+    for (const [key, label] of [[SEARCH_SERVICES_KEY, text.searchServices], [FETCH_SERVICES_KEY, text.webFetch]]) {
+      if (rows.some((row) => isServiceRow(row) && keyOf(row) === key)) {
+        identities.set(key, { key, label, sourceLabel: '', removed: false, unlisted: false });
+      }
     }
   }
   const get = (key: string) => identities.get(key)!;

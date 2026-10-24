@@ -1768,6 +1768,7 @@
         },
         "services": {
           "title": "Search services",
+          "hostedTitle": "Search and page reading",
           "identity": "Source / service",
           "billable": "Billable",
           "uncertain_one": "+{{requests}} with unknown billing",

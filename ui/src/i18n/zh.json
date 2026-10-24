@@ -1768,6 +1768,7 @@
         },
         "services": {
           "title": "搜索服务",
+          "hostedTitle": "搜索与网页读取",
           "identity": "供应商 / 服务",
           "billable": "计费请求",
           "uncertain_one": "另有 {{requests}} 次计费未知",
