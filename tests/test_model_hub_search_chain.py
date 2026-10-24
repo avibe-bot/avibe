@@ -19,7 +19,7 @@ from config.v2_config import (
     ModelHubConfig, ModelHubSourceStateConfig,
     model_hub_keyless_exa_source,
 )
-from core.handlers.model_hub import hosted_tools
+from core.handlers.model_hub import hosted_tools, search_chain
 from core.handlers.model_hub.adapter import SearchCredentialCheck, SearchResponse
 from core.handlers.model_hub.capability_evidence import EvidenceFeature
 from tests.test_model_hub_api import _service
@@ -311,6 +311,136 @@ async def test_skip_precedence_terminal_reason_and_attempts_without_execution(tm
     if mix == "long":
         assert "128" in result["record"]["error"]
     _hosted_result("web_search", result)
+
+
+@pytest.mark.asyncio
+async def test_keyless_producer_writes_request_only_zero_cost_usage(tmp_path, monkeypatch):
+    """KEX-2: an admitted keyless call records one request, zero billable requests and zero cost."""
+    service = owner(
+        tmp_path,
+        ("exa",),
+        web={
+            "enabled": True,
+            "executor_order": [KEYLESS_EXA_SOURCE_ID],
+            "executor_order_kinds": {KEYLESS_EXA_SOURCE_ID: "service"},
+            "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
+        },
+    )
+    monkeypatch.setattr(hosted_tools, "KEYLESS_EXA_ACTIVE", True)
+    monkeypatch.setattr(search_chain, "KEYLESS_EXA_ACTIVE", True)
+    body = {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": json.dumps({
+        "results": [{"url": "https://example.test/keyless", "title": "Keyless", "highlights": ["excerpt"]}],
+    })}]}}
+    calls = answers(monkeypatch, service, wire(body=body))
+    result = await run(service)
+    assert calls == [(KEYLESS_EXA_SOURCE_ID, "exa-mcp", KEYLESS_EXA_SERVICE_ID, None, {
+        "type": "auto", "query": "query", "numResults": 3,
+        "enableHighlights": True, "highlightsMaxCharacters": 1000, "textMaxCharacters": 1,
+    })]
+    assert result["record"]["attempts"] == [{
+        "source_id": KEYLESS_EXA_SOURCE_ID, "label": "Exa (free)", "kind": "service",
+        "outcome": "completed", "cost": {"basis": "list", "usd": 0},
+    }]
+    usage = summary(service)
+    assert usage["services"][0]["requests"] == 1
+    assert usage["services"][0]["billable_requests"] == 0
+
+
+@pytest.mark.asyncio
+async def test_keyless_rate_limit_settles_service_cooldown_without_persisted_source(tmp_path, monkeypatch):
+    """KEX-2: synthetic keyless identity still owns the in-memory service cooldown."""
+    service = owner(
+        tmp_path,
+        (),
+        web={
+            "enabled": True,
+            "executor_order": [KEYLESS_EXA_SOURCE_ID],
+            "executor_order_kinds": {KEYLESS_EXA_SOURCE_ID: "service"},
+            "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
+        },
+    )
+    monkeypatch.setattr(hosted_tools, "KEYLESS_EXA_ACTIVE", True)
+    monkeypatch.setattr(search_chain, "KEYLESS_EXA_ACTIVE", True)
+    calls = answers(monkeypatch, service, wire(429, {"error": {"message": "slow down"}}, headers={"Retry-After": "60"}))
+    first = await run(service)
+    second = await run(service)
+    assert len(calls) == 1
+    assert first["record"]["attempts"][0]["error_code"] == "service_rate_limited"
+    assert second["record"]["attempts"] == [{
+        "source_id": KEYLESS_EXA_SOURCE_ID, "label": "Exa (free)", "kind": "service",
+        "outcome": "skipped", "skipped": "cooling",
+        "retry_at": (NOW + timedelta(seconds=60)).isoformat().replace("+00:00", "Z"),
+    }]
+    assert _web(service)["executor_candidates"][0]["cooldown_until"] == (NOW + timedelta(seconds=60)).isoformat().replace("+00:00", "Z")
+
+
+@pytest.mark.asyncio
+async def test_keyless_overlapping_searches_settle_rate_limit_before_next_admission(tmp_path, monkeypatch):
+    """KEX-2: a queued keyless turn cannot invalidate the active cooldown generation."""
+    service = owner(
+        tmp_path,
+        (),
+        web={
+            "enabled": True,
+            "executor_order": [KEYLESS_EXA_SOURCE_ID],
+            "executor_order_kinds": {KEYLESS_EXA_SOURCE_ID: "service"},
+            "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
+        },
+    )
+    monkeypatch.setattr(hosted_tools, "KEYLESS_EXA_ACTIVE", True)
+    monkeypatch.setattr(search_chain, "KEYLESS_EXA_ACTIVE", True)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def search(source_id, vendor, service_id, credential_ref, request, *, on_sent):
+        calls.append((source_id, service_id))
+        await on_sent()
+        if len(calls) == 1:
+            entered.set()
+            await release.wait()
+            return wire(429, {"error": {"message": "slow down"}}, headers={"Retry-After": "60"})
+        raise AssertionError("queued keyless search reached the adapter")
+
+    monkeypatch.setattr(service.adapter, "search", search, raising=False)
+    active = asyncio.create_task(run(service))
+    await entered.wait()
+    queued = asyncio.create_task(run(service))
+    await asyncio.sleep(0)
+    release.set()
+    first, second = await asyncio.gather(active, queued)
+    assert calls == [(KEYLESS_EXA_SOURCE_ID, KEYLESS_EXA_SERVICE_ID)]
+    assert first["record"]["attempts"][0]["error_code"] == "service_rate_limited"
+    assert second["record"]["attempts"][0]["skipped"] == "cooling"
+
+
+@pytest.mark.asyncio
+async def test_keyless_queued_waiter_times_out_before_admission(tmp_path, monkeypatch):
+    """KEX-2: lock wait consumes the attempt budget and never sends a keyless request."""
+    service = owner(
+        tmp_path,
+        (),
+        web={
+            "enabled": True,
+            "executor_order": [KEYLESS_EXA_SOURCE_ID],
+            "executor_order_kinds": {KEYLESS_EXA_SOURCE_ID: "service"},
+            "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
+        },
+    )
+    monkeypatch.setattr(hosted_tools, "KEYLESS_EXA_ACTIVE", True)
+    monkeypatch.setattr(search_chain, "KEYLESS_EXA_ACTIVE", True)
+    monkeypatch.setattr(search_chain, "ATTEMPT_SECONDS", 0.01)
+    await service._keyless_exa_attempt_lock.acquire()
+    calls = answers(monkeypatch, service, wire())
+    try:
+        result = await run(service)
+    finally:
+        service._keyless_exa_attempt_lock.release()
+    assert calls == []
+    assert result["record"]["attempts"] == [{
+        "source_id": KEYLESS_EXA_SOURCE_ID, "label": "Exa (free)", "kind": "service",
+        "outcome": "skipped", "skipped": "unavailable",
+    }]
 
 
 @pytest.mark.asyncio

@@ -67,10 +67,11 @@ export const SearchCandidateStatus: React.FC<{
 
 export const SearchServiceNotes: React.FC<{ vendor?: HostedSearchServiceVendor }> = ({ vendor }) => {
   const { t } = useTranslation();
+  const keyless = vendor?.id === 'exa-mcp';
   return <div className="model-hub-tool-note flex flex-col gap-2">
-    <p>{vendor ? t('settings.models.searchServices.queryVendor', { vendor: vendor.name }) : t('settings.models.searchServices.queryDestination')}</p>
+    <p>{keyless ? t('settings.models.searchServices.keylessQueryDestination') : vendor ? t('settings.models.searchServices.queryVendor', { vendor: vendor.name }) : t('settings.models.searchServices.queryDestination')}</p>
     <p>{t('settings.models.searchServices.placement')}</p>
-    <p className="flex items-start gap-2"><LockKeyhole className="mt-0.5 size-3.5 shrink-0" aria-hidden />{t('settings.models.searchServices.custody')}</p>
+    <p className="flex items-start gap-2"><LockKeyhole className="mt-0.5 size-3.5 shrink-0" aria-hidden />{t(keyless ? 'settings.models.searchServices.keylessCustody' : 'settings.models.searchServices.custody')}</p>
   </div>;
 };
 

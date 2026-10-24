@@ -15,6 +15,7 @@ from config.v2_config import (
     KEYLESS_EXA_ACTIVE,
     KEYLESS_EXA_SOURCE_ID,
     ModelHubSourceStateConfig,
+    is_keyless_exa_source,
     model_hub_keyless_exa_source,
     model_hub_search_service,
 )
@@ -216,6 +217,24 @@ class SearchChain:
         return Failure(self.say("modelHub.hostedTools.noSearchSource"), None)
 
     async def service_attempt(self, slot, source, catalog):
+        loop = asyncio.get_running_loop()
+        attempt_deadline = loop.time() + max(0.0, min(ATTEMPT_SECONDS, self.deadline - loop.time()))
+        if is_keyless_exa_source(source):
+            remaining = max(0.0, attempt_deadline - loop.time())
+            try:
+                await asyncio.wait_for(self.owner._keyless_exa_attempt_lock.acquire(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return None, {
+                    "source_id": slot.source_id, "label": source.display_name[:64],
+                    "kind": "service", "outcome": "skipped", "skipped": "unavailable",
+                }
+            try:
+                return await self._service_attempt_locked(slot, source, catalog, attempt_deadline=attempt_deadline)
+            finally:
+                self.owner._keyless_exa_attempt_lock.release()
+        return await self._service_attempt_locked(slot, source, catalog, attempt_deadline=attempt_deadline)
+
+    async def _service_attempt_locked(self, slot, source, catalog, *, attempt_deadline: float):
         from .service import _ExecutorAttempt
 
         owner = self.owner
@@ -244,7 +263,7 @@ class SearchChain:
                     health_generation = owner._latest_source_attempt_generation.get(source.id)
                     cooldown_generation = owner._service_cooldowns.generation(source, slot.model_id)
                 else:
-                    health_generation = owner._reserve_settlement_generation(source.id, source=source)
+                    health_generation = None if is_keyless_exa_source(source) else owner._reserve_settlement_generation(source.id, source=source)
                     cooldown_generation = owner._service_cooldowns.advance(source, slot.model_id)
 
             async def on_sent():
@@ -282,7 +301,7 @@ class SearchChain:
 
         task = asyncio.create_task(invoke())
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=max(0.0, min(ATTEMPT_SECONDS, self.deadline - asyncio.get_running_loop().time())))
+            await asyncio.wait_for(asyncio.shield(task), timeout=max(0.0, attempt_deadline - asyncio.get_running_loop().time()))
         except asyncio.TimeoutError:
             timed_out = True
             task.cancel()
@@ -343,14 +362,16 @@ class SearchChain:
             superseded = False
             async with owner._mutation_lock:
                 previous = await asyncio.to_thread(owner.store.load)
-                current = next((s for s in previous.sources if s.id == source.id), None)
-                identity_current = current is not None and source_identity(current) == source_identity(source)
-                health_current = identity_current and owner._settlement_current(current, health_generation)
+                keyless_source = is_keyless_exa_source(source)
+                current = source if keyless_source else next((s for s in previous.sources if s.id == source.id), None)
+                identity_current = keyless_source or (current is not None and source_identity(current) == source_identity(source))
+                health_current = not keyless_source and identity_current and owner._settlement_current(current, health_generation)
                 cooldown_current = identity_current and owner._service_cooldowns.current(current, slot.model_id, cooldown_generation)
                 writes_health = result.blocker is not None or result.authenticated
                 writes_cooldown = result.cooling or result.record["status"] == "completed"
-                superseded = health_generation is not None and (
-                    (writes_health and not health_current) or (writes_cooldown and not cooldown_current)
+                superseded = (
+                    (health_generation is not None and writes_health and not health_current)
+                    or (cooldown_generation is not None and writes_cooldown and not cooldown_current)
                 )
                 if cooldown_current:
                     owner._service_cooldowns.settle(current, slot.model_id, cooldown_generation, result, response, ended_at)

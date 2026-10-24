@@ -19,7 +19,7 @@ import { GuardDialog } from './GuardDialog';
 import { GuardImpact } from './GuardImpact';
 import { HostedCapabilityChips } from './HostedCapabilityChips';
 import { modelCapabilities } from './hostedTools';
-import { searchServicesActive, serviceVendorForSource, webSearchTool } from './searchServices';
+import { searchServicesActive, serviceVendorForSource, webSearchTool, KEYLESS_EXA_SOURCE_ID } from './searchServices';
 import { SearchServiceSettings, SearchVendorGlyph } from './SearchServiceParts';
 import { confirmGuardPlan, sendAgreed, unansweredRefusal } from './guardedWrite';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
@@ -246,8 +246,9 @@ export const SourceDetailPanel: React.FC<{
       })
     : null;
   const searchTool = webSearchTool(capabilityStatus);
+  const keylessExa = source.id === KEYLESS_EXA_SOURCE_ID;
   const serviceVendor = serviceVendorForSource(searchTool, source.id);
-  const serviceDetail = Boolean(serviceVendor && (source.protocol === 'search' || serviceView));
+  const serviceDetail = keylessExa || Boolean(serviceVendor && (source.protocol === 'search' || serviceView));
   // Usage, like the Tools rows, waits for the read to list this Source as a search service.
   const serviceCandidate = searchServicesActive(searchTool)
     && Boolean(searchTool?.executor_candidates.some((row) => row.kind === 'service' && row.source_id === source.id));
@@ -805,16 +806,18 @@ export const SourceDetailPanel: React.FC<{
   const providerLabel = providerCopyKey ? t(providerCopyKey) : providerIdentity;
   const protocolLabel = t(PROTOCOL_COPY_KEYS[source.protocol]);
   const interfaceLabel = detailsHidden ? protocolLabel : `${providerLabel} · ${protocolLabel}`;
-  const credentialLabel = source.kind === 'api_key'
-    ? t('settings.models.sourceDetail.metadata.apiKey')
-    : t('settings.models.sourceDetail.metadata.account');
+  const credentialLabel = keylessExa
+    ? t('settings.models.searchServices.noSetup')
+    : source.kind === 'api_key'
+      ? t('settings.models.sourceDetail.metadata.apiKey')
+      : t('settings.models.sourceDetail.metadata.account');
   const credentialValue = source.kind === 'api_key'
     ? source.masked_credential
     : source.account_label;
   const lastFetched = source.last_discovered_at
     ? formatRelativeTime(source.last_discovered_at, t)
     : t('settings.models.sourceDetail.metadata.neverFetched');
-  const testable = source.kind === 'api_key' && source.protocol !== 'search' && source.supply_channel === 'hub';
+  const testable = !keylessExa && source.kind === 'api_key' && source.protocol !== 'search' && source.supply_channel === 'hub';
   const usageSummary = adoptedBackends.length > 0
     ? t('settings.models.sourceDetail.usageSummary', { count: source.models.length, backends: adoptedBackends.join(i18n.language.startsWith('zh') ? '、' : ', ') })
     : t('settings.models.gateway.modelCount', { count: source.models.length });
@@ -827,6 +830,7 @@ export const SourceDetailPanel: React.FC<{
           <div className="flex min-w-0 flex-col gap-1">
             <h2 ref={headingRef} tabIndex={-1} className="text-lg font-bold text-foreground">{source.display_name}</h2>
             <p className="model-hub-tool-note">{t(source.protocol === 'search' ? 'settings.models.searchServices.noModels' : 'settings.models.searchServices.modelsAndSearch')}</p>
+            {keylessExa && <p className="model-hub-tool-note">{t('settings.models.searchServices.keylessEndpoint')}</p>}
           </div>
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -840,19 +844,19 @@ export const SourceDetailPanel: React.FC<{
           </div>}
           {source.trial_pending && <p className="model-hub-tool-note px-5 pt-3">{t('settings.models.searchServices.trialPending')}</p>}
           <section className="flex flex-col gap-3 border-b border-border px-5 py-4">
-            <h3 className="font-semibold text-foreground">{t('settings.models.sourceDetail.metadata.apiKey')}</h3>
+            <h3 className="font-semibold text-foreground">{keylessExa ? t('settings.models.searchServices.noSetup') : t('settings.models.sourceDetail.metadata.apiKey')}</h3>
             {source.protocol === 'search' ? <div className="flex flex-wrap items-center gap-3">
               {credentialValue && <SourcePrivateValue value={credentialValue} className="font-mono" />}
-              <Button variant="outline" size="sm" disabled={busy} onClick={() => setReplacingKey(true)}>{t('settings.models.searchServices.replaceKey')}</Button>
+              {!keylessExa && <Button variant="outline" size="sm" disabled={busy} onClick={() => setReplacingKey(true)}>{t('settings.models.searchServices.replaceKey')}</Button>}
             </div> : <>
               <p className="model-hub-tool-note">{t('settings.models.searchServices.sharedKey', { source: source.display_name })}</p>
               <Button variant="outline" size="sm" className="self-start" onClick={() => { onManageSource?.(); setReplacingKey(true); }}>{t('settings.models.searchServices.manageSource')}</Button>
             </>}
           </section>
           {searchSettings}
-          <p className="model-hub-tool-note px-5 py-4">{t('settings.models.searchServices.custody')}</p>
+          <p className="model-hub-tool-note px-5 py-4">{t(keylessExa ? 'settings.models.searchServices.keylessCustody' : 'settings.models.searchServices.custody')}</p>
         </div>
-        {source.protocol === 'search' && <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-5 py-4">
+        {source.protocol === 'search' && !keylessExa && <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-5 py-4">
           <p className="model-hub-tool-note">{t('settings.models.searchServices.removeNote')}</p>
           <Button variant="outline" size="sm" className="text-destructive-ink" disabled={busy} onClick={beginDelete}>{t('settings.models.sourceDetail.row.remove')}</Button>
         </footer>}
@@ -872,9 +876,11 @@ export const SourceDetailPanel: React.FC<{
         {(source.base_url || credentialValue) && <SourcePrivacyToggle />}
       </section>
       <dl className="model-hub-source-metadata grid shrink-0 grid-cols-2 gap-x-5 gap-y-3 border-b border-border bg-background px-5 py-3 sm:grid-cols-4">
-        <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.endpoint')}</dt><dd className="truncate font-mono">{source.base_url
-          ? <SourcePrivateValue value={source.base_url} />
-          : t('settings.models.sourceDetail.metadata.officialEndpoint')}</dd></div>
+        <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.endpoint')}</dt><dd className="truncate font-mono">{keylessExa
+          ? t('settings.models.searchServices.keylessEndpoint')
+          : source.base_url
+            ? <SourcePrivateValue value={source.base_url} />
+            : t('settings.models.sourceDetail.metadata.officialEndpoint')}</dd></div>
         <div className="min-w-0"><dt>{credentialLabel}</dt><dd className="font-mono">{credentialValue
           ? <SourcePrivateValue value={credentialValue} />
           : '—'}</dd></div>

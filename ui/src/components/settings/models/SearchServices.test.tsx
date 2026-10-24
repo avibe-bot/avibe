@@ -16,6 +16,7 @@ import { createSourceCollectionReadAuthority } from './collectionReadAuthority';
 import { ApiCallError, modelsApi } from './modelsApi';
 import type { SourceMutationSettlement, TrackSourceMutation } from './mutationSettlement';
 import { readyRegion } from './regionRead';
+import { keylessExaSource } from './searchServices';
 import { ACTIVE_SEARCH, KEYLESS_ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import { SourcesCard } from './SourcesCard';
@@ -23,8 +24,8 @@ import { ToolsTab } from './ToolsTab';
 import type { HostedServiceExecutorCandidate, HostedWebSearchToolStatus, Source, UsageReport } from './types';
 
 const wrap = (element: React.ReactElement, lng = 'en') => <I18nextProvider i18n={i18n.cloneInstance({ lng })}><ToastProvider>{element}</ToastProvider></I18nextProvider>;
-const tab = (tool = ACTIVE_SEARCH) => {
-  const onSave = vi.fn();
+const tab = (tool = ACTIVE_SEARCH, save = vi.fn()) => {
+  const onSave = save;
   const onOpenService = vi.fn();
   const onRetryService = vi.fn();
   const onAddService = vi.fn();
@@ -79,7 +80,7 @@ describe('search service activation and mixed order', () => {
       <SourcesCard read={readyRegion(SEARCH_SOURCES)} onRetry={vi.fn()} onOpenSource={vi.fn()} onAddApiKey={vi.fn()} onAddSubscription={vi.fn()} searchTool={ACTIVE_SEARCH} onAddSearchService={vi.fn()} />
     </>, lng));
     expect(screen.getByText(locale.t('settings.models.searchServices.subtitle'))).toBeTruthy();
-    expect(screen.getAllByRole('switch')).toHaveLength(2);
+    expect(screen.getAllByRole('switch')).toHaveLength(2 + ACTIVE_SEARCH.executor_candidates.filter((candidate) => candidate.kind === 'service').length);
     expect(screen.getByRole('heading', { name: locale.t('settings.models.searchServices.order') })).toBeTruthy();
     expect(screen.getByRole('button', { name: locale.t('settings.models.searchServices.addProvider') })).toBeTruthy();
     expect(screen.getByRole('button', { name: locale.t('settings.models.searchServices.add') })).toBeTruthy();
@@ -124,11 +125,27 @@ describe('search service activation and mixed order', () => {
     tab(KEYLESS_ACTIVE_SEARCH);
     expect(screen.getByText('Exa (free)')).toBeTruthy();
     expect(screen.getByText('Free')).toBeTruthy();
+    expect(screen.getByText(/IP rate-limited/)).toBeTruthy();
     const { onOpenSource } = addDialog(KEYLESS_ACTIVE_SEARCH);
     expect(screen.getByText('Free; IP rate-limited')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Add Exa (free)' })).toBeNull();
     await userEvent.click(screen.getByRole('button', { name: 'View search order' }));
     expect(onOpenSource).toHaveBeenCalledWith('src_exakeyless');
+  });
+
+  it('saves the built-in keyless Exa row switch without opening credential actions', async () => {
+    const onSave = vi.fn();
+    tab(KEYLESS_ACTIVE_SEARCH, onSave);
+    await userEvent.click(within(document.querySelector('[data-executor="src_exakeyless"]') as HTMLElement).getByRole('switch', { name: 'Use for web search' }));
+    expect(onSave).toHaveBeenCalledWith('web_search', { services: { src_exakeyless: { enabled: false } } });
+  });
+
+  it('opens the built-in keyless detail without key or removal actions', () => {
+    detail(keylessExaSource(KEYLESS_ACTIVE_SEARCH.executor_candidates[0], KEYLESS_ACTIVE_SEARCH.service_vendors?.[0]), KEYLESS_ACTIVE_SEARCH);
+    expect(screen.getByText('mcp.exa.ai')).toBeTruthy();
+    expect(screen.getByText('Free')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Replace key' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
   });
 
   it('keeps keyboard focus on a usable arrow when the last movable row is followed by disabled Sources', async () => {

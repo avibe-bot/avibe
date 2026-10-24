@@ -1,4 +1,23 @@
-import type { HostedSearchServiceVendor, HostedToolsStatus, HostedWebSearchToolStatus } from './types';
+import type { HostedSearchServiceVendor, HostedToolsStatus, HostedWebSearchToolStatus, Source, SourceState } from './types';
+
+export const KEYLESS_EXA_SOURCE_ID = 'src_exakeyless';
+export const KEYLESS_EXA_VENDOR_ID = 'exa-mcp';
+
+export const keylessExaSource = (candidate?: HostedWebSearchToolStatus['executor_candidates'][number], vendor?: HostedSearchServiceVendor): Source => ({
+  id: KEYLESS_EXA_SOURCE_ID,
+  kind: 'api_key',
+  vendor: KEYLESS_EXA_VENDOR_ID,
+  display_name: vendor?.name ?? 'Exa (free)',
+  protocol: 'search',
+  supply_channel: 'hub',
+  billing: 'metered',
+  state: (candidate?.kind === 'service' ? candidate.state : undefined) ?? ({ status: 'active' } satisfies SourceState),
+  last_discovered_at: null,
+  models: [],
+  base_url: null,
+  credential_ref: null,
+  masked_credential: null,
+});
 
 /** One read signal across Tools, Sources and detail; S2b-2 activates service reads and execution together. */
 export const searchServicesActive = (tool: HostedWebSearchToolStatus | null | undefined): boolean =>
