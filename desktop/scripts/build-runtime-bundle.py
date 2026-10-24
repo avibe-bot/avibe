@@ -68,20 +68,17 @@ def run(command: list[str], *, cwd: Path = REPO_ROOT, env: dict[str, str] | None
 def rename_payload(
     source: Path,
     destination: Path,
-    *,
-    os_name: str = os.name,
-    retry_delays: tuple[float, ...] = WINDOWS_RENAME_RETRY_DELAYS,
 ) -> None:
     """Rename a built payload, tolerating transient Windows file locks."""
 
-    total_attempts = len(retry_delays) + 1
+    total_attempts = len(WINDOWS_RENAME_RETRY_DELAYS) + 1
     for attempt in range(1, total_attempts + 1):
         try:
             source.rename(destination)
             return
         except OSError as error:
             winerror = getattr(error, "winerror", None)
-            if os_name != "nt" or winerror not in {5, 32}:
+            if os.name != "nt" or winerror not in {5, 32}:
                 raise
             if attempt == total_attempts:
                 print(
@@ -91,7 +88,7 @@ def rename_payload(
                     flush=True,
                 )
                 raise
-            delay = retry_delays[attempt - 1]
+            delay = WINDOWS_RENAME_RETRY_DELAYS[attempt - 1]
             print(
                 f"--- payload rename attempt {attempt}/{total_attempts} failed "
                 f"with WinError {winerror}; retrying in {delay:g}s ---",

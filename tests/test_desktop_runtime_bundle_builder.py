@@ -34,14 +34,11 @@ def test_payload_rename_retries_windows_file_locks_then_succeeds(monkeypatch, tm
     destination = tmp_path / "relocated runtime"
     source.rename.side_effect = [windows_file_error(5), windows_file_error(32), None]
     sleeps = []
+    monkeypatch.setattr(builder.os, "name", "nt")
+    monkeypatch.setattr(builder, "WINDOWS_RENAME_RETRY_DELAYS", (0.25, 0.5))
     monkeypatch.setattr(builder.time, "sleep", sleeps.append)
 
-    builder.rename_payload(
-        source,
-        destination,
-        os_name="nt",
-        retry_delays=(0.25, 0.5),
-    )
+    builder.rename_payload(source, destination)
 
     assert source.rename.call_args_list == [((destination,),)] * 3
     assert sleeps == [0.25, 0.5]
@@ -56,15 +53,12 @@ def test_payload_rename_exhausts_windows_retry_budget(monkeypatch, tmp_path, cap
     error = windows_file_error(5)
     source.rename.side_effect = error
     sleeps = []
+    monkeypatch.setattr(builder.os, "name", "nt")
+    monkeypatch.setattr(builder, "WINDOWS_RENAME_RETRY_DELAYS", (1.0, 2.0))
     monkeypatch.setattr(builder.time, "sleep", sleeps.append)
 
     with pytest.raises(OSError) as raised:
-        builder.rename_payload(
-            source,
-            destination,
-            os_name="nt",
-            retry_delays=(1.0, 2.0),
-        )
+        builder.rename_payload(source, destination)
 
     assert raised.value is error
     assert source.rename.call_count == 3
@@ -89,15 +83,12 @@ def test_payload_rename_does_not_retry_other_platforms_or_errors(
     destination = tmp_path / "relocated runtime"
     source.rename.side_effect = error
     sleep = Mock()
+    monkeypatch.setattr(builder.os, "name", os_name)
+    monkeypatch.setattr(builder, "WINDOWS_RENAME_RETRY_DELAYS", (0.0,))
     monkeypatch.setattr(builder.time, "sleep", sleep)
 
     with pytest.raises(OSError) as raised:
-        builder.rename_payload(
-            source,
-            destination,
-            os_name=os_name,
-            retry_delays=(0.0,),
-        )
+        builder.rename_payload(source, destination)
 
     assert raised.value is error
     source.rename.assert_called_once_with(destination)
