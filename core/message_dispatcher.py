@@ -536,9 +536,10 @@ class ConsolidatedMessageDispatcher:
         On every exit, including a cancellation in a surface, the processing
         indicator is finished and the armed commit then runs with no await
         inside it: the signal, the emit's post-signal steps, the runtime release
-        and the Turn's evidence write. Neither the runner nor a cancellation can
-        get between the signal and that write (#2714). An emit that never armed
-        only releases the runtime, as before.
+        and the Turn's initial evidence-write attempt. On writer contention the
+        manager owns a pending completion before control yields; the runner joins
+        that fence before cleanup (#2706 B2). An emit that never armed only
+        releases the runtime, as before.
         """
 
         commit = _TerminalCommit(output_semantics)
@@ -566,7 +567,7 @@ class ConsolidatedMessageDispatcher:
     def _commit_terminal_turn(
         self, context: MessageContext, commit: _TerminalCommit
     ) -> BaseException | None:
-        """Run an armed commit synchronously; return the post-signal step's error."""
+        """Run the signal/release/write attempt synchronously; hold a post-signal error."""
 
         if commit.signal is None:
             self._release_runtime_turn(context, commit.output_semantics)
