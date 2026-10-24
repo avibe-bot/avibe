@@ -9,6 +9,9 @@ Status: **design**, 2026-10-19. Direction and the six product decisions in §0 a
   agent process.
 - The owner reviewed an interactive draft (a Show Page) on 2026-10-19. Formal frames go to `avibe-docs/design.pen`
   through Pencil (§6).
+- The built-in, keyless Exa extension is specified in [`web-search-keyless-exa.md`](web-search-keyless-exa.md).
+  It keeps this document's service, record, order and `auto_enroll` rules unless that plan names a keyless-specific
+  exception; its UI and public-disclosure details are authoritative for `Exa（免费）`.
 
 ## 0. Owner decisions
 
@@ -393,9 +396,10 @@ unrecognized tags keep the status-only fallback (including `403 FEATURE_DISABLED
     failed before `on_sent`, as with DNS, connect or TLS errors; a pre-send failure is `service_unavailable`, costs
     $0 and is not metered) or `skipped` (not tried);
   - `error_code` is set on a failed entry when the failure has a code. A failed search-service request always has
-    one of `service_key_invalid`, `service_balance`, `service_limit`, `service_unavailable`, `service_refused` and
-    `service_unreadable`, each with en and zh copy. A model executor has one only when its failure already carries
-    a code (`FAILURE_CODES`); otherwise the note says "失败" for that Source;
+    one of `service_key_invalid`, `service_balance`, `service_limit`, `service_unavailable`, `service_refused`,
+    `service_unreadable`, or the keyless-Exa-specific `service_rate_limited`, each with en and zh copy. The
+    rate-limited code is a cooldown/failover reason, never credential health. A model executor has one only when
+    its failure already carries a code (`FAILURE_CODES`); otherwise the note says "失败" for that Source;
   - `skipped` is `blocked`, `disabled`, `cooling`, `query_too_long` or `unavailable`; a `cooling` entry also
     carries `retry_at`, the deadline captured when the skip was decided, since a service cooldown is in memory
     and a later read cannot rebuild it;
@@ -587,12 +591,22 @@ and an exact $0 do not; a total keeps "≈" when any non-zero figure in it does)
 
 ## 7. Defaults, cost and privacy
 
-- Nothing new turns on by itself except decision 4: a qualifying DeepSeek Source joins the search order, ahead of
-  model executors, because it is a search service. The public docs say so.
+- The current automatic order is a fact of this release: the user's own search services (Tavily, keyed Exa and
+  official DeepSeek) → the built-in keyless Exa service → model executors. Keyless
+  Exa is on by default, needs no key or setup, remains a fallback even when
+  another service exists, and each search-service row can be reordered or
+  turned off.
+  The complete keyless-Exa representation, MCP execution, rate-limit handling, UI and public-disclosure facts are in
+  [`web-search-keyless-exa.md`](web-search-keyless-exa.md).
+- This design makes no general promise that nothing else will turn on automatically. Public docs state the current
+  default and where a query goes as facts, and are updated when a default changes.
 - A search sends the query to the service that runs it. DeepSeek processes queries in the People's Republic of
-  China; the add dialog states each vendor's facts.
-- Prices are list prices with date and source. Free tiers and plans are not modeled; the footnote says that actual
-  bills may differ.
+  China; keyless Exa sends the query directly from the Avibe runtime host to Exa's hosted MCP endpoint, where Exa
+  can see the connection's IP and the honest Avibe integration identity. The keyless request has no API key. The
+  Exa Terms and current upstream processing facts are recorded in the keyless-Exa plan.
+- Prices are list prices with date and source. Keyless Exa's price and recorded cost are exactly $0 and its UI label
+  is "免费"; keyed Exa's monthly free credits, if documented by Exa, apply only to the keyed REST path. Actual
+  bills and provider limits may differ from list-price or anonymous-rate-limit facts.
 
 ## 8. Contract changes
 
@@ -650,8 +664,10 @@ One coordinated Model Hub version event under the freeze protocol (`model-hub-co
   `HostedRecord.attempts[]` with `source_id`, `label`, `kind`, `outcome`, `error_code`, `skipped`, `retry_at`, `needs_action`, `cost` and
   `superseded`; the `core/hosted_activity` projection's "至少" for a total with an unpriced attempt; `HostedCost.estimate` ("≈" on a reported figure), and a cost of exactly 0 rendered as
   "$0" without "≈" by that projection, `HostedToolRow` and the IM line, since a zero is never an estimate; and
-  their reader and writer types, and the six `service_*` codes in `HOSTED_ERROR_CODES`, with copy on every surface; and a
-  service executor origin. `Protocol` and the assistant-message `Origin` stay unchanged (four model protocols); a
+  their reader and writer types, and the six existing `service_*` codes plus keyless Exa's
+  `service_rate_limited` in `HOSTED_ERROR_CODES`, with copy on every surface; and a
+  service executor origin. The rate-limited code is operationally a service
+  cooldown/failover reason, never credential health. `Protocol` and the assistant-message `Origin` stay unchanged (four model protocols); a
   new `ServiceExecutorOrigin` definition `{provider, api, model}` has `api` fixed to the const `"search_api"`,
   `provider` the vendor and `model` the catalog service id, and `ProxyExecution.executor_origin` (today a `$ref` to `Origin`) becomes `oneOf` the
   released `Origin` and `ServiceExecutorOrigin`. C-1 owns the definition; the Python reader and writer types in
