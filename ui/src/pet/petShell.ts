@@ -1,12 +1,15 @@
 import { useEffect, useSyncExternalStore } from 'react';
 
-import { onPetEvents, petBridge, type LayoutSnapshot, type PetBinding, type PetIntent } from './petBridge';
+import { onPetEvents, petBridge, type LayoutSnapshot, type PetBinding, type PetIntent, type PetReady } from './petBridge';
 import { petPanel } from './petPanel';
 import type { PetSurfaceEpoch } from './usePetSession';
 
 /** Document-local main resolution and pending summons. Legacy shell bindings
  * remain readable for compatibility, but never select the conversation. */
 const FIRST_LAYOUT_TIMEOUT_MS = 4000;
+// A failed `pet_ready` is asked again after this, doubling up to the cap.
+const READY_RETRY_MS = 250;
+const READY_RETRY_MAX_MS = 8000;
 let binding: string | null = null;
 let legacyBinding: PetBinding | null = null;
 let pendingSummon: PetIntent | null = null;
@@ -53,7 +56,7 @@ const start = () => {
   // The page draws nothing until the shell's first layout; if that never
   // comes, it draws the default one after FIRST_LAYOUT_TIMEOUT.
   const waiting = window.setTimeout(petPanel.stopWaiting, FIRST_LAYOUT_TIMEOUT_MS);
-  readyPromise = petBridge.ready().then((ready) => {
+  const onReady = (ready: PetReady) => {
     window.clearTimeout(waiting);
     legacyBinding = ready;
     readyLoaded = true;
@@ -65,10 +68,17 @@ const start = () => {
       else acknowledge(petPanel.revision());
     } else petPanel.stopWaiting();
     if (ready.summon_pending && liveSummons === liveSummonsAtRequest) noteSummon(ready.summon_pending.intent);
-  }).catch(() => {
+  };
+  // Until the shell has heard this document draws the top layout, it cannot
+  // release a frame held for it, so a failed pet_ready is asked again. The
+  // page draws the default layout meanwhile and drags the window natively.
+  const ask = (attempt: number): Promise<void> => petBridge.ready().then(onReady, () => {
     window.clearTimeout(waiting);
     petPanel.stopWaiting();
+    const delay = Math.min(READY_RETRY_MS * 2 ** attempt, READY_RETRY_MAX_MS);
+    return new Promise<void>((resolve) => { window.setTimeout(resolve, delay); }).then(() => ask(attempt + 1));
   });
+  readyPromise = ask(0);
 };
 
 /**

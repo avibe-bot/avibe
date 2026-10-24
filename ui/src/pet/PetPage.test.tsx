@@ -3188,7 +3188,7 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     expect(invoke).toHaveBeenCalledWith('pet_ready', { layouts: true });
   });
 
-  it('draws nothing until the shell\'s first snapshot, whichever layout it is, and the default one if pet_ready fails', async () => {
+  it('draws nothing until the shell\'s first snapshot, whichever layout it is', async () => {
     const readyAnswer = deferred<unknown>();
     shell(vi.fn((command: string) => command === 'pet_ready' ? readyAnswer.promise : Promise.resolve({ revision: 2, layout: top })));
     mainSession('S'); render(<PetPage />);
@@ -3216,15 +3216,30 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     expect(pending()).toBe(false);
     expect(edge()).toBe('bottom');
     setupDone = true;
+  });
 
-    cleanup();
-    vi.resetModules();
-    ({ PetPage } = await import('./PetPage'));
-    shell(vi.fn((command: string) => command === 'pet_ready' ? Promise.reject(new Error('gone')) : Promise.resolve(bottom)));
-    render(<PetPage />);
+  it('asks pet_ready again after it fails, drawing the default layout and dragging natively meanwhile', async () => {
+    let failures = 2;
+    const invoke = recording((command, args) => {
+      if (command === 'pet_ready') return failures-- > 0 ? Promise.reject(new Error('not yet')) : ready(top, 3);
+      if (command === 'pet_drag') return new Promise(() => {});
+      return { revision: args?.revision ?? 3, layout: top };
+    });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
     await screen.findByText('Session S');
+    const pending = () => document.querySelector('.pet-mini-stage')?.hasAttribute('data-layout-pending');
+    const called = (name: string) => invoke.mock.calls.filter(([command]) => command === name).length;
     await waitFor(() => expect(pending()).toBe(false));
     expect(edge()).toBe('bottom');
+    drag(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(called('plugin:window|start_dragging')).toBe(1));
+    expect(called('pet_drag')).toBe(0);
+    // Two failures back off 250ms, then 500ms; the third answer is drawn and acknowledged.
+    await waitFor(() => expect(settles(invoke)).toContainEqual([3, 'top']), { timeout: 3000 });
+    expect(called('pet_ready')).toBe(3);
+    drag(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(called('pet_drag')).toBe(1));
   });
 
   it('draws a published snapshot before acknowledging it, and ignores an older one', async () => {
@@ -3264,7 +3279,7 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     expect(edge()).toBe('top');
   });
 
-  it('a press drags through the shell at once, even before pet_ready answers, and its layout arrives as a snapshot', async () => {
+  it('a press drags the window natively until pet_ready answers, then through the shell, and its layout arrives as a snapshot', async () => {
     const readyAnswer = deferred<unknown>();
     const invoke = recording((command, args) => {
       if (command === 'pet_ready') return readyAnswer.promise;
@@ -3274,10 +3289,15 @@ describe('dragging the pet to the top of the display (spec §9.1)', () => {
     shell(invoke);
     mainSession('S'); render(<PetPage />);
     await screen.findByText('Session S');
+    const called = (name: string) => invoke.mock.calls.filter(([command]) => command === name).length;
+    // The shell does not yet know this page draws the top layout.
     drag(screen.getByLabelText('pet.recentTurns'));
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_drag'));
-    expect(invoke.mock.calls.some(([command]) => command === 'plugin:window|start_dragging')).toBe(false);
+    await waitFor(() => expect(called('plugin:window|start_dragging')).toBe(1));
+    expect(called('pet_drag')).toBe(0);
     await act(async () => readyAnswer.resolve(ready()));
+    drag(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(called('pet_drag')).toBe(1));
+    expect(called('plugin:window|start_dragging')).toBe(1);
     await publish(2, top);
     await waitFor(() => expect(settles(invoke)).toContainEqual([2, 'top']));
     // The drag was not a click: the history stays closed.

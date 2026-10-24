@@ -656,7 +656,10 @@ already communicate activity. Keep the upper-right red unread badge.
   that loads reads the same snapshot from `pet_ready`. The page draws only a
   newer revision, then acknowledges it (`pet_settle(revision)`), and the
   waiting frame comes back only on its own revision. Stale acknowledgements
-  change nothing; after 1s without one the frame applies anyway. No reply
+  change nothing; after 1s without one the frame applies anyway. That 1s
+  belongs to one publication: when the machine publishes the held snapshot
+  again (a document loaded meanwhile), the earlier timer releases nothing and
+  the new one starts over. No reply
   carries a layout to current pages (`pet_set_expanded` still answers one for
   older pages). The page always acknowledges the snapshot in its `pet_ready`
   reply, even a revision it already drew from an event.
@@ -679,10 +682,15 @@ already communicate activity. Keep the upper-right red unread badge.
   native drag. Both layouts draw Vibey at the same place in the strip, and the
   page hides the column in any window that short (a sliver otherwise). If the
   native drag cannot start, the window goes back as it was.
-  - The shell says it drags the pet before any page script runs: an
-    initialization script defines `window.__AVIBE_PET_DRAG__`, so a press
-    picks its drag path at once and nothing waits on `pet_ready`. Shells
-    without the marker keep the page's old `start_dragging` path.
+  - The shell says it can drag the pet before any page script runs: an
+    initialization script defines `window.__AVIBE_PET_DRAG__`. Shells without
+    the marker keep the page's old `start_dragging` path. The shell drags
+    only a document whose `pet_ready` has told it the document draws layouts,
+    and refuses `pet_drag` from one it still takes for loading (or legacy).
+    The page drags through the shell only once its `pet_ready` has succeeded;
+    before that a press drags the window natively, which the shell treats
+    like any other move (below). A failed `pet_ready` is asked again after
+    250ms, doubling up to 8s, until it succeeds.
   - On release (the shell reads the buttons: no button down in
     `pressedMouseButtons` on macOS, whose bits are physical and whose primary
     side can be the right one; the primary button in `GetAsyncKeyState` on
@@ -699,7 +707,7 @@ already communicate activity. Keep the upper-right red unread badge.
   until it has the shell's first snapshot from `pet_ready`, so a pet restored
   in the top layout never shows a frame in the other one as it loads. If
   `pet_ready` fails or has not answered after 4s, the page draws the default
-  layout anyway. The window itself is created and shown as before: a hidden
+  layout anyway (and keeps asking, as above). The window itself is created and shown as before: a hidden
   macOS window would pause the page's animation frames, and with them its
   first acknowledgement. Older pages, which do not read the marker, draw at
   once as before.
@@ -717,7 +725,10 @@ already communicate activity. Keep the upper-right red unread badge.
     Vibey overlaps most, else its saved display if it is connected, else the
     primary. A pet the user parked on a small laptop screen stays there, even
     when a large external display is connected. With no display at all, keep
-    today's behaviour.
+    today's behaviour. The saved display for a drop or a move is the one
+    saved before it (a drag saves nothing on its way), so a pet dropped off
+    every display, as Windows allows just above a secondary one, returns to
+    the display it came from.
   - A short display gets a shorter window, never a window past its edge. The
     expanded list keeps its fixed box, so on such a display its far end can
     still be cut at the window's edge, as before.

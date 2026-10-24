@@ -83,6 +83,9 @@ const parseBinding = (value: unknown): PetBinding => {
 };
 
 let devMemory: PetBinding = { binding: null, revision: 0 };
+// Whether this document's `pet_ready` has succeeded: only then does the shell
+// know it draws the top layout, and only then may the shell drag it.
+let shellKnowsLayouts = false;
 
 const readDevBinding = (): PetBinding => {
   try {
@@ -99,12 +102,18 @@ export const petBridge = {
   native: (): boolean => shellInvoke() !== null,
 
   /**
-   * Whether `drag` goes through the shell, which shrinks the window to Vibey.
-   * The shell says so before any page script runs (`__AVIBE_PET_DRAG__`), so
-   * a press knows at once; older shells have no marker.
+   * Whether the shell drags the pet and owns its layout. It says so before
+   * any page script runs (`__AVIBE_PET_DRAG__`); older shells have no marker.
    */
-  shellDrags: (): boolean => shellInvoke() !== null
+  shellOwnsLayout: (): boolean => shellInvoke() !== null
     && (window as unknown as { __AVIBE_PET_DRAG__?: unknown }).__AVIBE_PET_DRAG__ === true,
+
+  /**
+   * Whether `drag` goes through the shell, which shrinks the window to Vibey:
+   * only once this page's `pet_ready` has told the shell the page draws the
+   * top layout. Until then a press drags the window natively.
+   */
+  shellDrags: (): boolean => shellKnowsLayouts && petBridge.shellOwnsLayout(),
 
   ready: async (): Promise<PetReady> => {
     const invoke = shellInvoke();
@@ -115,11 +124,13 @@ export const petBridge = {
     } | null;
     const pending = result?.summon_pending;
     const snapshot = parseSnapshot({ revision: result?.layout_revision, layout: result?.layout });
-    return {
+    const ready = {
       ...parseBinding(result),
       summon_pending: pending && isIntent(pending.intent) ? { intent: pending.intent } : null,
       ...(snapshot ? { snapshot } : {}),
     };
+    shellKnowsLayouts = true;
+    return ready;
   },
 
   setExpanded: async (expanded: boolean): Promise<PetLayout> => {

@@ -527,7 +527,12 @@ fn follow_move(app: &AppHandle, window: &WebviewWindow) {
     };
     let scale = anchor_scale(app, Some(window_scale));
     let page_layouts = lock(&pet.frame).state.draws_layouts();
-    let (anchor, next) = place_moved(rescale(at, window_scale, scale), &work_areas(app, scale), page_layouts);
+    let (anchor, next) = place_moved(
+        rescale(at, window_scale, scale),
+        &work_areas(app, scale),
+        saved_monitor(app),
+        page_layouts,
+    );
     pet.store().set_anchor(PetAnchor {
         x: anchor.x.round(),
         y: anchor.y.round(),
@@ -558,9 +563,11 @@ fn perform(app: &AppHandle, window: &WebviewWindow, step: FrameStep) {
     match step {
         FrameStep::Keep => {}
         FrameStep::Apply { frame, anchor } => set_frame(window, frame.origin(anchor, 1.0), frame.size()),
-        FrameStep::Publish(snapshot) => {
+        FrameStep::Publish { snapshot, publication } => {
             // An older page ignores the event; one still loading may already listen.
             dispatch(window, LAYOUT_EVENT, &serde_json::json!(snapshot));
+            // The timer is this publication's: once the frame is published
+            // again (the page reloaded), it no longer releases anything.
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(SETTLE_TIMEOUT).await;
@@ -568,13 +575,21 @@ fn perform(app: &AppHandle, window: &WebviewWindow, step: FrameStep) {
                     let Some(window) = app.get_webview_window(PET_WINDOW) else {
                         return;
                     };
-                    let step = lock(&app.state::<Pet>().frame).state.expire(snapshot.revision);
+                    let step = lock(&app.state::<Pet>().frame).state.expire(publication);
                     perform(app, &window, step);
                 })
                 .await;
             });
         }
     }
+}
+
+/// The display `pet.json` last placed the pet on.
+fn saved_monitor(app: &AppHandle) -> Option<String> {
+    app.state::<Pet>()
+        .store()
+        .anchor()
+        .and_then(|anchor| anchor.monitor.clone())
 }
 
 /// The anchor of `window` drawn as `frame`, in the window's logical points.
@@ -835,7 +850,9 @@ fn begin_drag(app: &AppHandle, window: &WebviewWindow) -> Result<u64, String> {
     let mut frame = lock(&pet.frame);
     let anchor = window_anchor(window, frame.state.current()).ok_or(WINDOW_GONE)?;
     let Some(strip) = frame.state.begin_drag(anchor) else {
-        return Err("The desktop pet is already being placed.".to_owned());
+        // Placing it already, or its page has not said it draws the top
+        // layout (it drags the window natively then).
+        return Err("The desktop pet cannot be dragged by the shell now.".to_owned());
     };
     set_frame(window, strip.origin(anchor, 1.0), strip.size());
     let generation = pet.drag_generation.fetch_add(1, Ordering::SeqCst) + 1;
@@ -889,7 +906,9 @@ fn end_drag(app: &AppHandle, window: &WebviewWindow, generation: u64) -> Result<
     // The document may have reloaded during the drag: the machine knows what
     // the one showing now draws (or that it is still loading).
     let page_layouts = lock(&pet.frame).state.draws_layouts();
-    let (anchor, next) = place_moved(saved, &work_areas(app, scale), page_layouts);
+    // A drag never saves where it is, so the saved display is the one the pet
+    // was on before it: a drop off every display goes back there.
+    let (anchor, next) = place_moved(saved, &work_areas(app, scale), saved_monitor(app), page_layouts);
     let at = (anchor.x, anchor.y);
     pet.store().set_anchor(PetAnchor {
         x: anchor.x.round(),
