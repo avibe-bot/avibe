@@ -283,7 +283,7 @@ async def test_turn_freezes_preference_candidates_results_and_disabled_tail(tmp_
     service = owner(tmp_path, ("exa", "deepseek"), model=True,
                     web={"prefer_native": False, "services": {EXA: {"results": 2}, DEEPSEEK: {"enabled": False}}})
     turn = service.freeze_turn_hosted_tools(service.store.load())
-    assert [slot.source_id for slot in turn.executors["web_search"]] == [EXA, MODEL, KEYLESS_EXA_SOURCE_ID, DEEPSEEK]
+    assert [slot.source_id for slot in turn.executors["web_search"]] == [EXA, MODEL, DEEPSEEK, KEYLESS_EXA_SOURCE_ID]
     model = service.store.load().sources[-1]
     facts = service.hosted_tools_for_hop(model, "grok-4.6", turn)["web_search"]
     assert facts == {"native": "unsupported", "replay": "unsupported"}
@@ -650,17 +650,19 @@ async def test_search_read_and_chain_activate_together(tmp_path, monkeypatch):
 
     The default-on reader and producer share one predicate; no activation monkeypatch is allowed.
     """
-    service = owner(tmp_path, ("exa",), web={"prefer_native": False}, include_keyless=True)
+    service = owner(tmp_path, ("deepseek", "exa"), web={"prefer_native": False}, include_keyless=True)
     calls = answers(monkeypatch, service, wire())
     frozen = service.freeze_turn_hosted_tools(service.store.load())
     visible = _web(service)
     assert frozen.prefer_native is False
     assert [(slot.source_id, slot.kind, slot.results, slot.label) for slot in frozen.executors["web_search"]] == [
         (EXA, "service", 5, "exa"),
+        (DEEPSEEK, "service", 5, "deepseek"),
         (KEYLESS_EXA_SOURCE_ID, "service", 5, "Exa (free)"),
     ]
     assert [(row["source_id"], row["kind"]) for row in visible["executor_candidates"]] == [
         (EXA, "service"),
+        (DEEPSEEK, "service"),
         (KEYLESS_EXA_SOURCE_ID, "service"),
     ]
     assert {vendor["id"] for vendor in visible["service_vendors"]} == {"exa", "tavily", "deepseek", "exa-mcp"}
