@@ -825,7 +825,10 @@ Document the current default and routing facts only.
 ## 9. Phase 2 `web_fetch`
 
 This section records only the upstream facts needed to keep the phase-1 client
-reusable; the separate phase-2 lane owns the `web_fetch` product design.
+reusable; [`web-fetch.md`](web-fetch.md) owns the phase-2 tool, local-first order,
+address policy, bounded content/replay and fetch UI. It reuses this plan's
+`src_exakeyless` / `exa/mcp` identity, advanced-search-plus-fetch endpoint,
+shared MCP session and cooldown.
 
 - The exact keyless MCP tool is `web_fetch_exa`. The checked source also
   registers `crawling_exa` as a deprecated alias that points to the same
@@ -867,7 +870,7 @@ reusable; the separate phase-2 lane owns the `web_fetch` product design.
 
 The Model Hub master contract is **v20**. It first shipped in prerelease tag
 `gh-v3.2.3rc3` on **2026-10-22**; the latest prerelease is
-`gh-v3.2.3rc6`, published **2026-10-24**, and the checked rc4, rc5, and rc6
+`gh-v3.2.3rc7`, published **2026-10-24**, and the checked rc4, rc5, rc6 and rc7
 contract mirrors still advertise v20. Therefore this keyless-Exa design must
 not append new contract meanings to v20. The implementation lanes must open
 the next coordinated contract event as **v21** for any keyless-Exa shapes.
