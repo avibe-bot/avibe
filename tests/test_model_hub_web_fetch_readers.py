@@ -249,4 +249,3 @@ def test_malformed_future_usage_tool_disables_only_that_row(tmp_path, tool):
     path = tmp_path / "usage.json"
     path.write_text(json.dumps([{"day": "2026-10-24", "source_id": FREE_EXA, "service_id": "exa/mcp", "tool": tool, "requests": 1}]))
     assert BoundedUsageLedger(path, now=lambda: NOW).report(window="7d", now=NOW)["services"] == []
-
