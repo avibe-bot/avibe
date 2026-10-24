@@ -23,6 +23,7 @@ import type {
 } from './mutationSettlement';
 import { GuardGapList } from './GuardGapList';
 import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, repairAction, type RepairKind } from './repair';
+import { keylessExaSource } from './searchServices';
 import { ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
 import { SourceDetailPanel } from './SourceDetailPanel';
 import {
@@ -220,6 +221,17 @@ afterEach(() => {
 });
 
 describe('SourceDetailPanel', () => {
+  it('keeps keyless Exa in service-only mode while the hosted-tools read is unread', () => {
+    render(
+      <I18nextProvider i18n={i18n}>
+        <CommittedPanel source={keylessExaSource()} hostedTools={unreadRegion()} serviceView trackMutation={immediateTrack} onReauth={noReauth} />
+      </I18nextProvider>,
+    );
+    expect(screen.getByText('mcp.exa.ai')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Manage|管理/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Remove source|移除供应商/ })).toBeNull();
+  });
+
   it.each(['en', 'zh'])('hides endpoint, key and domain-derived metadata with one header control in %s', async (lng) => {
     const locale = i18n.cloneInstance({ lng });
     const { container } = render(<I18nextProvider i18n={locale}>

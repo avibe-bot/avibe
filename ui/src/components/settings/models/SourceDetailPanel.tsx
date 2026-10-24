@@ -248,7 +248,7 @@ export const SourceDetailPanel: React.FC<{
   const searchTool = webSearchTool(capabilityStatus);
   const keylessExa = source.id === KEYLESS_EXA_SOURCE_ID;
   const serviceVendor = serviceVendorForSource(searchTool, source.id);
-  const serviceDetail = Boolean(serviceVendor && (source.protocol === 'search' || serviceView));
+  const serviceDetail = keylessExa || Boolean(serviceVendor && (source.protocol === 'search' || serviceView));
   // Usage, like the Tools rows, waits for the read to list this Source as a search service.
   const serviceCandidate = searchServicesActive(searchTool)
     && Boolean(searchTool?.executor_candidates.some((row) => row.kind === 'service' && row.source_id === source.id));

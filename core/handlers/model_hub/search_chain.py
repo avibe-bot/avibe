@@ -15,6 +15,7 @@ from config.v2_config import (
     KEYLESS_EXA_ACTIVE,
     KEYLESS_EXA_SOURCE_ID,
     ModelHubSourceStateConfig,
+    is_keyless_exa_source,
     model_hub_keyless_exa_source,
     model_hub_search_service,
 )
@@ -244,7 +245,7 @@ class SearchChain:
                     health_generation = owner._latest_source_attempt_generation.get(source.id)
                     cooldown_generation = owner._service_cooldowns.generation(source, slot.model_id)
                 else:
-                    health_generation = owner._reserve_settlement_generation(source.id, source=source)
+                    health_generation = None if is_keyless_exa_source(source) else owner._reserve_settlement_generation(source.id, source=source)
                     cooldown_generation = owner._service_cooldowns.advance(source, slot.model_id)
 
             async def on_sent():
@@ -343,14 +344,16 @@ class SearchChain:
             superseded = False
             async with owner._mutation_lock:
                 previous = await asyncio.to_thread(owner.store.load)
-                current = next((s for s in previous.sources if s.id == source.id), None)
-                identity_current = current is not None and source_identity(current) == source_identity(source)
-                health_current = identity_current and owner._settlement_current(current, health_generation)
+                keyless_source = is_keyless_exa_source(source)
+                current = source if keyless_source else next((s for s in previous.sources if s.id == source.id), None)
+                identity_current = keyless_source or (current is not None and source_identity(current) == source_identity(source))
+                health_current = not keyless_source and identity_current and owner._settlement_current(current, health_generation)
                 cooldown_current = identity_current and owner._service_cooldowns.current(current, slot.model_id, cooldown_generation)
                 writes_health = result.blocker is not None or result.authenticated
                 writes_cooldown = result.cooling or result.record["status"] == "completed"
-                superseded = health_generation is not None and (
-                    (writes_health and not health_current) or (writes_cooldown and not cooldown_current)
+                superseded = (
+                    (health_generation is not None and writes_health and not health_current)
+                    or (cooldown_generation is not None and writes_cooldown and not cooldown_current)
                 )
                 if cooldown_current:
                     owner._service_cooldowns.settle(current, slot.model_id, cooldown_generation, result, response, ended_at)

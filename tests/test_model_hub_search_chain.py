@@ -347,6 +347,34 @@ async def test_keyless_producer_writes_request_only_zero_cost_usage(tmp_path, mo
 
 
 @pytest.mark.asyncio
+async def test_keyless_rate_limit_settles_service_cooldown_without_persisted_source(tmp_path, monkeypatch):
+    """KEX-2: synthetic keyless identity still owns the in-memory service cooldown."""
+    service = owner(
+        tmp_path,
+        (),
+        web={
+            "enabled": True,
+            "executor_order": [KEYLESS_EXA_SOURCE_ID],
+            "executor_order_kinds": {KEYLESS_EXA_SOURCE_ID: "service"},
+            "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
+        },
+    )
+    monkeypatch.setattr(hosted_tools, "KEYLESS_EXA_ACTIVE", True)
+    monkeypatch.setattr(search_chain, "KEYLESS_EXA_ACTIVE", True)
+    calls = answers(monkeypatch, service, wire(429, {"error": {"message": "slow down"}}, headers={"Retry-After": "60"}))
+    first = await run(service)
+    second = await run(service)
+    assert len(calls) == 1
+    assert first["record"]["attempts"][0]["error_code"] == "service_rate_limited"
+    assert second["record"]["attempts"] == [{
+        "source_id": KEYLESS_EXA_SOURCE_ID, "label": "Exa (free)", "kind": "service",
+        "outcome": "skipped", "skipped": "cooling",
+        "retry_at": (NOW + timedelta(seconds=60)).isoformat().replace("+00:00", "Z"),
+    }]
+    assert _web(service)["executor_candidates"][0]["cooldown_until"] == (NOW + timedelta(seconds=60)).isoformat().replace("+00:00", "Z")
+
+
+@pytest.mark.asyncio
 async def test_keyless_retry_branch_accepts_the_synthetic_source_while_flag_is_off(tmp_path):
     """KEX-1: a downgraded reader can clear a built-in cooldown without a Source row or network call."""
     service = owner(tmp_path, ("exa",))
