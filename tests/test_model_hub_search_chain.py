@@ -9,6 +9,7 @@ import asyncio
 import copy
 import json
 import threading
+from dataclasses import replace
 from datetime import timedelta
 
 import pytest
@@ -16,7 +17,7 @@ import pytest
 from config.v2_config import (
     KEYLESS_EXA_SERVICE_ID,
     KEYLESS_EXA_SOURCE_ID,
-    ModelHubConfig, ModelHubSourceStateConfig,
+    ModelHubConfig, ModelHubSearchServiceSettings, ModelHubSourceStateConfig,
     model_hub_keyless_exa_source,
 )
 from core.handlers.model_hub import hosted_tools, search_chain
@@ -35,13 +36,29 @@ ROW = {"url": "https://example.test/a", "title": "Title", "summary": "Model exce
        "date": "2026-10-21", "published_date": "today", "publishedDate": "yesterday"}
 
 
-def owner(tmp_path, vendors=("exa",), *, web=None, model=False):
+def owner(tmp_path, vendors=("exa",), *, web=None, model=False, include_keyless=False):
     service, store, adapter = _service(tmp_path)
     config = _config(web)
     selected = [IDS[vendor] for vendor in vendors]
     config.sources = [next(s for s in config.sources if s.id == sid) for sid in selected] + (
         [next(s for s in config.sources if s.id == MODEL)] if model else []
     )
+    setting = config.hosted_tools["web_search"]
+    if not include_keyless:
+        services = dict(setting.services)
+        services.setdefault(KEYLESS_EXA_SOURCE_ID, ModelHubSearchServiceSettings(enabled=False))
+        setting = replace(setting, services=services)
+    if not include_keyless and setting.executor_order is None and not (web and web.get("service_order")):
+        automatic_without_keyless = list(selected)
+        if model:
+            automatic_without_keyless.append(MODEL)
+        config.hosted_tools["web_search"] = replace(
+            setting,
+            executor_order=tuple(automatic_without_keyless),
+            executor_order_kinds={sid: "model" if sid == MODEL else "service" for sid in automatic_without_keyless},
+        )
+    else:
+        config.hosted_tools["web_search"] = setting
     store.config = config
     service.now = lambda: NOW
     return service
@@ -239,12 +256,12 @@ async def test_mapping_bounds_and_decode_are_off_loop(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("saved,kinds,expected", [
-    (None, None, [EXA, TAVILY, DEEPSEEK, MODEL]),
-    ([MODEL], None, [EXA, TAVILY, DEEPSEEK, MODEL]),
-    ([MODEL, DEEPSEEK], None, [EXA, TAVILY, DEEPSEEK, MODEL]),
-    ([MODEL, DEEPSEEK], {MODEL: "model", DEEPSEEK: "service"}, [EXA, TAVILY, MODEL, DEEPSEEK]),
-    ([DEEPSEEK], {DEEPSEEK: "service"}, [DEEPSEEK, EXA, TAVILY, MODEL]),
-    ([EXA, MODEL], {EXA: "model", MODEL: "model"}, [EXA, TAVILY, DEEPSEEK, MODEL]),
+    (None, None, [EXA, TAVILY, DEEPSEEK, MODEL, KEYLESS_EXA_SOURCE_ID]),
+    ([MODEL], None, [EXA, TAVILY, DEEPSEEK, MODEL, KEYLESS_EXA_SOURCE_ID]),
+    ([MODEL, DEEPSEEK], None, [EXA, TAVILY, DEEPSEEK, MODEL, KEYLESS_EXA_SOURCE_ID]),
+    ([MODEL, DEEPSEEK], {MODEL: "model", DEEPSEEK: "service"}, [EXA, TAVILY, MODEL, DEEPSEEK, KEYLESS_EXA_SOURCE_ID]),
+    ([DEEPSEEK], {DEEPSEEK: "service"}, [DEEPSEEK, EXA, TAVILY, MODEL, KEYLESS_EXA_SOURCE_ID]),
+    ([EXA, MODEL], {EXA: "model", MODEL: "model"}, [EXA, TAVILY, DEEPSEEK, MODEL, KEYLESS_EXA_SOURCE_ID]),
 ])
 def test_order_placement_is_read_only_and_survives_reload(tmp_path, saved, kinds, expected):
     web = {"service_order": [EXA, TAVILY]}
@@ -266,7 +283,7 @@ async def test_turn_freezes_preference_candidates_results_and_disabled_tail(tmp_
     service = owner(tmp_path, ("exa", "deepseek"), model=True,
                     web={"prefer_native": False, "services": {EXA: {"results": 2}, DEEPSEEK: {"enabled": False}}})
     turn = service.freeze_turn_hosted_tools(service.store.load())
-    assert [slot.source_id for slot in turn.executors["web_search"]] == [EXA, MODEL, DEEPSEEK]
+    assert [slot.source_id for slot in turn.executors["web_search"]] == [EXA, MODEL, KEYLESS_EXA_SOURCE_ID, DEEPSEEK]
     model = service.store.load().sources[-1]
     facts = service.hosted_tools_for_hop(model, "grok-4.6", turn)["web_search"]
     assert facts == {"native": "unsupported", "replay": "unsupported"}
@@ -282,13 +299,13 @@ async def test_turn_freezes_preference_candidates_results_and_disabled_tail(tmp_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mix,code,skips", [
-    ("disabled", "search_sources_blocked", ["disabled", "disabled"]),
-    ("blocked", "search_sources_blocked", ["blocked", "disabled"]),
-    ("cooling", "service_unavailable", ["cooling", "disabled"]),
-    ("unavailable", "service_unavailable", ["unavailable", "disabled"]),
-    ("long", "search_query_too_long", ["query_too_long", "disabled"]),
-    ("blocked_long", "search_sources_blocked", ["blocked", "disabled"]),
-    ("cooling_long", "service_unavailable", ["cooling", "disabled"]),
+    ("disabled", "search_sources_blocked", ["disabled", "disabled", "disabled"]),
+    ("blocked", "search_sources_blocked", ["blocked", "disabled", "disabled"]),
+    ("cooling", "service_unavailable", ["cooling", "disabled", "disabled"]),
+    ("unavailable", "service_unavailable", ["unavailable", "disabled", "disabled"]),
+    ("long", "search_query_too_long", ["query_too_long", "disabled", "disabled"]),
+    ("blocked_long", "search_sources_blocked", ["blocked", "disabled", "disabled"]),
+    ("cooling_long", "service_unavailable", ["cooling", "disabled", "disabled"]),
 ])
 async def test_skip_precedence_terminal_reason_and_attempts_without_execution(tmp_path, mix, code, skips):
     service = owner(tmp_path, ("deepseek", "exa"), web={"services": {EXA: {"enabled": False}, DEEPSEEK: {"enabled": mix != "disabled"}}})
@@ -326,8 +343,6 @@ async def test_keyless_producer_writes_request_only_zero_cost_usage(tmp_path, mo
             "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
         },
     )
-    monkeypatch.setattr(hosted_tools, "KEYLESS_EXA_ACTIVE", True)
-    monkeypatch.setattr(search_chain, "KEYLESS_EXA_ACTIVE", True)
     body = {"jsonrpc": "2.0", "id": 1, "result": {"content": [{"type": "text", "text": json.dumps({
         "results": [{"url": "https://example.test/keyless", "title": "Keyless", "highlights": ["excerpt"]}],
     })}]}}
@@ -359,8 +374,6 @@ async def test_keyless_rate_limit_settles_service_cooldown_without_persisted_sou
             "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
         },
     )
-    monkeypatch.setattr(hosted_tools, "KEYLESS_EXA_ACTIVE", True)
-    monkeypatch.setattr(search_chain, "KEYLESS_EXA_ACTIVE", True)
     calls = answers(monkeypatch, service, wire(429, {"error": {"message": "slow down"}}, headers={"Retry-After": "60"}))
     first = await run(service)
     second = await run(service)
@@ -387,8 +400,6 @@ async def test_keyless_overlapping_searches_settle_rate_limit_before_next_admiss
             "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
         },
     )
-    monkeypatch.setattr(hosted_tools, "KEYLESS_EXA_ACTIVE", True)
-    monkeypatch.setattr(search_chain, "KEYLESS_EXA_ACTIVE", True)
     entered = asyncio.Event()
     release = asyncio.Event()
     calls = []
@@ -427,8 +438,6 @@ async def test_keyless_queued_waiter_times_out_before_admission(tmp_path, monkey
             "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
         },
     )
-    monkeypatch.setattr(hosted_tools, "KEYLESS_EXA_ACTIVE", True)
-    monkeypatch.setattr(search_chain, "KEYLESS_EXA_ACTIVE", True)
     monkeypatch.setattr(search_chain, "ATTEMPT_SECONDS", 0.01)
     await service._keyless_exa_attempt_lock.acquire()
     calls = answers(monkeypatch, service, wire())
@@ -444,8 +453,8 @@ async def test_keyless_queued_waiter_times_out_before_admission(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_keyless_retry_branch_accepts_the_synthetic_source_while_flag_is_off(tmp_path):
-    """KEX-1: a downgraded reader can clear a built-in cooldown without a Source row or network call."""
+async def test_keyless_retry_branch_accepts_the_synthetic_source(tmp_path):
+    """KEX-3: a built-in cooldown clears without a credential Source or network call."""
     service = owner(tmp_path, ("exa",))
     source = model_hub_keyless_exa_source()
     generation = service._service_cooldowns.advance(source, KEYLESS_EXA_SERVICE_ID)
@@ -637,20 +646,24 @@ async def test_free_check_is_joined_without_holding_the_mutation_lock(tmp_path, 
 
 @pytest.mark.asyncio
 async def test_search_read_and_chain_activate_together(tmp_path, monkeypatch):
-    """MH-SEARCH-SERVICES-001: shipped defaults expose the same service that the frozen turn executes.
+    """MH-SEARCH-SERVICES-001: shipped defaults expose the same active services that the frozen turn executes.
 
-    No activation monkeypatch: a dormant producer or a separately gated read must fail here.
+    The default-on reader and producer share one predicate; no activation monkeypatch is allowed.
     """
-    service = owner(tmp_path, ("exa",), web={"prefer_native": False})
+    service = owner(tmp_path, ("exa",), web={"prefer_native": False}, include_keyless=True)
     calls = answers(monkeypatch, service, wire())
     frozen = service.freeze_turn_hosted_tools(service.store.load())
     visible = _web(service)
     assert frozen.prefer_native is False
     assert [(slot.source_id, slot.kind, slot.results, slot.label) for slot in frozen.executors["web_search"]] == [
         (EXA, "service", 5, "exa"),
+        (KEYLESS_EXA_SOURCE_ID, "service", 5, "Exa (free)"),
     ]
-    assert [(row["source_id"], row["kind"]) for row in visible["executor_candidates"]] == [(EXA, "service")]
-    assert {vendor["id"] for vendor in visible["service_vendors"]} == {"exa", "tavily", "deepseek"}
+    assert [(row["source_id"], row["kind"]) for row in visible["executor_candidates"]] == [
+        (EXA, "service"),
+        (KEYLESS_EXA_SOURCE_ID, "service"),
+    ]
+    assert {vendor["id"] for vendor in visible["service_vendors"]} == {"exa", "tavily", "deepseek", "exa-mcp"}
     answer = await run(service, turn=frozen)
     assert len(calls) == 1 and calls[0][0] == EXA
     assert answer["record"]["status"] == "completed"
@@ -698,16 +711,17 @@ async def test_mixed_chain_keeps_every_attempts_cost_even_when_the_last_failed_b
         expected = [EXA, TAVILY]
     result = await run(service)
     attempts = result["record"]["attempts"]
-    assert [row["source_id"] for row in attempts] == expected
-    assert attempts[-1]["cost"] == {"basis": "list", "usd": 0}
-    assert len(calls) == (1 if first == "model" else 2)
+    executed_candidates = [row for row in attempts if row["source_id"] != KEYLESS_EXA_SOURCE_ID]
+    assert [row["source_id"] for row in executed_candidates] == expected
+    assert executed_candidates[-1]["cost"] == {"basis": "list", "usd": 0}
+    assert len(calls) == 2
     earlier = result["execution"]["failed_attempts"][0]
     assert earlier["source_id"] == expected[0]
-    assert earlier.get("cost") == attempts[0].get("cost")
+    assert earlier.get("cost") == executed_candidates[0].get("cost")
     if first == "unknown":
-        assert "cost" not in attempts[0]
+        assert "cost" not in executed_candidates[0]
     else:
-        assert attempts[0]["cost"]["usd"] > 0
+        assert executed_candidates[0]["cost"]["usd"] > 0
     assert result["execution"]["executor_source_id"] == expected[-1]
     _hosted_result("web_search", result)
 
@@ -909,12 +923,14 @@ def test_read_time_role_changes_never_duplicate_sources_or_rewrite_config(tmp_pa
     rows = _web(service)["executor_candidates"]
     ids = [row["source_id"] for row in rows]
     assert len(ids) == len(set(ids))
+    stable_rows = [row for row in rows if row["source_id"] != KEYLESS_EXA_SOURCE_ID]
+    stable_ids = [row["source_id"] for row in stable_rows]
     if scenario == "retired":
-        assert ids == [DEEPSEEK, MODEL]
+        assert stable_ids == [DEEPSEEK, MODEL]
     elif scenario == "opt_in":
-        assert ids == [EXA, DEEPSEEK, MODEL] and all(row["kind"] == "service" for row in rows)
+        assert stable_ids == [EXA, DEEPSEEK, MODEL] and all(row["kind"] == "service" for row in stable_rows)
     else:
-        assert ids == [EXA, DEEPSEEK, MODEL] and rows[-1]["kind"] == "model"
+        assert stable_ids == [EXA, DEEPSEEK, MODEL] and stable_rows[-1]["kind"] == "model"
     assert config.to_payload() == before
 
 
@@ -1009,7 +1025,7 @@ async def test_stop_during_timeout_teardown_never_runs_the_next_paid_candidate(t
 @pytest.mark.parametrize("mixed", [False, True])
 async def test_model_executor_retains_the_chain_budget_not_the_service_attempt_limit(tmp_path, monkeypatch, mixed):
     """A native model search is not cut short and paid for again just because services are active."""
-    from config.v2_config import ModelHubHostedToolConfig
+    from config.v2_config import ModelHubHostedToolConfig, ModelHubSearchServiceSettings
     from core.handlers.model_hub import search_chain
     from tests.test_model_hub_hosted_executor import WEB_ANSWER, WEB_CALL, _responses
     from tests.test_model_hub_l3 import LiveInvokeHandle, RawOutcomeKind, _outcome
@@ -1031,6 +1047,7 @@ async def test_model_executor_retains_the_chain_budget_not_the_service_attempt_l
     service.store.config.hosted_tools["web_search"] = ModelHubHostedToolConfig(
         executor_order=(MODEL, EXA) if mixed else (MODEL,),
         executor_order_kinds={MODEL: "model", EXA: "service"} if mixed else {MODEL: "model"},
+        services={KEYLESS_EXA_SOURCE_ID: ModelHubSearchServiceSettings(enabled=False)},
     )
     monkeypatch.setattr(search_chain, "ATTEMPT_SECONDS", .01)
     monkeypatch.setattr(search_chain, "call_timeout", lambda tool: 1)
@@ -1038,7 +1055,7 @@ async def test_model_executor_retains_the_chain_budget_not_the_service_attempt_l
     result = await run(service)
     assert not calls and result["record"]["status"] == "completed"
     assert result["execution"]["executor_source_id"] == MODEL
-    assert ("attempts" in result["record"]) is mixed
+    assert "attempts" in result["record"]
 
 
 @pytest.mark.asyncio
@@ -1094,6 +1111,7 @@ async def test_blocked_model_executor_keeps_its_own_remedy_beside_a_disabled_ser
         {"source_id": MODEL, "label": model.display_name, "kind": "model", "outcome": "skipped",
          "skipped": "blocked", "needs_action": "models.source.error.unclassified"},
         {"source_id": EXA, "label": "exa", "kind": "service", "outcome": "skipped", "skipped": "disabled"},
+        {"source_id": KEYLESS_EXA_SOURCE_ID, "label": "Exa (free)", "kind": "service", "outcome": "skipped", "skipped": "disabled"},
     ]
     assert "execution" not in result
     _hosted_result("web_search", result)
