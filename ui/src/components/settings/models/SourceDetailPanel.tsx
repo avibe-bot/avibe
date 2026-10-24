@@ -828,14 +828,14 @@ export const SourceDetailPanel: React.FC<{
         <header className="flex shrink-0 items-center gap-3 border-b border-border px-5 py-4">
           <SearchVendorGlyph vendor={source.vendor} />
           <div className="flex min-w-0 flex-col gap-1">
-            <h2 ref={headingRef} tabIndex={-1} className="text-lg font-bold text-foreground">{source.display_name}</h2>
+            <h2 ref={headingRef} tabIndex={-1} className="text-lg font-bold text-foreground">{keylessExa ? t('settings.models.searchServices.vendorName.exa-mcp') : source.display_name}</h2>
             <p className="model-hub-tool-note">{t(source.protocol === 'search' ? 'settings.models.searchServices.noModels' : 'settings.models.searchServices.modelsAndSearch')}</p>
             {keylessExa && <p className="model-hub-tool-note">{t('settings.models.searchServices.keylessEndpoint')}</p>}
           </div>
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto">
           {capabilityFailure}
-          {state.key && wasBlocked(source.state) && <div className="model-hub-status-gold m-5 flex flex-col gap-2 rounded-lg border p-3" role="status">
+          {!keylessExa && state.key && wasBlocked(source.state) && <div className="model-hub-status-gold m-5 flex flex-col gap-2 rounded-lg border p-3" role="status">
             <p className="font-semibold">{t(state.key, state.values)}</p>
             <p className="model-hub-tool-note">{t(source.state.detail_key ?? 'models.source.error.unclassified')}</p>
             {source.vendor === 'tavily' && source.state.detail_key === 'models.source.needs_action.spend_limit_reached' && <p className="model-hub-tool-note">{t('settings.models.searchServices.tavilyLimit')}</p>}
@@ -846,7 +846,7 @@ export const SourceDetailPanel: React.FC<{
           <section className="flex flex-col gap-3 border-b border-border px-5 py-4">
             <h3 className="font-semibold text-foreground">{keylessExa ? t('settings.models.searchServices.noSetup') : t('settings.models.sourceDetail.metadata.apiKey')}</h3>
             {source.protocol === 'search' ? <div className="flex flex-wrap items-center gap-3">
-              {credentialValue && <SourcePrivateValue value={credentialValue} className="font-mono" />}
+              {!keylessExa && credentialValue && <SourcePrivateValue value={credentialValue} className="font-mono" />}
               {!keylessExa && <Button variant="outline" size="sm" disabled={busy} onClick={() => setReplacingKey(true)}>{t('settings.models.searchServices.replaceKey')}</Button>}
             </div> : <>
               <p className="model-hub-tool-note">{t('settings.models.searchServices.sharedKey', { source: source.display_name })}</p>

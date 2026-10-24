@@ -216,8 +216,38 @@ describe('hosted tool cards', () => {
 });
 
 describe('search service cards', () => {
-  // The cards `tests/test_hosted_activity.py` projects from a search chain and its Sources' current state, with the
-  // words both surfaces show for them: the note here is the sentence the IM line carries.
+  it('MH-HOSTED-UI-008: renders keyless success, rate-limit fallback and final failure without credential wording', () => {
+    const success = {
+      version: 1, call_id: 'call_keyless_success', tool: 'web_search', mode: 'proxy', status: 'completed',
+      subject: 'DeepSeek search API pricing', provider: 'exa-mcp', source_id: 'src_exakeyless', source_name: 'Exa', executor_kind: 'service',
+      sources: [{ url: 'https://exa.example/result', title: 'Exa result' }], images: [],
+      attempts: [{ source_id: 'src_exakeyless', label: 'Exa', kind: 'service', outcome: 'completed', cost: { basis: 'list', usd: 0 } }],
+      cost: { basis: 'list', calls: 1, usd: 0 },
+    };
+    const fallback = {
+      ...success, call_id: 'call_keyless_fallback', source_id: 'src_deepseek1', source_name: 'DeepSeek', provider: 'deepseek', executor_kind: 'model', model: 'deepseek-chat',
+      attempts: [
+        { source_id: 'src_exakeyless', label: 'Exa', kind: 'service', outcome: 'failed', error_code: 'service_rate_limited', reason_key: 'reason.service_rate_limited', remedy_key: 'repair.retrySearch', cost: { basis: 'list', usd: 0 } },
+        { source_id: 'src_deepseek1', label: 'DeepSeek', kind: 'model', outcome: 'completed', cost: { basis: 'list', usd: 0.01 } },
+      ],
+      switch: { sources: ['Exa'], reason_key: 'reason.service_rate_limited', to: 'DeepSeek' },
+      cost: { basis: 'list', calls: 1, usd: 0.01 },
+    };
+    const failed = {
+      ...success, call_id: 'call_keyless_failed', status: 'failed', error: 'the search failed', error_code: 'service_rate_limited',
+      attempts: [{ source_id: 'src_exakeyless', label: 'Exa', kind: 'service', outcome: 'failed', error_code: 'service_rate_limited', reason_key: 'reason.service_rate_limited', remedy_key: 'repair.retrySearch', cost: { basis: 'list', usd: 0 } }],
+      cost: { basis: 'list', calls: 1, usd: 0 },
+    };
+    renderGroup([success, fallback, failed], 'zh');
+    within(row('call_keyless_success')).getByText('通过 Exa（免费）');
+    within(row('call_keyless_success')).getByText('免费');
+    within(row('call_keyless_success')).getByText('1 个来源');
+    within(row('call_keyless_fallback')).getByText('由 DeepSeek 代理 · deepseek-chat');
+    within(row('call_keyless_fallback')).getByText('Exa（免费）限流，已改用 DeepSeek。冷却结束后会自动重试，也可在 模型 › 工具 中立即重试。');
+    within(row('call_keyless_failed')).getByText(/Exa（免费）\s+暂时限流/);
+    expect(document.body.textContent).not.toMatch(/密钥|key/i);
+  });
+
   it.each(['en', 'zh'] as const)('MH-HOSTED-UI-008 (%s): names the service that ran, what it found and cost, and why it moved past a Source', (lng) => {
     const { service_completed: completed, service_switch: switched, service_estimate: estimated, service_blocked: blocked } = services;
     renderGroup([completed.payload, switched.payload, estimated.payload, blocked.payload], lng);

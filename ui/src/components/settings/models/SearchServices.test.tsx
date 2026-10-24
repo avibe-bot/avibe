@@ -59,11 +59,12 @@ const detail = (source: Source, tool = ACTIVE_SEARCH, serviceView = true) => {
   const view = render(wrap(<SourceDetailPanel source={source} hostedTools={readyRegion({ tools: [tool] })} onSaveSearch={onSaveSearch} onRetryService={onRetryService} serviceView={serviceView} onManageSource={vi.fn()} onOpenUsage={onOpenUsage} trackMutation={trackMutation} onReauth={vi.fn()} onMutationCommitted={async (commit) => { await commit.settle(); }} />));
   return { ...view, onSaveSearch, onRetryService, onOpenUsage, readUsage, settle };
 };
-const addDialog = (tool = ACTIVE_SEARCH) => {
+const addDialog = (tool = ACTIVE_SEARCH, lng = 'en') => {
   const onAdded = vi.fn();
   const onOpenSource = vi.fn();
-  render(wrap(<AddSearchServiceDialog tool={tool} pending={false} sourceReads={createSourceCollectionReadAuthority(modelsApi)} onClose={vi.fn()} onAdded={onAdded} onOpenSource={onOpenSource} />));
-  return { onAdded, onOpenSource };
+  const onViewOrder = vi.fn();
+  render(wrap(<AddSearchServiceDialog tool={tool} pending={false} sourceReads={createSourceCollectionReadAuthority(modelsApi)} onClose={vi.fn()} onAdded={onAdded} onOpenSource={onOpenSource} onViewOrder={onViewOrder} />, lng));
+  return { onAdded, onOpenSource, onViewOrder };
 };
 const newVendors = (): HostedWebSearchToolStatus => ({
   ...ACTIVE_SEARCH, services: {}, executor_candidates: [],
@@ -121,16 +122,27 @@ describe('search service activation and mixed order', () => {
     expect(screen.getByRole('heading', { name: 'Status by Source' })).toBeTruthy();
   });
 
-  it('renders the built-in keyless Exa row as free and non-addable', async () => {
-    tab(KEYLESS_ACTIVE_SEARCH);
-    expect(screen.getByText('Exa (free)')).toBeTruthy();
-    expect(screen.getByText('Free')).toBeTruthy();
-    expect(screen.getByText(/IP rate-limited/)).toBeTruthy();
-    const { onOpenSource } = addDialog(KEYLESS_ACTIVE_SEARCH);
-    expect(screen.getByText('Free; IP rate-limited')).toBeTruthy();
-    expect(screen.queryByRole('button', { name: 'Add Exa (free)' })).toBeNull();
-    await userEvent.click(screen.getByRole('button', { name: 'View search order' }));
-    expect(onOpenSource).toHaveBeenCalledWith('src_exakeyless');
+  it.each(['en', 'zh'])('keeps the built-in row visible when overall web search is off in %s', (lng) => {
+    const tool = { ...KEYLESS_ACTIVE_SEARCH, enabled: false };
+    render(wrap(<ToolsTab read={readyRegion({ tools: [tool] })} sources={SEARCH_SOURCES} pending={new Set()} onSave={vi.fn()} onClear={vi.fn()} onRetry={vi.fn()} />, lng));
+    const row = document.querySelector('[data-executor="src_exakeyless"]') as HTMLElement;
+    expect(row).toBeTruthy();
+    expect(within(row).getByRole('switch', { name: i18n.cloneInstance({ lng }).t('settings.models.searchServices.use') as string })).toBeTruthy();
+  });
+
+  it.each(['en', 'zh'])('renders the built-in keyless Exa row as free and non-addable in %s', async (lng) => {
+    const locale = i18n.cloneInstance({ lng });
+    render(wrap(<ToolsTab read={readyRegion({ tools: [KEYLESS_ACTIVE_SEARCH] })} sources={SEARCH_SOURCES} pending={new Set()} onSave={vi.fn()} onClear={vi.fn()} onRetry={vi.fn()} />, lng));
+    expect(screen.getByText(locale.t('settings.models.searchServices.vendorName.exa-mcp'))).toBeTruthy();
+    expect(screen.getByText(locale.t('settings.models.searchServices.keylessReady'))).toBeTruthy();
+    expect(screen.getByText(locale.t('settings.models.searchServices.keylessResults', { count: 5 }))).toBeTruthy();
+    expect(screen.getByText(locale.t('settings.models.searchServices.free'))).toBeTruthy();
+    cleanup();
+    const { onViewOrder } = addDialog(KEYLESS_ACTIVE_SEARCH, lng);
+    expect(screen.getByText(locale.t('settings.models.searchServices.freeTier'))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: locale.t('settings.models.searchServices.addVendor', { vendor: locale.t('settings.models.searchServices.vendorName.exa-mcp') }) })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: locale.t('settings.models.searchServices.viewOrder') }));
+    expect(onViewOrder).toHaveBeenCalledOnce();
   });
 
   it('saves the built-in keyless Exa row switch without opening credential actions', async () => {
@@ -141,13 +153,36 @@ describe('search service activation and mixed order', () => {
   });
 
   it('opens the built-in keyless detail without key or removal actions', () => {
-    detail(keylessExaSource(KEYLESS_ACTIVE_SEARCH.executor_candidates[0], KEYLESS_ACTIVE_SEARCH.service_vendors?.[0]), KEYLESS_ACTIVE_SEARCH);
+    const candidate = KEYLESS_ACTIVE_SEARCH.executor_candidates.find((row) => row.source_id === 'src_exakeyless');
+    const vendor = KEYLESS_ACTIVE_SEARCH.service_vendors?.find((row) => row.id === 'exa-mcp');
+    detail(keylessExaSource(candidate, vendor), KEYLESS_ACTIVE_SEARCH);
     expect(screen.getByText('mcp.exa.ai')).toBeTruthy();
     expect(screen.getByText('Free')).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Replace key' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Remove' })).toBeNull();
   });
 
+  it('renders known zero keyless usage as free, not a paid zero', async () => {
+    const candidate = KEYLESS_ACTIVE_SEARCH.executor_candidates.find((row) => row.source_id === 'src_exakeyless');
+    const vendor = KEYLESS_ACTIVE_SEARCH.service_vendors?.find((row) => row.id === 'exa-mcp');
+    detail(keylessExaSource(candidate, vendor), KEYLESS_ACTIVE_SEARCH);
+    const line = await screen.findByText('This month');
+    expect(line.closest('p')?.textContent).toContain('Free');
+    expect(line.closest('p')?.textContent).not.toContain('$0');
+  });
+
+  it('shows keyless cooldown and retries through the built-in route without credential wording', async () => {
+    const candidate = KEYLESS_ACTIVE_SEARCH.executor_candidates.find((row) => row.source_id === 'src_exakeyless')!;
+    const tool = { ...KEYLESS_ACTIVE_SEARCH, executor_candidates: KEYLESS_ACTIVE_SEARCH.executor_candidates.map((row) => row.source_id === candidate.source_id ? { ...row, cooldown_until: '2026-12-01T10:00:00Z' } : row) };
+    const view = tab(tool);
+    const row = document.querySelector('[data-executor="src_exakeyless"]') as HTMLElement;
+    expect(row.textContent).toContain('Rate-limited · retry later');
+    expect(row.textContent).toMatch(/Paused until 12-01/);
+    expect(row.textContent).toContain('5 results · IP rate-limited');
+    expect(row.textContent).not.toMatch(/invalid key|replacement key|API key/i);
+    await userEvent.click(within(row).getByRole('button', { name: 'Retry now' }));
+    expect(view.onRetryService).toHaveBeenCalledWith('src_exakeyless');
+  });
   it('keeps keyboard focus on a usable arrow when the last movable row is followed by disabled Sources', async () => {
     const view = tab();
     await userEvent.click(screen.getByRole('button', { name: 'Move Exa down' }));
