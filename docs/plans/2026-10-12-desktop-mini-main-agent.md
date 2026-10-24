@@ -67,7 +67,9 @@ the main agent; there is no Follow up on cards.
   bottom sits on the top edge of Vibey's image box and overlaps it by 4px
   (the art has its own transparent margin). The column is centred on Vibey.
 - The column grows **upward**. It is a floating layer above everything else
-  in the window.
+  in the window. Near the top of the display it opens **downward** instead
+  (owner decision, 2026-10-23, §9.1): Vibey and the dock sit at the top of the
+  window and the whole column is mirrored below them.
 - **Column width:** `min(440px, 94vw)`. Every card, the marquee and the input
   bubble are **the same width**: the column minus 18px on each side.
   - Expanded: 6px panel padding plus 12px scroll padding.
@@ -620,34 +622,116 @@ already communicate activity. Keep the upper-right red unread badge.
 
 ### 9.1 Window
 
-- **One fixed window size** in every state, large enough for the expanded
-  column plus the speech slot, Vibey and the dock: about **460 × 600**
-  logical px.
-  - Collapsing does not resize the window; click-through (§9.2) makes the
-    empty area harmless.
-  - This replaces the collapsed 88 × 88 / expanded side-panel geometry
-    (`window_size`, `PetLayout`).
-- **Placement:** Vibey is anchored at the bottom centre of the window.
-  - The stored anchor is Vibey's position.
-  - The window is clamped into the work area, so Vibey cannot sit higher
-    than the window's height above it.
-  - Dragging Vibey drags the window (existing `startDragging`).
-- **When the frame does not fit (decision 2026-10-12, from the #2508
-  breaker).** On a work area shorter or narrower than the frame (for
-  example 1366×768 at 125% minus the taskbar), full-frame clamping is
-  impossible.
-  - **Priority:** Vibey and its dock must always be fully inside a connected
-    work area and reachable. The transparent rest of the frame may extend
-    past the work area.
-  - **How, decided per display:** choose the target from all connected
-    displays: the one Vibey overlaps most, else its saved display if it is
-    connected, else the primary. Then clamp with the whole frame if *that
-    display* fits it, otherwise with Vibey's rect plus the dock. A pet the
-    user parked on a small laptop screen stays there, even when a large
-    external display is connected. With no display at all, keep today's
-    behaviour.
-  - **Expanded list on a short display:** its top may fall off-screen. This
-    is accepted in v1; do not shrink or flip the column.
+- **One width, and no resize for any interaction state.** The window is
+  460 logical px wide. Collapsing, expanding, the speech slot and the cards
+  never resize it; click-through (§9.2) makes the empty area harmless. Its
+  height is decided only where the pet is placed (below), at most **600**.
+  - This replaces the collapsed 88 × 88 / expanded side-panel geometry.
+- **Placement:** the stored anchor is Vibey's image top-left. Dragging Vibey
+  drags the window.
+- **Which way the column opens (owner decision, 2026-10-23).** On a display
+  with room for the full 600px window above Vibey's image (449px), the column
+  opens upward, as before: Vibey sits at the bottom of the window. Otherwise
+  the column opens toward the side with more room: below the dock when there
+  is more room below than above (Vibey and the dock at the top of the window,
+  the image 12px from its top), else upward. Ties stay upward.
+  - The window reaches from Vibey toward the column only as far as the work
+    area goes, up to 600px, so no part of it is ever off the display. macOS
+    never lets this window's top rise above the menu bar (verified: even a
+    programmatic frame is pushed back down at its floating level), so a frame
+    that did would move Vibey instead.
+  - The page draws the layout the shell reports (`panel_edge: top | bottom`)
+    and mirrors the whole column for `top`: the speech slot stays nearest
+    Vibey, the stack's layers peek toward Vibey, the history opens on the far
+    side of its toggle row with Open in Avibe on the far corner, the bubble's
+    tail points at Vibey, and content enters moving toward Vibey. Focus order
+    is unchanged.
+- **The shell owns the frame and the layout (decision 2026-10-23, after the
+  #2945 breaker).** One state machine in the shell (`FrameState`) holds the
+  window frame and the layout snapshot `{revision, layout}`, the page's only
+  source for which edge to draw. A frame change that keeps the layout applies
+  at once. One that changes it, and every drop, gets a new revision and waits.
+  The shell publishes the snapshot to the document showing now
+  (`avibe:pet-layout`), whichever document started the change; a document
+  that loads reads the same snapshot from `pet_ready`. The page draws only a
+  newer revision, then acknowledges it (`pet_settle(revision)`), and the
+  waiting frame comes back only on its own revision. Stale acknowledgements
+  change nothing; after 1s without one the frame applies anyway. That 1s
+  belongs to one publication: when the machine publishes the held snapshot
+  again (a document loaded meanwhile), the earlier timer releases nothing and
+  the new one starts over. No reply
+  carries a layout to current pages (`pet_set_expanded` still answers one for
+  older pages). The page always acknowledges the snapshot in its `pet_ready`
+  reply, even a revision it already drew from an event.
+  - The machine also knows what the document draws: *loading* (from the
+    moment a document starts loading until its `pet_ready`), *layouts*, or
+    *legacy*. While it is loading nothing held is released, expiry included;
+    when it is ready, a page that draws layouts gets the held snapshot again,
+    and an older page gets the upward window at once, in place of a held frame
+    or a current one in the top layout (mid-drag, in place of the frame a
+    failed drag returns to).
+  - Every drag ends idle or holding: one that does not end with a placement
+    (the native drag did not start, the window could not be read on release,
+    the window was replaced, the release could not be handled) goes back to
+    the frame and anchor it started from, held like any other change of layout
+    if that layout is no longer the one the page draws.
+- **Dragging.** A 600px window cannot take Vibey near the menu bar, so the
+  drag goes through the shell (`pet_drag`): it shrinks the window to the
+  **drag strip** around Vibey and the dock (12px above the image, 36px below
+  it: 163px at full width), keeping Vibey under the pointer, and starts the
+  native drag. Both layouts draw Vibey at the same place in the strip, and the
+  page hides the column in any window that short (a sliver otherwise). If the
+  native drag cannot start, the window goes back as it was.
+  - The shell says it can drag the pet before any page script runs: an
+    initialization script defines `window.__AVIBE_PET_DRAG__`. Shells without
+    the marker keep the page's old `start_dragging` path. The shell drags
+    only a document whose `pet_ready` has told it the document draws layouts,
+    and refuses `pet_drag` from one it still takes for loading (or legacy).
+    The page drags through the shell only once its `pet_ready` has succeeded;
+    before that a press drags the window natively, which the shell treats
+    like any other move (below). A failed `pet_ready` is asked again after
+    250ms, doubling up to 8s, until it succeeds.
+  - On release (the shell reads the buttons: no button down in
+    `pressedMouseButtons` on macOS, whose bits are physical and whose primary
+    side can be the right one; the primary button in `GetAsyncKeyState` on
+    Windows; where it cannot, a drag ends once the window has not moved for
+    400ms), the shell keeps the pet whole on a display (as on restore),
+    chooses the window for that spot, saves the anchor and publishes the drop
+    as above.
+  - A page that predates the top layout (the shell can adopt an older running
+    Runtime) does not declare `layouts` in `pet_ready`; it only ever gets the
+    upward window at the same spot, as tall as the room above allows, so
+    Vibey stays put and nothing is mis-drawn.
+- **Nothing is drawn before the layout is known.** Under a shell with the
+  marker, the page keeps its stage invisible (and so reports no hit regions)
+  until it has the shell's first snapshot from `pet_ready`, so a pet restored
+  in the top layout never shows a frame in the other one as it loads. If
+  `pet_ready` fails or has not answered after 4s, the page draws the default
+  layout anyway (and keeps asking, as above). The window itself is created and shown as before: a hidden
+  macOS window would pause the page's animation frames, and with them its
+  first acknowledgement. Older pages, which do not read the marker, draw at
+  once as before.
+- **Every other move gets the window for its spot.** When the platform moves
+  the window (a display is removed, a work area or scale changes) or an older
+  page drags it natively, the shell, once the move settles for 400ms, keeps
+  the pet whole on a display and applies the window for that spot through the
+  same state machine. An older page still cannot drag Vibey above the 600px
+  window's reach: only the shell's drag shrinks the window.
+- **What must stay on a display.** Restore on launch, a dropped pet and a
+  display or scale change keep the drag strip inside a connected work area:
+  at the window's width on a display that fits the full 460 × 600 window,
+  else at Vibey's width. The window for that spot then follows the rule above.
+  - **Which display (decision 2026-10-12, from the #2508 breaker):** the one
+    Vibey overlaps most, else its saved display if it is connected, else the
+    primary. A pet the user parked on a small laptop screen stays there, even
+    when a large external display is connected. With no display at all, keep
+    today's behaviour. The saved display for a drop or a move is the one
+    saved before it (a drag saves nothing on its way), so a pet dropped off
+    every display, as Windows allows just above a secondary one, returns to
+    the display it came from.
+  - A short display gets a shorter window, never a window past its edge. The
+    expanded list keeps its fixed box, so on such a display its far end can
+    still be cut at the window's edge, as before.
 
 ### 9.2 Click-through (verified in a spike)
 
@@ -812,7 +896,12 @@ GET /api/sessions/main
 - [ ] Dismiss: 200ms exit, then a 340ms gap close after a 140ms delay; no end
       jump; the card stays gone after a refresh and a restart.
 - [ ] Busy rule follows §8.
-- [ ] Window: fixed size; Vibey anchored at the bottom; clicks pass through
+- [ ] Window: fixed width, never resized by an interaction; Vibey anchored at
+      the bottom, or at the top with the column mirrored below when it has
+      been dragged there (§9.1), the window never past the work area.
+- [ ] Vibey drags all the way to the top of the work area and back; the
+      column flips on drop without showing the other layout at full size.
+- [ ] Clicks pass through
       everywhere except the reported regions on macOS and Windows (shadows
       included); polling backs off and stops when hidden.
 - [ ] With the input or dictation open, a Vibey click opens the history above

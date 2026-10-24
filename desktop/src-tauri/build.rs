@@ -16,6 +16,8 @@ fn main() {
         "computer_use_open_permission",
         "pet_ready",
         "pet_set_expanded",
+        "pet_drag",
+        "pet_settle",
         "pet_hit_regions",
         "pet_set_dismissed",
         "pet_bind",

@@ -1345,3 +1345,115 @@ for (const asr of [true, false]) {
     expect(order).toEqual(asr ? ['语音输入', '|', '输入消息'] : ['输入消息']);
   });
 }
+
+// Spec §9.1: near the top of the display the shell flips the window; Vibey and
+// the dock sit at its top and the column opens below them, mirrored.
+for (const theme of ['light', 'dark']) {
+  test(`the top layout opens the column below Vibey and the dock, mirrored (${theme})`, async ({ page }) => {
+    await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=3&edge=top');
+    await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
+    const avatar = page.locator('.pet-mini-avatar-button');
+    await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+    await settleMotion(page);
+    const anchor = (await avatar.boundingBox())!;
+    expect(anchor.y).toBeCloseTo(12, 0);
+    expect(anchor.x + anchor.width / 2).toBeCloseTo(230, 0);
+    const below = 163 - 7; // the column's top, less the bubble's tail
+    const fits = async (selector: string) => {
+      const box = (await page.locator(selector).first().boundingBox())!;
+      expect(box.y).toBeGreaterThanOrEqual(below - 1);
+      expect(box.y + box.height).toBeLessThanOrEqual(600 + 1);
+      return box;
+    };
+    // Collapsed: the layers peek out above the front card, toward Vibey.
+    const front = await fits('.pet-mini-front');
+    const layer = (await page.locator('.pet-mini-layer').first().boundingBox())!;
+    expect(layer.y).toBeLessThan(front.y);
+
+    // History: the toggle row is nearest Vibey, the history opens below it,
+    // the tail points up, and the stack stays below the bubble.
+    await avatar.click();
+    await expect(page.locator('.pet-mini-detail')).toHaveClass(/is-open/);
+    await settleMotion(page);
+    const toggle = await fits('.pet-mini-reply-toggle');
+    const history = await fits('.pet-mini-bubble-history');
+    const bubble = await fits('.pet-mini-reply-bubble');
+    const stack = await fits('.pet-mini-collapsed');
+    expect(toggle.y).toBeLessThan(history.y);
+    expect(bubble.y + bubble.height).toBeLessThanOrEqual(stack.y + 1);
+    expect(await page.locator('.pet-mini-reply-bubble').evaluate((node) => getComputedStyle(node, '::after').top)).toBe('-7px');
+    const open = (await page.locator('.pet-mini-history-open').boundingBox())!;
+    expect(open.y).toBeGreaterThan(history.y + history.height / 2);
+    await expect.poll(() => bubbleIsRegion(page)).toBe(true);
+
+    // The list opens below the speech slot, inside the window.
+    await page.locator('.pet-mini-collapsed').click();
+    await expect(page.locator('.pet-mini-scroll')).toBeVisible();
+    await settleMotion(page);
+    await fits('.pet-mini-scroll');
+    await avatar.click();
+    await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+
+    // Input with the history: the input is nearest Vibey, the bubble below it.
+    await avatar.hover();
+    await page.getByRole('button', { name: '输入消息', exact: true }).click();
+    await page.getByRole('textbox').fill('帮我看一下这周的进展');
+    await avatar.click();
+    await expect(page.locator('.pet-mini-detail')).toHaveClass(/is-open/);
+    await settleMotion(page);
+    const input = await fits('.pet-mini-input');
+    const over = await fits('.pet-mini-reply-bubble');
+    expect(input.y + input.height + 7).toBeLessThanOrEqual(over.y + 1);
+    await fits('.pet-mini-collapsed');
+    expect(await avatar.boundingBox()).toEqual(anchor);
+  });
+}
+
+// Spec §9.1: while the shell drags, the window is only the strip around Vibey
+// and the dock; the column has no room there and must not show as a sliver.
+test('the column hides while the window is only the drag strip, and returns with the full window', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=3&queued=1');
+  await expect(page.locator('.pet-mini-collapsed')).toBeVisible();
+  await page.setViewportSize({ width: 460, height: 163 });
+  await expect(page.locator('.pet-mini-column')).toHaveCSS('visibility', 'hidden');
+  const avatar = (await page.locator('.pet-mini-avatar-button').boundingBox())!;
+  expect(avatar.y).toBeCloseTo(12, 0);
+  await expect.poll(() => page.evaluate(() => window.petLayoutHitRegions.every((rect) => rect.y >= 0 && rect.y + rect.height <= 163))).toBe(true);
+  await page.setViewportSize({ width: 460, height: 600 });
+  await expect(page.locator('.pet-mini-column')).toHaveCSS('visibility', 'visible');
+});
+
+// Spec §9.1: a layout flip moves Vibey and the column without resizing
+// anything, and the desktop's input regions must follow; frequent stage
+// attribute changes (busy, state) must not flood the shell with reports.
+test('a layout flip re-reports the input regions, and stage attribute churn stays coalesced', async ({ page }) => {
+  // No card stack and no transitions: the flip changes nothing but the
+  // stage's own attribute.
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&history=long&activities=0');
+  await expect(page.locator('.pet-mini-avatar-button')).toBeVisible();
+  await settleMotion(page);
+  await page.waitForTimeout(700);
+  const vibey = () => page.evaluate(() => {
+    const box = document.querySelector('.pet-mini-avatar-button')!.getBoundingClientRect();
+    return window.petLayoutHitRegions.some((rect) => Math.abs(rect.y - box.top) <= 1 && Math.abs(rect.height - box.height) <= 1);
+  });
+  await expect.poll(vibey).toBe(true);
+  await page.evaluate(() => window.petFixtureLayout(2, 'top'));
+  await expect(page.locator('.pet-mini-stage')).toHaveAttribute('data-edge', 'top');
+  expect((await page.locator('.pet-mini-avatar-button').boundingBox())!.y).toBeCloseTo(12, 0);
+  await expect.poll(vibey).toBe(true);
+  // A burst of stage attribute changes that move nothing sends no report.
+  await settleMotion(page);
+  await page.waitForTimeout(700);
+  const before = await page.evaluate(() => window.petHitReports);
+  await page.evaluate(async () => {
+    const stage = document.querySelector('.pet-mini-stage')!;
+    for (let frame = 0; frame < 10; frame += 1) {
+      for (let i = 0; i < 20; i += 1) stage.setAttribute('data-probe', String(frame * 20 + i));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+    }
+  });
+  await page.waitForTimeout(100);
+  expect(await page.evaluate(() => window.petHitReports)).toBe(before);
+});

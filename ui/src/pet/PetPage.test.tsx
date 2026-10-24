@@ -17,7 +17,7 @@ import type {
 
 import { ApiError } from '@/context/ApiContext';
 
-import { PET_BOUND_EVENT, PET_HOVER_EVENT, PET_SUMMON_EVENT } from './petBridge';
+import { PET_BOUND_EVENT, PET_HOVER_EVENT, PET_LAYOUT_EVENT, PET_SUMMON_EVENT } from './petBridge';
 import { SEND_GRACE_MS } from './usePetSession';
 
 vi.mock('react-i18next', () => ({
@@ -3143,5 +3143,218 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     await userEvent.click(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(bubbleOpen()).toBe(false));
     expect(screen.getByLabelText('pet.recentTurns').getAttribute('aria-expanded')).toBe('false');
+  });
+});
+
+describe('dragging the pet to the top of the display (spec §9.1)', () => {
+  // A shell that drags the pet says so before page scripts run (the marker);
+  // `invoke` answers the pet commands.
+  const shell = (invoke: (command: string, args?: unknown) => Promise<unknown>, drags = true) => {
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
+    if (drags) Object.defineProperty(window, '__AVIBE_PET_DRAG__', { value: true, configurable: true });
+  };
+  afterEach(() => { Reflect.deleteProperty(window, '__AVIBE_PET_DRAG__'); });
+  const edge = () => document.querySelector('.pet-mini-stage')?.getAttribute('data-edge');
+  const top = { panel_side: 'left', panel_edge: 'top' };
+  const bottom = { panel_side: 'left', panel_edge: 'bottom' };
+  const ready = (layout = bottom, revision = 1) => ({ binding: 'S', revision: 1, summon_pending: null, layout, layout_revision: revision });
+  const publish = (revision: number, layout: typeof top) => act(() => {
+    window.dispatchEvent(new CustomEvent(PET_LAYOUT_EVENT, { detail: { revision, layout } }));
+  });
+  const drag = (avatar: HTMLElement) => {
+    fireEvent.pointerDown(avatar, { button: 0, pointerId: 1, clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(avatar, { buttons: 1, pointerId: 1, clientX: 30, clientY: 10 });
+  };
+  // Every `pet_settle(revision)` with the edge drawn when it was sent.
+  const settles = (invoke: ReturnType<typeof vi.fn>) => (invoke as unknown as { settled: [number, string | null | undefined][] }).settled;
+  const recording = (answer: (command: string, args?: { revision?: number }) => unknown) => {
+    const settled: [number, string | null | undefined][] = [];
+    const invoke = vi.fn(async (command: string, args?: { revision?: number }) => {
+      if (command === 'pet_settle') settled.push([args!.revision!, edge()]);
+      return answer(command, args);
+    });
+    Object.assign(invoke, { settled });
+    return invoke;
+  };
+
+  it('draws the snapshot from pet_ready, then acknowledges that revision', async () => {
+    const invoke = recording((command) => command === 'pet_ready' ? ready(top, 4) : { revision: 4, layout: top });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    await waitFor(() => expect(edge()).toBe('top'));
+    await waitFor(() => expect(settles(invoke)).toContainEqual([4, 'top']));
+    expect(invoke).toHaveBeenCalledWith('pet_ready', { layouts: true });
+  });
+
+  it('draws nothing until the shell\'s first snapshot, whichever layout it is', async () => {
+    const readyAnswer = deferred<unknown>();
+    shell(vi.fn((command: string) => command === 'pet_ready' ? readyAnswer.promise : Promise.resolve({ revision: 2, layout: top })));
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    const pending = () => document.querySelector('.pet-mini-stage')?.hasAttribute('data-layout-pending');
+    expect(pending()).toBe(true);
+    await act(async () => readyAnswer.resolve(ready(top, 2)));
+    await waitFor(() => expect(pending()).toBe(false));
+    expect(edge()).toBe('top');
+
+    // A first snapshot in the default layout shows the stage as well, even on
+    // a surface that nothing else re-renders (setup pending).
+    cleanup();
+    vi.resetModules();
+    ({ PetPage } = await import('./PetPage'));
+    setupDone = false;
+    const defaultAnswer = deferred<unknown>();
+    shell(vi.fn((command: string) => command === 'pet_ready' ? defaultAnswer.promise : Promise.resolve({ revision: 1, layout: bottom })));
+    render(<PetPage />);
+    await screen.findByText('pet.setupPending');
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(pending()).toBe(true);
+    await act(async () => defaultAnswer.resolve(ready(bottom, 1)));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(pending()).toBe(false);
+    expect(edge()).toBe('bottom');
+    setupDone = true;
+  });
+
+  it('asks pet_ready again after it fails, drawing the default layout and dragging natively meanwhile', async () => {
+    let failures = 2;
+    const invoke = recording((command, args) => {
+      if (command === 'pet_ready') return failures-- > 0 ? Promise.reject(new Error('not yet')) : ready(top, 3);
+      if (command === 'pet_drag') return new Promise(() => {});
+      return { revision: args?.revision ?? 3, layout: top };
+    });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    const pending = () => document.querySelector('.pet-mini-stage')?.hasAttribute('data-layout-pending');
+    const called = (name: string) => invoke.mock.calls.filter(([command]) => command === name).length;
+    await waitFor(() => expect(pending()).toBe(false));
+    expect(edge()).toBe('bottom');
+    drag(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(called('plugin:window|start_dragging')).toBe(1));
+    expect(called('pet_drag')).toBe(0);
+    // Two failures back off 250ms, then 500ms; the third answer is drawn and acknowledged.
+    await waitFor(() => expect(settles(invoke)).toContainEqual([3, 'top']), { timeout: 3000 });
+    expect(called('pet_ready')).toBe(3);
+    drag(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(called('pet_drag')).toBe(1));
+  });
+
+  it('draws a published snapshot before acknowledging it, and ignores an older one', async () => {
+    const invoke = recording((command, args) => command === 'pet_ready' ? ready() : { revision: args?.revision ?? 1, layout: top });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    await waitFor(() => expect(settles(invoke)).toContainEqual([1, 'bottom']));
+    await publish(3, top);
+    await waitFor(() => expect(settles(invoke)).toContainEqual([3, 'top']));
+    // A snapshot older than the one drawn (a reordered event) changes nothing.
+    await publish(2, bottom);
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 40)));
+    expect(edge()).toBe('top');
+    expect(settles(invoke).map(([revision]) => revision)).not.toContain(2);
+  });
+
+  it('acknowledges the pet_ready snapshot even when an event already drew that revision', async () => {
+    const readyAnswer = deferred<unknown>();
+    const invoke = recording((command, args) => command === 'pet_ready' ? readyAnswer.promise : { revision: args?.revision ?? 3, layout: top });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    // The shell published revision 3 while it still took this document for loading.
+    await publish(3, top);
+    await waitFor(() => expect(settles(invoke)).toEqual([[3, 'top']]));
+    await act(async () => readyAnswer.resolve(ready(top, 3)));
+    await waitFor(() => expect(settles(invoke)).toEqual([[3, 'top'], [3, 'top']]));
+  });
+
+  it('draws a newer snapshot the shell answers with, when its event never arrived', async () => {
+    const invoke = recording((command) => command === 'pet_ready' ? ready() : { revision: 5, layout: top });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    await waitFor(() => expect(settles(invoke)).toContainEqual([5, 'top']));
+    expect(edge()).toBe('top');
+  });
+
+  it('a press drags the window natively until pet_ready answers, then through the shell, and its layout arrives as a snapshot', async () => {
+    const readyAnswer = deferred<unknown>();
+    const invoke = recording((command, args) => {
+      if (command === 'pet_ready') return readyAnswer.promise;
+      if (command === 'pet_drag') return new Promise(() => {});
+      return { revision: args?.revision ?? 1, layout: top };
+    });
+    shell(invoke);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    const called = (name: string) => invoke.mock.calls.filter(([command]) => command === name).length;
+    // The shell does not yet know this page draws the top layout.
+    drag(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(called('plugin:window|start_dragging')).toBe(1));
+    expect(called('pet_drag')).toBe(0);
+    await act(async () => readyAnswer.resolve(ready()));
+    drag(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(called('pet_drag')).toBe(1));
+    expect(called('plugin:window|start_dragging')).toBe(1);
+    await publish(2, top);
+    await waitFor(() => expect(settles(invoke)).toContainEqual([2, 'top']));
+    // The drag was not a click: the history stays closed.
+    expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull();
+  });
+
+  it('drags with the window\'s own start_dragging under a shell without the marker', async () => {
+    const invoke = vi.fn(async (command: string) => command === 'pet_ready'
+      ? { binding: 'S', revision: 1, summon_pending: null }
+      : bottom);
+    shell(invoke, false);
+    mainSession('S'); render(<PetPage />);
+    await screen.findByText('Session S');
+    drag(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('plugin:window|start_dragging'));
+    expect(invoke.mock.calls.some(([command]) => command === 'pet_drag' || command === 'pet_settle')).toBe(false);
+    expect(edge()).toBe('bottom');
+  });
+
+  it('takes no layout from the panel reply: only snapshots', async () => {
+    const invoke = recording((command, args) => {
+      if (command === 'pet_ready') return ready();
+      if (command === 'pet_set_expanded') return top;
+      return { revision: args?.revision ?? 1, layout: bottom };
+    });
+    shell(invoke);
+    tails.S = [message('u', 'S', { author: 'user', type: 'user', text: 'hello' }), message('r', 'S', { text: 'Old reply' })];
+    mainSession('S'); render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
+    await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
+    expect(edge()).toBe('bottom');
+  });
+
+  it('peeks the stack layers out toward Vibey in either layout', async () => {
+    canUseAgents = true;
+    const row = workingIn('running').agents[0];
+    runningAgents = { ...workingIn('running'), agents: ['A', 'B', 'C'].map((id) => ({ ...row, session_id: id })) };
+    const layers = () => [...document.querySelectorAll<HTMLElement>('.pet-mini-layer')].map((layer) => [layer.style.top, layer.style.bottom]);
+    let reply = bottom;
+    shell(vi.fn(async (command: string, args?: { revision?: number }) => command === 'pet_ready'
+      ? ready(reply)
+      : { revision: args?.revision ?? 1, layout: reply }));
+    mainSession('S'); const view = render(<PetPage />);
+    await waitFor(() => expect(document.querySelectorAll('.pet-mini-layer')).toHaveLength(2));
+    // Below the front card: the nearest layer peeks 9px, the next 18px.
+    expect(layers()).toEqual([['9px', '9px'], ['18px', '0px']]);
+    expect(document.querySelector<HTMLElement>('.pet-mini-collapsed')!.style.paddingBottom).toBe('18px');
+    view.unmount();
+    reply = top;
+    vi.resetModules();
+    ({ PetPage } = await import('./PetPage'));
+    render(<PetPage />);
+    await waitFor(() => expect(edge()).toBe('top'));
+    await waitFor(() => expect(document.querySelectorAll('.pet-mini-layer')).toHaveLength(2));
+    expect(layers()).toEqual([['9px', '9px'], ['0px', '18px']]);
+    expect(document.querySelector<HTMLElement>('.pet-mini-collapsed')!.style.paddingTop).toBe('18px');
   });
 });

@@ -1,10 +1,15 @@
 import { useEffect, useSyncExternalStore } from 'react';
 
-import { onPetEvents, petBridge, type PetBinding, type PetIntent } from './petBridge';
+import { onPetEvents, petBridge, type LayoutSnapshot, type PetBinding, type PetIntent, type PetReady } from './petBridge';
+import { petPanel } from './petPanel';
 import type { PetSurfaceEpoch } from './usePetSession';
 
 /** Document-local main resolution and pending summons. Legacy shell bindings
  * remain readable for compatibility, but never select the conversation. */
+const FIRST_LAYOUT_TIMEOUT_MS = 4000;
+// A failed `pet_ready` is asked again after this, doubling up to the cap.
+const READY_RETRY_MS = 250;
+const READY_RETRY_MAX_MS = 8000;
 let binding: string | null = null;
 let legacyBinding: PetBinding | null = null;
 let pendingSummon: PetIntent | null = null;
@@ -43,13 +48,54 @@ const start = () => {
       liveSummons += 1;
       noteSummon(intent);
     },
+    // The shell chose a layout (a drop, even one another document started, or
+    // a display change).
+    layout: drawSnapshot,
   });
   const liveSummonsAtRequest = liveSummons;
-  readyPromise = petBridge.ready().then((ready) => {
+  // The page draws nothing until the shell's first layout; if that never
+  // comes, it draws the default one after FIRST_LAYOUT_TIMEOUT.
+  const waiting = window.setTimeout(petPanel.stopWaiting, FIRST_LAYOUT_TIMEOUT_MS);
+  const onReady = (ready: PetReady) => {
+    window.clearTimeout(waiting);
     legacyBinding = ready;
     readyLoaded = true;
+    // A frame may already be waiting for this document (it loaded mid-drop).
+    // The reply is always acknowledged, even for a revision this document
+    // already drew from an event: the shell may have taken it for loading then.
+    if (ready.snapshot) {
+      if (petPanel.applySnapshot(ready.snapshot)) acknowledge(ready.snapshot.revision);
+      else acknowledge(petPanel.revision());
+    } else petPanel.stopWaiting();
     if (ready.summon_pending && liveSummons === liveSummonsAtRequest) noteSummon(ready.summon_pending.intent);
-  }).catch(() => undefined);
+  };
+  // Until the shell has heard this document draws the top layout, it cannot
+  // release a frame held for it, so a failed pet_ready is asked again. The
+  // page draws the default layout meanwhile and drags the window natively.
+  const ask = (attempt: number): Promise<void> => petBridge.ready().then(onReady, () => {
+    window.clearTimeout(waiting);
+    petPanel.stopWaiting();
+    const delay = Math.min(READY_RETRY_MS * 2 ** attempt, READY_RETRY_MAX_MS);
+    return new Promise<void>((resolve) => { window.setTimeout(resolve, delay); }).then(() => ask(attempt + 1));
+  });
+  readyPromise = ask(0);
+};
+
+/**
+ * Draws a newer layout snapshot, then tells the shell this revision is drawn
+ * so a frame waiting for it comes back. The shell answers with its latest
+ * snapshot, which is drawn in turn if it is newer still (an event that never
+ * reached this document).
+ */
+const drawSnapshot = (snapshot: LayoutSnapshot) => {
+  if (petPanel.applySnapshot(snapshot)) acknowledge(snapshot.revision);
+};
+
+/** After the drawn revision has been painted, tell the shell. */
+const acknowledge = (revision: number) => {
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    void petBridge.settle(revision).then((latest) => { if (latest) drawSnapshot(latest); }).catch(() => undefined);
+  }));
 };
 
 const setDismissed = (ids: string[]) => {

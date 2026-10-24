@@ -24,6 +24,7 @@ use std::time::Duration;
 mod native_frame;
 mod notifications;
 mod pet;
+mod pet_native;
 mod update_install;
 mod updater;
 
@@ -2190,7 +2191,7 @@ pub fn run() {
                     }
                     if let RunEvent::WindowEvent {
                         label,
-                        event: WindowEvent::Moved(_),
+                        event: WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. },
                         ..
                     } = event
                     {
@@ -2229,6 +2230,8 @@ pub fn run() {
             computer_use_open_permission,
             pet::pet_ready,
             pet::pet_set_expanded,
+            pet::pet_drag,
+            pet::pet_settle,
             pet::pet_hit_regions,
             pet::pet_set_dismissed,
             pet::pet_bind,

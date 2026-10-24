@@ -404,6 +404,8 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "computer_use_open_permission",
         "pet_ready",
         "pet_set_expanded",
+        "pet_drag",
+        "pet_settle",
         "pet_hit_regions",
         "pet_set_dismissed",
         "pet_bind",
@@ -655,6 +657,36 @@ fn every_main_window_sends_new_browsing_contexts_to_the_system_browser() {
             "the page must never get a second webview, found {forbidden:?}"
         );
     }
+}
+
+#[test]
+fn the_pet_learns_the_shell_drags_it_from_one_top_level_marker() {
+    let source = shipping_source("src/pet.rs");
+    let builder = source
+        .split("fn build_window(")
+        .nth(1)
+        .expect("pet window builder")
+        .split("\n}\n")
+        .next()
+        .expect("builder body");
+    assert!(
+        builder.contains(".initialization_script(PET_DRAG_MARKER)"),
+        "the pet window must define the drag marker before its scripts run"
+    );
+    let marker = source
+        .split("const PET_DRAG_MARKER: &str =")
+        .nth(1)
+        .expect("marker script")
+        .split("\";\n")
+        .next()
+        .expect("marker literal");
+    assert!(marker.contains("if (window.self === window.top)"));
+    assert!(marker.contains("Object.defineProperty(window, '__AVIBE_PET_DRAG__', { value: true })"));
+    let reader = read_to_string(&crate_dir().join("../../ui/src/pet/petBridge.ts"));
+    assert!(
+        reader.contains("__AVIBE_PET_DRAG__ === true"),
+        "the pet page must read the same marker the shell defines"
+    );
 }
 
 #[test]
@@ -1143,6 +1175,8 @@ fn the_pet_and_the_workbench_get_only_their_pet_commands_on_loopback_pages() {
         serde_json::json!([
             "allow-pet-ready",
             "allow-pet-set-expanded",
+            "allow-pet-drag",
+            "allow-pet-settle",
             "allow-pet-hit-regions",
             "allow-pet-set-dismissed",
             "allow-pet-bind",
