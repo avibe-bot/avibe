@@ -7,7 +7,7 @@ import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { ToggleSwitch } from '../SettingsPrimitives';
 import { Field } from './dialogFields';
-import { atLeast, formatCost, formatCount, formatMonthDay, formatSmallUsd, formatUsd } from './format';
+import { atLeast, cooldownTime, formatCost, formatCount, formatMonthDay, formatSmallUsd, formatUsd } from './format';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import { KEYLESS_EXA_SOURCE_ID, serviceSettings } from './searchServices';
 import { sourceStatePresentation } from './sourceStatePresentation';
@@ -30,12 +30,6 @@ export const SearchServicePrice: React.FC<{ price: HostedServiceListPrice }> = (
 };
 
 /** Positive evidence is display-only. Disabled/blocked/cooling always wins over an old success. */
-export const cooldownTime = (until: string, language: string): string => {
-  const date = new Date(until);
-  const clock = new Intl.DateTimeFormat(language, { hour: '2-digit', minute: '2-digit', hour12: false }).format(date);
-  return date.toDateString() === new Date().toDateString() ? clock : `${formatMonthDay(until)} ${clock}`;
-};
-
 export const SearchCandidateStatus: React.FC<{
   candidate: HostedExecutorCandidate;
   tool: HostedWebSearchToolStatus;
@@ -113,7 +107,9 @@ const ServiceMonthLine: React.FC<{ month: RegionRead<ServiceMonth>; keyless?: bo
     // Without a price table the report carries counts only.
     ...(usage.priced ? [usageHasNoPrice(usage.totals)
       ? t('settings.models.usage.cost.noPrice')
-      : keyless && (usage.totals.api_cost_usd ?? 0) === 0 && usage.totals.requests === 0 && !usage.totals.api_cost_lower_bound && !usage.partial
+      : keyless && (usage.totals.api_cost_usd ?? 0) === 0
+        && (usage.totals.api_cost_usd !== undefined || usage.totals.requests === 0)
+        && !usage.totals.api_cost_lower_bound && !usage.partial
         ? t('settings.models.searchServices.free')
         : t('settings.models.searchServices.monthEstimate', {
         usd: formatCost(usage.totals.api_cost_usd ?? 0, usage.totals.api_cost_lower_bound || usage.partial, i18n.language),

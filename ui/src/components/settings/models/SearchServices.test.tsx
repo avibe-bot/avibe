@@ -46,11 +46,11 @@ const MONTH_REPORT: UsageReport = {
     }],
   })),
 };
-const detail = (source: Source, tool = ACTIVE_SEARCH, serviceView = true) => {
+const detail = (source: Source, tool = ACTIVE_SEARCH, serviceView = true, report = MONTH_REPORT) => {
   const onSaveSearch = vi.fn();
   const onRetryService = vi.fn();
   const onOpenUsage = vi.fn();
-  const readUsage = vi.spyOn(modelsApi, 'getUsageSummary').mockResolvedValue(MONTH_REPORT);
+  const readUsage = vi.spyOn(modelsApi, 'getUsageSummary').mockResolvedValue(report);
   const settle: SourceMutationSettlement = {
     source: vi.fn().mockResolvedValue(null), gone: vi.fn().mockResolvedValue(null), unread: vi.fn().mockResolvedValue(null), release: vi.fn(),
     readInventory: vi.fn().mockResolvedValue({ snapshot: 1, sources: [source] }),
@@ -137,6 +137,9 @@ describe('search service activation and mixed order', () => {
     expect(screen.getByText(locale.t('settings.models.searchServices.keylessReady'))).toBeTruthy();
     expect(screen.getByText(locale.t('settings.models.searchServices.keylessResults', { count: 5 }))).toBeTruthy();
     expect(screen.getByText(locale.t('settings.models.searchServices.free'))).toBeTruthy();
+    const keylessRow = document.querySelector('[data-executor="src_exakeyless"]') as HTMLElement;
+    expect(within(keylessRow).getByText(locale.t('settings.models.searchServices.use'))).toBeTruthy();
+    expect(keylessRow.textContent).not.toMatch(/使用供应商|Uses .* key|invalid key|Replace key|密钥无效/i);
     cleanup();
     const { onViewOrder } = addDialog(KEYLESS_ACTIVE_SEARCH, lng);
     expect(screen.getByText(locale.t('settings.models.searchServices.freeTier'))).toBeTruthy();
@@ -169,6 +172,31 @@ describe('search service activation and mixed order', () => {
     const line = await screen.findByText('This month');
     expect(line.closest('p')?.textContent).toContain('Free');
     expect(line.closest('p')?.textContent).not.toContain('$0');
+  });
+
+  it.each([
+    { name: 'known zero after actual requests', usd: 0, lower: false, partial: false, free: true },
+    { name: 'paid total', usd: 0.01, lower: false, partial: false, free: false },
+    { name: 'unknown price', usd: undefined, lower: false, partial: false, free: false },
+    { name: 'zero lower bound', usd: 0, lower: true, partial: false, free: false },
+    { name: 'partial history', usd: 0, lower: false, partial: true, free: false },
+  ])('keeps keyless monthly cost truthful: $name', async ({ usd, lower, partial, free }) => {
+    const candidate = KEYLESS_ACTIVE_SEARCH.executor_candidates.find((row) => row.source_id === 'src_exakeyless');
+    const vendor = KEYLESS_ACTIVE_SEARCH.service_vendors?.find((row) => row.id === 'exa-mcp');
+    const report: UsageReport = {
+      ...MONTH_REPORT,
+      buckets: MONTH_REPORT.buckets.map((bucket) => ({
+        ...bucket, history_complete: !partial,
+        rows: [{ kind: 'service', source_id: 'src_exakeyless', service_id: 'exa/mcp', requests: 3,
+          billable_requests: 0, uncertain_requests: 0, reported_requests: 0,
+          ...(usd === undefined ? {} : { api_cost_usd: usd }), api_cost_lower_bound: lower }],
+      })),
+    };
+    detail(keylessExaSource(candidate, vendor), KEYLESS_ACTIVE_SEARCH, true, report);
+    const line = (await screen.findByText('This month')).closest('p')?.textContent;
+    expect(line?.includes('Free')).toBe(free);
+    expect(line).toContain('3');
+    if (free) expect(line).not.toMatch(/\$0|included/i);
   });
 
   it('shows keyless cooldown and retries through the built-in route without credential wording', async () => {

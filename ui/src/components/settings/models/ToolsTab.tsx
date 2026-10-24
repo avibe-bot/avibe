@@ -13,11 +13,11 @@ import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { ToggleSwitch } from '../SettingsPrimitives';
-import { formatMonthDay, formatNameList, formatSmallUsd } from './format';
+import { cooldownTime, formatMonthDay, formatNameList, formatSmallUsd } from './format';
 import { executorOrderAfterMove, imageModelCopyKey, pairEvidence, refusalSummary, type PairEvidence, type RefusalSummary } from './hostedTools';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import { KEYLESS_EXA_SOURCE_ID, searchServicesActive, webSearchTool } from './searchServices';
-import { SearchCandidateStatus, SearchServicePrice, SearchVendorGlyph, cooldownTime } from './SearchServiceParts';
+import { SearchCandidateStatus, SearchServicePrice, SearchVendorGlyph } from './SearchServiceParts';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
   HostedExecutorCandidate,
@@ -284,12 +284,15 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                           {candidate.kind === 'service' ? <button type="button" data-search-source={candidate.source_id} className="truncate text-left font-semibold text-foreground hover:underline" onClick={(event) => onOpenService?.(candidate.source_id, event.currentTarget)}>{name}</button> : <span className="truncate font-semibold text-foreground">{name}</span>}
                           <span className={cn('model-hub-pill border', candidate.kind === 'service' ? ACCENT_PILL.cyan : ACCENT_PILL.muted)}>{t(candidate.kind === 'service' ? 'settings.models.searchServices.kind' : 'settings.models.searchServices.modelKind')}</span>
                           <SearchCandidateStatus candidate={candidate} tool={activeWeb} source={source} />
-                          {candidate.kind === 'service' && <ToggleSwitch
-                            enabled={candidate.settings.enabled}
-                            disabled={pending}
-                            label={t('settings.models.searchServices.use') as string}
-                            onClick={() => onSave('web_search', { services: { [candidate.source_id]: { enabled: !candidate.settings.enabled } } })}
-                          />}
+                          {candidate.kind === 'service' && <span className="inline-flex items-center gap-2">
+                            <span className="model-hub-tool-note">{t('settings.models.searchServices.use')}</span>
+                            <ToggleSwitch
+                              enabled={candidate.settings.enabled}
+                              disabled={pending}
+                              label={t('settings.models.searchServices.use') as string}
+                              onClick={() => onSave('web_search', { services: { [candidate.source_id]: { enabled: !candidate.settings.enabled } } })}
+                            />
+                          </span>}
                         </div>
                         <span className="model-hub-tool-note">{candidate.kind === 'service'
                           ? <>{cooldown && keyless && <>{t('settings.models.searchServices.keylessCooldownUntil', { time: cooldown })} · </>}{t(keyless ? 'settings.models.searchServices.keylessResults' : source?.protocol === 'search' ? 'settings.models.searchServices.resultCount' : 'settings.models.searchServices.sharedKeyResults', { count: candidate.settings.results, source: name })}</>

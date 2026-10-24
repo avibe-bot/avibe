@@ -632,6 +632,36 @@ def _chain(attempts, *, status="completed", execution=None, state=HEALTHY, names
     )
 
 
+@pytest.mark.parametrize("lang", ["en", "zh"])
+@pytest.mark.parametrize("outcome", ["success", "rate_limited", "unavailable", "failed"])
+def test_keyless_im_projection_names_free_service_and_network_remedy(lang, outcome):
+    keyless_attempt = _tried(
+        KEYLESS, "completed" if outcome == "success" else "failed", usd=0,
+        **({} if outcome == "success" else {"error_code":
+           "service_unavailable" if outcome == "unavailable" else "service_rate_limited"}),
+    )
+    fallback = outcome in {"rate_limited", "unavailable"}
+    activity = _chain(
+        (keyless_attempt, _tried(DEEPSEEK, "completed", usd=0.00075)) if fallback else (keyless_attempt,),
+        status="failed" if outcome == "failed" else "completed",
+        execution=_service_ran(DEEPSEEK, "deepseek", 0.00075) if fallback else _service_ran(KEYLESS, "exa-mcp", 0),
+        sources=() if outcome == "failed" else RESULTS,
+        error_code="service_rate_limited" if outcome == "failed" else None,
+    )
+    line = hosted_line(activity, lang)
+    assert ("Exa（免费）" if lang == "zh" else "Exa (free)") in line
+    assert not any(word in line.lower() for word in ("密钥", "api key", "credential", "included", "$0 ·"))
+    if outcome == "success":
+        assert ("通过 Exa（免费） · 5 个来源 · 免费" if lang == "zh" else "via Exa (free) · 5 sources · Free") in line
+    elif outcome == "rate_limited":
+        assert ("Exa（免费）限流，已改用 DeepSeek" if lang == "zh" else "Exa (free) was rate-limited; switched to DeepSeek") in line
+    elif outcome == "unavailable":
+        assert ("暂时不可用" if lang == "zh" else "unavailable") in line
+    else:
+        assert ("立即重试" if lang == "zh" else "Retry now") in line
+        assert activity.attempts[0].remedy_key == "repair.retrySearch"
+
+
 SERVICE_CARDS = {
     # Design example: Tavily answers with five results.
     "service_completed": lambda: _chain(
