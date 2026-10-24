@@ -4,7 +4,9 @@ Status: **design**, 2026-10-19. Direction and the six product decisions in §0 a
 - Scope: Vibey's `web_search` through Model Hub. `x_search`, `image_generate`, Claude Code, Codex and OpenCode are
   unchanged.
 - Extends [`vibey-hosted-tools.md`](vibey-hosted-tools.md) (design v2). Every rule there holds unless this document
-  says otherwise; section references like "hosted tools §6" point into it.
+  says otherwise; section references like "hosted tools §6" point into it. Phase-2 page reading is specified in
+  [`web-fetch.md`](web-fetch.md), which reuses this plan's Source, usage, failover, and activity conventions where
+  it is more specific.
 - Replaces the approach of #2854 (not merged): no per-vendor tool names, no environment switch, no requests from the
   agent process.
 - The owner reviewed an interactive draft (a Show Page) on 2026-10-19. Formal frames go to `avibe-docs/design.pen`
@@ -26,7 +28,8 @@ Status: **design**, 2026-10-19. Direction and the six product decisions in §0 a
    second key, by the same rule that makes an OpenAI, Anthropic or xAI key an executor.
 5. **Adding a key checks it only where the check is free.** Otherwise the first real search confirms it. No paid test
    search (hosted tools §0, no active detection).
-6. **Page reading (`web_fetch`) is phase 2**, as its own tool card over the same services.
+6. **Page reading (`web_fetch`) is phase 2**, as its own tool card over the same services; see
+   [`web-fetch.md`](web-fetch.md).
 
 Carried over from the #2854 review: the model sees exactly one `web_search`, and a vendor is an execution choice,
 never a tool name.

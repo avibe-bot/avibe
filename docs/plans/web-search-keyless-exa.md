@@ -825,7 +825,10 @@ Document the current default and routing facts only.
 ## 9. Phase 2 `web_fetch`
 
 This section records only the upstream facts needed to keep the phase-1 client
-reusable; the separate phase-2 lane owns the `web_fetch` product design.
+reusable; [`web-fetch.md`](web-fetch.md) owns the phase-2 tool, local-first order,
+address policy, bounded content/replay and fetch UI. It reuses this plan's
+`src_exakeyless` / `exa/mcp` identity, advanced-search-plus-fetch endpoint,
+shared MCP session and cooldown.
 
 - The exact keyless MCP tool is `web_fetch_exa`. The checked source also
   registers `crawling_exa` as a deprecated alias that points to the same

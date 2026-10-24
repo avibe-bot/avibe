@@ -10,7 +10,9 @@ Status: **design v2**, 2026-10-15, owner-approved direction (passive, default-on
 - What is already built (rc4) and what v2 removes or changes is listed in §11; the implementation split is §12.
 - Extension: [`web-search-services.md`](web-search-services.md) adds search APIs (Tavily, Exa, DeepSeek, …) as
   `web_search` executors, the "prefer the model's own search" switch, and moves the web search order into the card
-  body. Where the two documents differ for `web_search`, that one holds.
+  body. [`web-fetch.md`](web-fetch.md) adds phase-2 page reading as a separate canonical hosted tool; it reuses
+  this document's turn freeze, replay, and unknown-tool reader rules. Where the documents differ for `web_search`,
+  the search plan holds.
 
 ## 0. Owner decisions this design implements
 
