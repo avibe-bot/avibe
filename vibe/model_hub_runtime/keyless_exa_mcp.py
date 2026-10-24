@@ -221,7 +221,7 @@ class KeylessExaMcpClient:
                             response_status, response_headers, None, "body_too_large", callback_called,
                             response_received_at, request_id=request_id,
                         )
-                    messages = _parse_messages(body)
+                    messages = await asyncio.to_thread(_parse_messages, body)
                     if request_id is not None and not messages and body:
                         # Preserve malformed/opaque errors for the service mapper.
                         return _Exchange(
@@ -341,14 +341,14 @@ class KeylessExaMcpClient:
                         self._clear_session()
                         continue
                     if initialized.error or initialized.status != 200 or self._session_id is None:
-                        return self._as_search_response(initialized)
+                        return await self._as_search_response(initialized)
                 listed = await self._list_tools(deadline=deadline)
                 if listed is not None:
                     last = listed
                     if _session_not_found(listed):
                         self._clear_session()
                         continue
-                    return self._as_search_response(listed)
+                    return await self._as_search_response(listed)
                 tool = (self._tools or {}).get(tool_name)
                 properties = _tool_properties(
                     tool,
@@ -370,8 +370,8 @@ class KeylessExaMcpClient:
                 if _session_not_found(called):
                     self._clear_session()
                     continue
-                return self._as_search_response(called)
-            return self._as_search_response(last or _Exchange(None, {}, None, "connection"))
+                return await self._as_search_response(called)
+            return await self._as_search_response(last or _Exchange(None, {}, None, "connection"))
 
     async def search(
         self,
@@ -382,20 +382,24 @@ class KeylessExaMcpClient:
         return await self.call_tool(KEYLESS_EXA_SEARCH_TOOL, arguments, on_sent=on_sent)
 
     @staticmethod
-    def _as_search_response(exchange: _Exchange) -> SearchResponse:
+    async def _as_search_response(exchange: _Exchange) -> SearchResponse:
         body = exchange.body
         error = exchange.error
         if exchange.request_id is not None:
             message = _matching_message(exchange.messages, exchange.request_id)
             if message is not None:
-                body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+                body = await asyncio.to_thread(
+                    lambda: json.dumps(message, separators=(",", ":")).encode("utf-8")
+                )
             elif exchange.messages:
                 body = None
                 error = error or "connection"
         # Normalize SSE to the matching JSON-RPC envelope so the core mapper has
         # one bounded representation for both MCP transport modes.
         elif exchange.messages:
-            body = json.dumps(exchange.messages[-1], separators=(",", ":")).encode("utf-8")
+            body = await asyncio.to_thread(
+                lambda: json.dumps(exchange.messages[-1], separators=(",", ":")).encode("utf-8")
+            )
         if not error and exchange.status is not None and 300 <= exchange.status < 400:
             error = "redirect"
         return SearchResponse(
