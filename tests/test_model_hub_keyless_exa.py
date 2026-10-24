@@ -42,9 +42,16 @@ def _tool_schema(*, missing: str | None = None) -> dict:
 
 
 @asynccontextmanager
-async def _mcp_stub(*, missing: str | None = None, sse: bool = False, stale_tools_once: bool = False):
+async def _mcp_stub(
+    *,
+    missing: str | None = None,
+    sse: bool = False,
+    stale_tools_once: bool = False,
+    invalid_init_once: bool = False,
+    notification_status: int | None = None,
+):
     calls: list[dict] = []
-    state = {"session": "stub-session-1", "stale_tools": stale_tools_once}
+    state = {"session": "stub-session-1", "stale_tools": stale_tools_once, "invalid_init": invalid_init_once}
 
     async def handle(request: web.Request) -> web.StreamResponse:
         payload = await request.json()
@@ -52,15 +59,19 @@ async def _mcp_stub(*, missing: str | None = None, sse: bool = False, stale_tool
         method = payload["method"]
         request_id = payload.get("id")
         if method == "initialize":
+            protocol = "1999-01-01" if state["invalid_init"] else "2025-06-18"
+            state["invalid_init"] = False
             return web.json_response(
                 _rpc(request_id, {
-                    "protocolVersion": "2025-06-18",
+                    "protocolVersion": protocol,
                     "capabilities": {"tools": {"listChanged": True}},
                     "serverInfo": {"name": "stub-exa", "version": "1"},
                 }),
                 headers={"Mcp-Session-Id": state["session"]},
             )
         if method == "notifications/initialized":
+            if notification_status is not None:
+                return web.Response(status=notification_status, headers={"Mcp-Session-Id": state["session"]})
             return web.Response(status=202, headers={"Mcp-Session-Id": state["session"]})
         if method == "tools/list":
             if state["stale_tools"]:
@@ -145,6 +156,29 @@ async def test_keyless_mcp_negotiates_once_adapts_live_schema_and_maps_highlight
     }
     assert mapped.cost is not None and mapped.cost.usd == 0
     assert not mapped.billable and not mapped.uncertain
+
+
+@pytest.mark.asyncio
+async def test_keyless_mcp_does_not_continue_after_initialized_transport_error() -> None:
+    """KEX-2: notification transport failures stop the handshake before tools/list."""
+    async with _mcp_stub(notification_status=500) as (endpoint, calls):
+        response = await KeylessExaMcpClient(endpoint=endpoint).search({"query": "avibe"})
+    assert response.http_status == 500
+    assert [call["payload"]["method"] for call in calls] == ["initialize", "notifications/initialized"]
+
+
+@pytest.mark.asyncio
+async def test_keyless_mcp_discards_session_after_invalid_initialization() -> None:
+    """KEX-2: a failed handshake cannot authorize a later search on the stale session."""
+    async with _mcp_stub(invalid_init_once=True) as (endpoint, calls):
+        client = KeylessExaMcpClient(endpoint=endpoint)
+        first = await client.search({"query": "first"})
+        second = await client.search({"query": "second", "numResults": 1, "enableHighlights": True, "textMaxCharacters": 1})
+    assert first.error == "connection"
+    assert second.http_status == 200
+    assert [call["payload"]["method"] for call in calls] == [
+        "initialize", "initialize", "notifications/initialized", "tools/list", "tools/call",
+    ]
 
 
 @pytest.mark.asyncio

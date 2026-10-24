@@ -288,7 +288,7 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                           />}
                         </div>
                         <span className="model-hub-tool-note">{candidate.kind === 'service'
-                          ? <>{t(source?.protocol === 'search' ? 'settings.models.searchServices.resultCount' : 'settings.models.searchServices.sharedKeyResults', { count: candidate.settings.results, source: name })}{vendor?.id === 'exa-mcp' && vendor.free_tier ? ` · ${vendor.free_tier}` : null}</>
+                          ? <>{t(source?.protocol === 'search' ? 'settings.models.searchServices.resultCount' : 'settings.models.searchServices.sharedKeyResults', { count: candidate.settings.results, source: name })}{vendor?.id === 'exa-mcp' && vendor.free_tier ? ` · ${t('settings.models.searchServices.freeTier')}` : null}</>
                           : <span className="font-mono">{candidate.model_id}</span>}</span>
                         {candidate.kind === 'service' && candidate.cooldown_until !== null && <Button variant="outline" size="xs" className="self-start" disabled={pending} onClick={() => onRetryService?.(candidate.source_id)}>{t('settings.models.searchServices.retry')}</Button>}
                       </div>

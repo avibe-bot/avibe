@@ -264,6 +264,7 @@ class KeylessExaMcpClient:
         result = message.get("result") if isinstance(message, Mapping) else None
         protocol = result.get("protocolVersion") if isinstance(result, Mapping) else None
         if exchange.status != 200 or not isinstance(result, Mapping) or protocol != MCP_PROTOCOL_VERSION:
+            self._clear_session()
             if exchange.status == 200 and exchange.messages and not exchange.error:
                 return _Exchange(
                     exchange.status, exchange.headers, exchange.body, "connection", exchange.sent,
@@ -279,7 +280,8 @@ class KeylessExaMcpClient:
         )
         if _session_not_found(initialized):
             self._clear_session()
-        if initialized.status is not None and initialized.status >= 400:
+        if initialized.error or initialized.status is None or initialized.status >= 400:
+            self._clear_session()
             return initialized
         return exchange
 
