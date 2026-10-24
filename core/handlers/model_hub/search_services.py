@@ -43,6 +43,8 @@ _KEYLESS_RATE_LIMIT_RE = re.compile(
     re.IGNORECASE,
 )
 _KEYLESS_REFUSAL_TAGS = frozenset({"PROHIBITED_CONTENT", "CONTENT_FILTER_ERROR"})
+_KEYLESS_TEXT_CONTENT_TYPE_FIELD = "type"
+_KEYLESS_TEXT_CONTENT_TYPE = "text"
 
 
 def _keyless_mcp_content(body: Mapping[str, Any]) -> tuple[dict[str, Any], Mapping[str, Any] | None]:
@@ -55,7 +57,7 @@ def _keyless_mcp_content(body: Mapping[str, Any]) -> tuple[dict[str, Any], Mappi
         if isinstance(raw_content, list):
             first_candidate: Mapping[str, Any] | None = None
             for item in raw_content[:8]:
-                if not isinstance(item, Mapping) or item.get("type") != "text":
+                if not isinstance(item, Mapping) or item.get(_KEYLESS_TEXT_CONTENT_TYPE_FIELD) != _KEYLESS_TEXT_CONTENT_TYPE:
                     continue
                 text = item.get("text")
                 if not isinstance(text, str) or len(text) > 2 * 1024 * 1024:
