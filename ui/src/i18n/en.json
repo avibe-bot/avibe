@@ -5097,7 +5097,7 @@
     "agentActivity": {
       "hosted": {
         "keylessExa": "Exa (free)",
-        "rateLimitSwitch": "{{sources}} was rate-limited; switched to {{provider}}. Retry after the cooldown, or use Retry now in Models › Tools.",
+        "rateLimitSwitch": "Rate-limited: {{sources}}; switched to {{provider}}. Retry after the cooldown, or use Retry now in Models › Tools.",
         "errorCode": {
           "provider_no_reason": "The provider gave no reason.",
           "provider_no_image": "The provider returned no image.",

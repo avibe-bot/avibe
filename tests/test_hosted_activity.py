@@ -654,7 +654,7 @@ def test_keyless_im_projection_names_free_service_and_network_remedy(lang, outco
     if outcome == "success":
         assert ("通过 Exa（免费） · 5 个来源 · 免费" if lang == "zh" else "via Exa (free) · 5 sources · Free") in line
     elif outcome == "rate_limited":
-        assert ("Exa（免费）限流，已改用 DeepSeek" if lang == "zh" else "Exa (free) was rate-limited; switched to DeepSeek") in line
+        assert ("Exa（免费）限流，已改用 DeepSeek" if lang == "zh" else "Rate-limited: Exa (free); switched to DeepSeek") in line
     elif outcome == "unavailable":
         assert ("暂时不可用" if lang == "zh" else "unavailable") in line
     else:
