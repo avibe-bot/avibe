@@ -217,12 +217,24 @@ class SearchChain:
         return Failure(self.say("modelHub.hostedTools.noSearchSource"), None)
 
     async def service_attempt(self, slot, source, catalog):
+        loop = asyncio.get_running_loop()
+        attempt_deadline = loop.time() + max(0.0, min(ATTEMPT_SECONDS, self.deadline - loop.time()))
         if is_keyless_exa_source(source):
-            async with self.owner._keyless_exa_attempt_lock:
-                return await self._service_attempt_locked(slot, source, catalog)
-        return await self._service_attempt_locked(slot, source, catalog)
+            remaining = max(0.0, attempt_deadline - loop.time())
+            try:
+                await asyncio.wait_for(self.owner._keyless_exa_attempt_lock.acquire(), timeout=remaining)
+            except asyncio.TimeoutError:
+                return None, {
+                    "source_id": slot.source_id, "label": source.display_name[:64],
+                    "kind": "service", "outcome": "skipped", "skipped": "unavailable",
+                }
+            try:
+                return await self._service_attempt_locked(slot, source, catalog, attempt_deadline=attempt_deadline)
+            finally:
+                self.owner._keyless_exa_attempt_lock.release()
+        return await self._service_attempt_locked(slot, source, catalog, attempt_deadline=attempt_deadline)
 
-    async def _service_attempt_locked(self, slot, source, catalog):
+    async def _service_attempt_locked(self, slot, source, catalog, *, attempt_deadline: float):
         from .service import _ExecutorAttempt
 
         owner = self.owner
@@ -289,7 +301,7 @@ class SearchChain:
 
         task = asyncio.create_task(invoke())
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=max(0.0, min(ATTEMPT_SECONDS, self.deadline - asyncio.get_running_loop().time())))
+            await asyncio.wait_for(asyncio.shield(task), timeout=max(0.0, attempt_deadline - asyncio.get_running_loop().time()))
         except asyncio.TimeoutError:
             timed_out = True
             task.cancel()

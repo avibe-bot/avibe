@@ -415,6 +415,35 @@ async def test_keyless_overlapping_searches_settle_rate_limit_before_next_admiss
 
 
 @pytest.mark.asyncio
+async def test_keyless_queued_waiter_times_out_before_admission(tmp_path, monkeypatch):
+    """KEX-2: lock wait consumes the attempt budget and never sends a keyless request."""
+    service = owner(
+        tmp_path,
+        (),
+        web={
+            "enabled": True,
+            "executor_order": [KEYLESS_EXA_SOURCE_ID],
+            "executor_order_kinds": {KEYLESS_EXA_SOURCE_ID: "service"},
+            "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
+        },
+    )
+    monkeypatch.setattr(hosted_tools, "KEYLESS_EXA_ACTIVE", True)
+    monkeypatch.setattr(search_chain, "KEYLESS_EXA_ACTIVE", True)
+    monkeypatch.setattr(search_chain, "ATTEMPT_SECONDS", 0.01)
+    await service._keyless_exa_attempt_lock.acquire()
+    calls = answers(monkeypatch, service, wire())
+    try:
+        result = await run(service)
+    finally:
+        service._keyless_exa_attempt_lock.release()
+    assert calls == []
+    assert result["record"]["attempts"] == [{
+        "source_id": KEYLESS_EXA_SOURCE_ID, "label": "Exa (free)", "kind": "service",
+        "outcome": "skipped", "skipped": "unavailable",
+    }]
+
+
+@pytest.mark.asyncio
 async def test_keyless_retry_branch_accepts_the_synthetic_source_while_flag_is_off(tmp_path):
     """KEX-1: a downgraded reader can clear a built-in cooldown without a Source row or network call."""
     service = owner(tmp_path, ("exa",))
