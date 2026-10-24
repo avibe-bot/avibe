@@ -227,7 +227,7 @@ describe('SourceDetailPanel', () => {
         <CommittedPanel source={keylessExaSource()} hostedTools={unreadRegion()} serviceView trackMutation={immediateTrack} onReauth={noReauth} />
       </I18nextProvider>,
     );
-    expect(screen.getByText('mcp.exa.ai')).toBeTruthy();
+    expect(screen.getByText(i18n.t('settings.models.searchServices.keylessEndpoint'))).toBeTruthy();
     expect(screen.queryByRole('button', { name: /Manage|管理/ })).toBeNull();
     expect(screen.queryByRole('button', { name: /Remove source|移除供应商/ })).toBeNull();
   });

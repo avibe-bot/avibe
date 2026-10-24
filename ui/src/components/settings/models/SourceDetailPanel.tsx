@@ -830,7 +830,7 @@ export const SourceDetailPanel: React.FC<{
           <div className="flex min-w-0 flex-col gap-1">
             <h2 ref={headingRef} tabIndex={-1} className="text-lg font-bold text-foreground">{source.display_name}</h2>
             <p className="model-hub-tool-note">{t(source.protocol === 'search' ? 'settings.models.searchServices.noModels' : 'settings.models.searchServices.modelsAndSearch')}</p>
-            {keylessExa && <p className="model-hub-tool-note">mcp.exa.ai</p>}
+            {keylessExa && <p className="model-hub-tool-note">{t('settings.models.searchServices.keylessEndpoint')}</p>}
           </div>
         </header>
         <div className="min-h-0 flex-1 overflow-y-auto">
@@ -877,7 +877,7 @@ export const SourceDetailPanel: React.FC<{
       </section>
       <dl className="model-hub-source-metadata grid shrink-0 grid-cols-2 gap-x-5 gap-y-3 border-b border-border bg-background px-5 py-3 sm:grid-cols-4">
         <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.endpoint')}</dt><dd className="truncate font-mono">{keylessExa
-          ? 'mcp.exa.ai'
+          ? t('settings.models.searchServices.keylessEndpoint')
           : source.base_url
             ? <SourcePrivateValue value={source.base_url} />
             : t('settings.models.sourceDetail.metadata.officialEndpoint')}</dd></div>

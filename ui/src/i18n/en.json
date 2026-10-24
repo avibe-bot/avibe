@@ -2547,6 +2547,7 @@
         "priceNote": "Prices are the catalog's dated API list prices. Free allowances, plans and actual bills may differ.",
         "custody": "Search service keys stay with the gateway, like other provider keys. They are never passed to the model or Agent.",
         "keylessQueryDestination": "Queries go directly from this Avibe runtime to Exa (mcp.exa.ai); Exa can see the connection's IP.",
+        "keylessEndpoint": "mcp.exa.ai",
         "keylessCustody": "Exa (free) needs no key; no key is given to the model or Agent.",
         "queryDestination": "Queries are sent to the service that runs the search.",
         "queryVendor": "Search queries are sent to {{vendor}}.",
