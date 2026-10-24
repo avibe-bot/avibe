@@ -23,7 +23,9 @@ use avibe_runtime_host::pet::{
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
 use tauri::menu::{CheckMenuItem, MenuItem, Submenu};
-use tauri::{AppHandle, Manager, Monitor, PhysicalPosition, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{
+    AppHandle, Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
+};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
 use url::Url;
 
@@ -944,6 +946,41 @@ pub fn pet_set_dismissed(window: WebviewWindow, session_id: String, ids: Vec<Str
         .map_err(|_| "The dismissed pet cards could not be saved.".to_owned())
 }
 
+fn cursor_scale(app: &AppHandle, window_scale: f64) -> f64 {
+    if cfg!(target_os = "macos") {
+        app.primary_monitor()
+            .ok()
+            .flatten()
+            .map_or(window_scale, |monitor| monitor.scale_factor())
+    } else {
+        window_scale
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct WindowCursor {
+    x: f64,
+    y: f64,
+    in_window: bool,
+}
+
+/// Converts the cursor and window geometry to the same logical screen space.
+/// On macOS the global cursor uses the primary display's scale, while tao
+/// reports the window position and size at the window's current display scale.
+fn cursor_in_window(
+    cursor: PhysicalPosition<f64>,
+    cursor_scale: f64,
+    origin: PhysicalPosition<i32>,
+    window_scale: f64,
+    size: PhysicalSize<u32>,
+) -> WindowCursor {
+    let x = cursor.x / cursor_scale - f64::from(origin.x) / window_scale;
+    let y = cursor.y / cursor_scale - f64::from(origin.y) / window_scale;
+    let in_window =
+        x >= 0.0 && y >= 0.0 && x < f64::from(size.width) / window_scale && y < f64::from(size.height) / window_scale;
+    WindowCursor { x, y, in_window }
+}
+
 /// One poller per native window. All window calls and cursor-event toggles
 /// happen on the main thread; a hidden window waits for an explicit wake.
 fn start_cursor_poll(app: &AppHandle) {
@@ -975,7 +1012,7 @@ fn start_cursor_poll(app: &AppHandle) {
                         let _ = send.send((None, ignoring, false));
                         return;
                     }
-                    let (Ok(cursor), Ok(origin), Ok(scale), Ok(size)) = (
+                    let (Ok(cursor), Ok(origin), Ok(window_scale), Ok(size)) = (
                         handle.cursor_position(),
                         window.outer_position(),
                         window.scale_factor(),
@@ -984,10 +1021,11 @@ fn start_cursor_poll(app: &AppHandle) {
                         let _ = send.send((Some(100), ignoring, hovered));
                         return;
                     };
-                    let x = (cursor.x - origin.x as f64) / scale;
-                    let y = (cursor.y - origin.y as f64) / scale;
-                    let in_window =
-                        x >= 0.0 && y >= 0.0 && x < size.width as f64 / scale && y < size.height as f64 / scale;
+                    let pointer =
+                        cursor_in_window(cursor, cursor_scale(&handle, window_scale), origin, window_scale, size);
+                    let x = pointer.x;
+                    let y = pointer.y;
+                    let in_window = pointer.in_window;
                     let (next, hover) = {
                         let regions = lock(&pet.hit_regions);
                         (
@@ -1087,6 +1125,41 @@ pub fn pet_open(window: WebviewWindow, link: String) -> Result<(), String> {
 mod tests {
     use super::*;
     use avibe_runtime_host::pet::{settle_frame, DRAG_HEIGHT, WINDOW_HEIGHT};
+
+    #[test]
+    fn mixed_scale_cursor_hit_testing_uses_the_primary_scale_for_global_cursor() {
+        // The primary display is 2x and the pet's secondary display is 1x.
+        // tao's global cursor is in primary-display physical pixels, while
+        // the window position and size use the window display's pixels.
+        let cursor = PhysicalPosition::new(3400.0, 240.0);
+        let origin = PhysicalPosition::new(1512, 100);
+        let size = PhysicalSize::new(460, 600);
+
+        let fixed = cursor_in_window(cursor, 2.0, origin, 1.0, size);
+        assert_eq!((fixed.x, fixed.y), (188.0, 20.0));
+        assert!(fixed.in_window);
+        assert!(HitRect {
+            x: 150.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            hover: false,
+        }
+        .contains(fixed.x, fixed.y));
+
+        // Using the window scale for both values reproduces the lost-input
+        // bug: the same physical cursor is incorrectly placed outside.
+        let broken = cursor_in_window(cursor, 1.0, origin, 1.0, size);
+        assert!(!broken.in_window);
+        assert!(!HitRect {
+            x: 150.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            hover: false,
+        }
+        .contains(broken.x, broken.y));
+    }
 
     #[test]
     fn window_build_placement_keeps_the_image_and_dock_reachable_on_small_displays() {
