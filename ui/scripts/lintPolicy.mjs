@@ -78,6 +78,7 @@ export const EXPECTED_RULES = {
   '@typescript-eslint/prefer-as-const': [2],
   '@typescript-eslint/prefer-namespace-keyword': [2],
   '@typescript-eslint/triple-slash-reference': [2],
+  'avibe/localized-user-text': [2],
   'constructor-super': [0],
   'for-direction': [2],
   'getter-return': [0, { allowImplicit: false }],
@@ -192,7 +193,7 @@ export const EXPECTED_POLICY = {
   sourceType: 'module',
   parserOptions: {},
   processor: null,
-  plugins: ['@', '@typescript-eslint', 'react-hooks', 'react-refresh'],
+  plugins: ['@', '@typescript-eslint', 'avibe', 'react-hooks', 'react-refresh'],
   linterOptions: { reportUnusedDisableDirectives: 1 },
   globals: EXPECTED_BROWSER_GLOBALS,
 };

@@ -4,6 +4,7 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
+import localizedUserText from './scripts/localizedUserText.mjs'
 
 export default defineConfig([
   globalIgnores(['dist']),
@@ -19,7 +20,9 @@ export default defineConfig([
       ecmaVersion: 2020,
       globals: globals.browser,
     },
+    plugins: { avibe: { rules: { 'localized-user-text': localizedUserText } } },
     rules: {
+      'avibe/localized-user-text': 'error',
       // The codebase already marks a binding as deliberately unused by naming it
       // `_something` — an argument kept for signature shape, a destructured slot
       // being skipped, a caught error that is intentionally swallowed. Opt the
