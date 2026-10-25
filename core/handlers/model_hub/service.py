@@ -10,6 +10,7 @@ import logging
 import threading
 import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -1608,6 +1609,7 @@ class ModelHubService:
         self._search_reenable_checks: dict[str, asyncio.Task] = {}
         self._service_cooldowns = ServiceCooldowns()
         self._keyless_exa_attempt_lock = asyncio.Lock()
+        self._jina_fetch_sent_at: deque[datetime] = deque()
         self._local_fetch_engine = None
         self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
         self._latest_source_attempt_generation: dict[str, int] = {}
@@ -2019,6 +2021,16 @@ class ModelHubService:
     def _mint_settlement_generation(self) -> int:
         self._next_settlement_generation += 1
         return self._next_settlement_generation
+
+    def _reserve_jina_fetch_slot(self, now: datetime, limit: int = 20) -> datetime | None:
+        """Reserve one runtime-wide keyless Reader call in its rolling minute."""
+        cutoff = now - timedelta(minutes=1)
+        while self._jina_fetch_sent_at and self._jina_fetch_sent_at[0] <= cutoff:
+            self._jina_fetch_sent_at.popleft()
+        if len(self._jina_fetch_sent_at) >= limit:
+            return self._jina_fetch_sent_at[0] + timedelta(minutes=1)
+        self._jina_fetch_sent_at.append(now)
+        return None
 
     def _reserve_settlement_generation(self, source_id: str, *, source: ModelHubSourceConfig | None = None) -> int:
         """Reserve on the loop; an already-admitted snapshot avoids a second config read."""

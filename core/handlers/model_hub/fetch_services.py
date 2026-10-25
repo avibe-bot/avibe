@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
@@ -40,14 +41,14 @@ def _nested(value: Any, *, depth: int = 0):
             yield from _nested(item, depth=depth + 1)
 
 
-def _decode(body: bytes | None) -> Mapping[str, Any] | None:
+def _decode(body: bytes | None) -> tuple[Mapping[str, Any] | None, bool]:
     if body is None:
-        return None
+        return None, False
     try:
         value = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
-        return None
-    return value if isinstance(value, Mapping) else None
+        return None, False
+    return (value, True) if isinstance(value, Mapping) else (None, False)
 
 
 def _provider_error(body: Mapping[str, Any] | None) -> str | None:
@@ -78,6 +79,39 @@ def _mcp_rate_limited(body: Mapping[str, Any] | None) -> bool:
         for key, value in _nested(body)
     )
 
+_EXA_MARKDOWN_HEADER = re.compile(
+    r"\A(?:#\s+|Title:\s*)(?P<title>[^\r\n]*)\r?\n"
+    r"URL:\s*(?P<url>https?://[^\r\n]*)\r?\n"
+    r"(?:(?:Published|Author):[^\r\n]*\r?\n)*"
+    r"(?:\r?\n)?(?P<content>.*)\Z",
+    re.DOTALL,
+)
+_EXA_NO_CONTENT = re.compile(r"\ANo content found(?: for the provided URL\(s\))?\.\Z", re.IGNORECASE)
+_EXA_CRAWL_TAG = re.compile(r"\b(CRAWL_[A-Z0-9_]+)\b")
+
+
+def _exa_markdown_payload(text: str) -> dict[str, Any]:
+    """Keep one Exa Markdown block intact, peeling only its leading wrapper."""
+    match = _EXA_MARKDOWN_HEADER.match(text)
+    if match is None:
+        stripped = text.strip()
+        payload: dict[str, Any] = {"content": text}
+        tag = _EXA_CRAWL_TAG.search(stripped) if stripped.startswith("Error fetching URL(s):") else None
+        if _EXA_NO_CONTENT.fullmatch(stripped) or _EXA_CRAWL_TAG.fullmatch(stripped) or tag:
+            payload["_mcp_target_failure"] = True
+            if tag:
+                payload["tag"] = tag.group(1)
+        return payload
+    payload = {
+        "content": match.group("content"),
+        "title": match.group("title"),
+        "url": match.group("url"),
+    }
+    if not match.group("content").strip():
+        payload["_mcp_target_failure"] = True
+    return payload
+
+
 def _mcp_payload(body: Mapping[str, Any] | None) -> tuple[Mapping[str, Any] | None, bool]:
     if not isinstance(body, Mapping):
         return body, False
@@ -99,16 +133,19 @@ def _mcp_payload(body: Mapping[str, Any] | None) -> tuple[Mapping[str, Any] | No
             if not isinstance(item, Mapping) or item.get("type") != "text":
                 continue
             text = item.get("text")
-            if isinstance(text, str):
-                try:
-                    value = json.loads(text)
-                except (json.JSONDecodeError, RecursionError):
-                    continue
-                if isinstance(value, Mapping):
-                    metadata = result.get("_meta")
-                    if isinstance(metadata, Mapping):
-                        value = {**value, "_meta": dict(metadata)}
-                    return value, result.get("isError") is True
+            if not isinstance(text, str):
+                continue
+            try:
+                value = json.loads(text)
+            except (json.JSONDecodeError, RecursionError):
+                value = _exa_markdown_payload(text)
+            if isinstance(value, Mapping):
+                metadata = result.get("_meta")
+                if isinstance(metadata, Mapping):
+                    value = {**value, "_meta": dict(metadata)}
+                if result.get("isError") is True:
+                    value = {**value, "_mcp_is_error": True}
+                return value, result.get("isError") is True
     return body, result.get("isError") is True
 
 def _url_value(value: Any) -> str | None:
@@ -128,6 +165,10 @@ def _content(service: Mapping[str, Any], body: Mapping[str, Any] | None) -> tupl
     content = _path(body, result.get("content"))
     title = _path(body, result.get("title"))
     final_url = _path(body, result.get("url"))
+    if service.get("vendor") == "exa-mcp":
+        content = _path(body, result.get("content", "content"))
+        title = _path(body, result.get("title", "title"))
+        final_url = _path(body, result.get("url", "url"))
     if service.get("vendor") == "tavily":
         items = _path(body, result.get("items"))
         if isinstance(items, list) and items:
@@ -198,13 +239,15 @@ def map_fetch_response(
     say: Callable[..., str],
 ) -> FetchServiceResult:
     """Map one service response, keeping target failures separate from service health."""
-    body = _decode(response.body)
+    body, decoded = _decode(response.body)
     status = response.http_status
     outcomes = service.get("outcomes") if isinstance(service.get("outcomes"), Mapping) else {}
     vendor = str(service.get("vendor") or "")
     mcp_error = False
+    mcp_target_failure = False
     if vendor == "exa-mcp":
         body, mcp_error = _mcp_payload(body)
+        mcp_target_failure = bool(isinstance(body, Mapping) and body.get("_mcp_target_failure") is True)
     free = vendor in {"exa-mcp", "jina-reader"}
     retry_after = next((value for key, value in response.headers.items() if key.lower() == "retry-after"), None)
     code: str | None = None
@@ -223,6 +266,11 @@ def map_fetch_response(
         code, target_failure = "fetch_target_unreadable", True
     elif vendor == "exa-mcp" and _mcp_rate_limited(body):
         code = "service_rate_limited"
+    elif vendor == "exa-mcp" and mcp_target_failure:
+        tag = _tag(body)
+        code, target_failure = "fetch_target_unreadable", True
+        if tag and not tag.startswith("CRAWL_"):
+            code, target_failure = "service_unavailable", False
     elif vendor == "exa-mcp" and mcp_error:
         tag = _tag(body)
         if tag and tag.startswith("CRAWL_"):
@@ -235,6 +283,10 @@ def map_fetch_response(
         code = "service_refused"
     elif _tag(body) and _tag(body) in {str(item).upper() for item in outcomes.get("target_tags", ())}:
         code, target_failure = "fetch_target_unreadable", True
+    elif status == 200 and not decoded:
+        # A provider envelope that cannot be decoded is a service fault, not
+        # evidence that this particular target was unreadable.
+        code = "service_unreadable" if response.error == "body_too_large" else "service_unavailable"
     elif response.error in {"timeout", "connection", "redirect", "body_too_large", "invalid_endpoint"}:
         code = "service_unavailable" if response.error != "body_too_large" else "service_unreadable"
     elif status != 200:
@@ -273,7 +325,11 @@ def map_fetch_response(
         _failed(code, say, detail=_provider_error(body) if code == "service_refused" else None),
         ZERO if sent and free else None,
         False,
-        bool(sent and not free and status is None and not target_failure),
+        bool(
+            sent and not free and status == 200
+            and not decoded
+            and not target_failure
+        ),
         {"service_key_invalid": "models.source.needs_action.credential_revoked",
          "service_balance": "models.source.needs_action.balance_exhausted",
          "service_limit": "models.source.needs_action.spend_limit_reached"}.get(code),

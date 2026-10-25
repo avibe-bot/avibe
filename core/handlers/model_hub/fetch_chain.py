@@ -31,7 +31,9 @@ from vibe.model_hub_runtime.fetch_catalog import fetch_service
 
 
 class _NotAdmitted(Exception):
-    pass
+    def __init__(self, skip: dict[str, Any] | None = None):
+        super().__init__()
+        self.skip = skip
 
 
 @dataclass(frozen=True)
@@ -225,7 +227,7 @@ class FetchChain:
             await self._record_local_usage(source, slot)
         if record.get("status") == "completed":
             await self.owner.record_hosted_success(source, slot.model_id, "web_fetch", "direct")
-        for key in ("error_code", "terminal", "sent", "retry_at", "cooldown_code", "cooldown_suppressed", "skipped"):
+        for key in ("terminal", "sent", "retry_at", "cooldown_code", "cooldown_suppressed", "skipped"):
             record.pop(key, None)
         return FetchAttempt(
             source, slot.model_id, "local", record, cost, False, False, moves_on, sent,
@@ -258,10 +260,8 @@ class FetchChain:
             async with self.owner._mutation_lock:
                 current, _, skip = await self._classify(slot, locked=True)
                 if skip is not None:
-                    raise _NotAdmitted
+                    raise _NotAdmitted(skip)
                 source = current
-                health_generation = self.owner._reserve_settlement_generation(source.id, source=source)
-                cooldown_generation = self.owner._service_cooldowns.advance(source, slot.model_id)
 
             async def on_sent():
                 nonlocal sent, source
@@ -269,8 +269,25 @@ class FetchChain:
                 async with self.owner._mutation_lock:
                     current, _, skip = await self._classify(slot, locked=True)
                     if skip is not None:
-                        raise _NotAdmitted
+                        raise _NotAdmitted(skip)
                     source = current
+                    if source.vendor == "jina-reader":
+                        limits = service.get("limits") if isinstance(service.get("limits"), Mapping) else {}
+                        requests_per_minute = limits.get("requests_per_minute", 20)
+                        if not isinstance(requests_per_minute, int) or requests_per_minute < 1:
+                            raise _NotAdmitted()
+                        retry_at = self.owner._reserve_jina_fetch_slot(self.owner.now(), requests_per_minute)
+                        if retry_at is not None:
+                            raise _NotAdmitted({
+                                "source_id": slot.source_id,
+                                "label": source.display_name[:64],
+                                "kind": "service",
+                                "outcome": "skipped",
+                                "skipped": "cooling",
+                                "retry_at": utc_text(retry_at),
+                            })
+                    health_generation = self.owner._reserve_settlement_generation(source.id, source=source)
+                    cooldown_generation = self.owner._service_cooldowns.advance(source, slot.model_id)
                     sent = True
 
             request = self._request_for(service)
@@ -290,9 +307,12 @@ class FetchChain:
         except asyncio.CancelledError:
             stopped = True
             task.cancel()
-        except _NotAdmitted:
+        except _NotAdmitted as exc:
             await self._release_unspent(source, slot, health_generation, cooldown_generation, response)
-            return None, {"source_id": slot.source_id, "label": source.display_name[:64], "kind": "service", "outcome": "skipped", "skipped": "unavailable"}
+            return None, exc.skip or {
+                "source_id": slot.source_id, "label": source.display_name[:64], "kind": "service",
+                "outcome": "skipped", "skipped": "unavailable",
+            }
         except FetchFailure as exc:
             self._gate_error = exc.code
             response = SearchResponse(None, {}, None, "invalid_endpoint")
@@ -312,25 +332,34 @@ class FetchChain:
         response = response or SearchResponse(None, {}, None, "cancelled" if stopped else "timeout" if timed_out else "connection")
         if timed_out and response.error == "cancelled":
             response = replace(response, error="timeout")
-        if stopped:
-            result = await asyncio.to_thread(
-                map_fetch_response, service, response, requested_url=self.requested_url,
-                sent=sent, say=self.say,
-            )
-            result = replace(result, cooling=False)
-            await self._settle_owned(source, slot, result, response, health_generation, cooldown_generation, sent)
-            raise asyncio.CancelledError
+        stopped = stopped or response.error == "cancelled"
         if not sent:
             await self._release_unspent(source, slot, health_generation, cooldown_generation, response)
+            if stopped:
+                raise asyncio.CancelledError
             return None, {
                 "source_id": slot.source_id, "label": source.display_name[:64], "kind": "service",
                 "outcome": "skipped", "skipped": "unavailable",
             }
-        result = await asyncio.to_thread(
-            map_fetch_response, service, response, requested_url=self.requested_url,
-            sent=sent, say=self.say,
-        )
-        await self._settle_owned(source, slot, result, response, health_generation, cooldown_generation, sent)
+
+        async def settle_response():
+            result = await asyncio.to_thread(
+                map_fetch_response, service, response, requested_url=self.requested_url,
+                sent=sent, say=self.say,
+            )
+            if stopped:
+                result = replace(result, cooling=False)
+            await self._settle_owned(source, slot, result, response, health_generation, cooldown_generation, sent)
+            return result
+
+        settlement = asyncio.create_task(settle_response())
+        try:
+            result = await asyncio.shield(settlement)
+        except asyncio.CancelledError:
+            await await_owned_task(settlement)
+            raise
+        if stopped:
+            raise asyncio.CancelledError
         record = dict(result.record)
         if result.retry_after:
             record["retry_after"] = result.retry_after
@@ -400,7 +429,7 @@ class FetchChain:
                 await self.owner._save_runtime_config(previous, config)
         if write is not None:
             await self.owner.usage_writer.wait_recorded(write)
-        if result.record.get("status") == "completed":
+        if sent and result.record.get("status") == "completed":
             await self.owner.record_hosted_success(source, slot.model_id, "web_fetch", "service")
 
     def _finish(self, last: FetchAttempt | None) -> dict[str, Any]:

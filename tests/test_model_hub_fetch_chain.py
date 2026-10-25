@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from config.v2_config import ModelHubFetchServiceSettings
+from core.handlers.model_hub import fetch_chain as fetch_chain_module
 from core.handlers.model_hub import hosted_tools
 from core.handlers.model_hub.adapter import SearchResponse
 from core.handlers.model_hub.fetch_services import map_fetch_response
@@ -60,6 +62,42 @@ async def test_jina_builtin_fetch_is_admitted_with_reader_headers():
     )
     assert limited.record["error_code"] == "service_rate_limited"
     assert limited.cooling and not limited.target_failure
+
+
+def test_exa_mcp_markdown_text_block_preserves_page_text_and_leading_metadata():
+    exa = next(item for item in fetch_service_catalog() if item["vendor"] == "exa-mcp")
+    text = "# Example page\nURL: https://example.com/page\nPublished: 2026-10-25\nAuthor: Example\n\n# Body\nURL: https://example.com/in-page\n"
+    mapped = map_fetch_response(
+        exa,
+        SearchResponse(200, {}, json.dumps({"result": {"content": [{"type": "text", "text": text}]}}).encode()),
+        requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
+    )
+    assert mapped.record["status"] == "completed"
+    assert mapped.record["title"] == "Example page"
+    assert mapped.record["final_url"] == "https://example.com/page"
+    assert mapped.record["content"] == "# Body\nURL: https://example.com/in-page\n"
+
+
+@pytest.mark.parametrize("body", [b"<html>broken provider</html>", b"[1, 2, 3]"])
+def test_http_200_malformed_provider_envelopes_are_service_failures(body):
+    deepseek = next(item for item in fetch_service_catalog() if item["vendor"] == "deepseek")
+    mapped = map_fetch_response(
+        deepseek, SearchResponse(200, {}, body), requested_url="https://example.com/", sent=True,
+        say=lambda key, **_: key,
+    )
+    assert mapped.record["error_code"] == "service_unavailable"
+    assert mapped.cooling and not mapped.target_failure
+
+
+def test_http_200_lost_paid_body_is_billing_uncertain():
+    deepseek = next(item for item in fetch_service_catalog() if item["vendor"] == "deepseek")
+    mapped = map_fetch_response(
+        deepseek,
+        SearchResponse(200, {}, None, "body_too_large"),
+        requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
+    )
+    assert mapped.record["error_code"] == "service_unreadable"
+    assert mapped.uncertain and not mapped.billable and mapped.cost is None
 
 
 class _Local:
@@ -254,8 +292,99 @@ async def test_pre_send_service_result_is_skipped_without_usage_or_cooldown(tmp_
     assert result["record"]["error_code"] == "fetch_sources_blocked"
     assert result["record"]["attempts"][0]["outcome"] == "skipped"
     assert service.usage_summary(days=7)["services"] == []
+    assert service.capability_evidence.records() == []
     source = next(source for source in config.sources if source.id == EXA)
     assert service._service_cooldowns.until(source, "exa/contents", service.now()) is None
+
+
+@pytest.mark.asyncio
+async def test_local_failure_code_survives_record_cleanup(tmp_path):
+    service, config = _service(
+        tmp_path,
+        enabled={LOCAL: True, EXA: False, FREE_EXA: False, JINA: False},
+        order=(LOCAL,),
+    )
+
+    class FailedLocal:
+        async def check(self, url, *, deadline):
+            return url
+
+        async def fetch(self, url, *, deadline, on_sent=None):
+            on_sent()
+            return {"error_code": "fetch_url_blocked", "terminal": True, "sent": True}
+
+    service._local_fetch_engine = FailedLocal()
+    result = await service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": "https://example.com/"}},
+        turn=service.freeze_turn_hosted_tools(config),
+    )
+    assert result["record"]["error_code"] == "fetch_url_blocked"
+    assert result["record"]["attempts"][0]["error_code"] == "fetch_url_blocked"
+
+
+@pytest.mark.asyncio
+async def test_jina_rolling_minute_budget_is_reserved_before_send(tmp_path):
+    service, config = _service(
+        tmp_path,
+        enabled={LOCAL: False, EXA: False, FREE_EXA: False, JINA: True},
+        order=(JINA,),
+    )
+    service._jina_fetch_sent_at.extend([service.now()] * 20)
+    sent = []
+
+    async def fetch(*args, on_sent):
+        await on_sent()
+        sent.append(True)
+        return SearchResponse(200, {}, json.dumps({"data": {"content": "body"}}).encode())
+
+    service.adapter.fetch = fetch
+    result = await service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": "https://example.com/"}},
+        turn=service.freeze_turn_hosted_tools(config),
+    )
+    assert result["record"]["attempts"][0]["skipped"] == "cooling"
+    assert result["record"]["attempts"][0]["retry_at"]
+    assert sent == []
+    assert service.usage_summary(days=7)["services"] == []
+
+
+@pytest.mark.asyncio
+async def test_remote_mapping_cancellation_waits_for_sent_settlement(tmp_path):
+    service, config = _service(
+        tmp_path,
+        enabled={LOCAL: False, EXA: True, FREE_EXA: False, JINA: False},
+        order=(EXA,),
+    )
+    mapping_started = threading.Event()
+    release_mapping = threading.Event()
+    original_mapper = fetch_chain_module.map_fetch_response
+
+    def blocked_mapper(*args, **kwargs):
+        mapping_started.set()
+        assert release_mapping.wait(10)
+        return original_mapper(*args, **kwargs)
+
+    fetch_chain_module.map_fetch_response = blocked_mapper
+    try:
+        async def fetch(*args, on_sent):
+            await on_sent()
+            return SearchResponse(200, {}, json.dumps({"results": [{"text": "body"}]}).encode())
+
+        service.adapter.fetch = fetch
+        task = asyncio.create_task(service.run_hosted_tool(
+            "web_fetch", {"arguments": {"url": "https://example.com/"}},
+            turn=service.freeze_turn_hosted_tools(config),
+        ))
+        assert await asyncio.to_thread(mapping_started.wait, 10)
+        task.cancel()
+        release_mapping.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release_mapping.set()
+        fetch_chain_module.map_fetch_response = original_mapper
+    row = next(row for row in service.usage_summary(days=7)["services"] if row["tool"] == "web_fetch")
+    assert row["requests"] == 1
 
 
 @pytest.mark.asyncio
