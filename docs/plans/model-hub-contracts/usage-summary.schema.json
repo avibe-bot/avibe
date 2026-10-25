@@ -300,6 +300,7 @@
           "type": "string",
           "minLength": 1
         },
+        "tool": {"enum": ["web_search", "web_fetch"], "description": "Absent historical rows mean web_search. Attribution is keyed by Source, service and tool; cooldown remains keyed by Source and service."},
         "requests": {
           "$ref": "#/definitions/Count"
         },
@@ -523,6 +524,7 @@
           "type": "string",
           "minLength": 1
         },
+        "tool": {"enum": ["web_search", "web_fetch"], "description": "Absent historical rows mean web_search. Attribution is keyed by Source, service and tool; cooldown remains keyed by Source and service."},
         "label": {
           "description": "Current Source label, null once the Source is removed.",
           "type": [

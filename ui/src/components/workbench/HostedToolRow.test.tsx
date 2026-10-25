@@ -53,6 +53,43 @@ const row = (callId: string) => document.querySelector(`[data-hosted-call="${cal
 afterEach(() => cleanup());
 
 describe('hosted tool cards', () => {
+  it.each(['en', 'zh'] as const)('WF-1: historical fetch is readable, counted by characters and inert in %s', (lng) => {
+    const content = 'Hello 😀';
+    renderGroup([{
+      version: 1, call_id: 'fetch-history', tool: 'web_fetch', mode: 'proxy', status: 'completed',
+      subject: 'example.test', source_id: 'src_localfetch', source_name: 'Local', executor_kind: 'local',
+      sources: [], images: [], cost: { basis: 'list', usd: 0, calls: 1 },
+      fetch: {
+        status: 'completed', requested_url: 'https://example.test', final_url: null, canonical_url: null,
+        title: '<script>title</script>', content_type: 'text/markdown', source_content_type: null,
+        content, size_bytes: 10, source_size_bytes: null, retrieved_at: '2026-10-24T12:00:00Z',
+        truncated: true, truncation_reason: 'provider_limit', budget_method: 'utf8_bytes_div4_v1', attempts: [],
+      },
+    }], lng);
+    const fetched = row('fetch-history');
+    expect(fetched.textContent).toContain(lng === 'en' ? '7 chars' : '7 字符');
+    expect(fetched.textContent).toContain(lng === 'en' ? 'Truncated' : '已截断');
+    fireEvent.click(within(fetched).getByRole('button'));
+    within(fetched).getByText(content);
+    within(fetched).getByText('<script>title</script>');
+    expect(fetched.querySelector('script, img, iframe')).toBeNull();
+    expect(within(fetched).queryAllByRole('link')).toEqual([]);
+  });
+
+  it('WF-1: page HTML and remote Markdown images remain quoted text', () => {
+    renderGroup([{
+      version: 1, call_id: 'fetch-hostile', tool: 'web_fetch', mode: 'proxy', status: 'completed', sources: [], images: [],
+      fetch: { status: 'completed', requested_url: 'https://example.test', final_url: null, canonical_url: null, title: null,
+        content_type: 'text/markdown', source_content_type: null,
+        content: '<img src="https://remote.invalid/a"> ![remote](https://remote.invalid/b) <script>callTool()</script>',
+        size_bytes: 106, retrieved_at: '2026-10-24T12:00:00Z', truncated: false, budget_method: 'utf8_bytes_div4_v1' },
+    }]);
+    const fetched = row('fetch-hostile');
+    fireEvent.click(within(fetched).getByRole('button'));
+    expect(fetched.querySelector('pre')?.textContent).toContain('<script>callTool()</script>');
+    expect(fetched.querySelector('script, img, iframe, a')).toBeNull();
+  });
+
   it('MH-HOSTED-UI-008: shows a native and a proxied call the same way, each with how it ran and its known cost', () => {
     renderGroup(['native_web_search', 'proxy_x_search']);
 

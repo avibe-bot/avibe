@@ -17,6 +17,7 @@ import { hostedCompleted, type HostedActivity, type HostedActivityImage, type Ho
 
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {
   web_search: Globe,
+  web_fetch: Globe,
   x_search: AtSign,
   image_generate: ImageIcon,
 };
@@ -128,7 +129,7 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
     );
   }
   if (!vendor) return null;
-  if (card.executor_kind === 'service') {
+  if (card.executor_kind === 'service' || card.executor_kind === 'local') {
     return (
       <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-cyan/40 bg-cyan-soft px-2 py-px text-[11px] font-medium text-cyan-ink">
         <Waypoints className="size-3" aria-hidden="true" />
@@ -155,6 +156,10 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
 const useCountLabel = (card: HostedActivity): string | null => {
   const { t } = useTranslation();
   if (!hostedCompleted(card)) return null;
+  if (card.fetch) {
+    const count = t('chat.agentActivity.hosted.fetch.characters', { count: Array.from(card.fetch.content).length });
+    return card.fetch.truncated ? `${count} · ${t('chat.agentActivity.hosted.fetch.truncated')}` : count;
+  }
   if (card.tool === 'image_generate') {
     if (card.images.length === 0) return null;
     const [first] = card.images;
@@ -274,11 +279,27 @@ const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
           <span className="min-w-0">{facts.join(' · ')}</span>
         </div>
       )}
+      {card.fetch && (
+        <div className="flex flex-col gap-2 px-2.5 py-2 text-[12px]" data-hosted-fetch={card.call_id}>
+          {card.fetch.title && <strong>{card.fetch.title}</strong>}
+          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 break-all text-muted">
+            {(['requested_url', 'final_url', 'canonical_url', 'content_type', 'source_content_type', 'size_bytes', 'source_size_bytes', 'retrieved_at', 'truncation_reason'] as const)
+              .map((key) => card.fetch?.[key] != null && <React.Fragment key={key}><dt>{t(`chat.agentActivity.hosted.fetch.${key}`)}</dt><dd>{String(card.fetch?.[key])}</dd></React.Fragment>)}
+          </dl>
+          {card.fetch.transport_degraded && <p>{t('chat.agentActivity.hosted.fetch.degraded')}: {card.fetch.transport_degraded_reason}</p>}
+          {/* A quoted document is inert text: no active HTML, links, remote images or page instructions. */}
+          <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words font-sans">{card.fetch.content}</pre>
+          <ul>{card.attempts?.map((attempt, index) => <li key={index}>
+            {attempt.label} · {attempt.reason_key ? serverText(t, `chat.agentActivity.hosted.${attempt.reason_key}`) : t(`chat.agentActivity.hosted.status.${attempt.outcome}`)}
+            {attempt.cost?.usd !== undefined && ` · $${formatUsd(attempt.cost.usd)}`}
+          </li>)}</ul>
+        </div>
+      )}
       {(card.status === 'failed' || card.status === 'incomplete') && card.error && (
         <p className="px-2.5 py-2 text-[12px] text-destructive-ink">
           {/* Avibe's own reasons in the reader's language; a provider's, or a code this
               client does not know yet, as it was written. */}
-          {(card.error_code && serverText(t, `chat.agentActivity.hosted.errorCode.${card.error_code}`)) || card.error}
+          {(card.error_code && serverText(t, `chat.agentActivity.hosted.${card.tool === 'web_fetch' && card.error_code.startsWith('service_') ? 'fetchErrorCode' : 'errorCode'}.${card.error_code}`)) || card.error}
         </p>
       )}
       {card.extra_queries && card.extra_queries.length > 0 && (

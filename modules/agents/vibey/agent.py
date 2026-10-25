@@ -1684,7 +1684,7 @@ class VibeyAgent(BaseAgent):
         except Exception:
             logger.exception("Vibey could not deliver %d generated image(s)", len(run.hosted_images))
 
-    async def _source_display(self) -> tuple[Mapping[str, str], Optional[Mapping[str, Mapping[str, Any]]]]:
+    async def _source_display(self, tool: str = "web_search") -> tuple[Mapping[str, str], Optional[Mapping[str, Mapping[str, Any]]]]:
         """Each Model Hub Source's display name and current state by id, as Model Hub holds them now.
 
         Read through the Model Hub runtime, the one owner of its current config, off the event loop: ``self.config``
@@ -1697,19 +1697,20 @@ class VibeyAgent(BaseAgent):
             return {}, None
 
         def read() -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
-            from config.v2_config import hosted_tool_setting, model_hub_keyless_exa_source
+            from config.v2_config import hosted_tool_setting, model_hub_builtin_sources
             from core.handlers.model_hub.hosted_tools import search_service_settings
+            from core.handlers.model_hub.fetch_readers import fetch_service_settings
 
             hub = runtime.snapshot()
-            web_search = hosted_tool_setting(hub, "web_search")
-            display_sources = [*hub.sources, model_hub_keyless_exa_source()]
+            setting = hosted_tool_setting(hub, tool)
+            display_sources = [*hub.sources, *model_hub_builtin_sources()]
             names = {source.id: source.display_name for source in display_sources if source.display_name}
             states: dict[str, dict[str, Any]] = {}
             for source in display_sources:
                 state: dict[str, Any] = {"protocol": source.protocol, "vendor": source.vendor}
                 if source.state.status in ("needs_action", "error"):
                     state["needs_action"] = source.state.detail_key
-                service = search_service_settings(web_search, source)
+                service = fetch_service_settings(setting, source) if tool == "web_fetch" else search_service_settings(setting, source)
                 if service is not None:
                     state["enabled"] = service["enabled"]
                 states[source.id] = state
@@ -1765,7 +1766,7 @@ class VibeyAgent(BaseAgent):
             await self._emit_tool_line(run, call.name, dict(call.arguments))
             return
         duration = int((time.monotonic() - started) * 1000) if started is not None else None
-        names, states = await self._source_display()
+        names, states = await self._source_display(call.name)
         await self._emit_hosted(
             run,
             proxy_activity(

@@ -68,6 +68,12 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
 
 7. **Hosted tools** (v2, [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md) §3.4, §3.5, §6, §7).
    - `HopResolution.hosted_tools` has one entry per hosted tool the turn declares:
+     - **`web_fetch`** (WF-1, unreleased v21) has exactly
+       `{native: "unsupported", replay: "unsupported"}`: always function-only,
+       never Claude-native. The dormant reader accepts this future entry without
+       registering a tool; the server omits it while `WEB_FETCH_ACTIVE = False`.
+       History uses C-1's complete capped ordinary quotation; replay never fetches
+       or bills again. Declaration/producer activation belongs to WF-2/WF-3.
      - **a search tool** (`web_search`, `x_search`) gives the primary hop's facts:
        - `native` is `assumed` when the tool runs on the hop (`hosted_tools.runs_on`: a hub Source with an eligible
          credential, never a Claude subscription, and an untranslated path, that serves the model, for which the

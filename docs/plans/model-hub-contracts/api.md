@@ -73,8 +73,9 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | GET `/api/models/quota` | → `{quota: QuotaSummary}` | Rate-limit windows of every hub-held subscription Source, from the vendor's own usage report, plus each Source's API-price `value` (see Subscription quota). Served from the server cache; a Source older than five minutes is re-read before answering, bounded by a short deadline, and a Source still being read is listed in `pending`. Never starts the engine. |
 | POST `/api/models/quota/refresh` | → `{quota: QuotaSummary}` | Forced re-read. Rate-limited per Source to one vendor call every 30 seconds and suppressed while a Source cools down after a vendor 429; a suppressed Source returns its cached snapshot. |
 | GET `/api/models/hosted-tools` | → `{hosted_tools: HostedToolsStatus}` | Models → Tools (`hosted-tools-status.schema.json`): every catalog tool with its switch (absent setting = on), its passive status from real use (`latest_ok`, current `refused[]`, per-pair `verified[]`), for a search tool the saved and effective executor order with every eligible executor candidate and its unit rates, and for `image_generate` the saved and effective default and the available image models. Memory only; nothing is probed. |
+| POST `/api/models/hosted-tools/web_fetch/services/<source_id>/retry` | `{}` → `{}` | WF-1 reader/control only: clears the same Source/service cooldown and generation as search for Exa (`src_exakeyless`, `exa/mcp`), or Jina's own. Member management role; no fetch is sent. Local has no whole-executor retry and returns `404 source_not_found`. |
 | POST `/api/models/hosted-tools/web_search/services/<source_id>/retry` | `{}` → `{}` | Clears the controller's `(Source, service)` cooldown, advances its generation, and leaves Source health unchanged. The Tools read is the follow-up source of truth. Member management role. |
-| PUT `/api/models/hosted-tools/<tool>` | `{enabled?: boolean, executor_order?: null \| [source_id], default_model?: null \| {source_id, model_id}, prefer_native?: boolean, services?: {source_id: null \| {results?: integer \| null, enabled?: boolean \| null}}}` → `{hosted_tools: HostedToolsStatus}` | Changes one tool's settings field by field: an absent field is unchanged, `null` resets `executor_order` to automatic or `default_model` to the default. `executor_order` is for search tools and `default_model` for `image_generate`; values are saved as given, never resolved. It applies from the next turn and interrupts nothing. An unknown tool returns `404 hosted_tool_not_found`; an empty or malformed body `400 invalid_parameter`, including a null `enabled`, an id that is not a Source id (`src_…`), or a model id with surrounding whitespace. |
+| PUT `/api/models/hosted-tools/<tool>` | `{enabled?: boolean, executor_order?: null \| [source_id], default_model?: null \| {source_id, model_id}, prefer_native?: boolean, services?: {source_id: null \| {results?: integer \| null, enabled?: boolean \| null}}}` → `{hosted_tools: HostedToolsStatus}` | Changes one tool's settings field by field: an absent field is unchanged, `null` resets `executor_order` to automatic or `default_model` to the default. `executor_order` is for search/fetch tools and `default_model` for `image_generate`; values are saved as given, never resolved. It applies from the next turn and interrupts nothing. An unknown tool returns `404 hosted_tool_not_found`; an empty or malformed body `400 invalid_parameter`, including a null `enabled`, an id that is not a Source id (`src_…`), or a model id with surrounding whitespace. |
 | POST `/api/models/hosted-tools/<tool>/clear` | `{source_id?, model_id?}` → `{hosted_tools: HostedToolsStatus}` | Clears the tool's refusals (`call` and `replay`): on one Source and model, on one Source (every model), or with `{}` on every Source. `model_id` requires `source_id`; neither is nullable, so a malformed body is refused rather than widened into a broader clear. A Source or model with nothing to clear is a no-op that answers the read. The file is written first: a failed write returns `500 state_write_failed` and changes nothing. A cleared Source is assumed again from its next request. An unknown tool returns `404 hosted_tool_not_found`; any other body `400 invalid_parameter`. |
 | POST `/api/models/sources/<source_id>/evidence/clear` | `{model_id, feature: {kind: "effort", name}}` → `{source: Source}` | Clears one effort refusal of a Source's model, so the next request at that effort may reach it. A missing record is a no-op. An unknown Source returns `404 source_not_found`; a hosted-tool feature or any other body `400 invalid_parameter` (hosted refusals clear through the Tools clear); a failed write `500 state_write_failed` with nothing changed. |
 | POST `/api/models/oauth/start` | `{vendor, channel, client_nonce?}` → `{flow: OAuthFlow}` | Starts creation of a new subscription source. Before provider work, the optional exact `(client_nonce, vendor, channel)` tuple is atomically claimed; concurrent retries coalesce to its one pending start and terminal result. |
@@ -138,7 +139,8 @@ no config migration is performed. KEX-3 sets `KEYLESS_EXA_ACTIVE = true` for the
 reader and producer together, with the public disclosure shipped in the same v21
 event.
 
-PUT accepts `prefer_native` and `services` only for `web_search`. `prefer_native`
+PUT accepts `prefer_native` only for `web_search`; search's `services` patch includes
+`results`, while fetch accepts enabled-only patches (see WF-1 below). `prefer_native`
 is a boolean, not nullable. `services` is a Source-keyed patch: an absent Source
 is untouched, a present object merges only its supplied fields, and a null
 Source or null field removes its saved override. An empty patch is a no-op.
@@ -177,6 +179,34 @@ per-Source search opt-outs, while preserving the whole-tool switch and both
 orders. Re-upgrading then uses service defaults; reapply DeepSeek's opt-out
 before enabling service execution. This is not a promise to retain new choices
 through an older release's write.
+
+### Dormant fetch readers (WF-1)
+
+`web_fetch` is a known saved tool in contract v21, but while `WEB_FETCH_ACTIVE`
+is false it is absent from GET, effective candidates, model declarations and
+active settings UI. V2 and PUT retain its settings; historical activity and
+usage remain readable. There is no fetch execution endpoint in WF-1.
+
+PUT accepts `{enabled?, executor_order?, services?}` for fetch: each service patch
+has only nullable `enabled`; no `results`, `prefer_native` or client-written
+roles. Null resets an override/order, absent fields are untouched. An explicit
+order save captures the current `local`/`service` roles. Independent ordering,
+automatic insertion and disabled-tail rules are specified in `web-fetch.md` §2.
+
+The future active GET entry is `FetchTool` in `hosted-tools-status.schema.json`:
+`services` contains saved partial consent; candidate `settings` is `{enabled}`.
+`service_vendors` carries `capabilities: ["web_fetch"]`, `content_types`, price,
+Source ids and `{built_in, requires_setup, auto_enroll}`. The local executor and
+keyless Exa/Jina use synthetic ids, never credential Sources; billing is metered
+with exact-zero price. The catalog lives in `vibe/data/web_fetch_services.json`
+with a closed descriptor schema. Catalog availability controls effective rows,
+not saved consent or historical identity.
+
+Usage adds optional `tool: "web_fetch"` to service summaries and daily/hourly
+bucket rows; absent attribution means search. The ledger key is Source/service/
+tool, while cooldown and generation remain Source/service. An rc4 config rewrite
+can lose fetch opt-outs; an rc4 ledger rewrite merges shared Exa rows and loses
+fetch attribution. Ordinary C-1 text survives that supported downgrade (#2920).
 
 ### Usage report windows
 

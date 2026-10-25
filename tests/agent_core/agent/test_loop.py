@@ -161,6 +161,29 @@ async def test_resume_merges_newly_admitted_inputs_into_same_turn_pins():
     assert user_texts(provider.requests[-1]) == ["hello", "不要删文件"]
 
 
+async def test_resume_replays_a_fetch_record_without_refetch_or_image_assumptions():
+    """WF-1: resumed histories keep the ordinary fetch quotation, not an image record."""
+    import json
+    from pathlib import Path
+    from core.agent_core.messages import message_from_dict
+    wire = json.loads((Path(__file__).parents[1] / "fixtures/web_fetch_v21.json").read_text())
+    message = message_from_dict(wire)
+    tool = FakeTool("web_fetch", result=ToolResult(message.content, hosted=message.hosted))
+    provider = ScriptedProvider([
+        [Done(assistant("", calls=[ToolCallBlock(wire["tool_call_id"], "web_fetch", {"url": "https://example.test/page"})]))],
+        [ProviderError("server", "temporary upstream failure", False)],
+        [Done(assistant("read once"))],
+    ])
+    agent = make_agent(provider, tools=[tool])
+    first = await collect(agent)
+    second = [event async for event in agent.resume(input_row("retry", "ignored"), turn_id="turn")]
+    assert first[-1].reason == "error" and second[-1].reason == "completed"
+    assert agent._generated_images == []
+    results = [row for row in await agent.store.load("session") if row.kind == "tool_result"]
+    assert len(results) == 1 and results[0].message.content == message.content
+    assert len(tool.calls) == 1
+
+
 async def test_resume_preserves_images_committed_by_an_earlier_tool_call():
     from core.agent_core.messages import HostedResult, ProxyExecution
 

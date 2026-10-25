@@ -277,7 +277,7 @@ async def test_a_stored_unknown_native_hosted_row_loads_through_the_transcript_o
             {
                 "type": "hosted_tool",
                 "id": "fetch_1",
-                "tool": "web_fetch",
+                "tool": "future_unknown_tool",
                 "action": {"type": "open_page", "url": "https://example.com/docs"},
                 "record": {
                     "status": "completed",
@@ -293,7 +293,7 @@ async def test_a_stored_unknown_native_hosted_row_loads_through_the_transcript_o
     unknown_tool_result = {
         "role": "tool_result",
         "tool_call_id": "call_unknown",
-        "tool_name": "web_fetch",
+        "tool_name": "future_unknown_tool",
         "content": [{"type": "text", "text": "stored tool result"}],
         "is_error": True,
         "hosted": {"record": {"status": "completed", "sources": []}},

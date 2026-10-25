@@ -45,6 +45,8 @@ from config.v2_config import (
     normalize_model_hub_base_url,
     normalize_model_hub_vendor_id,
     model_hub_keyless_exa_source,
+    model_hub_builtin_source,
+    model_hub_builtin_sources,
     model_hub_search_service,
     normalized_model_hub_override,
     validate_model_hub_protocol_vendor,
@@ -1656,7 +1658,7 @@ class ModelHubService:
     def _evidence_sources(config: ModelHubConfig) -> list[ModelHubSourceConfig]:
         """Config Sources plus the stable synthetic identity for evidence joins."""
 
-        return [*config.sources, model_hub_keyless_exa_source()]
+        return [*config.sources, *model_hub_builtin_sources()]
 
     @staticmethod
     def _agent(config: ModelHubConfig, backend: str) -> ModelHubAgentSupplyConfig:
@@ -7257,9 +7259,8 @@ class ModelHubService:
 
     def _search_visible_cooldown(self, source_id: str, service_id: str) -> str | None:
         source = (
-            model_hub_keyless_exa_source()
-            if source_id == KEYLESS_EXA_SOURCE_ID
-            else next((item for item in self.store.load().sources if item.id == source_id), None)
+            model_hub_builtin_source(source_id)
+            or next((item for item in self.store.load().sources if item.id == source_id), None)
         )
         if source is None:
             return None
@@ -7268,19 +7269,23 @@ class ModelHubService:
             return None
         # Keyless Exa's UI must expose even a short active cooldown so Retry now
         # remains available for provider rate limits.
-        return utc_text(until) if source_id == KEYLESS_EXA_SOURCE_ID or (until - self.now()).total_seconds() > 60 else None
+        return utc_text(until) if model_hub_builtin_source(source_id) is not None or (until - self.now()).total_seconds() > 60 else None
 
-    async def clear_service_cooldown(self, source_id: str, service_id: str | None = None, payload: object = None) -> dict:
-        if payload not in (None, {}):
+    async def clear_service_cooldown(
+        self, source_id: str, service_id: str | None = None, payload: object = None, tool: str = "web_search",
+    ) -> dict:
+        if payload not in (None, {}) or tool not in ("web_search", "web_fetch"):
             raise ModelHubError("invalid_parameter", status=400)
         async with self._mutation_lock:
             config = await asyncio.to_thread(self.store.load)
-            source = (
-                model_hub_keyless_exa_source()
-                if source_id == KEYLESS_EXA_SOURCE_ID
-                else self._source(config, source_id)
-            )
-            service = model_hub_search_service(source)
+            source = model_hub_builtin_source(source_id) or self._source(config, source_id)
+            if tool == "web_fetch":
+                from vibe.model_hub_runtime.fetch_catalog import fetch_service
+                service = fetch_service(source)
+                if service is not None and service["kind"] == "local":
+                    service = None  # Local cooldown is target-host scoped, never a whole-executor outage.
+            else:
+                service = model_hub_search_service(source)
             if service is None or (service_id is not None and service["service_id"] != service_id):
                 raise ModelHubError("source_not_found", status=404)
             self._service_cooldowns.advance(source, service["service_id"], clear=True)
@@ -8657,11 +8662,8 @@ class ModelHubService:
             )
             for source in config.sources
         ]
-        identities.append(SourceIdentity(
-            source_id=KEYLESS_EXA_SOURCE_ID,
-            label=KEYLESS_EXA_DISPLAY_NAME,
-            model_ids=[],
-        ))
+        identities.extend(SourceIdentity(source_id=source.id, label=source.display_name)
+                          for source in model_hub_builtin_sources())
         # The release's search services label and value service rows, as the price
         # table values model tokens; a row a later catalog dropped stays unpriced.
         service_catalog = [
@@ -8674,6 +8676,12 @@ class ModelHubService:
             for entry in api_key_vendor_catalog()
             if entry.search is not None
         ]
+        from vibe.model_hub_runtime.fetch_catalog import fetch_service_catalog
+        known_services = {entry.service_id for entry in service_catalog}
+        service_catalog.extend(
+            ServiceCatalogEntry(entry["service_id"], entry["label"], float(entry["price"]["usd_per_1k"]), entry["price"]["as_of"])
+            for entry in fetch_service_catalog() if entry["service_id"] not in known_services
+        )
         now = self.now()
         prices = self.price_table()
         if window is not None:

@@ -940,6 +940,8 @@ export type ServiceUsage = ServiceCounters & {
   source_id: string;
   /** The catalog's service ID, such as `tavily/search`. */
   service_id: string;
+  /** Missing historical attribution means web_search; Exa keeps one shared service id. */
+  tool?: 'web_search' | 'web_fetch';
   /** Joined from current Source config; null exactly when config no longer
    *  holds the Source, which then folds into the removed-Sources identity. */
   label: string | null;
@@ -1015,6 +1017,8 @@ export type UsageServiceBucketRow = ServiceCounters & {
   kind: 'service';
   source_id: string;
   service_id: string;
+  /** Missing historical attribution means web_search; Exa keeps one shared service id. */
+  tool?: 'web_search' | 'web_fetch';
 };
 
 export type UsageBucketEntry = UsageBucketRow | UsageServiceBucketRow;
@@ -1114,9 +1118,9 @@ export type QuotaSummary = {
 
 // ── hosted-tools-status.schema.json ─────────────────────────────────────
 /** The catalog's tools, in catalog order (`vibey-hosted-tools.md` §2). */
-export const HOSTED_TOOL_NAMES = ['web_search', 'x_search', 'image_generate'] as const;
+export const HOSTED_TOOL_NAMES = ['web_search', 'x_search', 'image_generate', 'web_fetch'] as const;
 export type HostedToolName = (typeof HOSTED_TOOL_NAMES)[number];
-export type HostedSearchToolName = Exclude<HostedToolName, 'image_generate'>;
+export type HostedSearchToolName = Exclude<HostedToolName, 'image_generate' | 'web_fetch'>;
 
 /** How a call ran: natively in the model's request, through a search executor, or on an image endpoint. */
 export type HostedExecutionMode = 'native' | 'executor' | 'service' | 'direct';
@@ -1143,7 +1147,7 @@ export type HostedToolRunStatus = {
 };
 
 /** The overlay's list price for one hosted tool on a provider (`usd_per_1k` per `unit`). */
-export type HostedToolPriceUnit = 'call' | 'search' | 'post' | 'profile';
+export type HostedToolPriceUnit = 'call' | 'search' | 'post' | 'profile' | 'fetch';
 export type HostedToolListPrice = {
   unit: HostedToolPriceUnit;
   usd_per_1k: number;
@@ -1247,7 +1251,24 @@ export type HostedImageToolStatus = HostedToolBase & {
 
 export type HostedToolStatus = HostedSearchToolStatus | HostedImageToolStatus;
 
-export type HostedToolsStatus = { tools: HostedToolStatus[] };
+export type HostedFetchExecutorCandidate = Omit<HostedServiceExecutorCandidate, 'kind' | 'price' | 'settings'> & {
+  kind: 'local' | 'service';
+  price: HostedToolListPrice;
+  settings: { enabled: boolean };
+};
+
+export type HostedWebFetchToolStatus = HostedSearchToolBase & {
+  name: 'web_fetch';
+  services: Record<string, { enabled?: boolean }>;
+  executor_candidates: HostedFetchExecutorCandidate[];
+  service_vendors: {
+    id: string; name: string; price: HostedToolListPrice; capabilities: ['web_fetch'];
+    content_types: string[]; source_ids: string[];
+    facts: { built_in: boolean; requires_setup: boolean; auto_enroll: boolean };
+  }[];
+};
+
+export type HostedToolsStatus = { tools: (HostedToolStatus | HostedWebFetchToolStatus)[] };
 
 /** PUT /api/models/hosted-tools/<tool>, per field: an absent field is unchanged, `null` resets it. */
 export type HostedToolPut = {

@@ -20,6 +20,19 @@ on it fork; after that, a change needs orchestrator approval and lands here firs
 
 Conventions:
 
+- WF-1 (2026-10-25, coordinated unreleased Model Hub v21) extends C-1 with
+  `WebFetchRecord`, discriminated only by outer `tool_name: web_fetch`. Its one
+  ordinary text block equals the canonical untrusted frame (≤48,000 UTF-8
+  surrogatepass bytes); nullable metadata, fixed budget method, diagnostics and
+  strict consistency are specified in `../web-fetch.md` §4. Search/native records
+  are unchanged. Executor origins accept `fetch_api` and `local_fetch`, not
+  assistant-model origins. Attempts accept `local`.
+- C-6 recognizes function-only fetch facts (`native` and `replay` both
+  `unsupported`). The dormant build never declares or executes fetch; records,
+  activity and usage remain readable. #2920's released rc4 reader preserves the
+  full ordinary quotation when discarding unknown hosted metadata. Config and
+  usage downgrade writes are intentionally lossy as disclosed in the owning plan.
+
 - JSON Schema draft-07, like `../model-hub-contracts/`. Python implementations use dataclasses; the schemas describe
   the serialized form, which is what crosses a lane boundary or reaches disk.
 - Persisted shapes carry `"version": 1`. Readers accept every released version (persisted-shape rule).

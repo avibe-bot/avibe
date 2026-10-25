@@ -65,7 +65,7 @@
           "description": "Search vendor identity, for example `tavily` or `deepseek`."
         },
         "api": {
-          "const": "search_api"
+          "enum": ["search_api", "fetch_api", "local_fetch"]
         },
         "model": {
           "type": "string",
@@ -463,7 +463,7 @@
           "description": "Set only on the result of a proxied search or an `image_generate` call. `execution` is present exactly when an executor or image endpoint ran; without it the record failed. `action` is what the executor reports it did: for `image_generate`, the model it ran on, the prompt it rendered, and the resolved size and quality.",
           "properties": {
             "record": {
-              "$ref": "#/definitions/HostedRecord"
+              "oneOf": [{"$ref": "#/definitions/HostedRecord"}, {"$ref": "#/definitions/WebFetchRecord"}]
             },
             "execution": {
               "$ref": "#/definitions/ProxyExecution"
@@ -507,6 +507,11 @@
         }
       },
       "allOf": [
+        {
+          "if": {"properties": {"tool_name": {"const": "web_fetch"}}},
+          "then": {"properties": {"hosted": {"properties": {"record": {"$ref": "#/definitions/WebFetchRecord"}}}}},
+          "else": {"properties": {"hosted": {"properties": {"record": {"$ref": "#/definitions/HostedRecord"}}}}}
+        },
         {
           "if": {
             "required": [
@@ -972,7 +977,8 @@
         "kind": {
           "enum": [
             "service",
-            "model"
+            "model",
+            "local"
           ]
         },
         "outcome": {
@@ -992,7 +998,9 @@
             "disabled",
             "cooling",
             "query_too_long",
-            "unavailable"
+            "unavailable",
+            "unsupported_type",
+            "service_busy"
           ]
         },
         "retry_at": {
@@ -1424,11 +1432,45 @@
         }
       }
     },
+    "WebFetchRecord": {
+      "type": "object", "additionalProperties": false,
+      "description": "WF-1: tool_name discriminates this record. Ordinary content equals frame(record), whose UTF-8 surrogatepass encoding is at most 48000 bytes. size_bytes equals the retained content bytes. These cross-field/byte invariants are validated by the Python reader.",
+      "required": ["status", "requested_url", "final_url", "canonical_url", "title", "content_type", "source_content_type", "content", "size_bytes", "source_size_bytes", "truncated", "truncation_reason", "retrieved_at", "attempts", "budget_method"],
+      "properties": {
+        "status": {"enum": ["completed", "failed"]},
+        "requested_url": {"type": "string", "maxLength": 8192},
+        "final_url": {"type": ["string", "null"], "maxLength": 8192},
+        "canonical_url": {"type": ["string", "null"], "maxLength": 8192},
+        "title": {"type": ["string", "null"], "maxLength": 300},
+        "content_type": {"type": ["string", "null"], "maxLength": 128},
+        "source_content_type": {"type": ["string", "null"], "maxLength": 128},
+        "content": {"type": "string", "maxLength": 48000},
+        "size_bytes": {"type": "integer", "minimum": 0, "maximum": 48000},
+        "source_size_bytes": {"type": ["integer", "null"], "minimum": 0, "maximum": 9007199254740991},
+        "truncated": {"type": "boolean"},
+        "truncation_reason": {"enum": ["budget", "provider_limit", null]},
+        "retrieved_at": {"type": "string", "format": "date-time"},
+        "budget_method": {"const": "utf8_bytes_div4_v1"},
+        "attempts": {"type": "array", "items": {"$ref": "#/definitions/HostedAttempt"}},
+        "error": {"type": "string", "minLength": 1, "maxLength": 1000},
+        "error_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "transport_degraded": {"type": "boolean"},
+        "transport_degraded_reason": {"type": "string", "maxLength": 400},
+        "charset_fallback": {"type": "boolean"}
+      },
+      "dependencies": {"error_code": ["error"]},
+      "allOf": [
+        {"if": {"properties": {"status": {"const": "failed"}}}, "then": {"required": ["error"]}, "else": {"not": {"required": ["error"]}}},
+        {"if": {"properties": {"truncated": {"const": true}}}, "then": {"properties": {"truncation_reason": {"enum": ["budget", "provider_limit"]}}}, "else": {"properties": {"truncation_reason": {"type": "null"}}}},
+        {"if": {"required": ["transport_degraded_reason"]}, "then": {"required": ["transport_degraded"], "properties": {"transport_degraded": {"const": true}}}}
+      ]
+    },
     "HostedResultToolName": {
       "enum": [
         "web_search",
         "x_search",
-        "image_generate"
+        "image_generate",
+        "web_fetch"
       ],
       "description": "A tool whose result carries `hosted`: a proxied search, or an `image_generate` call (`vibey-hosted-tools.md` §4.2, §7)."
     }

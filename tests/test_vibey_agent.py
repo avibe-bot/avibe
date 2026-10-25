@@ -4337,7 +4337,9 @@ def _without(entry: dict, key: str) -> dict:
     "hosted_tools",
     [
         None,
-        {"web_fetch": _PROXY_SEARCH},
+        {"future_unknown_tool": _PROXY_SEARCH},
+        {"web_fetch": _NATIVE_SEARCH},
+        {"web_fetch": {**_PROXY_SEARCH, "refused": True}},
         {"web_search": _without(_NATIVE_SEARCH, "declaration")},
         {"web_search": {**_PROXY_SEARCH, "include": []}},
         {"web_search": {**_NATIVE_SEARCH, "note": "extra"}},
@@ -4354,7 +4356,7 @@ def _without(entry: dict, key: str) -> dict:
         {"image_generate": {**_IMAGES, "models": [{**_IMAGES["models"][0], "source_id": "openai-main"}]}},
     ],
     ids=[
-        "absent", "unknown-tool", "assumed-without-declaration", "unsupported-with-include", "extra-field",
+        "absent", "unknown-tool", "native-fetch", "refused-fetch", "assumed-without-declaration", "unsupported-with-include", "extra-field",
         "no-replay", "unknown-fact", "unhashable-fact", "include-not-a-list", "v1-executor", "refused-not-true",
         "refused-on-a-native-tool", "no-image-models",
         "default-not-first", "unknown-image-param", "image-source-not-a-source-id",

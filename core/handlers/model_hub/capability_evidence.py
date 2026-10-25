@@ -51,6 +51,7 @@ HOSTED_TOOL_ASPECTS: Mapping[str, tuple[str, ...]] = {
     "x_search": ("call", "replay"),
     # An image call is an ordinary tool call and result, so only its call is evidence.
     "image_generate": ("call",),
+    "web_fetch": ("call",),
 }
 EXECUTION_MODES: frozenset[str] = frozenset({"native", "executor", "service", "direct"})
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")

@@ -28,6 +28,8 @@ from typing import Any, Callable, Final, Literal, Mapping, Optional
 from config.v2_config import (
     KEYLESS_EXA_ACTIVE,
     KEYLESS_EXA_SOURCE_ID,
+    WEB_FETCH_ACTIVE,
+    model_hub_builtin_sources,
     MODEL_HUB_HOSTED_TOOLS,
     MODEL_HUB_SEARCH_TOOLS,
     ModelHubConfig,
@@ -207,7 +209,8 @@ def hosted_tool_facts(
 def enabled_tools(config: ModelHubConfig) -> tuple[str, ...]:
     """The tools a turn would declare now, in catalog order: every tool the user has not turned off."""
 
-    return tuple(tool for tool in MODEL_HUB_HOSTED_TOOLS if hosted_tool_setting(config, tool).enabled)
+    return tuple(tool for tool in MODEL_HUB_HOSTED_TOOLS
+                 if (tool != "web_fetch" or WEB_FETCH_ACTIVE) and hosted_tool_setting(config, tool).enabled)
 
 
 def _vibey_order(config: ModelHubConfig) -> list[ModelHubSourceConfig]:
@@ -241,6 +244,9 @@ def executor_candidates(
     the user's ``executor_order`` first, then Vibey's Source order.
     """
 
+    if tool == "web_fetch":
+        from .fetch_readers import fetch_candidates
+        return fetch_candidates(config) if WEB_FETCH_ACTIVE else ()
     if tool not in MODEL_HUB_SEARCH_TOOLS:
         return ()
     candidates: dict[str, ExecutorCandidate] = {}
@@ -502,7 +508,7 @@ def freeze_turn_tools(config: ModelHubConfig, *, evidence: HostedEvidence, spec_
             ExecutorSlot(
                 candidate.source.id, candidate.model_id, identity_digest(candidate.source),
                 kind=candidate.kind,
-                results=candidate.settings["results"] if candidate.settings else None,
+                results=candidate.settings.get("results") if candidate.settings else None,
                 enabled=candidate.settings["enabled"] if candidate.settings else True,
                 label=candidate.source.display_name[:64] if SEARCH_SERVICES_ACTIVE and tool == "web_search" else "",
             )
@@ -671,7 +677,7 @@ def _status(
     """The status lines' data: the latest success, the current refusals, and the per-pair successes."""
 
     live = {source.id: source for source in config.sources}
-    live[KEYLESS_EXA_SOURCE_ID] = model_hub_keyless_exa_source()
+    live.update({source.id: source for source in model_hub_builtin_sources()})
     refused: list[dict[str, Any]] = []
     successes: list[tuple[datetime, str, str, Optional[str]]] = []
     for record in evidence.store.records():
@@ -728,6 +734,11 @@ def hosted_tools_status(
     sources = {source.id: source for source in config.sources}
     tools: list[dict[str, Any]] = []
     for tool in MODEL_HUB_HOSTED_TOOLS:
+        if tool == "web_fetch":
+            if WEB_FETCH_ACTIVE:
+                from .fetch_readers import fetch_status
+                tools.append(fetch_status(config, status=_status(config, tool, evidence), cooldown_until=search_cooldown_until))
+            continue
         setting = hosted_tool_setting(config, tool)
         entry: dict[str, Any] = {"name": tool, "enabled": setting.enabled, "status": _status(config, tool, evidence)}
         if tool in MODEL_HUB_SEARCH_TOOLS:
@@ -818,7 +829,9 @@ def apply_hosted_tool_put(config: ModelHubConfig, tool: str, payload: object) ->
 
     if tool not in MODEL_HUB_HOSTED_TOOLS:
         raise HostedToolSettingRefused("hosted_tool_not_found", 404)
-    allowed = {"enabled"} | ({"executor_order"} if tool in MODEL_HUB_SEARCH_TOOLS else {"default_model"})
+    allowed = {"enabled"} | ({"executor_order"} if tool in (*MODEL_HUB_SEARCH_TOOLS, "web_fetch") else {"default_model"})
+    if tool == "web_fetch":
+        allowed.add("services")
     if tool == "web_search":
         allowed |= {"prefer_native", "services"}
     if not isinstance(payload, dict) or not payload or set(payload) - allowed:
@@ -835,7 +848,11 @@ def apply_hosted_tool_put(config: ModelHubConfig, tool: str, payload: object) ->
                 raise ValueError("prefer_native must be a boolean")
             changes["prefer_native"] = payload["prefer_native"]
         if "services" in payload:
-            changes["services"] = _patch_search_services(config, payload["services"])
+            if tool == "web_fetch":
+                from .fetch_readers import patch_fetch_services
+                changes["services"] = patch_fetch_services(config, payload["services"])
+            else:
+                changes["services"] = _patch_search_services(config, payload["services"])
         if "executor_order" in payload:
             order = payload["executor_order"]
             changes["executor_order"] = None if order is None else model_hub_executor_order(order, tool=tool)
@@ -845,6 +862,9 @@ def apply_hosted_tool_put(config: ModelHubConfig, tool: str, payload: object) ->
     except ValueError:
         raise HostedToolSettingRefused("invalid_parameter", 400) from None
     setting = replace(hosted_tool_setting(config, tool), **changes)
+    if tool == "web_fetch" and "executor_order" in payload:
+        from .fetch_readers import fetch_order_roles
+        setting = fetch_order_roles(config, setting)
     if tool == "web_search" and "executor_order" in payload:
         live = {source.id: source for source in config.sources}
         live[KEYLESS_EXA_SOURCE_ID] = model_hub_keyless_exa_source()

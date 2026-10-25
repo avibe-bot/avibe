@@ -27,8 +27,8 @@ import {
   type UsageFilter,
 } from './usageProjection';
 
-const TEXT = { unknownModel: 'Unknown model', removedSources: 'Removed providers', searchServices: 'Search services' };
-const TEXT_ZH = { unknownModel: '未知模型', removedSources: '已移除的供应商', searchServices: '搜索服务' };
+const TEXT = { unknownModel: 'Unknown model', removedSources: 'Removed providers', searchServices: 'Search services', webFetch: 'Web fetch' };
+const TEXT_ZH = { unknownModel: '未知模型', removedSources: '已移除的供应商', searchServices: '搜索服务', webFetch: '网页读取' };
 const NO_FILTER = { sourceIds: [], modelKeys: [] };
 
 const counters = (over: Partial<UsageCounters> = {}): UsageCounters => ({
@@ -381,6 +381,27 @@ describe('search-service usage', () => {
     expect(table(NO_FILTER, '01').map(([label]) => label)).toEqual(['Removed providers']);
     expect(table({ sourceIds: [], modelKeys: [pairKey('source-a', 'model-a')] })).toEqual([]);
     expect(aggregateCounters(filteredRows(value, NO_FILTER).filter((entry) => !isModelRow(entry))).requests).toBe(0);
+  });
+
+  it('WF-1: separates fetch/search on the same service and never inflates search details', () => {
+    const fetched = search({ service_id: 'exa/mcp', tool: 'web_fetch', requests: 7 });
+    const searched = search({ service_id: 'exa/mcp', requests: 3 });
+    const value = { ...reportWith([bucket('00', [searched, fetched])]), services: [
+      listing(searched, { label: 'Exa (free)', service_label: 'Exa' }),
+      listing(fetched, { label: 'Exa (free)', service_label: 'Exa', tool: 'web_fetch' }),
+    ] };
+    expect(serviceUsageRows(value, NO_FILTER, null, TEXT).map((item) => [item.tool ?? 'web_search', item.totals.requests]))
+      .toEqual([['web_fetch', 7], ['web_search', 3]]);
+    expect(seriesFor(value, NO_FILTER, 'model', 'cost', TEXT).map((series) => series.label))
+      .toEqual(['Search services', 'Web fetch']);
+    value.window_key = '60d'; value.granularity = 'day'; value.to_day = '2026-09-24';
+    value.buckets![0]!.key = '2026-09-24';
+    expect(serviceMonthUsage(value, 'src_exa').totals.requests).toBe(3);
+    expect(serviceMonthUsage(value, 'src_exa', 'web_fetch').totals.requests).toBe(7);
+    value.services = value.services.map((item) => ({ ...item, label: null }));
+    const removed = serviceUsageRows(value, NO_FILTER, null, TEXT);
+    expect(removed.map((item) => [item.removed, item.tool ?? 'web_search', item.totals.requests]))
+      .toEqual([[true, 'web_fetch', 7], [true, 'web_search', 3]]);
   });
 
   describe('this month on a Source detail', () => {

@@ -102,6 +102,7 @@ const usageText = (t: UsageTranslate): UsageText => ({
   unknownModel: t('settings.models.usage.unknownModel'),
   removedSources: t('settings.models.usage.removedSources'),
   searchServices: t('settings.models.usage.services.title'),
+  webFetch: t('settings.models.tools.tool.web_fetch.name'),
 });
 
 const useCount = () => {
@@ -367,10 +368,10 @@ function UsageChart({
     ? requestedIndex
     : null;
   const bars = report.window_key === '30d' || report.window_key === '60d';
-  const { unknownModel, removedSources, searchServices } = usageText(t);
+  const { unknownModel, removedSources, searchServices, webFetch } = usageText(t);
   const series = React.useMemo(
-    () => seriesFor(report, filter, group, metric, { unknownModel, removedSources, searchServices }),
-    [filter, group, metric, removedSources, report, searchServices, unknownModel],
+    () => seriesFor(report, filter, group, metric, { unknownModel, removedSources, searchServices, webFetch }),
+    [filter, group, metric, removedSources, report, searchServices, unknownModel, webFetch],
   );
   const unpriced = React.useMemo(() => unpricedServices(report), [report]);
   const labels = React.useMemo(() => new Map(series.map((item) => [
@@ -1378,7 +1379,7 @@ export const UsageTab: React.FC<{
             <section className="model-hub-usage-card model-hub-usage-details" aria-labelledby="model-hub-usage-services-title">
               <div className="model-hub-usage-card-header model-hub-usage-details-header">
                 <div>
-                  <h3 id="model-hub-usage-services-title">{t('settings.models.usage.services.title')} <span>{serviceRows.length}</span></h3>
+                  <h3 id="model-hub-usage-services-title">{t(serviceRows.some((row) => row.tool === 'web_fetch') ? 'settings.models.usage.services.hostedTitle' : 'settings.models.usage.services.title')} <span>{serviceRows.length}</span></h3>
                   <p>{activePinnedKey === null
                     ? t('settings.models.usage.table.range')
                     : t('settings.models.usage.table.bucket', { bucket: formatBucketLabel(pinnedBucket!, i18n.language) })}</p>
@@ -1400,7 +1401,7 @@ export const UsageTab: React.FC<{
                       <tr key={row.key} className={cn(row.removed && 'is-removed')}>
                         <th scope="row">
                           <span className="model-hub-usage-row-name">{row.label}</span>
-                          <span className="model-hub-usage-row-detail">{row.removed ? t('settings.models.usage.removedSourcesHint') : row.service}</span>
+                          <span className="model-hub-usage-row-detail">{row.removed ? t('settings.models.usage.removedSourcesHint') : row.service}{row.tool === 'web_fetch' && ` · ${t('settings.models.tools.tool.web_fetch.name')}`}</span>
                         </th>
                         <td>{count(row.totals.requests)}</td>
                         <td>{serviceBillable(row.totals)}</td>

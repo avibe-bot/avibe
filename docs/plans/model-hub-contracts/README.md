@@ -1,8 +1,9 @@
 # Model Hub contracts
 
-Status: **contract_version 21**, 2026-10-24: keyless Exa activation (KEX-3).
+Status: **contract_version 21**, 2026-10-25: keyless Exa activation (KEX-3)
+and dormant fetch readers (WF-1).
 `gh-v3.2.3rc3` through `rc7` carry v20, so the unreleased v21 event now includes
-its coordinated readers, producer, and default-on activation. The versioned
+its coordinated readers, producer, and default-on Exa search activation. The versioned
 mirrors advance together; persisted TurnProvenance retains v5–v20 and adds v21.
 KEX-1 and KEX-2 supplied the optional built-in catalog/read metadata, synthetic
 `src_exakeyless` Source identity (`exa-mcp` / `exa/mcp`), keyless MCP producer,
@@ -10,6 +11,15 @@ cooldown classification, and compatibility-safe readers. KEX-3 sets
 `KEYLESS_EXA_ACTIVE = true` for the reader and producer together and ships the
 public disclosure; no live Exa call is used in tests or CI. An older release must
 ignore the additive fields while retaining ordinary service settings and orders.
+
+WF-1 appends dormant `web_fetch` readers to this unreleased event:
+separate fetch consent/order, local/Exa/Jina synthetic identities, fetch/local
+executor origins and local attempts, C-1 bounded fetch records, C-6 function-only
+facts, and optional service usage `tool` attribution (absent means `web_search`).
+`WEB_FETCH_ACTIVE = False` keeps GET/candidates/declarations/active settings UI
+unchanged; historical reads and V2/PUT preservation do not depend on activation.
+The exact shapes and downgrade losses are owned by [`../web-fetch.md`](../web-fetch.md)
+§§2/4/6/8. WF-1 adds no fetch producer, network transport or dependency.
 The localized hosted-activity vocabulary adds `service_rate_limited` as a fallback
 reason; it never creates a credential health blocker for the synthetic Source.
 

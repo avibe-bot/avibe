@@ -1433,7 +1433,7 @@ class Agent:
         self._rows.append(row)
         # The committed result, which a settlement race may have taken from another writer, not this execution's.
         committed = row.message.hosted if isinstance(row.message, ToolResultMessage) else None
-        if committed is not None and committed.record.status == "completed":
+        if committed is not None and committed.record.status == "completed" and call.name == "image_generate":
             # Only an image a surface can deliver counts toward the reply, and is carried with it.
             self._generated_images.extend(image for image in committed.record.images or () if image_deliverable(image))
         if emit_finished:
