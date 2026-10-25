@@ -115,7 +115,7 @@ def test_key_unlinked_before_service_and_delivered_only_to_bootstrap_stdin(tmp_p
             assert kwargs["input"] == SENTINEL
             result = {"source_id": "fixture-source"}
         elif "agent" in argv and "run" in argv:
-            result = {"run_id": "fixture-run", "session_id": "fixture-session"}
+            result = {"run": {"id": "fixture-run", "session_id": "fixture-session"}}
         elif "runs" in argv:
             result = {"run": {"status": "succeeded", "result_text": SENTINEL}}
         elif "harness" in argv:
