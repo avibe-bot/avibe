@@ -2,8 +2,8 @@
 
 The chain freezes order in ``TurnHostedTools`` but rechecks identity, enablement
 and shared service cooldown immediately before each send. Local execution is
-isolated in ``LocalFetchEngine``; keyless transports stay behind EngineAdapter.
-Configured provider execution remains unavailable until its separate delivery.
+isolated in ``LocalFetchEngine``; all remote transports stay behind
+``EngineAdapter`` and configured Source health settles through fenced generations.
 """
 from __future__ import annotations
 
@@ -110,7 +110,7 @@ class FetchChain:
         if service is None or service.get("service_id") != slot.model_id:
             fact["skipped"] = "unavailable"
             return source, service, fact
-        if not service.get("available", False) or service.get("vendor") not in {"local", "exa-mcp", "jina-reader"}:
+        if not service.get("available", False) or service.get("kind") not in {"local", "service"}:
             fact["skipped"] = "unavailable"
             return source, service, fact
         if not slot.enabled:
@@ -265,6 +265,7 @@ class FetchChain:
         sent = False
         response: SearchResponse | None = None
         cooldown_generation = None
+        health_generation = None
 
         async def invoke():
             nonlocal source, response
@@ -275,8 +276,8 @@ class FetchChain:
                 source = current
 
             async def on_sent():
-                nonlocal sent, source, cooldown_generation
-                await self._engine.check(self.requested_url, deadline=self.deadline)
+                nonlocal sent, source, cooldown_generation, health_generation
+                await self._engine.check(self.requested_url, deadline=attempt_deadline)
                 async with self.owner._mutation_lock:
                     current, _, skip = await self._classify(slot, locked=True)
                     if skip is not None:
@@ -298,6 +299,8 @@ class FetchChain:
                                 "retry_at": utc_text(retry_at),
                             })
                     cooldown_generation = self.owner._service_cooldowns.advance(source, slot.model_id)
+                    if service.get("source_id") is None:
+                        health_generation = self.owner._reserve_settlement_generation(source.id, source=source)
                     sent = True
 
             request = self._request_for(service)
@@ -356,7 +359,7 @@ class FetchChain:
             )
             if stopped:
                 result = replace(result, cooling=False)
-            await self._settle_owned(source, slot, result, response, cooldown_generation, sent)
+            await self._settle_owned(source, slot, result, response, cooldown_generation, health_generation, sent)
             return result
 
         settlement = asyncio.create_task(settle_response())
@@ -373,9 +376,9 @@ class FetchChain:
         moves_on = result.record.get("status") != "completed"
         return FetchAttempt(source, slot.model_id, "service", record, result.cost, result.billable, result.uncertain, moves_on, sent), None
 
-    async def _settle_owned(self, source, slot, result, response, cooldown_generation, sent):
+    async def _settle_owned(self, source, slot, result, response, cooldown_generation, health_generation, sent):
         await await_owned_task(asyncio.create_task(
-            self._settle_service(source, slot, result, response, cooldown_generation, sent)
+            self._settle_service(source, slot, result, response, cooldown_generation, health_generation, sent)
         ))
 
     @staticmethod
@@ -393,6 +396,10 @@ class FetchChain:
         value = url
         if value is None:
             raise ValueError("fetch URL is required")
+        limits = service.get("limits") if isinstance(service.get("limits"), Mapping) else {}
+        max_chars = limits.get("url_chars")
+        if isinstance(max_chars, int) and len(value) > max_chars:
+            raise ValueError("fetch URL exceeds provider limit")
         field = str(request_spec.get("url_field") or "url")
         payload = dict(request_spec.get("fixed") or {})
         payload[field] = [value] if request_spec.get("url_array") else value
@@ -401,7 +408,7 @@ class FetchChain:
     def _request_for(self, service: Mapping[str, Any]) -> dict[str, Any]:
         return self._request_payload(service, self.requested_url)
 
-    async def _settle_service(self, source, slot, result: FetchServiceResult, response, cooldown_generation, sent):
+    async def _settle_service(self, source, slot, result: FetchServiceResult, response, cooldown_generation, health_generation, sent):
         write = self.owner.usage_writer.record_service(
             source_id=source.id,
             service_id=slot.model_id,
@@ -417,6 +424,23 @@ class FetchChain:
             identity_current = current is not None and source_identity(current) == source_identity(source)
             if identity_current and cooldown_generation is not None:
                 self.owner._service_cooldowns.settle(current, slot.model_id, cooldown_generation, _search_compatible(result), response, self.owner.now())
+            health_current = (
+                identity_current and health_generation is not None
+                and self.owner._settlement_current(current, health_generation)
+            )
+            if health_current and (result.blocker is not None or result.authenticated):
+                from config.v2_config import ModelHubSourceStateConfig
+                desired_state = (
+                    ModelHubSourceStateConfig(status="needs_action", detail_key=result.blocker)
+                    if result.blocker is not None else ModelHubSourceStateConfig(status="standby")
+                )
+                if desired_state != current.state or (result.authenticated and current.verification_pending is not None):
+                    config = await asyncio.to_thread(self.owner._clone_config, previous)
+                    updated = self.owner._source(config, source.id)
+                    updated.state = desired_state
+                    if result.authenticated:
+                        updated.verification_pending = None
+                    await self.owner._save_runtime_config(previous, config)
         if write is not None:
             await self.owner.usage_writer.wait_recorded(write)
         if sent and result.record.get("status") == "completed":

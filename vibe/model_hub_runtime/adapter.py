@@ -2328,33 +2328,45 @@ class CLIProxyEngineAdapter:
                 return SearchResponse(None, {}, None, "invalid_endpoint")
             return await self._keyless_exa_client.fetch(request, on_sent=on_sent)
 
-        # Keyed transports/mappings are delivered separately. This boundary
-        # admits only the exact built-in Reader identity, never a credential.
-        if vendor != "jina-reader" or credential_ref is not None:
-            return SearchResponse(None, {}, None, "invalid_endpoint")
+        # Keyed services use the same custody and bounded HTTP transport as search,
+        # but their immutable fetch catalog owns a different endpoint and body shape.
         service = next(
             (
                 entry for entry in fetch_service_catalog()
                 if entry.get("service_id") == service_id and entry.get("vendor") == vendor
-                and entry.get("source_id") == source_id
+                and entry.get("kind") == "service"
+                and (entry.get("source_id") is None)
             ),
             None,
         )
-        if service is None or service.get("kind") != "service":
-            return SearchResponse(None, {}, None, "invalid_endpoint")
+        if service is None or vendor not in {"tavily", "exa", "deepseek"} or credential_ref is None:
+            # The built-in Reader is the only credentialless HTTP fetch service.
+            if vendor != "jina-reader" or credential_ref is not None:
+                return SearchResponse(None, {}, None, "invalid_endpoint")
+            service = next(
+                (
+                    entry for entry in fetch_service_catalog()
+                    if entry.get("service_id") == service_id and entry.get("vendor") == vendor
+                    and entry.get("source_id") == source_id and entry.get("kind") == "service"
+                ),
+                None,
+            )
+            if service is None:
+                return SearchResponse(None, {}, None, "invalid_endpoint")
         payload = dict(request)
         request_spec = service.get("request") if isinstance(service.get("request"), Mapping) else {}
         headers = request_spec.get("headers") if isinstance(request_spec.get("headers"), Mapping) else {}
         if isinstance(service.get("headers"), Mapping):
             headers = {**headers, **service["headers"]}
-        headers = {**headers, "User-Agent": f"Avibe/{AVIBE_VERSION}"}
+        if vendor == "jina-reader":
+            headers = {**headers, "User-Agent": f"Avibe/{AVIBE_VERSION}"}
         return await self._search_http(
             catalog={"vendor": vendor, **service},
             credential_ref=credential_ref,
             method="POST",
             endpoint=str(service.get("endpoint") or ""),
             payload=payload,
-            extra_headers=headers,
+            extra_headers=headers or None,
             on_sent=on_sent,
         )
 

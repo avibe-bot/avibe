@@ -95,7 +95,7 @@ def test_http_200_malformed_provider_envelopes_are_service_failures(body, vendor
 @pytest.mark.asyncio
 @pytest.mark.parametrize("vendor", ["exa", "tavily", "deepseek"])
 async def test_configured_fetch_is_dormant_at_chain_and_adapter_boundaries(tmp_path, vendor):
-    """The split must not expose an unreviewed paid transport even if the flag is enabled."""
+    """The activation flag still blocks the new producer while the adapter is ready for hermetic tests."""
     sid = IDS[vendor]
     service, config = _service(
         tmp_path, vendor=vendor,
@@ -108,19 +108,29 @@ async def test_configured_fetch_is_dormant_at_chain_and_adapter_boundaries(tmp_p
         raise AssertionError("configured fetch must remain unavailable")
 
     service.adapter.fetch = unexpected
-    result = await service.run_hosted_tool(
-        "web_fetch", {"arguments": {"url": "https://example.com/"}},
-        turn=service.freeze_turn_hosted_tools(config),
-    )
-    first = result["record"]["attempts"][0]
-    assert first["source_id"] == sid and first["skipped"] == "unavailable"
-    assert service.usage_summary(days=7)["services"] == []
-    assert service.capability_evidence.records() == []
+    turn = service.freeze_turn_hosted_tools(config)
+    hosted_tools.WEB_FETCH_ACTIVE = False
+    with pytest.raises(ModelHubError) as raised:
+        await service.run_hosted_tool(
+            "web_fetch", {"arguments": {"url": "https://example.com/"}},
+            turn=turn,
+        )
+    assert raised.value.code == "tool_not_enabled"
     adapter = object.__new__(CLIProxyEngineAdapter)
-    adapter._search_http = unexpected
+    captured = {}
+
+    async def transport(**kwargs):
+        captured.update(kwargs)
+        return SearchResponse(200, {}, b"{}")
+
+    adapter._search_http = transport
     catalog = next(item for item in fetch_service_catalog() if item["vendor"] == vendor)
-    response = await adapter.fetch(sid, vendor, catalog["service_id"], f"cred_{sid}", {"url": "https://example.com/"})
-    assert response.error == "invalid_endpoint"
+    request = dict(catalog["request"]["fixed"])
+    request[catalog["request"]["url_field"]] = ["https://example.com/"] if catalog["request"]["url_array"] else "https://example.com/"
+    response = await adapter.fetch(sid, vendor, catalog["service_id"], f"cred_{sid}", request)
+    assert response.http_status == 200
+    assert captured["endpoint"] == catalog["endpoint"]
+    assert captured["payload"] == request
     assert calls == []
 
 
@@ -333,6 +343,200 @@ async def test_extractor_overflow_survives_short_normalized_content_into_record_
     assert ("Final paragraph." in record.content) is (not overflow)
     assert "content_overflow" not in result["record"]
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vendor,body,expected_request,expected_cost", [
+    ("tavily", {"results": [{"url": "https://example.com/", "raw_content": "Tavily body", "title": "T"}], "failed_results": []},
+     {"urls": ["https://example.com/"], "extract_depth": "basic", "format": "markdown"}, 0.0016),
+    ("exa", {"results": [{"id": "https://example.com/", "url": "https://final.example/", "text": "Exa body", "title": "E"}],
+             "statuses": [{"id": "https://example.com/", "status": "success"}], "costDollars": {"total": 0.02}},
+     {"ids": ["https://example.com/"], "text": {"maxCharacters": 48000}}, 0.02),
+    ("deepseek", {"title": "D", "content": "DeepSeek body"}, {"url": "https://example.com/"}, 0.00075),
+])
+async def test_configured_fetch_maps_request_content_cost_and_source_success(
+    tmp_path, vendor, body, expected_request, expected_cost,
+):
+    sid = IDS[vendor]
+    service, config = _service(
+        tmp_path, vendor=vendor,
+        enabled={LOCAL: False, FREE_EXA: False, JINA: False, sid: True}, order=(sid,),
+    )
+    calls = []
+
+    async def fetch(source_id, actual_vendor, service_id, credential_ref, request, *, on_sent):
+        calls.append((source_id, actual_vendor, service_id, credential_ref, request))
+        await on_sent()
+        return SearchResponse(200, {}, json.dumps(body).encode())
+
+    service.adapter.fetch = fetch
+    result = await service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": "https://example.com/"}},
+        turn=service.freeze_turn_hosted_tools(config),
+    )
+    assert result["record"]["status"] == "completed"
+    assert result["record"]["content"] in {"Tavily body", "Exa body", "DeepSeek body"}
+    assert result["execution"]["cost"]["usd"] == expected_cost
+    catalog = next(item for item in fetch_service_catalog() if item["vendor"] == vendor)
+    assert calls == [(sid, vendor, catalog["service_id"], f"cred_{sid}", expected_request)]
+    row = next(row for row in service.usage_summary(days=7)["services"] if row["tool"] == "web_fetch")
+    assert row["requests"] == row["billable_requests"] == 1
+    assert service.store.load().sources[0].state.status == "standby"
+
+
+@pytest.mark.parametrize("vendor,body", [
+    ("tavily", {"results": [], "failed_results": [{"url": "https://example.com/", "error": "blocked"}]}),
+    ("exa", {"results": [{"id": "https://example.com/", "text": ""}], "statuses": [{"id": "https://example.com/", "status": "error"}]}),
+])
+def test_configured_target_failures_do_not_cool_or_mark_source(tmp_path, vendor, body):
+    catalog = next(item for item in fetch_service_catalog() if item["vendor"] == vendor)
+    result = map_fetch_response(
+        catalog, SearchResponse(200, {}, json.dumps(body).encode()),
+        requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
+    )
+    assert result.record["error_code"] == "fetch_target_unreadable"
+    assert result.target_failure and not result.cooling and not result.uncertain
+    assert result.cost is not None and result.cost.usd == 0 and not result.billable
+
+
+@pytest.mark.parametrize("vendor,status,body,error,expected_code,expected_usd,expected_billable,expected_uncertain", [
+    ("tavily", 503, {}, "", "service_unavailable", 0, False, False),
+    ("exa", 429, {}, "", "service_rate_limited", 0, False, False),
+    ("deepseek", 401, {}, "", "service_key_invalid", 0, False, False),
+    ("deepseek", 404, {}, "", "fetch_target_unreadable", 0, False, False),
+    ("deepseek", None, {}, "timeout", "service_unavailable", 0, False, False),
+    ("deepseek", None, {}, "connection", "service_unavailable", None, False, True),
+    ("exa", None, {}, "timeout", "service_unavailable", None, False, True),
+    ("deepseek", 200, {"title": "missing content"}, "", "service_unreadable", None, False, True),
+    ("tavily", 200, {"results": [], "failed_results": [{"url": "https://example.com/"}]}, "",
+     "fetch_target_unreadable", 0, False, False),
+])
+def test_configured_billing_distinguishes_known_zero_from_unknown_sent_cost(
+    vendor, status, body, error, expected_code, expected_usd, expected_billable, expected_uncertain,
+):
+    catalog = next(item for item in fetch_service_catalog() if item["vendor"] == vendor)
+    result = map_fetch_response(
+        catalog, SearchResponse(status, {}, json.dumps(body).encode() if status is not None else None, error),
+        requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
+    )
+    assert result.record["error_code"] == expected_code
+    assert result.billable is expected_billable and result.uncertain is expected_uncertain
+    assert (None if result.cost is None else result.cost.usd) == expected_usd
+
+
+def test_configured_url_matching_rejects_malformed_provider_urls_without_mapper_failure():
+    catalog = next(item for item in fetch_service_catalog() if item["vendor"] == "exa")
+    body = {
+        "results": [{"id": "https://example.com:bad/", "text": "body"}],
+        "statuses": [{"id": "https://example.com:bad/", "status": "success"}],
+    }
+    result = map_fetch_response(
+        catalog, SearchResponse(200, {}, json.dumps(body).encode()),
+        requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
+    )
+    assert result.record["error_code"] == "fetch_target_unreadable"
+    assert result.target_failure
+
+
+def test_deepseek_200_unrecoverable_body_is_uncertain_and_cooling():
+    catalog = next(item for item in fetch_service_catalog() if item["vendor"] == "deepseek")
+    result = map_fetch_response(
+        catalog, SearchResponse(200, {}, b'{"title":"missing content"}'),
+        requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
+    )
+    assert result.record["error_code"] == "service_unreadable"
+    assert result.uncertain and result.cooling and result.cost is None
+
+
+def test_exa_reported_cost_outside_catalog_ceiling_falls_back_to_list_estimate():
+    catalog = next(item for item in fetch_service_catalog() if item["vendor"] == "exa")
+    body = {"results": [{"id": "https://example.com/", "text": "body"}],
+            "statuses": [{"id": "https://example.com/", "status": "success"}],
+            "costDollars": {"total": 0.1001}}
+    result = map_fetch_response(
+        catalog, SearchResponse(200, {}, json.dumps(body).encode()),
+        requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
+    )
+    assert result.cost == result.cost.__class__(basis="list", usd=0.001)
+    assert result.reported_usd is None
+
+
+@pytest.mark.asyncio
+async def test_stale_configured_fetch_health_generation_cannot_overwrite_newer_source(tmp_path):
+    sid = IDS["deepseek"]
+    service, config = _service(
+        tmp_path, vendor="deepseek",
+        enabled={LOCAL: False, FREE_EXA: False, JINA: False, sid: True}, order=(sid,),
+    )
+
+    async def fetch(*args, on_sent):
+        await on_sent()
+        service._reserve_settlement_generation(sid, source=service.store.load().sources[0])
+        return SearchResponse(401, {}, b"{}")
+
+    service.adapter.fetch = fetch
+    result = await service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": "https://example.com/"}},
+        turn=service.freeze_turn_hosted_tools(config),
+    )
+    assert result["record"]["error_code"] == "service_key_invalid"
+    assert service.store.load().sources[0].state.status == "standby"
+
+
+@pytest.mark.asyncio
+async def test_paid_sent_cancellation_is_uncertain_and_does_not_cool(tmp_path):
+    service, config = _service(
+        tmp_path, vendor="deepseek",
+        enabled={LOCAL: False, FREE_EXA: False, JINA: False, IDS["deepseek"]: True},
+        order=(IDS["deepseek"],),
+    )
+    started = asyncio.Event()
+
+    async def fetch(*args, on_sent):
+        await on_sent()
+        started.set()
+        await asyncio.Event().wait()
+
+    service.adapter.fetch = fetch
+    task = asyncio.create_task(service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": "https://example.com/"}},
+        turn=service.freeze_turn_hosted_tools(config),
+    ))
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    row = next(row for row in service.usage_summary(days=7)["services"] if row["tool"] == "web_fetch")
+    assert row["requests"] == 1 and row["billable_requests"] == 0 and row["uncertain_requests"] == 1
+    assert service._service_cooldowns.until(service.store.load().sources[0], "deepseek/fetch", service.now()) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vendor,status,detail", [
+    ("deepseek", 401, "credential_revoked"),
+    ("tavily", 432, "spend_limit_reached"),
+])
+async def test_configured_blocker_response_settles_source_health(tmp_path, vendor, status, detail):
+    sid = IDS[vendor]
+    service, config = _service(
+        tmp_path, vendor=vendor,
+        enabled={LOCAL: False, FREE_EXA: False, JINA: False, sid: True}, order=(sid,),
+    )
+
+    async def fetch(*args, on_sent):
+        await on_sent()
+        return SearchResponse(status, {}, b"{}")
+
+    service.adapter.fetch = fetch
+    result = await service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": "https://example.com/"}},
+        turn=service.freeze_turn_hosted_tools(config),
+    )
+    assert result["record"]["error_code"] == (
+        "service_key_invalid" if detail == "credential_revoked" else "service_limit"
+    )
+    source = service.store.load().sources[0]
+    assert source.state.status == "needs_action"
+    assert source.state.detail_key == f"models.source.needs_action.{detail}"
+
 
 class _Local:
     def __init__(self):
@@ -529,6 +733,30 @@ async def test_pre_send_service_result_is_skipped_without_usage_or_cooldown(tmp_
     assert service.capability_evidence.records() == []
     source = model_hub_builtin_source(FREE_EXA)
     assert service._service_cooldowns.until(source, "exa/mcp", service.now()) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vendor,sid", [("exa", FREE_EXA), ("deepseek", IDS["deepseek"])])
+async def test_keyed_pre_send_adapter_rejection_is_skipped_and_unmetered(tmp_path, vendor, sid):
+    service, config = _service(
+        tmp_path, vendor=vendor,
+        enabled={LOCAL: False, EXA: False, FREE_EXA: False, JINA: False, sid: True},
+        order=(sid,),
+    )
+
+    async def fetch(*args, **kwargs):
+        return SearchResponse(None, {}, None, "invalid_endpoint")
+
+    service.adapter.fetch = fetch
+    result = await service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": "https://example.com/"}},
+        turn=service.freeze_turn_hosted_tools(config),
+    )
+    assert result["record"]["error_code"] == "fetch_unavailable"
+    attempt = result["record"]["attempts"][0]
+    assert attempt["source_id"] == sid and attempt["kind"] == "service"
+    assert attempt["outcome"] == "skipped" and attempt["skipped"] == "unavailable"
+    assert service.usage_summary(days=7)["services"] == []
 
 
 @pytest.mark.asyncio

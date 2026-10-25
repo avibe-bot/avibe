@@ -7329,8 +7329,9 @@ class ModelHubService:
         on after a failure normal routing fails over from, a narrow-rule
         refusal, a refusal of the executor model, or a failure mid-response;
         any other outcome ends it. Every candidate called is metered on its own
-        Source. A proxy call never changes Source health: it is a tool call,
-        not the turn's model hop.
+        Source. A proxy call may update service-local retry state; configured
+        Source health changes only from an actual sent provider outcome and
+        remains identity/generation fenced.
         """
 
         def say(key: str, **params: str) -> str:
