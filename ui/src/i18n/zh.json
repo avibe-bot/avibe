@@ -199,6 +199,7 @@
     "edit": "编辑",
     "configure": "配置",
     "cancel": "取消",
+    "done": "完成",
     "confirm": "确定",
     "clear": "清除",
     "retry": "重试",
@@ -5024,6 +5025,7 @@
     },
     "picker": {
       "agent": "Agent",
+      "sheetTitle": "Agent 与模型",
       "model": "模型",
       "effort": "思考强度",
       "effortNotOn": "{{sources}} 不支持",

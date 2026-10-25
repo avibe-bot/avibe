@@ -32,6 +32,9 @@ export const ResponsiveMenu: React.FC<{
   sheetDescription?: string;
   /** Sheet-only header block rendered above the items (e.g. the row's identity). */
   sheetHeader?: React.ReactNode;
+  /** The sheet's closing row. Defaults to 取消; a menu whose picks apply at once
+   *  has nothing to cancel and says 完成 instead. */
+  sheetCloseLabel?: string;
   /** Popover-only sizing/appearance. */
   className?: string;
   align?: 'start' | 'center' | 'end';
@@ -45,6 +48,7 @@ export const ResponsiveMenu: React.FC<{
   sheetTitleVisible = true,
   sheetDescription,
   sheetHeader,
+  sheetCloseLabel,
   className,
   align = 'end',
   sideOffset = 6,
@@ -112,7 +116,7 @@ export const ResponsiveMenu: React.FC<{
 
           <div className="shrink-0 px-4 pb-4 pt-3">
             <DialogPrimitive.Close className="flex h-12 w-full items-center justify-center rounded-xl border border-border bg-surface text-[14px] font-semibold text-foreground transition-colors hover:bg-surface-2">
-              {t('common.cancel')}
+              {sheetCloseLabel ?? t('common.cancel')}
             </DialogPrimitive.Close>
           </div>
         </DialogPrimitive.Content>

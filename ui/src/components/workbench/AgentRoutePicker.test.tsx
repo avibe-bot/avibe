@@ -120,8 +120,9 @@ const OptimisticOwner: React.FC<{
   isDefaultRoute?: boolean;
   defaultRoute?: AgentRouteValue;
   defaultLabel?: string;
+  presentation?: 'columns' | 'compact';
   onWrite: (patch: AgentRoutePatch) => void;
-}> = ({ initial = CLAUDE_ROUTE, isDefaultRoute, defaultRoute, defaultLabel, onWrite }) => {
+}> = ({ initial = CLAUDE_ROUTE, isDefaultRoute, defaultRoute, defaultLabel, presentation, onWrite }) => {
   const [route, setRoute] = useState<AgentRouteValue>(initial);
   const [saving, setSaving] = useState(false);
   return (
@@ -133,6 +134,7 @@ const OptimisticOwner: React.FC<{
         isDefaultRoute={isDefaultRoute}
         defaultRoute={defaultRoute}
         defaultLabel={defaultLabel}
+        presentation={presentation}
         onChange={(patch) => {
           setRoute((prev) => ({ ...prev, ...patch }));
           setSaving(true);
@@ -166,13 +168,20 @@ const HubPicker: React.FC<{
   surfaceActive?: boolean;
   onNavigateAway?: () => void;
   onChange?: (value: AgentRouteValue) => void;
-}> = ({ role, surfaceActive = true, onNavigateAway, onChange = () => {} }) => (
+  presentation?: 'columns' | 'compact';
+}> = ({ role, surfaceActive = true, onNavigateAway, onChange = () => {}, presentation }) => (
   <InstanceAuthorizationContext.Provider
     value={{ remote: false, instanceKind: null, instanceRole: role, capabilities: capabilitiesFor(role) }}
   >
     <RouteSurfaceActiveContext.Provider value={surfaceActive}>
       <MemoryRouter>
-        <AgentRoutePicker value={CLAUDE_ROUTE} agents={AGENTS} onChange={onChange} onNavigateAway={onNavigateAway} />
+        <AgentRoutePicker
+          value={CLAUDE_ROUTE}
+          agents={AGENTS}
+          onChange={onChange}
+          onNavigateAway={onNavigateAway}
+          presentation={presentation}
+        />
         <LocationProbe />
       </MemoryRouter>
     </RouteSurfaceActiveContext.Provider>
@@ -563,5 +572,77 @@ describe('AgentRoutePicker', () => {
       model: 'opus',
       reasoning_effort: 'low',
     });
+  });
+});
+
+// The chat composer's presentation: the same route state and writes, laid out
+// model-first — models and an effort radio group up front, the Agent list one
+// level down — so the picks most made mid-conversation take one tap.
+describe('AgentRoutePicker compact presentation', () => {
+  afterEach(() => {
+    cleanup();
+    catalogReasoning = {};
+    catalogMenus = {};
+    sourceNames = null;
+    hubMode = 'direct';
+  });
+
+  const effortGroup = () => within(screen.getByRole('radiogroup', { name: 'chat.picker.effort' }));
+
+  it('writes models and efforts from the first page and keeps Agents one level down', async () => {
+    catalogReasoning = {
+      sonnet: [{ value: 'low', label: 'Low' }, { value: 'high', label: 'High' }],
+      opus: [{ value: 'low', label: 'Low' }, { value: 'high', label: 'High' }],
+    };
+    const user = userEvent.setup();
+    const onWrite = vi.fn();
+    render(<OptimisticOwner presentation="compact" onWrite={onWrite} />);
+    await openMenu(user);
+
+    // Agents are not on the first page; the route's Agent is named on its row.
+    expect(screen.queryByRole('button', { name: /codex/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'chat.picker.newAgent' })).toBeNull();
+    expect(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.low' }).getAttribute('aria-checked')).toBe('true');
+
+    await user.click(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.high' }));
+    expect(onWrite).toHaveBeenLastCalledWith({ reasoning_effort: 'high' });
+    expect(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.high' }).getAttribute('aria-checked')).toBe('true');
+
+    await user.click(screen.getByRole('button', { name: /^opus/ }));
+    expect(onWrite).toHaveBeenLastCalledWith({ model: 'opus' });
+
+    await user.click(screen.getByRole('button', { name: /chat\.picker\.agent/ }));
+    await user.click(screen.getByRole('button', { name: /^codex/ }));
+    // An Agent pick is the whole route, exactly as the cascade writes it, and
+    // the menu returns to its model page.
+    expect(onWrite).toHaveBeenLastCalledWith({
+      agent_name: 'codex',
+      agent_id: 'agt-codex',
+      agent_backend: 'codex',
+      agent_variant: 'codex',
+      model: 'gpt',
+      reasoning_effort: null,
+    });
+    expect(screen.getByText('chat.picker.model')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'chat.picker.newAgent' })).toBeNull();
+  });
+
+  it('still names refusing Sources and a refused saved effort, as the cascade does', async () => {
+    hubMode = 'hub';
+    catalogReasoning = { sonnet: [{ value: 'medium', label: 'medium' }, { value: 'high', label: 'high' }] };
+    catalogMenus = { sonnet: { omitted: ['low'], not_on: { high: ['src_relaygpt1'] } } };
+    sourceNames = { src_relaygpt1: 'relay-gpt' };
+    const user = userEvent.setup();
+    render(<HubPicker role="owner" presentation="compact" />);
+    await openMenu(user);
+
+    // The saved `low` every hop now refuses stays checked as itself, with the reason.
+    expect(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.low' }).getAttribute('aria-checked')).toBe('true');
+    expect(screen.getByText('chat.picker.effortRefused')).toBeTruthy();
+    // A Source that refuses an offered effort is named under the group and on the option.
+    expect(screen.getByText(/chat\.picker\.effortOptions\.high · chat\.picker\.effortNotOn:relay-gpt/)).toBeTruthy();
+    expect(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.high' }).getAttribute('title'))
+      .toBe('chat.picker.effortNotOn:relay-gpt');
+    expect(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.medium' }).getAttribute('title')).toBeNull();
   });
 });

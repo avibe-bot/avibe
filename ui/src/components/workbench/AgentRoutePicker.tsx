@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { ChevronDown, Loader2, Plus, Search, Sparkles } from 'lucide-react';
+import { Check, ChevronDown, ChevronLeft, ChevronRight, Loader2, Plus, Search, Sparkles } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../context/ApiContext';
@@ -13,6 +13,7 @@ import { isEffortSupported, refusedSavedEffort, resolveEffortOptions } from '../
 import { useSourceNames } from '../../lib/useSourceNames';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
+import { ResponsiveMenu } from '../ui/responsive-menu';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { BackendAvatar } from '../visual';
@@ -59,8 +60,11 @@ interface AgentRoutePickerProps {
   align?: 'start' | 'end';
   /** Override the trigger width (chat caps at 62%; the create surfaces go full width). */
   triggerClassName?: string;
-  /** On mobile chat headers, keep the closed trigger to the agent label only. */
-  compactMobile?: boolean;
+  /** ``columns`` (default): the bordered trigger and the three-column cascade.
+   *  ``compact``: a borderless trigger and a model-first menu for the chat
+   *  composer — models and efforts up front, the Agent one level down — shown as
+   *  a popover on desktop and a bottom sheet on phones. */
+  presentation?: 'columns' | 'compact';
   /** Make the popover a modal layer — required when nested in a modal Dialog (the
    *  new-session sheet) so its content isn't aria-hidden/inert by the dialog. */
   modal?: boolean;
@@ -94,7 +98,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   disabled,
   align = 'end',
   triggerClassName,
-  compactMobile,
+  presentation = 'columns',
   modal,
   onNavigateAway,
 }) => {
@@ -103,6 +107,9 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const authorization = useInstanceAuthorization();
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
+  const compact = presentation === 'compact';
+  // The compact menu's Agent list is a second page, not a column.
+  const [agentPage, setAgentPage] = useState(false);
   const [modelsByBackend, setModelsByBackend] = useState<Record<string, string[]>>({});
   const [modelLabelsByBackend, setModelLabelsByBackend] = useState<Record<string, Record<string, string>>>({});
   const [reasoningByBackend, setReasoningByBackend] = useState<
@@ -170,7 +177,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const currentEffort = displayValue.reasoning_effort;
   const currentAgentLabel = displayedAgent?.display_name || currentAgent;
   const triggerLabel = (routeIsDefault && defaultLabel) || currentAgentLabel || defaultLabel || t('chat.pickAgent');
-  const compactTriggerLabel = currentAgentLabel || defaultLabel || t('chat.pickAgent');
+  const agentLabel = currentAgentLabel || defaultLabel || t('chat.pickAgent');
 
   const allowedBackendSet = useMemo(
     () => new Set((allowedBackends ?? []).map((item) => item.trim()).filter(Boolean)),
@@ -327,51 +334,130 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     return t('chat.picker.effortNotOn', { sources: ids.map((id) => sourceNames[id] ?? id).join(', ') });
   };
 
-  return (
-    <Popover open={open} onOpenChange={setOpen} modal={modal}>
-      <PopoverTrigger asChild>
+  // One set of picks for both presentations, so the compact menu cannot drift
+  // from the cascade on what a click writes.
+  const pickDefault = () =>
+    applyPatch({
+      agent_name: null,
+      agent_id: null,
+      agent_backend: null,
+      agent_variant: null,
+      model: null,
+      reasoning_effort: null,
+    });
+  const pickAgent = (agent: VibeAgentBrief) =>
+    applyPatch({
+      agent_name: agent.name,
+      agent_id: agent.id,
+      agent_backend: agent.backend,
+      agent_variant: agent.backend,
+      // Explicit null (not undefined) so switching to an agent with
+      // no default model/effort clears the previous override.
+      model: agent.model ?? null,
+      reasoning_effort: agent.reasoning_effort ?? null,
+    });
+  const pickModel = (model: string) => {
+    const patch: AgentRoutePatch = { model };
+    // Switching to a model whose effort set no longer includes
+    // the current effort: clear it in the same patch so the displayed
+    // route matches what dispatches. Choosing the current model
+    // again changes nothing, a refused saved effort included.
+    if (model !== currentModel && !isEffortSupported(backend, model, currentEffort, backendReasoning)) {
+      patch.reasoning_effort = null;
+    }
+    applyPatch(patch);
+  };
+  const openNewAgent = () => {
+    setOpen(false);
+    onNavigateAway?.(); // close the create sheet before leaving, if any
+    // Creating an agent needs the Definitions controls, so ask for
+    // that tab explicitly instead of resuming the remembered one.
+    navigate('/agents?tab=definitions');
+  };
+  const openAddModelExit = openAddModel
+    ? () => {
+        setOpen(false);
+        openAddModel();
+      }
+    : null;
+  const effortLabel = (effort: string) => t(`chat.picker.effortOptions.${effort}`, { defaultValue: effort });
+
+  // The model list body — search, loading/empty states, rows — is shared; only
+  // how a row presents its name differs.
+  const modelListBody = (renderRow: (model: string) => React.ReactNode) => (
+    <>
+      {showModelSearch && (
+        <div className="sticky top-0 z-10 -mx-1.5 mb-1 bg-panel px-1.5 pb-1 pt-0.5">
+          <div className="flex items-center gap-1.5 rounded-md border border-border bg-surface-2 px-2 focus-within:border-cyan/50">
+            <Search className="size-3 shrink-0 text-muted" />
+            <Input
+              variant="bare"
+              value={modelQuery}
+              onChange={(e) => setModelQuery(e.target.value)}
+              placeholder={t('chat.picker.searchModels')}
+              aria-label={t('chat.picker.searchModels')}
+              className="h-7 flex-1 text-[11px]"
+            />
+          </div>
+        </div>
+      )}
+      {loadingModels && models.length === 0 ? (
+        <div className="flex items-center gap-1.5 px-2 py-3 text-[11px] text-muted">
+          <Loader2 className="size-3 animate-spin" />
+          {t('common.loading')}
+        </div>
+      ) : models.length === 0 ? (
+        <div className="px-2 py-3 text-[11px] text-muted">{t('chat.picker.noModels')}</div>
+      ) : filteredModels.length === 0 ? (
+        <div className="px-2 py-3 text-[11px] text-muted">{t('chat.picker.noModelMatch')}</div>
+      ) : (
+        filteredModels.map(renderRow)
+      )}
+      {/* Pinned like the search above it: a long model list must not scroll
+          the way to add one out of sight. */}
+      {openAddModelExit && (
+        <div className="sticky -bottom-1.5 z-10 -mx-1.5 -mb-1.5 border-t border-border bg-panel px-1.5 pb-1.5">
+          <PickerExitButton label={t('chat.picker.addModel')} onClick={openAddModelExit} />
+        </div>
+      )}
+    </>
+  );
+
+  const triggerButton = (
         <Button
           type="button"
           variant="outline"
           disabled={disabled}
           className={clsx(
-            'inline-flex h-auto items-center justify-start gap-1.5 rounded-lg border-cyan/40 bg-surface-2 px-2.5 py-1.5 text-[12px] font-normal hover:bg-cyan/[0.06]',
-            triggerClassName ?? 'max-w-[62%]',
+            compact
+              ? 'inline-flex h-9 min-w-0 items-center justify-start gap-1.5 rounded-lg border-transparent bg-transparent px-2 text-[12px] font-normal shadow-none hover:bg-foreground/[0.05]'
+              : 'inline-flex h-auto items-center justify-start gap-1.5 rounded-lg border-cyan/40 bg-surface-2 px-2.5 py-1.5 text-[12px] font-normal hover:bg-cyan/[0.06]',
+            triggerClassName ?? (compact ? undefined : 'max-w-[62%]'),
           )}
         >
-          {backend && (
-            <span
-              className={clsx(
-                'shrink-0 items-center gap-1 rounded border border-cyan/30 bg-cyan/[0.08] px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-cyan-ink',
-                compactMobile ? 'hidden md:inline-flex' : 'inline-flex',
-              )}
-            >
+          {/* The composer's quiet trigger names the route without the backend
+              badge: the Agent name already implies it, and the menu shows it. */}
+          {backend && !compact && (
+            <span className="inline-flex shrink-0 items-center gap-1 rounded border border-cyan/30 bg-cyan/[0.08] px-1.5 py-0.5 font-mono text-[9px] font-bold uppercase text-cyan-ink">
               <BackendAvatar backend={backend} className="size-3" />
               {getBackendUiMeta(backend).label}
             </span>
           )}
-          {compactMobile ? (
-            <>
-              <span className="truncate font-semibold text-foreground md:hidden">{compactTriggerLabel}</span>
-              <span className="hidden truncate font-semibold text-foreground md:inline">{triggerLabel}</span>
-            </>
-          ) : (
-            <span className="truncate font-semibold text-foreground">{triggerLabel}</span>
-          )}
+          <span className="truncate font-semibold text-foreground">{triggerLabel}</span>
           {currentModel && (
             <>
-              <span className={clsx('text-muted', compactMobile && 'hidden md:inline')}>·</span>
-              <span className={clsx('truncate font-mono text-[10px] text-muted', compactMobile && 'hidden md:inline')}>
+              <span className="text-muted">·</span>
+              <span className="truncate font-mono text-[10px] text-muted">
                 {currentModel}
               </span>
             </>
           )}
           {currentEffort && (
             <>
-              <span className={clsx('text-muted', compactMobile && 'hidden md:inline')}>·</span>
+              <span className="text-muted">·</span>
               {/* Localize via the same key the column uses so the closed trigger
                   doesn't show raw low/max in zh builds; unknown falls back to raw. */}
-              <span className={clsx('shrink-0 text-[10px] capitalize text-muted', compactMobile && 'hidden md:inline')}>
+              <span className="shrink-0 text-[10px] capitalize text-muted">
                 {t(`chat.picker.effortOptions.${currentEffort}`, { defaultValue: currentEffort })}
               </span>
             </>
@@ -385,6 +471,156 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             <ChevronDown className="ml-auto size-3 shrink-0 text-muted" />
           )}
         </Button>
+  );
+
+  if (compact) {
+    const agentRowLabel = (routeIsDefault && defaultLabel) || agentLabel;
+    const agentList = (
+      <div className="flex flex-col gap-0.5 p-1.5">
+        <button
+          type="button"
+          onClick={() => setAgentPage(false)}
+          className="flex items-center gap-1 rounded px-1.5 py-1.5 text-left text-[12px] font-semibold text-foreground hover:bg-foreground/[0.04]"
+        >
+          <ChevronLeft className="size-3.5 text-muted" />
+          {t('chat.picker.agent')}
+        </button>
+        {defaultLabel && (
+          <RouteItem
+            active={routeIsDefault}
+            onClick={() => {
+              pickDefault();
+              setAgentPage(false);
+            }}
+          >
+            <Sparkles className="size-3.5 shrink-0 text-cyan-ink" />
+            <span className="flex-1 truncate font-semibold">{defaultLabel}</span>
+            {routeIsDefault && <Check className="size-3.5 shrink-0" />}
+          </RouteItem>
+        )}
+        {visibleAgents.length === 0 && (
+          <div className="px-2 py-3 text-center text-[11px] text-muted">{t('chat.noAgents')}</div>
+        )}
+        {Object.entries(grouped).map(([be, list]) => (
+          <div key={be} className="flex flex-col gap-0.5 pb-1">
+            <div className="px-2 pt-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.12em] text-muted">{be}</div>
+            {list.map((agent) => {
+              const active = !routeIsDefault && agent.name === currentAgent;
+              return (
+                <RouteItem
+                  key={agent.id}
+                  active={active}
+                  onClick={() => {
+                    pickAgent(agent);
+                    setAgentPage(false);
+                  }}
+                >
+                  <BackendAvatar backend={agent.backend} className="size-3.5 shrink-0" />
+                  <span className="flex-1 truncate font-semibold">{agent.name}</span>
+                  {agent.model && <span className="truncate font-mono text-[9px] text-muted">{agent.model}</span>}
+                  {active && <Check className="size-3.5 shrink-0" />}
+                </RouteItem>
+              );
+            })}
+          </div>
+        ))}
+        <PickerExitButton label={t('chat.picker.newAgent')} onClick={openNewAgent} />
+      </div>
+    );
+    const routeMenu = (
+      <div className="flex flex-col">
+        <button
+          type="button"
+          onClick={() => setAgentPage(true)}
+          className="flex items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-foreground/[0.03]"
+        >
+          <span className="text-[10px] font-bold uppercase tracking-[0.1em] text-muted">{t('chat.picker.agent')}</span>
+          <span className="ml-auto flex min-w-0 items-center gap-1.5">
+            {backend && <BackendAvatar backend={backend} className="size-3.5 shrink-0" />}
+            <span className="truncate text-[12px] font-semibold text-foreground">{agentRowLabel}</span>
+            <ChevronRight className="size-3.5 shrink-0 text-muted" />
+          </span>
+        </button>
+        <RouteColumn title={t('chat.picker.model')} className="max-h-[40vh] border-t border-border">
+          {modelListBody((model) => {
+            const label = modelOptionLabel(model, modelLabels);
+            const active = model === currentModel;
+            return (
+              <RouteItem key={model} active={active} disabled={loadingModels} onClick={() => pickModel(model)}>
+                <span className="flex min-w-0 flex-1 flex-col">
+                  <span className="whitespace-normal break-words font-semibold leading-snug">
+                    <ModelName label={label} />
+                  </span>
+                  {label !== model && (
+                    <span className="whitespace-normal break-words font-mono text-[10px] leading-snug text-muted">{model}</span>
+                  )}
+                </span>
+                {active && <Check className="size-3.5 shrink-0" />}
+              </RouteItem>
+            );
+          })}
+        </RouteColumn>
+        {showEffortColumn && (
+          <div className="border-t border-border p-3">
+            <div className="pb-2 text-[10px] font-bold uppercase tracking-[0.1em] text-muted">{t('chat.picker.effort')}</div>
+            {/* One tap per effort, wrapping when a model states many. Hints that
+                a column would print under each row are listed below instead. */}
+            <div
+              role="radiogroup"
+              aria-label={t('chat.picker.effort')}
+              className="flex flex-wrap gap-0.5 rounded-md border border-border bg-foreground/[0.03] p-0.5"
+            >
+              {refusedEffort && (
+                <EffortChip active refused label={effortLabel(refusedEffort)} onClick={() => setOpen(false)} />
+              )}
+              {effortOptions.map((opt) => (
+                <EffortChip
+                  key={opt}
+                  active={opt === currentEffort}
+                  disabled={loadingModels}
+                  label={effortLabel(opt)}
+                  hint={notOnLabel(opt)}
+                  onClick={() => applyPatch({ reasoning_effort: opt })}
+                />
+              ))}
+            </div>
+            {refusedEffort && (
+              <p className="pt-1.5 text-[10px] leading-snug text-gold-ink">{t('chat.picker.effortRefused')}</p>
+            )}
+            {effortOptions.map((opt) => {
+              const notOn = notOnLabel(opt);
+              return notOn ? (
+                <p key={opt} className="pt-1 text-[10px] leading-snug text-muted">
+                  {effortLabel(opt)} · {notOn}
+                </p>
+              ) : null;
+            })}
+          </div>
+        )}
+      </div>
+    );
+    return (
+      <ResponsiveMenu
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          if (!next) setAgentPage(false);
+        }}
+        trigger={triggerButton}
+        sheetTitle={t('chat.picker.sheetTitle')}
+        sheetCloseLabel={t('common.done')}
+        className="w-[320px] max-w-[92vw] overflow-hidden p-0"
+        align={align}
+      >
+        {agentPage ? agentList : routeMenu}
+      </ResponsiveMenu>
+    );
+  }
+
+  return (
+    <Popover open={open} onOpenChange={setOpen} modal={modal}>
+      <PopoverTrigger asChild>
+        {triggerButton}
       </PopoverTrigger>
       <PopoverContent align={align} className="z-50 max-h-[70vh] w-[680px] max-w-[92vw] overflow-y-auto p-0">
         {/* On phones the columns stack into one scrollable list; sm+ keeps the
@@ -405,16 +641,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             {defaultLabel && (
               <RouteItem
                 active={routeIsDefault}
-                onClick={() =>
-                  applyPatch({
-                    agent_name: null,
-                    agent_id: null,
-                    agent_backend: null,
-                    agent_variant: null,
-                    model: null,
-                    reasoning_effort: null,
-                  })
-                }
+                onClick={pickDefault}
               >
                 <Sparkles className="size-3.5 shrink-0 text-cyan-ink" />
                 <span className="flex-1 truncate font-semibold">{defaultLabel}</span>
@@ -430,18 +657,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                   <RouteItem
                     key={agent.id}
                     active={!routeIsDefault && agent.name === currentAgent}
-                    onClick={() =>
-                      applyPatch({
-                        agent_name: agent.name,
-                        agent_id: agent.id,
-                        agent_backend: agent.backend,
-                        agent_variant: agent.backend,
-                        // Explicit null (not undefined) so switching to an agent with
-                        // no default model/effort clears the previous override.
-                        model: agent.model ?? null,
-                        reasoning_effort: agent.reasoning_effort ?? null,
-                      })
-                    }
+                    onClick={() => pickAgent(agent)}
                   >
                     <span className="flex-1 truncate font-semibold">{agent.name}</span>
                     {agent.model && <span className="truncate font-mono text-[9px] text-muted">{agent.model}</span>}
@@ -449,16 +665,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                 ))}
               </div>
             ))}
-            <PickerExitButton
-              label={t('chat.picker.newAgent')}
-              onClick={() => {
-                setOpen(false);
-                onNavigateAway?.(); // close the create sheet before leaving, if any
-                // Creating an agent needs the Definitions controls, so ask for
-                // that tab explicitly instead of resuming the remembered one.
-                navigate('/agents?tab=definitions');
-              }}
-            />
+            <PickerExitButton label={t('chat.picker.newAgent')} onClick={openNewAgent} />
           </RouteColumn>
 
           {/* Column 2 — Model (lazy-loaded for the active backend). Its own
@@ -466,70 +673,21 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
               and Add model rows pin to the nearest scroll box, and a column that
               never scrolls would leave them at the far ends of a long list. */}
           <RouteColumn title={t('chat.picker.model')} className="max-h-[45vh]">
-            {showModelSearch && (
-              <div className="sticky top-0 z-10 -mx-1.5 mb-1 bg-panel px-1.5 pb-1 pt-0.5">
-                <div className="flex items-center gap-1.5 rounded-md border border-border bg-surface-2 px-2 focus-within:border-cyan/50">
-                  <Search className="size-3 shrink-0 text-muted" />
-                  <Input
-                    variant="bare"
-                    value={modelQuery}
-                    onChange={(e) => setModelQuery(e.target.value)}
-                    placeholder={t('chat.picker.searchModels')}
-                    aria-label={t('chat.picker.searchModels')}
-                    className="h-7 flex-1 text-[11px]"
-                  />
-                </div>
-              </div>
-            )}
-            {loadingModels && models.length === 0 ? (
-              <div className="flex items-center gap-1.5 px-2 py-3 text-[11px] text-muted">
-                <Loader2 className="size-3 animate-spin" />
-                {t('common.loading')}
-              </div>
-            ) : models.length === 0 ? (
-              <div className="px-2 py-3 text-[11px] text-muted">{t('chat.picker.noModels')}</div>
-            ) : filteredModels.length === 0 ? (
-              <div className="px-2 py-3 text-[11px] text-muted">{t('chat.picker.noModelMatch')}</div>
-            ) : (
-              filteredModels.map((model) => (
-                <RouteItem
-                  key={model}
-                  active={model === currentModel}
-                  disabled={loadingModels}
-                  onClick={() => {
-                    const patch: AgentRoutePatch = { model };
-                    // Switching to a model whose effort set no longer includes
-                    // the current effort: clear it in the same patch so the displayed
-                    // route matches what dispatches. Choosing the current model
-                    // again changes nothing, a refused saved effort included.
-                    if (model !== currentModel && !isEffortSupported(backend, model, currentEffort, backendReasoning)) {
-                      patch.reasoning_effort = null;
-                    }
-                    applyPatch(patch);
-                  }}
-                >
-                  {/* Full id always visible (wraps instead of truncating); the
-                      provider/vendor prefix on OpenCode ids is de-emphasized so the
-                      model name itself stands out. */}
-                  <span className="min-w-0 flex-1 whitespace-normal break-words text-left font-mono text-[11px] leading-snug">
-                    <ModelName label={modelOptionLabel(model, modelLabels)} />
-                  </span>
-                </RouteItem>
-              ))
-            )}
-            {/* Pinned like the search above it: a long model list must not scroll
-                the way to add one out of sight. */}
-            {openAddModel && (
-              <div className="sticky -bottom-1.5 z-10 -mx-1.5 -mb-1.5 border-t border-border bg-panel px-1.5 pb-1.5">
-                <PickerExitButton
-                  label={t('chat.picker.addModel')}
-                  onClick={() => {
-                    setOpen(false);
-                    openAddModel();
-                  }}
-                />
-              </div>
-            )}
+            {modelListBody((model) => (
+              <RouteItem
+                key={model}
+                active={model === currentModel}
+                disabled={loadingModels}
+                onClick={() => pickModel(model)}
+              >
+                {/* Full id always visible (wraps instead of truncating); the
+                    provider/vendor prefix on OpenCode ids is de-emphasized so the
+                    model name itself stands out. */}
+                <span className="min-w-0 flex-1 whitespace-normal break-words text-left font-mono text-[11px] leading-snug">
+                  <ModelName label={modelOptionLabel(model, modelLabels)} />
+                </span>
+              </RouteItem>
+            ))}
           </RouteColumn>
 
           {/* Column 3 — Effort (uses per-model catalog entries when available) */}
@@ -538,7 +696,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
               {refusedEffort && (
                 <RouteItem active onClick={() => setOpen(false)}>
                   <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="capitalize">{t(`chat.picker.effortOptions.${refusedEffort}`, { defaultValue: refusedEffort })}</span>
+                    <span className="capitalize">{effortLabel(refusedEffort)}</span>
                     <span className="text-[10px] leading-snug text-gold-ink">{t('chat.picker.effortRefused')}</span>
                   </span>
                 </RouteItem>
@@ -553,7 +711,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
                     onClick={() => applyPatch({ reasoning_effort: opt })}
                   >
                     <span className="flex min-w-0 flex-1 flex-col">
-                      <span className="capitalize">{t(`chat.picker.effortOptions.${opt}`, { defaultValue: opt })}</span>
+                      <span className="capitalize">{effortLabel(opt)}</span>
                       {notOn && <span className="text-[10px] leading-snug text-muted">{notOn}</span>}
                     </span>
                   </RouteItem>
@@ -566,6 +724,38 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
     </Popover>
   );
 };
+
+// One effort in the compact menu's radio group. A refused saved effort stays
+// checked and gold: routing still sends it, so it shows as itself.
+const EffortChip: React.FC<{
+  active: boolean;
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  hint?: string | null;
+  refused?: boolean;
+}> = ({ active, label, onClick, disabled, hint, refused }) => (
+  <button
+    type="button"
+    role="radio"
+    aria-checked={active}
+    disabled={disabled}
+    title={hint ?? undefined}
+    onClick={onClick}
+    className={clsx(
+      'min-w-[3rem] flex-1 whitespace-nowrap rounded-[4px] border px-2 py-1.5 text-[12px] capitalize transition-colors',
+      'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-cyan/60 disabled:cursor-not-allowed disabled:opacity-60',
+      refused
+        ? 'border-gold/40 bg-gold/10 font-bold text-gold-ink'
+        : active
+          ? 'border-cyan/40 bg-cyan-soft font-bold text-cyan-ink'
+          : 'border-transparent font-medium text-muted hover:text-foreground',
+      hint && !active && 'underline decoration-dotted underline-offset-4',
+    )}
+  >
+    {label}
+  </button>
+);
 
 const RouteColumn: React.FC<{ title: string; className?: string; children: React.ReactNode }> = ({ title, className, children }) => (
   <div className={clsx('flex min-w-0 flex-col overflow-y-auto p-1.5 sm:max-h-[320px]', className)}>

@@ -130,13 +130,16 @@ vi.mock('./Composer', () => ({
   Composer: ({
     onSend,
     onStop,
+    actions,
   }: {
     onSend: (text: string) => void | Promise<unknown>;
     onStop: () => void | Promise<unknown>;
+    actions?: React.ReactNode;
   }) => {
     mocks.onSend = onSend;
     mocks.onStop = onStop;
-    return null;
+    // The route picker lives in the composer's action row.
+    return <>{actions}</>;
   },
 }));
 
@@ -238,7 +241,7 @@ function messagePosts() {
   return mocks.apiFetch.mock.calls.filter(([url]) => String(url).includes('/messages'));
 }
 
-// What the header's picker is showing right now.
+// What the composer's route picker is showing right now.
 function shownRoute() {
   return screen.getByTestId('route').dataset;
 }
@@ -268,8 +271,8 @@ async function mountChat() {
     </MemoryRouter>,
   );
   await settle();
-  // The live header only renders once the row is loaded, and the picker is where
-  // a route pick comes from.
+  // The live header and composer only render once the row is loaded, and the
+  // composer's picker is where a route pick comes from.
   if (!mocks.onPatch || !mocks.onSend || !mocks.onStop) {
     throw new Error('ChatPage did not mount its header/composer');
   }
