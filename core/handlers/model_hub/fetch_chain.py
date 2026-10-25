@@ -183,7 +183,16 @@ class FetchChain:
             source_id=source.id, service_id=slot.model_id, tool="web_fetch",
             billable=False, uncertain=False, at=self.owner.now(),
         )
-        await await_owned_task(asyncio.create_task(self.owner.usage_writer.wait_recorded(write)))
+        settlement = asyncio.create_task(self.owner.usage_writer.wait_recorded(write))
+        try:
+            await asyncio.shield(settlement)
+        except asyncio.CancelledError as cancelled:
+            try:
+                await await_owned_task(settlement)
+            except BaseException:
+                # Drain owns the write; Stop still owns the public outcome.
+                pass
+            raise cancelled
 
     async def _local_attempt(self, slot: ExecutorSlot, source):
         sent = False

@@ -138,14 +138,15 @@ def _mcp_payload(body: Mapping[str, Any] | None) -> tuple[Mapping[str, Any] | No
             text = item.get("text")
             if not isinstance(text, str):
                 continue
-            try:
-                value = json.loads(text)
-            except (json.JSONDecodeError, RecursionError):
-                value = None
-            if isinstance(value, Mapping) and (is_error or isinstance(value.get("content"), str)):
-                return normalize(value)
-            # JSON documents/scalars are still page text. Only an error-shaped
-            # MCP result may reinterpret them as provider error evidence.
+            if is_error:
+                try:
+                    value = json.loads(text)
+                except (json.JSONDecodeError, RecursionError):
+                    value = None
+                if isinstance(value, Mapping):
+                    return normalize(value)
+            # Successful text blocks are documents regardless of their JSON
+            # keys; structured provider results belong in structuredContent.
             value = _exa_markdown_payload(text)
             if is_error:
                 value["text"] = text

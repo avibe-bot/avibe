@@ -283,6 +283,8 @@ async def test_fallback_regate_failure_is_terminal_without_forwarding(tmp_path, 
 
 
 @pytest.mark.parametrize("text", [
+    '{"content":"Article body","other":"Important details","title":"Document title","url":"https://other.example/"}',
+    '{"content":"","other":"Still a nonempty JSON document"}',
     '{"error":{"code":"CONTENT_FILTER_ERROR","message":"Free MCP rate limit exceeded"}}',
     '[{"error":"Internal error"}]',
     '123',
@@ -297,6 +299,7 @@ def test_successful_mcp_text_documents_are_not_reinterpreted_as_error_envelopes(
     )
     assert result.record["status"] == "completed"
     assert result.record["content"] == text
+    assert result.record["title"] is None and result.record["final_url"] is None
     assert not result.cooling and not result.target_failure
 
 
@@ -647,6 +650,59 @@ async def test_sent_local_cancellation_is_metered(tmp_path):
         await task
     row = next(row for row in service.usage_summary(days=7)["services"] if row["tool"] == "web_fetch")
     assert row["requests"] == 1 and row["billable_requests"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("local_succeeded", [False, True])
+async def test_cancellation_during_local_usage_drains_once_and_cannot_return_or_fallback(tmp_path, monkeypatch, local_succeeded):
+    """Stop can arrive after transport completes; draining is not permission to continue the chain."""
+    service, config = _service(
+        tmp_path, enabled={LOCAL: True, EXA: False, FREE_EXA: True, JINA: True}, order=(LOCAL, FREE_EXA, JINA),
+    )
+    waiting, release = asyncio.Event(), asyncio.Event()
+    original_wait = service.usage_writer.wait_recorded
+    remote_calls = []
+
+    async def wait_recorded(write):
+        waiting.set()
+        await release.wait()
+        await original_wait(write)
+
+    async def local(url, *, deadline, on_sent):
+        on_sent()
+        return ({"sent": True, "content": "Finished local page"} if local_succeeded else
+                {"sent": True, "error_code": "fetch_challenge", "terminal": False})
+
+    async def fetch(*args, **kwargs):
+        remote_calls.append(args)
+        raise AssertionError("Stop must not forward the URL to the next provider")
+
+    monkeypatch.setattr(service.usage_writer, "wait_recorded", wait_recorded)
+    service._local_fetch_engine.fetch = local
+    service.adapter.fetch = fetch
+    task = asyncio.create_task(service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": "https://example.com/"}}, turn=service.freeze_turn_hosted_tools(config),
+    ))
+    try:
+        await asyncio.wait_for(waiting.wait(), 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert remote_calls == []
+    rows = service.usage_summary(days=7)["services"]
+    assert len(rows) == 1 and rows[0]["source_id"] == LOCAL and rows[0]["requests"] == 1
+    assert rows[0]["billable_requests"] == rows[0]["uncertain_requests"] == 0
+    assert service.capability_evidence.records() == []
 
 
 @pytest.mark.asyncio
