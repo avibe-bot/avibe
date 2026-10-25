@@ -2445,6 +2445,24 @@ async def test_chat_finish_reason_end_maps_to_stop() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("finish_reason", "expected"),
+    [("model_context_window_exceeded", "length"), ("stop", "stop"), ("content_filter", "safety")],
+)
+async def test_chat_context_window_finish_reason_maps_only_the_named_reason(finish_reason: str, expected: str) -> None:
+    body = f'data: {{"choices":[{{"delta":{{"content":"ok"}},"finish_reason":"{finish_reason}"}}]}}\n\ndata: [DONE]\n\n'
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    assert isinstance(events[-1], Done)
+    assert events[-1].message.stop_reason == expected
+
+
+@pytest.mark.asyncio
 async def test_anthropic_abort_after_message_start_keeps_usage_in_partial() -> None:
     stream = _StalledStream(
         b'data: {"type":"message_start","message":{"usage":{"input_tokens":7,"output_tokens":9,'

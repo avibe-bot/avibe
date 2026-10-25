@@ -120,6 +120,9 @@ class ModelEndpoint:
     hosted_tools: Mapping[str, HostedToolRoute] = field(default_factory=dict)
     #: The models ``image_generate`` may call; None when the tool is off or no model is available.
     image_models: Optional[ImageModels] = None
+    #: The upstream protocol whose response origin and tokenizer anchor C-9 for a converted hop; ``None`` when the
+    #: wire protocol is also the served protocol.
+    origin_api: Optional[ProtocolName] = None
 
 
 @dataclass(frozen=True)
