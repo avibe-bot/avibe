@@ -194,6 +194,13 @@ initial refusal has zero executor attempts. A safe redirect, one same-origin
 zero-delay meta-refresh and one same-origin Markdown alternate all consume the
 same local deadline/body/hop budgets. Ignore malformed alternates; an alternate
 whose resolution is policy-blocked terminates like any other followed target.
+A genuine DNS failure or expiry of the full 5-second DNS allowance remains
+terminal. Distinguish that from the local attempt deadline being exhausted by
+queueing or earlier work: before any local send it is a `service_busy` skip;
+after a sent local hop it is non-terminal `fetch_timeout`. Neither case cools
+the host. The next candidate receives only the **original `requested_url`**,
+after running the mandatory gate on it again, never an unverified redirect URL
+(owner-approved clarification, 2026-10-25).
 
 **Remote boundary:** API destinations are fixed HTTPS catalog endpoints, no
 HTTP redirects or ambient proxies, with an 8 MiB response cap. Avibe validates
@@ -244,7 +251,7 @@ Override only the negotiated representation and bounded encoding policy:
 
 ```http
 Accept: text/markdown, text/html;q=0.95, application/xhtml+xml;q=0.9, text/plain;q=0.8, application/json;q=0.5, */*;q=0.1
-Accept-Encoding: gzip, br, zstd
+Accept-Encoding: gzip, deflate, br, zstd
 ```
 
 `Accept-Language` follows Avibe locale. Preserve matching `Sec-Fetch-*`,
@@ -253,9 +260,13 @@ metadata. Request Markdown first; accept a valid HTML response normally. A
 single cheap same-origin `<link rel="alternate" type="text/markdown">` is
 allowed, with original HTML retained if the alternate is merely unreadable.
 This is deliberate agent content negotiation, not a byte-identical browser request.
-The degraded HTTP/2 path sends `User-Agent: Avibe/<version>`, the negotiated
-`Accept`/`Accept-Encoding`/`Accept-Language` headers, and no `sec-ch-*` or
-`Sec-Fetch-*` fingerprint headers. It cannot impersonate Chrome TLS; its
+The degraded HTTP/2 path sends `User-Agent: Avibe/<version>`, negotiated
+`Accept`/`Accept-Language`, **`Accept-Encoding: gzip, deflate`**, and no `sec-ch-*`
+or `Sec-Fetch-*` fingerprint headers. It decodes only gzip/deflate (plus identity)
+with bounded standard-library decoders. Native br/zstd decoding stays inside
+libcurl; do not install Python `brotli` or `zstandard` for this feature, because
+importable codecs change unrelated Sentry/HTTP/Discord defaults. It cannot
+impersonate Chrome TLS; its
 `transport_degraded` marker explicitly states that exception and it must not
 silently choose another browser profile.
 
@@ -263,17 +274,22 @@ Repository packaging facts checked at #2924's merge:
 
 | Path / platform | Integration |
 | --- | --- |
-| `pyproject.toml`, `uv.lock` | Python >=3.10; add the pinned native dependency with CPython/platform markers, HTTP/2 and Brotli/Zstandard decoders, `trafilatura>=2.3.1` (Apache-2.0) and `pypdf>=6.21.2`; lock the reviewed stable versions. Keep core import lazy. |
+| `pyproject.toml`, `uv.lock` | Python >=3.10; add the pinned native dependency with CPython/platform markers, HTTP/2, `trafilatura>=2.3.1` (Apache-2.0) and `pypdf>=6.21.2`; lock the reviewed stable versions. Native libcurl provides br/zstd without Python codec packages; degraded HTTPX uses stdlib gzip/deflate. Keep core import lazy. |
 | macOS x86_64 / arm64 | 0.16.3 publishes `cp310-abi3` wheels tagged macOS 10.9+ / 11.0+. |
 | Linux x86_64 / aarch64, including WSL | `cp310-abi3` wheels for glibc 2.17+ and musl 1.2+. No system curl/browser/Homebrew prerequisite. |
 | Windows x86_64 / arm64 | Both wheel families exist; `install.ps1` currently chooses x64 CPython 3.12 on Windows Arm for other dependency constraints. Do not claim full native-Arm support. |
 | `install.sh`, `install.ps1`, `vibe/upgrade.py` | Normal wheel metadata resolves dependencies in the new install generation before launcher activation. Direct `uv tool install`/pip follows the same metadata; no fetch-time package install. |
-| `desktop/scripts/build-runtime-bundle.py`, `desktop/runtime-sources.json` | Existing macOS arm64/x64 and Windows x64 bundles use CPython 3.12.15, frozen hash-checked exports and binary-only dependency install. Add `lxml` to the bundle's binary-wheel allowlist/check alongside curl resources before bundle signing; no new Linux desktop bundle is implied. |
+| `desktop/scripts/build-runtime-bundle.py`, `desktop/runtime-sources.json` | Existing macOS arm64/x64 and Windows x64 bundles use CPython 3.12.15, frozen hash-checked exports and binary-only dependency install. The `required_binary_wheels` gate requires `curl-cffi` and `lxml` native wheels; these must never enter the separate sdist-exception allowlist. After relocation, verify native imports, the offline `chrome150` preset and built-in br/zstd features, CA resources and extraction before hashing/signing. No new Linux desktop bundle is implied. |
 
 Use dependency markers for the supported CPython/OS/architecture wheel families;
 other combinations keep base HTTP/2 without trying to compile libcurl. Within
 the supported matrix, missing wheels fail the release packaging gate rather than
-silently breaking installation. Native import/load errors at runtime select the
+silently breaking installation. The disposable entry points live under the lightweight
+`core/web_fetch_worker/` package (whose parent `core/__init__.py` is empty): the gate
+imports only policy/DNS code, while transport and extraction modules load only inside
+the fetch branch. Existing `core.handlers` and `core.handlers.model_hub` package
+initializers retain their established eager exports and import side effects; they are
+not changed to solve worker startup. Native import/load errors at runtime select the
 degraded transport **before sending** and record `transport_degraded: true` with
 a bounded reason; no target error triggers a second local request. Decode only
 advertised encodings on both paths. Verify clean install and upgrade on Python
@@ -287,12 +303,33 @@ One chain deadline: **180 s**; each local/service attempt: **30 s**, including
 DNS, lock wait, redirects and extraction; connect/TLS: **5 s** within that.
 Local: five redirect hops, 16 MiB HTML/text/JSON or 32 MiB PDF, separately counted
 on the wire and after decompression across all hops/alternates. Bound headers
-(64 KiB), URLs and cookies (64 entries, 4 KiB each); reject oversized announced
-lengths and abort streamed unknown lengths at the same cap. Bounded native body
-callbacks/transfer counters prevent an unbounded buffered response. Stop/cancel
-closes sockets; parsers run in a disposable process with hard wall-clock/resource
-bounds, terminated on expiry—not a timed-out thread continuing indefinitely.
-One local fetch in flight per host; its queue wait consumes the attempt deadline.
+(64 KiB per hop, including informational headers/trailers), URLs and cookies (64 entries, 4 KiB each); reject oversized announced
+lengths and abort streamed unknown lengths at the same cap. Native libcurl
+performs decoding; its bounded decoded-body callbacks enforce the decoded cap
+before retaining bytes, while `XFERINFOFUNCTION` tracks the separate encoded
+entity-byte cap even for compressed input that emits no body. HTTPX reads bounded
+raw chunks and uses bounded stdlib gzip/deflate decoding, rejecting br/zstd even
+if another installation happens to supply Python codecs. DNS, sockets,
+decoding and parsing run in one disposable process per fetch. All platforms have
+a 30-second hard wall timeout: Stop/expiry kills and reaps the process, closing
+its sockets rather than leaving a timed-out thread. The parent checks resident
+memory every 50 ms and kills at 768 MiB. Linux additionally applies kernel
+`RLIMIT_AS`/CPU limits; Windows uses a Job process-memory limit. macOS applies
+the kernel CPU limit plus parent RSS supervision only: brief overshoot between
+samples is possible, so this is **not a hard memory sandbox** (owner-approved
+implementation clarification, 2026-10-25). No extra daemon or VM is introduced.
+One local fetch is in flight per host; its queue wait consumes the attempt deadline.
+The parent admits host ownership and a fetch-worker slot atomically before
+spawning (at most eight fetch workers); initial waiters hold neither resource.
+The mandatory gate has its own bounded worker capacity, never a fetch slot. Its
+subprocess starts from the lightweight worker package above, so package/controller
+registration and HTTP/parser imports are outside the gate's five-second budget. An
+isolated subprocess fixture forbids those HTTP and extraction imports while exercising
+a public IP-literal gate. Cleanup survives repeated cancellation and reaps before
+releasing admission.
+The invocation owner publishes settled host health before releasing/notifying
+host waiters, so a queued redirect cannot bypass or clear a new Retry-After.
+Inherited stricter kernel hard limits are retained, never raised.
 
 No browser profile, cookie store, Authorization, client certificate, environment
 credential, custom proxy or user secret. A fresh in-memory jar accepts only valid
@@ -539,7 +576,8 @@ is a no-send `service_busy` skip, not a provider fault, cost or shared cooldown.
 
 | Outcome | Chain / settlement |
 | --- | --- |
-| Invalid argument / address refusal / unresolved policy gate | terminal, no third-party forwarding; preserve any earlier sent attempts |
+| Invalid argument / address refusal / DNS failure or full DNS allowance expiry | terminal, no third-party forwarding; preserve any earlier sent attempts |
+| Local attempt budget exhausted during admission/revalidation | no-send `service_busy` skip, or `fetch_timeout` after a local send; no cooldown; re-gate only the original requested URL before the next candidate |
 | Usable content | end with completed record |
 | Local 403/503 challenge, JS shell, empty page, unsupported type | next enabled candidate, no local retry/headless path |
 | Local 404/410, connect/TLS/timeout/server failure | next; bounded host cooldown where transient |

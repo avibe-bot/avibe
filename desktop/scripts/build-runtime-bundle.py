@@ -264,6 +264,44 @@ for name in ("claude", "claude.exe"):
     )
 
 
+def verify_fetch_dependencies(private_python: Path, work_dir: Path, required_binary_wheels: list[str]) -> None:
+    """Offline release gate on the relocated tree, before hashing/signing.
+
+    Missing native wheels are release errors on our desktop matrix, not silently
+    accepted degraded builds. Runtime import failure still has its safe fallback.
+    """
+    probe = r'''
+import json
+import sys
+from importlib.metadata import distribution
+from pathlib import Path
+import certifi
+import h2.connection
+import pypdf
+from core.web_fetch_worker.transport import native_available
+from core.web_fetch_worker.extract import extract_page
+
+for name in json.loads(sys.argv[1]):
+    dist = distribution(name)
+    wheel = dist.read_text("WHEEL") or ""
+    if "Root-Is-Purelib: false" not in wheel or not any(
+        str(path).endswith((".so", ".pyd", ".dylib", ".dll"))
+        for path in (dist.files or ())
+    ):
+        raise SystemExit(f"Required binary wheel missing: {name}")
+if not Path(certifi.where()).is_file() or "BEGIN CERTIFICATE" not in Path(certifi.where()).read_text():
+    raise SystemExit("curl/httpx CA resources missing")
+if native_available() != (True, None):
+    raise SystemExit("Pinned curl_cffi/chrome150 native profile/codecs unavailable")
+page = extract_page(b"<article><h1>Offline</h1><p>Readable bundled extraction fixture.</p></article>", "text/html", "https://example.com/")
+assert "bundled extraction" in page.content
+'''.strip()
+    subprocess.run(
+        [str(private_python), "-I", "-B", "-c", probe, json.dumps(required_binary_wheels)],
+        cwd=work_dir, check=True,
+    )
+
+
 def install_runtime_cli(target_config: dict[str, Any], payload: Path) -> None:
     """Replace build-machine console scripts with one relocatable CLI.
 
@@ -871,6 +909,9 @@ def main() -> int:
     sources = json.loads(SOURCES_PATH.read_text(encoding="utf-8"))
     if sources.get("schema_version") != 2:
         raise SystemExit("Unsupported runtime-sources.json schema")
+    required_binary_wheels = sources["required_binary_wheels"]
+    if set(required_binary_wheels) & set(sources.get("sdist_build_allowlist", [])):
+        raise SystemExit("Required binary wheels cannot be sdist exceptions")
     try:
         target_config = sources["targets"][args.target]
     except KeyError:
@@ -922,7 +963,8 @@ def main() -> int:
         prune_payload(payload)
         private_python = payload / target_config["python_entrypoint"]
         compile_payload(private_python, python_library(private_python, payload))
-        # Probe the tree as it ships, bytecode included.
+        # Probe the tree as it ships, bytecode included, with no network calls.
+        verify_fetch_dependencies(private_python, work_dir, required_binary_wheels)
         verify_payload(target_config, payload, work_dir, sources["npm_version"])
 
         output_parent = args.output.parent

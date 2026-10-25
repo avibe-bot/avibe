@@ -1,0 +1,12 @@
+{
+  "version": "0.16.3",
+  "impersonate": "chrome150",
+  "verified_at": "2026-10-25",
+  "sec_ch_ua": "\"Not;A=Brand\";v=\"8\", \"Chromium\";v=\"150\", \"Google Chrome\";v=\"150\"",
+  "platforms": {
+    "darwin": {"platform": "macOS", "ua_os": "Macintosh; Intel Mac OS X 10_15_7"},
+    "win32": {"platform": "Windows", "ua_os": "Windows NT 10.0; Win64; x64"},
+    "linux": {"platform": "Linux", "ua_os": "X11; Linux x86_64"}
+  },
+  "header_order": ["sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform", "Upgrade-Insecure-Requests", "User-Agent", "Accept", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-User", "Sec-Fetch-Dest", "Accept-Encoding", "Accept-Language"]
+}

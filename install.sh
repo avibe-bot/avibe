@@ -543,7 +543,7 @@ uv_tool_install() {
 
     # Suppress package-manager progress only, not activation/retention diagnostics.
     if env ${UV_INSTALL_PYTHON_MIRROR:+"UV_PYTHON_INSTALL_MIRROR=$UV_INSTALL_PYTHON_MIRROR"} \
-        UV_TOOL_DIR="$generation_tools" UV_TOOL_BIN_DIR="$generation_bin" uv tool install "$@" 2>/dev/null; then
+        UV_TOOL_DIR="$generation_tools" UV_TOOL_BIN_DIR="$generation_bin" uv tool install "$@" --quiet; then
         VIBE_CANDIDATE_BIN_PATH="$generation_bin/vibe"
         if [ ! -x "$VIBE_CANDIDATE_BIN_PATH" ]; then
             warn "uv completed but the candidate vibe launcher was not created"

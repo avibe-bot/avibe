@@ -215,6 +215,8 @@ def test_runtime_sources_schema_two_contains_only_node_and_npm_tools():
     assert sources["schema_version"] == 2
     assert sources["npm_version"] == "10.9.9"
     assert set(sources["sdist_build_allowlist"]) == {"claude-agent-sdk", "http-ece"}
+    assert set(sources["required_binary_wheels"]) == {"curl-cffi", "lxml"}
+    assert not set(sources["required_binary_wheels"]) & set(sources["sdist_build_allowlist"])
     assert "codex_version" not in sources
     assert "codex_license" not in sources
     for target, config in sources["targets"].items():
@@ -222,6 +224,18 @@ def test_runtime_sources_schema_two_contains_only_node_and_npm_tools():
         assert config["npm_source"] == expected_source
         assert config["npm_entrypoint"] == "tools/npm/bin/npm-cli.js"
         assert not any(key.startswith("codex") for key in config)
+
+
+def test_fetch_bundle_offline_native_and_resource_gate(tmp_path):
+    """WF-LOCAL-PACKAGE: the packaged interpreter must load native resources.
+
+    The old bundle gate never imported curl/lxml, so missing wheels could ship
+    unnoticed. This exercises the real offline probe, not a source-text check.
+    """
+    pytest.importorskip("curl_cffi")
+    builder.verify_fetch_dependencies(Path(sys.executable), tmp_path, ["curl-cffi", "lxml"])
+    with pytest.raises(subprocess.CalledProcessError):
+        builder.verify_fetch_dependencies(Path(sys.executable), tmp_path, ["pypdf"])
 
 
 def test_python_runtime_verification_checks_bundled_claude_paths(monkeypatch, tmp_path):

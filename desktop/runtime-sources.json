@@ -5,6 +5,10 @@
     "claude-agent-sdk",
     "http-ece"
   ],
+  "required_binary_wheels": [
+    "curl-cffi",
+    "lxml"
+  ],
   "show_runtime_manifest": {
     "url": "https://github.com/avibe-bot/avibe/releases/download/v3.1.3/show-runtime-manifest.json",
     "sha256": "c628743535cbf70014fe81c6fd502f26ce24b394f874cf347ed531f97f479cb1"
