@@ -18768,8 +18768,9 @@ def build_parser():
         description="Run one guarded read-only SQL query against the local SQLite state database.",
         epilog=(
             "Discover the schema before guessing names:\n"
-            "  vibe data query --sql \"select name from pragma_table_list where schema = 'main' order by name\" --limit 100\n"
-            "  vibe data query --sql \"PRAGMA table_info(run_definitions)\" --limit 100\n"
+            "  vibe data query --sql \"select group_concat(name, ', ') as tables from pragma_table_list where schema = 'main'\"\n"
+            "  vibe data query --sql \"select group_concat(name, ', ') as columns from pragma_table_info('run_definitions')\"\n"
+            "  vibe data query --sql \"PRAGMA table_info(run_definitions)\" --limit 100   # with types and keys\n"
             f"Only schema PRAGMAs run: {', '.join(sorted(SCHEMA_PRAGMAS))}.\n"
             "Tasks and Watches are rows of run_definitions (definition_type is scheduled or watch)."
         ),

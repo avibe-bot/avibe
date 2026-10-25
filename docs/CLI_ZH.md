@@ -196,8 +196,9 @@ SQLite 数据库的 `agent_events` 与 `skill_usage_daily` 中，没有统计面
 对本地 SQLite 状态数据库执行一条受保护的只读 SQL 语句。结果默认每页 20 行，最多 100 行。
 
 ```bash
-vibe data query --sql "select name from pragma_table_list where schema = 'main' order by name" --limit 100
-vibe data query --sql "PRAGMA table_info(run_definitions)" --limit 100
+vibe data query --sql "select group_concat(name, ', ') as tables from pragma_table_list where schema = 'main'"
+vibe data query --sql "select group_concat(name, ', ') as columns from pragma_table_info('run_definitions')"
+vibe data query --sql "PRAGMA table_info(run_definitions)" --limit 100   # 含类型与主键
 vibe data query --sql "select id, status, created_at from agent_runs order by created_at desc"
 vibe data query --sql-file query.sql --limit 50
 ```

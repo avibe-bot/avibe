@@ -278,8 +278,9 @@ Run one guarded read-only SQL statement against the local SQLite state database.
 Results return 20 rows per page by default and at most 100.
 
 ```bash
-vibe data query --sql "select name from pragma_table_list where schema = 'main' order by name" --limit 100
-vibe data query --sql "PRAGMA table_info(run_definitions)" --limit 100
+vibe data query --sql "select group_concat(name, ', ') as tables from pragma_table_list where schema = 'main'"
+vibe data query --sql "select group_concat(name, ', ') as columns from pragma_table_info('run_definitions')"
+vibe data query --sql "PRAGMA table_info(run_definitions)" --limit 100   # with types and keys
 vibe data query --sql "select id, status, created_at from agent_runs order by created_at desc"
 vibe data query --sql-file query.sql --limit 50
 ```
