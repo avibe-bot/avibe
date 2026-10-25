@@ -39,11 +39,13 @@ const presetLabel = (provider: string | undefined): string | null =>
 const SERVICE_RATE_LIMITED_REASON = ['reason', 'service_rate_limited'].join('.');
 
 const builtinKey = (sourceId: string | undefined): string | undefined => ({
-  src_exakeyless: 'keylessExa', src_localfetch: 'fetch.local', src_jinakeyless: 'fetch.jina',
+  src_exakeyless: 'chat.agentActivity.hosted.keylessExa',
+  src_localfetch: 'chat.agentActivity.hosted.fetch.local',
+  src_jinakeyless: 'chat.agentActivity.hosted.fetch.jina',
 })[sourceId ?? ''];
 const sourceLabel = (sourceId: string | undefined, label: string, t: TFunction): string => {
   const key = builtinKey(sourceId);
-  return key ? t(`chat.agentActivity.hosted.${key}`, { defaultValue: label }) as string : label;
+  return key ? t(key, { defaultValue: label }) as string : label;
 };
 const switchLabel = (card: HostedActivity, name: string, t: TFunction): string => {
   const ids = [...new Set((card.attempts ?? []).filter((a) => a.label === name).map((a) => a.source_id))];
