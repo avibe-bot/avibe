@@ -8338,15 +8338,15 @@ def cmd_vault_tags(args):
         return 1
 
 
-def cmd_vault_rm(args):
+def cmd_vault_remove(args):
     from storage import vault_service
     from storage.models import agent_sessions
 
-    help_command = "vibe vault rm --help"
+    help_command = "vibe vault remove --help"
     try:
         if "." in str(getattr(args, "name", "")):
             raise TaskCliError(
-                "vibe vault rm deletes whole secrets; remove single fields in the Vaults page.",
+                "vibe vault remove deletes whole secrets; remove single fields in the Vaults page.",
                 code="vault_field_delete_forbidden",
                 help_command=help_command,
             )
@@ -17457,7 +17457,7 @@ def build_parser():
     )
     vault_subparsers = vault_parser.add_subparsers(
         dest="vault_command",
-        metavar="{list,find,tags,edit,rm,run,fetch,access,sign,await,request,export,inject,key}",
+        metavar="{list,find,tags,edit,remove,run,fetch,access,sign,await,request,export,inject,key}",
     )
     vault_subparsers.required = True
 
@@ -17503,20 +17503,20 @@ def build_parser():
     _add_pagination_args(vault_tags_parser, help_command="vibe vault tags --help")
     _add_json_noop(vault_tags_parser)
 
-    vault_rm_parser = vault_subparsers.add_parser(
-        "rm",
+    vault_remove_parser = vault_subparsers.add_parser(
+        "remove",
         help="Request user approval to delete a secret",
         description="Ask the user to delete a secret by name. Returns a request ID; never deletes without approval.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        error_help_command="vibe vault rm --help",
+        error_help_command="vibe vault remove --help",
     )
-    vault_rm_parser.add_argument("name", help="Secret name to delete")
-    vault_rm_parser.add_argument("--reason", help="Why the secret should be deleted (shown to the user)")
-    vault_rm_parser.add_argument(
+    vault_remove_parser.add_argument("name", help="Secret name to delete")
+    vault_remove_parser.add_argument("--reason", help="Why the secret should be deleted (shown to the user)")
+    vault_remove_parser.add_argument(
         "--no-callback", action="store_true",
         help="Don't auto-resume this Session after the decision; check it with 'vibe vault await'",
     )
-    _add_json_noop(vault_rm_parser)
+    _add_json_noop(vault_remove_parser)
 
     vault_edit_parser = vault_subparsers.add_parser(
         "edit",
@@ -18726,7 +18726,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("vault", "inject"): "editor",
     ("vault", "export"): "editor",
     ("vault", "edit"): "editor",
-    ("vault", "rm"): "editor",
+    ("vault", "remove"): "editor",
     ("vault", "key", "export"): "owner",
     ("vault", "key", "import"): "owner",
     # Show: reading a page is Viewer work and writing to one is Editor work; the
@@ -18998,8 +18998,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             sys.exit(cmd_vault_tags(args))
         if args.vault_command == "edit":
             sys.exit(cmd_vault_edit(args))
-        if args.vault_command == "rm":
-            sys.exit(cmd_vault_rm(args))
+        if args.vault_command == "remove":
+            sys.exit(cmd_vault_remove(args))
         if args.vault_command == "run":
             sys.exit(cmd_vault_run(args))
         if args.vault_command == "fetch":

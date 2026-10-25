@@ -591,7 +591,7 @@ def test_rm_requests_deletion_for_protected_secret_and_leaves_it(capfd):
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PROTECTED_RM", protection="protected", sealed=_sealed("protected-rm"))
 
-    code = cli.cmd_vault_rm(_ns(name="PROTECTED_RM"))
+    code = cli.cmd_vault_remove(_ns(name="PROTECTED_RM"))
     captured = capfd.readouterr()
 
     assert code == 0
@@ -608,7 +608,7 @@ def test_rm_requests_deletion_for_protected_secret_and_leaves_it(capfd):
 def test_rm_requests_deletion_for_standard_secret_and_leaves_it(capfd):
     _create_standard_secret("STANDARD_RM")
 
-    code = cli.cmd_vault_rm(_ns(name="STANDARD_RM"))
+    code = cli.cmd_vault_remove(_ns(name="STANDARD_RM"))
     captured = capfd.readouterr()
 
     assert code == 0
@@ -623,7 +623,7 @@ def test_rm_requests_deletion_for_standard_secret_and_leaves_it(capfd):
 def test_rm_no_callback_points_to_await(capfd):
     _create_standard_secret("NO_CALLBACK_RM")
 
-    code = cli.cmd_vault_rm(_ns(name="NO_CALLBACK_RM", no_callback=True))
+    code = cli.cmd_vault_remove(_ns(name="NO_CALLBACK_RM", no_callback=True))
     payload = json.loads(capfd.readouterr().out)
 
     assert code == 0
@@ -636,9 +636,9 @@ def test_rm_reuses_pending_request_without_repeating_notification(capfd, monkeyp
     published: list[dict] = []
     monkeypatch.setattr(cli, "_publish_cli_vaults_updated", lambda **kwargs: published.append(kwargs))
 
-    assert cli.cmd_vault_rm(_ns(name="REUSED_RM")) == 0
+    assert cli.cmd_vault_remove(_ns(name="REUSED_RM")) == 0
     first = json.loads(capfd.readouterr().out)
-    assert cli.cmd_vault_rm(_ns(name="REUSED_RM")) == 0
+    assert cli.cmd_vault_remove(_ns(name="REUSED_RM")) == 0
     second = json.loads(capfd.readouterr().out)
 
     assert first["request_id"] == second["request_id"]
@@ -677,9 +677,9 @@ def test_rm_reused_callback_enabled_request_keeps_auto_resume_guidance(capfd, mo
         )
     monkeypatch.setattr(cli, "_publish_cli_vaults_updated", lambda **kwargs: None)
 
-    assert cli.cmd_vault_rm(_ns(name="CALLBACK_REUSE_RM", session_id="ses_rm_callback")) == 0
+    assert cli.cmd_vault_remove(_ns(name="CALLBACK_REUSE_RM", session_id="ses_rm_callback")) == 0
     first = json.loads(capfd.readouterr().out)
-    assert cli.cmd_vault_rm(_ns(name="CALLBACK_REUSE_RM", session_id="ses_rm_callback", no_callback=True)) == 0
+    assert cli.cmd_vault_remove(_ns(name="CALLBACK_REUSE_RM", session_id="ses_rm_callback", no_callback=True)) == 0
     second = json.loads(capfd.readouterr().out)
 
     assert first["request_id"] == second["request_id"]
@@ -730,13 +730,13 @@ def test_rm_passes_remote_authority_for_acl_and_request_snapshot(capfd, monkeypa
     monkeypatch.setattr(cli, "caller_resource_user_context", lambda _context: editor)
     monkeypatch.setattr(cli, "_publish_cli_vaults_updated", lambda **kwargs: None)
 
-    assert cli.cmd_vault_rm(_ns(name="PRIVATE_REMOTE_RM", session_id="ses_remote_rm")) == 1
+    assert cli.cmd_vault_remove(_ns(name="PRIVATE_REMOTE_RM", session_id="ses_remote_rm")) == 1
     assert "vault_access_forbidden" in capfd.readouterr().err
     with cli._open_vault_engine().connect() as conn:
         assert conn.execute(select(vault_requests.c.id).where(vault_requests.c.secret_name == "PRIVATE_REMOTE_RM")).first() is None
 
     monkeypatch.setattr(cli, "caller_resource_user_context", lambda _context: owner)
-    assert cli.cmd_vault_rm(_ns(name="ALLOWED_REMOTE_RM", session_id="ses_remote_rm")) == 0
+    assert cli.cmd_vault_remove(_ns(name="ALLOWED_REMOTE_RM", session_id="ses_remote_rm")) == 0
     capfd.readouterr()
     with cli._open_vault_engine().connect() as conn:
         row = conn.execute(select(vault_requests).where(vault_requests.c.secret_name == "ALLOWED_REMOTE_RM")).mappings().one()
@@ -744,22 +744,22 @@ def test_rm_passes_remote_authority_for_acl_and_request_snapshot(capfd, monkeypa
 
 
 def test_rm_rejects_single_field_delete(capfd):
-    code = cli.cmd_vault_rm(_ns(name="LOGIN.password"))
+    code = cli.cmd_vault_remove(_ns(name="LOGIN.password"))
     payload = json.loads(capfd.readouterr().err)
 
     assert code == 1
     assert payload["code"] == "vault_field_delete_forbidden"
-    assert payload["error"] == "vibe vault rm deletes whole secrets; remove single fields in the Vaults page."
+    assert payload["error"] == "vibe vault remove deletes whole secrets; remove single fields in the Vaults page."
 
 
 def test_rm_missing_secret_still_reports_not_found(capfd):
-    code = cli.cmd_vault_rm(_ns(name="MISSING_RM"))
+    code = cli.cmd_vault_remove(_ns(name="MISSING_RM"))
     captured = capfd.readouterr()
 
     assert code == 1
     payload = json.loads(captured.err)
     assert payload["code"] == "secret_not_found"
-    assert payload["help_command"] == "vibe vault rm --help"
+    assert payload["help_command"] == "vibe vault remove --help"
 
 
 def test_access_request_cli_uses_caller_session(tmp_path, capfd, monkeypatch):

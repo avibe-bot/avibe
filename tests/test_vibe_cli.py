@@ -141,6 +141,7 @@ def test_top_level_help_lists_only_public_commands(capsys):
         ["hook", "send", "--session-id", "ses1", "--message", "hi"],
         ["task", "ls"],
         ["watch", "rm", "watch1"],
+        ["vault", "rm", "OLD_TOKEN"],
         ["agent", "run", "--agent", "a", "--async", "--message", "hi"],
         ["agent", "run", "--session-id", "ses1", "--send-now", "--message", "hi"],
         ["agent", "run", "--agent", "a", "--create-session", "--message", "hi"],

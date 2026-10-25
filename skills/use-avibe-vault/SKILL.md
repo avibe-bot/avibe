@@ -73,9 +73,9 @@ Sign a 32-byte digest with a keypair secret. Standard keys may return the signat
 `vibe vault sign WALLET_KEY --digest 0000000000000000000000000000000000000000000000000000000000000001 --scheme ecdsa-secp256k1-recoverable --command "sign deployment transaction"`
 
 Ask the user to delete a Vault secret. Every agent-initiated delete needs one-click user approval, including standard, protected, static, and keypair secrets:
-`vibe vault rm OLD_TOKEN --reason "Rotated credential"`
+`vibe vault remove OLD_TOKEN --reason "Rotated credential"`
 This returns a pending request ID without deleting anything. With the normal callback, Avibe resumes this Session after the user decides; do not rerun `rm`. With `--no-callback`, or when the request has no resolvable Session, check explicitly with `vibe vault await <request_id>`; do not rerun `rm`. If a repeated `rm` reuses a pending request created by another Session, use the returned request ID with `vibe vault await <request_id>` rather than expecting a callback for the current Session.
 
-`vibe vault rm` always requests whole-secret deletion. It rejects `NAME.field`; remove a single field from the Vaults page instead.
+`vibe vault remove` always requests whole-secret deletion. It rejects `NAME.field`; remove a single field from the Vaults page instead.
 
 For more details, run `vibe vault --help`.
