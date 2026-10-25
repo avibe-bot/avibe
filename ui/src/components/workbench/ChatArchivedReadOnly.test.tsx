@@ -387,9 +387,8 @@ describe('read-only header withdraws the Show Page controls', () => {
   });
 
   it('renders an archived header with the title and badge but no Show Page button', () => {
-    // Only the read-only header is reachable here: the live one renders
-    // AgentRoutePicker, which calls useApi() and throws without an ApiProvider.
-    // The pure matrix above covers the live side.
+    // Only the read-only header is reachable here; the pure matrix above covers
+    // the live side.
     const markup = render(
       <ChatHeaderBar
         session={session({ status: 'archived' })}
@@ -397,7 +396,6 @@ describe('read-only header withdraws the Show Page controls', () => {
         defaultAgentName={null}
         onPatch={async () => undefined}
         onBack={() => undefined}
-        working={false}
         showPageMode={false}
         showPageBusy={false}
         onToggleShowPage={() => undefined}
@@ -440,7 +438,6 @@ describe('read-only header withdraws the Show Page controls', () => {
         defaultAgentName={null}
         onPatch={async () => undefined}
         onBack={() => undefined}
-        working={false}
         showPageMode={false}
         showPageBusy={false}
         onToggleShowPage={() => undefined}
@@ -580,7 +577,6 @@ describe('archived conflicts converge whatever the verb', () => {
         defaultAgentName={null}
         onPatch={async () => undefined}
         onBack={() => undefined}
-        working={false}
         showPageMode={false}
         showPageBusy={false}
         onToggleShowPage={() => undefined}
@@ -692,7 +688,6 @@ describe('a runtime-owned system session is read-only for its own reason', () =>
         defaultAgentName="claude"
         onPatch={async () => undefined}
         onBack={() => undefined}
-        working={false}
         showPageMode={false}
         showPageBusy={false}
         onToggleShowPage={() => undefined}

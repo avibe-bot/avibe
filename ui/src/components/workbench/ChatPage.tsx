@@ -2930,9 +2930,7 @@ export const ChatPage: React.FC = () => {
           agents={agents}
           defaultAgentName={defaultAgentName}
           onPatch={patch}
-          patchSaving={patchSaving}
           onBack={goBack}
-          working={working}
           showPageMode={showPageActive}
           showPageBusy={showPageBusy}
           onToggleShowPage={toggleShowPage}
@@ -3088,6 +3086,18 @@ export const ChatPage: React.FC = () => {
           onSearchAgents={searchAgents}
           onSearchSessions={searchSessions}
           readOnlyReason={readOnlyReason}
+          // Hidden with the rest of the chat surface in Show Page mode, which is
+          // also where the header used to withdraw the picker.
+          actions={writable ? (
+            <ChatRoutePicker
+              session={session}
+              agents={agents}
+              defaultAgentName={defaultAgentName}
+              onPatch={patch}
+              patchSaving={patchSaving}
+              working={working}
+            />
+          ) : null}
         />}
       </div>
       {/* Archive confirm — mounted at the chat surface (not inside the header's
@@ -3563,6 +3573,8 @@ export const QueueStrip: React.FC<{
 
 interface ComposeProps {
   composerRef: React.Ref<ComposerHandle>;
+  /** The live route picker for the composer's action row; null when read-only. */
+  actions: React.ReactNode;
   readLatestAgentReply: ComposerProps['readLatestAgentReply'];
   onSend: (text: string, attachments?: ComposerAttachment[], references?: MentionReference[]) => void;
   onStop: () => void;
@@ -3578,7 +3590,7 @@ interface ComposeProps {
   readOnlyReason: SessionReadOnlyReason | null;
 }
 
-const Compose: React.FC<ComposeProps> = ({ composerRef, readLatestAgentReply, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason }) => {
+const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgentReply, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason }) => {
   const { t } = useTranslation();
   const readOnly = readOnlyReason !== null;
   return (
@@ -3601,6 +3613,8 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, readLatestAgentReply, on
         onSearchAgents={onSearchAgents}
         onSearchSessions={onSearchSessions}
         readLatestAgentReply={readLatestAgentReply}
+        layout="stacked"
+        actions={actions}
         // Read-only archived session: reuse the composer's own disabled +
         // placeholder props rather than swapping in a notice bar. ``busy`` is NOT
         // reliably false here — archive commits before the controller turn is
@@ -3630,68 +3644,23 @@ interface TitleFieldHandle {
   startEditing: () => void;
 }
 
-interface ChatHeaderBarProps {
+interface ChatRoutePickerProps {
   session: WorkbenchSession;
   agents: VibeAgentBrief[];
   defaultAgentName: string | null;
-  // Applies to the local row first, then persists — never awaited by the header.
+  // Applies to the local row first, then persists — never awaited by the picker.
   onPatch: (changes: Partial<WorkbenchSession>) => void;
   /** A queued ``onPatch`` write is still in flight. */
   patchSaving?: boolean;
-  onBack: () => void;
   working: boolean;
-  // The EFFECTIVE mode (ChatPage passes ``showPageActive``): whether the page is
-  // actually framed right now, which a read-only session is never.
-  showPageMode: boolean;
-  showPageBusy: boolean;
-  onToggleShowPage: () => void;
-  onPrepareShowPageLaunch: (sessionId: string) => Promise<boolean>;
-  onShowPageVisibilityChange?: (payload: ShowPageLinkInfo) => void;
-  onShareOpenChange?: (open: boolean) => void;
-  annotation: AnnotationBridge;
-  onAnnotateOpenChange?: (open: boolean) => void;
-  // Read-only session: the title and the agent route render as static text — the
-  // server refuses both edits (409 archived / 403 reserved) — and the Show Page action
-  // cluster is withdrawn entirely (see showPageControlActions). The REASON, not a
-  // boolean, because it also picks the badge: a runtime-owned row is not "Archived".
-  readOnlyReason: SessionReadOnlyReason | null;
-  writable?: boolean;
-  showPageAccess?: ShowPageAccess | null;
-  canOpenShowPage?: boolean;
-  canManageShowPage?: boolean;
-  canManageInstance?: boolean;
-  canPinToDock?: boolean;
-  // Shared session actions, rendered behind a ⋯ beside the title on desktop and
-  // at the far right of the compact mobile bar. Empty (or absent) withdraws the
-  // trigger — which is what a read-only session yields, since every one of those
-  // writes is refused.
-  sessionActions?: SessionActionDescriptor[];
-  // Lets the menu's Rename row focus the title field that already lives here.
-  titleFieldRef?: React.Ref<TitleFieldHandle>;
 }
 
-// Exported for the read-only regression test (ChatArchivedReadOnly.test.tsx),
-// which renders the header alone rather than mounting the whole page. Note the
-// live (non-readOnly) header pulls in AgentRoutePicker → useApi, so only the
-// read-only rendering is reachable without an ApiProvider.
-export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, patchSaving, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, canPinToDock = false, sessionActions, titleFieldRef }) => {
+// The live session's agent/model/effort picker, hosted by the composer's action
+// row: the route is "who answers the next message", so it sits beside Send.
+// Read-only sessions never mount it — their header names the frozen route.
+const ChatRoutePicker: React.FC<ChatRoutePickerProps> = ({ session, agents, defaultAgentName, onPatch, patchSaving, working }) => {
   const { t } = useTranslation();
-  const windowChrome = useDesktopWindowChrome();
-  const readOnly = !writable;
-  const sessionReadOnly = readOnlyReason !== null;
-  const showPageActions = showPageControlActions(sessionReadOnly, showPageMode);
-  const showLaunchControl = showPageActions.visualize && (showPageMode || canOpenShowPage);
-  // Share lives ONLY while the page is framed (owner ruling 2026-08-17): the
-  // chat header never carries it, for anyone — access-only managers reach it
-  // from the framed view (or the app window title bar) instead.
-  const showShareControl = showPageActions.share && canManageShowPage;
-  // ``!readOnly`` twice over: useSessionActions already yields an empty list for a
-  // read-only session, and the withdrawal is re-stated here so this header cannot
-  // grow a ⋯ full of guaranteed-409 rows if a future caller passes actions anyway.
-  const headerSessionActions = sessionActions ?? [];
-  const hasSessionActions = writable && headerSessionActions.length > 0;
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
-  const sessionAgentLabel = sessionAgentDisplayName(session, agents);
   // Mirrors update_session's guard. A session with a NATIVE conversation can
   // still move to another backend: the server replaces the conversation and
   // hands the next turn a handoff (docs/plans/2026-10-22-session-backend-switch.md).
@@ -3729,9 +3698,92 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
       }
     : undefined;
   const inheritsDefault = !session.agent_name && !session.agent_backend;
+  return (
+    <AgentRoutePicker
+      presentation="compact"
+      value={session}
+      agents={agents}
+      onChange={onPatch}
+      saving={patchSaving}
+      disabled={pickerDisabled}
+      allowedBackends={pinnedBackend ? [pinnedBackend] : undefined}
+      defaultLabel={
+        canClearToDefault
+          ? defaultAgent
+            ? t('newSession.defaultAgentNamed', { name: defaultAgent.name })
+            : t('newSession.defaultAgent')
+          : undefined
+      }
+      defaultRoute={defaultRoute}
+      isDefaultRoute={inheritsDefault}
+      triggerClassName="max-w-[min(60vw,360px)]"
+      align="end"
+    />
+  );
+};
+
+interface ChatHeaderBarProps {
+  session: WorkbenchSession;
+  agents: VibeAgentBrief[];
+  defaultAgentName: string | null;
+  // Applies to the local row first, then persists — never awaited by the header.
+  onPatch: (changes: Partial<WorkbenchSession>) => void;
+  onBack: () => void;
+  // The EFFECTIVE mode (ChatPage passes ``showPageActive``): whether the page is
+  // actually framed right now, which a read-only session is never.
+  showPageMode: boolean;
+  showPageBusy: boolean;
+  onToggleShowPage: () => void;
+  onPrepareShowPageLaunch: (sessionId: string) => Promise<boolean>;
+  onShowPageVisibilityChange?: (payload: ShowPageLinkInfo) => void;
+  onShareOpenChange?: (open: boolean) => void;
+  annotation: AnnotationBridge;
+  onAnnotateOpenChange?: (open: boolean) => void;
+  // Read-only session: the title and the agent route render as static text — the
+  // server refuses both edits (409 archived / 403 reserved) — and the Show Page action
+  // cluster is withdrawn entirely (see showPageControlActions). The REASON, not a
+  // boolean, because it also picks the badge: a runtime-owned row is not "Archived".
+  readOnlyReason: SessionReadOnlyReason | null;
+  writable?: boolean;
+  showPageAccess?: ShowPageAccess | null;
+  canOpenShowPage?: boolean;
+  canManageShowPage?: boolean;
+  canManageInstance?: boolean;
+  canPinToDock?: boolean;
+  // Shared session actions, rendered behind a ⋯ beside the title on desktop and
+  // at the far right of the compact mobile bar. Empty (or absent) withdraws the
+  // trigger — which is what a read-only session yields, since every one of those
+  // writes is refused.
+  sessionActions?: SessionActionDescriptor[];
+  // Lets the menu's Rename row focus the title field that already lives here.
+  titleFieldRef?: React.Ref<TitleFieldHandle>;
+}
+
+// Exported for the read-only regression test (ChatArchivedReadOnly.test.tsx),
+// which renders the header alone rather than mounting the whole page.
+export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, canPinToDock = false, sessionActions, titleFieldRef }) => {
+  const { t } = useTranslation();
+  const windowChrome = useDesktopWindowChrome();
+  const readOnly = !writable;
+  const sessionReadOnly = readOnlyReason !== null;
+  const showPageActions = showPageControlActions(sessionReadOnly, showPageMode);
+  const showLaunchControl = showPageActions.visualize && (showPageMode || canOpenShowPage);
+  // Share lives ONLY while the page is framed (owner ruling 2026-08-17): the
+  // chat header never carries it, for anyone — access-only managers reach it
+  // from the framed view (or the app window title bar) instead.
+  const showShareControl = showPageActions.share && canManageShowPage;
+  // ``!readOnly`` twice over: useSessionActions already yields an empty list for a
+  // read-only session, and the withdrawal is re-stated here so this header cannot
+  // grow a ⋯ full of guaranteed-409 rows if a future caller passes actions anyway.
+  const headerSessionActions = sessionActions ?? [];
+  const hasSessionActions = writable && headerSessionActions.length > 0;
+  const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
+  const sessionAgentLabel = sessionAgentDisplayName(session, agents);
   const header = (
     // A single compact row (design.pen IDQ5n): back button + click-to-edit
-    // title on the left, the agent/model/effort picker on the right. The bar
+    // title and the session menu on the left, page controls on the right. The
+    // live agent/model/effort picker sits in the composer's action row (see
+    // ChatRoutePicker); a read-only session names its frozen route here. The bar
     // runs edge-to-edge (the page root cancels the shell padding) with a
     // hairline bottom border separating it from the scrolling transcript.
     // No project-id pill and no override banner — both were noise the user
@@ -3773,7 +3825,8 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
         )}
         {/* Hidden while the Show Page is open so the view gets the full width.
             On a read-only session the route is frozen, so show it as static text
-            plus a badge naming WHY instead of an interactive picker. A runtime-owned
+            plus a badge naming WHY; a live session picks its route in the
+            composer instead. A runtime-owned
             row has no backend at all (``agent_backend`` is empty by design), so the
             agent name — which would fall back to the default agent's, naming a route
             this session will never run — is omitted there rather than invented. */}
@@ -3790,26 +3843,6 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
               </Badge>
             )}
           </div>
-        )}
-        {!showPageMode && !readOnly && (
-          <AgentRoutePicker
-            value={session}
-            agents={agents}
-            onChange={onPatch}
-            saving={patchSaving}
-            disabled={pickerDisabled}
-            allowedBackends={pinnedBackend ? [pinnedBackend] : undefined}
-            defaultLabel={
-              canClearToDefault
-                ? defaultAgent
-                  ? t('newSession.defaultAgentNamed', { name: defaultAgent.name })
-                  : t('newSession.defaultAgent')
-                : undefined
-            }
-            defaultRoute={defaultRoute}
-            isDefaultRoute={inheritsDefault}
-            compactMobile
-          />
         )}
         {/* Chat hides the brand header, so mount the install nudge here too —
             IM-launched users often land straight in a chat. Renders only on iOS

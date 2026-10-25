@@ -402,10 +402,13 @@ export interface ComposerProps {
   sendDisabled?: boolean;
   /** Override the row container — e.g. a narrower max-width on the home canvas. */
   className?: string;
-  /** Caller-owned controls (Agent + workspace pickers on the home). Supplying
-   *  them moves the box to the two-row layout: input on top, then an action row
-   *  carrying these on the left and Send on the right. Callers that pass nothing
-   *  keep the single-row box the chat has always used. */
+  /** ``inline`` (default): one row — Attach and Voice, the input, Send.
+   *  ``stacked``: the input takes the whole first row; the action row below keeps
+   *  Attach on the left and ``actions``, Voice and Send on the right, so the text
+   *  gets the full width and no control moves as it grows. */
+  layout?: 'inline' | 'stacked';
+  /** Caller-owned controls for the stacked action row, placed just before Voice
+   *  (the chat's Agent/model picker). Ignored by the inline layout. */
   actions?: React.ReactNode;
   /** Upload + retained voice scope for an existing chat session. */
   sessionId?: string;
@@ -461,6 +464,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   disabled = false,
   sendDisabled = false,
   className,
+  layout = 'inline',
   actions,
   sessionId,
   stageMedia = false,
@@ -1597,136 +1601,143 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     }
   };
 
-  // The left-edge media cluster and the input itself, named so both box
-  // layouts below compose the same controls instead of duplicating them.
-  const mediaControls = (
+  // The media controls and the input itself, named so both box layouts below
+  // compose the same controls instead of duplicating them. Attach stays in the
+  // first idle slot and withdraws once a voice flow starts. The inline box keeps
+  // Attach and Voice together on the left; the stacked box splits them — Attach
+  // bottom-left, Voice beside Send.
+  const stacked = layout === 'stacked';
+  const attachControl = (
     <>
-        {/* Attach stays in the first idle slot and voice starts in the second.
-            Once a voice flow starts, the unrelated attachment control withdraws
-            and the active voice action takes the left edge. */}
-        {mediaEnabled && (
-          <div className="flex items-end">
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              disabled={disabled || voiceDraftReadOnly}
-              className="hidden"
-              onChange={(e) => {
-                if (e.target.files?.length) void uploadFiles(Array.from(e.target.files));
-                e.target.value = '';
-              }}
-            />
-            {!voiceFlowActive && (
-              /* Attach uses a generic plus rather than a paperclip so it reads
-                 as the general "add anything" entry point. */
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={disabled}
-                aria-label={t('chat.compose.attach')}
-                className={actions ? 'size-7 shrink-0' : 'h-9 w-7 shrink-0'}
-              >
-                <Plus className="size-4" />
-              </Button>
-            )}
-            {voiceControlMode === 'record' && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onPointerDown={() => {
-                  void prewarmVoiceCapture().catch(() => undefined);
-                  pendingVoiceInsertionRef.current = captureVoiceInsertion();
-                }}
-                onPointerCancel={() => {
-                  pendingVoiceInsertionRef.current = null;
-                }}
-                onContextMenu={() => {
-                  pendingVoiceInsertionRef.current = null;
-                }}
-                onClick={(event) => {
-                  focusNextVoiceControlRef.current = true;
-                  toggleRecording(event.detail > 0);
-                }}
-                disabled={isVoiceControlDisabled(
-                  disabled,
-                  recording,
-                  voiceProcessing,
-                  Boolean(voiceRetainedSession),
-                )}
-                aria-label={t('chat.compose.voice')}
-                title={voiceShortcutAvailable ? voiceShortcutHint : t('chat.compose.voice')}
-                className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
-              >
-                <Mic className="size-4" />
-              </Button>
-            )}
-            {voiceControlMode === 'finish' && (
-              <Button
-                ref={finishVoiceControlRef}
-                type="button"
-                variant="default"
-                size="icon"
-                onClick={stopRecording}
-                aria-label={t('chat.compose.stopRecording')}
-                title={voiceShortcutAvailable ? voiceShortcutHint : t('chat.compose.stopRecording')}
-                className="h-9 w-12 shrink-0"
-              >
-                <Check className="size-[18px]" strokeWidth={2.5} />
-              </Button>
-            )}
-            {voiceControlMode === 'loading' && (
-              <Button
-                type="button"
-                variant="secondary"
-                size="icon"
-                disabled
-                aria-label={t('chat.compose.voiceProcessing')}
-                className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
-              >
-                <Loader2 className="size-4 animate-spin" />
-              </Button>
-            )}
-            {voiceControlMode === 'retry' && voiceRetainedSession && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => void retryVoiceSession(voiceRetainedSession)}
-                aria-label={t('chat.compose.voiceRetry')}
-                title={t('chat.compose.voiceRetry')}
-                className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
-              >
-                <RotateCcw className="size-4" />
-              </Button>
-            )}
-            {voiceControlMode === 'copy' && voiceRetainedSession && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => void copyReadyVoiceTranscript(voiceRetainedSession)}
-                aria-label={t('chat.compose.voiceCopyTranscript')}
-                title={t('chat.compose.voiceCopyTranscript')}
-                className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
-              >
-                <Copy className="size-4" />
-              </Button>
-            )}
-            {recording && (
-              <span
-                className="flex h-9 w-10 items-center justify-center text-xs tabular-nums text-muted"
-                aria-live="off"
-              >
-                {formatRecordingDuration(recordingSeconds)}
-              </span>
-            )}
-          </div>
-        )}
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        disabled={disabled || voiceDraftReadOnly}
+        className="hidden"
+        onChange={(e) => {
+          if (e.target.files?.length) void uploadFiles(Array.from(e.target.files));
+          e.target.value = '';
+        }}
+      />
+      {!voiceFlowActive && (
+        /* Attach uses a generic plus rather than a paperclip so it reads
+           as the general "add anything" entry point. */
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={disabled}
+          aria-label={t('chat.compose.attach')}
+          className={stacked ? 'size-9 shrink-0' : 'h-9 w-7 shrink-0'}
+        >
+          <Plus className="size-4" />
+        </Button>
+      )}
     </>
+  );
+  const voiceControl = (
+    <>
+      {voiceControlMode === 'record' && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onPointerDown={() => {
+            void prewarmVoiceCapture().catch(() => undefined);
+            pendingVoiceInsertionRef.current = captureVoiceInsertion();
+          }}
+          onPointerCancel={() => {
+            pendingVoiceInsertionRef.current = null;
+          }}
+          onContextMenu={() => {
+            pendingVoiceInsertionRef.current = null;
+          }}
+          onClick={(event) => {
+            focusNextVoiceControlRef.current = true;
+            toggleRecording(event.detail > 0);
+          }}
+          disabled={isVoiceControlDisabled(
+            disabled,
+            recording,
+            voiceProcessing,
+            Boolean(voiceRetainedSession),
+          )}
+          aria-label={t('chat.compose.voice')}
+          title={voiceShortcutAvailable ? voiceShortcutHint : t('chat.compose.voice')}
+          className="size-9 shrink-0"
+        >
+          <Mic className="size-4" />
+        </Button>
+      )}
+      {voiceControlMode === 'finish' && (
+        <Button
+          ref={finishVoiceControlRef}
+          type="button"
+          variant="default"
+          size="icon"
+          onClick={stopRecording}
+          aria-label={t('chat.compose.stopRecording')}
+          title={voiceShortcutAvailable ? voiceShortcutHint : t('chat.compose.stopRecording')}
+          className="h-9 w-12 shrink-0"
+        >
+          <Check className="size-[18px]" strokeWidth={2.5} />
+        </Button>
+      )}
+      {voiceControlMode === 'loading' && (
+        <Button
+          type="button"
+          variant="secondary"
+          size="icon"
+          disabled
+          aria-label={t('chat.compose.voiceProcessing')}
+          className="size-9 shrink-0"
+        >
+          <Loader2 className="size-4 animate-spin" />
+        </Button>
+      )}
+      {voiceControlMode === 'retry' && voiceRetainedSession && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onClick={() => void retryVoiceSession(voiceRetainedSession)}
+          aria-label={t('chat.compose.voiceRetry')}
+          title={t('chat.compose.voiceRetry')}
+          className="size-9 shrink-0"
+        >
+          <RotateCcw className="size-4" />
+        </Button>
+      )}
+      {voiceControlMode === 'copy' && voiceRetainedSession && (
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon"
+          onClick={() => void copyReadyVoiceTranscript(voiceRetainedSession)}
+          aria-label={t('chat.compose.voiceCopyTranscript')}
+          title={t('chat.compose.voiceCopyTranscript')}
+          className="size-9 shrink-0"
+        >
+          <Copy className="size-4" />
+        </Button>
+      )}
+      {recording && (
+        <span
+          className="flex h-9 w-10 items-center justify-center text-xs tabular-nums text-muted"
+          aria-live="off"
+        >
+          {formatRecordingDuration(recordingSeconds)}
+        </span>
+      )}
+    </>
+  );
+  const mediaControls = mediaEnabled && (
+    <div className="flex items-end">
+      {attachControl}
+      {voiceControl}
+    </div>
   );
 
   const inputControl = (
@@ -1830,7 +1841,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ? 'chat.compose.cancelRecording'
           : 'chat.compose.voiceDiscard',
       )}
-      className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
+      className="size-9 shrink-0"
     >
       <Trash2 className="size-4" />
     </Button>
@@ -1853,7 +1864,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
                 onClick={submit}
                 aria-label={t('chat.compose.queueSend')}
                 title={t('chat.compose.queueSend')}
-                className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
+                className="size-9 shrink-0"
               >
                 <span className="relative inline-flex">
                   <Send className="size-4" />
@@ -1871,7 +1882,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
               onClick={onStop}
               disabled={!stopArmed}
               aria-label={t('chat.compose.stop')}
-              className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
+              className="size-9 shrink-0"
             >
               <Square className="size-4" />
             </Button>
@@ -1884,7 +1895,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
             onClick={submit}
             disabled={!canSubmit}
             aria-label={t('chat.compose.send')}
-            className={actions ? 'size-7 shrink-0' : 'size-9 shrink-0'}
+            className="size-9 shrink-0"
           >
             <Send className="size-4" />
           </Button>
@@ -1940,18 +1951,20 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
           ? `${t('chat.compose.voicePreview')}: ${realtimeAnnouncement}`
           : ''}
       </div>
-      {actions ? (
-        /* Two-row box (design TfqkD): the input on top, then an action row
-           carrying the caller's pickers on the left and Send on the right. */
-        <div className="flex w-full flex-col gap-3 rounded-2xl border border-border-strong bg-surface-2 p-3 shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]">
-          <div className="flex w-full items-end gap-1.5">{inputControl}</div>
-          <div className="flex w-full items-end justify-between gap-2">
-            <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+      {stacked ? (
+        /* Two-row box: the input across the top, then the action row — Attach
+           (or, mid-voice, Discard) on the left; the caller's actions, Voice and
+           Send on the right. */
+        <div className="flex w-full flex-col gap-1 rounded-2xl border border-border-strong bg-surface-2 p-2 shadow-[0_-4px_24px_-12px_rgba(0,0,0,0.5)]">
+          <div className="flex w-full min-w-0 px-1.5">{inputControl}</div>
+          <div className="flex w-full items-center justify-between gap-2">
+            <div className="flex shrink-0 items-center gap-1">
               {voiceDiscardControl}
-              {actions}
+              {mediaEnabled && <div className="flex items-end">{attachControl}</div>}
             </div>
-            <div className="flex shrink-0 items-center gap-1.5">
-              {mediaControls}
+            <div className="flex min-w-0 items-center justify-end gap-1">
+              {actions}
+              {mediaEnabled && <div className="flex items-end">{voiceControl}</div>}
               {sendControls}
             </div>
           </div>

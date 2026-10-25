@@ -199,6 +199,7 @@
     "edit": "Edit",
     "configure": "Configure",
     "cancel": "Cancel",
+    "done": "Done",
     "confirm": "Confirm",
     "clear": "Clear",
     "retry": "Retry",
@@ -5024,6 +5025,7 @@
     },
     "picker": {
       "agent": "Agent",
+      "sheetTitle": "Agent & model",
       "model": "Model",
       "effort": "Effort",
       "effortNotOn": "Not on {{sources}}",
