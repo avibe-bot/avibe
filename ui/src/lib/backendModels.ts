@@ -132,6 +132,22 @@ export async function fetchBackendModels(
   return agent === null ? { ...native, hubUnread: true } : native;
 }
 
+/**
+ * Just the display labels of a backend's models, for a closed picker that names
+ * the current model. Reads only what is already on disk: Model Hub's persisted
+ * catalog, or Claude/Codex's cached catalog snapshot. OpenCode's live list is
+ * never read here — it may start OpenCode, and it carries no labels anyway.
+ */
+export async function fetchBackendModelLabels(
+  api: ApiContextType,
+  backend: string,
+): Promise<Record<string, string>> {
+  const hub = hubCatalogModels(await api.readModelHubAgentCatalogForModelPicker(backend), backend);
+  if (hub) return hub.modelLabels ?? {};
+  if (backend !== 'claude' && backend !== 'codex') return {};
+  return (await nativeBackendModels(api, backend)).modelLabels ?? {};
+}
+
 async function nativeBackendModels(api: ApiContextType, backend: string): Promise<BackendModels> {
   if (!getBackendUiMeta(backend).capabilities.supports_cli) return { models: [] };
   if (backend === 'claude') {
