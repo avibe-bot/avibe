@@ -363,7 +363,7 @@ def test_permissions_026_a_stale_snapshot_cannot_reach_a_command_that_forwards_i
 
     try:
         before = counts()
-        argv = ["agent", "run", "--create-session", "--message", "hi", "--async", "--no-callback"]
+        argv = ["agent", "run", "--message", "hi", "--no-callback"]
         assert invoke(argv, caller=caller) == 1
         payload = _refusal(capsys)
         assert payload["code"] == "instance_access_forbidden"

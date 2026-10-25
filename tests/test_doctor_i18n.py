@@ -245,7 +245,6 @@ def test_package_integrity_doctor_items_are_localized(
     site_packages = tmp_path / "site-packages"
     (site_packages / "avibe_os-1.0.dist-info").mkdir(parents=True)
     active_vibe = (Path.home() / ".local" / "bin" / "vibe").resolve()
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     monkeypatch.setattr(cli, "_path_entries_for_executable", lambda _name: [active_vibe])
     monkeypatch.setattr(cli, "_uv_tool_site_packages_for_vibe", lambda _path: [site_packages])
     monkeypatch.setattr(cli, "_is_uv_tool_editable", lambda _path: False)
@@ -254,7 +253,7 @@ def test_package_integrity_doctor_items_are_localized(
 
     item = next(
         item
-        for item in cli._local_cli_installation_items()
+        for item in cli._local_cli_installation_items(language=language)
         if item.get("code") == "installation.package_integrity"
     )
 
@@ -291,12 +290,11 @@ def test_restart_failure_summary_localizes_labels_and_preserves_raw_payload(
     original = dict(payload)
     status_path = tmp_path / "restart.json"
     status_path.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     monkeypatch.setattr(cli.runtime, "get_restart_status_path", lambda: status_path)
     monkeypatch.setattr(cli.runtime, "read_json", lambda _path: payload)
     monkeypatch.setattr(cli.runtime, "verified_service_running", lambda: False)
 
-    item = cli._restart_state_items()[0]
+    item = cli._restart_state_items(language=language)[0]
 
     assert item["code"] == "runtime.restart_failed"
     assert state_marker in item["message"]
@@ -313,13 +311,12 @@ def test_service_pid_sentinel_is_localized_only_at_rendering_boundary(
     language: str,
     missing_marker: str,
 ) -> None:
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     monkeypatch.setattr(cli.paths, "get_runtime_pid_path", lambda: tmp_path / "absent.pid")
     monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda **_kwargs: 4242)
     monkeypatch.setattr(cli.runtime, "service_lock_holder_pid", lambda: 4242)
     monkeypatch.setattr(cli.runtime, "read_status", lambda: {"service_pid": None})
 
-    items = cli._service_lifecycle_items(detect_extra_processes=False)
+    items = cli._service_lifecycle_items(language=language, detect_extra_processes=False)
 
     mismatch_codes = {
         "runtime.service_pidfile_mismatch",
@@ -384,9 +381,8 @@ def test_doctor_dependency_status_stays_machine_data_and_out_of_sentence(
         },
     )
     monkeypatch.setattr(cli.api, "askill_auto_install_supported", lambda: True)
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
 
-    items = cli._managed_dependencies_doctor_items(deep=False)
+    items = cli._managed_dependencies_doctor_items(language="zh", deep=False)
 
     expected = {
         "dependencies.askill.not_ready": "missing",
@@ -413,9 +409,7 @@ def test_doctor_ready_and_unsupported_dependencies_keep_stable_codes(
             ]
         },
     )
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "en")
-
-    items = cli._managed_dependencies_doctor_items(deep=False)
+    items = cli._managed_dependencies_doctor_items(language="en", deep=False)
 
     ready = next(item for item in items if item.get("code") == "dependencies.askill.ready")
     unsupported = next(item for item in items if item.get("code") == "dependencies.avault.platform_unsupported")
@@ -458,9 +452,8 @@ def test_show_runtime_download_labels_are_localized(
         archive_cache_status=lambda: None,
     )
     monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **kwargs: manager)
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
 
-    items = cli._show_runtime_doctor_items(deep=True)
+    items = cli._show_runtime_doctor_items(language="zh", deep=True)
     message = "\n".join(item["message"] for item in items)
     assert label_marker in message
     assert english_label not in message
@@ -470,8 +463,7 @@ def test_doctor_uses_real_chinese_path_and_stable_code(monkeypatch: pytest.Monke
     monkeypatch.setenv(cli.paths.AVIBE_HOME_ENV, "/tmp/avibe-doctor-home")
     rendered: dict[str, list[dict]] = {}
     for language in ("en", "zh"):
-        monkeypatch.setattr(cli, "_configured_cli_language", lambda language=language: language)
-        rendered[language] = cli._home_migration_items()
+        rendered[language] = cli._home_migration_items(language=language)
 
     items = rendered["zh"]
 
@@ -481,11 +473,9 @@ def test_doctor_uses_real_chinese_path_and_stable_code(monkeypatch: pytest.Monke
     assert [item["code"] for item in rendered["en"]] == [item["code"] for item in rendered["zh"]]
 
 
-def test_doctor_localizes_nested_repair_details_and_missing_payload_values(
+def test_doctor_projects_nested_repair_details_and_missing_payload_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
-
     repaired = cli._repair_managed_dependency(
         "avault",
         lambda force: {
@@ -497,7 +487,7 @@ def test_doctor_localizes_nested_repair_details_and_missing_payload_values(
     )
     assert "English installer completed" not in repaired["message"]
     assert "0.1.6" in repaired["message"]
-    assert "修复完成" in repaired["message"]
+    assert "avault repair completed" in repaired["message"]
 
     failures = [
         (
@@ -508,7 +498,7 @@ def test_doctor_localizes_nested_repair_details_and_missing_payload_values(
                 "platform": "Windows ARM64",
                 "message": "no askill build for Windows ARM64",
             },
-            "没有为当前平台发布",
+            "No askill build is published for this platform.",
         ),
         (
             "avault",
@@ -519,7 +509,7 @@ def test_doctor_localizes_nested_repair_details_and_missing_payload_values(
                 "actual_sha256": "actual",
                 "message": "checksum verification failed",
             },
-            "校验和验证失败",
+            "checksum verification failed (expected expected, got actual)",
         ),
     ]
     for target, result, marker in failures:
@@ -536,7 +526,7 @@ def test_doctor_localizes_nested_repair_details_and_missing_payload_values(
             "message": "raw download copy",
         },
     )
-    assert "DNS 查询失败" in download["message"]
+    assert "DNS lookup failed after 3 attempts" in download["message"]
     assert "dns" not in download["message"]
     unknown_download = cli._repair_managed_dependency(
         "tmux",
@@ -555,6 +545,7 @@ def test_doctor_localizes_nested_repair_details_and_missing_payload_values(
         label="avault",
         code_prefix="dependencies.avault.download",
         repair_target=None,
+        language="zh",
     )
     assert "the selected dependency URL" not in items[0]["message"]
     assert "所选依赖 URL" in items[0]["message"]
@@ -574,7 +565,7 @@ def test_doctor_localizes_nested_repair_details_and_missing_payload_values(
         archive_cache_status=lambda: None,
     )
     monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **kwargs: manager)
-    runtime_items = cli._show_runtime_doctor_items()
+    runtime_items = cli._show_runtime_doctor_items(language="zh")
     messages = "\n".join(item["message"] for item in runtime_items)
     assert "this platform" not in messages
     assert "当前平台" in messages
@@ -603,15 +594,15 @@ def test_doctor_tunnel_quality_projects_every_finite_value(
     monkeypatch.setattr(cli.paths, "get_config_path", lambda: config_path)
     monkeypatch.setattr(cli.paths, "get_runtime_doctor_path", lambda: tmp_path / "doctor.json")
     monkeypatch.setattr(cli.V2Config, "load", lambda *_args, **_kwargs: config)
-    monkeypatch.setattr(cli, "_home_migration_items", lambda: [])
+    monkeypatch.setattr(cli, "_home_migration_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_service_lifecycle_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_service_install_family_items", lambda **_kwargs: [])
-    monkeypatch.setattr(cli, "_restart_state_items", lambda: [])
-    monkeypatch.setattr(cli, "_runtime_architecture_items", lambda: [])
-    monkeypatch.setattr(cli, "_show_git_checkpoint_items", lambda: [])
+    monkeypatch.setattr(cli, "_restart_state_items", lambda **_kwargs: [])
+    monkeypatch.setattr(cli, "_runtime_architecture_items", lambda **_kwargs: [])
+    monkeypatch.setattr(cli, "_show_git_checkpoint_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_managed_dependencies_doctor_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_show_runtime_doctor_items", lambda **_kwargs: [])
-    monkeypatch.setattr(cli, "_local_cli_installation_items", lambda: [])
+    monkeypatch.setattr(cli, "_local_cli_installation_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli.api, "detect_cli", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
         cli.paths,
@@ -659,9 +650,7 @@ def test_doctor_tunnel_quality_projects_every_finite_value(
         "vibe.remote_access.tunnel_quality.request_path_has_usable_latency",
         lambda request_path: bool(request_path and request_path.get("latency_ms")),
     )
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
-
-    result = cli._doctor()
+    result = cli._doctor(language="zh")
     remote_group = next(group for group in result["groups"] if group["name"] == t("doctor.group.remoteAccess", "zh"))
     shape_marker = {
         "tunnelQualityRequestsUnavailable": "远程请求不可用",

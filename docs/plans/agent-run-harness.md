@@ -108,7 +108,10 @@ Execution controls:
 
 ### Deprecating `vibe hook send`
 
-Compatibility window:
+The compatibility window has closed: `vibe hook send` is removed, and stored
+`hook_send` run records stay readable.
+
+Compatibility window (historical):
 
 ```bash
 vibe hook send ... -> vibe agent run ...

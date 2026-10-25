@@ -60,7 +60,7 @@ def test_list_excludes_archived_and_orders_by_activity(monkeypatch, tmp_path, ca
     assert payload["kind"] == "agent_sessions"
     ids = [s["id"] for s in payload["sessions"]]
     assert ids == ["sesbbb", "sesaaa"]  # newest activity first; archived excluded
-    assert "data query" in payload["message"]
+    assert "message" not in payload
 
 
 def test_list_row_has_only_lean_fields(monkeypatch, tmp_path, capsys):
@@ -142,7 +142,7 @@ def test_list_invalid_type_errors(monkeypatch, tmp_path, capsys):
 def test_get_returns_detail_without_status_agentid_anchor(monkeypatch, tmp_path, capsys):
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesaaa", platform="avibe", native="proj_a")
-    code, payload = _run(cli.cmd_session_get, ["session", "get", "sesaaa"], capsys)
+    code, payload = _run(cli.cmd_session_get, ["session", "get", "--session-id", "sesaaa"], capsys)
     assert code == 0
     s = payload["session"]
     assert s["id"] == "sesaaa"
@@ -150,7 +150,7 @@ def test_get_returns_detail_without_status_agentid_anchor(monkeypatch, tmp_path,
     assert s["agent_backend"] == "claude"  # backend kept in detail
     for omitted in ("status", "agent_id", "session_anchor"):
         assert omitted not in s
-    assert "vibe runs list --session-id sesaaa" in payload["message"]
+    assert "message" not in payload
 
 
 def test_get_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
@@ -162,36 +162,42 @@ def test_get_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
 
     assert code == 0
     assert payload["session"]["id"] == "sesaaa"
-    assert payload["session_default_notice"] == {
-        "code": "session_defaulted_to_caller",
-        "message": "Session defaulted to this Agent Session.",
-        "session_id": "sesaaa",
-    }
+    assert "session_default_notice" not in payload
 
 
-def test_get_requires_session_without_caller(monkeypatch, tmp_path, capsys):
+@pytest.mark.parametrize(
+    ("cmd_name", "argv", "help_command"),
+    [
+        ("cmd_session_get", ["session", "get"], "vibe session get --help"),
+        ("cmd_session_update", ["session", "update", "--title", "x"], "vibe session update --help"),
+        ("cmd_session_send_now", ["session", "send-now"], "vibe session send-now --help"),
+        ("cmd_session_queue_list", ["session", "queue", "list"], "vibe session queue list --help"),
+        ("cmd_session_queue_remove", ["session", "queue", "remove", "msg_any"], "vibe session queue remove --help"),
+    ],
+)
+def test_single_session_commands_need_a_caller_or_session_id(monkeypatch, tmp_path, capsys, cmd_name, argv, help_command):
     _setup(monkeypatch, tmp_path)
     monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
 
-    code, payload = _run(cli.cmd_session_get, ["session", "get"], capsys)
+    code, payload = _run(getattr(cli, cmd_name), argv, capsys)
 
     assert code == 1
-    assert payload["code"] == "missing_session_target"
-    assert payload["help_command"] == "vibe session get --help"
-    assert payload["hint"] == "Run this command from an Avibe Agent shell, or pass the target Session ID positionally."
+    assert payload["code"] == "missing_caller_session"
+    assert payload["help_command"] == help_command
+
 
 
 def test_get_archived_is_not_found(monkeypatch, tmp_path, capsys):
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesarch", status="archived")
-    code, payload = _run(cli.cmd_session_get, ["session", "get", "sesarch"], capsys)
+    code, payload = _run(cli.cmd_session_get, ["session", "get", "--session-id", "sesarch"], capsys)
     assert code == 1
     assert payload["code"] == "session_not_found"
 
 
 def test_get_missing_is_not_found(monkeypatch, tmp_path, capsys):
     _setup(monkeypatch, tmp_path)
-    code, payload = _run(cli.cmd_session_get, ["session", "get", "nope"], capsys)
+    code, payload = _run(cli.cmd_session_get, ["session", "get", "--session-id", "nope"], capsys)
     assert code == 1
     assert payload["code"] == "session_not_found"
 
@@ -225,7 +231,7 @@ def test_send_now_dispatches_an_existing_queue_without_adding_a_message(
 
     code, payload = _run(
         cli.cmd_session_send_now,
-        ["session", "send-now", "sesaaa"],
+        ["session", "send-now", "--session-id", "sesaaa"],
         capsys,
     )
 
@@ -266,7 +272,7 @@ def test_send_now_surfaces_a_typed_steer_refusal(monkeypatch, tmp_path, capsys):
 
     code, payload = _run(
         cli.cmd_session_send_now,
-        ["session", "send-now", "sesaaa"],
+        ["session", "send-now", "--session-id", "sesaaa"],
         capsys,
     )
 
@@ -297,7 +303,7 @@ def test_send_now_surfaces_an_idle_flush_failure(monkeypatch, tmp_path, capsys):
 
     code, payload = _run(
         cli.cmd_session_send_now,
-        ["session", "send-now", "sesaaa"],
+        ["session", "send-now", "--session-id", "sesaaa"],
         capsys,
     )
 
@@ -324,24 +330,12 @@ def test_send_now_rejects_an_archived_session_before_controller_call(
 
     code, payload = _run(
         cli.cmd_session_send_now,
-        ["session", "send-now", "sesarch"],
+        ["session", "send-now", "--session-id", "sesarch"],
         capsys,
     )
 
     assert code == 1
     assert payload["code"] == "session_not_found"
-
-
-def test_send_now_requires_an_explicit_target(capsys):
-    parser = cli.build_parser()
-
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["session", "send-now"])
-
-    assert exc.value.code == 2
-    payload = json.loads(capsys.readouterr().err)
-    assert payload["code"] == "invalid_arguments"
-    assert payload["help_command"] == "vibe session send-now --help"
 
 
 def test_send_now_accepts_im_while_queue_management_remains_workbench_only(
@@ -368,17 +362,17 @@ def test_send_now_accepts_im_while_queue_management_remains_workbench_only(
 
     send_code, send_payload = _run(
         cli.cmd_session_send_now,
-        ["session", "send-now", "sesim"],
+        ["session", "send-now", "--session-id", "sesim"],
         capsys,
     )
     list_code, list_payload = _run(
         cli.cmd_session_queue_list,
-        ["session", "queue", "list", "sesim"],
+        ["session", "queue", "list", "--session-id", "sesim"],
         capsys,
     )
     remove_code, remove_payload = _run(
         cli.cmd_session_queue_remove,
-        ["session", "queue", "remove", "sesim", "msg_any"],
+        ["session", "queue", "remove", "msg_any", "--session-id", "sesim"],
         capsys,
     )
 
@@ -434,7 +428,7 @@ def test_queue_list_is_paginated_in_fifo_order_and_exposes_run_identity(
 
     code, page1 = _run(
         cli.cmd_session_queue_list,
-        ["session", "queue", "list", "sesaaa", "--limit", "2"],
+        ["session", "queue", "list", "--session-id", "sesaaa", "--limit", "2"],
         capsys,
     )
 
@@ -444,12 +438,12 @@ def test_queue_list_is_paginated_in_fifo_order_and_exposes_run_identity(
     assert page1["queued"][0]["run_id"] is None
     assert page1["queued"][1]["run_id"] == "run_second"
     assert page1["pagination"]["next_command"] == (
-        "vibe session queue list sesaaa --page 2 --limit 2"
+        "vibe session queue list --session-id sesaaa --page 2 --limit 2"
     )
 
     code, page2 = _run(
         cli.cmd_session_queue_list,
-        ["session", "queue", "list", "sesaaa", "--page", "2", "--limit", "2"],
+        ["session", "queue", "list", "--session-id", "sesaaa", "--page", "2", "--limit", "2"],
         capsys,
     )
 
@@ -472,7 +466,7 @@ def test_queue_list_reports_server_owned_explicit_retry_hold(monkeypatch, tmp_pa
             conn, scope_id=scope_id, session_id="sesaaa", text="保留附件",
             metadata={"requires_explicit_retry": True, "retry_reason": "caller spoof"},
         )
-    _, before = _run(cli.cmd_session_queue_list, ["session", "queue", "list", "sesaaa"], capsys)
+    _, before = _run(cli.cmd_session_queue_list, ["session", "queue", "list", "--session-id", "sesaaa"], capsys)
     assert before["queued"][0]["requires_explicit_retry"] is False
     assert before["queued"][0]["retry_reason"] is None
     for _ in range(3):
@@ -484,7 +478,7 @@ def test_queue_list_reports_server_owned_explicit_retry_hold(monkeypatch, tmp_pa
                 deliveries=[delivery], dispatch_text="保留附件",
             )
         manager._settle_durable_prewrite_failure(turn_id, outcome="no_terminal_result")
-    code, result = _run(cli.cmd_session_queue_list, ["session", "queue", "list", "sesaaa"], capsys)
+    code, result = _run(cli.cmd_session_queue_list, ["session", "queue", "list", "--session-id", "sesaaa"], capsys)
     assert code == 0
     assert result["queued"][0]["id"] == payload["id"]
     assert result["queued"][0]["requires_explicit_retry"] is True
@@ -517,7 +511,7 @@ def test_queue_remove_deletes_only_the_named_session_row_and_notifies_web(
 
     code, wrong_session = _run(
         cli.cmd_session_queue_remove,
-        ["session", "queue", "remove", "sesbbb", queued["id"]],
+        ["session", "queue", "remove", queued["id"], "--session-id", "sesbbb"],
         capsys,
     )
 
@@ -528,7 +522,7 @@ def test_queue_remove_deletes_only_the_named_session_row_and_notifies_web(
 
     code, removed = _run(
         cli.cmd_session_queue_remove,
-        ["session", "queue", "remove", "sesaaa", queued["id"]],
+        ["session", "queue", "remove", queued["id"], "--session-id", "sesaaa"],
         capsys,
     )
 
@@ -585,7 +579,7 @@ def test_queue_remove_cancels_the_agent_run_owned_by_that_row(
 
     code, removed = _run(
         cli.cmd_session_queue_remove,
-        ["session", "queue", "remove", "sesrun", queued["id"]],
+        ["session", "queue", "remove", queued["id"], "--session-id", "sesrun"],
         capsys,
     )
 
@@ -605,12 +599,12 @@ def test_queue_commands_reject_an_archived_session(monkeypatch, tmp_path, capsys
 
     list_code, list_payload = _run(
         cli.cmd_session_queue_list,
-        ["session", "queue", "list", "sesarch"],
+        ["session", "queue", "list", "--session-id", "sesarch"],
         capsys,
     )
     remove_code, remove_payload = _run(
         cli.cmd_session_queue_remove,
-        ["session", "queue", "remove", "sesarch", "msg_any"],
+        ["session", "queue", "remove", "msg_any", "--session-id", "sesarch"],
         capsys,
     )
 
@@ -626,7 +620,7 @@ def test_queue_commands_reject_an_archived_session(monkeypatch, tmp_path, capsys
 def test_update_sets_title(monkeypatch, tmp_path, capsys):
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesaaa", title="Old")
-    code, payload = _run(cli.cmd_session_update, ["session", "update", "sesaaa", "--title", "New name"], capsys)
+    code, payload = _run(cli.cmd_session_update, ["session", "update", "--session-id", "sesaaa", "--title", "New name"], capsys)
     assert code == 0
     assert payload["updated"] is True
     assert payload["session"]["title"] == "New name"
@@ -646,29 +640,13 @@ def test_update_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
     assert payload["updated"] is True
     assert payload["session"]["id"] == "sesaaa"
     assert payload["session"]["title"] == "New name"
-    assert payload["session_default_notice"] == {
-        "code": "session_defaulted_to_caller",
-        "message": "Session defaulted to this Agent Session.",
-        "session_id": "sesaaa",
-    }
-
-
-def test_update_requires_session_without_caller(monkeypatch, tmp_path, capsys):
-    _setup(monkeypatch, tmp_path)
-    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
-
-    code, payload = _run(cli.cmd_session_update, ["session", "update", "--title", "New name"], capsys)
-
-    assert code == 1
-    assert payload["code"] == "missing_session_target"
-    assert payload["help_command"] == "vibe session update --help"
-    assert payload["hint"] == "Run this command from an Avibe Agent shell, or pass the target Session ID positionally."
+    assert "session_default_notice" not in payload
 
 
 def test_update_empty_title_clears(monkeypatch, tmp_path, capsys):
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesaaa", title="Old")
-    _, payload = _run(cli.cmd_session_update, ["session", "update", "sesaaa", "--title", ""], capsys)
+    _, payload = _run(cli.cmd_session_update, ["session", "update", "--session-id", "sesaaa", "--title", ""], capsys)
     assert payload["session"]["title"] is None
 
 
@@ -682,7 +660,7 @@ def test_update_help_teaches_visibility_sugar(capsys):
     help_text = capsys.readouterr().out
     assert "--visible" in help_text
     assert "--hidden" in help_text
-    assert "--visibility {foreground,background}" in help_text
+    assert "--visibility" not in help_text
 
 
 @pytest.mark.parametrize(
@@ -690,7 +668,7 @@ def test_update_help_teaches_visibility_sugar(capsys):
     [("--visible", "foreground"), ("--hidden", "background")],
 )
 def test_update_visibility_sugar_parses(flag, expected):
-    args = cli.build_parser().parse_args(["session", "update", "sesaaa", flag])
+    args = cli.build_parser().parse_args(["session", "update", "--session-id", "sesaaa", flag])
 
     assert args.visibility == expected
 
@@ -699,15 +677,13 @@ def test_update_visibility_sugar_parses(flag, expected):
     "visibility_args",
     [
         ["--visible", "--hidden"],
-        ["--visible", "--visibility", "background"],
-        ["--hidden", "--visibility", "foreground"],
     ],
 )
 def test_update_visibility_sugar_rejects_conflicts(visibility_args, capsys):
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["session", "update", "sesaaa", *visibility_args])
+        parser.parse_args(["session", "update", "--session-id", "sesaaa", *visibility_args])
 
     assert exc.value.code == 2
     payload = json.loads(capsys.readouterr().err)
@@ -739,9 +715,9 @@ def test_update_visibility_and_make_standalone_keeps_workdir(monkeypatch, tmp_pa
         [
             "session",
             "update",
+            "--session-id",
             "sesaaa",
-            "--visibility",
-            "background",
+            "--hidden",
             "--scope-id",
             "none",
         ],
@@ -768,7 +744,7 @@ def test_update_visibility_and_make_standalone_keeps_workdir(monkeypatch, tmp_pa
 def test_update_archived_is_not_found(monkeypatch, tmp_path, capsys):
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesarch", status="archived", title="Old")
-    code, payload = _run(cli.cmd_session_update, ["session", "update", "sesarch", "--title", "x"], capsys)
+    code, payload = _run(cli.cmd_session_update, ["session", "update", "--session-id", "sesarch", "--title", "x"], capsys)
     assert code == 1
     assert payload["code"] == "session_not_found"
     # title must not have been written to the soft-deleted row

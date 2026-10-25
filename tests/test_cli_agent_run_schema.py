@@ -209,7 +209,7 @@ def test_agent_run_explicit_async_flag_remains_compatible(tmp_path: Path, capsys
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
     request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-    args = _parse_agent_run(["--agent", "worker", "--async", "--no-callback", "--message", "hi"])
+    args = _parse_agent_run(["--agent", "worker", "--no-callback", "--message", "hi"])
 
     with (
         patch("vibe.cli._agent_store", return_value=agent_store),
@@ -416,7 +416,7 @@ def test_agent_run_async_defaults_callback_from_caller_env(tmp_path: Path, capsy
     assert stored["metadata"]["caller_context"]["session_id"] == caller_session["id"]
 
 
-def test_agent_run_send_now_is_explicit_p1_on_an_existing_session(
+def test_agent_run_existing_session_defaults_to_p1_steer(
     tmp_path: Path,
     capsys,
 ) -> None:
@@ -470,7 +470,6 @@ def test_agent_run_send_now_is_explicit_p1_on_an_existing_session(
             [
                 "--session-id",
                 session_id,
-                "--send-now",
                 "--no-callback",
                 "--message",
                 "apply this correction",
@@ -490,26 +489,6 @@ def test_agent_run_send_now_is_explicit_p1_on_an_existing_session(
     assert stored is not None
     assert stored["session_id"] == session_id
     assert stored["metadata"]["delivery_intent"] == "steer"
-
-
-def test_agent_run_send_now_rejects_a_new_session(capsys) -> None:
-    args = _parse_agent_run(
-        [
-            "--agent",
-            "worker",
-            "--send-now",
-            "--no-callback",
-            "--message",
-            "apply this correction",
-        ]
-    )
-
-    result = cli.cmd_agent_run(args)
-
-    assert result == 1
-    payload = json.loads(capsys.readouterr().err)
-    assert payload["code"] == "send_now_requires_existing_session"
-    assert "--session-id" in payload["hint"]
 
 
 def test_agent_run_queue_persists_explicit_p3_intent(
@@ -587,7 +566,7 @@ def test_agent_run_queue_persists_explicit_p3_intent(
     assert stored["metadata"]["delivery_intent"] == "queue"
 
 
-def test_agent_run_send_now_accepts_an_im_backed_session(
+def test_agent_run_steers_an_im_backed_session_by_default(
     tmp_path: Path,
     capsys,
 ) -> None:
@@ -643,7 +622,6 @@ def test_agent_run_send_now_accepts_an_im_backed_session(
                 "worker",
                 "--session-id",
                 session["id"],
-                "--send-now",
                 "--no-callback",
                 "--message",
                 "steer this",
@@ -1128,7 +1106,6 @@ def test_agent_run_callback_conflict_does_not_reserve_session(tmp_path: Path, ca
             [
                 "--agent",
                 "worker",
-                "--async",
                 "--callback-session-id",
                 "ses-caller",
                 "--no-callback",
@@ -1245,7 +1222,6 @@ def test_agent_run_fork_session_reserves_new_session_and_persists_metadata(tmp_p
                 "gpt-5.2",
                 "--reasoning-effort",
                 "low",
-                "--async",
                 "--no-callback",
                 "--message",
                 "continue from here",
@@ -1307,7 +1283,6 @@ def test_agent_run_fork_self_uses_caller_session_and_inherits_scope(tmp_path: Pa
                 "--fork-self",
                 "--agent",
                 "reviewer",
-                "--async",
                 "--no-callback",
                 "--message",
                 "continue from here",
@@ -1355,7 +1330,7 @@ def test_agent_run_create_same_scope_snapshots_scope_workdir(tmp_path: Path, cap
         agent_store = cli.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
         request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-        args = _parse_agent_run(["--agent", "worker", "--same-scope", "--async", "--no-callback", "--message", "hi"])
+        args = _parse_agent_run(["--agent", "worker", "--same-scope", "--no-callback", "--message", "hi"])
         monkeypatch.chdir(invoke_dir)
 
         with (
@@ -1402,7 +1377,7 @@ def test_agent_run_same_scope_rejects_standalone_caller(tmp_path: Path, capsys) 
         agent_store.create(name="worker", backend="codex")
         request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
-            ["--agent", "worker", "--same-scope", "--async", "--no-callback", "--message", "hi"]
+            ["--agent", "worker", "--same-scope", "--no-callback", "--message", "hi"]
         )
 
         with (
@@ -1427,7 +1402,6 @@ def test_agent_run_same_scope_rejects_standalone_fork_source(monkeypatch) -> Non
             "--fork-session",
             "ses-standalone",
             "--same-scope",
-            "--async",
             "--no-callback",
             "--message",
             "hi",
@@ -1452,7 +1426,6 @@ def test_agent_run_fork_defaults_to_source_scope_not_caller_scope(monkeypatch) -
             "worker",
             "--fork-session",
             "ses-source",
-            "--async",
             "--no-callback",
             "--message",
             "hi",
@@ -1500,7 +1473,6 @@ def test_agent_run_create_scope_id_snapshots_scope_workdir(tmp_path: Path, capsy
                 "worker",
                 "--scope-id",
                 "avibe::project::proj_fork_cli",
-                "--async",
                 "--no-callback",
                 "--message",
                 "hi",
@@ -1547,7 +1519,6 @@ def test_agent_run_create_scope_id_requires_existing_scope(tmp_path: Path, capsy
                 "worker",
                 "--scope-id",
                 "avibe::project::missing",
-                "--async",
                 "--no-callback",
                 "--message",
                 "hi",
@@ -1611,7 +1582,6 @@ def test_agent_run_create_scope_id_rejects_archived_project(tmp_path: Path, caps
                 "worker",
                 "--scope-id",
                 scope_id,
-                "--async",
                 "--no-callback",
                 "--message",
                 "hi",
@@ -1647,7 +1617,6 @@ def test_agent_run_fork_rejects_cross_backend_agent(tmp_path: Path, capsys) -> N
                 source_session_id,
                 "--agent",
                 "claude-worker",
-                "--async",
                 "--no-callback",
                 "--message",
                 "hi",
@@ -1691,7 +1660,6 @@ def test_only_fork_self_is_the_agents_own_fork(tmp_path: Path, capsys, flags, se
                 *[source_session_id if flag == "SOURCE" else flag for flag in flags],
                 "--agent",
                 "worker",
-                "--async",
                 "--no-callback",
                 "--message",
                 "try the other fix",
@@ -1714,7 +1682,7 @@ def test_only_fork_self_is_the_agents_own_fork(tmp_path: Path, capsys, flags, se
     assert reserve.call_args.kwargs["self_fork"] is self_fork
 
 
-def test_agent_run_fork_localizes_unavailable_source_agent(monkeypatch) -> None:
+def test_agent_run_fork_reports_unavailable_source_agent_in_english_under_a_zh_ui(monkeypatch) -> None:
     from core.services.session_fork import (
         SESSION_AGENT_UNAVAILABLE_CODE,
         SESSION_AGENT_UNAVAILABLE_I18N_KEY,
@@ -1745,8 +1713,8 @@ def test_agent_run_fork_localizes_unavailable_source_agent(monkeypatch) -> None:
 
     exc = exc_info.value
     assert exc.code == SESSION_AGENT_UNAVAILABLE_CODE
-    assert str(exc) == i18n_t(f"{SESSION_AGENT_UNAVAILABLE_I18N_KEY}.message", "zh")
-    assert exc.hint == i18n_t(f"{SESSION_AGENT_UNAVAILABLE_I18N_KEY}.hint", "zh")
+    assert str(exc) == i18n_t(f"{SESSION_AGENT_UNAVAILABLE_I18N_KEY}.message", "en")
+    assert exc.hint == i18n_t(f"{SESSION_AGENT_UNAVAILABLE_I18N_KEY}.hint", "en")
     assert exc.details == {"source_session_id": "ses-source"}
 
 
@@ -1763,7 +1731,7 @@ def test_agent_run_callerless_session_workdir_uses_show_workspace(tmp_path: Path
         agent_store = cli.VibeAgentStore(db_path)
         agent_store.create(name="worker", backend="codex")
         request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-        args = _parse_agent_run(["--agent", "worker", "--async", "--no-callback", "--message", "hi"])
+        args = _parse_agent_run(["--agent", "worker", "--no-callback", "--message", "hi"])
         monkeypatch.chdir(invoke_dir)
 
         with (
@@ -1796,7 +1764,7 @@ def test_agent_run_explicit_cwd_wins(tmp_path: Path, capsys, monkeypatch) -> Non
         agent_store.create(name="worker", backend="codex")
         request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
         args = _parse_agent_run(
-            ["--agent", "worker", "--cwd", str(picked_dir), "--async", "--no-callback", "--message", "hi"]
+            ["--agent", "worker", "--cwd", str(picked_dir), "--no-callback", "--message", "hi"]
         )
         monkeypatch.chdir(invoke_dir)
 
@@ -1815,7 +1783,7 @@ def test_agent_run_explicit_cwd_wins(tmp_path: Path, capsys, monkeypatch) -> Non
 
 def test_agent_run_cwd_must_exist(tmp_path: Path, capsys) -> None:
     args = _parse_agent_run(
-        ["--agent", "worker", "--create-session", "--cwd", str(tmp_path / "missing"), "--async", "--message", "hi"]
+        ["--agent", "worker", "--cwd", str(tmp_path / "missing"), "--message", "hi"]
     )
 
     result = cli.cmd_agent_run(args)
@@ -1829,7 +1797,7 @@ def test_agent_run_cwd_must_exist(tmp_path: Path, capsys) -> None:
 def test_agent_run_cwd_rejected_with_existing_session(capsys) -> None:
     """An existing session keeps its own workdir — --cwd cannot re-route it."""
 
-    args = _parse_agent_run(["--session-id", "ses123", "--cwd", "/tmp", "--async", "--message", "hi"])
+    args = _parse_agent_run(["--session-id", "ses123", "--cwd", "/tmp", "--message", "hi"])
 
     result = cli.cmd_agent_run(args)
 

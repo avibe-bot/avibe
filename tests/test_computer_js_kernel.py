@@ -579,24 +579,15 @@ def test_exceptions_and_unserializable_results_are_reported() -> None:
     assert "Circular" in cyclic["result_text"]
 
 
-@pytest.mark.parametrize(
-    ("language", "expected"),
-    [
-        ("en", "The JavaScript call failed: The JavaScript kernel was reset"),
-        ("zh", "JavaScript 调用失败：JavaScript 内核已重置"),
-    ],
-)
-def test_cli_envelope_and_localized_errors(
+def test_cli_envelope_and_errors(
     monkeypatch: pytest.MonkeyPatch,
     capsys,
     tmp_path: Path,
-    language: str,
-    expected: str,
 ) -> None:
     from vibe import cli
 
+    expected = "The JavaScript call failed: The JavaScript kernel was reset"
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     seen: list[dict] = []
     code_file = tmp_path / "step.js"
     code_file.write_text("1 + 1", encoding="utf-8")

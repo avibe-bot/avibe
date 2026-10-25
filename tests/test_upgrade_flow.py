@@ -1163,11 +1163,8 @@ def test_do_upgrade_keeps_active_launcher_when_staged_install_fails(monkeypatch,
     assert launcher.resolve() == old.resolve()
 
 
-@pytest.mark.parametrize(
-    ("language", "expected"),
-    [("en", "Upgrade activated the new version"), ("zh", "升级已激活新版本")],
-)
-def test_cmd_upgrade_reports_peer_activation_failures(monkeypatch, tmp_path, capsys, language, expected):
+def test_cmd_upgrade_reports_peer_activation_failures(monkeypatch, tmp_path, capsys):
+    expected = "Upgrade activated the new version"
     launcher = tmp_path / "activated home 空格" / "vibe"
     peer = tmp_path / "peer home 空格" / "稳定-vibe"
     outcome = vibe_upgrade.ActivationOutcome(
@@ -1188,7 +1185,6 @@ def test_cmd_upgrade_reports_peer_activation_failures(monkeypatch, tmp_path, cap
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: str(launcher))
     monkeypatch.setattr(cli, "build_upgrade_plan", lambda **_kwargs: plan)
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: False)
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     monkeypatch.setattr(cli, "activate_upgrade_candidate", lambda _activation: outcome)
     monkeypatch.setattr(
         cli,
@@ -1791,13 +1787,13 @@ def test_cmd_check_update_reports_desktop_managed_runtime(monkeypatch, capsys):
     assert "Updates are delivered with the Avibe desktop app." in capsys.readouterr().out
 
 
-def test_desktop_managed_runtime_messages_follow_configured_language(monkeypatch, capsys):
+def test_desktop_managed_runtime_messages_are_english_in_the_cli_and_localized_on_the_web(monkeypatch, capsys):
     monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
     monkeypatch.setattr(cli.V2Config, "load", lambda: SimpleNamespace(language="zh"))
     monkeypatch.setattr(api.V2Config, "load", lambda: SimpleNamespace(language="zh"))
 
     assert cli.cmd_check_update() == 0
-    assert "更新由 Avibe 桌面应用统一提供。" in capsys.readouterr().out
+    assert "Updates are delivered with the Avibe desktop app." in capsys.readouterr().out
     assert api.do_upgrade()["message"] == "此 Runtime 由 Avibe 桌面应用管理。"
 
 

@@ -106,7 +106,9 @@ def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
     assert "--lifetime-timeout" in captured.out
     assert "vibe watch add --session-id sesk8m4q2p7x --message 'The export finished. Inspect it and continue.'" in captured.out
     assert "watches follow up in this conversation by default" in captured.out
-    assert "Prefer --message or --message-file for follow-up instructions" in captured.out
+    assert "Use --message or --message-file for follow-up instructions." in captured.out
+    assert "--prefix" not in captured.out
+    assert "--session-key" not in captured.out
     assert "Terminal failures also send a follow-up and disable the watch." in captured.out
     assert "an allowed `--retry-exit-code` keeps waiting" in captured.out
     assert "A once Watch stops after its first event" in captured.out
@@ -198,15 +200,7 @@ def test_watch_list_help_describes_bounded_history(capsys) -> None:
 
 
 def test_watch_add_parser_keeps_top_level_command_name() -> None:
-    args = _parse_watch_add(
-        [
-            "--session-key",
-            "slack::channel::C123",
-            "--",
-            "python3",
-            "wait.py",
-        ]
-    )
+    args = _parse_watch_add(["--session-id", "sesk8m4q2p7x", "--", "python3", "wait.py"])
 
     assert args.command == "watch"
     assert args.watch_command == "add"
@@ -222,7 +216,7 @@ def test_watch_update_parser_accepts_argv_command_replacement() -> None:
 
 
 def test_watch_add_missing_command_is_structured_json() -> None:
-    args = _parse_watch_add(["--session-key", "slack::channel::C123"])
+    args = _parse_watch_add(["--session-id", "sesk8m4q2p7x"])
 
     with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
         result, payload = _capture_stderr_json(cli.cmd_watch_add, args)
@@ -236,10 +230,11 @@ def test_watch_add_accepts_lifetime_timeout_for_retrying_once_watch(
     tmp_path: Path,
     capsys,
 ) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--lifetime-timeout",
             "10",
             "--shell",
@@ -268,11 +263,12 @@ def test_watch_add_accepts_lifetime_timeout_for_retrying_once_watch(
     assert payload["definition"]["lifetime_timeout_seconds"] == 10
 
 
-def test_watch_add_rejects_missing_cwd() -> None:
+def test_watch_add_rejects_missing_cwd(tmp_path: Path) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--cwd",
             "/tmp/definitely-missing-watch-dir",
             "--shell",
@@ -322,7 +318,7 @@ def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pa
     args = _parse_watch_add(
         [
             "--create-session-per-run",
-            "--deliver-key",
+            "--scope-id",
             "slack::channel::C123",
             "--shell",
             "echo done",
@@ -415,15 +411,16 @@ def test_watch_add_releases_create_once_session_when_definition_write_fails(
 
 
 def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--name",
             "Wait for export",
-            "--prefix",
+            "--message",
             "Export finished.",
             "--shell",
             "python3 scripts/wait.py",
@@ -453,14 +450,15 @@ def test_remote_editor_watch_add_starts_and_persists_authorization_context(
     tmp_path: Path,
     capsys,
 ) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store_path = tmp_path / "watches.json"
     runtime_path = tmp_path / "watch_runtime.json"
     store = ManagedWatchStore(store_path)
     runtime_store = WatchRuntimeStateStore(runtime_path)
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--shell",
             "python3 scripts/wait.py",
         ]
@@ -736,12 +734,13 @@ def test_watch_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> 
 
 
 def test_watch_add_accepts_message_template(tmp_path: Path, capsys) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--message",
             "Summarize the waiter output.",
             "--shell",
@@ -764,12 +763,13 @@ def test_watch_add_accepts_message_template(tmp_path: Path, capsys) -> None:
 
 
 def test_watch_add_creates_exec_watch_with_retry_codes(tmp_path: Path, capsys) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--forever",
             "--timeout",
             "600",
@@ -816,12 +816,13 @@ def test_watch_add_timeout_round_trips_through_persisted_read(
     timeout_args: list[str],
     expected_timeout: float,
 ) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store = ManagedWatchStore()
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             *timeout_args,
             "--shell",
             "exit 75",
@@ -856,14 +857,15 @@ def test_watch_add_timeout_round_trips_through_persisted_read(
 
 
 def test_watch_add_persists_absolute_cwd(tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     workdir = tmp_path / "repo"
     workdir.mkdir()
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--cwd",
             str(workdir.relative_to(tmp_path)),
             "--shell",
@@ -887,12 +889,13 @@ def test_watch_add_persists_absolute_cwd(tmp_path: Path, capsys, monkeypatch: py
 
 
 def test_watch_add_returns_structured_error_when_startup_fails(tmp_path: Path) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--shell",
             "python3 scripts/wait.py",
         ]
@@ -1367,6 +1370,7 @@ def test_watch_pause_resume_and_remove_update_store(tmp_path: Path, capsys) -> N
 
 
 def test_watch_update_renames_and_retargets_watch(tmp_path: Path, capsys) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     watch = store.add_watch(
@@ -1389,11 +1393,9 @@ def test_watch_update_renames_and_retargets_watch(tmp_path: Path, capsys) -> Non
             watch.id,
             "--name",
             "Watch deploy",
-            "--session-key",
-            "slack::channel::C456",
-            "--post-to",
-            "channel",
-            "--prefix",
+            "--session-id",
+            session_id,
+            "--message",
             "Deploy finished.",
             "--forever",
             "--timeout",
@@ -1422,10 +1424,9 @@ def test_watch_update_renames_and_retargets_watch(tmp_path: Path, capsys) -> Non
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["id"] == watch.id
     assert payload["definition"]["name"] == "Watch deploy"
+    assert payload["definition"]["session_id"] == session_id
     assert payload["definition"]["message"] == "Deploy finished."
     assert {"session_key", "post_to", "deliver_key", "prefix"}.isdisjoint(payload["definition"])
-    stored = store.get_watch(watch.id)
-    assert (stored.session_key, stored.post_to) == ("slack::channel::C456", "channel")
     assert payload["definition"]["mode"] == "forever"
     assert payload["definition"]["timeout_seconds"] == 1200
     assert payload["definition"]["lifetime_timeout_seconds"] == 7200
@@ -1465,40 +1466,6 @@ def test_watch_update_accepts_zero_timeout(tmp_path: Path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["timeout_seconds"] == 0
     assert store.get_watch(watch.id).timeout_seconds == 0
-
-
-def test_watch_update_session_key_clears_previous_session_id(tmp_path: Path, capsys) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
-    watch = store.add_watch(
-        name="Watch CI",
-        session_key="",
-        session_id="sesk8m4q2p7x",
-        command=["python3", "wait.py"],
-        shell_command=None,
-        prefix=None,
-        cwd=None,
-        mode="once",
-        timeout_seconds=600,
-        lifetime_timeout_seconds=0,
-        retry_exit_codes=[75],
-        retry_delay_seconds=30,
-        post_to=None,
-        deliver_key=None,
-    )
-    args = _parse_watch_update([watch.id, "--session-key", "slack::channel::C456"])
-
-    with (
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
-    ):
-        result = cli.cmd_watch_update(args)
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["definition"].get("session_id") is None
-    assert store.get_watch(watch.id).session_key == "slack::channel::C456"
 
 
 def test_watch_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: Path, capsys) -> None:
@@ -1721,57 +1688,6 @@ def test_watch_update_allows_cwd_for_already_reserved_create_once_watch(tmp_path
     assert payload["definition"]["session_id"] == "sesExisting"
     assert payload["definition"]["cwd"] == str(new_cwd)
     assert "session_workdir" not in payload["definition"]["metadata"]
-
-
-def test_watch_update_rejects_deprecated_prompt_argument(tmp_path: Path) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    watch = store.add_watch(
-        name="Watch CI",
-        session_key="slack::channel::C123",
-        command=["python3", "wait.py"],
-        shell_command=None,
-        prefix=None,
-        cwd=None,
-        mode="once",
-        timeout_seconds=600,
-        lifetime_timeout_seconds=0,
-        retry_exit_codes=[75],
-        retry_delay_seconds=30,
-        post_to=None,
-        deliver_key=None,
-    )
-    args = _parse_watch_update([watch.id, "--prompt", "hello"])
-
-    with (
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-    ):
-        result, payload = _capture_stderr_json(cli.cmd_watch_update, args)
-
-    assert result == 1
-    assert payload["code"] == "deprecated_prompt_argument"
-    assert "--message" in payload["hint"]
-
-
-def test_watch_add_rejects_deprecated_prompt_argument() -> None:
-    args = _parse_watch_add(
-        [
-            "--session-key",
-            "slack::channel::C123",
-            "--prompt",
-            "hello",
-            "--",
-            "python3",
-            "wait.py",
-        ]
-    )
-
-    with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
-        result, payload = _capture_stderr_json(cli.cmd_watch_add, args)
-
-    assert result == 1
-    assert payload["code"] == "deprecated_prompt_argument"
-    assert "--message" in payload["hint"]
 
 
 def test_watch_update_rejects_agent_together_with_clear_agent(tmp_path: Path) -> None:

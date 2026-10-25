@@ -501,11 +501,18 @@ bind vr-a3x9k2
 
 `vibe` 可执行文件负责管理本地服务与异步自动化能力。
 
-所有面向 Agent 的集合命令都使用 `--page` / `--limit`，默认返回 20 条紧凑记录，
-单页最多 100 条，并且不提供无分页的 `--all` 模式。按
-`pagination.next_command` 继续翻页；单条完整详情通过对应的 `show` 或 `get` 命令获取。
-列表行省略 null、空值和零值字段；`vibe task show`、`vibe watch show`、`vibe runs show`、
-`vibe session get` 和 `vibe agent show` 加上 `--brief` 时只输出对应的列表行。
+所有面向 Agent 的集合命令都使用 `--page` / `--limit`，默认返回 20 条紧凑记录。
+单页最多 100 条；更大的 `--limit` 按 100 读取，`pagination.limit` 报告实际使用的
+上限。不提供无分页的 `--all` 模式。按 `pagination.next_command` 继续翻页；单条完整
+详情通过对应的 `show` 或 `get` 命令获取。列表行省略 null、空值和零值字段；
+`vibe task show`、`vibe watch show`、`vibe runs show`、`vibe session get` 和
+`vibe agent show` 加上 `--brief` 时只输出对应的列表行。
+
+所有命令遵循同一套语法：只用 `--session-id <id>` 指定 Session，作用于单个 Session
+的命令在 Avibe Agent shell 内默认使用调用方 Session。面向 Agent 的命令输出 JSON
+信封（`schema_version`、`ok`、`kind` 和字段），接受 `--json` 但不改变行为；运维
+命令输出文本，其中大多数加 `--json` 时输出该信封。CLI 文本始终是英文。命令和参数
+都没有别名。完整的语法与输出规则见 [CLI 参考手册](CLI_ZH.md#命令详解)。
 
 ## 5.1 顶层 CLI 命令
 
@@ -515,7 +522,7 @@ bind vr-a3x9k2
 | `vibe start` | 按需启动服务与 Web UI；已运行时复用现有进程；`--no-open-browser` 可禁止自动打开浏览器 |
 | `vibe stop` | 停止服务与 UI，同时终止 OpenCode server |
 | `vibe restart` | 停止后重新启动 |
-| `vibe status` | 输出运行状态 JSON |
+| `vibe status` | 以 JSON 信封输出运行状态 |
 | `vibe doctor` | 运行诊断；`vibe doctor repair` 显式执行安全修复 |
 | `vibe remote` | 引导式配置 Avibe Cloud 远程 Web UI |
 | `vibe screenshot` | 截取本机桌面截图 |
@@ -596,7 +603,7 @@ vibe restart --delay-seconds 60
 vibe status
 ```
 
-- 输出运行状态 JSON
+- 以 JSON 信封输出运行状态（`kind: "service_status"`）
 - 如果正在运行的服务比最近一次激活的安装更旧，会包含 `generation_downgrade`，写明两个版本以及选中较新安装的启动器
 
 ### `vibe doctor`
@@ -668,7 +675,7 @@ vibe screenshot --json
 - 截取本机桌面并保存为 PNG 文件
 - 默认保存到 `~/.vibe_remote/screenshots/`
 - 默认输出保存路径
-- 加 `--json` 时输出机器可读的 JSON
+- 加 `--json` 时输出 JSON 信封
 - 只停留在宿主机 CLI 层；不新增聊天命令、bot 按钮，也不注入 Agent prompt
 
 ### `vibe version`
@@ -709,13 +716,11 @@ vibe upgrade
 | `vibe task add` | 创建任务 |
 | `vibe task update` | 更新任务 |
 | `vibe task list` | 列出任务 |
-| `vibe task ls` | `list` 的隐藏别名 |
 | `vibe task show <task_id>` | 查看单个任务 |
 | `vibe task pause <task_id>` | 暂停任务 |
 | `vibe task resume <task_id>` | 恢复任务 |
 | `vibe task run <task_id>` | 立即运行一次 |
 | `vibe task remove <task_id>` | 删除任务 |
-| `vibe task rm <task_id>` | `remove` 的隐藏别名 |
 
 ### `vibe task add`
 
@@ -732,7 +737,6 @@ vibe task add (--cron <表达式> | --at <时间戳>) (--shell <命令> | -- <ar
 
 - `--name`
 - `--session-id`
-- `--send-now`
 - `--create-session`
 - `--create-session-per-run`
 - `--agent`
@@ -876,17 +880,19 @@ vibe agent models --backend opencode --provider deepseek
 ### `vibe agent run`
 
 ```bash
-vibe agent run (--session-id <session_id> | --create-session | --fork-session <session_id>)? (--message <文本> | --message-file <文件>) [options]
+vibe agent run (--session-id <session_id> | --fork-session <session_id> | --fork-self)? (--message <文本> | --message-file <文件>) [options]
 ```
 
 重要参数：
 
 - `--agent`
 - `--session-id`
+- `--queue`
 - `--fork-session`
-- `--create-session`
+- `--fork-self`
 - `--same-scope`
 - `--scope-id`
+- `--visible`
 - `--model`
 - `--reasoning-effort`
 - `--close-after`
@@ -894,32 +900,33 @@ vibe agent run (--session-id <session_id> | --create-session | --fork-session <s
 - `--message`
 - `--message-file`
 
-如果不传 `--session-id` 或创建策略，run 会使用 private
-no-delivery session，更适合 sub-agent 调用。
+不传 `--session-id` 也不 fork 时，run 会为 `--agent` 新建一个 Session。它默认在
+后台运行，适合 sub-agent 调用；`--visible` 让它面向用户，`--same-scope` 或
+`--scope-id` 决定它的位置。
 
 Run 默认异步：命令会队列化 run，立即输出一个带 `id` 和 `session_id` 的 `run`
 对象，并按 callback 策略稍后投递最终结果。只有终端需要等待完成时才使用
-`--sync`。`--async` 仍兼容旧脚本，但不再需要显式传入。
+`--sync`。
 
 `--close-after` 适用于新建或 fork 的 Session。Run 结束后它会释放该 Agent
 runtime，同时保留 Session、transcript 和 Run 记录；不能和现有的
 `--session-id` 一起使用。
 
 对于现有 `--session-id`，默认投递是 P1：新消息会 steering 进活动 native Turn，
-Session 空闲时立即启动；明确拒绝后，同一个 Delivery 才回退到 P3。`--queue` 会
-直接选择 P3。`--send-now` 显式选择相同的带内容 P1 语义，只针对这条新消息，
-不会提升更早的排队工作。`vibe session send-now` 是无内容 P1 操作，只提升现有的
-精确 FIFO 队头，不新增消息。命令响应包含 `delivery_intent`，Controller 消费请求后，
-`vibe runs show <run-id>` 会显示持久化的 `metadata.delivery_outcome`。
+Session 空闲时立即启动；明确拒绝后，同一个 Delivery 才回退到 P3。它只针对这条新消息，
+不会提升更早的排队工作。`--queue` 会直接选择 P3。
+`vibe session send-now --session-id <id>` 是无内容 P1 操作，只提升现有的精确 FIFO
+队头，不新增消息。Controller 消费请求后，`vibe runs show <run-id>` 会显示持久化的
+`metadata.delivery_outcome`。
 
 `--fork-session <session_id>` 会基于源 Session 的 native backend 上下文创建一个新的
 Agent Session，适合在保留上下文的同时做分支调查或委派工作，而不修改源 Session。
 fork 会保持源 Session 的 backend；只有 backend 不变时，`--agent`、`--model`
 和 `--reasoning-effort` 才能覆盖 fork 后 Session 的 Agent、模型或推理强度。
-不要把 `--fork-session` 和 `--session-id` 或 `--create-session` 混用。
+不要把 `--fork-session` 和 `--session-id` 混用。
 
 `--model` 和 `--reasoning-effort` 可以为这次运行创建的任何新 Session（空白新
-Session、`--create-session` 或 fork）设置模型，该 Session 会沿用它。与
+Session 或 fork）设置模型，该 Session 会沿用它。与
 `--session-id` 一起使用会被拒绝（`model_override_with_existing_session`）。新 Session
 实际运行的组合（覆盖值加上它原本沿用的默认值）会被检查：Vibey 的 Model Hub 菜单不提供
 的模型或推理强度，或菜单无法加载时，会被拒绝（`session_model_unavailable`）；claude

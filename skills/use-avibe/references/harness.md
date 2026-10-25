@@ -15,10 +15,10 @@ Preferred CLI shape:
 - delegate to a visible sibling Session in the same scope from an Avibe Agent shell: `vibe agent run --agent '<agent-name>' --same-scope --message '...'`
 - wait for an Agent result in the terminal: `vibe agent run --sync --agent '<agent-name>' --message '...'`
 - continue a specific existing Session: `vibe agent run --session-id '<session-id>' --message '...'`
-- explicitly steer a new message as P1 into the active Turn: `vibe agent run --session-id '<session-id>' --send-now --message '...'`
-- steer an already-queued exact head without adding a message: `vibe session send-now '<session-id>'`
-- inspect another Session's durable FIFO queue: `vibe session queue list '<session-id>'`
-- remove one exact queued message after inspecting its stable ID: `vibe session queue remove '<session-id>' '<message-id>'`
+- queue a new message behind the active Turn instead of steering it: `vibe agent run --session-id '<session-id>' --queue --message '...'`
+- steer an already-queued exact head without adding a message: `vibe session send-now --session-id '<session-id>'`
+- inspect another Session's durable FIFO queue: `vibe session queue list --session-id '<session-id>'`
+- remove one exact queued message after inspecting its stable ID: `vibe session queue remove '<message-id>' --session-id '<session-id>'`
 - fork this Session for an alternate path: `vibe agent run --fork-self --message '...'`
 - fork another explicit Session for an alternate path: `vibe agent run --fork-session '<source-session-id>' --message '...'`
 - recurring task for this conversation: `vibe task add --cron '<expr>' --message '...'`; write cron weekdays as names (`mon` ... `sun`), since numeric weekdays are rejected
@@ -39,10 +39,10 @@ Targeting and callbacks:
 - Use `--session-id <id>` only when the command should operate on a different existing Agent Session.
 - When `vibe agent run --session-id <id>` targets an existing Session, it sends a new message into that Session. It does not change that Session's cwd, scope, Agent, model, or reasoning settings.
 - When coordinating another Workbench Session, decide whether its current turn should finish or be preempted from the work dependency, urgency, and cost of discarding in-flight work. An explicit user request is one signal, not a prerequisite.
-- Add `--send-now` to explicitly select the normal content-bearing P1 behavior for an existing Session. It steers that new message into an active Turn, starts it when idle, and falls back to P3 only after a definitive refusal; it never promotes an older queued message.
-- Use `vibe session send-now <session-id>` when a Session already has queued work and no new message should be added. This promotes the existing FIFO head.
+- A new message to an existing Session is P1 by default: it steers into an active Turn, starts when idle, and falls back to P3 only after a definitive refusal; it never promotes an older queued message. Add `--queue` to put it in P3 behind the active Turn instead.
+- Use `vibe session send-now --session-id <session-id>` when a Session already has queued work and no new message should be added. This promotes the existing FIFO head.
 - Both commands use the shared steering path for Workbench and IM Sessions. A refused or stale steer leaves the affected input durably queued and never falls back to Stop.
-- Use `vibe session queue list <session-id>` before changing another Workbench Session's queue. If an instruction is obsolete, contradictory, or duplicated, remove that exact stable row with `vibe session queue remove <session-id> <message-id>`. Never guess a message ID or delete another row to simulate reordering.
+- Use `vibe session queue list --session-id <session-id>` before changing another Workbench Session's queue. If an instruction is obsolete, contradictory, or duplicated, remove that exact stable row with `vibe session queue remove <message-id> --session-id <session-id>`. Never guess a message ID or delete another row to simulate reordering.
 - When `vibe agent run` creates a new Session, the default placement is private/background. Add `--same-scope` for a visible sibling Session in the same Workbench project or IM scope, or `--scope-id <scopes.id>` for a specific existing scope.
 - When a task, watch, or new Agent run creates a Session and `--cwd` is omitted, Avibe uses the command's current working directory. Forks keep the source Session cwd by default.
 - Async Agent runs return the final result to this conversation by default. Pass `--no-callback` only when you will inspect the run later with `vibe runs`. Pass `--callback-session-id <id>` only when the final result should return to a different Session.
@@ -50,7 +50,7 @@ Targeting and callbacks:
 - `vibe task add` stores a message template — or, with `--shell` / a trailing `-- <argv>`, a command — and creates Runs when the time trigger fires. A command task runs with no Agent turn: silent on success, a failure notice on failure, `--on-failure agent` to escalate failures to an Agent.
 - `vibe watch add` uses `--message` as the instruction template for the Agent Run created after the waiter reaches a reportable state.
 - `--fork-self` forks this Session's native backend context. `--fork-session <id>` forks another explicit Session. Forks keep the source Session backend, scope, and cwd by default.
-- `--model` and `--reasoning-effort` set the model of any new Session a run creates (blank, `--create-session`, or a fork); the Session keeps it, and they are refused with `--session-id`. Fork overrides stay narrow: `--agent`, `--model`, and `--reasoning-effort` can override the forked Session only if the backend stays the same. Do not combine fork flags with existing-session or session-creation flags.
+- `--model` and `--reasoning-effort` set the model of any new Session a run creates (blank or a fork); the Session keeps it, and they are refused with `--session-id`. Fork overrides stay narrow: `--agent`, `--model`, and `--reasoning-effort` can override the forked Session only if the backend stays the same. Do not combine fork flags with `--session-id`.
 
 Operational guidance:
 

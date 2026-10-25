@@ -106,7 +106,7 @@ Amendments (orchestrator-approved):
 - Errors: `400` invalid value; `404` unknown session. Changing `scope_id`
   never mutates the session's stored `workdir`.
 
-CLI equivalent: `vibe session update [--visibility foreground|background]
+CLI equivalent: `vibe session update [--session-id <id>] [--visible|--hidden]
 [--scope-id <scopes.id>|none]`.
 
 ## 3. Graph endpoint (M2 owns; shape frozen for both)

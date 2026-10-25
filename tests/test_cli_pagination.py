@@ -7,8 +7,8 @@ import json
 import re
 import shlex
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
+
+import pytest
 
 import pytest
 
@@ -134,42 +134,59 @@ def test_injected_and_builtin_skill_commands_only_use_parser_supported_flags() -
     assert checked_commands >= 20
 
 
-def test_managed_harness_session_queue_commands_name_real_subcommands() -> None:
+def test_session_examples_in_guidance_parse_against_the_cli() -> None:
+    """Every `vibe session ...` call the prompt or a built-in Skill teaches must parse.
+
+    The flag check above cannot see a Session named positionally: `vibe session
+    get <id>` mentions no flag. The session group names its Session only with
+    `--session-id`, so an example that still passes it positionally fails here.
+    """
+
     context = MessageContext(
         user_id="user",
         channel_id="channel",
         platform="avibe",
         platform_specific={"agent_session_id": "ses-test"},
     )
-    with patch(
-        "core.managed_skills.resolve_skills",
-        return_value=[
-            SimpleNamespace(
-                name="use-avibe-harness",
-                description="Harness workflow",
-                directory=ROOT / "skills" / "use-avibe-harness",
-                disable_model_invocation=False,
-            )
-        ],
-    ):
-        prompt = build_system_prompt_injection(context=context, skills_cwd=ROOT)
-    harness_skill = (ROOT / "skills" / "use-avibe-harness" / "SKILL.md").read_text()
+    guidance = [build_system_prompt_injection(context=context)] + [
+        path.read_text() for path in sorted((ROOT / "skills").rglob("*.md"))
+    ]
+    examples = sorted(set(re.findall(r"`(vibe session [^`\n]+)`", "\n".join(guidance))))
+    assert any("queue remove" in example for example in examples), examples
 
-    assert "load the `use-avibe-harness` Skill" in prompt
+    parser = cli.build_parser()
+    for example in examples:
+        argv = shlex.split(re.sub(r"<[^>]+>|\.\.\.", "x", example))[1:]
+        try:
+            parser.parse_args(argv)
+        except SystemExit as exc:
+            raise AssertionError(f"guidance teaches an unparseable session command: {example!r}") from exc
 
-    for command, expected_path in (
-        (
-            "vibe session queue list <session-id>",
-            ("session", "queue", "list"),
-        ),
-        (
-            "vibe session queue remove <session-id> <message-id>",
-            ("session", "queue", "remove"),
-        ),
-    ):
-        assert f"`{command}`" in harness_skill
-        _, path = _prompt_command_parser(command)
-        assert path == expected_path
+
+@pytest.mark.parametrize(
+    ("argv", "expected_limit", "error_code"),
+    [
+        (["--limit", "500"], 100, None),
+        (["--limit", "100"], 100, None),
+        (["--limit", "0"], None, "invalid_pagination"),
+        (["--page", "0"], None, "invalid_pagination"),
+    ],
+)
+def test_cli_limit_above_the_maximum_is_served_at_the_maximum(
+    monkeypatch, tmp_path, capsys, argv, expected_limit, error_code
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    args = cli.build_parser().parse_args(["session", "list", *argv])
+
+    result = cli.cmd_session_list(args)
+
+    captured = capsys.readouterr()
+    if error_code is None:
+        assert result == 0
+        assert json.loads(captured.out)["pagination"]["limit"] == expected_limit
+    else:
+        assert result == 1
+        assert json.loads(captured.err)["code"] == error_code
 
 
 @pytest.mark.parametrize(

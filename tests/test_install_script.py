@@ -83,7 +83,6 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
                 return upgrade.ActivationOutcome(outcome.activated_launcher, (failure,))
 
             cli.activate_installer_candidate = _activate_with_peer_failure
-            cli._configured_cli_language = lambda: "zh"
         if os.environ.get("VIBE_TEST_CP1252_DIAGNOSTIC") == "1":
             sys.stdout = io.TextIOWrapper(
                 os.fdopen(os.dup(1), "wb"),

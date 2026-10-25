@@ -287,8 +287,6 @@ def _resume_in_the_web_ui(watch_id: str, capsys) -> tuple[str, str]:
 def test_a_job_watch_that_no_longer_owns_its_job_is_never_resumed(
     tmp_path: Path, capsys, monkeypatch, state: str, resume
 ) -> None:
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
-
     async def run() -> tuple[LocalJobHost, str, str, tuple[str, str]]:
         store = ManagedWatchStore()
         host = _host(tmp_path, store)
@@ -317,8 +315,7 @@ def test_a_job_watch_that_no_longer_owns_its_job_is_never_resumed(
     host, job_id, watch_id, (code, message) = asyncio.run(run())
 
     assert code == "job_watch_not_resumable"
-    language = "zh" if resume is _resume_in_the_cli else "en"
-    assert message == i18n_t("error.jobWatchResumeRefused.message", language)
+    assert message == i18n_t("error.jobWatchResumeRefused.message", "en")
     assert not ManagedWatchStore().get_watch(watch_id).enabled
     if state == "released":
         assert len(_follow_ups(watch_id)) == 1
@@ -328,7 +325,7 @@ def test_a_job_watch_that_no_longer_owns_its_job_is_never_resumed(
         assert host.stop_reason(job_id) == "watch_disabled"
 
 
-def test_changing_a_job_watch_waiter_is_refused_in_the_user_language(tmp_path: Path, capsys, monkeypatch) -> None:
+def test_changing_a_job_watch_waiter_is_refused(tmp_path: Path, capsys, monkeypatch) -> None:
     async def hand_over() -> tuple[LocalJobHost, str, str]:
         store = ManagedWatchStore()
         host = _host(tmp_path, store)
@@ -336,7 +333,6 @@ def test_changing_a_job_watch_waiter_is_refused_in_the_user_language(tmp_path: P
         return host, job_id, await host.hand_over(job_id)
 
     host, job_id, watch_id = asyncio.run(hand_over())
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
     monkeypatch.setattr(sys, "argv", ["vibe", "watch", "update", watch_id, "--shell", "pytest -q"])
     with pytest.raises(SystemExit) as exit_info:
         cli.main()
@@ -344,7 +340,9 @@ def test_changing_a_job_watch_waiter_is_refused_in_the_user_language(tmp_path: P
     assert exit_info.value.code == 1
     error = json.loads(capsys.readouterr().err)
     assert error["code"] == "job_watch_update_refused"
-    assert error["error"] == i18n_t("error.jobWatchUpdateRefused.message", "zh")
+    assert error["error"] == (
+        "This Watch waits on a command that is already running, so only its name, message, and lifetime can be changed."
+    )
     assert ManagedWatchStore().get_watch(watch_id).job_target["command"] == "sleep 60"
 
     # What it does take goes through the same doorway.

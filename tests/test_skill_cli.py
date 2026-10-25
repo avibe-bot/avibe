@@ -1,5 +1,5 @@
+import json
 from pathlib import Path
-from types import SimpleNamespace
 
 from core import managed_skills
 from vibe.cli import build_parser, cmd_skill
@@ -29,49 +29,46 @@ def _isolate_catalog(monkeypatch, tmp_path: Path) -> Path:
     return cwd
 
 
-def test_skill_list_and_load_follow_the_text_protocol(monkeypatch, tmp_path, capsys):
+def _skill_content(skill_file: Path, body: str) -> str:
+    return f'<skill_content name="{skill_file.parent.name}" directory="{skill_file.parent.resolve()}">\n{body}</skill_content>\n'
+
+
+def test_skill_list_prints_the_json_envelope(monkeypatch, tmp_path, capsys):
     cwd = _isolate_catalog(monkeypatch, tmp_path)
-    skill_file = _write_skill(
-        cwd / ".agents" / "skills",
-        "docs",
-        "Read project docs.",
-        "Use references/guide.md\n",
-    )
+    _write_skill(cwd / ".agents" / "skills", "docs", "Read project docs.", "Use references/guide.md\n")
 
-    assert cmd_skill(SimpleNamespace(skill_command="list", page=1)) == 0
-    assert capsys.readouterr().out == "- docs: Read project docs.\n"
+    assert cmd_skill(build_parser().parse_args(["skill", "list"])) == 0
 
-    assert cmd_skill(SimpleNamespace(skill_command="load", name="docs")) == 0
-    output = capsys.readouterr().out
-    assert output == (
-        f'<skill_content name="docs" directory="{skill_file.parent.resolve()}">\n'
-        "Use references/guide.md\n"
-        "</skill_content>\n"
-    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema_version"] == 1
+    assert payload["ok"] is True
+    assert payload["kind"] == "skills"
+    assert payload["skills"] == [{"name": "docs", "description": "Read project docs."}]
+    assert payload["pagination"] == {"page": 1, "returned": 1, "has_more": False, "next_page": None}
 
 
-def test_skill_load_failure_has_empty_stdout(monkeypatch, tmp_path, capsys):
-    _isolate_catalog(monkeypatch, tmp_path)
+def test_skill_load_prints_each_named_skill_in_order_and_fails_on_unknown_names(monkeypatch, tmp_path, capsys):
+    cwd = _isolate_catalog(monkeypatch, tmp_path)
+    docs = _write_skill(cwd / ".agents" / "skills", "docs", "Read project docs.", "Use references/guide.md\n")
+    release = _write_skill(cwd / ".agents" / "skills", "release", "Cut a release.", "Tag it.\n")
+    args = build_parser().parse_args(["skill", "load", "--", "release", "missing", "docs"])
 
-    assert cmd_skill(SimpleNamespace(skill_command="load", name="missing")) == 1
-    captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == "Skill not found: missing\n"
-
-
-def test_skill_load_parser_accepts_the_canonical_separator_form():
-    args = build_parser().parse_args(["skill", "load", "--", "pdf-processing"])
-
-    assert args.skill_command == "load"
-    assert args.name == "pdf-processing"
-
-
-def test_skill_cli_localizes_errors(monkeypatch, tmp_path, capsys):
-    _isolate_catalog(monkeypatch, tmp_path)
-    monkeypatch.setattr("vibe.cli._configured_cli_language", lambda: "zh")
-
-    assert cmd_skill(SimpleNamespace(skill_command="load", name="missing")) == 1
+    assert cmd_skill(args) == 1
 
     captured = capsys.readouterr()
-    assert captured.out == ""
-    assert captured.err == "未找到 Skill：missing\n"
+    assert captured.out == _skill_content(release, "Tag it.\n") + _skill_content(docs, "Use references/guide.md\n")
+    error = json.loads(captured.err)
+    assert error["kind"] == "error"
+    assert error["code"] == "skill_not_found"
+    assert error["details"] == {"missing": ["missing"], "loaded": ["release", "docs"]}
+
+
+def test_skill_load_of_known_names_succeeds_with_skill_text_only(monkeypatch, tmp_path, capsys):
+    cwd = _isolate_catalog(monkeypatch, tmp_path)
+    docs = _write_skill(cwd / ".agents" / "skills", "docs", "Read project docs.", "Use references/guide.md\n")
+
+    assert cmd_skill(build_parser().parse_args(["skill", "load", "--", "docs"])) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == _skill_content(docs, "Use references/guide.md\n")
+    assert captured.err == ""

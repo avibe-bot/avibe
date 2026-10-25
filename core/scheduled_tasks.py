@@ -11445,7 +11445,7 @@ class ScheduledTaskService:
         if deliver_key:
             delivery_target = parse_session_key(deliver_key)
             if delivery_target.platform != session_target.platform:
-                raise ValueError("--deliver-key must stay on the same platform as the session target")
+                raise ValueError("the stored delivery target must stay on the same platform as the session target")
             return delivery_target
         if post_to == "channel":
             return ParsedSessionKey(
@@ -11456,7 +11456,7 @@ class ScheduledTaskService:
             )
         if post_to == "thread":
             if not session_target.thread_id:
-                raise ValueError("--post-to thread requires a thread-bound session target or an explicit --deliver-key")
+                raise ValueError("stored thread delivery requires a thread-bound session target or an explicit delivery target")
             return session_target
         return session_target
 
