@@ -104,16 +104,39 @@ class LocalFetchEngine:
             return {"error_code": "fetch_dns_unverified", "terminal": True}
         if state["phase"] == "extract":
             code = "fetch_target_unreadable"
-        return {"error_code": code, "terminal": False}
+        return {"error_code": code, "terminal": False, "cooldown_suppressed": code == "fetch_timeout"}
 
     async def _run(self, operation, url, *, deadline, locale="en", on_sent=None):
         state = {"operation": operation, "sent": False, "host": None, "held_host": None, "slot": False,
                  "waiting": True, "phase": "policy" if operation == "gate" else "admission"}
+        invocation = asyncio.create_task(self._invoke(operation, url, locale, state, on_sent, deadline))
+
+        async def drain():
+            try:
+                await invocation
+            except asyncio.CancelledError:
+                pass  # The child's cancellation is not another caller Stop.
+
         try:
-            result = await asyncio.wait_for(self._invoke(operation, url, locale, state, on_sent, deadline),
-                                            timeout=max(0, deadline - time.monotonic()))
+            result = await asyncio.wait_for(asyncio.shield(invocation), timeout=max(0, deadline - time.monotonic()))
         except asyncio.TimeoutError:
+            invocation.cancel()
+            draining = asyncio.create_task(drain())
+            try:
+                await asyncio.shield(draining)
+            except asyncio.CancelledError:
+                await await_owned_task(draining)
+                raise
             result = self._failure(state, "fetch_timeout")
+        except asyncio.CancelledError:
+            # Python <=3.11 wait_for can abandon its inner cancellation wait
+            # on a second Stop. Own the whole invocation, not just its finally.
+            invocation.cancel()
+            try:
+                await await_owned_task(asyncio.create_task(drain()))
+            except Exception:
+                pass  # Reaping owns resources; Stop owns the public outcome.
+            raise
         if result.get("error_code") == "service_busy" and not state["sent"]:
             result["skipped"] = "unavailable"
         if state.get("fallback") and result.get("error_code") and not result.get("terminal"):
@@ -224,7 +247,12 @@ class LocalFetchEngine:
                             await asyncio.gather(*(task for task in (reader, monitor) if task), return_exceptions=True)
                     # Timeout followed by Stop must not interrupt kill/reap,
                     # strand a host, or leave a monitor reading a dead PID.
-                    await await_owned_task(asyncio.create_task(cleanup()))
+                    cleaning = asyncio.create_task(cleanup())
+                    try:
+                        await asyncio.shield(cleaning)
+                    except asyncio.CancelledError:
+                        await await_owned_task(cleaning)
+                        raise  # Even a Stop arriving after a normal result wins.
         finally:
             self._release(operation, state)
 

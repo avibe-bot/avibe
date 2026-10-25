@@ -201,8 +201,16 @@ def fetch_document(url: str, locale: str, exchange, *, remaining_seconds: float 
         if cookie := cookies.header(address):
             headers["Cookie"] = cookie
         stage = "fetch"
+        allowance = max(0.01, deadline - time.monotonic())
+        hop_sent = False
+
+        def mark_hop_sent():
+            nonlocal hop_sent
+            on_sent()
+            hop_sent = True
+
         try:
-            response = hop(target, headers, budget, max(0.01, deadline - time.monotonic()), on_sent)
+            response = hop(target, headers, budget, allowance, mark_hop_sent)
             cookies.receive(address, response.headers)
             if response.status == 401:
                 raise FetchFailure("fetch_refused", terminal=True)
@@ -249,6 +257,8 @@ def fetch_document(url: str, locale: str, exchange, *, remaining_seconds: float 
             result = {**page.payload(), "final_url": address.url, "source_size_bytes": len(response.body)}
             break
         except FetchFailure as error:
+            if error.code == "fetch_timeout" and (hop_sent or allowance < 5):
+                error.cooldown_suppressed = True
             if error.terminal or retained is None:
                 raise
             page, final_url, size = retained
@@ -260,11 +270,16 @@ def fetch_document(url: str, locale: str, exchange, *, remaining_seconds: float 
             # No target error retries on the other transport. Native-load failure
             # was the only fallback, chosen before the first socket existed.
             code = "fetch_target_unreadable" if stage == "extract" else "fetch_timeout" if "timeout" in type(error).__name__.lower() else "fetch_unavailable"
+            # Connect/TLS has an independent 5 s bound. After send, the only
+            # timeout is the remaining attempt budget; a shortened connect
+            # allowance likewise cannot prove this new host is unhealthy.
+            suppressed = code == "fetch_timeout" and (hop_sent or allowance < 5)
             if retained is not None:
                 page, final_url, size = retained
-                result = {**page.payload(), "final_url": final_url, "source_size_bytes": size, "cooldown_code": code}
+                result = {**page.payload(), "final_url": final_url, "source_size_bytes": size,
+                          "cooldown_code": code, "cooldown_suppressed": suppressed}
                 break
-            raise FetchFailure(code) from None
+            raise FetchFailure(code, cooldown_suppressed=suppressed) from None
     else:
         raise FetchFailure("fetch_target_unreadable")
     for field in ("follow_url", "follow_kind"):

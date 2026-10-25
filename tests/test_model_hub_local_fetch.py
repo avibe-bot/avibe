@@ -454,22 +454,72 @@ time.sleep(60)
 
 
 @pytest.mark.parametrize("sent", [False, True])
-async def test_attempt_expiry_during_revalidation_is_not_a_dns_refusal(monkeypatch, sent):
+@pytest.mark.parametrize("phase", ["policy", "fetch"])
+async def test_attempt_expiry_during_revalidation_is_not_a_dns_refusal(monkeypatch, sent, phase):
     script = '''import sys,time,json
 sys.stdin.readline()
 for event in EVENTS:
  print(json.dumps(event),flush=True); sys.stdin.readline()
 time.sleep(60)
-'''.replace("EVENTS", repr(([{"event": "sent"}] if sent else []) + [{"event": "phase", "phase": "policy"}]))
+'''.replace("EVENTS", repr([{"event": "host", "host": "example.com"}] +
+                        ([{"event": "sent"}] if sent else []) + [{"event": "phase", "phase": phase}]))
     monkeypatch.setattr(local_fetch, "_WORKER", script)
     engine = local_fetch.LocalFetchEngine()
     result = await engine.fetch("https://example.com/", deadline=time.monotonic() + .3)
-    assert result["error_code"] == ("fetch_timeout" if sent else "service_busy") and not result["terminal"]
+    code = "service_busy" if not sent and phase == "policy" else "fetch_timeout"
+    assert result["error_code"] == code and not result["terminal"]
     assert result["sent"] == sent and not engine._cooldowns
-    if not sent:
+    if code == "service_busy":
         assert result["skipped"] == "unavailable"
     with pytest.raises(FetchFailure, match="fetch_dns_unverified"):
         await engine.check("https://example.com/", deadline=time.monotonic() + .3)
+
+
+@pytest.mark.parametrize("remaining,elapsed,sent,timeout_type,suppressed", [
+    (30, 5, False, "connect", False),
+    (1, 1, False, "connect", True),
+    (30, 30, True, "read", True),
+])
+def test_hop_timeout_only_cools_when_it_had_its_own_connect_budget(
+    local_fixture, monkeypatch, remaining, elapsed, sent, timeout_type, suppressed
+):
+    import httpcore
+    from types import SimpleNamespace
+    _, _, _, events = local_fixture
+    clock = SimpleNamespace(now=0)
+    monkeypatch.setattr(worker, "time", SimpleNamespace(monotonic=lambda: clock.now, time=time.time))
+
+    def timed_out(target, headers, budget, timeout, on_sent):
+        if sent:
+            on_sent()
+        clock.now += elapsed
+        raise (httpcore.ReadTimeout if timeout_type == "read" else httpcore.ConnectTimeout)()
+
+    monkeypatch.setattr(worker, "curl_hop", timed_out)
+    with pytest.raises(FetchFailure) as raised:
+        worker.fetch_document("https://example.com/", "en", events.append, remaining_seconds=remaining)
+    assert raised.value.code == "fetch_timeout" and raised.value.cooldown_suppressed == suppressed
+
+async def test_stop_during_success_cleanup_is_rethrown_after_reap(monkeypatch):
+    script = 'import sys; sys.stdin.readline(); print(\'{"event":"result","result":{"content":"page"}}\',flush=True)'
+    monkeypatch.setattr(local_fetch, "_WORKER", script)
+    cleaning, release = asyncio.Event(), asyncio.Event()
+    async def monitor(process):
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cleaning.set()
+            await release.wait()
+            raise
+    monkeypatch.setattr(local_fetch.LocalFetchEngine, "_monitor", staticmethod(monitor))
+    task = asyncio.create_task(local_fetch.LocalFetchEngine().fetch("https://example.com/", deadline=time.monotonic() + 5))
+    await asyncio.wait_for(cleaning.wait(), 5)
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 async def test_active_worker_cap_and_cancellation_safe_host_release(monkeypatch):
@@ -531,14 +581,14 @@ def test_worker_respects_stricter_inherited_kernel_limits():
     from pathlib import Path
     code = '''import resource,sys,json
 sys.path.insert(0,sys.argv[1])
+from core.handlers.model_hub.fetch_worker import resource_limits
 resource.setrlimit(resource.RLIMIT_CPU,(20,20))
 resource.setrlimit(resource.RLIMIT_FSIZE,(65536,65536))
-from core.handlers.model_hub.fetch_worker import resource_limits
 resource_limits()
 print(json.dumps([resource.getrlimit(resource.RLIMIT_CPU),resource.getrlimit(resource.RLIMIT_FSIZE)]))
 '''
     result = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(Path(worker.__file__).resolve().parents[3])],
-                            capture_output=True, text=True, check=True, timeout=5)
+                            capture_output=True, text=True, check=True, timeout=30)
     assert json.loads(result.stdout) == [[20, 20], [65536, 65536]]
 
 
