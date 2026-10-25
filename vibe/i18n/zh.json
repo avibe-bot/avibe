@@ -110,7 +110,9 @@
         "command": "检查统一的 Harness 实时状态和异常",
         "description": "检查活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。",
         "status": "显示有界的实时状态与异常快照",
-        "statusDescription": "显示调用方 Session 的活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。用 --session-id 查看其他 Session，用 --global 查看所有 Session。"
+        "statusDescription": "显示调用方 Session 的活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。用 --session-id 查看其他 Session，用 --global 查看所有 Session。",
+        "brief": "只输出 '{list_command}' 为这条记录打印的那一行精简记录",
+        "query": "搜索常见的 {items} 文本字段"
       },
       "error": {
         "sqliteRequired": "Harness 状态需要 SQLite Task 存储。",
@@ -206,8 +208,7 @@
       "bindingUnresolvedPaused": "已暂停:绑定的 Agent 会话 {session} 无法接收请求，该定义继续运行只会反复失败。请用以下命令重新绑定:vibe task update {id} --session-id <id>;然后恢复:vibe task resume {id}。",
       "cli": {
         "help": {
-          "cancel": "\u8bf7\u6c42\u5c3d\u529b\u53d6\u6d88\u4e00\u4e2a run\uff1b\u82e5\u8be5 run \u5df2\u8fdb\u5165\u6b63\u5728\u8fd0\u884c\u7684 Session turn\uff0c\u4f1a\u50cf Session Stop \u4e00\u6837\u505c\u6b62\u6574\u4e2a turn",
-          "showBrief": "只显示状态、时间、错误和回调字段，与 vibe runs list 相同"
+          "cancel": "\u8bf7\u6c42\u5c3d\u529b\u53d6\u6d88\u4e00\u4e2a run\uff1b\u82e5\u8be5 run \u5df2\u8fdb\u5165\u6b63\u5728\u8fd0\u884c\u7684 Session turn\uff0c\u4f1a\u50cf Session Stop \u4e00\u6837\u505c\u6b62\u6574\u4e2a turn"
         },
         "canceledBeforeLiveTurn": "\u8be5 run \u5728\u5176\u8f93\u5165\u8fdb\u5165\u6b63\u5728\u8fd0\u884c\u7684 Session turn \u4e4b\u524d\u5df2\u88ab\u53d6\u6d88\u3002"
       }
@@ -293,7 +294,9 @@
     "selectOne": "选择一个",
     "selectOneOrMore": "选择一个或多个",
     "processing": "正在处理 `/{command}`...",
-    "submitted": "已提交"
+    "submitted": "已提交",
+    "moreRecordsAddPage": "还有更多记录。加上 --page 继续翻页。",
+    "moreRecordsContinueWith": "还有更多记录。继续翻页：{command}"
   },
   "dependencies": {
     "askill": {

@@ -756,10 +756,10 @@ def test_a_job_watch_reads_as_its_command_and_stores_no_waiter(tmp_path: Path) -
 
     sqlite = SQLiteBackgroundTaskStore()
     shown = cli._watch_projection_payload(sqlite.get_watch(watch_id))
+    row = cli._watch_projection_payload(sqlite.get_watch(watch_id), brief=True)
     listed = sqlite.list_watches_page(page_request=None, query="test_slow").items
-    assert shown["command_preview"] == command
-    assert shown["display_name"] == command
     assert shown["shell_command"] == command
+    assert row["command_preview"] == command
     assert [row["id"] for row in listed] == [watch_id]
     # Nothing a reader without job targets could run.
     assert _sql("SELECT command_json, shell_command FROM run_definitions WHERE id = ?", watch_id) == [("[]", None)]

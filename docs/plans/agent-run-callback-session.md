@@ -99,16 +99,19 @@ Validation:
 - `--callback-session-id` is orthogonal to target Session selection and scope
   placement.
 
-Output payload should include:
+The accept payload is one `run` object, and the callback route lives on it:
 
 ```json
 {
-  "callback_session_id": "ses...",
   "run": {
     "callback_session_id": "ses..."
   }
 }
 ```
+
+`callback_notice` appears only when the route is not what the caller's flags
+imply: a run on the caller's own Session, which gets no callback because the
+result already lands there.
 
 ### Internal/API Payload
 

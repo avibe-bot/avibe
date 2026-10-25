@@ -41,7 +41,16 @@ All list/query commands should return:
 - `pagination.next_page`
 - `pagination.next_command`
 
-Text output should append a concise "more records" hint when `has_more` is true.
+`pagination.next_command` is the only continuation: no top-level prose repeats
+it. A page whose command cannot be replayed (SQL piped on stdin, which has no
+`next_command`) adds one `message` telling the caller to add `--page`.
+
+### Task and Watch Lists
+
+`vibe task list` and `vibe watch list` take `--q` with the same substring
+semantics as `vibe runs list --q`, searching the store's definition text fields
+(the Workbench search), and carry it into `next_command`. Enabled definitions
+come first, each group ordered by most recent activity.
 
 ### Runs List
 

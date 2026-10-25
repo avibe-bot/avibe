@@ -25,6 +25,12 @@ and never provide an unpaginated `--all` bypass. Follow
 `pagination.next_command` for the next page and use the corresponding `show` or
 `get` command for full record detail.
 
+List rows carry only what is needed to decide the next step and omit null,
+empty, and zero-valued fields, so an absent field means unset. `vibe task show`,
+`vibe watch show`, `vibe runs show`, `vibe session get`, and `vibe agent show`
+print the full record; add `--brief` to print exactly the row the matching list
+command prints.
+
 ### Session-owned lists
 
 `vibe harness status`, `vibe runs list`, `vibe task list`, `vibe watch list`,
@@ -440,7 +446,7 @@ may be omitted and defaults to the caller Session from `AVIBE_SESSION_ID`.
 List and inspect Agent run records.
 
 ```bash
-vibe runs list --brief                 # inside an Avibe Agent shell, the caller Session's runs
+vibe runs list                         # inside an Avibe Agent shell, the caller Session's runs
 vibe runs list --global --definition-id <task-or-watch-id>   # every fire, across per-run Sessions
 vibe runs show run_abc123
 vibe runs show run_abc123 --brief      # status, timing, error, and callback fields only
@@ -480,8 +486,9 @@ Use `vibe task add --help` and `vibe task update --help` for the full command su
 
 When `vibe task add` runs inside an Avibe-injected Agent shell, `--session-id`
 may be omitted. Avibe defaults the task target to the caller Session from
-`AVIBE_SESSION_ID` and reports that default in the command output. Explicit
-`--session-id`, session creation flags, and delivery flags still win.
+`AVIBE_SESSION_ID`; the printed definition's `session_id` shows the resolved
+target. Explicit `--session-id`, session creation flags, and delivery flags
+still win.
 
 A pure command task (`--on-failure none`, the default) skips that caller-session
 default and takes no session, scope, or agent flags. Successful runs are silent;
@@ -560,6 +567,12 @@ Hub menu does not offer, or a menu that cannot be loaded, is refused; for claude
 and codex an unknown value is a warning, since their bundled catalogs can lag
 behind a new release. `vibe agent models <agent>` lists valid values.
 
+The command prints one `run` object: its `id`, `status`, `run_type`,
+`agent_name`, and the `session_id`, `scope_id`, `visibility`, and
+`callback_session_id` Avibe resolved for it. `--sync` replaces it with the
+finished run record. `callback_notice` appears only when a run on the caller's
+own Session gets no callback because the result already lands there.
+
 Async runs need an explicit callback policy unless the command is running inside
 an Avibe-injected Agent environment. Use `--callback-session-id` when the final
 result text should return to a caller Session as a follow-up Agent message; use
@@ -611,18 +624,27 @@ vibe watch remove <watch-id>
 
 `vibe task list` and `vibe watch list` read the caller Session by default (see
 [Session-owned lists](#session-owned-lists)), return 20 definitions per page, and
-include `pagination.next_command` when more rows exist. Successful one-shot
-definitions are hidden by default. Add `--include-finished` to page through
-history. List output is always bounded; there is no unpaginated `--all` mode.
-Task and watch commands use `definition` for one record and `definitions` for
-lists; they do not duplicate those records under command-specific aliases.
+include `pagination.next_command` when more rows exist. Enabled definitions come
+first, each group ordered by most recent activity. `--q <text>` searches the
+same text fields as the Workbench search (id, name, Agent, Session, message, and
+command) and is carried into `next_command`. Successful one-shot definitions are
+hidden by default. Add `--include-finished` to page through history. List output
+is always bounded; there is no unpaginated `--all` mode. Task and watch commands
+use `definition` for one record and `definitions` for lists; they do not
+duplicate those records under command-specific aliases.
+
 Both list and show read the same Harness projection as the Workbench:
-`lifecycle_state`, `lifecycle_detail`, `next_run_at`, `waiting_since`, and
-`running_since`; watch rows also include `process_alive`. For watches,
-`process_alive: null` means no waiter runtime has ever been observed, while
-`false` means an observed waiter has exited. The older `state` and task
-`last_status` fields remain compatibility-only display fields and do not define
-the lifecycle.
+`lifecycle_state` is the lifecycle, with `lifecycle_detail` and
+`lifecycle_finished_at` for a finished definition and `next_run_at`,
+`waiting_since`, or `running_since` while it is in play. A row names an unnamed
+definition by `message_preview` or `command_preview` and carries `last_error`
+and a non-zero `last_exit_code`. Rows and `show` print `health` (and a watch's
+`processing_health`) only when the verdict is not `healthy`, and failure
+counters only when non-zero. A watch row adds `process_alive: false`
+only when an enabled watch's observed waiter has exited; `vibe watch show`
+prints the observed `process_alive` and `runtime`, and omits both when no waiter
+has ever been observed. Task and watch add, update, pause, and resume print the
+same `definition` as `show`, plus `warnings` when there are any.
 
 `vibe task show` and `vibe watch show` also read a removed definition: the same
 projection with `lifecycle_state: "removed"` and `removed_at`. Lists never
@@ -643,7 +665,9 @@ views while preserving existing run history in SQLite. Prefer `vibe watch`
 over ad-hoc `nohup` jobs when the
 user wants a managed background task with a guaranteed follow-up message.
 `--timeout` defaults to 21600 seconds; an explicit `--timeout 0` disables the
-per-cycle timeout, while any positive value is persisted unchanged.
+per-cycle timeout, while any positive value is persisted unchanged. A waiter exit
+listed in `--retry-exit-code` means "still waiting": the watch records it as
+`last_exit_code` and keeps `last_error` for real failures.
 
 ### `vibe version`
 

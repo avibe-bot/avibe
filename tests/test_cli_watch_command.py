@@ -444,7 +444,7 @@ def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
     assert "watch" not in payload
     assert payload["definition"]["name"] == "Wait for export"
     assert payload["definition"]["shell_command"] == "python3 scripts/wait.py"
-    assert payload["definition"]["command"] == []
+    assert "command" not in payload["definition"]
     assert payload["definition"]["mode"] == "once"
     assert payload["definition"]["retry_exit_codes"] == [75]
 
@@ -574,7 +574,7 @@ def test_watch_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pa
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["session_policy"] == "create_per_run"
-    assert payload["definition"]["deliver_key"] is None
+    assert payload["definition"].get("deliver_key") is None
     assert payload["definition"]["cwd"] == str(invoke_dir)
     assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-watch"
     assert "session_workdir" not in payload["definition"]["metadata"]
@@ -612,8 +612,8 @@ def test_watch_add_create_per_run_without_scope_records_standalone_definition(tm
     assert result == 0
     watch = json.loads(capsys.readouterr().out)["definition"]
     assert watch["session_policy"] == "create_per_run"
-    assert watch["session_id"] is None
-    assert watch["deliver_key"] is None
+    assert watch.get("session_id") is None
+    assert watch.get("deliver_key") is None
     assert "session_scope_id" not in watch["metadata"]
     assert "session_workdir" not in watch["metadata"]
 
@@ -731,11 +731,8 @@ def test_watch_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> 
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["session_id"] == "sesCaller"
     assert payload["definition"]["session_policy"] == "existing"
-    assert payload["session_default_notice"] == {
-        "code": "session_defaulted_to_caller",
-        "message": "Watch target Session defaulted to this Agent Session.",
-        "session_id": "sesCaller",
-    }
+    # The defaulted target is the definition's session_id; no notice repeats it.
+    assert set(payload) == {"schema_version", "ok", "kind", "definition"}
 
 
 def test_watch_add_accepts_message_template(tmp_path: Path, capsys) -> None:
@@ -763,7 +760,7 @@ def test_watch_add_accepts_message_template(tmp_path: Path, capsys) -> None:
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["message"] == "Summarize the waiter output."
-    assert payload["definition"]["prefix"] is None
+    assert payload["definition"].get("prefix") is None
 
 
 def test_watch_add_creates_exec_watch_with_retry_codes(tmp_path: Path, capsys) -> None:
@@ -1065,17 +1062,21 @@ def test_wait_for_watch_startup_rejects_watch_that_fails_before_stable_window(tm
     assert exc.value.code == "watch_startup_failed"
 
 
-def test_watch_list_brief_includes_runtime_state(tmp_path: Path, capsys) -> None:
+def test_watch_list_row_carries_only_decision_fields(tmp_path: Path, capsys) -> None:
+    """A list row is the compact projection: what an Agent decides its next step from."""
+
     store = ManagedWatchStore()
     runtime_store = WatchRuntimeStateStore()
-    watch = store.add_watch(
-        name="Watch CI",
+    retrying = _add_test_watch(store, name="Watch CI", mode="forever")
+    dead = _add_test_watch(store, name="Dead waiter", mode="forever")
+    unnamed = store.add_watch(
+        name=None,
         session_key="slack::channel::C123",
-        command=["python3", "wait.py"],
+        command=["python3", "wait.py", "--pr", "7"],
         shell_command=None,
         prefix=None,
         cwd=None,
-        mode="forever",
+        mode="once",
         timeout_seconds=600,
         lifetime_timeout_seconds=0,
         retry_exit_codes=[75],
@@ -1083,15 +1084,24 @@ def test_watch_list_brief_includes_runtime_state(tmp_path: Path, capsys) -> None
         post_to=None,
         deliver_key=None,
     )
+    # A configured retry exit: the waiter is healthy and still waiting.
+    assert store.mark_cycle_start(retrying.id)
+    assert store.mark_cycle_result(retrying.id, exit_code=75, error=None)
     runtime_store.write(
         {
             "watches": {
-                watch.id: {
+                retrying.id: {
                     "running": True,
                     "pid": 1234,
                     "started_at": "2026-04-02T00:00:00+00:00",
                     "updated_at": "2026-04-02T00:00:00+00:00",
-                }
+                },
+                dead.id: {
+                    "running": False,
+                    "pid": 2345,
+                    "started_at": "2026-04-02T00:00:00+00:00",
+                    "updated_at": "2026-04-02T00:00:00+00:00",
+                },
             }
         }
     )
@@ -1100,12 +1110,23 @@ def test_watch_list_brief_includes_runtime_state(tmp_path: Path, capsys) -> None
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
-        result = cli.cmd_watch_list(scope=cli.SessionListScope(), brief=True)
+        result = cli.cmd_watch_list(scope=cli.SessionListScope())
 
     assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["definitions"][0]["state"] == "running"
-    assert payload["definitions"][0]["mode"] == "forever"
+    rows = {row["id"]: row for row in json.loads(capsys.readouterr().out)["definitions"]}
+    assert set(rows[retrying.id]) == {
+        "id",
+        "name",
+        "mode",
+        "lifecycle_state",
+        "waiting_since",
+        "last_exit_code",
+    }
+    assert (rows[retrying.id]["lifecycle_state"], rows[retrying.id]["last_exit_code"]) == ("waiting", 75)
+    # An enabled watch whose observed waiter exited is the one liveness worth naming.
+    assert rows[dead.id]["process_alive"] is False
+    assert "name" not in rows[unnamed.id]
+    assert rows[unnamed.id]["command_preview"] == "python3 wait.py --pr 7"
 
 
 def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) -> None:
@@ -1125,14 +1146,15 @@ def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) 
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
-        result = cli.cmd_watch_list(scope=cli.SessionListScope(), brief=True)
+        result = cli.cmd_watch_list(scope=cli.SessionListScope())
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     ids = {item["id"] for item in payload["definitions"]}
     assert ids == {active.id, failed.id, paused.id, failed_forever.id}
     assert completed.id not in ids
-    assert next(item for item in payload["definitions"] if item["id"] == failed.id)["state"] == "failed"
+    failed_row = next(item for item in payload["definitions"] if item["id"] == failed.id)
+    assert (failed_row["lifecycle_state"], failed_row["lifecycle_detail"]) == ("finished", "error")
 
 
 def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, capsys) -> None:
@@ -1152,7 +1174,7 @@ def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, ca
 
     payload = json.loads(capsys.readouterr().out)
     assert [item["id"] for item in payload["definitions"]] == [watch.id]
-    assert payload["definitions"][0]["state"] == "paused"
+    assert payload["definitions"][0]["lifecycle_state"] == "paused"
 
 
 def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
@@ -1191,7 +1213,7 @@ def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
 
     payload = json.loads(capsys.readouterr().out)
     assert [item["id"] for item in payload["definitions"]] == [watch.id]
-    assert payload["definitions"][0]["state"] == "paused"
+    assert payload["definitions"][0]["lifecycle_state"] == "paused"
 
 
 def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
@@ -1204,7 +1226,7 @@ def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
-        result = cli.cmd_watch_list(scope=cli.SessionListScope(), brief=True)
+        result = cli.cmd_watch_list(scope=cli.SessionListScope())
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1258,7 +1280,6 @@ def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, cap
         result = cli.cmd_watch_list(
             scope=cli.SessionListScope(),
             include_finished=True,
-            brief=True,
             page_request=cli.PageRequest(page=1, limit=2),
         )
 
@@ -1290,9 +1311,11 @@ def test_removed_watch_reads_as_removed_and_refuses_mutations(capsys) -> None:
     assert definition["id"] == watch.id
     assert definition["name"] == "Watch CI"
     assert definition["lifecycle_state"] == "removed"
-    assert definition["state"] == "removed"
     removed_at = definition["removed_at"]
     assert removed_at
+    assert cli.cmd_watch_show(watch.id, brief=True) == 0
+    row = json.loads(capsys.readouterr().out)["definition"]
+    assert (row["lifecycle_state"], row["removed_at"]) == ("removed", removed_at)
 
     mutations = [
         (cli.cmd_watch_set_enabled, (watch.id, False)),
@@ -1399,9 +1422,10 @@ def test_watch_update_renames_and_retargets_watch(tmp_path: Path, capsys) -> Non
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["id"] == watch.id
     assert payload["definition"]["name"] == "Watch deploy"
-    assert payload["definition"]["session_key"] == "slack::channel::C456"
-    assert payload["definition"]["post_to"] == "channel"
-    assert payload["definition"]["prefix"] == "Deploy finished."
+    assert payload["definition"]["message"] == "Deploy finished."
+    assert {"session_key", "post_to", "deliver_key", "prefix"}.isdisjoint(payload["definition"])
+    stored = store.get_watch(watch.id)
+    assert (stored.session_key, stored.post_to) == ("slack::channel::C456", "channel")
     assert payload["definition"]["mode"] == "forever"
     assert payload["definition"]["timeout_seconds"] == 1200
     assert payload["definition"]["lifetime_timeout_seconds"] == 7200
@@ -1473,8 +1497,8 @@ def test_watch_update_session_key_clears_previous_session_id(tmp_path: Path, cap
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["definition"]["session_id"] is None
-    assert payload["definition"]["session_key"] == "slack::channel::C456"
+    assert payload["definition"].get("session_id") is None
+    assert store.get_watch(watch.id).session_key == "slack::channel::C456"
 
 
 def test_watch_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: Path, capsys) -> None:
@@ -1515,8 +1539,8 @@ def test_watch_update_reset_delivery_preserves_creation_scope_metadata(tmp_path:
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["definition"]["post_to"] is None
-    assert payload["definition"]["deliver_key"] is None
+    assert payload["definition"].get("post_to") is None
+    assert payload["definition"].get("deliver_key") is None
     assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-reset-watch"
     assert payload["definition"]["metadata"]["session_workdir"] == str(tmp_path)
 
@@ -1551,7 +1575,7 @@ def test_watch_update_replaces_argv_command(tmp_path: Path, capsys) -> None:
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["command"] == ["python3", "wait_deploy.py", "--flag", "value"]
-    assert payload["definition"]["shell_command"] is None
+    assert payload["definition"].get("shell_command") is None
 
 
 def test_watch_update_no_changes_returns_structured_error(tmp_path: Path) -> None:

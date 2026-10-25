@@ -3452,10 +3452,12 @@ class SQLiteBackgroundTaskStore:
             "",
         )
         if enabled_first:
-            # Offset pagination needs a persisted ordering key. Lifecycle can
-            # change when the clock crosses run_at between page requests.
+            # Enabled rows lead, each group newest activity first, so the rows an
+            # Agent most likely means sit on page 1. Both keys are stored columns:
+            # lifecycle is derived and can change when the clock crosses run_at
+            # between page requests.
             enabled_rank = case((run_definitions.c.enabled != 0, 0), else_=1)
-            stmt = stmt.order_by(enabled_rank, run_definitions.c.created_at, run_definitions.c.id)
+            stmt = stmt.order_by(enabled_rank, activity.desc(), run_definitions.c.id.desc())
         elif newest_first:
             stmt = stmt.order_by(activity.desc(), run_definitions.c.id.desc())
         else:
@@ -3719,10 +3721,12 @@ class SQLiteBackgroundTaskStore:
             "",
         )
         if enabled_first:
-            # Runtime and execution state may change between pages; the stored
-            # switch keeps the list order stable while those facts are enriched.
+            # Enabled rows lead, each group newest activity first, so the rows an
+            # Agent most likely means sit on page 1. Both keys are stored columns:
+            # lifecycle is derived and can change when the clock crosses run_at
+            # between page requests.
             enabled_rank = case((run_definitions.c.enabled != 0, 0), else_=1)
-            stmt = stmt.order_by(enabled_rank, run_definitions.c.created_at, run_definitions.c.id)
+            stmt = stmt.order_by(enabled_rank, activity.desc(), run_definitions.c.id.desc())
         elif newest_first:
             stmt = stmt.order_by(activity.desc(), run_definitions.c.id.desc())
         else:

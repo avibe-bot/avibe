@@ -495,7 +495,7 @@ def test_find_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
     assert "sk-" not in json.dumps(payload)
 
 
-def test_list_paginates_and_points_agents_to_find(capfd):
+def test_list_paginates_through_next_command_alone(capfd):
     for index in range(25):
         _create_standard_secret(f"KEY_{index:02d}")
 
@@ -507,8 +507,8 @@ def test_list_paginates_and_points_agents_to_find(capfd):
     assert payload["secrets"][0]["name"] == "KEY_00"
     assert payload["pagination"]["has_more"] is True
     assert payload["pagination"]["next_command"] == "vibe vault list --page 2 --limit 20"
-    assert "vibe vault find --q <keyword>" in payload["message"]
-    assert "Use pagination.next_command" in payload["next_steps"][0]
+    # next_command is the continuation; no fixed prose or next_steps repeat it.
+    assert set(payload) == {"schema_version", "ok", "kind", "secrets", "pagination"}
 
 
 def test_find_filters_by_query_and_multiple_tags(capfd):

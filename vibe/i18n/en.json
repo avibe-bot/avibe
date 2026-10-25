@@ -110,7 +110,9 @@
         "command": "Inspect unified Harness live state and anomalies",
         "description": "Inspect active Runs, armed Watches, upcoming Tasks, and live anomalies.",
         "status": "Show the bounded live/anomaly snapshot",
-        "statusDescription": "Show live Runs, armed Watches, upcoming Tasks, and anomalies for the caller Session. Use --session-id for another Session or --global for every Session."
+        "statusDescription": "Show live Runs, armed Watches, upcoming Tasks, and anomalies for the caller Session. Use --session-id for another Session or --global for every Session.",
+        "brief": "Print only the compact row that '{list_command}' prints for this record",
+        "query": "Search common {items} text fields"
       },
       "error": {
         "sqliteRequired": "Harness status requires the SQLite task store.",
@@ -206,8 +208,7 @@
       "bindingUnresolvedPaused": "paused: pinned agent session {session} cannot accept a turn. This definition would fail on every run. Re-point it with: vibe task update {id} --session-id <id>; then resume it with: vibe task resume {id}.",
       "cli": {
         "help": {
-          "cancel": "Request best-effort cancellation for one run; a run already in the live Session turn stops that whole turn, like Session Stop",
-          "showBrief": "Show only status, timing, error, and callback fields, as in vibe runs list"
+          "cancel": "Request best-effort cancellation for one run; a run already in the live Session turn stops that whole turn, like Session Stop"
         },
         "canceledBeforeLiveTurn": "Run was canceled before its input reached the live Session turn."
       }
@@ -293,7 +294,9 @@
     "selectOne": "Select one",
     "selectOneOrMore": "Select one or more",
     "processing": "Processing `/{command}`...",
-    "submitted": "Submitted"
+    "submitted": "Submitted",
+    "moreRecordsAddPage": "More records are available. Add --page to continue.",
+    "moreRecordsContinueWith": "More records are available. Continue with: {command}"
   },
   "dependencies": {
     "askill": {

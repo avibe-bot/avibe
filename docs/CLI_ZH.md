@@ -23,6 +23,10 @@ list/marks、`vibe data query`、`vibe task list` 和 `vibe watch list`。默认
 绕过。使用 `pagination.next_command` 继续翻页；完整记录详情通过对应的 `show`
 或 `get` 命令获取。
 
+列表行只携带决定下一步所需的字段，并省略 null、空值和零值字段，因此缺失的字段即表示
+未设置。`vibe task show`、`vibe watch show`、`vibe runs show`、`vibe session get`
+和 `vibe agent show` 输出完整记录；加上 `--brief` 则只输出对应 list 命令打印的那一行。
+
 ### Session 归属的列表
 
 `vibe harness status`、`vibe runs list`、`vibe task list`、`vibe watch list`
@@ -345,7 +349,7 @@ vibe session update --title 'Release review'                 # 在 Avibe Agent s
 列出和查看 Agent run 记录。
 
 ```bash
-vibe runs list --brief                 # 在 Avibe Agent shell 内查看调用方 Session 的 run
+vibe runs list                         # 在 Avibe Agent shell 内查看调用方 Session 的 run
 vibe runs list --global --definition-id <task-or-watch-id>   # 跨每次运行各自的 Session 查看全部触发
 vibe runs show run_abc123
 vibe runs show run_abc123 --brief      # 只看状态、时间、错误和回调字段
@@ -384,8 +388,8 @@ vibe task remove <task-id>
 
 当 `vibe task add` 运行在 Avibe 已注入 caller context 的 Agent shell 内时，
 可以省略 `--session-id`。Avibe 会把任务目标默认到 `AVIBE_SESSION_ID`
-对应的调用方 Session，并在命令输出里报告这次默认。显式 `--session-id`、
-session creation 参数和 delivery 参数仍然优先。
+对应的调用方 Session；输出的 definition 中的 `session_id` 就是解析后的目标。
+显式 `--session-id`、session creation 参数和 delivery 参数仍然优先。
 
 纯命令任务（`--on-failure none`，即默认值）不会套用上面这条调用方 Session 默认，
 也不接受 session、scope 或 agent 相关参数。执行成功时完全静默；执行失败会记录一条
@@ -450,6 +454,11 @@ Session、`--create-session` 或 fork）设置模型，该 Session 之后的轮�
 会被拒绝；claude 和 codex 的未知值只给出警告，因为它们内置的目录可能落后于新版本。
 `vibe agent models <agent>` 会列出可用的值。
 
+命令输出一个 `run` 对象：它的 `id`、`status`、`run_type`、`agent_name`，以及 Avibe
+为它解析出的 `session_id`、`scope_id`、`visibility` 和 `callback_session_id`。
+`--sync` 会用结束后的 run 记录替换它。只有当 run 落在调用方自己的 Session、
+结果已直接回到那里因而不再回调时，才会附带 `callback_notice`。
+
 异步 run 需要明确 callback 策略，除非命令运行在 Avibe 已注入 caller context
 的 Agent 环境内。当最终结果文本需要回到调用方 Session 时，使用
 `--callback-session-id`；当你有意不自动回调、后续会通过 `vibe runs show`
@@ -498,15 +507,23 @@ vibe watch remove <watch-id>
 
 `vibe task list` 和 `vibe watch list` 默认读取调用方 Session（见
 [Session 归属的列表](#session-归属的列表)），每页返回 20 条定义；还有下一页时，
-响应会包含 `pagination.next_command`。默认隐藏成功结束的一次性定义；使用
+响应会包含 `pagination.next_command`。已启用的定义排在前面，每组内按最近活动时间倒序。
+`--q <text>` 搜索与 Workbench 搜索相同的文本字段（id、名称、Agent、Session、message
+和命令），并会带进 `next_command`。默认隐藏成功结束的一次性定义；使用
 `--include-finished` 分页查看历史。列表输出始终有上限，不提供无分页的 `--all` 模式。
 task 和 watch 命令用 `definition` 表示单条记录、用 `definitions` 表示列表，
 不会再通过命令专属别名重复输出同一份记录。
-list 和 show 与 Workbench 读取同一份 Harness 投影：`lifecycle_state`、
-`lifecycle_detail`、`next_run_at`、`waiting_since` 和 `running_since`；
-watch 还会返回 `process_alive`。对 watch 来说，`process_alive: null`
-表示从未观测到 waiter runtime，`false` 表示曾观测到的 waiter 已退出。
-旧的 `state` 和 task 的 `last_status` 仅作为兼容展示字段保留，不定义 lifecycle。
+
+list 和 show 与 Workbench 读取同一份 Harness 投影：`lifecycle_state` 就是 lifecycle；
+已结束的定义带 `lifecycle_detail` 和 `lifecycle_finished_at`，仍在进行的定义带
+`next_run_at`、`waiting_since` 或 `running_since`。列表行用 `message_preview` 或
+`command_preview` 标识未命名的定义，并携带 `last_error` 和非零的 `last_exit_code`。
+列表行和 `show` 只有当结论不是 `healthy` 时才输出 `health`（watch 还有
+`processing_health`），失败计数只在非零时输出。
+只有已启用 watch 的已观测 waiter 退出时，watch 行才会附带 `process_alive: false`；
+`vibe watch show` 输出观测到的 `process_alive` 和 `runtime`，从未观测到 waiter 时两者都省略。
+task 和 watch 的 add、update、pause、resume 输出与 `show` 相同的 `definition`，
+有警告时再附带 `warnings`。
 
 `vibe task show` 和 `vibe watch show` 也能读取已删除的 definition：返回同一份投影，
 其中 `lifecycle_state: "removed"`，并带有 `removed_at`。列表从不包含已删除的
@@ -522,7 +539,8 @@ watch 与 `vibe task`、`vibe agent run` 共用 `--session-id`、`--create-sessi
 只属于 `vibe task` 和 `vibe watch` 这类 stored definitions。需要可管理、可暂停、可查看的
 后台等待任务时，优先使用 `vibe watch`，不要随手起 `nohup`。
 `--timeout` 默认是 21600 秒；显式传入 `--timeout 0` 会关闭单次 cycle 的
-超时限制，任何正数值都会原样持久化。
+超时限制，任何正数值都会原样持久化。waiter 以 `--retry-exit-code` 中的退出码退出
+表示“仍在等待”：watch 把它记录为 `last_exit_code`，`last_error` 只留给真正的失败。
 
 ### `vibe version`
 

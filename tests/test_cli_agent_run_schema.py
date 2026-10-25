@@ -1,11 +1,9 @@
 """Snapshot test for ``vibe agent run --json`` output schema.
 
-C2 of the services-layer refactor moves CLI's session reservation off
-``storage.sessions_service.SQLiteSessionsService`` and onto
-``core.services.sessions``. The CLI's JSON output shape is the public
-contract callers (and scheduled tasks, watch hooks, downstream tools)
-depend on — Q8 in the design doc commits to keeping it byte-stable
-through the refactor.
+The accept payload is one ``run`` object: what Avibe resolved for the caller
+(the Run id, its Session, scope, visibility and callback route). Anything the
+caller's own flags already decided stays out, and ``callback_notice`` appears
+only when the callback route is not what those flags imply.
 
 This test pins the **keys** in the ``agent_run`` envelope. Values like
 run ids and session ids are non-deterministic so we check key presence /
@@ -44,27 +42,7 @@ def _clear_caller_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
-_EXPECTED_KEYS = {
-    "schema_version",
-    "ok",
-    "kind",
-    "accepted",
-    "request_type",
-    "run_id",
-    "execution_id",
-    "agent",
-    "session_policy",
-    "session_id",
-    "deliver_key",
-    "scope_id",
-    "visibility",
-    "callback_session_id",
-    "caller_context",
-    "callback_notice",
-    "close_after",
-    "async",
-    "run",
-}
+_EXPECTED_KEYS = {"schema_version", "ok", "kind", "run"}
 
 _EXPECTED_RUN_KEYS_QUEUED = {
     "id",
@@ -72,13 +50,7 @@ _EXPECTED_RUN_KEYS_QUEUED = {
     "run_type",
     "agent_name",
     "session_id",
-    "scope_id",
     "visibility",
-    "callback_session_id",
-    "source_kind",
-    "source_actor",
-    "parent_run_id",
-    "close_after",
 }
 
 
@@ -114,11 +86,6 @@ def test_agent_run_default_async_envelope_schema(tmp_path: Path, capsys) -> None
     assert payload["schema_version"] == 1
     assert payload["ok"] is True
     assert payload["kind"] == "agent_run"
-    assert payload["async"] is True
-    assert payload["request_type"] == "agent_run"
-    assert payload["callback_session_id"] is None
-    assert payload["caller_context"] is None
-    assert payload["callback_notice"]["code"] == "async_run_without_callback"
 
     run = payload["run"]
     assert set(run.keys()) == _EXPECTED_RUN_KEYS_QUEUED, (
@@ -127,12 +94,8 @@ def test_agent_run_default_async_envelope_schema(tmp_path: Path, capsys) -> None
     assert run["status"] == "queued"
     assert run["run_type"] == "agent_run"
     assert run["agent_name"] == "worker"
-    assert run["id"] == payload["run_id"]
-    assert run["source_kind"] == "cli"
-    assert run["source_actor"] is None
-    assert run["parent_run_id"] is None
-    assert payload["close_after"] is False
-    assert run["close_after"] is False
+    stored = request_store.get_run(run["id"])
+    assert stored is not None and stored["source_kind"] == "cli"
 
 
 def test_agent_run_close_after_is_persisted_for_new_session(
@@ -157,9 +120,7 @@ def test_agent_run_close_after_is_persisted_for_new_session(
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["close_after"] is True
-    assert payload["run"]["close_after"] is True
-    stored = request_store.get_run(payload["run_id"])
+    stored = request_store.get_run(payload["run"]["id"])
     assert stored is not None
     assert stored["metadata"]["close_after"] is True
 
@@ -260,7 +221,6 @@ def test_agent_run_explicit_async_flag_remains_compatible(tmp_path: Path, capsys
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["async"] is True
     assert payload["run"]["status"] == "queued"
 
 
@@ -332,9 +292,9 @@ def test_agent_run_async_accepts_callback_session_id(tmp_path: Path, capsys) -> 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["callback_session_id"] == callback_session["id"]
     assert payload["run"]["callback_session_id"] == callback_session["id"]
-    stored = request_store.get_run(payload["run_id"])
+    assert payload["run"]["callback_session_id"] == callback_session["id"]
+    stored = request_store.get_run(payload["run"]["id"])
     assert stored is not None
     assert stored["callback_session_id"] == callback_session["id"]
     assert stored["callback_status"] == "pending"
@@ -444,19 +404,10 @@ def test_agent_run_async_defaults_callback_from_caller_env(tmp_path: Path, capsy
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["callback_session_id"] == caller_session["id"]
-    assert payload["caller_context"] == {
-        "session_id": caller_session["id"],
-        "run_id": "run-parent",
-        "source": "agent_run",
-        "backend": "codex",
-        "native_session_id": "thread-caller",
-    }
-    assert payload["callback_notice"]["code"] == "callback_defaulted_to_caller_session"
-    assert payload["run"]["source_kind"] == "agent"
-    assert payload["run"]["source_actor"] == caller_session["id"]
-    assert payload["run"]["parent_run_id"] == "run-parent"
-    stored = request_store.get_run(payload["run_id"])
+    assert payload["run"]["callback_session_id"] == caller_session["id"]
+    # run.callback_session_id already says the result returns here.
+    assert "callback_notice" not in payload
+    stored = request_store.get_run(payload["run"]["id"])
     assert stored is not None
     assert stored["callback_session_id"] == caller_session["id"]
     assert stored["source_kind"] == "agent"
@@ -535,9 +486,7 @@ def test_agent_run_send_now_is_explicit_p1_on_an_existing_session(
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["delivery_intent"] == "steer"
-    assert payload["run"]["delivery_intent"] == "steer"
-    stored = request_store.get_run(payload["run_id"])
+    stored = request_store.get_run(payload["run"]["id"])
     assert stored is not None
     assert stored["session_id"] == session_id
     assert stored["metadata"]["delivery_intent"] == "steer"
@@ -633,9 +582,7 @@ def test_agent_run_queue_persists_explicit_p3_intent(
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["delivery_intent"] == "queue"
-    assert payload["run"]["delivery_intent"] == "queue"
-    stored = request_store.get_run(payload["run_id"])
+    stored = request_store.get_run(payload["run"]["id"])
     assert stored is not None
     assert stored["metadata"]["delivery_intent"] == "queue"
 
@@ -712,9 +659,8 @@ def test_agent_run_send_now_accepts_an_im_backed_session(
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["session_id"] == session["id"]
-    assert payload["delivery_intent"] == "steer"
-    stored = request_store.get_run(payload["run_id"])
+    assert payload["run"]["session_id"] == session["id"]
+    stored = request_store.get_run(payload["run"]["id"])
     assert stored is not None
     assert stored["metadata"]["delivery_intent"] == "steer"
 
@@ -788,9 +734,9 @@ def test_agent_run_async_self_target_defaults_to_no_callback(
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["callback_session_id"] is None
+    assert "callback_session_id" not in payload["run"]
     assert payload["callback_notice"]["code"] == "async_self_run_without_callback"
-    stored = request_store.get_run(payload["run_id"])
+    stored = request_store.get_run(payload["run"]["id"])
     assert stored is not None
     assert stored["callback_session_id"] is None
     assert stored["callback_status"] is None
@@ -862,8 +808,8 @@ def test_agent_run_sync_self_target_detach_defaults_to_no_callback(
             patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
             patch(
                 "vibe.cli._wait_for_run_result",
-                return_value={
-                    "id": "still-running",
+                side_effect=lambda _store, run_id, **_kwargs: {
+                    "id": run_id,
                     "status": "running",
                     "wait_state": "detached",
                     "handoff_reason": "wait_limit_reached",
@@ -874,10 +820,10 @@ def test_agent_run_sync_self_target_detach_defaults_to_no_callback(
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["callback_session_id"] is None
+    assert "callback_session_id" not in payload["run"]
     assert payload["callback_notice"]["code"] == "async_self_run_without_callback"
     assert payload["run"].get("callback_status") is None
-    stored = request_store.get_run(payload["run_id"])
+    stored = request_store.get_run(payload["run"]["id"])
     assert stored is not None
     assert stored["callback_session_id"] is None
     assert stored["callback_status"] is None
@@ -937,15 +883,17 @@ def test_agent_run_callback_session_records_sync_route(tmp_path: Path, capsys) -
             patch("vibe.cli._task_request_store", return_value=request_store),
             patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
             patch("vibe.cli._primary_platform", return_value="slack"),
-            patch("vibe.cli._wait_for_run_result", return_value={"id": "done", "status": "succeeded"}),
+            patch(
+                "vibe.cli._wait_for_run_result",
+                side_effect=lambda _store, run_id, **_kwargs: {"id": run_id, "status": "succeeded"},
+            ),
         ):
             result = cli.cmd_agent_run(args)
 
     assert result == 0
     captured = capsys.readouterr()
     payload = json.loads(captured.out)
-    assert payload["callback_session_id"] == callback_session["id"]
-    stored = request_store.get_run(payload["run_id"])
+    stored = request_store.get_run(payload["run"]["id"])
     assert stored is not None
     assert stored["callback_session_id"] == callback_session["id"]
     assert stored["callback_status"] is None
@@ -975,9 +923,9 @@ def test_agent_run_sync_waits_for_run_result(tmp_path: Path, capsys) -> None:
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["async"] is False
     assert payload["run"] == {"id": "done", "status": "succeeded"}
-    assert wait_calls == [(payload["run_id"], None)]
+    assert len(wait_calls) == 1 and wait_calls[0][1] is None
+    assert request_store.get_run(wait_calls[0][0]) is not None
 
 
 def test_agent_run_sync_wait_timeout_is_passed_to_waiter(tmp_path: Path, capsys) -> None:
@@ -1004,8 +952,6 @@ def test_agent_run_sync_wait_timeout_is_passed_to_waiter(tmp_path: Path, capsys)
         result = cli.cmd_agent_run(args)
 
     assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["async"] is False
     assert wait_timeouts == [2.5]
 
 
@@ -1065,7 +1011,10 @@ def test_agent_run_callback_session_records_sync_route_in_sqlite_store(tmp_path:
             patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
             patch("vibe.cli.paths.get_state_dir", return_value=state_home / "state"),
             patch("vibe.cli._primary_platform", return_value="slack"),
-            patch("vibe.cli._wait_for_run_result", return_value={"id": "done", "status": "succeeded"}),
+            patch(
+                "vibe.cli._wait_for_run_result",
+                side_effect=lambda _store, run_id, **_kwargs: {"id": run_id, "status": "succeeded"},
+            ),
         ):
             result = cli.cmd_agent_run(args)
 
@@ -1074,7 +1023,7 @@ def test_agent_run_callback_session_records_sync_route_in_sqlite_store(tmp_path:
         with create_sqlite_engine(db_path).connect() as conn:
             row = conn.execute(
                 select(agent_runs.c.callback_session_id, agent_runs.c.callback_status)
-                .where(agent_runs.c.id == payload["run_id"])
+                .where(agent_runs.c.id == payload["run"]["id"])
                 .limit(1)
             ).mappings().one()
         assert row["callback_session_id"] == callback_session["id"]
@@ -1140,8 +1089,8 @@ def test_agent_run_sync_detach_marks_callback_pending(tmp_path: Path, capsys) ->
             patch("vibe.cli._primary_platform", return_value="slack"),
             patch(
                 "vibe.cli._wait_for_run_result",
-                return_value={
-                    "id": "still-running",
+                side_effect=lambda _store, run_id, **_kwargs: {
+                    "id": run_id,
                     "status": "running",
                     "wait_state": "detached",
                     "handoff_reason": "wait_limit_reached",
@@ -1156,7 +1105,7 @@ def test_agent_run_sync_detach_marks_callback_pending(tmp_path: Path, capsys) ->
         with create_sqlite_engine(db_path).connect() as conn:
             row = conn.execute(
                 select(agent_runs.c.callback_status, agent_runs.c.callback_completed_at)
-                .where(agent_runs.c.id == payload["run_id"])
+                .where(agent_runs.c.id == payload["run"]["id"])
                 .limit(1)
             ).mappings().one()
         assert row["callback_status"] == "pending"
@@ -1313,11 +1262,9 @@ def test_agent_run_fork_session_reserves_new_session_and_persists_metadata(tmp_p
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["session_policy"] == "fork"
-    assert payload["forked_from_session_id"] == source_session_id
-    assert payload["session_id"] != source_session_id
+    assert payload["run"]["session_id"] != source_session_id
 
-    run = request_store.get_run(payload["run_id"])
+    run = request_store.get_run(payload["run"]["id"])
     assert run is not None
     assert run["metadata"]["session_fork"]["source_native_session_id"] == "thread-source"
     assert run["model"] == "gpt-5.2"
@@ -1327,7 +1274,7 @@ def test_agent_run_fork_session_reserves_new_session_and_persists_metadata(tmp_p
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                select(agent_sessions).where(agent_sessions.c.id == payload["session_id"])
+                select(agent_sessions).where(agent_sessions.c.id == payload["run"]["session_id"])
             ).mappings().one()
     finally:
         engine.dispose()
@@ -1337,7 +1284,7 @@ def test_agent_run_fork_session_reserves_new_session_and_persists_metadata(tmp_p
     assert row["model"] == "gpt-5.2"
     assert row["reasoning_effort"] == "low"
     assert row["scope_id"] == "avibe::project::proj_fork_cli"
-    assert row["session_anchor"] == payload["session_id"]
+    assert row["session_anchor"] == payload["run"]["session_id"]
 
 
 def test_agent_run_fork_self_uses_caller_session_and_inherits_scope(tmp_path: Path, capsys) -> None:
@@ -1377,14 +1324,13 @@ def test_agent_run_fork_self_uses_caller_session_and_inherits_scope(tmp_path: Pa
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["forked_from_session_id"] == source_session_id
-    assert payload["scope_id"] == "avibe::project::proj_fork_cli"
+    assert payload["run"]["scope_id"] == "avibe::project::proj_fork_cli"
 
     engine = create_sqlite_engine(db_path)
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                select(agent_sessions).where(agent_sessions.c.id == payload["session_id"])
+                select(agent_sessions).where(agent_sessions.c.id == payload["run"]["session_id"])
             ).mappings().one()
     finally:
         engine.dispose()
@@ -1422,13 +1368,13 @@ def test_agent_run_create_same_scope_snapshots_scope_workdir(tmp_path: Path, cap
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["scope_id"] == "avibe::project::proj_fork_cli"
+    assert payload["run"]["scope_id"] == "avibe::project::proj_fork_cli"
 
     engine = create_sqlite_engine(db_path)
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                select(agent_sessions).where(agent_sessions.c.id == payload["session_id"])
+                select(agent_sessions).where(agent_sessions.c.id == payload["run"]["session_id"])
             ).mappings().one()
     finally:
         engine.dispose()
@@ -1571,13 +1517,13 @@ def test_agent_run_create_scope_id_snapshots_scope_workdir(tmp_path: Path, capsy
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["scope_id"] == "avibe::project::proj_fork_cli"
+    assert payload["run"]["scope_id"] == "avibe::project::proj_fork_cli"
 
     engine = create_sqlite_engine(db_path)
     try:
         with engine.connect() as conn:
             row = conn.execute(
-                select(agent_sessions).where(agent_sessions.c.id == payload["session_id"])
+                select(agent_sessions).where(agent_sessions.c.id == payload["run"]["session_id"])
             ).mappings().one()
     finally:
         engine.dispose()
@@ -1765,8 +1711,6 @@ def test_only_fork_self_is_the_agents_own_fork(tmp_path: Path, capsys, flags, se
             result = cli.cmd_agent_run(args)
 
     assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["forked_from_session_id"] == source_session_id
     assert reserve.call_args.kwargs["self_fork"] is self_fork
 
 
@@ -1832,8 +1776,8 @@ def test_agent_run_callerless_session_workdir_uses_show_workspace(tmp_path: Path
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    expected = state_home / "show" / payload["session_id"]
-    assert _read_session_workdir(db_path, payload["session_id"]) == str(expected)
+    expected = state_home / "show" / payload["run"]["session_id"]
+    assert _read_session_workdir(db_path, payload["run"]["session_id"]) == str(expected)
     assert expected.is_dir()
 
 
@@ -1866,7 +1810,7 @@ def test_agent_run_explicit_cwd_wins(tmp_path: Path, capsys, monkeypatch) -> Non
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert _read_session_workdir(db_path, payload["session_id"]) == str(picked_dir)
+    assert _read_session_workdir(db_path, payload["run"]["session_id"]) == str(picked_dir)
 
 
 def test_agent_run_cwd_must_exist(tmp_path: Path, capsys) -> None:

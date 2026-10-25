@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import re
 import shlex
@@ -170,6 +172,31 @@ def test_managed_harness_session_queue_commands_name_real_subcommands() -> None:
         assert path == expected_path
 
 
+@pytest.mark.parametrize(
+    ("argv", "accepted"),
+    [
+        (["task", "show", "t1", "--brief"], True),
+        (["watch", "show", "w1", "--brief"], True),
+        (["runs", "show", "r1", "--brief"], True),
+        (["session", "get", "--brief"], True),
+        (["agent", "show", "worker", "--brief"], True),
+        (["task", "list", "--brief"], False),
+        (["watch", "list", "--brief"], False),
+        (["runs", "list", "--brief"], False),
+        (["agent", "list", "--brief"], False),
+    ],
+)
+def test_brief_selects_the_list_row_on_show_and_is_not_a_list_flag(argv, accepted) -> None:
+    """``--brief`` means "print this record's list row"; a list is already rows."""
+
+    parser = cli.build_parser()
+    if accepted:
+        assert parser.parse_args(argv).brief is True
+        return
+    with pytest.raises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+        parser.parse_args(argv)
+
+
 def test_runs_list_cli_defaults_to_first_page(monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
@@ -192,7 +219,7 @@ def test_runs_list_cli_defaults_to_first_page(monkeypatch, tmp_path, capsys) -> 
     finally:
         store.close()
 
-    args = cli.build_parser().parse_args(["runs", "list", "--global", "--brief"])
+    args = cli.build_parser().parse_args(["runs", "list", "--global"])
     assert cli.cmd_runs_list(args) == 0
 
     payload = json.loads(capsys.readouterr().out)
@@ -200,8 +227,9 @@ def test_runs_list_cli_defaults_to_first_page(monkeypatch, tmp_path, capsys) -> 
     assert len(payload["runs"]) == 20
     assert payload["runs"][0]["id"] == "run-24"
     assert payload["pagination"]["has_more"] is True
-    assert payload["pagination"]["next_command"] == "vibe runs list --global --brief --page 2 --limit 20"
-    assert "More records are available" in payload["message"]
+    assert payload["pagination"]["next_command"] == "vibe runs list --global --page 2 --limit 20"
+    # The continuation is next_command alone: no prose repeats it.
+    assert "message" not in payload
 
 
 def test_runs_list_cli_filters_status_and_query(monkeypatch, tmp_path, capsys) -> None:
@@ -238,7 +266,7 @@ def test_runs_list_cli_filters_status_and_query(monkeypatch, tmp_path, capsys) -
     finally:
         store.close()
 
-    args = cli.build_parser().parse_args(["runs", "list", "--global", "--status", "succeeded", "--q", "weekly", "--brief"])
+    args = cli.build_parser().parse_args(["runs", "list", "--global", "--status", "succeeded", "--q", "weekly"])
     assert cli.cmd_runs_list(args) == 0
 
     payload = json.loads(capsys.readouterr().out)
@@ -272,7 +300,7 @@ def test_runs_list_cli_normalizes_offset_time_filters(monkeypatch, tmp_path, cap
     finally:
         store.close()
 
-    args = cli.build_parser().parse_args(["runs", "list", "--global", "--created-after", "2026-05-25T10:00:00+08:00", "--brief"])
+    args = cli.build_parser().parse_args(["runs", "list", "--global", "--created-after", "2026-05-25T10:00:00+08:00"])
     assert cli.cmd_runs_list(args) == 0
 
     payload = json.loads(capsys.readouterr().out)
