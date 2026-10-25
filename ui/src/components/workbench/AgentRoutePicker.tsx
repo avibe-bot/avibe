@@ -597,8 +597,9 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             {effortOptions.map((opt) => {
               const notOn = notOnLabel(opt);
               return notOn ? (
-                <p key={opt} className="pt-1 text-[10px] leading-snug text-muted">
-                  {effortLabel(opt)} · {notOn}
+                <p key={opt} className="flex gap-1.5 pt-1 text-[10px] leading-snug text-muted">
+                  <span className="shrink-0 font-semibold">{effortLabel(opt)}</span>
+                  <span>{notOn}</span>
                 </p>
               ) : null;
             })}

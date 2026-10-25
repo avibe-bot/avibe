@@ -640,7 +640,8 @@ describe('AgentRoutePicker compact presentation', () => {
     expect(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.low' }).getAttribute('aria-checked')).toBe('true');
     expect(screen.getByText('chat.picker.effortRefused')).toBeTruthy();
     // A Source that refuses an offered effort is named under the group and on the option.
-    expect(screen.getByText(/chat\.picker\.effortOptions\.high · chat\.picker\.effortNotOn:relay-gpt/)).toBeTruthy();
+    const hint = screen.getByText('chat.picker.effortNotOn:relay-gpt', { selector: 'p > span' });
+    expect(hint.parentElement?.textContent).toBe('chat.picker.effortOptions.highchat.picker.effortNotOn:relay-gpt');
     expect(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.high' }).getAttribute('title'))
       .toBe('chat.picker.effortNotOn:relay-gpt');
     expect(effortGroup().getByRole('radio', { name: 'chat.picker.effortOptions.medium' }).getAttribute('title')).toBeNull();
