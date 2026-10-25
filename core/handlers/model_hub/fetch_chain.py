@@ -175,7 +175,10 @@ class FetchChain:
         if record.get("error_code"):
             fact["error_code"] = record["error_code"]
         if attempt.cost is not None:
-            fact["cost"] = {"basis": attempt.cost.basis, "usd": attempt.cost.usd}
+            cost = {"basis": attempt.cost.basis, "usd": attempt.cost.usd}
+            if attempt.cost.estimate is not None:
+                cost["estimate"] = attempt.cost.estimate
+            fact["cost"] = cost
         return fact
 
     async def _record_local_usage(self, source, slot):
@@ -432,7 +435,7 @@ class FetchChain:
                 from config.v2_config import ModelHubSourceStateConfig
                 desired_state = (
                     ModelHubSourceStateConfig(status="needs_action", detail_key=result.blocker)
-                    if result.blocker is not None else ModelHubSourceStateConfig(status="standby")
+                    if result.blocker is not None else current.state
                 )
                 if desired_state != current.state or (result.authenticated and current.verification_pending is not None):
                     config = await asyncio.to_thread(self.owner._clone_config, previous)

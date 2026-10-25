@@ -252,15 +252,16 @@ def _configured_content(
             (item for item in rows if _url_matches(item.get("id"), requested_url) or _url_matches(item.get("url"), requested_url)),
             None,
         )
-        if row is None:
-            return "target", None, None, False
         status_row = next(
             (item for item in statuses if _url_matches(item.get("id"), requested_url) or _url_matches(item.get("url"), requested_url)),
             statuses[0] if len(statuses) == 1 and not any(item.get("id") or item.get("url") for item in statuses) else None,
         )
         if status_row is None or not isinstance(status_row.get("status"), str):
             return "malformed", None, None, False
-        if status_row["status"].lower() not in {"success", "completed"}:
+        status_ok = status_row["status"].lower() in {"success", "completed"}
+        if row is None:
+            return ("malformed", None, None, False) if status_ok else ("target", None, None, False)
+        if not status_ok:
             return "target", None, None, False
         content = row.get(result.get("content", "text"))
         if not isinstance(content, str) or not content.strip():

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from config.v2_config import ModelHubFetchServiceSettings, model_hub_builtin_source
+from config.v2_config import ModelHubFetchServiceSettings, ModelHubSourceStateConfig, model_hub_builtin_source
 from core.handlers.model_hub import fetch_chain as fetch_chain_module
 from core.handlers.model_hub import hosted_tools
 from core.handlers.model_hub.adapter import SearchResponse
@@ -376,6 +376,10 @@ async def test_configured_fetch_maps_request_content_cost_and_source_success(
     assert result["record"]["content"] in {"Tavily body", "Exa body", "DeepSeek body"}
     assert result["execution"]["cost"]["usd"] == expected_cost
     catalog = next(item for item in fetch_service_catalog() if item["vendor"] == vendor)
+    assert result["record"]["attempts"][0]["cost"] == (
+        {"basis": "reported", "usd": expected_cost, "estimate": True}
+        if vendor == "exa" else {"basis": "list", "usd": expected_cost}
+    )
     assert calls == [(sid, vendor, catalog["service_id"], f"cred_{sid}", expected_request)]
     row = next(row for row in service.usage_summary(days=7)["services"] if row["tool"] == "web_fetch")
     assert row["requests"] == row["billable_requests"] == 1
@@ -400,6 +404,20 @@ def test_configured_target_failures_do_not_cool_or_mark_source(tmp_path, vendor,
 def test_tavily_nonmatching_failure_is_malformed_service_evidence():
     catalog = next(item for item in fetch_service_catalog() if item["vendor"] == "tavily")
     body = {"results": [], "failed_results": [{"url": "https://other.example/", "error": "blocked"}]}
+    result = map_fetch_response(
+        catalog, SearchResponse(200, {}, json.dumps(body).encode()),
+        requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
+    )
+    assert result.record["error_code"] == "service_unreadable"
+    assert result.uncertain and result.cooling and result.cost is None
+
+
+def test_exa_nonmatching_status_is_malformed_service_evidence():
+    catalog = next(item for item in fetch_service_catalog() if item["vendor"] == "exa")
+    body = {
+        "results": [],
+        "statuses": [{"id": "https://other.example/", "status": "error"}],
+    }
     result = map_fetch_response(
         catalog, SearchResponse(200, {}, json.dumps(body).encode()),
         requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
@@ -443,8 +461,8 @@ def test_configured_url_matching_rejects_malformed_provider_urls_without_mapper_
         catalog, SearchResponse(200, {}, json.dumps(body).encode()),
         requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
     )
-    assert result.record["error_code"] == "fetch_target_unreadable"
-    assert result.target_failure
+    assert result.record["error_code"] == "service_unreadable"
+    assert result.uncertain and result.cooling and result.cost is None
 
 
 def test_deepseek_200_unrecoverable_body_is_uncertain_and_cooling():
@@ -547,6 +565,33 @@ async def test_configured_blocker_response_settles_source_health(tmp_path, vendo
     source = service.store.load().sources[0]
     assert source.state.status == "needs_action"
     assert source.state.detail_key == f"models.source.needs_action.{detail}"
+
+
+@pytest.mark.asyncio
+async def test_configured_fetch_auth_evidence_preserves_model_cooldown(tmp_path):
+    sid = IDS["deepseek"]
+    service, config = _service(
+        tmp_path, vendor="deepseek",
+        enabled={LOCAL: False, FREE_EXA: False, JINA: False, sid: True}, order=(sid,),
+    )
+    retry_at = "2026-10-25T16:00:00Z"
+    source = config.sources[0]
+    source.state = ModelHubSourceStateConfig(
+        status="cooldown", detail_key="models.source.cooldown.rate_limited", retry_at=retry_at,
+    )
+
+    async def fetch(*args, on_sent):
+        await on_sent()
+        return SearchResponse(200, {}, json.dumps({"title": "D", "content": "body"}).encode())
+
+    service.adapter.fetch = fetch
+    result = await service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": "https://example.com/"}},
+        turn=service.freeze_turn_hosted_tools(config),
+    )
+    assert result["record"]["status"] == "completed"
+    current = service.store.load().sources[0]
+    assert current.state == source.state
 
 
 class _Local:
