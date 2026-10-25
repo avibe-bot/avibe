@@ -1886,7 +1886,7 @@
     },
     "tool": {
       "web_search": "Web search",
-      "web_fetch": "Web fetch",
+      "web_fetch": "Read",
       "x_search": "X search",
       "image_generate": "Image generation"
     },
@@ -1900,7 +1900,7 @@
       "service_unreadable": "the page-reading service returned an unreadable response",
       "service_busy": "the page-reading service is busy"
     },
-    "fetch": {"characters": "{count} chars", "truncated": "truncated"},
+    "fetch": {"characters": "{count} chars", "truncated": "Truncated", "local": "Local", "jina": "Jina Reader (free)", "policy": "Blocked by local policy", "notForwarded": "not forwarded", "forwarded": "previously sent to {providers}"},
     "quoted": "“{subject}”",
     "mode": {
       "service": "via {provider}",
@@ -1927,6 +1927,7 @@
       "atLeast": "at least {cost}"
     },
     "repair": {
+      "retryFetch": "retry later or use Retry now in Models › Tools › Web fetch",
       "retrySearch": "was rate-limited; retry later or use Retry now in Models › Tools",
       "disabled": "needs web search enabled in Models › Tools",
       "fetch_disabled": "needs page reading enabled",

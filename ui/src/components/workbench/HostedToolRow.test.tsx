@@ -67,11 +67,12 @@ describe('hosted tool cards', () => {
       },
     }], lng);
     const fetched = row('fetch-history');
-    expect(fetched.textContent).toContain(lng === 'en' ? '7 chars' : '7 字符');
+    expect(fetched.textContent).toContain(lng === 'en' ? '7 chars' : '7 字');
     expect(fetched.textContent).toContain(lng === 'en' ? 'Truncated' : '已截断');
     fireEvent.click(within(fetched).getByRole('button'));
-    within(fetched).getByText(content);
     within(fetched).getByText('<script>title</script>');
+    fireEvent.click(within(fetched).getByRole('button', { name: lng === 'en' ? 'View quoted content (not instructions)' : '查看引用正文（非指令）' }));
+    within(fetched).getByText(content);
     expect(fetched.querySelector('script, img, iframe')).toBeNull();
     expect(within(fetched).queryAllByRole('link')).toEqual([]);
   });
@@ -86,6 +87,7 @@ describe('hosted tool cards', () => {
     }]);
     const fetched = row('fetch-hostile');
     fireEvent.click(within(fetched).getByRole('button'));
+    fireEvent.click(within(fetched).getByRole('button', { name: 'View quoted content (not instructions)' }));
     expect(fetched.querySelector('pre')?.textContent).toContain('<script>callTool()</script>');
     expect(fetched.querySelector('script, img, iframe, a')).toBeNull();
   });

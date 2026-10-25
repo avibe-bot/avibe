@@ -164,5 +164,13 @@ export function useHostedTools(active: boolean, revision: string | null = null, 
     [write],
   );
 
-  return { read, pending: held, refresh, save, clear, retryService };
+  const retryFetch = React.useCallback(
+    (sourceId: string) => write('web_fetch', async () => {
+      await modelsApi.retryFetchService(sourceId);
+      return modelsApi.getHostedTools();
+    }, 'save'),
+    [write],
+  );
+
+  return { read, pending: held, refresh, save, clear, retryService, retryFetch };
 }

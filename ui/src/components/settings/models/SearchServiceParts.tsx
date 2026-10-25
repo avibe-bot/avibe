@@ -93,7 +93,7 @@ export const SearchVendorFacts: React.FC<{ vendor: HostedSearchServiceVendor }> 
 };
 
 /** This month's requests and their list valuation, with the vendors' own figure beside it, never in it. */
-const ServiceMonthLine: React.FC<{ month: RegionRead<ServiceMonth>; keyless?: boolean; onOpenUsage?: () => void }> = ({ month, keyless = false, onOpenUsage }) => {
+export const ServiceMonthLine: React.FC<{ month: RegionRead<ServiceMonth>; keyless?: boolean; onOpenUsage?: () => void }> = ({ month, keyless = false, onOpenUsage }) => {
   const { t, i18n } = useTranslation();
   const usage = foldRegionRead<ServiceMonth, ServiceMonth | null>(month, {
     loading: () => null, ready: (data) => data, unread: () => null, degraded: (data) => data,

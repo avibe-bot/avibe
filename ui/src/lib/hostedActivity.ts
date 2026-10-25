@@ -101,6 +101,7 @@ export type HostedActivity = {
   fallback_from?: { source_id: string; source_name?: string };
   /** Every candidate a search chain reached; absent for a record that has none, as a model-only chain's. */
   attempts?: HostedActivityAttempt[];
+  policy_sources?: string[];
   switch?: HostedActivitySwitch;
   /** Absent when no price is known: unknown is never shown as zero. ``calls`` is how many calls it covers,
    *  ``at_least`` marks a lower bound (an attempt reported no price), and ``estimate`` a vendor's own estimate. */
@@ -154,6 +155,7 @@ export const hostedActivityFrom = (raw: unknown): HostedActivity | undefined => 
     sources: Array.isArray(card.sources) ? (card.sources as HostedActivitySource[]).filter((s) => typeof s?.url === 'string' || typeof s?.title === 'string') : [],
     images: Array.isArray(card.images) ? (card.images as HostedActivityImage[]).filter((i) => typeof i?.path === 'string') : [],
     attempts: Array.isArray(card.attempts) ? card.attempts.map(attemptFrom).filter((attempt): attempt is HostedActivityAttempt => attempt !== undefined) : undefined,
+    policy_sources: Array.isArray(card.policy_sources) && card.policy_sources.every((id) => typeof id === 'string') ? card.policy_sources : undefined,
     switch: switchFrom(card.switch),
     fetch: fetchFrom(card.fetch),
   };

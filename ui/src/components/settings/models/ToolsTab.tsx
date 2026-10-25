@@ -7,7 +7,7 @@
 // request. Nothing here checks a Source or decides a route.
 import * as React from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, ArrowDown, ArrowUp, AtSign, CheckCircle2, ChevronRight, Eraser, Globe, Image as ImageIcon, Info, LockKeyhole, Plus, RotateCcw } from 'lucide-react';
+import { AlertCircle, ArrowDown, ArrowUp, AtSign, CheckCircle2, ChevronRight, Eraser, FileText, Globe, Image as ImageIcon, Info, LockKeyhole, Plus, RotateCcw } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
@@ -18,6 +18,8 @@ import { executorOrderAfterMove, imageModelCopyKey, pairEvidence, refusalSummary
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import { KEYLESS_EXA_SOURCE_ID, searchServicesActive, serviceVendorForSource, webSearchTool } from './searchServices';
 import { SearchCandidateStatus, SearchServicePrice, SearchVendorGlyph } from './SearchServiceParts';
+import { WebFetchOrder } from './WebFetchOrder';
+import { fetchVendorForSource, webFetchTool } from './webFetch';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
   HostedExecutorCandidate,
@@ -41,14 +43,14 @@ type Clear = (tool: HostedToolName, body: HostedToolClear) => void;
 
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {
   web_search: Globe,
-  web_fetch: Globe,
+  web_fetch: FileText,
   x_search: AtSign,
   image_generate: ImageIcon,
 };
 
 /** The tab's groups, by capability, in catalog order. */
 const TOOL_GROUPS: { key: 'search' | 'generate'; tools: readonly HostedToolName[] }[] = [
-  { key: 'search', tools: ['web_search', 'x_search'] },
+  { key: 'search', tools: ['web_search', 'web_fetch', 'x_search'] },
   { key: 'generate', tools: ['image_generate'] },
 ];
 
@@ -394,8 +396,8 @@ const Advanced: React.FC<{ tool: HostedToolStatus; summary: RefusalSummary; look
   const { t } = useTranslation();
   const [open, setOpen] = React.useState(false);
   const bodyId = React.useId();
-  const services = tool.name === 'web_search' && searchServicesActive(tool);
-  const search = tool.name === 'image_generate' || services ? null : tool;
+  const services = tool.name === 'web_fetch' || (tool.name === 'web_search' && searchServicesActive(tool));
+  const search = tool.name === 'image_generate' || tool.name === 'web_fetch' || services ? null : tool;
   const statusList = services || summary.sources >= 2;
   if (!search && !statusList) return null;
   const order = search
@@ -548,6 +550,7 @@ type ServiceActions = {
   onAddService?: (opener: HTMLButtonElement) => void;
   onOpenService?: (sourceId: string, opener: HTMLButtonElement) => void;
   onRetryService?: (sourceId: string) => void;
+  onRetryFetch?: (sourceId: string) => void;
 };
 
 const WebSearchServices: React.FC<{ tool: HostedWebSearchToolStatus; lookup: SourceLookup; pending: boolean; onSave: Save } & ServiceActions> = ({ tool, lookup, pending, onSave, onAddService, onOpenService, onRetryService }) => {
@@ -597,6 +600,7 @@ const ToolCard: React.FC<{ tool: HostedToolStatus; lookup: SourceLookup; pending
       </header>
       <StatusLines tool={tool} summary={summary} lookup={lookup} pending={pending} onClear={onClear} />
       {tool.name === 'web_search' && searchServicesActive(tool) && <WebSearchServices tool={tool} lookup={lookup} pending={pending} onSave={onSave} {...serviceActions} />}
+      {tool.name === 'web_fetch' && <WebFetchOrder tool={tool} sources={tool.executor_candidates.flatMap((row) => { const source = lookup.source(row.source_id); return source ? [source] : []; })} pending={pending} onSave={(body) => onSave('web_fetch', body)} onAdd={serviceActions.onAddService} onOpen={serviceActions.onOpenService} onRetry={serviceActions.onRetryFetch} />}
       {tool.name === 'image_generate' && <ImageModels tool={tool} lookup={lookup} pending={pending} onSave={onSave} />}
       <Advanced tool={tool} summary={summary} lookup={lookup} pending={pending} onSave={onSave} onClear={onClear} />
     </section>
@@ -627,6 +631,8 @@ export const ToolsTab: React.FC<{
         if (source) return source.display_name;
         // Built-ins have catalog membership, not a persisted Source. Resolve
         // them here so status, fallback, evidence and action labels agree.
+        const fetchVendor = fetchVendorForSource(webFetchTool(status), id);
+        if (fetchVendor?.facts.built_in) return t(`settings.models.webFetch.vendorName.${fetchVendor.id}`, { defaultValue: fetchVendor.name }) as string;
         const vendor = serviceVendorForSource(webSearchTool(status), id);
         return vendor?.facts.built_in
           ? t(`settings.models.searchServices.vendorName.${vendor.id}`, { defaultValue: vendor.name }) as string
@@ -651,7 +657,7 @@ export const ToolsTab: React.FC<{
         ? read.kind === 'loading' && <p className="model-hub-usage-pending text-muted">{t('common.loading')}</p>
         : <>
             {TOOL_GROUPS.map((group) => {
-              const tools = group.tools.flatMap((name) => status.tools.filter((tool): tool is HostedToolStatus => tool.name !== 'web_fetch' && tool.name === name));
+              const tools = group.tools.flatMap((name) => status.tools.filter((tool) => tool.name === name));
               if (tools.length === 0) return null;
               return (
                 <section key={group.key} className="model-hub-tool-group flex flex-col" aria-label={t(`settings.models.tools.group.${group.key}`) as string}>

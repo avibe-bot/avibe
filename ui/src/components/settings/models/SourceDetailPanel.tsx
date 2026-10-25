@@ -20,7 +20,9 @@ import { GuardImpact } from './GuardImpact';
 import { HostedCapabilityChips } from './HostedCapabilityChips';
 import { modelCapabilities } from './hostedTools';
 import { searchServicesActive, serviceVendorForSource, webSearchTool, KEYLESS_EXA_SOURCE_ID } from './searchServices';
-import { SearchServiceSettings, SearchVendorGlyph } from './SearchServiceParts';
+import { SearchServiceSettings, SearchVendorGlyph, ServiceMonthLine } from './SearchServiceParts';
+import { FetchServiceSettings } from './WebFetchOrder';
+import { webFetchTool, fetchVendorForSource } from './webFetch';
 import { confirmGuardPlan, sendAgreed, unansweredRefusal } from './guardedWrite';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { SourcePrivateValue, SourcePrivacyToggle } from './SourcePrivacy';
@@ -153,14 +155,14 @@ const committedPlan = (hops: RouteHopRef[], gaps: SupplyGap[]): ManageGuardPlan 
 const NO_TOOLS: ReadonlySet<HostedToolName> = new Set();
 
 /** A candidate service's host-local month, read in the keyed detail child only while it is visible. */
-function useServiceMonth(sourceId: string): RegionRead<ServiceMonth> {
+function useServiceMonth(sourceId: string, tool: 'web_search' | 'web_fetch' = 'web_search'): RegionRead<ServiceMonth> {
   const [month, setMonth] = React.useState<RegionRead<ServiceMonth>>(loadingRegion);
   React.useEffect(() => {
     let current = true;
-    void readRegion(async () => serviceMonthUsage(await modelsApi.getUsageSummary('60d'), sourceId))
+    void readRegion(async () => serviceMonthUsage(await modelsApi.getUsageSummary('60d'), sourceId, tool))
       .then((read) => { if (current) setMonth(read); });
     return () => { current = false; };
-  }, [sourceId]);
+  }, [sourceId, tool]);
   return month;
 }
 
@@ -169,6 +171,11 @@ type SearchSettingsProps = React.ComponentProps<typeof SearchServiceSettings>;
 const ServiceMonthSearchSettings: React.FC<Omit<SearchSettingsProps, 'month'>> = (props) => {
   const month = useServiceMonth(props.source.id);
   return <SearchServiceSettings {...props} month={month} />;
+};
+
+const ServiceMonthFetchSettings: React.FC<React.ComponentProps<typeof FetchServiceSettings> & { onOpenUsage?: () => void }> = (props) => {
+  const month = useServiceMonth(props.sourceId, 'web_fetch');
+  return <><FetchServiceSettings {...props} /><div className="px-5 py-3"><ServiceMonthLine month={month} keyless={props.sourceId === KEYLESS_EXA_SOURCE_ID} onOpenUsage={props.onOpenUsage} /></div></>;
 };
 
 type SourceReconciliation =
@@ -204,13 +211,15 @@ export const SourceDetailPanel: React.FC<{
   hostedPending?: ReadonlySet<HostedToolName>;
   onClearHostedRefusal?: (tool: HostedToolName, modelId: string) => void;
   onSaveSearch?: (body: HostedToolPut) => void;
+  onSaveFetch?: (body: HostedToolPut) => void;
+  onRetryFetch?: (sourceId: string) => void;
   onRetryService?: (sourceId: string) => void;
   /** A model Source reached from Tools shows its search detail, without model removal. */
   serviceView?: boolean;
   onManageSource?: () => void;
   /** Leave the detail for the Usage tab, from a search service's monthly line. */
   onOpenUsage?: () => void;
-}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools, onRetryHostedTools, hostedPending, onClearHostedRefusal, onSaveSearch, onRetryService, serviceView, onManageSource, onOpenUsage }) => {
+}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools, onRetryHostedTools, hostedPending, onClearHostedRefusal, onSaveSearch, onSaveFetch, onRetryFetch, onRetryService, serviceView, onManageSource, onOpenUsage }) => {
   const { t, i18n } = useTranslation();
   const { showToast } = useToast();
   const detailsHidden = useSourceDetailsHidden();
@@ -246,6 +255,9 @@ export const SourceDetailPanel: React.FC<{
       })
     : null;
   const searchTool = webSearchTool(capabilityStatus);
+  const fetchTool = webFetchTool(capabilityStatus);
+  const fetchSettings = fetchTool && fetchVendorForSource(fetchTool, source.id) && onSaveFetch && onRetryFetch
+    ? <ServiceMonthFetchSettings sourceId={source.id} tool={fetchTool} pending={busy || (hostedPending?.has('web_fetch') ?? false)} onSave={onSaveFetch} onRetry={onRetryFetch} onOpenUsage={onOpenUsage} /> : null;
   const keylessExa = source.id === KEYLESS_EXA_SOURCE_ID;
   const serviceVendor = serviceVendorForSource(searchTool, source.id);
   const serviceDetail = keylessExa || Boolean(serviceVendor && (source.protocol === 'search' || serviceView));
@@ -829,7 +841,7 @@ export const SourceDetailPanel: React.FC<{
           <SearchVendorGlyph vendor={source.vendor} />
           <div className="flex min-w-0 flex-col gap-1">
             <h2 ref={headingRef} tabIndex={-1} className="text-lg font-bold text-foreground">{keylessExa ? t('settings.models.searchServices.vendorName.exa-mcp') : source.display_name}</h2>
-            <p className="model-hub-tool-note">{t(source.protocol === 'search' ? 'settings.models.searchServices.noModels' : 'settings.models.searchServices.modelsAndSearch')}</p>
+            <p className="model-hub-tool-note">{t(source.protocol === 'search' ? fetchSettings ? 'settings.models.webFetch.noModels' : 'settings.models.searchServices.noModels' : 'settings.models.searchServices.modelsAndSearch')}</p>
             {keylessExa && <p className="model-hub-tool-note">{t('settings.models.searchServices.keylessEndpoint')}</p>}
           </div>
         </header>
@@ -854,6 +866,7 @@ export const SourceDetailPanel: React.FC<{
             </>}
           </section>
           {searchSettings}
+          {fetchSettings}
           <p className="model-hub-tool-note px-5 py-4">{t(keylessExa ? 'settings.models.searchServices.keylessCustody' : 'settings.models.searchServices.custody')}</p>
         </div>
         {source.protocol === 'search' && !keylessExa && <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-5 py-4">
@@ -888,6 +901,7 @@ export const SourceDetailPanel: React.FC<{
         <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.lastFetched')}</dt><dd className="truncate">{lastFetched}</dd></div>
       </dl>
       {searchSettings}
+      {fetchSettings}
       </>}
       {(result || refetchFailed || reenableFailed || manageStage.kind === 'delete_failed') && <div className="model-hub-source-notices shrink-0 space-y-2 px-5 pt-3">
         {result && result.removed.length > 0 && <p className="model-hub-status-gold rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.removed', { count: result.removed.length, models: result.removed.join(', ') })}</p>}

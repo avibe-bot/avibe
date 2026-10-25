@@ -21,10 +21,12 @@ import base64
 import json
 import re
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Mapping, Optional, Sequence
 
 import httpx
 
+from config import v2_config
 from core.agent_core.agent.recovery import RecoveryRenderer
 from core.agent_core.ai._common import CONNECT_TIMEOUT_S, auth_headers, join_endpoint_url
 from core.agent_core.ai.hosted import failure, generate_action, image_dimensions, record_text
@@ -37,6 +39,7 @@ from core.agent_core.messages import (
     HostedResult,
     TextBlock,
     ToolResultMessage,
+    WebFetchRecord,
     message_from_dict,
 )
 from core.agent_core.tools.base import CallInstance, JobHost, JobStatus, Tool, ToolContext, ToolResult, ToolSpec
@@ -366,6 +369,19 @@ async def _gateway_call(
     """One call on the gateway's executor endpoint (§6, §7.4): its result, and the answer it was read from (None
     when the gateway gave none)."""
 
+    def failed(reason: str, code: str) -> tuple[HostedResult, None]:
+        if tool == "web_fetch":
+            # A transport/admission failure still has a portable fetch record;
+            # it claims no executor, network attempt or cost.
+            requested = arguments.get("url")
+            record = WebFetchRecord(
+                status="failed", requested_url=requested if isinstance(requested, str) and len(requested) <= 8192 else "",
+                content="", size_bytes=0, retrieved_at=datetime.now(timezone.utc).isoformat(),
+                error=reason, error_code=code,
+            )
+            return HostedResult(record=record), None
+        return _failed(tool, reason, code), None
+
     url = join_endpoint_url(endpoint.base_url, f"/hosted-tools/{tool}")
     # Reference images make the body megabytes of base64: serialized off the controller loop.
     content = await asyncio.to_thread(json.dumps, {"arguments": dict(arguments)})
@@ -380,16 +396,16 @@ async def _gateway_call(
             async with httpx.AsyncClient(timeout=timeout, trust_env=False) as own:
                 response = await own.post(url, content=content, headers=headers)
     except httpx.HTTPError as error:
-        return _failed(tool, f"the gateway could not run the call ({type(error).__name__})", "gateway_unreachable"), None
+        return failed(f"the gateway could not run the call ({type(error).__name__})", "gateway_unreachable")
     if response.status_code != 200:
         reason = f"the gateway refused the call (HTTP {response.status_code} {_error_code(response)})"
-        return _failed(tool, reason, "gateway_refused"), None
+        return failed(reason, "gateway_refused")
     try:
         # An image's answer carries megabytes of base64: parsed off the controller loop.
         answer = await asyncio.to_thread(response.json)
         return _hosted_result(tool, answer), answer
     except (TypeError, ValueError):
-        return _failed(tool, "the gateway answered with no hosted result", "gateway_no_result"), None
+        return failed("the gateway answered with no hosted result", "gateway_no_result")
 
 
 def _failed_record(tool: str, reason: str, code: Optional[str]) -> HostedRecord:
@@ -423,12 +439,19 @@ def _hosted_result(tool: str, body: Any) -> HostedResult:
     if tool == "image_generate":
         # The executor answers an image's bytes beside the record (``images``); the record lists what is saved.
         hosted["record"] = {**hosted["record"], "images": []}
+    content = []
+    if tool == "web_fetch":
+        from core.agent_core.web_fetch import fetch_record_from_dict, frame_fetch_record
+
+        # The gateway owns normalization/cutting. Build the ordinary content
+        # from that exact bounded record before C-1 validates both together.
+        content = [{"type": "text", "text": frame_fetch_record(fetch_record_from_dict(hosted["record"]))}]
     message = message_from_dict(
         {
             "role": "tool_result",
             "tool_call_id": "proxied",
             "tool_name": tool,
-            "content": [],
+            "content": content,
             "is_error": body["record"].get("status") in ("failed", "incomplete"),
             "hosted": hosted,
         }
@@ -457,8 +480,10 @@ def hosted_tools(
     def route() -> ModelEndpoint:
         return router.current.endpoint
 
-    # WF-1 reads future hop metadata, but supplies no fetch declaration or producer.
-    tools: list[Tool] = [HostedTool(hosted_tool_spec(name), route, client) for name in frozen.hosted_tools if name != "web_fetch"]
+    tools: list[Tool] = [
+        HostedTool(hosted_tool_spec(name), route, client)
+        for name in frozen.hosted_tools if name != "web_fetch" or v2_config.WEB_FETCH_ACTIVE
+    ]
     if frozen.image_models is not None:
         spec = image_generate_spec(frozen.image_models)
         tools.append(ImageGenerateTool(spec, frozen.image_models, route, client, media, language))

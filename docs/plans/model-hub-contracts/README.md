@@ -1,7 +1,7 @@
 # Model Hub contracts
 
 Status: **contract_version 21**, 2026-10-25: keyless Exa activation (KEX-3)
-and dormant fetch readers (WF-1).
+and dormant fetch readers (WF-1) / Vibey and UI producer support (WF-2V).
 `gh-v3.2.3rc3` through `rc7` carry v20, so the unreleased v21 event now includes
 its coordinated readers, producer, and default-on Exa search activation. The versioned
 mirrors advance together; persisted TurnProvenance retains v5–v20 and adds v21.
@@ -22,6 +22,18 @@ The exact shapes and downgrade losses are owned by [`../web-fetch.md`](../web-fe
 §§2/4/6/8. WF-1 adds no fetch producer, network transport or dependency.
 The localized hosted-activity vocabulary adds `service_rate_limited` as a fallback
 reason; it never creates a credential health blocker for the synthetic Source.
+
+WF-2V joins this same unreleased event without changing its schemas: Vibey
+registers the canonical `{url}` function only behind `WEB_FETCH_ACTIVE`, freezes
+it with the turn's first resolution, and uses the existing gateway envelope.
+The exact bounded record produces ordinary tool content through the WF-1 frame;
+replay keeps that content with no fetch or settlement. Models → Tools uses the
+server's presence/absence of `web_fetch` as its activation signal. The shared
+activity projection adds optional `policy_sources` (service ids reached before
+an address-policy refusal; an empty list means not forwarded). Web and IM read
+that one decision, localize synthetic labels, and retain historical readability
+regardless of activation. See [`../web-fetch-vibey-ui.md`](../web-fetch-vibey-ui.md)
+for fixture acceptance and intentional boundaries. The production flag stays off.
 
 It builds on v20 (2026-10-22): active web-search services (S2b-2).
 `gh-v3.2.3rc1` and `gh-v3.2.3rc2` carried v19, so activation opened v20 rather than
