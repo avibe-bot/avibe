@@ -2,6 +2,16 @@
 
 Status: implemented (#2714). The runner's fallback order is #2735.
 
+**B step 2 amendment (#2706):** the signal, runtime release and initial B attempt
+still run without an await. B now tries SQLite's writer without waiting. On
+contention, an exact-Turn pending completion fences cleanup, admissions and late
+receipts until the evidence and successor decision land; resultless Run settlement
+finishes through the runtime-work door before terminal events. See
+[terminal-completion synchronization](terminal-completion-synchronization.md) for
+the current retry, cancellation and shutdown contract. The rest of this note
+records the original #2714 placement decision; its synchronous B-write assumption
+is superseded only by that explicit completion fence.
+
 ## Background
 
 A terminal result reaches its durable Turn through two writers:

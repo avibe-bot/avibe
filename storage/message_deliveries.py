@@ -1868,7 +1868,11 @@ def mark_attempt_receipt(
         conn,
         delivery_id,
         expected_version=expected_version,
-        expected_states=("steering",),
+        expected_states=(
+            ("steering", "reconciling_steer")
+            if outcome == "accepted" and delivery.get("current_receipt_outcome") == "unknown"
+            else ("steering",)
+        ),
         values={
             "state": "reconciling_steer",
             "current_receipt_outcome": outcome,
@@ -1917,13 +1921,16 @@ def mark_attempt_receipt_batch(
         or (
             row["state"] == "reconciling_steer"
             and row.get("current_receipt_outcome") != outcome
+            # Definitive acceptance upgrades an earlier UNKNOWN reconciliation,
+            # never the reverse. Both still belong to this exact current attempt.
+            and not (outcome == "accepted" and row.get("current_receipt_outcome") == "unknown")
         )
         for row in rows
     ):
         return []
     saved_rows: list[dict[str, Any]] = []
     for row in rows:
-        if row["state"] == "reconciling_steer":
+        if row["state"] == "reconciling_steer" and row.get("current_receipt_outcome") == outcome:
             saved_rows.append(row)
             continue
         saved = mark_attempt_receipt(
