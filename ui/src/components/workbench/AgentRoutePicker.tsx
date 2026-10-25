@@ -11,6 +11,7 @@ import type { EffortMenu } from '../settings/models/types';
 import { loadBackendModelsWithRefresh, modelOptionLabel, supersedesHubAnswer, useAddModelExit } from '../../lib/backendModels';
 import { isEffortSupported, refusedSavedEffort, resolveEffortOptions } from '../../lib/effortOptions';
 import { useSourceNames } from '../../lib/useSourceNames';
+import { rememberModelLabels, useRememberedModelLabel } from '../../lib/modelLabelMemory';
 import { useRouteSurfaceActive } from '../../lib/routeSurfaceActivity';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { ResponsiveMenu } from '../ui/responsive-menu';
@@ -175,6 +176,9 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   const currentAgent = displayValue.agent_name;
   const currentModel = displayValue.model;
   const currentEffort = displayValue.reasoning_effort;
+  // The closed trigger names the model as the menu does, from labels remembered
+  // across pickers and loads; the raw id stays one hover away.
+  const currentModelLabel = useRememberedModelLabel(backend, currentModel) ?? currentModel;
   const currentAgentLabel = displayedAgent?.display_name || currentAgent;
   const triggerLabel = (routeIsDefault && defaultLabel) || currentAgentLabel || defaultLabel || t('chat.pickAgent');
   const agentLabel = currentAgentLabel || defaultLabel || t('chat.pickAgent');
@@ -266,6 +270,8 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
         setEffortMenusByBackend((prev) => ({ ...prev, [backend]: effortMenus ?? {} }));
         setModelsByBackend((prev) => ({ ...prev, [backend]: models }));
         setModelLabelsByBackend((prev) => ({ ...prev, [backend]: modelLabels ?? {} }));
+        // Closed pickers anywhere name their model from this answer.
+        rememberModelLabels(backend, modelLabels ?? {});
       },
       () => {
         loadedBackends.delete(backend);
@@ -447,8 +453,11 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
           {currentModel && (
             <>
               <span className="text-muted">·</span>
-              <span className="truncate font-mono text-[10px] text-muted">
-                {currentModel}
+              <span
+                className="truncate font-mono text-[10px] text-muted"
+                title={currentModelLabel !== currentModel ? currentModel : undefined}
+              >
+                {currentModelLabel}
               </span>
             </>
           )}

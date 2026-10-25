@@ -44,6 +44,7 @@ vi.mock('../../context/ApiContext', async (importOriginal) => ({
 // does — and an empty default keeps the backend fallback in play.
 let catalogReasoning: Record<string, { value: string; label: string }[]> = {};
 let catalogMenus: Record<string, { omitted: string[]; not_on: Record<string, string[]> }> = {};
+let catalogLabels: Record<string, string> = {};
 // How many catalog reads were made, and whether the next ones wait to be answered.
 let catalogReads = 0;
 let deferReads = false;
@@ -68,7 +69,7 @@ vi.mock('../../lib/backendModels', async (importOriginal) => ({
     catalogReads += 1;
     const answer = () => onLoaded({
       models: ['sonnet', 'opus'],
-      modelLabels: {},
+      modelLabels: catalogLabels,
       reasoningOptions: catalogReasoning,
       // As the real loader answers: only a Hub catalog carries effort menus.
       ...(hubUnread ? { hubUnread: true as const } : hubMode === 'hub' ? { effortMenus: catalogMenus } : {}),
@@ -193,6 +194,8 @@ describe('AgentRoutePicker', () => {
     cleanup();
     catalogReasoning = {};
     catalogMenus = {};
+    catalogLabels = {};
+    window.localStorage.clear();
     sourceNames = null;
     hubMode = 'direct';
     hubUnread = false;
@@ -450,6 +453,18 @@ describe('AgentRoutePicker', () => {
 
     expect(screen.getByText('chat.picker.model')).toBeTruthy();
     expect(catalogReads).toBe(2);
+  });
+
+  it('names the model on the closed trigger by the label the catalog gave it', async () => {
+    catalogLabels = { sonnet: 'Sonnet 5.5' };
+    const user = userEvent.setup();
+    render(<OptimisticOwner onWrite={vi.fn()} />);
+    await openMenu(user);
+    await user.keyboard('{Escape}');
+
+    const name = within(screen.getByRole('button', { name: /claude/ })).getByText('Sonnet 5.5');
+    // The stored id stays one hover away.
+    expect(name.getAttribute('title')).toBe('sonnet');
   });
 
   it('highlights the pick while the owner write is still in flight', async () => {
