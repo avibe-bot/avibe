@@ -118,6 +118,21 @@ async def test_gateway_result_preserves_one_frame_and_live_turn(monkeypatch, out
         }[outcome]
 
 
+@pytest.mark.parametrize("length", [8192, 8193])
+async def test_gateway_failure_never_fabricates_a_shortened_requested_url(monkeypatch, length):
+    monkeypatch.setattr(v2_config, "WEB_FETCH_ACTIVE", True)
+    url = "https://example.test/" + "a" * (length - len("https://example.test/"))
+    def unavailable(request):
+        raise httpx.ConnectError("offline", request=request)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(unavailable)) as client:
+        (tool,) = hosted_tools(router(selection()), client)
+        result = await tool.execute({"url": url}, None)
+    # The original stays in the tool call. If C-1 cannot hold it, omit it whole
+    # rather than invent another URL by cutting its path or signed query.
+    assert result.hosted.record.requested_url == (url if length <= 8192 else "")
+    assert result.hosted.record.error_code == "gateway_unreachable"
+
+
 @pytest.mark.parametrize("protocol", ["anthropic", "openai_responses", "openai_chat", "google"])
 async def test_newly_produced_result_replays_without_fetch_or_rebill(monkeypatch, protocol):
     monkeypatch.setattr(v2_config, "WEB_FETCH_ACTIVE", True)

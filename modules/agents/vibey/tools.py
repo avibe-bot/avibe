@@ -375,7 +375,7 @@ async def _gateway_call(
             # it claims no executor, network attempt or cost.
             requested = arguments.get("url")
             record = WebFetchRecord(
-                status="failed", requested_url=requested[:8192] if isinstance(requested, str) else "",
+                status="failed", requested_url=requested if isinstance(requested, str) and len(requested) <= 8192 else "",
                 content="", size_bytes=0, retrieved_at=datetime.now(timezone.utc).isoformat(),
                 error=reason, error_code=code,
             )
