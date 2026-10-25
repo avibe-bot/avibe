@@ -1608,6 +1608,7 @@ class ModelHubService:
         self._search_reenable_checks: dict[str, asyncio.Task] = {}
         self._service_cooldowns = ServiceCooldowns()
         self._keyless_exa_attempt_lock = asyncio.Lock()
+        self._local_fetch_engine = None
         self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
         self._latest_source_attempt_generation: dict[str, int] = {}
         self._source_attempt_identities: dict[str, tuple | None] = {}
@@ -7291,6 +7292,11 @@ class ModelHubService:
             self._service_cooldowns.advance(source, service["service_id"], clear=True)
         return {}
 
+    async def _run_fetch_chain(self, call: ExecutorCall, turn: TurnHostedTools, *, say: Callable[..., str]) -> dict:
+        """Run the dormant web_fetch service/local chain behind the activation flag."""
+        from .fetch_chain import FetchChain
+        return await FetchChain(self, call, turn, say).run()
+
     async def _run_search_chain(self, call: ExecutorCall, turn: TurnHostedTools, *, say: Callable[..., str]) -> dict:
         """Run the service/model chain; all response decoding and mapping stay off the loop."""
         return await SearchChain(self, call, turn, say).run()
@@ -7325,6 +7331,10 @@ class ModelHubService:
             raise ModelHubError(refused.code, status=refused.status) from None
         if turn is None or tool not in turn.tools:
             raise ModelHubError("tool_not_enabled", status=409)
+        if tool == "web_fetch" and not hosted_tools_module.WEB_FETCH_ACTIVE:
+            raise ModelHubError("tool_not_enabled", status=409)
+        if tool == "web_fetch":
+            return await self._run_fetch_chain(call, turn, say=say)
         if tool == "web_search" and turn.prefer_native is not None:
             return await self._run_search_chain(call, turn, say=say)
         loop = asyncio.get_running_loop()

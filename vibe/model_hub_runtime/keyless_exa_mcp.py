@@ -23,12 +23,14 @@ from vibe import __version__ as AVIBE_VERSION
 
 KEYLESS_EXA_ENDPOINT = "https://mcp.exa.ai/mcp?tools=web_search_advanced_exa,web_fetch_exa"
 KEYLESS_EXA_SEARCH_TOOL = "web_search_advanced_exa"
+KEYLESS_EXA_FETCH_TOOL = "web_fetch_exa"
 MCP_PROTOCOL_VERSION = "2025-06-18"
 MCP_SESSION_HEADER = "Mcp-Session-Id"
 _MAX_BODY_BYTES = 8 * 1024 * 1024
 _TIMEOUT_SECONDS = 30.0
 _CONNECT_TIMEOUT_SECONDS = 5.0
 _REQUIRED_SEARCH_FIELDS = frozenset({"query", "numResults", "enableHighlights", "textMaxCharacters"})
+_REQUIRED_FETCH_FIELDS = frozenset({"urls", "maxCharacters"})
 
 
 @dataclass(frozen=True)
@@ -100,7 +102,12 @@ def _session_not_found(exchange: _Exchange) -> bool:
     return "session" in text and "not found" in text
 
 
-def _tool_properties(tool: Mapping[str, Any], *, require_search_controls: bool = False) -> Mapping[str, Any] | None:
+def _tool_properties(
+    tool: Mapping[str, Any],
+    *,
+    require_search_controls: bool = False,
+    require_fetch_controls: bool = False,
+) -> Mapping[str, Any] | None:
     schema = tool.get("inputSchema")
     if not isinstance(schema, Mapping):
         return None
@@ -108,6 +115,8 @@ def _tool_properties(tool: Mapping[str, Any], *, require_search_controls: bool =
     if not isinstance(properties, Mapping):
         return None
     if require_search_controls and not _REQUIRED_SEARCH_FIELDS.issubset(properties):
+        return None
+    if require_fetch_controls and not _REQUIRED_FETCH_FIELDS.issubset(properties):
         return None
     return properties
 
@@ -353,6 +362,7 @@ class KeylessExaMcpClient:
                 properties = _tool_properties(
                     tool,
                     require_search_controls=tool_name == KEYLESS_EXA_SEARCH_TOOL,
+                    require_fetch_controls=tool_name == KEYLESS_EXA_FETCH_TOOL,
                 ) if isinstance(tool, Mapping) else None
                 if properties is None:
                     return SearchResponse(None, {}, None, "invalid_endpoint")
@@ -380,6 +390,14 @@ class KeylessExaMcpClient:
         on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
         return await self.call_tool(KEYLESS_EXA_SEARCH_TOOL, arguments, on_sent=on_sent)
+
+    async def fetch(
+        self,
+        arguments: Mapping[str, Any],
+        *,
+        on_sent: Callable[[], Awaitable[None] | None] | None = None,
+    ) -> SearchResponse:
+        return await self.call_tool(KEYLESS_EXA_FETCH_TOOL, arguments, on_sent=on_sent)
 
     @staticmethod
     async def _as_search_response(exchange: _Exchange) -> SearchResponse:
@@ -412,4 +430,4 @@ class KeylessExaMcpClient:
         )
 
 
-__all__ = ["KEYLESS_EXA_ENDPOINT", "KEYLESS_EXA_SEARCH_TOOL", "KeylessExaMcpClient"]
+__all__ = ["KEYLESS_EXA_ENDPOINT", "KEYLESS_EXA_SEARCH_TOOL", "KEYLESS_EXA_FETCH_TOOL", "KeylessExaMcpClient"]

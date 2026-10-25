@@ -1411,6 +1411,7 @@ def _service_increment(
         "day": owner_day,
         "source_id": source_key,
         "service_id": service_key,
+        **({"tool": call.tool} if call.tool == "web_fetch" else {}),
         **counts,
         "last_metered_at": metered_at.isoformat(),
         "hours": [
@@ -2472,16 +2473,19 @@ class ServiceUsageCall:
     reported_requests: int = 0
     reported_usd: float = 0.0
     owner_day: str = ""
+    tool: str = "web_search"
 
     def __post_init__(self) -> None:
+        if self.tool not in ("web_search", "web_fetch"):
+            raise ValueError("unsupported hosted service tool")
         if not self.owner_day:
             object.__setattr__(self, "owner_day", local_usage_day(self.at).isoformat())
 
     @property
-    def fold_key(self) -> tuple[str, str, str, str, str]:
+    def fold_key(self) -> tuple[str, str, str, str, str, str]:
         """What makes two calls one daily row and one hourly slice; never a model's key."""
 
-        return ("service", self.owner_day, _hour_key(self.at), self.source_id, self.service_id)
+        return ("service", self.owner_day, _hour_key(self.at), self.source_id, self.service_id, self.tool)
 
     def folded_with(self, other: "ServiceUsageCall") -> "ServiceUsageCall":
         """Fold a call that shares this one's row: every count adds, the later stamp wins."""
@@ -2664,6 +2668,7 @@ class UsageWriter:
         uncertain: bool = False,
         reported_usd: Optional[float] = None,
         at: datetime,
+        tool: str = "web_search",
     ) -> "asyncio.Future[None]":
         """Own one sent search-service request and queue it, as `record` does a model call.
 
@@ -2684,6 +2689,7 @@ class UsageWriter:
                 uncertain_requests=_flag_count(uncertain),
                 reported_requests=int(reported_usd is not None),
                 reported_usd=reported_usd if reported_usd is not None else 0.0,
+                tool=tool,
             )
         )
 

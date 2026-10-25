@@ -673,6 +673,19 @@ class EngineAdapter(Protocol):
         """
         ...
 
+    async def fetch(
+        self,
+        source_id: str,
+        vendor: str,
+        service_id: str,
+        credential_ref: str | None,
+        request: Mapping[str, Any],
+        *,
+        on_sent: Callable[[], Awaitable[None] | None] | None = None,
+    ) -> SearchResponse:
+        """Make exactly one catalog web-fetch request from Model Hub custody."""
+        ...
+
     async def revoke_search_credential(self, credential_ref: str) -> None:
         """Remove a search-only credential from Model Hub custody."""
         ...

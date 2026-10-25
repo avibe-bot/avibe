@@ -67,6 +67,7 @@ from vibe.model_hub_runtime.client import (
     probe_models,
     upstream_api_url,
 )
+from vibe import __version__ as AVIBE_VERSION
 from vibe.model_hub_runtime.api_key_vendors import (
     anthropic_api_key_header,
     pinned_api_key_protocol,
@@ -2062,10 +2063,11 @@ class CLIProxyEngineAdapter:
         self,
         *,
         catalog: Mapping[str, Any],
-        credential_ref: str,
+        credential_ref: str | None,
         method: str,
         endpoint: str,
         payload: Mapping[str, Any] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
         timeout_total: float = _SEARCH_TIMEOUT_SECONDS,
         connect_timeout: float | None = None,
         on_sent: Callable[[], Awaitable[None] | None] | None = None,
@@ -2094,18 +2096,28 @@ class CLIProxyEngineAdapter:
         ):
             return SearchResponse(None, {}, None, "invalid_endpoint")
         try:
-            key = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
-            metadata = await asyncio.to_thread(self.state_store.credential_metadata, credential_ref)
+            if credential_ref is None:
+                key = None
+                metadata = {}
+            else:
+                key = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
+                metadata = await asyncio.to_thread(self.state_store.credential_metadata, credential_ref)
         except Exception:
             return SearchResponse(None, {}, None, "connection")
-        if vendor is None or metadata.get("vendor") != vendor:
+        if vendor is None or (credential_ref is not None and metadata.get("vendor") != vendor):
             return SearchResponse(None, {}, None, "invalid_endpoint")
         auth = str(service.get("auth") or "bearer")
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
-        if auth == "x-api-key":
+        if auth == "x-api-key" and key is not None:
             headers["x-api-key"] = key
-        else:
+        elif auth != "none" and key is not None:
             headers["Authorization"] = f"Bearer {key}"
+        elif auth != "none":
+            return SearchResponse(None, {}, None, "invalid_endpoint")
+        if isinstance(service.get("headers"), Mapping):
+            headers.update({str(name): str(value) for name, value in service["headers"].items()})
+        if extra_headers:
+            headers.update(extra_headers)
         timeout = aiohttp.ClientTimeout(total=timeout_total, connect=connect_timeout)
         callback_called = False
         response_status: int | None = None
@@ -2287,6 +2299,61 @@ class CLIProxyEngineAdapter:
 
     async def revoke_search_credential(self, credential_ref: str) -> None:
         await asyncio.to_thread(self.state_store.revoke_search_credential, credential_ref)
+
+    async def fetch(
+        self,
+        source_id: str,
+        vendor: str,
+        service_id: str,
+        credential_ref: str | None,
+        request: Mapping[str, Any],
+        *,
+        on_sent: Callable[[], Awaitable[None] | None] | None = None,
+    ) -> SearchResponse:
+        from vibe.model_hub_runtime.fetch_catalog import fetch_service_catalog
+
+        if service_id == KEYLESS_EXA_SERVICE_ID:
+            if (
+                not model_hub_config.KEYLESS_EXA_ACTIVE
+                or source_id != KEYLESS_EXA_SOURCE_ID
+                or vendor != "exa-mcp"
+                or credential_ref is not None
+            ):
+                return SearchResponse(None, {}, None, "invalid_endpoint")
+            service = next(
+                (entry for entry in fetch_service_catalog() if entry.get("service_id") == service_id),
+                None,
+            )
+            if service is None:
+                return SearchResponse(None, {}, None, "invalid_endpoint")
+            return await self._keyless_exa_client.fetch(request, on_sent=on_sent)
+
+        service = next(
+            (
+                entry for entry in fetch_service_catalog()
+                if entry.get("service_id") == service_id and entry.get("vendor") == vendor
+                and not entry.get("source_id")
+            ),
+            None,
+        )
+        if service is None or service.get("kind") != "service":
+            return SearchResponse(None, {}, None, "invalid_endpoint")
+        payload = dict(request)
+        request_spec = service.get("request") if isinstance(service.get("request"), Mapping) else {}
+        headers = request_spec.get("headers") if isinstance(request_spec.get("headers"), Mapping) else {}
+        if isinstance(service.get("headers"), Mapping):
+            headers = {**headers, **service["headers"]}
+        if vendor == "jina-reader":
+            headers = {**headers, "User-Agent": f"Avibe/{AVIBE_VERSION}"}
+        return await self._search_http(
+            catalog={"vendor": vendor, **service},
+            credential_ref=credential_ref,
+            method="POST",
+            endpoint=str(service.get("endpoint") or ""),
+            payload=payload,
+            extra_headers=headers,
+            on_sent=on_sent,
+        )
 
     async def provision_oauth_credential(
         self,
