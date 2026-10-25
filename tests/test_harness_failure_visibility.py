@@ -9179,7 +9179,7 @@ def test_definition_health_reaches_the_cli_list_after_a_success(capsys) -> None:
             }
         )
 
-        assert cli.cmd_task_list(page_request=PageRequest(limit=20)) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope(), page_request=PageRequest(limit=20)) == 0
     finally:
         store.close()
 
@@ -9207,7 +9207,7 @@ def test_brief_task_payload_carries_last_error(capsys) -> None:
     store = SQLiteBackgroundTaskStore()
     try:
         _task(store, "task-broken", last_error="unresolvable session binding", last_run_at=_EPOCH)
-        assert cli.cmd_task_list(page_request=PageRequest(limit=20)) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope(), page_request=PageRequest(limit=20)) == 0
     finally:
         store.close()
 
@@ -9252,7 +9252,7 @@ def test_a_watch_reports_processing_health_separately_from_waiter_health(capsys)
                 "completed_at": _instant(1.98),
             }
         )
-        assert cli.cmd_watch_list(page_request=PageRequest(limit=20)) == 0
+        assert cli.cmd_watch_list(scope=cli.SessionListScope(), page_request=PageRequest(limit=20)) == 0
     finally:
         store.close()
 

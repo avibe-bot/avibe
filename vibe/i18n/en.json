@@ -109,7 +109,8 @@
       "help": {
         "command": "Inspect unified Harness live state and anomalies",
         "description": "Inspect active Runs, armed Watches, upcoming Tasks, and live anomalies.",
-        "status": "Show the bounded live/anomaly snapshot"
+        "status": "Show the bounded live/anomaly snapshot",
+        "statusDescription": "Show live Runs, armed Watches, upcoming Tasks, and anomalies for the caller Session. Use --session-id for another Session or --global for every Session."
       },
       "error": {
         "sqliteRequired": "Harness status requires the SQLite task store.",
@@ -710,8 +711,8 @@
     "new": {
       "started": "Started a fresh session. Your next message will begin a new conversation.",
       "pausedReason": "the bound agent session was cleared by /new",
-      "pausedTasks": "⏸️ Paused {count} scheduled task(s) pinned to the cleared session. Re-point with `vibe task list` → `vibe task update <id> --session-id <new>`, then `vibe task resume <id>`.",
-      "pausedWatches": "⏸️ Paused {count} watch(es) pinned to the cleared session. Re-point with `vibe watch list` → `vibe watch update <id> --session-id <new>`, then `vibe watch resume <id>`."
+      "pausedTasks": "⏸️ Paused {count} scheduled task(s) pinned to the cleared session. Re-point with `vibe task list --global` → `vibe task update <id> --session-id <new>`, then `vibe task resume <id>`.",
+      "pausedWatches": "⏸️ Paused {count} watch(es) pinned to the cleared session. Re-point with `vibe watch list --global` → `vibe watch update <id> --session-id <new>`, then `vibe watch resume <id>`."
     },
     "clear": {
       "noSessions": "No active sessions to clear.\nSession state has been reset.",

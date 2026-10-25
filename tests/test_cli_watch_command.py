@@ -1100,7 +1100,7 @@ def test_watch_list_brief_includes_runtime_state(tmp_path: Path, capsys) -> None
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
-        result = cli.cmd_watch_list(brief=True)
+        result = cli.cmd_watch_list(scope=cli.SessionListScope(), brief=True)
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1125,7 +1125,7 @@ def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) 
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
-        result = cli.cmd_watch_list(brief=True)
+        result = cli.cmd_watch_list(scope=cli.SessionListScope(), brief=True)
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1148,7 +1148,7 @@ def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, ca
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
-        assert cli.cmd_watch_list() == 0
+        assert cli.cmd_watch_list(scope=cli.SessionListScope()) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert [item["id"] for item in payload["definitions"]] == [watch.id]
@@ -1187,7 +1187,7 @@ def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
-        assert cli.cmd_watch_list() == 0
+        assert cli.cmd_watch_list(scope=cli.SessionListScope()) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert [item["id"] for item in payload["definitions"]] == [watch.id]
@@ -1204,7 +1204,7 @@ def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
-        result = cli.cmd_watch_list(brief=True)
+        result = cli.cmd_watch_list(scope=cli.SessionListScope(), brief=True)
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1216,7 +1216,7 @@ def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
         "returned": 20,
         "has_more": True,
         "next_page": 2,
-        "next_command": "vibe watch list --page 2 --limit 20",
+        "next_command": "vibe watch list --global --page 2 --limit 20",
     }
 
 
@@ -1230,7 +1230,7 @@ def test_watch_list_cli_dispatches_pagination_flags(
     for index in range(3):
         _add_test_watch(store, name=f"Watch {index}")
 
-    monkeypatch.setattr(sys, "argv", ["vibe", "watch", "list", "--limit", "2"])
+    monkeypatch.setattr(sys, "argv", ["vibe", "watch", "list", "--global", "--limit", "2"])
     with (
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
@@ -1241,7 +1241,7 @@ def test_watch_list_cli_dispatches_pagination_flags(
     assert exc.value.code == 0
     payload = json.loads(capsys.readouterr().out)
     assert len(payload["definitions"]) == 2
-    assert payload["pagination"]["next_command"] == "vibe watch list --page 2 --limit 2"
+    assert payload["pagination"]["next_command"] == "vibe watch list --global --page 2 --limit 2"
 
 
 def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, capsys) -> None:
@@ -1256,6 +1256,7 @@ def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, cap
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
         result = cli.cmd_watch_list(
+            scope=cli.SessionListScope(),
             include_finished=True,
             brief=True,
             page_request=cli.PageRequest(page=1, limit=2),
@@ -1266,7 +1267,7 @@ def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, cap
     assert len(payload["definitions"]) == 2
     assert payload["pagination"]["has_more"] is True
     assert payload["pagination"]["next_command"] == (
-        "vibe watch list --include-finished --page 2 --limit 2"
+        "vibe watch list --global --include-finished --page 2 --limit 2"
     )
 
 

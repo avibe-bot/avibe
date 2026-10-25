@@ -82,7 +82,7 @@ actually loads rather than assuming default paths.
 | Project rules | nearest `AGENTS.md` / `CLAUDE.md` chain | The repository's own delivery process |
 | Agent system prompt, model, effort | `vibe agent show <name> --json` | `vibe agent update <name> --system-prompt-file <file>` |
 | Skills | user skill dirs (follow symlinks), Avibe `skills/`, project `.agents/skills/` | The directory's owner |
-| Task and Watch messages (re-sent every fire) | `vibe task list` / `vibe watch list` for ids, then `vibe task show <id>` / `vibe watch show <id>` for the full text | `vibe task update`, `vibe watch update` |
+| Task and Watch messages (re-sent every fire) | `vibe task list --session-id <id>` / `vibe watch list --session-id <id>` (or `--global`) for ids, then `vibe task show <id>` / `vibe watch show <id>` for the full text | `vibe task update`, `vibe watch update` |
 | User preferences (read on demand) | `~/.avibe/state/user_preferences.md`; inspect only the reported user's part, and only when the transcript shows it was read | The user |
 | Delegation briefs and callbacks | `agent_runs.message` / `result_text` | The prompt or Skill that writes them |
 
@@ -110,7 +110,7 @@ no history covers it, say the attribution is unconfirmed.
 `messages`. Keep evidence to the Session the user reported, plus any others they point
 to — a channel's `scope_id` can hold other people's threads; the user's
 own corrections in `messages` are usually the sharpest evidence. For a
-recurring Task or Watch, `vibe runs list --definition-id <id>` gathers its
+recurring Task or Watch, `vibe runs list --global --definition-id <id>` gathers its
 fires across per-run Sessions. A stuck delegated turn stays `running`, so include
 long-running rows when the complaint is a stall; ordinary IM turns have no
 `agent_runs` row, so read that Session's messages instead. A delegated run can succeed while

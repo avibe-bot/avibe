@@ -789,10 +789,11 @@ vibe task update <task_id> [options]
 ### `vibe task list`
 
 ```bash
-vibe task list [--include-finished] [--page N] [--limit N]
+vibe task list [--session-id <id> | --global] [--include-finished] [--page N] [--limit N]
 ```
 
-默认每页返回 20 条紧凑记录，单页最多 100 条。按 `pagination.next_command`
+在 Avibe Agent shell 内列出调用方 Session 的任务；用 `--session-id` 查看其他
+Session，用 `--global` 查看所有 Session（在 Agent shell 之外必须二选一）。默认每页返回 20 条紧凑记录，单页最多 100 条。按 `pagination.next_command`
 继续翻页；需要完整详情时使用 `vibe task show <task_id>`。
 list 和 show 会返回与 Workbench 相同的 lifecycle 投影。watch 还包含三态的
 `process_alive`；兼容字段 `state` / `last_status` 不定义 lifecycle。
@@ -926,7 +927,7 @@ Session、`--create-session` 或 fork）设置模型，该 Session 会沿用它�
 
 | 子命令 | 作用 |
 | --- | --- |
-| `vibe runs list` | 列出最近 run |
+| `vibe runs list` | 列出调用方 Session 最近的 run；`--session-id <id>` 查看其他 Session，`--global` 查看所有 Session |
 | `vibe runs show <run_id>` | 查看单个 run |
 | `vibe runs cancel <run_id>` | 请求取消 run；若该 run 的输入已进入正在运行的 Session turn，会像 Session Stop 一样停止整个 turn，同一 turn 中的其他 run 也会一起停止 |
 
@@ -963,6 +964,6 @@ Session、`--create-session` 或 fork）设置模型，该 Session 会沿用它�
 vibe
 vibe status
 vibe doctor
-vibe task list
+vibe task list --global
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
 ```

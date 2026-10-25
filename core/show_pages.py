@@ -635,17 +635,13 @@ def _new_share_id() -> str:
             return candidate
 
 
-def _like_pattern(value: str, *, prefix: bool = False, contains: bool = False) -> str:
+def _like_contains_pattern(value: str) -> str:
     escaped = (
         value.replace(_LIKE_ESCAPE, _LIKE_ESCAPE + _LIKE_ESCAPE)
         .replace("%", _LIKE_ESCAPE + "%")
         .replace("_", _LIKE_ESCAPE + "_")
     )
-    if contains:
-        return f"%{escaped}%"
-    if prefix:
-        return f"{escaped}%"
-    return escaped
+    return f"%{escaped}%"
 
 
 def _resolve_resource_access_context(user_context: Any = None):
@@ -1079,13 +1075,13 @@ class ShowPageStore:
                     show_pages.c.access_mode == visibility,
                 )
         if session_id:
-            statement = statement.where(show_pages.c.session_id.like(_like_pattern(session_id, prefix=True), escape=_LIKE_ESCAPE))
+            statement = statement.where(show_pages.c.session_id == session_id)
         if updated_after:
             statement = statement.where(show_pages.c.updated_at >= updated_after)
         if updated_before:
             statement = statement.where(show_pages.c.updated_at <= updated_before)
         if query:
-            pattern = _like_pattern(query, contains=True)
+            pattern = _like_contains_pattern(query)
             clauses = [
                 show_pages.c.session_id.like(pattern, escape=_LIKE_ESCAPE),
                 show_pages.c.share_id.like(pattern, escape=_LIKE_ESCAPE),

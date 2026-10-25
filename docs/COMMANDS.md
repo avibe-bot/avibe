@@ -853,10 +853,12 @@ exists.
 ### `vibe task list`
 
 ```bash
-vibe task list [--include-finished] [--page N] [--limit N]
+vibe task list [--session-id <id> | --global] [--include-finished] [--page N] [--limit N]
 ```
 
-Returns compact rows, 20 per page by default and at most 100. Use
+Lists the caller Session's tasks inside an Avibe Agent shell; pass `--session-id`
+for another Session or `--global` for every Session (required outside an Agent
+shell). Returns compact rows, 20 per page by default and at most 100. Use
 `pagination.next_command` to continue; use `vibe task show <task_id>` for detail.
 List and show expose the Workbench lifecycle projection. Watch rows additionally
 include tri-state `process_alive`; compatibility `state` / `last_status` fields
@@ -1001,7 +1003,7 @@ direct Agent Run calls.
 
 | Subcommand | Purpose |
 | --- | --- |
-| `vibe runs list` | List recent runs |
+| `vibe runs list` | List the caller Session's recent runs; `--session-id <id>` for another Session, `--global` for every Session |
 | `vibe runs show <run_id>` | Show one run |
 | `vibe runs cancel <run_id>` | Request cancellation; once the run's input reached the live Session turn, this stops that turn like Session Stop, including other runs sharing it |
 
@@ -1038,6 +1040,6 @@ Use the right command family for the job:
 vibe
 vibe status
 vibe doctor
-vibe task list
+vibe task list --global
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
 ```
