@@ -403,6 +403,7 @@ vibe session list --page 2 --limit 50   # 第 2 页，每页 50 条（最多 100
 vibe session get                        # 在 Avibe Agent shell 内查看调用方 Session
 vibe session get --session-id sesk8m4q2p7x                   # 其他会话的完整明细
 vibe session update --title 'Release review'                 # 在 Avibe Agent shell 内
+vibe session update --title 'Release review' --if-untitled   # 保留用户或 Agent 已设置的标题
 vibe session update --session-id sesk8m4q2p7x --title ''     # 清空标题
 vibe session update --session-id sesk8m4q2p7x --hidden       # 只在后台；--visible 恢复显示
 vibe session queue list --session-id sesk8m4q2p7x            # 按 FIFO 顺序列出排队消息
@@ -411,7 +412,9 @@ vibe session send-now --session-id sesk8m4q2p7x              # 提升精确的�
 ```
 
 除 `list` 外，每个命令都作用于一个 Session：`--session-id`，或在 Avibe Agent shell
-内默认的调用方 Session（见 [语法](#语法)）。`--type` 取平台 id：`avibe`（Web/Workbench）、`slack`、`discord`、`telegram`、`lark`、`wechat`。需要更高级的筛选——按 Agent、时间段、消息内容或跨表联查——请使用 `vibe data query`。
+内默认的调用方 Session（见 [语法](#语法)）。加上 `--if-untitled` 时，`update --title`
+只在用户或 Agent 尚未设置标题时写入，自动生成的标题仍视为未命名；检查与写入在同一个事务内，
+不会覆盖同时发生的重命名，`updated: false` 表示保留了原标题。`--type` 取平台 id：`avibe`（Web/Workbench）、`slack`、`discord`、`telegram`、`lark`、`wechat`。需要更高级的筛选——按 Agent、时间段、消息内容或跨表联查——请使用 `vibe data query`。
 
 ### `vibe runs`
 

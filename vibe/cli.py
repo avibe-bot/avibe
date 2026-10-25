@@ -61,6 +61,7 @@ from core.vibe_agents import AgentAlwaysEnabledError, AgentArchivedEditError, Ag
 from core.watches import (
     DEFAULT_RETRY_EXIT_CODE,
     NO_EVENT_EXIT_CODE,
+    NO_EVENT_MARKER,
     WATCH_RECOVERY_ENTRY_TIMEOUT_SECONDS,
     WATCH_RECONCILE_INTERVAL_SECONDS,
     JobWatchUpdateRefused,
@@ -1159,10 +1160,9 @@ def _task_examples_text() -> str:
     return dedent(
         """\
         Examples:
-          vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
+          vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'
           vibe task update 12ab34cd56ef --cron '*/30 * * * *' --name 'Half-hour summary'
           vibe task run 12ab34cd56ef
-          vibe task add --create-session --scope-id slack::channel::C123 --cron '*/5 * * * *' --message 'Tell a new joke each time.'
           vibe task add --create-session --scope-id slack::channel::C123 --at '2026-03-31T09:00:00+08:00' --message-file briefing.md
         """
     )
@@ -1171,36 +1171,17 @@ def _task_examples_text() -> str:
 def _task_add_examples_text() -> str:
     return dedent(
         """\
-        Session target:
-          Use --session-id with the target Agent Session ID, for example sesk8m4q2p7x.
-          Inside an Avibe Agent shell, tasks continue this conversation by default.
-
-        Guidance:
-          If this is your first time using this command, read this whole help entry before creating a task.
-          `--session-id` chooses which Agent Session Avibe will continue using when the task runs.
-          Use --create-session with --scope-id <scopes.id> to create a reusable Session in a specific existing scope.
-          Use --create-session with --same-scope only from an Avibe Agent shell, where the caller Session scope is available.
-          Use --cwd only for Sessions created by this task; existing target Sessions keep their own cwd.
-          `--message` and `--message-file` provide the stored user message that will be sent each time the task runs.
-          Use --cron for recurring jobs and --at for one-shot jobs.
-          Write cron weekdays as names (mon, tue, ... sun). Numeric weekdays are rejected because Avibe's scheduler reads 0 as Monday while crontab(5) reads 0 as Sunday.
-          --timezone controls how --cron and naive --at timestamps are interpreted.
-
-        Command tasks:
-          A command task runs a subprocess on schedule with NO Agent turn, so it needs no Session, Agent, or message.
-          Use --shell for a shell command string, or pass the executable and its args after '--'.
-          Failure handling is silent-success by default: a successful run stays quiet, and a failed run records a failure notice.
-          Add --on-failure agent with --message to spend an Agent turn triaging a failed run instead.
-          --timeout bounds one run; use 0 for no timeout.
-          --cwd is where the command runs; without it, a Session-bound command follows that Session's directory
-          and every other command records the directory you ran this from.
+        A message task stores --message and sends it to the target Session on each run.
+        A command task (--shell, or a command after '--') runs with no Agent turn. A success is
+          silent; a failure records a notice, or with --on-failure agent starts one Agent turn
+          with the failure and --message. Only that form takes Session, scope, or Agent flags.
+        Write cron weekdays as names (mon ... sun): numbers are rejected, because Avibe reads
+          0 as Monday and crontab(5) reads it as Sunday.
 
         Examples:
-          vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'
-          vibe task add --create-session --scope-id slack::channel::C123 --cron '*/5 * * * *' --message 'Tell a new joke each time.'
-          vibe task add --create-session --scope-id slack::channel::C123 --cron '0 9 * * *' --message 'Post a visible daily summary in this scope.'
-          vibe task add --name nightly-sync --cron '0 3 * * *' --shell './scripts/sync.sh'
-          vibe task add --cron '0 3 * * *' --shell './scripts/sync.sh' --on-failure agent --message 'The nightly sync failed. Diagnose it.'
+          vibe task add --cron '0 9 * * mon-fri' --message 'Share the morning summary.'
+          vibe task add --at '2026-03-31T09:00:00+08:00' --create-session --scope-id slack::channel::C123 --message-file briefing.md
+          vibe task add --cron '0 3 * * *' --shell './scripts/sync.sh' --on-failure agent --message 'The sync failed. Diagnose it.'
         """
     )
 
@@ -1208,26 +1189,14 @@ def _task_add_examples_text() -> str:
 def _task_update_examples_text() -> str:
     return dedent(
         """\
-        You may update any subset of the stored task fields while keeping the same task ID.
+        Unspecified fields keep their values. A message task cannot become a command task, or
+          the reverse, and --on-failure cannot change: remove the task and add a new one.
+        Write cron weekdays as names (mon ... sun); numbers are rejected.
 
-        Common updates:
-          vibe task update 12ab34cd56ef --name 'Morning summary'
-          vibe task update 12ab34cd56ef --cron '*/30 * * * *'
-          vibe task update 12ab34cd56ef --message 'Send a shorter summary.'
-          vibe task update 12ab34cd56ef --session-id sesk8m4q2p7x
-          vibe task update 12ab34cd56ef --create-session --scope-id slack::channel::C123
-          vibe task update 12ab34cd56ef --reset-delivery
-          vibe task update 12ab34cd56ef --shell './scripts/sync.sh --verbose'
-          vibe task update 12ab34cd56ef --timeout 900
-
-        Guidance:
-          Unspecified fields keep their existing values.
-          A command task and a message task are different kinds: remove and recreate the task to move between them, or to change --on-failure.
-          Use --reset-delivery to return to following the session target directly.
-          Use --same-scope or --scope-id when this task should create new Sessions in a specific scope.
-          When changing schedule fields, pass either --cron or --at.
-          Write cron weekdays as names (mon, tue, ... sun). Numeric weekdays are rejected because Avibe's scheduler reads 0 as Monday while crontab(5) reads 0 as Sunday.
-          Use --clear-name if you want the task to stop storing a custom name.
+        Examples:
+          vibe task update 12ab34cd56ef --cron '0 9 * * mon-fri'
+          vibe task update 12ab34cd56ef --name 'Morning summary' --message 'Send a shorter summary.'
+          vibe task update 12ab34cd56ef --shell './scripts/sync.sh --verbose' --timeout 900
         """
     )
 
@@ -1236,9 +1205,8 @@ def _watch_examples_text() -> str:
     return dedent(
         """\
         Examples:
-          vibe watch add --session-id sesk8m4q2p7x --name 'Wait for export' --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
+          vibe watch add --name 'Wait for export' --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
           vibe watch add --create-session --scope-id slack::channel::C123 --message 'The CI job finished. Inspect the result.' -- python3 scripts/wait_for_ci.py --build 42
-          vibe watch add --session-id sesk8m4q2p7x --forever --retry-exit-code 75 --retry-delay 60 --message 'The log pattern appeared. Continue from the result below.' --shell 'bash scripts/wait_for_log_pattern.sh'
           vibe watch list
           vibe watch show 12ab34cd56ef
           vibe watch pause 12ab34cd56ef
@@ -1924,59 +1892,20 @@ def _remote_pair_examples_text() -> str:
 
 
 def _show_examples_text() -> str:
-    markdown_help = "Public Show Page links automatically return agent-readable Markdown to Agents and command-line clients. For an authorized private read, request the URL with Accept: text/markdown."
     return dedent(
         """\
-        A Show Page is one session-scoped visual page that Avibe serves through the Web UI / Avibe Cloud tunnel.
-        One Agent Session has exactly one Show Page.
-
-        Agent-readable representation:
-          __MARKDOWN_HELP__
-
-        Commands:
-          list     List existing Show Pages across sessions.
-          path     Create or resolve the local workspace.
-          status   Inspect local path, visibility, active URL, and share state.
-          update   Switch visibility, set a custom public link, rotate share links, or take the page offline.
-          mark     Add an assistant mark event to the session.
-          reply    Reply to a dispatched page annotation at its original anchor.
-          marks    List active assistant marks.
-          unmark   Resolve active assistant marks by id or target.
-          event    Record a generic annotation-layer event.
-          annotate Control the page's annotation overlay.
-
-        Visibility:
-          private  Authenticated Web UI URL under /show/<session-id>/.
-          public   Short unauthenticated share URL under /p/<share-id>/.
-          offline  URL access is revoked; local files remain.
+        Each Agent Session has one Show Page, served through the Web UI or the Avibe Cloud tunnel.
+        Visibility: private is the signed-in /show/<session-id>/ URL; public is an unauthenticated
+          /p/<share-id>/ URL; offline revokes URL access and keeps the local files.
+        Public Show Page links automatically return agent-readable Markdown to Agents and
+          command-line clients. For an authorized private read, send Accept: text/markdown.
 
         Examples:
-          vibe show list
-          vibe show list --global --visibility public
-          vibe show path --session-id sesk8m4q2p7x
-          vibe show status --session-id sesk8m4q2p7x
-          vibe show update --session-id sesk8m4q2p7x --visibility public
-          vibe show update --session-id sesk8m4q2p7x --visibility offline
-          vibe show mark mark-default-summary --session-id sesk8m4q2p7x --message "Review this summary."
-          vibe show reply show_evt_1a2b3c4d --message "The source changed in W30."
-          vibe show marks
-          vibe show unmark mark_1 mark-default-summary
-          vibe show event --session-id sesk8m4q2p7x --event-json @./show-event.json
-          vibe show annotate --session-id sesk8m4q2p7x --on --mode screenshot
-
-        More:
-          vibe show list --help
-          vibe show path --help
-          vibe show status --help
-          vibe show update --help
-          vibe show mark --help
-          vibe show reply --help
-          vibe show marks --help
-          vibe show unmark --help
-          vibe show event --help
-          vibe show annotate --help
+          vibe show path
+          vibe show update --visibility public
+          vibe show annotate --on --mode screenshot
         """
-    ).replace("__MARKDOWN_HELP__", markdown_help)
+    )
 
 
 def _show_path_examples_text() -> str:
@@ -2080,35 +2009,19 @@ def _print_json(payload: dict) -> None:
 
 def _watch_add_examples_text() -> str:
     return dedent(
-        """\
-        Session target:
-          Use --session-id with the target Agent Session ID, for example sesk8m4q2p7x.
-          Inside an Avibe Agent shell, watches follow up in this conversation by default.
-
-        Guidance:
-          If this is your first time using this command, read this whole help entry before creating a watch.
-          Use a watch when a script should wait in the background and send a follow-up when it detects an event or reaches a terminal failure.
-          `--session-id` chooses which Agent Session Avibe will continue using for follow-up messages from the watch.
-          Use --create-session with --scope-id <scopes.id> to create a reusable Session in a specific existing scope.
-          Use --create-session with --same-scope only from an Avibe Agent shell, where the caller Session scope is available.
-          Use --message or --message-file for follow-up instructions.
-          Terminal failures also send a follow-up and disable the watch.
-          In either mode, an allowed `--retry-exit-code` keeps waiting. A once Watch stops after its first event.
-          A forever Watch waits for each event's Agent Run to finish before re-arming, then applies a five-second safety delay.
-          Exit 0 must mean one new reportable event, not a condition that merely remains true. Repeated rapid successes automatically pause the Watch and send the Agent a repair message.
-          Waiter exit codes: 0 detected an event and sends the follow-up; 124 timed out and is terminal unless explicitly allowed for retry;
-          64 PLUS the line 'avibe-watch: no-event' on stderr means the cycle ran and found nothing worth reporting,
-          so a once Watch ends and a forever Watch re-arms WITHOUT an Agent turn. A once waiter that is still waiting must use a retry exit code.
-          Any other non-zero is a failure.
-          The marker is required: 64 alone is also sysexits EX_USAGE, so a bare 64 stays a failure and stops the watch.
-          Use it in waiters whose normal outcome is uninteresting, such as green CI.
-          Pass either --shell '<command>' or a command after '--'.
-          --timeout applies to each cycle. --lifetime-timeout applies to the whole Watch lifetime across retries and re-arms.
+        f"""\
+        Waiter exit codes:
+          0      one new event: start the follow-up Run
+          {DEFAULT_RETRY_EXIT_CODE}     still waiting (any --retry-exit-code): rerun after --retry-delay
+          {NO_EVENT_EXIT_CODE}     plus the stderr line '{NO_EVENT_MARKER}': quiet cycle, no Agent turn
+          other  failure (124 = timed out): a follow-up Run, then the Watch stops
+        A once Watch stops at its first event or quiet cycle; --forever re-arms after each.
+        Exit 0 only for a new event: rapid repeats pause the Watch. A bare {NO_EVENT_EXIT_CODE} is a failure.
 
         Examples:
-          vibe watch add --session-id sesk8m4q2p7x --message 'The export finished. Inspect it and continue.' --shell 'python3 scripts/wait_for_export.py'
-          vibe watch add --create-session --scope-id slack::channel::C123 --message 'The export finished.' -- bash -lc 'sleep 120; echo done'
-          vibe watch add --session-id sesk8m4q2p7x --forever --timeout 600 --lifetime-timeout 86400 --retry-exit-code 75 --retry-delay 30 --message 'PR #153 changed. Inspect it and continue.' -- uv run --no-project scripts/wait_pr.py --repo avibe-bot/avibe --pr 153
+          vibe watch add --name export --message 'The export finished. Check it.' -- python3 wait_export.py
+          vibe watch add --forever --timeout 0 --message 'The deploy changed.' --shell './wait_deploy.sh'
+          vibe watch add --create-session --scope-id slack::channel::C123 --message 'Build done.' -- make build
         """
     )
 
@@ -2116,50 +2029,15 @@ def _watch_add_examples_text() -> str:
 def _agent_run_examples_text() -> str:
     return dedent(
         """\
-        Session target:
-          Use --session-id to continue an existing Agent Session.
-          The default is P1: steer an active native Turn, start when idle, or fall back to the durable P3 queue.
-          Add --queue to persist this Run as P3 behind the active Turn.
-          To promote the exact existing P3 queue head without a new message, use: vibe session send-now --session-id <session-id>
-          Inspect queued work with: vibe session queue list --session-id <session-id>
-          Remove one exact queued row with: vibe session queue remove <message-id> --session-id <session-id>
-          Omit --session-id/--fork-self/--fork-session to create a background Session for --agent.
-          Inside an Agent shell it inherits the caller scope and invocation cwd; outside one it is standalone with its own Show workspace.
-          Use --same-scope to explicitly place a new Session in the caller/source Session's scope.
-          Use --scope-id <scopes.id> to place a new Session in a specific existing scope.
-          New and forked delegated Sessions are background by default; pass --visible to make them user-facing and enable outward delivery.
-          --cwd only applies to new Sessions; existing Sessions keep their own cwd.
+        Inside an Agent shell a new Session takes the caller's scope and current directory.
+          Elsewhere, pass --callback-session-id, --no-callback, or --sync.
+        --model, --reasoning-effort, --visible, --same-scope, --scope-id, and --close-after
+          apply only to a new or forked Session.
 
-        Callback:
-          Agent runs are async by default. From an Avibe Agent shell, they return their final result to this conversation by default.
-          From a normal terminal, pass --callback-session-id or --no-callback for async runs.
-          Pass --no-callback only when you intentionally want no automatic follow-up.
-          Pass --callback-session-id only when the final result should return somewhere else.
-          Pass --sync when the CLI should wait for the run result in the terminal.
-
-        Forking:
-          --fork-self forks this current Session.
-          --fork-session <session-id> creates a new Avibe Agent Session and asks the native backend to fork the source native session on the first turn.
-          Forks keep the same backend, scope, and cwd as the source Session. Passing --agent is allowed only when that Agent uses the same backend.
-          --agent, --model, and --reasoning-effort may override the forked Session's Agent/model/effort.
-          Do not combine fork flags with --session-id.
-
-        Avibe Agent shell examples:
-          vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
-          vibe agent run --agent release-reviewer --visible --message 'Review this project in a visible sibling Session.'
-          vibe agent run --session-id sesk8m4q2p7x --message 'Apply this correction in the current turn.'
-          vibe session queue list --session-id sesk8m4q2p7x
-          vibe session queue remove msg_queued123 --session-id sesk8m4q2p7x
-          vibe session send-now --session-id sesk8m4q2p7x
-
-        Normal terminal examples:
-          vibe agent run --sync --agent release-reviewer --message 'Review the latest CI result and print it here.'
-          vibe agent run --agent release-reviewer --callback-session-id sescaller456 --message 'Review the latest CI result and report back.'
-          vibe agent run --agent release-reviewer --no-callback --message 'Run a background experiment; I will inspect the run later.'
-
-        Fork examples:
-          vibe agent run --fork-self --message 'Explore this alternate fix from the current context.'
-          vibe agent run --fork-session sesk8m4q2p7x --agent reviewer --model gpt-5.4 --reasoning-effort high --message 'Review the forked context.'
+        Examples:
+          vibe agent run --agent reviewer --message 'Review the latest deployment result.'
+          vibe agent run --session-id sesk8m4q2p7x --queue --message 'After this turn, also update the docs.'
+          vibe agent run --fork-self --message 'Explore the alternate fix from this context.'
         """
     )
 
@@ -7859,8 +7737,22 @@ def cmd_session_queue_remove(args):
 
 def cmd_session_update(args):
     from core.services import sessions as sessions_service
+    from storage.agent_session_rows import reserve_write_lock
+    from storage.workbench_sessions_service import DELIBERATE_TITLE_SOURCES
 
     try:
+        if_untitled = bool(getattr(args, "if_untitled", False))
+        if if_untitled and (
+            getattr(args, "title", None) is None
+            or getattr(args, "visibility", None) is not None
+            or getattr(args, "scope_id", None) is not None
+        ):
+            raise TaskCliError(
+                "--if-untitled applies only to --title",
+                code="invalid_arguments",
+                hint="Pass --title with --if-untitled, and change visibility or scope in a separate call.",
+                help_command="vibe session update --help",
+            )
         updates = {}
         if getattr(args, "title", None) is not None:
             updates["title"] = args.title
@@ -7891,10 +7783,19 @@ def cmd_session_update(args):
         )
         engine = _open_session_engine()
         with engine.begin() as conn:
+            # Hold the write lock from before the read, so a rename committed by the
+            # Web UI cannot land between the --if-untitled check and this write.
+            reserve_write_lock(conn)
             # Validate first so an archived/missing id is a clean not-found rather
             # than silently writing a title onto a soft-deleted row.
             previous_session = sessions_service.get_active_session(conn, session_id)
-            payload = sessions_service.update_session(conn, session_id, **updates)
+            title_source = (previous_session.get("metadata") or {}).get("title_source")
+            updated = not (if_untitled and title_source in DELIBERATE_TITLE_SOURCES)
+            payload = (
+                sessions_service.update_session(conn, session_id, **updates)
+                if updated
+                else previous_session
+            )
     except LookupError:
         _print_task_error(
             TaskCliError(
@@ -7910,14 +7811,15 @@ def cmd_session_update(args):
         return 1
     # The DB write is committed above; ping a running UI so the rename shows live
     # (best-effort — never affects this command's result).
-    _post_session_activity_to_live_ui(
-        session_id,
-        previous_scope_id=previous_session.get("scope_id"),
-        previous_visibility=previous_session.get("visibility"),
-    )
+    if updated:
+        _post_session_activity_to_live_ui(
+            session_id,
+            previous_scope_id=previous_session.get("scope_id"),
+            previous_visibility=previous_session.get("visibility"),
+        )
     _print_cli_payload(
         "agent_session",
-        updated=True,
+        updated=updated,
         session=_session_row(payload, brief=False),
     )
     return 0
@@ -17295,59 +17197,49 @@ def build_parser():
     agent_run_parser = agent_subparsers.add_parser(
         "run",
         help="Run an Avibe Agent",
-        description="Run an Avibe Agent turn. Runs are async by default; use --sync to wait for the result.",
+        description=(
+            "Run an Agent turn in a new background Session (--agent), an existing Session "
+            "(--session-id), or a fork. Runs are async: the final result returns to the caller Session."
+        ),
         epilog=_agent_run_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe agent run --help",
     )
-    agent_run_parser.add_argument("--agent", help="Avibe Agent name")
-    agent_run_parser.add_argument("--session-id", help="Existing Agent Session ID to continue")
+    agent_run_parser.add_argument("--agent", metavar="NAME", help="Agent for a new Session (a fork: same backend only)")
     agent_run_parser.add_argument(
-        "--queue",
-        action="store_true",
-        help="Queue this Run behind the active Turn instead of steering it",
+        "--session-id", metavar="ID", help="Join this Session's running turn, or start one if idle"
     )
-    agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
-    agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork this current Agent Session")
-    agent_run_parser.add_argument("--same-scope", action="store_true", help="Place a new or forked Session in the caller/source Session scope")
-    agent_run_parser.add_argument("--scope-id", help="Existing scopes.id that should own the new or forked Session")
+    agent_run_parser.add_argument("--queue", action="store_true", help="With --session-id: wait for the running turn")
+    agent_run_parser.add_argument("--fork-session", metavar="ID", help="Fork this Session's context, backend, scope, and cwd")
+    agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork the caller Session")
+    agent_run_parser.add_argument("--same-scope", action="store_true", help="Place the new Session in the caller's scope")
+    agent_run_parser.add_argument("--scope-id", metavar="ID", help="Place the new Session in this scopes.id")
     agent_run_parser.add_argument(
         "--visible",
         dest="visibility",
         action="store_const",
         const="foreground",
-        help="Make the new or forked Session user-facing from the start (default: background)",
+        help="Make the new Session user-facing",
     )
-    agent_run_parser.add_argument(
-        "--model", help="Model for the new Session this run creates (a blank new Session or a fork); kept on that Session for its later turns. Not valid with --session-id. See `vibe agent models <agent>`."
-    )
-    agent_run_parser.add_argument(
-        "--reasoning-effort", help="Reasoning effort for the new Session this run creates; kept on that Session. Not valid with --session-id."
-    )
-    agent_run_parser.add_argument(
-        "--cwd",
-        help=(
-            "Working directory for the NEW session. Caller-delegated sessions default to the invocation "
-            "directory; explicit scoped sessions use the scope workdir; standalone sessions use their Show workspace. Invalid with --session-id "
-            "(an existing session keeps its own working directory)."
-        ),
-    )
-    agent_run_parser.add_argument("--callback-session-id", help="Caller Session ID to receive the completed async run result")
+    agent_run_parser.add_argument("--model", help="Model the new Session keeps; see 'vibe agent models <agent>'")
+    agent_run_parser.add_argument("--reasoning-effort", metavar="EFFORT", help="Reasoning effort the new Session keeps")
+    agent_run_parser.add_argument("--cwd", metavar="DIR", help="Working directory for a new, unforked Session")
+    agent_run_parser.add_argument("--callback-session-id", metavar="ID", help="Send the result to this Session instead")
     agent_run_parser.add_argument(
         "--no-callback",
         action="store_true",
-        help="For async runs, intentionally skip automatic callback delivery and inspect the run later.",
+        help="Send the result nowhere; read it with 'vibe runs show'",
     )
     agent_run_parser.add_argument(
         "--close-after",
         action="store_true",
-        help="Close the newly-created Agent runtime after the run settles while keeping its Session and transcript.",
+        help="Release the new Session's runtime when the run ends",
     )
-    agent_run_parser.add_argument("--sync", dest="sync_run", action="store_true", help="Wait for the run result before exiting")
-    agent_run_parser.add_argument("--wait-timeout", type=float, help="Maximum seconds the CLI waits for a synchronous run result")
+    agent_run_parser.add_argument("--sync", dest="sync_run", action="store_true", help="Wait and print the finished run")
+    agent_run_parser.add_argument("--wait-timeout", metavar="SEC", type=float, help="With --sync: maximum seconds to wait")
     agent_message_group = agent_run_parser.add_mutually_exclusive_group(required=True)
-    agent_message_group.add_argument("--message")
-    agent_message_group.add_argument("--message-file")
+    agent_message_group.add_argument("--message", metavar="TEXT", help="Message for the Agent")
+    agent_message_group.add_argument("--message-file", metavar="PATH", help="Read the message from a UTF-8 file")
     _add_json_noop(agent_run_parser)
 
     runs_parser = subparsers.add_parser(
@@ -17523,6 +17415,11 @@ def build_parser():
     _add_session_target_arg(session_update_parser)
     session_update_parser.add_argument(
         "--title", help="New title. Pass an empty string to clear it (reverts to id-based display)."
+    )
+    session_update_parser.add_argument(
+        "--if-untitled",
+        action="store_true",
+        help="Set --title only if no user or Agent has titled the Session; else keep it (updated: false).",
     )
     session_visibility_group = session_update_parser.add_mutually_exclusive_group()
     session_visibility_group.add_argument(
@@ -18151,120 +18048,88 @@ def build_parser():
     task_add_parser = task_subparsers.add_parser(
         "add",
         help="Create a scheduled task",
-        description="Create a recurring or one-shot scheduled Agent message.",
+        description="Schedule an Agent message (message task) or a command with no Agent turn (command task).",
         epilog=_task_add_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe task add --help",
-        error_hint="Use --session-id together with exactly one schedule flag and one message input flag. Use --same-scope or --scope-id when the task creates a new Session.",
+        error_hint="Pass --cron or --at, plus --message, --shell, or a command after '--'.",
     )
-    task_add_parser.add_argument(
-        "--name",
-        help="Optional human-friendly task name",
-    )
-    task_add_parser.add_argument(
-        "--session-id",
-        help="Agent Session ID to continue when the task runs.",
-    )
-    task_add_parser.add_argument("--create-session", action="store_true", help="Create one reusable Avibe Session ID for this task")
-    task_add_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID each time this task runs")
-    task_add_parser.add_argument("--same-scope", action="store_true", help="Place a created Session in the caller Session scope")
-    task_add_parser.add_argument("--scope-id", help="Existing scopes.id that should own created Sessions")
-    task_add_parser.add_argument("--agent", help="Avibe Agent name to use when the task runs")
-    task_add_parser.add_argument(
-        "--cwd",
-        help=(
-            "Working directory for Sessions created by this task, and for a command task, "
-            "the directory its command runs in. Defaults to the caller's current directory."
-        ),
-    )
+    task_add_parser.add_argument("--name", help="Display name")
+    task_add_parser.add_argument("--session-id", metavar="ID", help="Run in this Session instead of the caller")
+    task_add_parser.add_argument("--create-session", action="store_true", help="Run in one new reusable Session")
+    task_add_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Session for each run")
+    task_add_parser.add_argument("--same-scope", action="store_true", help="Place a created Session in the caller's scope")
+    task_add_parser.add_argument("--scope-id", metavar="ID", help="Place a created Session in this scopes.id")
+    task_add_parser.add_argument("--agent", metavar="NAME", help="Agent that runs the message")
+    task_add_parser.add_argument("--cwd", metavar="DIR", help="Created Session's directory; also where a command runs")
     schedule_group = task_add_parser.add_mutually_exclusive_group(required=True)
-    schedule_group.add_argument(
-        "--cron", help="Recurring schedule in 5-field crontab format; write weekdays as names (mon ... sun)"
-    )
-    schedule_group.add_argument("--at", help="One-shot timestamp in ISO 8601 format")
+    schedule_group.add_argument("--cron", metavar="EXPR", help="Recurring 5-field cron schedule")
+    schedule_group.add_argument("--at", metavar="TIME", help="One-shot ISO 8601 time")
     # Not ``required=True`` any more: a command task carries no message at all, so the
     # "message or command" choice is enforced in ``cmd_task_add`` where both inputs are
     # visible (``missing_task_action``).
     prompt_group = task_add_parser.add_mutually_exclusive_group()
-    prompt_group.add_argument("--message", help="Stored user message to send each time the task runs")
-    prompt_group.add_argument("--message-file", help="Read stored user message from a UTF-8 text file")
-    task_add_parser.add_argument("--timezone", help="IANA timezone name used for --cron and naive --at values")
-    task_add_parser.add_argument(
-        "--shell",
-        help="Shell command to run on schedule. Use this or pass a command after '--'.",
-    )
+    prompt_group.add_argument("--message", metavar="TEXT", help="Message sent on each run")
+    prompt_group.add_argument("--message-file", metavar="PATH", help="Read the message from a UTF-8 file")
+    task_add_parser.add_argument("--timezone", metavar="TZ", help="IANA timezone for --cron and a naive --at")
+    task_add_parser.add_argument("--shell", metavar="CMD", help="Command task: one shell command string")
     task_add_parser.add_argument(
         "--on-failure",
         choices=["none", "agent"],
         default=None,
-        help="What a failed command run does: 'none' records the failure, 'agent' starts an Agent turn to triage it. Default: none",
+        help="Command task failure: record a notice, or start an Agent turn",
     )
     task_add_parser.add_argument(
         "--timeout",
+        metavar="SEC",
         type=float,
-        help="Per-run timeout in seconds for command tasks. Use 0 for no timeout. Default: 21600.",
+        help="Command task per-run timeout; 0 = none. Default: 21600",
     )
     task_add_parser.add_argument(
         "command_argv",
         nargs=argparse.REMAINDER,
-        help="-- followed by the command to run on schedule",
+        help="Or the command task's command after '--'",
     )
     _add_json_noop(task_add_parser)
 
     task_update_parser = task_subparsers.add_parser(
         "update",
         help="Update a scheduled task",
-        description="Update one stored scheduled task while keeping its task ID.",
+        description="Update one scheduled task in place; unspecified fields keep their values.",
         epilog=_task_update_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe task update --help",
         error_hint="Pass the task ID plus at least one field to change. Unspecified fields keep their existing values.",
     )
     task_update_parser.add_argument("task_id", help="Task ID from 'vibe task list'")
-    task_update_parser.add_argument("--name", help="New human-friendly task name")
-    task_update_parser.add_argument(
-        "--clear-name",
-        action="store_true",
-        help="Remove the stored custom task name",
-    )
-    task_update_parser.add_argument("--session-id", help="Replace the stored Agent Session ID")
-    task_update_parser.add_argument("--create-session", action="store_true", help="Replace the task with one reusable newly-created Avibe Session ID")
-    task_update_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID each time this task runs")
-    task_update_parser.add_argument("--same-scope", action="store_true", help="Place created Sessions in the caller Session scope")
-    task_update_parser.add_argument("--scope-id", help="Existing scopes.id that should own created Sessions")
-    task_update_parser.add_argument("--agent", help="Replace the Avibe Agent used by this task")
-    task_update_parser.add_argument("--clear-agent", action="store_true", help="Clear the stored Avibe Agent override")
-    task_update_parser.add_argument(
-        "--cwd",
-        help="Set working directory for Sessions created by this task, or for a command task, where its command runs",
-    )
+    task_update_parser.add_argument("--name", help="Set the display name")
+    task_update_parser.add_argument("--clear-name", action="store_true", help="Clear the display name")
+    task_update_parser.add_argument("--session-id", metavar="ID", help="Run in this Session")
+    task_update_parser.add_argument("--create-session", action="store_true", help="Run in one new reusable Session")
+    task_update_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Session for each run")
+    task_update_parser.add_argument("--same-scope", action="store_true", help="Place created Sessions in the caller's scope")
+    task_update_parser.add_argument("--scope-id", metavar="ID", help="Place created Sessions in this scopes.id")
+    task_update_parser.add_argument("--agent", metavar="NAME", help="Set the Agent")
+    task_update_parser.add_argument("--clear-agent", action="store_true", help="Clear the Agent override")
+    task_update_parser.add_argument("--cwd", metavar="DIR", help="Directory for created Sessions, or the command's")
     task_update_parser.add_argument(
         "--reset-delivery",
         action="store_true",
-        help="Clear any stored delivery override so delivery follows the session target directly",
+        help="Clear the delivery override; deliver to the Session",
     )
-    task_update_parser.add_argument(
-        "--cron", help="Replace the schedule with a recurring 5-field crontab; write weekdays as names (mon ... sun)"
-    )
-    task_update_parser.add_argument("--at", help="Replace the schedule with a one-shot ISO 8601 timestamp")
-    task_update_parser.add_argument("--message", help="Replace the stored user message text")
-    task_update_parser.add_argument("--message-file", help="Replace the stored user message from a UTF-8 text file")
-    task_update_parser.add_argument("--timezone", help="Replace the stored IANA timezone name")
-    task_update_parser.add_argument(
-        "--shell",
-        help="Replace the shell command a command task runs. Use this or pass a command after '--'.",
-    )
+    task_update_parser.add_argument("--cron", metavar="EXPR", help="Switch to this recurring cron schedule")
+    task_update_parser.add_argument("--at", metavar="TIME", help="Switch to this one-shot ISO 8601 time")
+    task_update_parser.add_argument("--message", metavar="TEXT", help="Replace the message")
+    task_update_parser.add_argument("--message-file", metavar="PATH", help="Read the message from a UTF-8 file")
+    task_update_parser.add_argument("--timezone", metavar="TZ", help="Set the IANA timezone")
+    task_update_parser.add_argument("--shell", metavar="CMD", help="Replace the command; or pass one after '--'")
     task_update_parser.add_argument(
         "--on-failure",
         choices=["none", "agent"],
         default=None,
         help=argparse.SUPPRESS,
     )
-    task_update_parser.add_argument(
-        "--timeout",
-        type=float,
-        help="Replace the per-run timeout in seconds for a command task. Use 0 for no timeout.",
-    )
+    task_update_parser.add_argument("--timeout", metavar="SEC", type=float, help="Command per-run timeout; 0 = none")
     # No positional landing slot here: the trailing ``-- <command ...>`` tail is lifted
     # out of argv before argparse runs, exactly as for 'vibe watch update'.
     task_update_parser.set_defaults(command_argv=None)
@@ -18371,119 +18236,115 @@ def build_parser():
     watch_add_parser = watch_subparsers.add_parser(
         "add",
         help="Create a managed background watch",
-        description="Create a managed background watch that runs a waiter command and sends a follow-up on success or terminal failure.",
+        description=(
+            "Run a waiter in the background; on an event or a failure, start a follow-up Agent Run "
+            "in the caller Session."
+        ),
         epilog=_watch_add_examples_text(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe watch add --help",
-        error_hint="Use --session-id and either --shell or a command after '--'. Retry exit codes keep either mode waiting; add --forever only when distinct successful events should re-arm the Watch.",
+        error_hint="Pass the waiter as --shell '<command>' or as a command after '--'.",
     )
-    watch_add_parser.add_argument("--name", help="Optional human-friendly watch name")
-    watch_add_parser.add_argument(
-        "--session-id",
-        help="Agent Session ID to continue for follow-up messages from this watch.",
-    )
-    watch_add_parser.add_argument("--create-session", action="store_true", help="Create one reusable Avibe Session ID for this watch")
-    watch_add_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID each time this watch triggers")
-    watch_add_parser.add_argument("--same-scope", action="store_true", help="Place a created Session in the caller Session scope")
-    watch_add_parser.add_argument("--scope-id", help="Existing scopes.id that should own created Sessions")
-    watch_add_parser.add_argument("--agent", help="Avibe Agent name to use for follow-up messages")
+    watch_add_parser.add_argument("--name", help="Display name")
+    watch_add_parser.add_argument("--session-id", metavar="ID", help="Follow up in this Session instead of the caller")
+    watch_add_parser.add_argument("--create-session", action="store_true", help="Follow up in one new reusable Session")
+    watch_add_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Session for each follow-up")
+    watch_add_parser.add_argument("--same-scope", action="store_true", help="Place a created Session in the caller's scope")
+    watch_add_parser.add_argument("--scope-id", metavar="ID", help="Place a created Session in this scopes.id")
+    watch_add_parser.add_argument("--agent", metavar="NAME", help="Agent for the follow-up Run")
     watch_message_group = watch_add_parser.add_mutually_exclusive_group()
-    watch_message_group.add_argument("--message", help="Follow-up user message template sent with waiter output")
-    watch_message_group.add_argument("--message-file", help="Read follow-up user message from a UTF-8 text file")
-    watch_add_parser.add_argument("--cwd", help="Working directory for the waiter process")
+    watch_message_group.add_argument("--message", metavar="TEXT", help="Follow-up instructions; waiter stdout is appended")
+    watch_message_group.add_argument("--message-file", metavar="PATH", help="Read the message from a UTF-8 file")
+    watch_add_parser.add_argument("--cwd", metavar="DIR", help="Waiter working directory")
     watch_add_parser.add_argument(
         "--timeout",
+        metavar="SEC",
         type=float,
         default=21600,
-        help="Per-cycle timeout in seconds. Use 0 for no per-cycle timeout. Default: 21600",
+        help="Per-cycle timeout; 0 = none. Default: 21600",
     )
-    watch_add_parser.add_argument(
-        "--forever",
-        action="store_true",
-        help="Monitor distinct events continuously. After each event's Agent Run settles, the Watch re-arms; terminal failures still stop it unless their exit code is retryable.",
-    )
+    watch_add_parser.add_argument("--forever", action="store_true", help="Re-arm after each event instead of stopping")
     watch_add_parser.add_argument(
         "--lifetime-timeout",
+        metavar="SEC",
         type=float,
         default=0,
-        help="Overall Watch lifetime timeout in seconds across retries and re-arms. Use 0 for no lifetime limit.",
+        help="Total lifetime; 0 = none (default)",
     )
     watch_add_parser.add_argument(
         "--retry-exit-code",
+        metavar="N",
         dest="retry_exit_code",
         action="append",
         type=int,
         default=None,
-        help=f"Cycle exit code that should keep waiting. Repeat to add more. Default: {DEFAULT_RETRY_EXIT_CODE}",
+        help=f"Still-waiting exit code; repeatable. Default: {DEFAULT_RETRY_EXIT_CODE}",
     )
     watch_add_parser.add_argument(
         "--retry-delay",
+        metavar="SEC",
         type=float,
         default=30,
-        help="Delay in seconds before retrying an allowed cycle result. Default: 30",
+        help="Seconds before a still-waiting rerun. Default: 30",
     )
-    watch_add_parser.add_argument(
-        "--shell",
-        help="Shell command to run as the waiter. Use this or pass a command after '--'.",
-    )
+    watch_add_parser.add_argument("--shell", metavar="CMD", help="Waiter as one shell command string")
     watch_add_parser.add_argument(
         "waiter_command",
         nargs=argparse.REMAINDER,
-        help="Waiter command to run after '--'. Example: vibe watch add ... -- python3 script.py --flag value",
+        help="Or the waiter command after '--'",
     )
     _add_json_noop(watch_add_parser)
 
     watch_update_parser = watch_subparsers.add_parser(
         "update",
         help="Update one background watch",
-        description="Update stored watch metadata, target, delivery, command, or runtime options.",
-        epilog="Find watch IDs with: vibe watch list",
+        description="Update a watch's target, message, waiter, or timing. Unspecified fields keep their values.",
+        epilog="Exit codes and modes: vibe watch add --help",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe watch update --help",
         error_hint="Pass at least one field to update, such as --name, --shell, --timeout, --session-id, or --scope-id.",
     )
     watch_update_parser.add_argument("watch_id", help="Watch ID from 'vibe watch list'")
-    watch_update_parser.add_argument("--name", help="Set a human-friendly watch name")
-    watch_update_parser.add_argument("--clear-name", action="store_true", help="Clear the stored watch name")
-    watch_update_parser.add_argument(
-        "--session-id",
-        help="Agent Session ID to continue for follow-up messages from this watch.",
-    )
-    watch_update_parser.add_argument("--create-session", action="store_true", help="Replace the watch with one reusable newly-created Avibe Session ID")
-    watch_update_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID each time this watch triggers")
-    watch_update_parser.add_argument("--same-scope", action="store_true", help="Place created Sessions in the caller Session scope")
-    watch_update_parser.add_argument("--scope-id", help="Existing scopes.id that should own created Sessions")
-    watch_update_parser.add_argument("--agent", help="Replace the Avibe Agent used for follow-up messages")
-    watch_update_parser.add_argument("--clear-agent", action="store_true", help="Clear the stored Avibe Agent override")
+    watch_update_parser.add_argument("--name", help="Set the display name")
+    watch_update_parser.add_argument("--clear-name", action="store_true", help="Clear the display name")
+    watch_update_parser.add_argument("--session-id", metavar="ID", help="Follow up in this Session")
+    watch_update_parser.add_argument("--create-session", action="store_true", help="Follow up in one new reusable Session")
+    watch_update_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Session for each follow-up")
+    watch_update_parser.add_argument("--same-scope", action="store_true", help="Place created Sessions in the caller's scope")
+    watch_update_parser.add_argument("--scope-id", metavar="ID", help="Place created Sessions in this scopes.id")
+    watch_update_parser.add_argument("--agent", metavar="NAME", help="Set the follow-up Agent")
+    watch_update_parser.add_argument("--clear-agent", action="store_true", help="Clear the Agent override")
     watch_update_parser.add_argument(
         "--reset-delivery",
         action="store_true",
-        help="Clear any stored delivery override and deliver back to the continued session target.",
+        help="Clear the delivery override; deliver to the Session",
     )
     watch_update_message_group = watch_update_parser.add_mutually_exclusive_group()
-    watch_update_message_group.add_argument("--message", help="Replace the follow-up user message template")
-    watch_update_message_group.add_argument("--message-file", help="Read replacement follow-up user message from a UTF-8 text file")
-    watch_update_parser.add_argument("--cwd", help="Set working directory for the waiter process")
-    watch_update_parser.add_argument("--clear-cwd", action="store_true", help="Clear the stored waiter working directory")
-    watch_update_parser.add_argument("--timeout", type=float, help="Set per-cycle timeout in seconds")
+    watch_update_message_group.add_argument("--message", metavar="TEXT", help="Replace the follow-up instructions")
+    watch_update_message_group.add_argument("--message-file", metavar="PATH", help="Read the message from a UTF-8 file")
+    watch_update_parser.add_argument("--cwd", metavar="DIR", help="Set the waiter working directory")
+    watch_update_parser.add_argument("--clear-cwd", action="store_true", help="Clear the waiter working directory")
+    watch_update_parser.add_argument("--timeout", metavar="SEC", type=float, help="Per-cycle timeout; 0 = none")
     watch_update_mode_group = watch_update_parser.add_mutually_exclusive_group()
-    watch_update_mode_group.add_argument("--forever", action="store_true", help="Switch this watch to forever mode")
-    watch_update_mode_group.add_argument("--once", action="store_true", help="Switch this watch to one-shot mode")
+    watch_update_mode_group.add_argument("--forever", action="store_true", help="Re-arm after each event")
+    watch_update_mode_group.add_argument("--once", action="store_true", help="Stop after the first event")
     watch_update_parser.add_argument(
         "--lifetime-timeout",
+        metavar="SEC",
         type=float,
-        help="Set the overall Watch lifetime timeout across retries and re-arms. Use 0 for no lifetime limit.",
+        help="Total lifetime; 0 = none",
     )
     watch_update_parser.add_argument(
         "--retry-exit-code",
+        metavar="N",
         dest="retry_exit_code",
         action="append",
         type=int,
         default=None,
-        help="Replace exit codes that keep this Watch waiting. Repeat to add more.",
+        help="Replace the still-waiting exit codes; repeatable",
     )
-    watch_update_parser.add_argument("--retry-delay", type=float, help="Set retry delay in seconds")
-    watch_update_parser.add_argument("--shell", help="Replace waiter with a shell command")
+    watch_update_parser.add_argument("--retry-delay", metavar="SEC", type=float, help="Seconds before a still-waiting rerun")
+    watch_update_parser.add_argument("--shell", metavar="CMD", help="Replace the waiter; or pass a command after '--'")
     watch_update_parser.set_defaults(waiter_command=None)
     _add_json_noop(watch_update_parser)
 

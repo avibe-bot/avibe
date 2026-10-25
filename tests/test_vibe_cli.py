@@ -76,10 +76,18 @@ def _write_alembic_revision(db_path: Path, revision: str) -> None:
         conn.execute("insert into alembic_version values (?)", (revision,))
 
 
+def _parser_leaves(parser, path=()):
+    import argparse
+
+    yield path, parser
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for name, child in action.choices.items():
+                yield from _parser_leaves(child, (*path, name))
+
+
 def test_cli_text_is_english_whatever_the_ui_language(monkeypatch, tmp_path, capsys):
     """Agents read CLI help and errors; they stay English when the Web UI is set to Chinese."""
-
-    import argparse
 
     config_path = tmp_path / "config.json"
     config_path.write_text(json.dumps({"language": "zh"}), encoding="utf-8")
@@ -87,20 +95,31 @@ def test_cli_text_is_english_whatever_the_ui_language(monkeypatch, tmp_path, cap
     monkeypatch.setattr(cli.V2Config, "load", lambda *_args, **_kwargs: SimpleNamespace(language="zh"))
     han = re.compile(r"[\u4e00-\u9fff]")
 
-    def leaves(parser, path=()):
-        yield path, parser
-        for action in parser._actions:
-            if isinstance(action, argparse._SubParsersAction):
-                for name, child in action.choices.items():
-                    yield from leaves(child, (*path, name))
-
-    for path, parser in leaves(cli.build_parser()):
+    for path, parser in _parser_leaves(cli.build_parser()):
         help_text = parser.format_help()
         assert not han.search(help_text), f"vibe {' '.join(path)} --help is not English"
 
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["skill", "load"])
     assert not han.search(capsys.readouterr().err)
+
+
+def test_every_help_fits_its_budget_and_its_examples_parse(monkeypatch):
+    """Agents read --help before a first call, pay for every byte, and copy its examples."""
+
+    monkeypatch.setenv("COLUMNS", "80")  # what a non-TTY Agent shell renders
+    for path, parser in _parser_leaves(cli.build_parser()):
+        command = " ".join(("vibe", *path))
+        size = len(parser.format_help().encode())
+        assert size <= 2560, f"{command} --help is {size} bytes; keep it within 2.5 KiB"
+        for line in (parser.epilog or "").splitlines():
+            example = line.strip()
+            if not example.startswith("vibe "):
+                continue
+            try:
+                cli.build_parser().parse_args(shlex.split(example, comments=True)[1:])
+            except SystemExit as exc:
+                raise AssertionError(f"{command} --help teaches an unparseable example: {example!r}") from exc
 
 
 def test_top_level_help_lists_only_public_commands(capsys):

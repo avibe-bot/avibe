@@ -659,6 +659,83 @@ def test_update_empty_title_clears(monkeypatch, tmp_path, capsys):
     assert payload["session"]["title"] is None
 
 
+@pytest.mark.parametrize(
+    ("title_source", "updated"),
+    [
+        (None, True),
+        ("backend", True),
+        ("derived_first_prompt", True),
+        ("user", False),
+        ("agent", False),
+    ],
+)
+def test_update_if_untitled_keeps_only_a_deliberate_title(monkeypatch, tmp_path, capsys, title_source, updated):
+    """The Session Title prompt's one call: an automatic title counts as untitled."""
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesaaa", title="Old", title_source=title_source)
+
+    code, payload = _run(
+        cli.cmd_session_update,
+        ["session", "update", "--session-id", "sesaaa", "--title", "New name", "--if-untitled"],
+        capsys,
+    )
+
+    assert code == 0
+    assert payload["updated"] is updated
+    assert payload["session"]["title"] == ("New name" if updated else "Old")
+    assert payload["session"]["metadata"].get("title_source") == ("agent" if updated else title_source)
+
+
+def test_update_if_untitled_never_overwrites_a_concurrent_user_rename(monkeypatch, tmp_path, capsys):
+    """A rename committed while the call waits wins, because the check holds the write lock."""
+    import threading
+    import time
+
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesaaa", title="Auto", title_source="backend")
+    args = cli.build_parser().parse_args(
+        ["session", "update", "--session-id", "sesaaa", "--title", "Agent name", "--if-untitled"]
+    )
+    result = {}
+    with engine.connect() as web:
+        web.exec_driver_sql("BEGIN IMMEDIATE")
+        web.execute(
+            agent_sessions.update()
+            .where(agent_sessions.c.id == "sesaaa")
+            .values(title="User name", metadata_json=json.dumps({"title_source": "user"}))
+        )
+        worker = threading.Thread(target=lambda: result.update(code=cli.cmd_session_update(args)))
+        worker.start()
+        time.sleep(0.5)  # let the CLI reach the lock before the rename commits
+        web.commit()
+        worker.join(timeout=10)
+
+    assert result["code"] == 0
+    assert json.loads(capsys.readouterr().out)["updated"] is False
+    with engine.connect() as conn:
+        assert conn.execute(
+            agent_sessions.select().where(agent_sessions.c.id == "sesaaa")
+        ).mappings().one()["title"] == "User name"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [[], ["--title", "x", "--hidden"], ["--title", "x", "--scope-id", "none"]],
+)
+def test_update_if_untitled_applies_only_to_title(monkeypatch, tmp_path, capsys, extra):
+    engine = _setup(monkeypatch, tmp_path)
+    _seed(engine, "sesaaa", title="Old")
+
+    code, payload = _run(
+        cli.cmd_session_update,
+        ["session", "update", "--session-id", "sesaaa", "--if-untitled", *extra],
+        capsys,
+    )
+
+    assert code == 1
+    assert payload["code"] == "invalid_arguments"
+
+
 def test_update_help_teaches_visibility_sugar(capsys):
     parser = cli.build_parser()
 
@@ -836,13 +913,11 @@ def test_web_title_prompt_defaults_to_current_session():
     out = _injection_for("sesweb")
     title_prompt = out[out.index("## Session Title") :]
     assert "## Session Title" in out
-    assert "`vibe session get`" in out
-    assert '`vibe session update --title "<short title>"`' in out
-    assert "vibe session get sesweb" not in out
-    assert 'vibe session update sesweb --title "<short title>"' not in out
-    assert "metadata.title_source" in out
-    assert "`user` or `agent`" in out
-    assert "leave the title unchanged" in out
+    # One call: the CLI keeps a deliberate title, so no `vibe session get` first.
+    assert '`vibe session update --title "<short title>" --if-untitled`' in title_prompt
+    assert "vibe session get" not in title_prompt
+    assert "sesweb" not in title_prompt
+    assert "keeps a title the user or an Agent already set" in out
     assert "silently set one concise, human-scannable Session title" in out
     assert "without waiting for the user" in out
     assert "do not rename it again" in out

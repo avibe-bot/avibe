@@ -511,6 +511,7 @@ vibe session list --page 2 --limit 50   # request page 2 with 50 rows (at most 1
 vibe session get                        # inside an Avibe Agent shell, the caller Session
 vibe session get --session-id sesk8m4q2p7x                   # full detail for another Session
 vibe session update --title 'Release review'                 # inside an Avibe Agent shell
+vibe session update --title 'Release review' --if-untitled   # keep a title a user or Agent set
 vibe session update --session-id sesk8m4q2p7x --title ''     # clear the title
 vibe session update --session-id sesk8m4q2p7x --hidden       # background-only; --visible promotes it
 vibe session queue list --session-id sesk8m4q2p7x            # queued messages in FIFO order
@@ -519,7 +520,11 @@ vibe session send-now --session-id sesk8m4q2p7x              # promote the exact
 ```
 
 Every command except `list` acts on one Session: `--session-id`, or the caller
-Session inside an Avibe Agent shell (see [Grammar](#grammar)). `--type` accepts
+Session inside an Avibe Agent shell (see [Grammar](#grammar)). With `--if-untitled`,
+`update --title` writes only when no user or Agent has titled the Session; an
+automatic title still counts as untitled. The check and the write are one
+transaction, so a concurrent rename is never overwritten, and `updated: false`
+reports that the existing title was kept. `--type` accepts
 a platform id: `avibe` (Web/Workbench), `slack`, `discord`, `telegram`, `lark`,
 `wechat`. For richer filtering — by agent, time range, message content, or
 cross-table joins — use `vibe data query`.
