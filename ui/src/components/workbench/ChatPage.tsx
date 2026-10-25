@@ -4,7 +4,7 @@ import { useDesktopWindowChrome } from '../../context/DesktopWindowChromeContext
 import { Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -86,7 +86,7 @@ import {
 } from './chatShortcuts';
 import { bindFrameChord } from '../apps/windowChords';
 import {
-  MobileChatSessionActionMenu,
+  ChatSessionActionMenu,
   type SessionActionDescriptor,
 } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
@@ -3661,9 +3661,10 @@ interface ChatHeaderBarProps {
   canManageShowPage?: boolean;
   canManageInstance?: boolean;
   canPinToDock?: boolean;
-  // Shared session actions, rendered behind the mobile-only ⋯ at the far right.
-  // Empty (or absent) withdraws the trigger — which is what a read-only session
-  // yields, since every one of those writes is refused.
+  // Shared session actions, rendered behind a ⋯ beside the title on desktop and
+  // at the far right of the compact mobile bar. Empty (or absent) withdraws the
+  // trigger — which is what a read-only session yields, since every one of those
+  // writes is refused.
   sessionActions?: SessionActionDescriptor[];
   // Lets the menu's Rename row focus the title field that already lives here.
   titleFieldRef?: React.Ref<TitleFieldHandle>;
@@ -3687,8 +3688,8 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
   // ``!readOnly`` twice over: useSessionActions already yields an empty list for a
   // read-only session, and the withdrawal is re-stated here so this header cannot
   // grow a ⋯ full of guaranteed-409 rows if a future caller passes actions anyway.
-  const mobileSessionActions = sessionActions ?? [];
-  const hasMobileSessionActions = writable && mobileSessionActions.length > 0;
+  const headerSessionActions = sessionActions ?? [];
+  const hasSessionActions = writable && headerSessionActions.length > 0;
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   const sessionAgentLabel = sessionAgentDisplayName(session, agents);
   // Mirrors update_session's guard. A session with a NATIVE conversation can
@@ -3760,6 +3761,16 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
           onCommit={(title) => onPatch({ title })}
           readOnly={readOnly}
         />
+        {/* Desktop: the session menu belongs to the session's name, so it sits
+            right after the title rather than among the page-level controls on
+            the right. Mobile keeps its own trigger at the far right below. */}
+        {hasSessionActions && (
+          <ChatSessionActionMenu
+            actions={headerSessionActions}
+            label={t('workbench.sessionActions')}
+            viewport="wide"
+          />
+        )}
         {/* Hidden while the Show Page is open so the view gets the full width.
             On a read-only session the route is frozen, so show it as static text
             plus a badge naming WHY instead of an interactive picker. A runtime-owned
@@ -3811,7 +3822,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
             back-to-chat button. */}
         {/* In Show Page mode the order is: annotation control, launch/back, Share.
             Share exists only there — never on the plain chat header. */}
-        {(showLaunchControl || showShareControl || hasMobileSessionActions) && (
+        {(showLaunchControl || showShareControl || hasSessionActions) && (
           <div className="ml-auto flex items-center gap-1.5">
             {showPageActions.annotate && writable && (
               <ShowPageAnnotateControl
@@ -3843,13 +3854,11 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
                 onOpenChange={onShareOpenChange}
               />
             )}
-            {/* The chat-level session menu is a compact-mobile affordance. Desktop
-                keeps these operations in the sidebar instead of duplicating a
-                second menu in the page header. */}
-            {hasMobileSessionActions && (
-              <MobileChatSessionActionMenu
-                actions={mobileSessionActions}
+            {hasSessionActions && (
+              <ChatSessionActionMenu
+                actions={headerSessionActions}
                 label={t('workbench.sessionActions')}
+                viewport="compact"
               />
             )}
           </div>
@@ -3905,14 +3914,16 @@ const TitleField = forwardRef<TitleFieldHandle, TitleFieldProps>(({ title, onCom
   }
 
   if (!editing) {
+    // A hover surface, not a trailing pencil, says "click to rename": the session
+    // menu sits right after the title, and a hidden pencil would hold a blank gap
+    // between the two.
     return (
       <button
         type="button"
         onClick={() => setEditing(true)}
-        className="group inline-flex min-w-0 items-center gap-2 truncate text-left text-[16px] font-bold text-foreground hover:text-foreground"
+        className="-mx-1.5 inline-flex min-w-0 items-center truncate rounded-md px-1.5 py-0.5 text-left text-[16px] font-bold text-foreground transition-colors hover:bg-foreground/[0.05]"
       >
         <span className="truncate">{title || t('chat.untitled')}</span>
-        <Pencil className="size-3.5 shrink-0 text-muted opacity-0 transition-opacity group-hover:opacity-100" />
       </button>
     );
   }

@@ -1,7 +1,7 @@
 import type * as React from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Archive, EyeOff, GitFork, Hash, Pencil, Pin, PinOff } from 'lucide-react';
+import { Archive, Eye, EyeOff, GitFork, Hash, Pencil, Pin, PinOff } from 'lucide-react';
 
 import { useApi } from '../../context/ApiContext';
 import type { WorkbenchSession } from '../../context/ApiContext';
@@ -9,7 +9,7 @@ import { useComposerInsertTarget } from '../../context/ComposerBridgeContext';
 import { useWorkbenchProjectsActions } from '../../context/WorkbenchProjectsContext';
 import { useToast } from '../../context/ToastContext';
 import { useUnsavedChangesActionGuard } from '../../context/useUnsavedChangesActionGuard';
-import { hideSessionToBackground } from '../../lib/sessionVisibilityActions';
+import { changeSessionVisibility } from '../../lib/sessionVisibilityActions';
 import { archiveRequestIsLive, isSessionReadOnly } from './sessionArchived';
 import { ArchiveSessionDialog } from './ArchiveSessionDialog';
 import type { SessionActionDescriptor } from './sessionActions';
@@ -92,10 +92,12 @@ export const useSessionActions = ({
   const [archiveRequestId, setArchiveRequestId] = useState<string | null>(null);
   const [pinning, setPinning] = useState(false);
   const [forking, setForking] = useState(false);
+  const [movingVisibility, setMovingVisibility] = useState(false);
   // Refs, not the state above: a second click can land before React re-renders
   // with the disabled row (a double fork spawns two sessions).
   const pinningRef = useRef(false);
   const forkingRef = useRef(false);
+  const movingVisibilityRef = useRef(false);
 
   // A read-only session (archived, or a runtime-owned ``system`` row) refuses every
   // one of these server-side — 409 archived / 403 reserved_session — so the whole
@@ -160,16 +162,31 @@ export const useSessionActions = ({
     }
   }, [target, ownerProjectId, forkSession, onOpenSession, authorizeNavigation]);
 
-  const hide = useCallback(() => {
-    if (!target) return;
-    void hideSessionToBackground({
-      sessionId: target.id,
-      setSessionVisibility: api.setSessionVisibility,
-      showToast,
-      hiddenMessage: t('workbench.sessionHiddenToast'),
-      undoLabel: t('common.undo'),
-    });
-  }, [target, api.setSessionVisibility, showToast, t]);
+  // A background session is reachable only by id (Agents → Runs, a link), and the
+  // chat header is where it is then read — so the row offers the way back instead
+  // of a second hide.
+  const inBackground = target?.visibility === 'background';
+  const toggleVisibility = useCallback(async () => {
+    if (!target || movingVisibilityRef.current) return;
+    movingVisibilityRef.current = true;
+    setMovingVisibility(true);
+    const next = target.visibility === 'background' ? 'foreground' : 'background';
+    const movedId = target.id;
+    try {
+      await changeSessionVisibility({
+        sessionId: movedId,
+        visibility: next,
+        setSessionVisibility: api.setSessionVisibility,
+        showToast,
+        message: t(next === 'background' ? 'workbench.sessionHiddenToast' : 'workbench.sessionShownToast'),
+        undoLabel: t('common.undo'),
+        onCommitted: (visibility) => onSessionPatched?.({ visibility }, movedId),
+      });
+    } finally {
+      movingVisibilityRef.current = false;
+      setMovingVisibility(false);
+    }
+  }, [target, api.setSessionVisibility, showToast, t, onSessionPatched]);
 
   const actions = useMemo<SessionActionDescriptor[]>(() => {
     if (!target) return [];
@@ -223,11 +240,13 @@ export const useSessionActions = ({
       });
     }
     rows.push({
-      id: 'hide',
+      id: 'visibility',
       group: 'continue',
-      icon: EyeOff,
-      label: t('workbench.sessionHideToBackground'),
-      onSelect: hide,
+      icon: inBackground ? Eye : EyeOff,
+      label: t(inBackground ? 'workbench.sessionShowInForeground' : 'workbench.sessionHideToBackground'),
+      pending: movingVisibility,
+      disabled: movingVisibility,
+      onSelect: () => void toggleVisibility(),
     });
     if (lifecycleWritable) {
       rows.push({
@@ -250,7 +269,9 @@ export const useSessionActions = ({
     togglePinned,
     onRenameStart,
     fork,
-    hide,
+    inBackground,
+    movingVisibility,
+    toggleVisibility,
     requestArchive,
     archiveHint,
     lifecycleWritable,
