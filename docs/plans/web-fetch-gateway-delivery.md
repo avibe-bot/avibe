@@ -1,24 +1,27 @@
 # WF-2G gateway delivery
 
-Status: 2026-10-25, dormant implementation; `WEB_FETCH_ACTIVE=False`.
+Status: 2026-10-26, WF-2G complete: #2962, #2968 and #2976 merged.
+WF-2G kept `WEB_FETCH_ACTIVE=False`; WF-3 now prepares the coordinated activation
+and public disclosure. The owner chose a combined reader/activation release
+(see §8 of the owning plan). The sections below retain the split's history.
 The behavior contract remains [web-fetch.md](web-fetch.md), especially §§3–6.
 This plan narrows delivery units, not the activation/release scope.
 
 ## Delivery units and ownership
 
 1. **Local engine and packaging:** PR #2962 merged. No activation.
-2. **Chain and keyless services:** PR #2968 retains the URL/DNS gate, local
+2. **Chain and keyless services:** PR #2968 merged with the URL/DNS gate, local
    wiring, keyless Exa/Jina, ordered fallback, no-send/skipped contract,
    additive fetch usage attribution, and endpoint routing.
-3. **Configured services:** a separate PR from the updated `master` after
-   #2968 merges adds Tavily Extract, keyed Exa `/contents`, and DeepSeek Fetch.
-   Both producer PRs must merge before WF-3 enables the feature.
+3. **Configured services:** PR #2976 merged from updated `master` after #2968,
+   adding Tavily Extract, keyed Exa `/contents`, and DeepSeek Fetch.
+   Both producer prerequisites are complete; WF-3 still requires review/CI and acceptance.
 
 The gateway lane prepares exact-head review/CI evidence; the orchestrator owns
 merging. No service restart, regression deployment, release or live paid probe is
 part of this lane. Tests use test-owned state and loopback fixtures only.
 
-## Convergence boundary
+## Convergence boundary (historical #2968 split)
 
 The third reviewed head of #2968 again had multiple provider-mapping/settlement
 findings, triggering the orchestrator's split guard. The configured transport,
@@ -40,7 +43,7 @@ response → settlement lifecycle. Boundary tests now own these invariants:
 
 | Boundary | Required evidence |
 | --- | --- |
-| Dormancy | Global flag rejects stale turns; configured providers cannot reach either adapter or transport even in flag-enabled test fixtures. |
+| Activation boundary | Global flag rejects stale turns before local or configured transport admission. Configured providers became eligible only with #2976; WF-3 exercises defaults without flag-on test patches. |
 | Admission | Every service submission re-gates only the original URL; a refusal stops forwarding but retains usage for earlier sent attempts. |
 | Attempt ownership | One capped deadline starts before the shared Exa lock, includes subsequent transport work, and allows Jina fallback on expiry. |
 | No-send | Disabled/unavailable/contended/over-budget candidates have only skipped facts, no usage, no capability success and no cooldown write. |
@@ -56,10 +59,10 @@ fixture in `tests/test_model_hub_keyless_exa.py`. Existing search-chain and fetc
 reader tests cover shared cooldown/ledger/read compatibility. Local engine tests
 remain the gate/transport/extraction owner; no live providers are test or CI inputs.
 
-## Configured-provider follow-up acceptance
+## Configured-provider follow-up acceptance (delivered in #2976)
 
-Build one explicit table across provider × response phase × failure scope before
-implementing the smaller PR:
+The separate follow-up used an explicit table across provider × response phase ×
+failure scope:
 
 - request shapes: Tavily basic/Markdown `urls`, Exa `/contents` `ids` and bounded
   text, DeepSeek `url`; use only the catalog endpoint and opaque credential owner;

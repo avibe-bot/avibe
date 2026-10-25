@@ -28,8 +28,10 @@ Conventions:
   are unchanged. Executor origins accept `fetch_api` and `local_fetch`, not
   assistant-model origins. Attempts accept `local`.
 - C-6 recognizes function-only fetch facts (`native` and `replay` both
-  `unsupported`). The dormant build never declares or executes fetch; records,
-  activity and usage remain readable. #2920's released rc4 reader preserves the
+  `unsupported`). WF-3 enables declaration and execution through the shared
+  `WEB_FETCH_ACTIVE` switch; records, activity and usage remain readable even
+  when the switch is false. The coordinated reader/activation release decision is
+  in `../web-fetch.md` §8. #2920's released rc4 reader preserves the
   full ordinary quotation when discarding unknown hosted metadata. Config and
   usage downgrade writes are intentionally lossy as disclosed in the owning plan.
 

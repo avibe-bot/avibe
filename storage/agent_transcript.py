@@ -77,6 +77,7 @@ from core.agent_core.harness.store import ContextEntry, EntryKind
 from core.agent_core.messages import (
     AssistantMessage,
     HostedImage,
+    HostedRecord,
     HostedToolBlock,
     TextBlock,
     ToolResultMessage,
@@ -467,10 +468,15 @@ def _register_images(
 ) -> None:
     """Register each generated image ``message`` names, in its row's transaction (module docstring)."""
 
+    # WebFetchRecord shares the hosted envelope, not search/image fields.
+    # Narrow before entering media registration so page results can commit.
+    records: list[HostedRecord]
     if isinstance(message, AssistantMessage):
         records = [block.record for block in message.content if isinstance(block, HostedToolBlock)]
+    elif message.hosted is not None and isinstance(message.hosted.record, HostedRecord):
+        records = [message.hosted.record]
     else:
-        records = [message.hosted.record] if message.hosted is not None else []
+        return
     for image in (image for record in records for image in record.images or ()):
         media_service.register(
             conn,

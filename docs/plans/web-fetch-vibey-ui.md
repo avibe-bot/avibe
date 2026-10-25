@@ -5,6 +5,12 @@ Change contract, 2026-10-25. Implements the Vibey and UI portion of
 owns gateway policy, network transports, extraction, normalization, settlement
 and packaging. No gateway contract change is needed by this lane.
 
+Activation follow-up, 2026-10-26: WF-3 sets the shared flag to true after all
+WF-2G producers merged, with default-on boundary acceptance and public en/zh
+disclosure. At 01:56 Asia/Shanghai the owner chose to ship readers and activation
+together, without a separate reader-first release. The invariants below describe
+WF-2V's original dormant landing; the current contract is `web-fetch.md` §§7–8.
+
 ## Invariants
 
 - The production `WEB_FETCH_ACTIVE` remains false. No function registration or
@@ -53,10 +59,39 @@ The existing WF-1 downgrade tests remain the authority for released-shape
 loading and lossy old config/usage rewrites. They are not lossless downgrade
 claims. The ordinary text path remains compatible with #2920.
 
+## WF-3 runtime acceptance and hosted-record audit
+
+The activation's direct tool test did not reach transcript commit. Real Vibey
+acceptance now exercises Anthropic wire → Agent loop → hosted tool/gateway HTTP
+→ result frame → SQLite transcript/media registration → dispatcher/mirror →
+activity API, then creates a fresh adapter for next-turn replay with fetch no
+longer declared. The table covers Local, keyless Exa, Jina and policy refusal on
+Web and Telegram, without live providers. A 200 must produce one committed
+`WebFetchRecord`, one card/IM line and an ordinary final answer, not an interrupted
+call; replay preserves that row and frame without another fetch or media entry.
+
+Audit of production search/image-only record access:
+
+| Owner | Type boundary |
+| --- | --- |
+| `storage/agent_transcript.py::_register_images` | Narrow to `HostedRecord` before enumerating images. `WebFetchRecord` is not a media container; previously this generic consumer raised before the result transaction committed. |
+| `core/agent_core/agent/loop.py::_commit_result` | Image collection requires both `HostedRecord` and `image_generate`; a fetch can never enter it. |
+| `core/agent_core/messages.py::_record_to_dict` | Dispatch fetch serialization before reading search sources/image fields. |
+| `core/agent_core/ai/hosted.py::record_text` | Dispatch to the bounded fetch frame before search/image formatting. |
+| `core/hosted_activity.py::proxy_activity` | Narrow fetch by type and project empty search sources/images plus the fetch record. Native activities accept only `HostedToolBlock`, whose record is validated as `HostedRecord`. |
+| Vibey image tool, media sink and shared mirror | Image tool decoding validates the image tool's record; the media sink accepts image bytes, not generic records. The mirror reads the projected card's image list, empty for fetch. |
+
+Primary regression: `tests/test_vibey_agent.py::test_web_fetch_survives_the_real_agent_commit_delivery_and_next_turn_replay`.
+It reproduced the exact `WebFetchRecord` missing `images` failure before the fix.
+Existing transcript media-sweep and image-generation tests retain positive image
+registration/delivery coverage; no dummy image/search fields are added to fetch.
+The orchestrator owns the separate local-Incus live-provider rerun before merge.
+
 ## Known by design
 
 - No activation, release/tag, public-doc activation, deployment, service restart
-  or local/remote regression update. WF-3 must first establish a reader release.
+  or local/remote regression update in the original WF-2V scope. WF-3's coordinated
+  activation and owner-controlled acceptance are described above.
 - The Tools read has no live local-transport state. Per orchestrator approval,
   Local detail shows the default Chrome 150 profile, fallback policy and limits;
   only actual call records show transport degradation and its reason.

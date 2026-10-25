@@ -1,4 +1,4 @@
-"""WF-1: dormant settings, independent order, and future ledger readers.
+"""WF-1/WF-3: saved fetch consent, active reads and independent ledger attribution.
 
 The existing search cases cannot catch erased fetch consent or merged Exa tool
 rows. These tests exercise the settings/read and ledger owners, not a producer.
@@ -38,7 +38,7 @@ def fetch_config(settings=None):
 
 @pytest.mark.asyncio
 async def test_fetch_consent_survives_v2_reload_and_unrelated_save(tmp_path):
-    """WF-1: a dormant build must not erase a newer build's built-in opt-outs."""
+    """Fetch activation must not erase persisted built-in opt-outs on unrelated saves."""
     config = fetch_config()
     assert config.to_payload()["hosted_tools"]["web_fetch"] == FETCH_SETTINGS
     service, path, _ = _disk_service(tmp_path, config)
@@ -94,8 +94,8 @@ def test_future_fetch_ledger_rows_do_not_merge_shared_exa_identity(tmp_path, win
     assert {(r.get("tool", "web_search"), r["requests"]) for r in reopened["services"]} == {("web_search", 3), ("web_fetch", 3)}
 
 
-def test_dormant_hop_reader_accepts_function_only_fetch_but_never_declares_it():
-    """WF-1 can read a future C-6 entry without enabling an execution path."""
+def test_hop_reader_declares_function_only_fetch_by_default():
+    """WF-3: a supplied C-6 entry registers the canonical function without flag patches."""
     from types import SimpleNamespace
     from modules.agents.model_hub import ModelHubLaunch
     from modules.agents.vibey.models import selection_from_hop
@@ -106,17 +106,21 @@ def test_dormant_hop_reader_accepts_function_only_fetch_but_never_declares_it():
     hop["hosted_tools"] = {"web_fetch": {"native": "unsupported", "replay": "unsupported"}}
     selection = selection_from_hop(hop)
     assert selection.endpoint.hosted_tools["web_fetch"].mode == "proxy"
-    assert turn_tools(SimpleNamespace(preflight=selection, current=selection)) == ()
+    assert [tool.spec.name for tool in turn_tools(SimpleNamespace(preflight=selection, current=selection))] == ["web_fetch"]
 
 
-def test_dormant_read_candidates_and_turn_do_not_advertise_fetch(tmp_path):
-    """A known stored tool must not implicitly enter a live turn or the Tools UI."""
-    service, path, _ = _disk_service(tmp_path, fetch_config())
+def test_active_read_candidates_and_turn_preserve_saved_fetch_consent(tmp_path):
+    """The visible row and frozen candidates agree without rewriting saved choices."""
+    config = fetch_config()
+    service, path, _ = _disk_service(tmp_path, config)
     before = path.read_bytes()
-    assert hosted_tools.WEB_FETCH_ACTIVE is False
-    assert "web_fetch" not in {t["name"] for t in service.hosted_tools_status()["hosted_tools"]["tools"]}
-    assert "web_fetch" not in hosted_tools.freeze_turn_tools(fetch_config(), evidence=service.hosted_evidence(), spec_for=hosted_tools.hosted_tool_spec).tools
-    assert not hosted_tools.executor_candidates(fetch_config(), "web_fetch", evidence=service.hosted_evidence(), spec_for=hosted_tools.hosted_tool_spec)
+    fetch = next(t for t in service.hosted_tools_status()["hosted_tools"]["tools"] if t["name"] == "web_fetch")
+    turn = service.freeze_turn_hosted_tools(config)
+    assert "web_fetch" in turn.tools
+    assert [slot.source_id for slot in turn.executors["web_fetch"]] == fetch["effective_order"]
+    assert {slot.source_id: slot.enabled for slot in turn.executors["web_fetch"]} == {
+        LOCAL: False, FREE_EXA: False, JINA: False, EXA: True, TAVILY: True, DEEPSEEK: True,
+    }
     assert path.read_bytes() == before
 
 
@@ -127,10 +131,9 @@ def test_dormant_read_candidates_and_turn_do_not_advertise_fetch(tmp_path):
     ({"executor_order": [LOCAL, JINA], "executor_order_kinds": {LOCAL: "service", JINA: "service"}}, [LOCAL, EXA, TAVILY, DEEPSEEK, JINA, FREE_EXA]),
     ({"services": {LOCAL: {"enabled": False}, EXA: {"enabled": False}}}, [TAVILY, DEEPSEEK, FREE_EXA, JINA, LOCAL, EXA]),
 ])
-def test_active_fetch_read_owns_independent_order_without_writing(tmp_path, monkeypatch, settings, expected):
+def test_active_fetch_read_owns_independent_order_without_writing(tmp_path, settings, expected):
     """Search's disabled Tavily/order cannot decide fetch consent or deliberate placement."""
     from tests.test_model_hub_api import _api_response_registry
-    monkeypatch.setattr(hosted_tools, "WEB_FETCH_ACTIVE", True)
     service, path, _ = _disk_service(tmp_path, fetch_config(settings))
     before = path.read_bytes()
     payload = service.hosted_tools_status()["hosted_tools"]
@@ -164,12 +167,11 @@ def test_fetch_catalog_capability_and_catalog_off_preserve_identity(monkeypatch)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sid,service_id", [(FREE_EXA, "exa/mcp"), (JINA, "jina/reader")])
-async def test_synthetic_fetch_cooldown_survives_save_and_retry_is_shared(tmp_path, monkeypatch, sid, service_id):
+async def test_synthetic_fetch_cooldown_survives_save_and_retry_is_shared(tmp_path, sid, service_id):
     """Retry uses the same synthetic identity/generation as other tools; no request is made."""
     from config.v2_config import model_hub_builtin_source
     from core.handlers.model_hub.search_services import ServiceCooldowns, ServiceResult
     from core.handlers.model_hub.adapter import SearchResponse
-    monkeypatch.setattr(hosted_tools, "WEB_FETCH_ACTIVE", True)
     service, _, _ = _disk_service(tmp_path, fetch_config({}))
     service.now = lambda: NOW
     service._service_cooldowns = ServiceCooldowns()
@@ -191,7 +193,7 @@ async def test_synthetic_fetch_cooldown_survives_save_and_retry_is_shared(tmp_pa
 @pytest.mark.asyncio
 @pytest.mark.parametrize("sid,service_id,label", [(LOCAL, "local/fetch", "Local"), (FREE_EXA, "exa/mcp", "Exa (free)"), (JINA, "jina/reader", "Jina Reader (free)")])
 async def test_synthetic_fetch_evidence_and_usage_survive_without_credential_sources(tmp_path, sid, service_id, label):
-    """Synthetic identities join both durable readers even when activation is off."""
+    """Synthetic identities join both durable readers without becoming credential Sources."""
     from config.v2_config import model_hub_builtin_source
     from core.handlers.model_hub.capability_evidence import CapabilityEvidenceStore
     service, _, _ = _disk_service(tmp_path, fetch_config())

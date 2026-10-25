@@ -593,7 +593,8 @@ async def test_stop_during_success_cleanup_is_rethrown_after_reap(monkeypatch):
         await task
 
 
-async def test_active_worker_cap_and_cancellation_safe_host_release(monkeypatch):
+@pytest.mark.parametrize("spawn_delay", [0, 0.4], ids=["normal-start", "slow-start"])
+async def test_active_worker_cap_and_cancellation_safe_host_release(monkeypatch, spawn_delay):
     script = '''import sys,time,json
 from urllib.parse import urlsplit
 request=json.loads(sys.stdin.readline())
@@ -602,9 +603,12 @@ print('{"event":"sent"}',flush=True); sys.stdin.readline()
 time.sleep(60)
 '''
     monkeypatch.setattr(local_fetch, "_WORKER", script)
-    children, spawn = [], asyncio.create_subprocess_exec
+    children, spawn, spawn_attempts = [], asyncio.create_subprocess_exec, []
     reaping, release = asyncio.Event(), asyncio.Event()
     async def capture(*args, **kwargs):
+        spawn_attempts.append(1)
+        if spawn_delay:
+            await asyncio.sleep(spawn_delay)
         child = await spawn(*args, **kwargs)
         children.append(child)
         if len(children) == 1:
@@ -634,11 +638,21 @@ time.sleep(60)
         again.cancel()
         await asyncio.gather(again, return_exceptions=True)
     children.clear()
+    spawn_attempts.clear()
     # Distinct hosts still have one aggregate process cap.
-    tasks = [asyncio.create_task(engine.fetch(f"https://host{i}.example/", deadline=time.monotonic() + 10)) for i in range(20)]
+    sent, ready = 0, asyncio.Event()
+    worker_cap = local_fetch._WORKERS
+    def mark_sent():
+        nonlocal sent
+        sent += 1
+        if sent == worker_cap:
+            ready.set()
+    tasks = [asyncio.create_task(engine.fetch(f"https://host{i}.example/", deadline=time.monotonic() + 10,
+                                             on_sent=mark_sent)) for i in range(20)]
     try:
-        await asyncio.sleep(.3)
-        assert 1 <= len(children) <= 8
+        await asyncio.wait_for(ready.wait(), 10)
+        assert sent == worker_cap
+        assert len(spawn_attempts) == len(children) == worker_cap == 8
     finally:
         for task in tasks:
             task.cancel()

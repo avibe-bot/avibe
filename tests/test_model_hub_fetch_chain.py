@@ -22,12 +22,6 @@ from vibe.model_hub_runtime.fetch_catalog import fetch_service_catalog
 from core.handlers.model_hub.service import ModelHubError
 
 
-@pytest.fixture(autouse=True)
-def _reset_fetch_flag(monkeypatch):
-    monkeypatch.setattr(hosted_tools, "WEB_FETCH_ACTIVE", False)
-    yield
-
-
 @pytest.mark.asyncio
 async def test_jina_builtin_fetch_is_admitted_with_reader_headers():
     adapter = object.__new__(CLIProxyEngineAdapter)
@@ -94,8 +88,8 @@ def test_http_200_malformed_provider_envelopes_are_service_failures(body, vendor
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("vendor", ["exa", "tavily", "deepseek"])
-async def test_configured_fetch_is_dormant_at_chain_and_adapter_boundaries(tmp_path, vendor):
-    """The activation flag still blocks the new producer while the adapter is ready for hermetic tests."""
+async def test_flag_off_rejects_configured_fetch_from_a_previously_frozen_turn(tmp_path, monkeypatch, vendor):
+    """The shared kill switch rejects stale turns before any configured transport admission."""
     sid = IDS[vendor]
     service, config = _service(
         tmp_path, vendor=vendor,
@@ -109,7 +103,7 @@ async def test_configured_fetch_is_dormant_at_chain_and_adapter_boundaries(tmp_p
 
     service.adapter.fetch = unexpected
     turn = service.freeze_turn_hosted_tools(config)
-    hosted_tools.WEB_FETCH_ACTIVE = False
+    monkeypatch.setattr(hosted_tools, "WEB_FETCH_ACTIVE", False)
     with pytest.raises(ModelHubError) as raised:
         await service.run_hosted_tool(
             "web_fetch", {"arguments": {"url": "https://example.com/"}},
@@ -626,7 +620,6 @@ def _service(tmp_path: Path, *, enabled: dict[str, bool], order=(LOCAL, EXA), ve
     )
     service.store.config = config
     service._local_fetch_engine = _Local()
-    hosted_tools.WEB_FETCH_ACTIVE = True
     return service, config
 
 
@@ -634,7 +627,7 @@ def _service(tmp_path: Path, *, enabled: dict[str, bool], order=(LOCAL, EXA), ve
 async def test_flag_off_rejects_fetch_without_running_gate_or_adapter(tmp_path, monkeypatch):
     service, config = _service(tmp_path, enabled={LOCAL: True, EXA: True, FREE_EXA: False, JINA: False})
     turn = service.freeze_turn_hosted_tools(config)
-    hosted_tools.WEB_FETCH_ACTIVE = False
+    monkeypatch.setattr(hosted_tools, "WEB_FETCH_ACTIVE", False)
     called = []
     monkeypatch.setattr(service.adapter, "fetch", lambda *args, **kwargs: called.append(args), raising=False)
     with pytest.raises(ModelHubError) as raised:
@@ -644,25 +637,75 @@ async def test_flag_off_rejects_fetch_without_running_gate_or_adapter(tmp_path, 
         )
     assert raised.value.code == "tool_not_enabled"
     assert called == []
+    assert service._local_fetch_engine.checks == 0
 
 
 @pytest.mark.asyncio
-async def test_local_sent_attempt_is_recorded_as_exact_zero_fetch_usage(tmp_path):
-    service, config = _service(
-        tmp_path,
-        enabled={LOCAL: True, EXA: False, FREE_EXA: False, JINA: False},
-        order=(LOCAL, EXA),
-    )
-    result = await service.run_hosted_tool(
-        "web_fetch", {"arguments": {"url": "https://example.com/"}},
-        turn=service.freeze_turn_hosted_tools(config),
-    )
+async def test_default_activation_connects_tools_read_frozen_hop_and_bounded_local_result(tmp_path):
+    """WF-3: no flag patches; a read/declaration/producer mismatch must break this path.
+
+    Earlier lane fixtures forced activation or supplied a canned gateway answer.
+    Only the external local engine and HTTP transport are replaced here.
+    """
+    import httpx
+
+    from config import v2_config
+    from core.agent_core.messages import ToolResultMessage, WebFetchRecord, message_from_dict, message_to_dict
+    from modules.agents.model_hub import ModelHubLaunch
+    from modules.agents.vibey.models import selection_from_hop
+    from modules.agents.vibey.tools import hosted_tools as declared_tools
+    from tests.test_vibey_web_fetch import router
+
+    service = owner(tmp_path, (), model=True)
+    service._local_fetch_engine = _Local()
+    config = service.store.load()
+    before = config.to_payload()
+    assert "web_fetch" not in config.hosted_tools
+    assert v2_config.WEB_FETCH_ACTIVE and hosted_tools.WEB_FETCH_ACTIVE
+    fetch = next(row for row in service.hosted_tools_status()["hosted_tools"]["tools"] if row["name"] == "web_fetch")
+    assert fetch["enabled"] is True
+    assert fetch["effective_order"] == [LOCAL, FREE_EXA, JINA]
+    frozen = service.freeze_turn_hosted_tools(config)
+    assert [slot.source_id for slot in frozen.executors["web_fetch"]] == [LOCAL, FREE_EXA, JINA]
+    source = config.sources[0]
+    model = source.models[0].id
+    facts = service.hosted_tools_for_hop(source, model, frozen)
+    assert facts["web_fetch"] == {"native": "unsupported", "replay": "unsupported"}
+    hop = ModelHubLaunch(
+        backend="vibey", channel="hub", requested_model=model, target_model=model, runtime_model=model,
+        source_id=source.id, source_identity="test-identity", gateway_base_url="http://hub.invalid/vibey",
+        gateway_token="fixture", gateway_request_metadata={"x-avibe-turn-id": "turn-fetch"},
+        protocol="openai_chat", provider="openai", hosted_tools=facts,
+    ).to_hop_resolution()
+    sent = []
+
+    async def gateway(request):
+        assert request.url.path == "/vibey/v1/hosted-tools/web_fetch"
+        assert request.headers["x-avibe-turn-id"] == "turn-fetch"
+        sent.append(request)
+        return httpx.Response(200, json=await service.run_hosted_tool(
+            "web_fetch", json.loads(request.content), turn=frozen,
+        ))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        tools = declared_tools(router(selection_from_hop(hop)), client)
+        tool = next(tool for tool in tools if tool.spec.name == "web_fetch")
+        output = await tool.execute({"url": "https://example.com/"}, None)
+    assert len(sent) == 1 and not output.is_error
+    assert isinstance(output.hosted.record, WebFetchRecord)
+    message = ToolResultMessage("fetch1", "web_fetch", output.content, hosted=output.hosted)
+    saved = message_to_dict(message)
+    assert message_from_dict(saved) == message
+    assert "local page" in saved["content"][0]["text"]
+    assert len(saved["content"][0]["text"].encode("utf-8")) <= 48000
+    result = saved["hosted"]
     assert result["record"]["status"] == "completed"
     assert result["record"]["attempts"][0]["kind"] == "local"
     assert result["execution"]["executor_origin"]["api"] == "local_fetch"
     assert result["execution"]["cost"] == {"basis": "list", "usd": 0}
     row = next(row for row in service.usage_summary(days=7)["services"] if row["tool"] == "web_fetch")
     assert row["requests"] == 1 and row["billable_requests"] == 0 and row["uncertain_requests"] == 0
+    assert service.store.load().to_payload() == before
 
 
 @pytest.mark.asyncio
