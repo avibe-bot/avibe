@@ -2,8 +2,8 @@
 
 The chain freezes order in ``TurnHostedTools`` but rechecks identity, enablement
 and shared service cooldown immediately before each send. Local execution is
-isolated in ``LocalFetchEngine``; configured/keyless transports stay behind the
-EngineAdapter boundary.
+isolated in ``LocalFetchEngine``; keyless transports stay behind EngineAdapter.
+Configured provider execution remains unavailable until its separate delivery.
 """
 from __future__ import annotations
 
@@ -24,9 +24,10 @@ from .adapter import SearchResponse
 from .async_owner import await_owned_task
 from .capability_evidence import identity_digest, utc_text
 from .fetch_services import FetchServiceResult, ZERO, map_fetch_response
-from .hosted_executor import ExecutorCall, Failure, call_timeout
+from .hosted_executor import ExecutorCall, call_timeout
 from .hosted_turn import ExecutorSlot, TurnHostedTools
 from .retry import source_identity
+from .search_services import ATTEMPT_SECONDS
 from vibe.model_hub_runtime.fetch_catalog import fetch_service
 
 
@@ -109,7 +110,7 @@ class FetchChain:
         if service is None or service.get("service_id") != slot.model_id:
             fact["skipped"] = "unavailable"
             return source, service, fact
-        if not service.get("available", False):
+        if not service.get("available", False) or service.get("vendor") not in {"local", "exa-mcp", "jina-reader"}:
             fact["skipped"] = "unavailable"
             return source, service, fact
         if not slot.enabled:
@@ -234,8 +235,10 @@ class FetchChain:
         ), None
 
     async def _service_attempt(self, slot: ExecutorSlot, source, service):
+        loop = asyncio.get_running_loop()
+        attempt_deadline = min(self.deadline, loop.time() + ATTEMPT_SECONDS)
         if is_keyless_exa_source(source):
-            remaining = max(0.0, self.deadline - asyncio.get_running_loop().time())
+            remaining = max(0.0, attempt_deadline - loop.time())
             try:
                 await asyncio.wait_for(self.owner._keyless_exa_attempt_lock.acquire(), timeout=remaining)
             except asyncio.TimeoutError:
@@ -244,19 +247,18 @@ class FetchChain:
                     "outcome": "skipped", "skipped": "service_busy",
                 }
             try:
-                return await self._service_attempt_locked(slot, source, service)
+                return await self._service_attempt_locked(slot, source, service, attempt_deadline=attempt_deadline)
             finally:
                 self.owner._keyless_exa_attempt_lock.release()
-        return await self._service_attempt_locked(slot, source, service)
+        return await self._service_attempt_locked(slot, source, service, attempt_deadline=attempt_deadline)
 
-    async def _service_attempt_locked(self, slot, source, service):
+    async def _service_attempt_locked(self, slot, source, service, *, attempt_deadline: float):
         sent = False
         response: SearchResponse | None = None
-        health_generation = None
         cooldown_generation = None
 
         async def invoke():
-            nonlocal sent, source, response, health_generation, cooldown_generation
+            nonlocal source, response
             async with self.owner._mutation_lock:
                 current, _, skip = await self._classify(slot, locked=True)
                 if skip is not None:
@@ -264,7 +266,7 @@ class FetchChain:
                 source = current
 
             async def on_sent():
-                nonlocal sent, source
+                nonlocal sent, source, cooldown_generation
                 await self._engine.check(self.requested_url, deadline=self.deadline)
                 async with self.owner._mutation_lock:
                     current, _, skip = await self._classify(slot, locked=True)
@@ -286,7 +288,6 @@ class FetchChain:
                                 "skipped": "cooling",
                                 "retry_at": utc_text(retry_at),
                             })
-                    health_generation = self.owner._reserve_settlement_generation(source.id, source=source)
                     cooldown_generation = self.owner._service_cooldowns.advance(source, slot.model_id)
                     sent = True
 
@@ -300,7 +301,7 @@ class FetchChain:
         task = asyncio.create_task(invoke())
         timed_out = stopped = False
         try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=max(0.0, self.deadline - asyncio.get_running_loop().time()))
+            await asyncio.wait_for(asyncio.shield(task), timeout=max(0.0, attempt_deadline - asyncio.get_running_loop().time()))
         except asyncio.TimeoutError:
             timed_out = True
             task.cancel()
@@ -308,7 +309,6 @@ class FetchChain:
             stopped = True
             task.cancel()
         except _NotAdmitted as exc:
-            await self._release_unspent(source, slot, health_generation, cooldown_generation, response)
             return None, exc.skip or {
                 "source_id": slot.source_id, "label": source.display_name[:64], "kind": "service",
                 "outcome": "skipped", "skipped": "unavailable",
@@ -327,19 +327,17 @@ class FetchChain:
                     stopped = True
                     await await_owned_task(draining)
         if stopped and not sent:
-            await self._release_unspent(source, slot, health_generation, cooldown_generation, response)
             raise asyncio.CancelledError
         response = response or SearchResponse(None, {}, None, "cancelled" if stopped else "timeout" if timed_out else "connection")
         if timed_out and response.error == "cancelled":
             response = replace(response, error="timeout")
         stopped = stopped or response.error == "cancelled"
         if not sent:
-            await self._release_unspent(source, slot, health_generation, cooldown_generation, response)
             if stopped:
                 raise asyncio.CancelledError
             return None, {
                 "source_id": slot.source_id, "label": source.display_name[:64], "kind": "service",
-                "outcome": "skipped", "skipped": "unavailable",
+                "outcome": "skipped", "skipped": "service_busy" if timed_out else "unavailable",
             }
 
         async def settle_response():
@@ -349,7 +347,7 @@ class FetchChain:
             )
             if stopped:
                 result = replace(result, cooling=False)
-            await self._settle_owned(source, slot, result, response, health_generation, cooldown_generation, sent)
+            await self._settle_owned(source, slot, result, response, cooldown_generation, sent)
             return result
 
         settlement = asyncio.create_task(settle_response())
@@ -366,19 +364,9 @@ class FetchChain:
         moves_on = result.record.get("status") != "completed"
         return FetchAttempt(source, slot.model_id, "service", record, result.cost, result.billable, result.uncertain, moves_on, sent), None
 
-    async def _release_unspent(self, source, slot, health_generation, cooldown_generation, response):
-        if health_generation is None and cooldown_generation is None:
-            return
-        await self._settle_owned(
-            source, slot,
-            FetchServiceResult({"status": "completed"}, None, False, False, None, False),
-            response or SearchResponse(None, {}, None, "invalid_endpoint"),
-            health_generation, cooldown_generation, False,
-        )
-
-    async def _settle_owned(self, source, slot, result, response, health_generation, cooldown_generation, sent):
+    async def _settle_owned(self, source, slot, result, response, cooldown_generation, sent):
         await await_owned_task(asyncio.create_task(
-            self._settle_service(source, slot, result, response, health_generation, cooldown_generation, sent)
+            self._settle_service(source, slot, result, response, cooldown_generation, sent)
         ))
 
     @staticmethod
@@ -404,7 +392,7 @@ class FetchChain:
     def _request_for(self, service: Mapping[str, Any]) -> dict[str, Any]:
         return self._request_payload(service, self.requested_url)
 
-    async def _settle_service(self, source, slot, result: FetchServiceResult, response, health_generation, cooldown_generation, sent):
+    async def _settle_service(self, source, slot, result: FetchServiceResult, response, cooldown_generation, sent):
         write = self.owner.usage_writer.record_service(
             source_id=source.id,
             service_id=slot.model_id,
@@ -420,13 +408,6 @@ class FetchChain:
             identity_current = current is not None and source_identity(current) == source_identity(source)
             if identity_current and cooldown_generation is not None:
                 self.owner._service_cooldowns.settle(current, slot.model_id, cooldown_generation, _search_compatible(result), response, self.owner.now())
-            if identity_current and health_generation is not None and result.blocker \
-                    and self.owner._settlement_current(current, health_generation):
-                config = await asyncio.to_thread(self.owner._clone_config, previous)
-                updated = self.owner._source(config, source.id)
-                from config.v2_config import ModelHubSourceStateConfig
-                updated.state = ModelHubSourceStateConfig(status="needs_action", detail_key=result.blocker)
-                await self.owner._save_runtime_config(previous, config)
         if write is not None:
             await self.owner.usage_writer.wait_recorded(write)
         if sent and result.record.get("status") == "completed":
@@ -440,7 +421,7 @@ class FetchChain:
                    "content": self.say(f"hostedTools.errorCode.{code}")}
             execution = None
         elif last is None:
-            if any(f.get("skipped") in {"blocked", "disabled"} for f in self.facts):
+            if self.facts and all(f.get("skipped") in {"blocked", "disabled"} for f in self.facts):
                 code = "fetch_sources_blocked"
             else:
                 code = "fetch_unavailable"

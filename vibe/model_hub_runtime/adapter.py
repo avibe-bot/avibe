@@ -2328,11 +2328,15 @@ class CLIProxyEngineAdapter:
                 return SearchResponse(None, {}, None, "invalid_endpoint")
             return await self._keyless_exa_client.fetch(request, on_sent=on_sent)
 
+        # Keyed transports/mappings are delivered separately. This boundary
+        # admits only the exact built-in Reader identity, never a credential.
+        if vendor != "jina-reader" or credential_ref is not None:
+            return SearchResponse(None, {}, None, "invalid_endpoint")
         service = next(
             (
                 entry for entry in fetch_service_catalog()
                 if entry.get("service_id") == service_id and entry.get("vendor") == vendor
-                and (not entry.get("source_id") or entry.get("source_id") == source_id)
+                and entry.get("source_id") == source_id
             ),
             None,
         )
@@ -2343,8 +2347,7 @@ class CLIProxyEngineAdapter:
         headers = request_spec.get("headers") if isinstance(request_spec.get("headers"), Mapping) else {}
         if isinstance(service.get("headers"), Mapping):
             headers = {**headers, **service["headers"]}
-        if vendor == "jina-reader":
-            headers = {**headers, "User-Agent": f"Avibe/{AVIBE_VERSION}"}
+        headers = {**headers, "User-Agent": f"Avibe/{AVIBE_VERSION}"}
         return await self._search_http(
             catalog={"vendor": vendor, **service},
             credential_ref=credential_ref,

@@ -49,6 +49,7 @@ async def _mcp_stub(
     stale_tools_once: bool = False,
     invalid_init_once: bool = False,
     notification_status: int | None = None,
+    fetch_schema: dict | None = None,
 ):
     calls: list[dict] = []
     state = {"session": "stub-session-1", "stale_tools": stale_tools_once, "invalid_init": invalid_init_once}
@@ -77,7 +78,10 @@ async def _mcp_stub(
             if state["stale_tools"]:
                 state["stale_tools"] = False
                 return web.json_response({"error": {"message": "MCP session not found"}}, status=404)
-            return web.json_response(_rpc(request_id, {"tools": [_tool_schema(missing=missing)]}))
+            tools = [_tool_schema(missing=missing)]
+            if fetch_schema is not None:
+                tools.append({"name": "web_fetch_exa", "inputSchema": fetch_schema})
+            return web.json_response(_rpc(request_id, {"tools": tools}))
         if method == "tools/call":
             result = {
                 "content": [{"type": "text", "text": json.dumps({
@@ -90,6 +94,8 @@ async def _mcp_stub(
                     }],
                 })}],
             }
+            if payload["params"]["name"] == "web_fetch_exa":
+                result = {"content": [{"type": "text", "text": "# Fetched page\nURL: https://example.com/\n\nPage body"}]}
             body = json.dumps(_rpc(request_id, result), separators=(",", ":"))
             if sse:
                 return web.Response(
@@ -156,6 +162,53 @@ async def test_keyless_mcp_negotiates_once_adapts_live_schema_and_maps_highlight
     }
     assert mapped.cost is not None and mapped.cost.usd == 0
     assert not mapped.billable and not mapped.uncertain
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sse", [False, True])
+async def test_fetch_reuses_search_mcp_session_and_sends_explicit_page_bound(sse):
+    """WF-2G: exercise the real MCP fetch transport, not only an adapter-result fake."""
+    from core.handlers.model_hub.fetch_services import map_fetch_response
+    from vibe.model_hub_runtime.fetch_catalog import fetch_service_catalog
+
+    schema = {"type": "object", "properties": {"urls": {"type": "array"}, "maxCharacters": {"type": "integer"}}, "required": ["urls"]}
+    async with _mcp_stub(sse=sse, fetch_schema=schema) as (endpoint, calls):
+        client = KeylessExaMcpClient(endpoint=endpoint, client_version="test")
+        await client.search({"query": "avibe", "numResults": 1, "enableHighlights": True, "textMaxCharacters": 1})
+        sent = []
+        response = await client.fetch({"urls": ["https://example.com/"], "maxCharacters": 48000}, on_sent=lambda: sent.append(True))
+    assert [call["payload"]["method"] for call in calls] == [
+        "initialize", "notifications/initialized", "tools/list", "tools/call", "tools/list", "tools/call",
+    ]
+    assert calls[-1]["headers"]["Mcp-Session-Id"] == calls[-3]["headers"]["Mcp-Session-Id"]
+    assert calls[-1]["payload"]["params"] == {
+        "name": "web_fetch_exa", "arguments": {"urls": ["https://example.com/"], "maxCharacters": 48000},
+    }
+    assert sent == [True]
+    catalog = next(entry for entry in fetch_service_catalog() if entry["vendor"] == "exa-mcp")
+    result = map_fetch_response(catalog, response, requested_url="https://example.com/", sent=True, say=lambda key, **_: key)
+    assert result.record["status"] == "completed" and result.record["content"] == "Page body"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("variant", ["missing_bound", "unknown_required", "missing_url"])
+async def test_fetch_incompatible_live_schema_or_arguments_never_send(variant):
+    """WF-2G: a fetch must not drop its cap or send an unsatisfied new required input."""
+    schema = {"type": "object", "properties": {"urls": {"type": "array"}, "maxCharacters": {"type": "integer"}}, "required": ["urls"]}
+    arguments = {"urls": ["https://example.com/"], "maxCharacters": 48000}
+    if variant == "missing_bound":
+        schema["properties"].pop("maxCharacters")
+    elif variant == "unknown_required":
+        schema["properties"]["newControl"] = {"type": "string"}
+        schema["required"].append("newControl")
+    else:
+        arguments.pop("urls")
+    async with _mcp_stub(fetch_schema=schema) as (endpoint, calls):
+        sent = []
+        response = await KeylessExaMcpClient(endpoint=endpoint).fetch(arguments, on_sent=lambda: sent.append(True))
+    assert response.error == "invalid_endpoint"
+    assert sent == []
+    assert [call["payload"]["method"] for call in calls] == ["initialize", "notifications/initialized", "tools/list"]
 
 
 @pytest.mark.asyncio

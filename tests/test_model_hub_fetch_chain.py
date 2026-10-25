@@ -5,16 +5,17 @@ import asyncio
 import json
 import threading
 from dataclasses import replace
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
 
-from config.v2_config import ModelHubFetchServiceSettings
+from config.v2_config import ModelHubFetchServiceSettings, model_hub_builtin_source
 from core.handlers.model_hub import fetch_chain as fetch_chain_module
 from core.handlers.model_hub import hosted_tools
 from core.handlers.model_hub.adapter import SearchResponse
 from core.handlers.model_hub.fetch_services import map_fetch_response
-from tests.test_model_hub_search_chain import EXA, owner
+from tests.test_model_hub_search_chain import EXA, IDS, owner
 from tests.test_model_hub_web_fetch_readers import FREE_EXA, JINA, LOCAL, fetch_config
 from vibe.model_hub_runtime.adapter import CLIProxyEngineAdapter
 from vibe.model_hub_runtime.fetch_catalog import fetch_service_catalog
@@ -78,26 +79,198 @@ def test_exa_mcp_markdown_text_block_preserves_page_text_and_leading_metadata():
     assert mapped.record["content"] == "# Body\nURL: https://example.com/in-page\n"
 
 
+@pytest.mark.parametrize("vendor", ["exa-mcp", "jina-reader"])
 @pytest.mark.parametrize("body", [b"<html>broken provider</html>", b"[1, 2, 3]"])
-def test_http_200_malformed_provider_envelopes_are_service_failures(body):
-    deepseek = next(item for item in fetch_service_catalog() if item["vendor"] == "deepseek")
+def test_http_200_malformed_provider_envelopes_are_service_failures(body, vendor):
+    catalog = next(item for item in fetch_service_catalog() if item["vendor"] == vendor)
     mapped = map_fetch_response(
-        deepseek, SearchResponse(200, {}, body), requested_url="https://example.com/", sent=True,
+        catalog, SearchResponse(200, {}, body), requested_url="https://example.com/", sent=True,
         say=lambda key, **_: key,
     )
     assert mapped.record["error_code"] == "service_unavailable"
     assert mapped.cooling and not mapped.target_failure
+    assert mapped.cost.usd == 0 and not mapped.uncertain and not mapped.billable
 
 
-def test_http_200_lost_paid_body_is_billing_uncertain():
-    deepseek = next(item for item in fetch_service_catalog() if item["vendor"] == "deepseek")
-    mapped = map_fetch_response(
-        deepseek,
-        SearchResponse(200, {}, None, "body_too_large"),
-        requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vendor", ["exa", "tavily", "deepseek"])
+async def test_configured_fetch_is_dormant_at_chain_and_adapter_boundaries(tmp_path, vendor):
+    """The split must not expose an unreviewed paid transport even if the flag is enabled."""
+    sid = IDS[vendor]
+    service, config = _service(
+        tmp_path, vendor=vendor,
+        enabled={LOCAL: False, FREE_EXA: False, JINA: False, sid: True}, order=(sid,),
     )
-    assert mapped.record["error_code"] == "service_unreadable"
-    assert mapped.uncertain and not mapped.billable and mapped.cost is None
+    calls = []
+
+    async def unexpected(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("configured fetch must remain unavailable")
+
+    service.adapter.fetch = unexpected
+    result = await service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": "https://example.com/"}},
+        turn=service.freeze_turn_hosted_tools(config),
+    )
+    first = result["record"]["attempts"][0]
+    assert first["source_id"] == sid and first["skipped"] == "unavailable"
+    assert service.usage_summary(days=7)["services"] == []
+    assert service.capability_evidence.records() == []
+    adapter = object.__new__(CLIProxyEngineAdapter)
+    adapter._search_http = unexpected
+    catalog = next(item for item in fetch_service_catalog() if item["vendor"] == vendor)
+    response = await adapter.fetch(sid, vendor, catalog["service_id"], f"cred_{sid}", {"url": "https://example.com/"})
+    assert response.error == "invalid_endpoint"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sid,status,body,expected,delay", [
+    (FREE_EXA, 429, {}, "service_rate_limited", 600),
+    (FREE_EXA, 500, {}, "service_unavailable", 30),
+    (FREE_EXA, 200, {"result": {"_meta": {"ai.exa/rateLimited": True}, "content": []}}, "service_rate_limited", 30),
+    (FREE_EXA, 200, {"result": {"isError": True, "content": [{"type": "text", "text": '{"error":{"code":"CONTENT_FILTER_ERROR"}}'}]}}, "service_refused", None),
+    (FREE_EXA, 200, {"result": {"isError": True, "structuredContent": {"error": {"code": "PROHIBITED_CONTENT"}}}}, "service_refused", None),
+    (FREE_EXA, 200, {"result": {"isError": True, "structuredContent": {"error": {"code": "CRAWL_UNKNOWN_ERROR"}}}}, "fetch_target_unreadable", None),
+    (FREE_EXA, 200, {"result": {"isError": True, "structuredContent": {"error": {"code": "NEW_ERROR"}}}}, "service_unavailable", 30),
+    (JINA, 429, {}, "service_rate_limited", 600),
+    (JINA, 500, {}, "service_unavailable", 60),
+    (JINA, 401, {}, "service_refused", None),
+    (JINA, 403, {}, "service_refused", None),
+])
+async def test_keyless_response_settles_real_shared_cooldown_and_free_usage(tmp_path, sid, status, body, expected, delay):
+    """Mapper-only checks missed the lost admission generation and generic MCP refusal branch."""
+    service, config = _service(
+        tmp_path, enabled={LOCAL: False, EXA: False, FREE_EXA: sid == FREE_EXA, JINA: sid == JINA}, order=(sid,),
+    )
+    sent = []
+
+    async def fetch(*args, on_sent):
+        await on_sent()
+        sent.append(True)
+        return SearchResponse(status, {"Retry-After": "600"} if status == 429 else {}, json.dumps(body).encode())
+
+    service.adapter.fetch = fetch
+    turn = service.freeze_turn_hosted_tools(config)
+    result = await service.run_hosted_tool("web_fetch", {"arguments": {"url": "https://example.com/"}}, turn=turn)
+    assert result["record"]["error_code"] == expected
+    assert result["record"]["attempts"][0]["cost"] == {"basis": "list", "usd": 0}
+    source = model_hub_builtin_source(sid)
+    service_id = "exa/mcp" if sid == FREE_EXA else "jina/reader"
+    until = service._service_cooldowns.until(source, service_id, service.now())
+    assert until == (None if delay is None else service.now() + timedelta(seconds=delay))
+    assert not service._latest_source_attempt_generation  # built-ins have no credential health
+    if delay is not None:
+        again = await service.run_hosted_tool("web_fetch", {"arguments": {"url": "https://example.com/"}}, turn=turn)
+        assert again["record"]["attempts"][0]["skipped"] == "cooling"
+        assert sent == [True]
+    row = next(row for row in service.usage_summary(days=7)["services"] if row["tool"] == "web_fetch")
+    assert row["requests"] == 1
+    assert row["billable_requests"] == row["uncertain_requests"] == row["reported_requests"] == 0
+
+
+@pytest.mark.asyncio
+async def test_stale_keyless_fetch_cannot_overwrite_a_newer_shared_generation(tmp_path):
+    """A search retry/reset can advance the same identity while a fetch is in flight."""
+    service, config = _service(
+        tmp_path, enabled={LOCAL: False, EXA: False, FREE_EXA: True, JINA: False}, order=(FREE_EXA,),
+    )
+    source = model_hub_builtin_source(FREE_EXA)
+
+    async def fetch(*args, on_sent):
+        await on_sent()
+        assert service._service_cooldowns.generation(source, "exa/mcp") is not None
+        service._service_cooldowns.advance(source, "exa/mcp", clear=True)
+        return SearchResponse(429, {}, b"{}")
+
+    service.adapter.fetch = fetch
+    result = await service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": "https://example.com/"}}, turn=service.freeze_turn_hosted_tools(config),
+    )
+    assert result["record"]["error_code"] == "service_rate_limited"
+    assert service._service_cooldowns.until(source, "exa/mcp", service.now()) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("release_lock", [False, True])
+async def test_keyless_attempt_deadline_includes_lock_wait_and_allows_jina_fallback(tmp_path, monkeypatch, release_lock):
+    """The original chain consumed 180s in the lock; resetting 30s after admission is also wrong."""
+    monkeypatch.setattr(fetch_chain_module, "ATTEMPT_SECONDS", 0.3, raising=False)
+    service, config = _service(
+        tmp_path, enabled={LOCAL: False, EXA: False, FREE_EXA: True, JINA: True}, order=(FREE_EXA, JINA),
+    )
+    await service._keyless_exa_attempt_lock.acquire()
+    sent = []
+
+    async def fetch(source_id, *args, on_sent):
+        await on_sent()
+        sent.append(source_id)
+        if source_id == FREE_EXA:
+            await asyncio.sleep(0.22)
+            body = {"result": {"structuredContent": {"content": "late Exa"}}}
+        else:
+            body = {"data": {"content": "Jina fallback"}}
+        return SearchResponse(200, {}, json.dumps(body).encode())
+
+    service.adapter.fetch = fetch
+    release_handle = asyncio.get_running_loop().call_later(0.12, service._keyless_exa_attempt_lock.release) if release_lock else None
+    try:
+        result = await asyncio.wait_for(service.run_hosted_tool(
+            "web_fetch", {"arguments": {"url": "https://example.com/"}}, turn=service.freeze_turn_hosted_tools(config),
+        ), timeout=2)
+    finally:
+        if release_handle:
+            release_handle.cancel()
+        if service._keyless_exa_attempt_lock.locked():
+            service._keyless_exa_attempt_lock.release()
+    assert result["record"]["content"] == "Jina fallback"
+    first = result["record"]["attempts"][0]
+    assert first["outcome"] == ("failed" if release_lock else "skipped")
+    if not release_lock:
+        assert first["skipped"] == "service_busy"
+    assert sent == ([FREE_EXA, JINA] if release_lock else [JINA])
+    rows = {row["source_id"]: row for row in service.usage_summary(days=7)["services"] if row["tool"] == "web_fetch"}
+    assert rows[JINA]["requests"] == 1
+    assert (FREE_EXA in rows) == release_lock
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("code", ["fetch_url_blocked", "fetch_dns_unverified"])
+async def test_fallback_regate_failure_is_terminal_without_forwarding(tmp_path, code):
+    """A sent local failure may not bypass the original-URL gate on service fallback."""
+    from core.web_fetch_worker.policy import FetchFailure
+
+    service, config = _service(
+        tmp_path, enabled={LOCAL: True, EXA: False, FREE_EXA: True, JINA: True}, order=(LOCAL, FREE_EXA, JINA),
+    )
+    checks, submissions = [], []
+    url = "https://example.com/"
+
+    async def check(value, *, deadline):
+        checks.append(value)
+        if len(checks) > 1:
+            raise FetchFailure(code, terminal=True)
+
+    async def local(value, *, deadline, on_sent):
+        on_sent()
+        return {"sent": True, "error_code": "fetch_timeout", "terminal": False}
+
+    async def fetch(*args, on_sent):
+        await on_sent()
+        submissions.append(args)
+        raise AssertionError("blocked fallback must not forward the URL")
+
+    service._local_fetch_engine.check = check
+    service._local_fetch_engine.fetch = local
+    service.adapter.fetch = fetch
+    result = await service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": url}}, turn=service.freeze_turn_hosted_tools(config),
+    )
+    assert result["record"]["error_code"] == code
+    assert checks == [url, url] and submissions == []
+    assert [(fact["source_id"], fact["outcome"]) for fact in result["record"]["attempts"]] == [(LOCAL, "failed"), (FREE_EXA, "skipped")]
+    rows = service.usage_summary(days=7)["services"]
+    assert len(rows) == 1 and rows[0]["source_id"] == LOCAL and rows[0]["requests"] == 1
 
 
 class _Local:
@@ -119,8 +292,8 @@ class _Local:
         }
 
 
-def _service(tmp_path: Path, *, enabled: dict[str, bool], order=(LOCAL, EXA)):
-    service = owner(tmp_path, ("exa",), include_keyless=False)
+def _service(tmp_path: Path, *, enabled: dict[str, bool], order=(LOCAL, EXA), vendor="exa"):
+    service = owner(tmp_path, (vendor,) if vendor else (), include_keyless=False)
     raw = fetch_config().hosted_tools["web_fetch"]
     saved = {sid: ModelHubFetchServiceSettings(enabled=value) for sid, value in enabled.items()}
     config = service.store.config
@@ -174,9 +347,9 @@ async def test_local_sent_attempt_is_recorded_as_exact_zero_fetch_usage(tmp_path
 @pytest.mark.asyncio
 async def test_disabled_candidates_are_skipped_and_never_metered(tmp_path):
     service, config = _service(
-        tmp_path,
-        enabled={LOCAL: False, EXA: False, FREE_EXA: False, JINA: False},
-        order=(LOCAL, EXA),
+        tmp_path, vendor=None,
+        enabled={LOCAL: False, FREE_EXA: False, JINA: False},
+        order=(LOCAL,),
     )
     result = await service.run_hosted_tool(
         "web_fetch", {"arguments": {"url": "https://example.com/"}},
@@ -189,11 +362,11 @@ async def test_disabled_candidates_are_skipped_and_never_metered(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_keyed_target_failure_is_sent_but_does_not_cool_shared_service(tmp_path):
+async def test_keyless_target_failure_is_sent_but_does_not_cool_shared_service(tmp_path):
     service, config = _service(
         tmp_path,
-        enabled={LOCAL: False, EXA: True, FREE_EXA: False, JINA: False},
-        order=(EXA,),
+        enabled={LOCAL: False, EXA: False, FREE_EXA: True, JINA: False},
+        order=(FREE_EXA,),
     )
 
     async def fetch(source_id, vendor, service_id, credential_ref, request, *, on_sent):
@@ -201,7 +374,7 @@ async def test_keyed_target_failure_is_sent_but_does_not_cool_shared_service(tmp
         return SearchResponse(
             200,
             {},
-            json.dumps({"results": [], "statuses": [{"status": "failed"}]}).encode(),
+            json.dumps({"result": {"content": [{"type": "text", "text": "No content found."}]}}).encode(),
         )
 
     service.adapter.fetch = fetch
@@ -210,8 +383,8 @@ async def test_keyed_target_failure_is_sent_but_does_not_cool_shared_service(tmp
         turn=service.freeze_turn_hosted_tools(config),
     )
     assert result["record"]["error_code"] == "fetch_target_unreadable"
-    source = next(source for source in config.sources if source.id == EXA)
-    assert service._service_cooldowns.until(source, "exa/contents", service.now()) is None
+    source = model_hub_builtin_source(FREE_EXA)
+    assert service._service_cooldowns.until(source, "exa/mcp", service.now()) is None
     row = next(row for row in service.usage_summary(days=7)["services"] if row["tool"] == "web_fetch")
     assert row["requests"] == 1 and row["billable_requests"] == 0
 
@@ -220,13 +393,13 @@ async def test_keyed_target_failure_is_sent_but_does_not_cool_shared_service(tmp
 async def test_remote_submission_rechecks_original_url_gate(tmp_path):
     service, config = _service(
         tmp_path,
-        enabled={LOCAL: False, EXA: True, FREE_EXA: False, JINA: False},
-        order=(EXA,),
+        enabled={LOCAL: False, EXA: False, FREE_EXA: True, JINA: False},
+        order=(FREE_EXA,),
     )
 
     async def fetch(source_id, vendor, service_id, credential_ref, request, *, on_sent):
         await on_sent()
-        body = {"results": [{"text": "body", "title": "T", "url": request["ids"][0]}]}
+        body = {"result": {"structuredContent": {"content": "body", "title": "T", "url": request["urls"][0]}}}
         return SearchResponse(200, {}, json.dumps(body).encode())
 
     service.adapter.fetch = fetch
@@ -276,8 +449,8 @@ async def test_keyless_mcp_fetch_is_free_and_preserves_record_shape(tmp_path):
 async def test_pre_send_service_result_is_skipped_without_usage_or_cooldown(tmp_path):
     service, config = _service(
         tmp_path,
-        enabled={LOCAL: False, EXA: True, FREE_EXA: False, JINA: False},
-        order=(EXA,),
+        enabled={LOCAL: False, EXA: False, FREE_EXA: True, JINA: False},
+        order=(FREE_EXA,),
     )
 
     async def fetch(*args, **kwargs):
@@ -289,12 +462,12 @@ async def test_pre_send_service_result_is_skipped_without_usage_or_cooldown(tmp_
         turn=service.freeze_turn_hosted_tools(config),
     )
     assert result["record"]["status"] == "failed"
-    assert result["record"]["error_code"] == "fetch_sources_blocked"
+    assert result["record"]["error_code"] == "fetch_unavailable"
     assert result["record"]["attempts"][0]["outcome"] == "skipped"
     assert service.usage_summary(days=7)["services"] == []
     assert service.capability_evidence.records() == []
-    source = next(source for source in config.sources if source.id == EXA)
-    assert service._service_cooldowns.until(source, "exa/contents", service.now()) is None
+    source = model_hub_builtin_source(FREE_EXA)
+    assert service._service_cooldowns.until(source, "exa/mcp", service.now()) is None
 
 
 @pytest.mark.asyncio
@@ -352,8 +525,8 @@ async def test_jina_rolling_minute_budget_is_reserved_before_send(tmp_path):
 async def test_remote_mapping_cancellation_waits_for_sent_settlement(tmp_path):
     service, config = _service(
         tmp_path,
-        enabled={LOCAL: False, EXA: True, FREE_EXA: False, JINA: False},
-        order=(EXA,),
+        enabled={LOCAL: False, EXA: False, FREE_EXA: True, JINA: False},
+        order=(FREE_EXA,),
     )
     mapping_started = threading.Event()
     release_mapping = threading.Event()
@@ -368,7 +541,7 @@ async def test_remote_mapping_cancellation_waits_for_sent_settlement(tmp_path):
     try:
         async def fetch(*args, on_sent):
             await on_sent()
-            return SearchResponse(200, {}, json.dumps({"results": [{"text": "body"}]}).encode())
+            return SearchResponse(200, {}, json.dumps({"result": {"structuredContent": {"content": "body"}}}).encode())
 
         service.adapter.fetch = fetch
         task = asyncio.create_task(service.run_hosted_tool(
@@ -449,8 +622,8 @@ async def test_sent_local_redirect_skip_is_a_failed_metered_attempt(tmp_path):
 async def test_cancellation_settles_a_sent_fetch_before_rethrowing(tmp_path):
     service, config = _service(
         tmp_path,
-        enabled={LOCAL: False, EXA: True, FREE_EXA: False, JINA: False},
-        order=(EXA,),
+        enabled={LOCAL: False, EXA: False, FREE_EXA: True, JINA: False},
+        order=(FREE_EXA,),
     )
     started = asyncio.Event()
 
@@ -470,5 +643,5 @@ async def test_cancellation_settles_a_sent_fetch_before_rethrowing(tmp_path):
         await task
     row = next(row for row in service.usage_summary(days=7)["services"] if row["tool"] == "web_fetch")
     assert row["requests"] == 1
-    source = next(source for source in config.sources if source.id == EXA)
-    assert service._service_cooldowns.until(source, "exa/contents", service.now()) is None
+    source = model_hub_builtin_source(FREE_EXA)
+    assert service._service_cooldowns.until(source, "exa/mcp", service.now()) is None

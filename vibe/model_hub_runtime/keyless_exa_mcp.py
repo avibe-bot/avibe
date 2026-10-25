@@ -369,6 +369,14 @@ class KeylessExaMcpClient:
                 adapted = self._adapt_arguments(properties, arguments)
                 if adapted is None:
                     return SearchResponse(None, {}, None, "invalid_endpoint")
+                if tool_name == KEYLESS_EXA_FETCH_TOOL:
+                    required = tool["inputSchema"].get("required", [])
+                    if (
+                        not isinstance(required, list)
+                        or not all(isinstance(name, str) and name in adapted for name in required)
+                        or not _REQUIRED_FETCH_FIELDS.issubset(adapted)
+                    ):
+                        return SearchResponse(None, {}, None, "invalid_endpoint")
                 called = await self._request(
                     "tools/call",
                     {"name": tool_name, "arguments": adapted},

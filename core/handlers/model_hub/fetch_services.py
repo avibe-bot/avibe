@@ -1,13 +1,12 @@
-"""Configured/keyless web-fetch service mappings.
+"""Keyless web-fetch service mappings.
 
-The adapter owns credential custody and bounded HTTP/MCP transport. This module
-only maps one already-completed response into fetch facts and billing evidence;
-it never decides chain order or writes health.
+The adapter owns bounded HTTP/MCP transport. This module maps completed free
+service responses into fetch facts; configured paid mappings ship separately.
+It never decides chain order or writes health.
 """
 from __future__ import annotations
 
 import json
-import math
 import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping
@@ -169,28 +168,6 @@ def _content(service: Mapping[str, Any], body: Mapping[str, Any] | None) -> tupl
         content = _path(body, result.get("content", "content"))
         title = _path(body, result.get("title", "title"))
         final_url = _path(body, result.get("url", "url"))
-    if service.get("vendor") == "tavily":
-        items = _path(body, result.get("items"))
-        if isinstance(items, list) and items:
-            item = items[0] if isinstance(items[0], Mapping) else {}
-            content = item.get(result.get("content", "raw_content"))
-            title = item.get(result.get("title", "title"))
-            final_url = item.get(result.get("url", "url"))
-        failures = _path(body, result.get("failures"))
-        if isinstance(failures, list) and failures:
-            return None, None, None, False
-    if service.get("vendor") == "exa":
-        items = _path(body, result.get("items", "results"))
-        statuses = _path(body, result.get("statuses"))
-        if isinstance(statuses, list) and statuses:
-            first = statuses[0]
-            if isinstance(first, Mapping) and str(first.get("status", "")).lower() not in {"success", "completed"}:
-                return None, None, None, False
-        if isinstance(items, list) and items:
-            item = items[0] if isinstance(items[0], Mapping) else {}
-            content = item.get(result.get("content", "text"))
-            title = item.get(result.get("title", "title"))
-            final_url = item.get(result.get("url", "url"))
     if service.get("vendor") == "jina-reader" and isinstance(body, Mapping):
         data = body.get("data")
         if isinstance(data, Mapping):
@@ -243,22 +220,19 @@ def map_fetch_response(
     status = response.http_status
     outcomes = service.get("outcomes") if isinstance(service.get("outcomes"), Mapping) else {}
     vendor = str(service.get("vendor") or "")
+    if vendor not in {"exa-mcp", "jina-reader"}:
+        raise ValueError("configured fetch mappings are not available in this build")
     mcp_error = False
     mcp_target_failure = False
     if vendor == "exa-mcp":
         body, mcp_error = _mcp_payload(body)
         mcp_target_failure = bool(isinstance(body, Mapping) and body.get("_mcp_target_failure") is True)
-    free = vendor in {"exa-mcp", "jina-reader"}
     retry_after = next((value for key, value in response.headers.items() if key.lower() == "retry-after"), None)
+    tag = _tag(body)
+    refusal_tags = {str(item).upper() for item in outcomes.get("refusal_tags", ())}
     code: str | None = None
     target_failure = False
-    if status in set(outcomes.get("credential") or ()):
-        code = "service_key_invalid"
-    elif status in set(outcomes.get("balance") or ()):
-        code = "service_balance"
-    elif status in set(outcomes.get("limit") or ()):
-        code = "service_limit"
-    elif status == 429:
+    if status == 429:
         code = "service_rate_limited"
     elif status in set(outcomes.get("refused") or ()):
         code = "service_refused"
@@ -266,22 +240,20 @@ def map_fetch_response(
         code, target_failure = "fetch_target_unreadable", True
     elif vendor == "exa-mcp" and _mcp_rate_limited(body):
         code = "service_rate_limited"
+    elif tag and tag in refusal_tags:
+        code = "service_refused"
     elif vendor == "exa-mcp" and mcp_target_failure:
-        tag = _tag(body)
         code, target_failure = "fetch_target_unreadable", True
         if tag and not tag.startswith("CRAWL_"):
             code, target_failure = "service_unavailable", False
     elif vendor == "exa-mcp" and mcp_error:
-        tag = _tag(body)
         if tag and tag.startswith("CRAWL_"):
             code, target_failure = "fetch_target_unreadable", True
         elif tag and tag.startswith("PROHIBITED"):
             code = "service_refused"
         else:
             code = "service_unavailable"
-    elif _tag(body) and _tag(body) in {str(item).upper() for item in outcomes.get("refusal_tags", ())}:
-        code = "service_refused"
-    elif _tag(body) and _tag(body) in {str(item).upper() for item in outcomes.get("target_tags", ())}:
+    elif tag and tag in {str(item).upper() for item in outcomes.get("target_tags", ())}:
         code, target_failure = "fetch_target_unreadable", True
     elif status == 200 and not decoded:
         # A provider envelope that cannot be decoded is a service fault, not
@@ -306,33 +278,16 @@ def map_fetch_response(
                 "source_size_bytes": None,
                 "provider_truncated": provider_truncated,
             }
-            billable = bool(sent and not free)
-            listed = float((service.get("price") or {}).get("usd_per_1k", 0)) / 1000
-            reported = _path(body, "costDollars.total") if vendor == "exa" else None
-            valid_reported = (
-                isinstance(reported, (int, float)) and not isinstance(reported, bool)
-                and math.isfinite(float(reported)) and 0 <= float(reported) <= max(listed * 100, 1.0)
-            )
-            cost = ZERO if sent and free else (
-                HostedCost(basis="reported", usd=float(reported)) if billable and valid_reported else
-                HostedCost(basis="list", usd=listed) if billable else None
-            )
-            return FetchServiceResult(record, cost, billable, False, None, False, retry_after=retry_after,
-                                      reported_usd=float(reported) if billable and valid_reported else None)
+            return FetchServiceResult(record, ZERO if sent else None, False, False, None, False,
+                                      retry_after=retry_after)
     if code is None:
         code = "service_unavailable"
     result = FetchServiceResult(
         _failed(code, say, detail=_provider_error(body) if code == "service_refused" else None),
-        ZERO if sent and free else None,
+        ZERO if sent else None,
         False,
-        bool(
-            sent and not free and status == 200
-            and not decoded
-            and not target_failure
-        ),
-        {"service_key_invalid": "models.source.needs_action.credential_revoked",
-         "service_balance": "models.source.needs_action.balance_exhausted",
-         "service_limit": "models.source.needs_action.spend_limit_reached"}.get(code),
+        False,
+        None,
         not target_failure and code in {"service_unavailable", "service_unreadable", "service_rate_limited"},
         target_failure,
         retry_after,
