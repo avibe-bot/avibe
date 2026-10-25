@@ -45,6 +45,16 @@ for (const desktop of [false, true]) {
     await expect(header.getByRole('button', { name: 'Visualize', exact: true })).toBeVisible();
     await expect(header.getByRole('button', { name: 'Back', exact: true })).toBeVisible();
     await expect(header).toHaveCount(1);
+    // Desktop carries the session menu right after the title, ahead of the route
+    // picker — not among the page-level controls on the right.
+    const sessionMenu = header.getByRole('button', { name: 'Session actions', exact: true });
+    await expect(sessionMenu).toHaveCount(1);
+    await expect(sessionMenu).toBeVisible();
+    const titleBox = await header.getByRole('button', { name: '中文窗口会话' }).boundingBox();
+    const menuBox = await sessionMenu.boundingBox();
+    const pickerBox = await header.getByRole('button', { name: /gpt-fixture/ }).boundingBox();
+    expect(menuBox!.x).toBeGreaterThanOrEqual(titleBox!.x + titleBox!.width - 1);
+    expect(menuBox!.x + menuBox!.width).toBeLessThan(pickerBox!.x);
 
     if (desktop) {
       await expect(page.locator('[data-desktop-window-chrome] [data-chat-header]')).toHaveCount(1);
