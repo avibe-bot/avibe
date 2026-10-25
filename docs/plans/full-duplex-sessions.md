@@ -109,12 +109,20 @@ policy; it never satisfies or inherits the parent's automatic callback. Parent
 against the callback Run created only from the parent's terminal result.
 
 If a Run fails or is canceled after recording partial outputs, its callback
-Session receives one terminal failure/cancellation Message. A successful Run
-receives one terminal result Message; prior Activity or progress output is not
-copied into the callback Session.
+Session receives one terminal failure/cancellation Message. When the Run's
+terminal reply was already recorded, for example before a background Activity
+it left running stopped or failed, that Message states the outcome and then
+carries the reply. A successful Run receives one terminal result Message; prior
+Activity or progress output is not copied into the callback Session.
 
 A terminal Run intent is retained in `result_payload_json` while a non-detached
-owned Activity remains active. A later Activity output can complete that Run
+owned Activity remains active. An owned Activity's own outcome only amends an
+intent its Turn already recorded: a background task the Agent stops, or sees
+fail, while the Turn still runs is a step of that Turn, and the Turn's terminal
+decides the Run. An Activity the Turn cannot answer still settles the Run
+ahead of it: one the service ended (it carries an `interrupt_reason`), one the
+runtime lost (`disconnected`), or a terminal recovered after a restart. A
+later Activity output can complete that Run
 without acquiring lifecycle authority over whichever foreground Turn is current.
 Deferred terminal intent is excluded from generic restart requeueing, then
 reconciled against recovered Activity/output snapshots before normal Run drain.
