@@ -19,7 +19,7 @@ import certifi
 import httpcore
 import httpx
 
-from .fetch_policy import CheckedTarget, FetchFailure
+from .policy import CheckedTarget, FetchFailure
 
 
 ACCEPT = "text/markdown, text/html;q=0.95, application/xhtml+xml;q=0.9, text/plain;q=0.8, application/json;q=0.5, */*;q=0.1"

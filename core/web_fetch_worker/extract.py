@@ -9,7 +9,7 @@ from dataclasses import asdict, dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
-from .fetch_policy import FetchFailure, metadata_url, parse_url
+from .policy import FetchFailure, metadata_url, parse_url
 
 
 @dataclass

@@ -284,7 +284,12 @@ Repository packaging facts checked at #2924's merge:
 Use dependency markers for the supported CPython/OS/architecture wheel families;
 other combinations keep base HTTP/2 without trying to compile libcurl. Within
 the supported matrix, missing wheels fail the release packaging gate rather than
-silently breaking installation. Native import/load errors at runtime select the
+silently breaking installation. The disposable entry points live under the lightweight
+`core/web_fetch_worker/` package (whose parent `core/__init__.py` is empty): the gate
+imports only policy/DNS code, while transport and extraction modules load only inside
+the fetch branch. Existing `core.handlers` and `core.handlers.model_hub` package
+initializers retain their established eager exports and import side effects; they are
+not changed to solve worker startup. Native import/load errors at runtime select the
 degraded transport **before sending** and record `transport_degraded: true` with
 a bounded reason; no target error triggers a second local request. Decode only
 advertised encodings on both paths. Verify clean install and upgrade on Python
@@ -316,8 +321,12 @@ implementation clarification, 2026-10-25). No extra daemon or VM is introduced.
 One local fetch is in flight per host; its queue wait consumes the attempt deadline.
 The parent admits host ownership and a fetch-worker slot atomically before
 spawning (at most eight fetch workers); initial waiters hold neither resource.
-The mandatory gate has its own bounded worker capacity, never a fetch slot.
-Cleanup survives repeated cancellation and reaps before releasing admission.
+The mandatory gate has its own bounded worker capacity, never a fetch slot. Its
+subprocess starts from the lightweight worker package above, so package/controller
+registration and HTTP/parser imports are outside the gate's five-second budget. An
+isolated subprocess fixture forbids those HTTP and extraction imports while exercising
+a public IP-literal gate. Cleanup survives repeated cancellation and reaps before
+releasing admission.
 The invocation owner publishes settled host health before releasing/notifying
 host waiters, so a queued redirect cannot bypass or clear a new Retry-After.
 Inherited stricter kernel hard limits are retained, never raised.

@@ -278,8 +278,8 @@ from pathlib import Path
 import certifi
 import h2.connection
 import pypdf
-from core.handlers.model_hub.fetch_transport import native_available
-from core.handlers.model_hub.fetch_extract import extract_page
+from core.web_fetch_worker.transport import native_available
+from core.web_fetch_worker.extract import extract_page
 
 for name in json.loads(sys.argv[1]):
     dist = distribution(name)

@@ -14,9 +14,7 @@ import time
 from email.utils import parsedate_to_datetime
 from urllib.parse import urljoin, urlsplit
 
-from .fetch_extract import extract_page
-from .fetch_policy import FetchFailure, parse_url, resolve_target
-from .fetch_transport import TransferBudget, curl_hop, httpx_hop, native_available, request_headers
+from .policy import FetchFailure, parse_url, resolve_target
 
 
 MEMORY_LIMIT = 768 * 1024 * 1024
@@ -139,6 +137,10 @@ class OriginCookies:
 
 def fetch_document(url: str, locale: str, exchange, *, remaining_seconds: float = 30) -> dict:
     deadline = time.monotonic() + max(0, min(remaining_seconds, 30))
+    # The independent URL/DNS gate must not pay HTTP/parser startup cost or
+    # depend on those packages loading. Imports stay inside the bounded fetch.
+    from .extract import extract_page
+    from .transport import TransferBudget, curl_hop, httpx_hop, native_available, request_headers
 
     def resolve(value):
         # A genuine DNS failure/full DNS allowance is terminal. Exhausting the

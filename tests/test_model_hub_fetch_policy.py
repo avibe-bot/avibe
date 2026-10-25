@@ -7,7 +7,7 @@ import socket
 
 import pytest
 
-from core.handlers.model_hub import fetch_policy as policy
+from core.web_fetch_worker import policy
 
 
 @pytest.mark.parametrize("ip,code", [

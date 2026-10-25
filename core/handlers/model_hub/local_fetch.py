@@ -20,11 +20,11 @@ from typing import Callable
 import psutil
 
 from .async_owner import await_owned_task
-from .fetch_policy import FetchFailure, parse_url
+from core.web_fetch_worker.policy import FetchFailure, parse_url
 from .retry import retry_after_deadline
 
 
-_WORKER = "import sys; sys.path.insert(0, sys.argv.pop(1)); from core.handlers.model_hub.fetch_worker import main; main()"
+_WORKER = "import sys; sys.path.insert(0, sys.argv.pop(1)); from core.web_fetch_worker.worker import main; main()"
 _MEMORY_LIMIT = 768 * 1024 * 1024
 _IPC_LIMIT = 1200000
 _WORKERS = 8

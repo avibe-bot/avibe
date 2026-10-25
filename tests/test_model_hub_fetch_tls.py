@@ -6,8 +6,8 @@ import threading
 
 import pytest
 
-from core.handlers.model_hub import fetch_transport as transport
-from core.handlers.model_hub.fetch_policy import CheckedTarget, FetchURL
+from core.web_fetch_worker import transport
+from core.web_fetch_worker.policy import CheckedTarget, FetchURL
 
 
 @pytest.fixture

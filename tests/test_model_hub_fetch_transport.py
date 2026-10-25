@@ -13,8 +13,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import httpcore
 import pytest
 
-from core.handlers.model_hub import fetch_transport as transport
-from core.handlers.model_hub.fetch_policy import CheckedTarget, FetchFailure, FetchURL
+from core.web_fetch_worker import transport
+from core.web_fetch_worker.policy import CheckedTarget, FetchFailure, FetchURL
 
 
 # Static codec fixtures keep optional Python codecs out of every install/test

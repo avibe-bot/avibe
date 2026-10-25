@@ -11,11 +11,11 @@ import time
 
 import pytest
 
-from core.handlers.model_hub import fetch_worker as worker
+from core.web_fetch_worker import worker, transport
 from core.handlers.model_hub import local_fetch
-from core.handlers.model_hub.fetch_extract import extract_page, inert_markdown
-from core.handlers.model_hub.fetch_policy import CheckedTarget, FetchFailure, parse_url
-from core.handlers.model_hub.fetch_transport import HopResponse
+from core.web_fetch_worker.extract import extract_page, inert_markdown
+from core.web_fetch_worker.policy import CheckedTarget, FetchFailure, parse_url
+from core.web_fetch_worker.transport import HopResponse
 
 
 @pytest.mark.parametrize("body,mime,expected", [
@@ -195,9 +195,9 @@ def local_fixture(monkeypatch):
             raise item
         return item
     monkeypatch.setattr(worker, "resolve_target", resolve)
-    monkeypatch.setattr(worker, "native_available", lambda: (True, None))
-    monkeypatch.setattr(worker, "curl_hop", hop)
-    monkeypatch.setattr(worker, "httpx_hop", lambda *a: pytest.fail("sent target failure retried on degraded transport"))
+    monkeypatch.setattr(transport, "native_available", lambda: (True, None))
+    monkeypatch.setattr(transport, "curl_hop", hop)
+    monkeypatch.setattr(transport, "httpx_hop", lambda *a: pytest.fail("sent target failure retried on degraded transport"))
     return responses, calls, gates, events
 
 
@@ -243,14 +243,14 @@ def test_redirect_cookie_scope_and_one_logical_send(local_fixture):
 
 def test_native_load_failure_selects_honest_transport_before_send(local_fixture, monkeypatch):
     responses, calls, gates, events = local_fixture
-    monkeypatch.setattr(worker, "native_available", lambda: (False, "native_library_unavailable"))
+    monkeypatch.setattr(transport, "native_available", lambda: (False, "native_library_unavailable"))
     def degraded(target, headers, budget, timeout, on_sent):
         assert headers["User-Agent"].startswith("Avibe/")
         assert not any(key.lower().startswith(("sec-ch-", "sec-fetch-")) for key in headers)
         on_sent()
         return HopResponse(200, [("content-type", "text/plain")], b"Readable degraded result.")
-    monkeypatch.setattr(worker, "httpx_hop", degraded)
-    monkeypatch.setattr(worker, "curl_hop", lambda *a: pytest.fail("unavailable native library was used"))
+    monkeypatch.setattr(transport, "httpx_hop", degraded)
+    monkeypatch.setattr(transport, "curl_hop", lambda *a: pytest.fail("unavailable native library was used"))
     result = worker.fetch_document("https://example.com/", "en", events.append)
     assert result["transport_degraded"] and result["transport_degraded_reason"] == "native_library_unavailable"
 
@@ -346,6 +346,30 @@ def test_short_attempt_dns_deadline_differs_from_real_dns_failure(local_fixture,
     with pytest.raises(FetchFailure) as raised:
         worker.fetch_document("https://example.com/", "en", events.append)
     assert raised.value.code == "fetch_dns_unverified" and raised.value.terminal
+
+
+def test_gate_worker_does_not_load_http_or_extraction_stack(tmp_path):
+    """The mandatory gate works even when no local fetch stack can be loaded."""
+    import subprocess
+    from pathlib import Path
+
+    code = '''import importlib.abc,sys
+sys.path.insert(0,sys.argv.pop(1))
+class PolicyOnly(importlib.abc.MetaPathFinder):
+ def find_spec(self,fullname,path=None,target=None):
+  if fullname.rsplit(".",1)[-1] in {"transport","extract"} or fullname.split(".",1)[0] in {"httpx","httpcore","curl_cffi","lxml","trafilatura","pypdf"}:
+   raise AssertionError("gate attempted unrelated import: " + fullname)
+sys.meta_path.insert(0,PolicyOnly())
+from core.web_fetch_worker.worker import main
+main()
+'''
+    result = subprocess.run(
+        [sys.executable, "-I", "-B", "-c", code, str(Path(__file__).resolve().parents[1])],
+        input=json.dumps({"operation": "gate", "url": "https://8.8.8.8/"}) + "\n",
+        capture_output=True, text=True, cwd=tmp_path, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {"event": "result", "result": {"url": "https://8.8.8.8/"}}
 
 
 async def test_gate_worker_and_initial_policy_failure_do_not_send():
@@ -542,7 +566,7 @@ def test_hop_timeout_only_cools_when_it_had_its_own_connect_budget(
         clock.now += elapsed
         raise (httpcore.ReadTimeout if timeout_type == "read" else httpcore.ConnectTimeout)()
 
-    monkeypatch.setattr(worker, "curl_hop", timed_out)
+    monkeypatch.setattr(transport, "curl_hop", timed_out)
     with pytest.raises(FetchFailure) as raised:
         worker.fetch_document("https://example.com/", "en", events.append, remaining_seconds=remaining)
     assert raised.value.code == "fetch_timeout" and raised.value.cooldown_suppressed == suppressed
@@ -628,13 +652,13 @@ def test_worker_respects_stricter_inherited_kernel_limits():
     from pathlib import Path
     code = '''import resource,sys,json
 sys.path.insert(0,sys.argv[1])
-from core.handlers.model_hub.fetch_worker import resource_limits
+from core.web_fetch_worker.worker import resource_limits
 resource.setrlimit(resource.RLIMIT_CPU,(20,20))
 resource.setrlimit(resource.RLIMIT_FSIZE,(65536,65536))
 resource_limits()
 print(json.dumps([resource.getrlimit(resource.RLIMIT_CPU),resource.getrlimit(resource.RLIMIT_FSIZE)]))
 '''
-    result = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(Path(worker.__file__).resolve().parents[3])],
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(Path(__file__).resolve().parents[1])],
                             capture_output=True, text=True, check=True, timeout=30)
     assert json.loads(result.stdout) == [[20, 20], [65536, 65536]]
 
