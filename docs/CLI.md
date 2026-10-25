@@ -77,10 +77,14 @@ and use the corresponding `show` or `get` command for full record detail.
 takes `--page` only.
 
 List rows carry only what is needed to decide the next step and omit null,
-empty, and zero-valued fields, so an absent field means unset. `vibe task show`,
-`vibe watch show`, `vibe runs show`, `vibe session get`, and `vibe agent show`
+empty, and zero-valued fields, so an absent field means unset. A Show Page row
+is its `session_id`, `visibility`, `active_url` (the URL to share), `path` (the
+workspace to edit), and `updated_at`. `vibe task show`, `vibe watch show`,
+`vibe runs show`, `vibe session get`, `vibe agent show`, and `vibe show status`
 print the full record; add `--brief` to print exactly the row the matching list
-command prints.
+command prints. A removed Task or Watch shows `lifecycle_state: "removed"` and
+`removed_at`, and none of the live fields (`enabled`, health, next fire, or
+waiter state) it no longer has.
 
 ### Session-owned lists
 

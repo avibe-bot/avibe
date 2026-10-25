@@ -2565,15 +2565,32 @@ def _definition_health_fields(row: Mapping[str, object]) -> dict:
     return fields
 
 
-def _definition_detail_payload(row: Mapping[str, object], **derived: object) -> dict:
-    """``vibe task show`` / ``vibe watch show``: every fact the projection holds, once."""
+#: What a removed definition no longer has: it is not armed, has no next fire or
+#: waiter, and its health describes nothing that can still run.
+_REMOVED_DEFINITION_LIVE_FIELDS = frozenset(
+    {"enabled", "next_run_at", "waiting_since", "running_since", "process_alive"}
+)
 
+
+def _definition_detail_payload(row: Mapping[str, object], **derived: object) -> dict:
+    """``vibe task show`` / ``vibe watch show``: every fact the projection holds, once.
+
+    ``runtime`` is the waiter's heartbeat record (pid and process identity);
+    ``process_alive``, ``waiting_since``, and ``running_since`` already state what
+    it means.
+    """
+
+    removed = row.get("lifecycle_state") == "removed"
     payload = {
         key: value
         for key, value in row.items()
-        if key not in _CLI_OMITTED_DEFINITION_FIELDS and key not in _DEFINITION_HEALTH_FIELDS
+        if key not in _CLI_OMITTED_DEFINITION_FIELDS
+        and key not in _DEFINITION_HEALTH_FIELDS
+        and key != "runtime"
+        and not (removed and key in _REMOVED_DEFINITION_LIVE_FIELDS)
     }
-    payload.update(_definition_health_fields(row))
+    if not removed:
+        payload.update(_definition_health_fields(row))
     payload.update(derived)
     return _present_fields(payload)
 
@@ -2618,7 +2635,7 @@ def _task_projection_payload(task: Mapping[str, object], *, brief: bool = False)
             "last_run_at": task.get("last_run_at"),
             "last_exit_code": task.get("last_exit_code") or None,
             "last_error": task.get("last_error"),
-            **_definition_health_fields(task),
+            **({} if task.get("lifecycle_state") == "removed" else _definition_health_fields(task)),
             "resume_blocked": task.get("resume_blocked"),
         }
     )
@@ -3827,9 +3844,13 @@ def _watch_projection_payload(watch: Mapping[str, object], *, brief: bool = Fals
             "last_exit_code": watch.get("last_exit_code") or None,
             "last_error": watch.get("last_error"),
             "process_alive": (
-                False if watch.get("enabled") and watch.get("process_alive") is False else None
+                False
+                if watch.get("enabled")
+                and watch.get("process_alive") is False
+                and watch.get("lifecycle_state") != "removed"
+                else None
             ),
-            **_definition_health_fields(watch),
+            **({} if watch.get("lifecycle_state") == "removed" else _definition_health_fields(watch)),
         }
     )
 
@@ -14565,6 +14586,19 @@ def _load_show_page_store():
     return ShowPageStore()
 
 
+def _show_page_row(page_payload: Mapping[str, object]) -> dict:
+    """One Show Page as ``vibe show list`` prints it.
+
+    The row names the page, its visibility, the URL to share, and the workspace to
+    edit. ``vibe show status`` prints the rest: the private and public URLs behind
+    ``active_url``, access revision, share id, icon token, and history.
+    """
+
+    return _present_fields(
+        {key: page_payload.get(key) for key in ("session_id", "visibility", "active_url", "path", "updated_at")}
+    )
+
+
 def cmd_show_list(args):
     from core.show_pages import avibe_cloud_connect_guidance, show_page_payload
 
@@ -14595,14 +14629,17 @@ def cmd_show_list(args):
         _add_optional_arg(command, "--updated-after", updated_after)
         _add_optional_arg(command, "--updated-before", updated_before)
         _add_optional_arg(command, "--q", getattr(args, "query", None))
+        # Without a reachable URL every row lacks ``active_url`` for the same reason, so
+        # the guidance is said once, and only then.
+        url_guidance = avibe_cloud_connect_guidance()
         _print_cli_payload(
             "show_pages",
             **scope.payload(),
             count=len(result.items),
-            visibility=getattr(args, "visibility", None),
-            pages=[show_page_payload(page) for page in result.items],
+            **({"visibility": args.visibility} if getattr(args, "visibility", None) else {}),
+            pages=[_show_page_row(show_page_payload(page)) for page in result.items],
             **_paginated_fields(result, command=command),
-            url_guidance=avibe_cloud_connect_guidance(),
+            **({"url_guidance": url_guidance} if url_guidance else {}),
         )
         return 0
     except Exception as exc:
@@ -14663,6 +14700,11 @@ def cmd_show_status(args):
                 help_command="vibe show path --help",
                 details={"session_id": session_id},
             )
+        if getattr(args, "brief", False):
+            from core.show_pages import show_page_payload
+
+            _print_json(_cli_payload("show_page", **_show_page_row(show_page_payload(page))))
+            return 0
         payload = _show_page_result(
             page,
             message=f"Show Page is {page.visibility}.",
@@ -17837,6 +17879,7 @@ def build_parser():
         error_hint="Pass --session-id, or run from an Avibe Agent shell where AVIBE_SESSION_ID is injected.",
     )
     show_status_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
+    _add_brief_arg(show_status_parser, list_command="vibe show list")
     _add_json_noop(show_status_parser)
 
     show_update_parser = show_subparsers.add_parser(

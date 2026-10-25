@@ -590,8 +590,8 @@ def test_removed_task_reads_as_removed_and_refuses_mutations(capsys) -> None:
     assert definition["id"] == task.id
     assert definition["name"] == "Hourly summary"
     assert definition["lifecycle_state"] == "removed"
-    # The removed row keeps ``enabled``, but it will never fire again.
-    assert "next_run_at" not in definition
+    # It will never fire again, so it carries no live state.
+    assert not {"enabled", "health", "next_run_at", "waiting_since"} & set(definition)
     removed_at = definition["removed_at"]
     assert removed_at
 

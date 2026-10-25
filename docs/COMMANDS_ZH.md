@@ -505,8 +505,8 @@ bind vr-a3x9k2
 单页最多 100 条；更大的 `--limit` 按 100 读取，`pagination.limit` 报告实际使用的
 上限。不提供无分页的 `--all` 模式。按 `pagination.next_command` 继续翻页；单条完整
 详情通过对应的 `show` 或 `get` 命令获取。列表行省略 null、空值和零值字段；
-`vibe task show`、`vibe watch show`、`vibe runs show`、`vibe session get` 和
-`vibe agent show` 加上 `--brief` 时只输出对应的列表行。
+`vibe task show`、`vibe watch show`、`vibe runs show`、`vibe session get`、
+`vibe agent show` 和 `vibe show status` 加上 `--brief` 时只输出对应的列表行。
 
 所有命令遵循同一套语法：只用 `--session-id <id>` 指定 Session，作用于单个 Session
 的命令在 Avibe Agent shell 内默认使用调用方 Session。面向 Agent 的命令输出 JSON
