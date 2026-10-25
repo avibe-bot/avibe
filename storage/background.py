@@ -6926,9 +6926,16 @@ class SQLiteBackgroundTaskStore:
         result_text: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         updated_at: Optional[str] = None,
+        amend_only: bool = False,
         _conn: Any = None,
     ) -> bool:
-        """Remember a terminal intent and its evidence while an Activity blocks it."""
+        """Remember a terminal intent and its evidence while an Activity blocks it.
+
+        ``amend_only`` adds to an intent the Run's Turn already recorded and does
+        nothing when there is none: an owned Activity that ends while its Turn is
+        still running is a step the Agent sees and answers in that Turn, so the
+        Turn's own terminal decides the Run.
+        """
 
         now = updated_at or _utc_now_iso()
         row_to_publish = None
@@ -6942,6 +6949,8 @@ class SQLiteBackgroundTaskStore:
             result_payload = _json_loads(row["result_payload_json"], {})
             if not isinstance(result_payload, dict):
                 result_payload = {}
+            if amend_only and not result_payload.get("deferred_terminal_status"):
+                return False
             normalized = _stronger_terminal_status(
                 result_payload.get("deferred_terminal_status"),
                 terminal_status,
