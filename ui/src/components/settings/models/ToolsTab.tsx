@@ -16,7 +16,7 @@ import { ToggleSwitch } from '../SettingsPrimitives';
 import { cooldownTime, formatMonthDay, formatNameList, formatSmallUsd } from './format';
 import { executorOrderAfterMove, imageModelCopyKey, pairEvidence, refusalSummary, type PairEvidence, type RefusalSummary } from './hostedTools';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
-import { KEYLESS_EXA_SOURCE_ID, searchServicesActive, webSearchTool } from './searchServices';
+import { KEYLESS_EXA_SOURCE_ID, searchServicesActive, serviceVendorForSource, webSearchTool } from './searchServices';
 import { SearchCandidateStatus, SearchServicePrice, SearchVendorGlyph } from './SearchServiceParts';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
@@ -620,8 +620,20 @@ export const ToolsTab: React.FC<{
   });
   const lookup = React.useMemo<SourceLookup>(() => {
     const byId = new Map(sources.map((source) => [source.id, source]));
-    return { name: (id) => byId.get(id)?.display_name ?? id, source: (id) => byId.get(id) };
-  }, [sources]);
+    return {
+      name: (id) => {
+        const source = byId.get(id);
+        if (source) return source.display_name;
+        // Built-ins have catalog membership, not a persisted Source. Resolve
+        // them here so status, fallback, evidence and action labels agree.
+        const vendor = serviceVendorForSource(webSearchTool(status), id);
+        return vendor?.facts.built_in
+          ? t(`settings.models.searchServices.vendorName.${vendor.id}`, { defaultValue: vendor.name }) as string
+          : id;
+      },
+      source: (id) => byId.get(id),
+    };
+  }, [sources, status, t]);
   return (
     <section className="model-hub-tools flex flex-col" aria-label={t('settings.models.tools.title') as string}>
       <div className="flex min-w-0 flex-col gap-1">
