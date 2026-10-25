@@ -187,8 +187,8 @@ switch enables GET, effective candidates, model declarations and the gateway
 producer together. An explicit false still omits the active surfaces and refuses
 execution; V2/PUT settings and historical activity/usage remain readable.
 The canonical `{url}` function uses `/hosted-tools/web_fetch` on the live Vibey
-turn; it is never a native Claude fetch. The reader-first release prerequisite
-and coordinated public disclosure are in `web-fetch.md` §8.
+turn; it is never a native Claude fetch. The owner's coordinated reader/activation
+release decision and public disclosure are in `web-fetch.md` §8.
 
 PUT accepts `{enabled?, executor_order?, services?}` for fetch: each service patch
 has only nullable `enabled`; no `results`, `prefer_native` or client-written

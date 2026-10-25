@@ -78,8 +78,8 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
        `/hosted-tools/web_fetch`; the gateway owns normalization and the budget.
        The validated record produces C-1's complete capped ordinary quotation
        through the same deterministic frame used by readers. Replay preserves
-       the stored call/result without a fetch or settlement. WF-3's merge remains
-       gated on an owner-published reader release (`../web-fetch.md` §8).
+       the stored call/result without a fetch or settlement. The owner chose to
+       ship readers and activation together (`../web-fetch.md` §8).
      - **a search tool** (`web_search`, `x_search`) gives the primary hop's facts:
        - `native` is `assumed` when the tool runs on the hop (`hosted_tools.runs_on`: a hub Source with an eligible
          credential, never a Claude subscription, and an untranslated path, that serves the model, for which the

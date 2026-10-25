@@ -694,23 +694,25 @@ Python/TypeScript mirrors, public routes and contract registry on one tested hea
 
 | Phase | Scope / gate |
 | --- | --- |
-| WF-1 readers | Config/read/record/usage/activity readers, synthetic identities, versioned mirrors and downgrade fixtures. Include #2920, release before any fetch producer writes. Hide active UI/candidates until activation. |
+| WF-1 readers | Config/read/record/usage/activity readers, synthetic identities, versioned mirrors and downgrade fixtures. Include #2920; originally reader-first, superseded by the coordinated-release decision below. Hide active UI/candidates until activation. |
 | WF-2 producer | Behind `WEB_FETCH_ACTIVE=false`: gateway policy/local transport/extraction, keyed APIs, shared Exa client + Jina, Vibey framing/replay, UI fixtures. Separate lanes only after reader contracts merge. Flag-off preserves prior behavior. |
-| WF-3 activation | Confirm reader release exists; flip declaration/candidates/producer together and publish public en/zh docs. Recheck vendor facts/tags, review/CI and manual fixture acceptance. |
+| WF-3 activation | Owner-approved coordinated reader/flip release: enable declaration/candidates/producer together and publish public en/zh docs. Recheck vendor facts/tags, review/CI and manual acceptance. |
 
-### WF-3 activation and release hold
+### WF-3 activation and coordinated release
 
 The activation change sets the one shared switch to true; it changes no schema,
 contract version, migration, catalog price or default ordering. It builds on the
 merged local engine (#2962), local/keyless chain (#2968), and configured providers
 (#2976). Public disclosure is the coordinated `avibe-docs#83` English/Chinese change.
 
-Rechecked **2026-10-26** before the activation push: the latest published release
-is `gh-v3.2.3rc7` (v20); no fetched tag contains WF-1 `9e47e5f`. The activation and
-public-doc PRs may reach Merge-ready, but **must not merge** until the owner cuts
-a release containing WF-1. Merged reader code is not a reader release. The owner
-owns that release and the coordinated merge; this lane never publishes a tag,
-release, deployment or service restart. Recheck the prerequisite before merging.
+At activation preparation on **2026-10-26**, the latest published release was
+`gh-v3.2.3rc7` (v20), and no fetched tag contained WF-1 `9e47e5f`. At **01:56
+Asia/Shanghai on 2026-10-26**, the owner explicitly waived the separate reader-first
+release and chose to **ship readers and the activation flip together**. No rc8 or
+other prior reader release is required. The orchestrator merges the activation
+and public-doc PRs together once the activation is Merge-ready and its required
+acceptance is complete; exact-head review and CI are not waived. This lane does
+not publish a tag/release, deploy or restart a service.
 
 Primary activation acceptance connects the real default-on Tools read, frozen
 candidates, C-6 hop, Vibey declaration, gateway chain and bounded C-1 result/usage

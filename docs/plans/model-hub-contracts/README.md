@@ -42,9 +42,10 @@ It changes no serialized shape or contract version. Missing fetch config uses th
 automatic local → configured services → keyless Exa → keyless Jina order without
 writing defaults; saved fetch opt-outs and ordering remain independent of search.
 Public en/zh disclosure ships with activation (`avibe-docs#83`); §7 of the owning
-plan specifies up/down buttons, not drag. **Release hold:** on 2026-10-26 no tag
-contains WF-1 `9e47e5f`; both activation and disclosure merges wait for an
-owner-published reader release. See [`../web-fetch.md`](../web-fetch.md) §8.
+plan specifies up/down buttons, not drag. **Owner decision, 2026-10-26 01:56
+Asia/Shanghai:** ship WF-1 readers and the activation flip together; no separate
+prior reader release is required. Exact-head review/CI and coordinated activation/
+disclosure acceptance still apply. See [`../web-fetch.md`](../web-fetch.md) §8.
 
 It builds on v20 (2026-10-22): active web-search services (S2b-2).
 `gh-v3.2.3rc1` and `gh-v3.2.3rc2` carried v19, so activation opened v20 rather than

@@ -7,9 +7,9 @@ and packaging. No gateway contract change is needed by this lane.
 
 Activation follow-up, 2026-10-26: WF-3 sets the shared flag to true after all
 WF-2G producers merged, with default-on boundary acceptance and public en/zh
-disclosure. Both activation and docs merges remain held for the owner to publish
-a WF-1 reader release. The invariants below describe WF-2V's original dormant
-landing; the current activation/release contract is `web-fetch.md` §§7–8.
+disclosure. At 01:56 Asia/Shanghai the owner chose to ship readers and activation
+together, without a separate reader-first release. The invariants below describe
+WF-2V's original dormant landing; the current contract is `web-fetch.md` §§7–8.
 
 ## Invariants
 
@@ -90,7 +90,8 @@ The orchestrator owns the separate local-Incus live-provider rerun before merge.
 ## Known by design
 
 - No activation, release/tag, public-doc activation, deployment, service restart
-  or local/remote regression update. WF-3 must first establish a reader release.
+  or local/remote regression update in the original WF-2V scope. WF-3's coordinated
+  activation and owner-controlled acceptance are described above.
 - The Tools read has no live local-transport state. Per orchestrator approval,
   Local detail shows the default Chrome 150 profile, fallback policy and limits;
   only actual call records show transport degradation and its reason.

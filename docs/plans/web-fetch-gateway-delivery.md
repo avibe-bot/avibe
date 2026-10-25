@@ -2,8 +2,8 @@
 
 Status: 2026-10-26, WF-2G complete: #2962, #2968 and #2976 merged.
 WF-2G kept `WEB_FETCH_ACTIVE=False`; WF-3 now prepares the coordinated activation
-and public disclosure, held for the owner-published reader release (see §8 of the
-owning plan). The sections below retain the split's implementation history.
+and public disclosure. The owner chose a combined reader/activation release
+(see §8 of the owning plan). The sections below retain the split's history.
 The behavior contract remains [web-fetch.md](web-fetch.md), especially §§3–6.
 This plan narrows delivery units, not the activation/release scope.
 
@@ -15,7 +15,7 @@ This plan narrows delivery units, not the activation/release scope.
    additive fetch usage attribution, and endpoint routing.
 3. **Configured services:** PR #2976 merged from updated `master` after #2968,
    adding Tavily Extract, keyed Exa `/contents`, and DeepSeek Fetch.
-   Both producer prerequisites are complete; neither waives WF-3's release gate.
+   Both producer prerequisites are complete; WF-3 still requires review/CI and acceptance.
 
 The gateway lane prepares exact-head review/CI evidence; the orchestrator owns
 merging. No service restart, regression deployment, release or live paid probe is
