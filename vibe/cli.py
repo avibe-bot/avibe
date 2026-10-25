@@ -1012,7 +1012,7 @@ def _add_brief_arg(parser, *, list_command: str) -> None:
     parser.add_argument(
         "--brief",
         action="store_true",
-        help=f"Print only the compact row that '{list_command}' prints for this record",
+        help=i18n_t("harness.cli.help.brief", _configured_cli_language(), list_command=list_command),
     )
 
 

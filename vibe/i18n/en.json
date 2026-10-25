@@ -110,7 +110,8 @@
         "command": "Inspect unified Harness live state and anomalies",
         "description": "Inspect active Runs, armed Watches, upcoming Tasks, and live anomalies.",
         "status": "Show the bounded live/anomaly snapshot",
-        "statusDescription": "Show live Runs, armed Watches, upcoming Tasks, and anomalies for the caller Session. Use --session-id for another Session or --global for every Session."
+        "statusDescription": "Show live Runs, armed Watches, upcoming Tasks, and anomalies for the caller Session. Use --session-id for another Session or --global for every Session.",
+        "brief": "Print only the compact row that '{list_command}' prints for this record"
       },
       "error": {
         "sqliteRequired": "Harness status requires the SQLite task store.",

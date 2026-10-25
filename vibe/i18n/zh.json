@@ -110,7 +110,8 @@
         "command": "检查统一的 Harness 实时状态和异常",
         "description": "检查活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。",
         "status": "显示有界的实时状态与异常快照",
-        "statusDescription": "显示调用方 Session 的活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。用 --session-id 查看其他 Session，用 --global 查看所有 Session。"
+        "statusDescription": "显示调用方 Session 的活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。用 --session-id 查看其他 Session，用 --global 查看所有 Session。",
+        "brief": "只输出 '{list_command}' 为这条记录打印的那一行精简记录"
       },
       "error": {
         "sqliteRequired": "Harness 状态需要 SQLite Task 存储。",
