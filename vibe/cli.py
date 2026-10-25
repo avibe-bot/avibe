@@ -2553,8 +2553,6 @@ _CLI_INTERNAL_RUN_METADATA_KEYS = frozenset(
         "delivered_reports",
         "owed_failure_notice",
         "turn_failure_notification",
-        "workbench_queue_holds_run",
-        "callback_output_id",
         "watch_recent_event_timestamps",
         "watch_lifetime_started_at",
         "task_schedule_consumed",
