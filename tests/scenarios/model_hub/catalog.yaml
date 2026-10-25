@@ -439,7 +439,7 @@ scenarios:
       - tests/agent_core/ai/test_hosted_replay.py::test_an_opaque_payload_refusal_ends_the_send_as_a_refusal_of_its_source_identity
       - tests/agent_core/ai/test_hosted_replay.py::test_an_opaque_payload_another_account_refuses_is_sent_portably_from_then_on_in_the_session
       - tests/agent_core/ai/test_hosted_replay.py::test_a_refusal_of_what_the_session_already_demoted_stands_as_the_error
-      - tests/agent_core/ai/test_hosted_replay.py::test_a_tool_loop_whose_assistant_message_cannot_start_with_thinking_continues_with_thinking_off
+      - tests/agent_core/ai/test_hosted_replay.py::test_anthropic_thinking_fallback_is_scoped_to_manual_claude_tool_loops
       - tests/agent_core/ai/test_hosted_replay.py::test_a_session_whose_signatures_were_refused_still_finishes_tool_loops_with_thinking_on
       - tests/agent_core/ai/test_hosted_replay.py::test_a_decrypt_refusal_drops_every_opaque_payload_of_that_identity_for_the_rest_of_the_turn
       - tests/agent_core/ai/test_hosted_replay.py::test_a_hosted_call_goes_back_verbatim_and_pinned_only_to_its_own_source_with_replay_evidence

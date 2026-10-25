@@ -23,6 +23,13 @@ _CLAUDE_VERSION: Final = re.compile(r"claude-(?:[a-z]+-)?(\d+)(?:-(\d{1,2}))?(?!
 _FIRST_ADAPTIVE_VERSION: Final = (4, 6)
 
 
+def is_claude_model(model_id: str) -> bool:
+    """Whether the model ID's final path segment names a Claude model."""
+
+    normalized = model_id.lower().replace(".", "-")
+    return normalized.rsplit("/", 1)[-1].startswith("claude-")
+
+
 def uses_adaptive_thinking(model_id: str) -> bool:
     """Whether this Claude model takes adaptive thinking; False for a Claude version before 4.6 and for non-Claude."""
 

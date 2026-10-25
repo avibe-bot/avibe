@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from core.agent_core.ai.claude_thinking import uses_adaptive_thinking
+from core.agent_core.ai.claude_thinking import is_claude_model, uses_adaptive_thinking
 from core.agent_core.ai.hosted import anthropic_hosted_block, citation, reported_counts
 from core.agent_core.ai.image_limits import LoadedImage
 from core.agent_core.ai._common import (
@@ -1045,15 +1045,16 @@ def build_messages_payload(
         payload["tools"] = tools
     effort = (request.reasoning_effort or "").lower()
     adaptive = uses_adaptive_thinking(request.endpoint.model_id)
-    if effort in {"none", "off", "disabled"} or (
-        effort and not adaptive and _continues_unthought_tool_loop(payload_messages)
-    ):
-        # Under manual thinking, Anthropic requires the assistant message a tool loop continues to start with its
-        # thinking block. One whose thinking cannot go back (another origin's, or a Session whose signatures the
-        # provider refused) continues with thinking off, as Anthropic's refusal itself advises; the models that take
-        # manual thinking all accept that. Adaptive thinking has no such rule, and several adaptive models refuse
-        # ``disabled``, so it stays on.
+    if effort in {"none", "off", "disabled"}:
         payload["thinking"] = {"type": "disabled"}
+    elif effort and not adaptive and _continues_unthought_tool_loop(payload_messages):
+        if is_claude_model(request.endpoint.model_id):
+            # Under manual thinking, Anthropic requires the assistant message a tool loop continues to start with its
+            # thinking block. One whose thinking cannot go back (another origin's, or a Session whose signatures the
+            # provider refused) continues with thinking off, as Anthropic's refusal itself advises; the models that
+            # take manual thinking all accept that. A non-Claude Anthropic-compatible model has no verified thinking
+            # shape here, so leave the field out rather than guessing.
+            payload["thinking"] = {"type": "disabled"}
     elif effort:
         if adaptive:
             payload["thinking"] = {"type": "adaptive"}
