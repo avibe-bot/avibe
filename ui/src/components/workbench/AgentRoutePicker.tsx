@@ -628,6 +628,7 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
         sheetCloseLabel={t('common.done')}
         className="w-[320px] max-w-[92vw] overflow-hidden p-0"
         align={align}
+        modal={modal}
       >
         {agentPage ? agentList : routeMenu}
       </ResponsiveMenu>

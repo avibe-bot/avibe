@@ -142,20 +142,6 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
             onNewProject={openNewProject}
             disabled={ns.sending}
           />
-          <div className="flex min-w-0 flex-col gap-2">
-            <div className="font-mono text-[11px] font-bold uppercase tracking-[0.08em] text-muted">{t('newSession.agent')}</div>
-            <AgentRoutePicker
-              value={ns.agentRoute}
-              agents={ns.agents}
-              onChange={ns.setAgentRoute}
-              defaultLabel={ns.effectiveDefaultAgentName ? t('newSession.defaultAgentNamed', { name: ns.effectiveDefaultAgentName }) : t('newSession.defaultAgent')}
-              disabled={ns.sending}
-              align="start"
-              triggerClassName="w-full max-w-full"
-              modal
-              onNavigateAway={close}
-            />
-          </div>
 
           {ns.error && (
             <div className="rounded-md border border-destructive/40 bg-destructive/[0.06] px-3 py-2 text-[12px] text-destructive-ink">
@@ -172,6 +158,21 @@ export const NewSessionSheet: React.FC<NewSessionSheetProps> = ({ open, onClose,
               create a session under a stale/removed cached project. initialDraft
               re-seeds a prompt stashed when the no-project flow closed the sheet. */}
           <Composer
+            layout="stacked"
+            actions={
+              <AgentRoutePicker
+                presentation="compact"
+                value={ns.agentRoute}
+                agents={ns.agents}
+                onChange={ns.setAgentRoute}
+                defaultLabel={ns.effectiveDefaultAgentName ? t('newSession.defaultAgentNamed', { name: ns.effectiveDefaultAgentName }) : t('newSession.defaultAgent')}
+                disabled={ns.sending}
+                align="end"
+                triggerClassName="max-w-[min(60vw,360px)]"
+                modal
+                onNavigateAway={close}
+              />
+            }
             onSend={send}
             onDraftChange={updateDraft}
             placeholder={t('newSession.placeholder')}

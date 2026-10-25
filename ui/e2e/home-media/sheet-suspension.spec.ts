@@ -284,6 +284,8 @@ for (const width of [390, 1366]) test(`sheet ${width} keeps Unicode draft and se
   await draft(page).fill('项目乙：请检查发布 ✓');
   await page.getByRole('button', { name: '第二个项目', exact: true }).click();
   await page.getByRole('button', { name: /codex/ }).first().click();
+  // The composer's picker keeps Agents one level below its model page.
+  await page.getByRole('button', { name: /^Agent/ }).click();
   await page.getByRole('button', { name: /^claude/ }).click();
   await settings(page);
   await expect(page.getByTestId('sheet-logical-open')).toHaveText('true');
