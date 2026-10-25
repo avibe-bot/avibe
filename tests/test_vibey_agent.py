@@ -5358,6 +5358,54 @@ async def test_an_answer_split_into_adjacent_text_blocks_reads_as_written(
     assert [citation["url"] for citation in citations] == ([RELEASE] if cited else [])
 
 
+@pytest.mark.parametrize("platform", ["avibe", "telegram"])
+async def test_unannotated_citation_markers_degrade_before_delivery_and_reload(
+    engine, session, tmp_path, published, platform
+) -> None:
+    """A raw provider marker is safe fallback text, not Web syntax, without annotations."""
+    marker = "\ue200cite\ue202turn0view0\ue201"
+    answer = (
+        f"Claim {marker} repeats {marker}.\n\n"
+        f"Inline `{marker}` remains literal.\n\n"
+        f"```\n{marker}\n```"
+    )
+    expected = (
+        "Claim (source unavailable) repeats (source unavailable).\n\n"
+        f"Inline `{marker}` remains literal.\n\n"
+        f"```\n{marker}\n```"
+    )
+    harness = _Harness(engine, tmp_path, platform, [[Done(assistant(answer))]])
+
+    await harness.agent.handle_message(harness.request("show the answer"))
+
+    [result] = harness.rows("result")
+    assert result["content_text"] == expected
+    assert "citations" not in json.loads(result["content_json"])
+    if platform == "telegram":
+        assert expected in harness.controller.im_client.sent
+        return
+
+    live = [
+        payload
+        for name, payload in published
+        if name == "message.new" and payload.get("id") == result["id"]
+    ]
+    assert len(live) == 1
+    assert live[0]["content"]["text"] == expected
+    assert "citations" not in live[0]["content"]
+
+    from storage import messages_service
+
+    with engine.connect() as conn:
+        [reloaded] = [
+            row
+            for row in messages_service.list_session_messages(conn, session_id=SESSION)["messages"]
+            if row["id"] == result["id"]
+        ]
+    assert reloaded["text"] == expected
+    assert "citations" not in (reloaded["content"] or {})
+
+
 async def test_a_native_hosted_call_reaches_the_workbench_as_a_card_and_cited_answer(
     engine, session, tmp_path, published
 ) -> None:
