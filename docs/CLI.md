@@ -43,7 +43,8 @@ and one output rule.
   `watch`, `show`, `vault`, `data query`, `data skill-usage`, `skill list`, and
   `status`) print one JSON object on stdout:
   `{"schema_version": 1, "ok": true, "kind": "<kind>", ...fields}`. They accept
-  `--json`, which changes nothing.
+  `--json`, which changes nothing. `vibe data query --format text` prints rows
+  as readable records instead.
 - **Failures** of those commands, and every argument error, print the same
   envelope on stderr with `"ok": false`, `"kind": "error"`, a stable `code`, the
   `error` text, and when useful a `hint`, `help_command`, and `details`. The exit
@@ -79,10 +80,17 @@ takes `--page` only.
 List rows carry only what is needed to decide the next step and omit null,
 empty, and zero-valued fields, so an absent field means unset. A Show Page row
 is its `session_id`, `visibility`, `active_url` (the URL to share), `path` (the
-workspace to edit), and `updated_at`. `vibe task show`, `vibe watch show`,
-`vibe runs show`, `vibe session get`, `vibe agent show`, and `vibe show status`
-print the full record; add `--brief` to print exactly the row the matching list
-command prints. A removed Task or Watch shows `lifecycle_state: "removed"` and
+workspace to edit), and `updated_at`. An Agent row is its `name`, `backend`,
+`model`, `reasoning_effort`, `source`, and `updated_at`; a disabled Agent adds
+`enabled: false`. A Vault row, the same from `vibe vault list` and
+`vibe vault find`, is the secret's `name`, `kind`, `protection`, `fields` (a
+multi-field secret adds `default_field`, the field `NAME` alone selects),
+`tags`, `description`, `policy`, a keypair's `signing_addresses`, and
+`per_use_sign: true` when `vibe vault sign` can use the key; it never holds a
+value. `vibe task show`, `vibe watch show`, `vibe runs show`,
+`vibe session get`, `vibe agent show`, and `vibe show status` print the full
+record; add `--brief` to print exactly the row the matching list command
+prints. A removed Task or Watch shows `lifecycle_state: "removed"` and
 `removed_at`, and none of the live fields (`enabled`, health, next fire, or
 waiter state) it no longer has.
 
@@ -349,7 +357,16 @@ vibe data query --sql "select group_concat(name, ', ') as columns from pragma_ta
 vibe data query --sql "PRAGMA table_info(run_definitions)" --limit 100   # with types and keys
 vibe data query --sql "select id, status, created_at from agent_runs order by created_at desc"
 vibe data query --sql-file query.sql --limit 50
+vibe data query --sql "select created_at, author, content_text from messages where session_id = 'sesk8m4q2p7x' order by created_at" --format text
 ```
+
+`--format text` prints each row as a record for reading long text such as a
+transcript or a message body: a `-[ RECORD n ]` line, then one `column: value`
+line per column. Values are printed as stored, with real newlines; a multi-line
+value starts on the line after its column name, indented two spaces, and SQL
+`NULL` prints as `(null)`. When more rows exist, the last line is
+`next_command: ...`, which keeps `--format text`. JSON stays the default, and
+errors are the JSON error envelope on stderr in both formats.
 
 The connection is read-only: writes, schema changes, `ATTACH`, and transactions
 are refused. The schema PRAGMAs `table_list`, `table_info`, `table_xinfo`,
@@ -522,9 +539,13 @@ vibe runs show                         # inside an Avibe Agent shell, show the c
 `vibe runs list` follows the [Session-owned list](#session-owned-lists) scope
 grammar. `vibe runs show` can omit the run id inside an
 Avibe-injected Agent run and defaults to `AVIBE_RUN_ID`. It prints the full
-record, with the text sent to the Agent as `message` and the reply as
-`result_text`; `--brief` prints the same compact row as `vibe runs list`, for
-status checks.
+record once: status and timing, `error`, the callback fields, the text sent to
+the Agent as `message`, the reply as `result_text`, and where the Run ran and
+came from (Agent, Session, `source_kind`, `source_session_id`,
+`parent_run_id`). Reply text delivered beside the final reply, such as a
+message sent mid-turn, is `other_outputs`; delivery bookkeeping, turn and
+process ids, and copies of other fields are not printed. `--brief` prints the
+same compact row as `vibe runs list`, for status checks.
 
 ### `vibe task`
 

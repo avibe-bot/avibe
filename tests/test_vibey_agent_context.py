@@ -397,7 +397,7 @@ async def test_the_earlier_record_example_runs_through_the_real_read_only_guard(
     hint = VibeyContextHost(engine, environment=lambda _: {}).earlier_record(SESSION, 3)
     (line,) = [line for line in hint.splitlines() if line.startswith("vibe data query ")]
     argv = shlex.split(line)
-    assert argv[:4] == ["vibe", "data", "query", "--sql"] and len(argv) == 5
+    assert argv[:4] == ["vibe", "data", "query", "--sql"] and argv[5:] == ["--format", "text"]
     sql = argv[4]
     assert "WITH" not in sql.upper().split()[0] and "json" not in sql.lower()
     result = run_read_only_query(sql, db_path=Path(engine.url.database), page_request=PageRequest())

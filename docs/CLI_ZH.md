@@ -38,7 +38,8 @@ vibe stop         # 停止所有服务
   `show`、`vault`、`data query`、`data skill-usage`、`skill list` 和 `status`）
   在 stdout 输出一个 JSON 对象：
   `{"schema_version": 1, "ok": true, "kind": "<kind>", ...字段}`。它们接受
-  `--json`，但不改变任何行为。
+  `--json`，但不改变任何行为。`vibe data query --format text` 则把各行输出为便于
+  阅读的记录。
 - **失败**：这些命令的失败以及所有参数错误，都会在 stderr 输出同样的信封，其中
   `"ok": false`、`"kind": "error"`，并带有稳定的 `code`、`error` 文本，必要时还有
   `hint`、`help_command` 和 `details`。退出码非零。
@@ -66,7 +67,13 @@ list/find/tags、Show Page 的 list/marks、`vibe data query`、`vibe task list`
 
 列表行只携带决定下一步所需的字段，并省略 null、空值和零值字段，因此缺失的字段即表示
 未设置。Show Page 的列表行只有 `session_id`、`visibility`、`active_url`（用于分享的
-URL）、`path`（要编辑的工作目录）和 `updated_at`。`vibe task show`、`vibe watch show`、
+URL）、`path`（要编辑的工作目录）和 `updated_at`。Agent 的列表行是 `name`、
+`backend`、`model`、`reasoning_effort`、`source` 和 `updated_at`；已停用的 Agent
+另带 `enabled: false`。Vault 的列表行在 `vibe vault list` 和 `vibe vault find` 中
+相同，包括 secret 的 `name`、`kind`、`protection`、`fields`（多字段 secret 另带
+`default_field`，即单写 `NAME` 时选中的字段）、`tags`、`description`、`policy`、
+keypair 的 `signing_addresses`，以及 `vibe vault sign` 可用该密钥时的
+`per_use_sign: true`；行中从不包含 secret 值。`vibe task show`、`vibe watch show`、
 `vibe runs show`、`vibe session get`、`vibe agent show` 和 `vibe show status` 输出完整
 记录；加上 `--brief` 则只输出对应 list 命令打印的那一行。已删除的 Task 或 Watch 显示
 `lifecycle_state: "removed"` 和 `removed_at`，不再带它已经没有的实时字段（`enabled`、
@@ -256,7 +263,14 @@ vibe data query --sql "select group_concat(name, ', ') as columns from pragma_ta
 vibe data query --sql "PRAGMA table_info(run_definitions)" --limit 100   # 含类型与主键
 vibe data query --sql "select id, status, created_at from agent_runs order by created_at desc"
 vibe data query --sql-file query.sql --limit 50
+vibe data query --sql "select created_at, author, content_text from messages where session_id = 'sesk8m4q2p7x' order by created_at" --format text
 ```
+
+`--format text` 把每一行输出为一条记录，适合阅读对话记录或消息正文这类长文本：先是
+一行 `-[ RECORD n ]`，然后每列一行 `column: value`。值按存储原样输出，换行就是真实
+换行；多行的值从列名的下一行开始，缩进两个空格；SQL `NULL` 输出为 `(null)`。还有更多
+行时，最后一行是 `next_command: ...`，并保留 `--format text`。默认仍是 JSON；两种格式
+下的错误都是 stderr 上的 JSON 错误信封。
 
 连接是只读的：写入、schema 变更、`ATTACH` 和事务都会被拒绝。schema PRAGMA
 `table_list`、`table_info`、`table_xinfo`、`index_list`、`index_info` 和
@@ -413,9 +427,12 @@ vibe runs show                         # 在 Avibe Agent shell 内查看调用�
 
 `vibe runs list` 遵循 [Session 归属的列表](#session-归属的列表) 的范围语法。
 `vibe runs show` 在 Avibe 已注入 caller context 的 Agent run 内
-可以省略 run id，并默认使用 `AVIBE_RUN_ID`。它输出完整记录：发给 Agent 的文本在
-`message`，回复在 `result_text`；`--brief` 只输出与 `vibe runs list` 相同的精简行，
-用于查看状态。
+可以省略 run id，并默认使用 `AVIBE_RUN_ID`。它把完整记录的每项事实输出一次：状态与
+时间、`error`、回调字段、发给 Agent 的文本 `message`、回复 `result_text`，以及 Run
+在哪里运行、从哪里来（Agent、Session、`source_kind`、`source_session_id`、
+`parent_run_id`）。最终回复之外送达的回复文本（例如回合中途发出的消息）在
+`other_outputs`；投递记账、turn 与进程 id，以及其他字段的副本都不输出。`--brief`
+只输出与 `vibe runs list` 相同的精简行，用于查看状态。
 
 ### `vibe task`
 

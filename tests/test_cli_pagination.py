@@ -424,6 +424,87 @@ def test_runs_show_prints_the_run_text_once_and_brief_prints_the_list_row(monkey
     assert (brief["status"], "message" in brief) == ("succeeded", False)
 
 
+def test_runs_show_prints_each_fact_once_without_delivery_bookkeeping(monkeypatch, tmp_path, capsys) -> None:
+    """The full record keeps what an Agent acts on and drops the reply's ledger and internals."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    provenance = {"turn_id": "trn_1", "run_id": "run-delegate", "detached": False}
+    store = SQLiteBackgroundTaskStore()
+    try:
+        store.enqueue_run(
+            {
+                "id": "run-delegate",
+                "request_type": "agent_run",
+                "status": "succeeded",
+                "agent_name": "helper",
+                "agent_id": "agent-internal-id",
+                "agent_backend": "codex",
+                "session_id": "ses-delegate",
+                "source_kind": "agent",
+                "source_actor": "ses-caller",
+                "message": "Review PR #1.",
+                "result_text": "No findings.",
+                "result_payload": {
+                    "outputs": [
+                        {"id": "msg_1", "text": "Reviewing now.", "provenance": provenance},
+                        {"id": "terminal", "text": "No findings.", "provenance": provenance},
+                    ]
+                },
+                "message_ids": ["msg_1"],
+                "pid": 4242,
+                "created_at": "2026-05-25T00:00:00+00:00",
+                "completed_at": "2026-05-25T00:05:00+00:00",
+                "updated_at": "2026-05-25T00:05:00+00:00",
+                "metadata": {
+                    "caller_context": {"session_id": "ses-caller", "channel_id": "ses-caller"},
+                    "delivery_intent": "steer",
+                    "delivery_outcome": {"intent": "steer", "status": "claimed"},
+                    "last_activity_at": "2026-05-25T00:04:00+00:00",
+                    "turn_id": "trn_1",
+                    "close_after": True,
+                },
+            }
+        )
+        # A callback names the Session its result came from only in metadata.
+        store.enqueue_run(
+            {
+                "id": "run-callback",
+                "request_type": "agent_run",
+                "status": "queued",
+                "session_id": "ses-caller",
+                "source_kind": "callback",
+                "source_actor": "run-delegate",
+                "parent_run_id": "run-delegate",
+                "message": "No findings.",
+                "created_at": "2026-05-25T00:05:00+00:00",
+                "metadata": {"source_session_id": "ses-delegate", "callback_parent_run_id": "run-delegate"},
+            }
+        )
+    finally:
+        store.close()
+
+    assert cli.cmd_runs_show(cli.build_parser().parse_args(["runs", "show", "run-delegate"])) == 0
+    out = capsys.readouterr().out
+    run = json.loads(out)["run"]
+    assert out.count("No findings.") == 1
+    assert (run["result_text"], run["other_outputs"]) == ("No findings.", ["Reviewing now."])
+    assert run["source_session_id"] == "ses-caller"
+    assert run["last_activity_at"] == "2026-05-25T00:04:00+00:00"
+    assert run["metadata"] == {"close_after": True}
+    for omitted in (
+        "result_payload", "message_ids", "pid", "ok", "cancel_requested",
+        "agent_id", "updated_at", "source_actor",
+    ):
+        assert omitted not in run
+
+    monkeypatch.setattr(cli, "_live_session_runtime_for_run", lambda run: None)
+    assert cli.cmd_runs_show(cli.build_parser().parse_args(["runs", "show", "run-callback"])) == 0
+    callback = json.loads(capsys.readouterr().out)["run"]
+    assert (callback["source_session_id"], callback["parent_run_id"]) == ("ses-delegate", "run-delegate")
+    assert "source_actor" not in callback and "metadata" not in callback
+
+
 def test_runs_show_attaches_live_session_owner_for_queued_run(monkeypatch, tmp_path, capsys) -> None:
     """HFR-002: CLI diagnosis names the authoritative live Session owner."""
 
@@ -542,6 +623,38 @@ def test_data_query_cli_omits_next_command_for_stdin_sql(monkeypatch, tmp_path, 
     assert payload["pagination"]["has_more"] is True
     assert "next_command" not in payload["pagination"]
     assert payload["message"] == "More records are available. Add --page to continue."
+
+
+def test_data_query_text_prints_records_with_values_verbatim_and_pages(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    SQLiteBackgroundTaskStore().close()
+    sql = (
+        "select 'Line one' || char(10) || 'He said \"hi\"' as body, null as gone, 7 as n "
+        "union all select 'second', '', 8 union all select 'third', 'x', 9"
+    )
+
+    args = cli.build_parser().parse_args(["data", "query", "--sql", sql, "--limit", "2", "--format", "text"])
+    assert cli.cmd_data_query(args) == 0
+    *records, next_line = capsys.readouterr().out.splitlines()
+    assert records == [
+        "-[ RECORD 1 ]",
+        "body:",
+        "  Line one",
+        '  He said "hi"',
+        "gone: (null)",
+        "n: 7",
+        "-[ RECORD 2 ]",
+        "body: second",
+        "gone:",
+        "n: 8",
+    ]
+    label, next_command = next_line.split(": ", 1)
+    assert label == "next_command"
+
+    args = cli.build_parser().parse_args(shlex.split(next_command)[1:])
+    assert cli.cmd_data_query(args) == 0
+    assert capsys.readouterr().out.splitlines() == ["-[ RECORD 3 ]", "body: third", "gone: x", "n: 9"]
 
 
 @pytest.mark.parametrize(
