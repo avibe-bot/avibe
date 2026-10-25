@@ -476,55 +476,62 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
   if (compact) {
     const agentRowLabel = (routeIsDefault && defaultLabel) || agentLabel;
     const agentList = (
-      <div className="flex flex-col gap-0.5 p-1.5">
-        <button
-          type="button"
-          onClick={() => setAgentPage(false)}
-          className="flex items-center gap-1 rounded px-1.5 py-1.5 text-left text-[12px] font-semibold text-foreground hover:bg-foreground/[0.04]"
-        >
-          <ChevronLeft className="size-3.5 text-muted" />
-          {t('chat.picker.agent')}
-        </button>
-        {defaultLabel && (
-          <RouteItem
-            active={routeIsDefault}
-            onClick={() => {
-              pickDefault();
-              setAgentPage(false);
-            }}
+      <div className="flex flex-col">
+        <div className="border-b border-border p-1.5">
+          <button
+            type="button"
+            onClick={() => setAgentPage(false)}
+            className="flex w-full items-center gap-1 rounded px-1.5 py-1.5 text-left text-[12px] font-semibold text-foreground hover:bg-foreground/[0.04]"
           >
-            <Sparkles className="size-3.5 shrink-0 text-cyan-ink" />
-            <span className="flex-1 truncate font-semibold">{defaultLabel}</span>
-            {routeIsDefault && <Check className="size-3.5 shrink-0" />}
-          </RouteItem>
-        )}
-        {visibleAgents.length === 0 && (
-          <div className="px-2 py-3 text-center text-[11px] text-muted">{t('chat.noAgents')}</div>
-        )}
-        {Object.entries(grouped).map(([be, list]) => (
-          <div key={be} className="flex flex-col gap-0.5 pb-1">
-            <div className="px-2 pt-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.12em] text-muted">{be}</div>
-            {list.map((agent) => {
-              const active = !routeIsDefault && agent.name === currentAgent;
-              return (
-                <RouteItem
-                  key={agent.id}
-                  active={active}
-                  onClick={() => {
-                    pickAgent(agent);
-                    setAgentPage(false);
-                  }}
-                >
-                  <BackendAvatar backend={agent.backend} className="size-3.5 shrink-0" />
-                  <span className="flex-1 truncate font-semibold">{agent.name}</span>
-                  {agent.model && <span className="truncate font-mono text-[9px] text-muted">{agent.model}</span>}
-                  {active && <Check className="size-3.5 shrink-0" />}
-                </RouteItem>
-              );
-            })}
-          </div>
-        ))}
-        <PickerExitButton label={t('chat.picker.newAgent')} onClick={openNewAgent} />
+            <ChevronLeft className="size-3.5 text-muted" />
+            {t('chat.picker.agent')}
+          </button>
+        </div>
+        {/* The popover has no height of its own, so the list bounds and scrolls
+            itself on desktop with the way back pinned above it; the phone sheet
+            already scrolls its whole body. */}
+        <div className="flex flex-col gap-0.5 p-1.5 md:max-h-[min(60vh,420px)] md:overflow-y-auto">
+          {defaultLabel && (
+            <RouteItem
+              active={routeIsDefault}
+              onClick={() => {
+                pickDefault();
+                setAgentPage(false);
+              }}
+            >
+              <Sparkles className="size-3.5 shrink-0 text-cyan-ink" />
+              <span className="flex-1 truncate font-semibold">{defaultLabel}</span>
+              {routeIsDefault && <Check className="size-3.5 shrink-0" />}
+            </RouteItem>
+          )}
+          {visibleAgents.length === 0 && (
+            <div className="px-2 py-3 text-center text-[11px] text-muted">{t('chat.noAgents')}</div>
+          )}
+          {Object.entries(grouped).map(([be, list]) => (
+            <div key={be} className="flex flex-col gap-0.5 pb-1">
+              <div className="px-2 pt-1.5 font-mono text-[9px] font-bold uppercase tracking-[0.12em] text-muted">{be}</div>
+              {list.map((agent) => {
+                const active = !routeIsDefault && agent.name === currentAgent;
+                return (
+                  <RouteItem
+                    key={agent.id}
+                    active={active}
+                    onClick={() => {
+                      pickAgent(agent);
+                      setAgentPage(false);
+                    }}
+                  >
+                    <BackendAvatar backend={agent.backend} className="size-3.5 shrink-0" />
+                    <span className="flex-1 truncate font-semibold">{agent.name}</span>
+                    {agent.model && <span className="truncate font-mono text-[9px] text-muted">{agent.model}</span>}
+                    {active && <Check className="size-3.5 shrink-0" />}
+                  </RouteItem>
+                );
+              })}
+            </div>
+          ))}
+          <PickerExitButton label={t('chat.picker.newAgent')} onClick={openNewAgent} />
+        </div>
       </div>
     );
     const routeMenu = (
