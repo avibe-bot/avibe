@@ -70,6 +70,14 @@ def _tag(body: Mapping[str, Any] | None) -> str | None:
     return None
 
 
+def _mcp_rate_limited(body: Mapping[str, Any] | None) -> bool:
+    if not isinstance(body, Mapping):
+        return False
+    return any(
+        key.lower() in {"ai.exa/ratelimited", "ratelimited"} and value is True
+        for key, value in _nested(body)
+    )
+
 def _mcp_payload(body: Mapping[str, Any] | None) -> tuple[Mapping[str, Any] | None, bool]:
     if not isinstance(body, Mapping):
         return body, False
@@ -78,7 +86,13 @@ def _mcp_payload(body: Mapping[str, Any] | None) -> tuple[Mapping[str, Any] | No
         return body, False
     structured = result.get("structuredContent")
     if isinstance(structured, Mapping):
-        return structured, result.get("isError") is True
+        normalized = dict(structured)
+        metadata = result.get("_meta")
+        if isinstance(metadata, Mapping):
+            normalized["_meta"] = dict(metadata)
+        if result.get("isError") is True:
+            normalized["_mcp_is_error"] = True
+        return normalized, result.get("isError") is True
     content = result.get("content")
     if isinstance(content, list):
         for item in content[:8]:
@@ -91,6 +105,9 @@ def _mcp_payload(body: Mapping[str, Any] | None) -> tuple[Mapping[str, Any] | No
                 except (json.JSONDecodeError, RecursionError):
                     continue
                 if isinstance(value, Mapping):
+                    metadata = result.get("_meta")
+                    if isinstance(metadata, Mapping):
+                        value = {**value, "_meta": dict(metadata)}
                     return value, result.get("isError") is True
     return body, result.get("isError") is True
 
@@ -146,7 +163,7 @@ def _content(service: Mapping[str, Any], body: Mapping[str, Any] | None) -> tupl
     )
     return (
         content if isinstance(content, str) and content.strip() else None,
-        title if isinstance(title, str) else None,
+        title[:300] if isinstance(title, str) else None,
         _url_value(final_url),
         provider_truncated,
     )
@@ -204,6 +221,8 @@ def map_fetch_response(
         code = "service_refused"
     elif status in set(outcomes.get("target_unreadable") or ()):
         code, target_failure = "fetch_target_unreadable", True
+    elif vendor == "exa-mcp" and _mcp_rate_limited(body):
+        code = "service_rate_limited"
     elif vendor == "exa-mcp" and mcp_error:
         tag = _tag(body)
         if tag and tag.startswith("CRAWL_"):

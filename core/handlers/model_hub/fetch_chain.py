@@ -152,6 +152,8 @@ class FetchChain:
                     "source_id": slot.source_id, "label": slot.label or slot.source_id,
                     "kind": slot.kind, "outcome": "skipped", "skipped": "unavailable",
                 })
+                if self._gate_error:
+                    return self._finish(None)
                 continue
             self.tried.append(attempt)
             self.facts.append(self._fact(attempt))
@@ -173,6 +175,13 @@ class FetchChain:
             fact["cost"] = {"basis": attempt.cost.basis, "usd": attempt.cost.usd}
         return fact
 
+    async def _record_local_usage(self, source, slot):
+        write = self.owner.usage_writer.record_service(
+            source_id=source.id, service_id=slot.model_id, tool="web_fetch",
+            billable=False, uncertain=False, at=self.owner.now(),
+        )
+        await await_owned_task(asyncio.create_task(self.owner.usage_writer.wait_recorded(write)))
+
     async def _local_attempt(self, slot: ExecutorSlot, source):
         sent = False
 
@@ -186,16 +195,21 @@ class FetchChain:
                 deadline=self.deadline,
                 on_sent=on_sent,
             )
+        except asyncio.CancelledError:
+            if sent:
+                await self._record_local_usage(source, slot)
+            raise
         except FetchFailure as exc:
             raw = {"error_code": exc.code, "terminal": exc.terminal, "sent": sent}
         sent = bool(raw.get("sent", sent))
-        if raw.get("skipped"):
+        skipped = raw.get("skipped")
+        if skipped and not sent:
             return None, {
                 "source_id": slot.source_id, "label": source.display_name[:64], "kind": "local",
-                "outcome": "skipped", "skipped": raw["skipped"],
+                "outcome": "skipped", "skipped": skipped,
                 **({"retry_at": raw["retry_at"]} if raw.get("retry_at") else {}),
             }
-        code = raw.get("error_code")
+        code = raw.get("error_code") or ("fetch_unavailable" if skipped else None)
         if code:
             record = {
                 "status": "failed", "error_code": code,
@@ -208,14 +222,10 @@ class FetchChain:
             moves_on = False
         cost = ZERO if sent else None
         if sent:
-            write = self.owner.usage_writer.record_service(
-                source_id=source.id, service_id=slot.model_id, tool="web_fetch",
-                billable=False, uncertain=False, at=self.owner.now(),
-            )
-            await self.owner.usage_writer.wait_recorded(write)
+            await self._record_local_usage(source, slot)
         if record.get("status") == "completed":
             await self.owner.record_hosted_success(source, slot.model_id, "web_fetch", "direct")
-        for key in ("error_code", "terminal", "sent", "retry_at", "cooldown_code", "cooldown_suppressed"):
+        for key in ("error_code", "terminal", "sent", "retry_at", "cooldown_code", "cooldown_suppressed", "skipped"):
             record.pop(key, None)
         return FetchAttempt(
             source, slot.model_id, "local", record, cost, False, False, moves_on, sent,
@@ -255,6 +265,7 @@ class FetchChain:
 
             async def on_sent():
                 nonlocal sent, source
+                await self._engine.check(self.requested_url, deadline=self.deadline)
                 async with self.owner._mutation_lock:
                     current, _, skip = await self._classify(slot, locked=True)
                     if skip is not None:
@@ -282,6 +293,9 @@ class FetchChain:
         except _NotAdmitted:
             await self._release_unspent(source, slot, health_generation, cooldown_generation, response)
             return None, {"source_id": slot.source_id, "label": source.display_name[:64], "kind": "service", "outcome": "skipped", "skipped": "unavailable"}
+        except FetchFailure as exc:
+            self._gate_error = exc.code
+            response = SearchResponse(None, {}, None, "invalid_endpoint")
         except Exception:
             response = SearchResponse(None, {}, None, "connection")
         finally:
@@ -377,7 +391,8 @@ class FetchChain:
             identity_current = current is not None and source_identity(current) == source_identity(source)
             if identity_current and cooldown_generation is not None:
                 self.owner._service_cooldowns.settle(current, slot.model_id, cooldown_generation, _search_compatible(result), response, self.owner.now())
-            if identity_current and health_generation is not None and result.blocker:
+            if identity_current and health_generation is not None and result.blocker \
+                    and self.owner._settlement_current(current, health_generation):
                 config = await asyncio.to_thread(self.owner._clone_config, previous)
                 updated = self.owner._source(config, source.id)
                 from config.v2_config import ModelHubSourceStateConfig

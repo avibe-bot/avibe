@@ -2332,7 +2332,7 @@ class CLIProxyEngineAdapter:
             (
                 entry for entry in fetch_service_catalog()
                 if entry.get("service_id") == service_id and entry.get("vendor") == vendor
-                and not entry.get("source_id")
+                and (not entry.get("source_id") or entry.get("source_id") == source_id)
             ),
             None,
         )
