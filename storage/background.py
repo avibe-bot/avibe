@@ -1103,6 +1103,16 @@ def _row_lifecycle_state(row: Any) -> Optional[str]:
         return None
 
 
+def _removed_at_field(row: Any) -> dict[str, Any]:
+    """``removed_at`` for a removed definition; nothing for a live one.
+
+    Only by-id reads admit removed rows, so list and Workbench payloads keep
+    their shape.
+    """
+
+    return {"removed_at": row["deleted_at"]} if row["deleted_at"] else {}
+
+
 def _definition_timed_out(metadata: Any) -> Optional[bool]:
     """Whether the scheduler stopped this definition's last fire, or ``None`` if unknown.
 
@@ -3462,8 +3472,19 @@ class SQLiteBackgroundTaskStore:
     ) -> dict[str, int]:
         return self._definition_counts("scheduled", query=query, session_id=session_id)
 
-    def get_scheduled_task(self, definition_id: str) -> Optional[dict[str, Any]]:
-        stmt = self._definitions_query("scheduled").where(run_definitions.c.id == definition_id).limit(1)
+    def get_scheduled_task(
+        self, definition_id: str, *, include_removed: bool = False
+    ) -> Optional[dict[str, Any]]:
+        """One live task, or with ``include_removed`` also a removed one.
+
+        A removed row reads ``lifecycle_state: removed`` and carries ``removed_at``.
+        """
+
+        stmt = (
+            self._definitions_query("scheduled", include_removed=include_removed)
+            .where(run_definitions.c.id == definition_id)
+            .limit(1)
+        )
         with self.engine.connect() as conn:
             row = conn.execute(stmt).mappings().first()
             if row is None:
@@ -3718,8 +3739,14 @@ class SQLiteBackgroundTaskStore:
     ) -> dict[str, int]:
         return self._definition_counts("watch", query=query, session_id=session_id)
 
-    def get_watch(self, watch_id: str) -> Optional[dict[str, Any]]:
-        stmt = self._definitions_query("watch").where(run_definitions.c.id == watch_id).limit(1)
+    def get_watch(self, watch_id: str, *, include_removed: bool = False) -> Optional[dict[str, Any]]:
+        """One live watch, or with ``include_removed`` also a removed one; see ``get_scheduled_task``."""
+
+        stmt = (
+            self._definitions_query("watch", include_removed=include_removed)
+            .where(run_definitions.c.id == watch_id)
+            .limit(1)
+        )
         with self.engine.connect() as conn:
             row = conn.execute(stmt).mappings().first()
             if row is None:
@@ -4948,6 +4975,7 @@ class SQLiteBackgroundTaskStore:
         query: Optional[str] = None,
         session_id: Optional[str] = None,
         include_successful_finished: bool = True,
+        include_removed: bool = False,
         columns: Any = None,
     ):
         lifecycle = definition_lifecycle_expression(definition_type)
@@ -4956,11 +4984,20 @@ class SQLiteBackgroundTaskStore:
         else:
             # Every row carries its state, resolved by the same expression the
             # counts group by.
-            stmt = select(run_definitions, lifecycle.label("lifecycle_state"))
-        stmt = (
-            stmt.where(run_definitions.c.definition_type == definition_type)
-            .where(run_definitions.c.deleted_at.is_(None))
-        )
+            state = lifecycle
+            if include_removed:
+                # Only a by-id read admits removed rows, so ``removed`` never reaches
+                # a list or a count. Removal outranks every live fact: the switch, a
+                # retirement, and even a Run still in flight no longer describe what
+                # the definition will do.
+                state = case(
+                    (run_definitions.c.deleted_at.is_not(None), "removed"),
+                    else_=lifecycle,
+                )
+            stmt = select(run_definitions, state.label("lifecycle_state"))
+        stmt = stmt.where(run_definitions.c.definition_type == definition_type)
+        if not include_removed:
+            stmt = stmt.where(run_definitions.c.deleted_at.is_(None))
         # This Session filter powers the Harness "只看本会话" chip that the
         # background-work banner navigates into. Scheduled Tasks use creation
         # provenance as the authoritative owner: a create-per-run or pure command
@@ -9126,6 +9163,7 @@ class SQLiteBackgroundTaskStore:
             "metadata": metadata,
             "resume_blocked": task_resume_block(metadata, row["session_id"]),
             "lifecycle_state": _row_lifecycle_state(row),
+            **_removed_at_field(row),
         }
 
     @staticmethod
@@ -9173,6 +9211,7 @@ class SQLiteBackgroundTaskStore:
             "last_exit_code": row["last_exit_code"],
             "metadata": metadata,
             "lifecycle_state": _row_lifecycle_state(row),
+            **_removed_at_field(row),
         }
 
     @staticmethod
@@ -9439,7 +9478,8 @@ class SQLiteBackgroundTaskStore:
             else:
                 row["lifecycle_finished_at"] = row.get("last_finished_at")
             row["next_run_at"] = compute_next_run_at(
-                enabled=bool(row.get("enabled")),
+                # A removed definition keeps its switch but never fires again.
+                enabled=bool(row.get("enabled")) and state != "removed",
                 schedule_type=row.get("schedule_type"),
                 cron=row.get("cron"),
                 run_at=row.get("run_at"),

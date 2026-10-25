@@ -853,6 +853,44 @@ def test_task_show_missing_id_returns_guidance(tmp_path: Path) -> None:
     assert payload["help_command"] == "vibe task list"
 
 
+def test_removed_task_reads_as_removed_and_refuses_mutations(capsys) -> None:
+    store = cli.ScheduledTaskStore()
+    task = store.add_task(
+        name="Hourly summary",
+        session_key="slack::channel::C123",
+        prompt="recurring summary prompt",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="Asia/Shanghai",
+    )
+    assert store.remove_task(task.id) is True
+
+    assert cli.cmd_task_show(task.id) == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["id"] == task.id
+    assert definition["name"] == "Hourly summary"
+    assert definition["lifecycle_state"] == "removed"
+    assert definition["state"] == "removed"
+    # The removed row keeps ``enabled``, but it will never fire again.
+    assert definition["next_run_at"] is None
+    removed_at = definition["removed_at"]
+    assert removed_at
+
+    update_args = cli.build_parser().parse_args(["task", "update", task.id, "--name", "Renamed"])
+    mutations = [
+        (cli.cmd_task_set_enabled, (task.id, False)),
+        (cli.cmd_task_set_enabled, (task.id, True)),
+        (cli.cmd_task_update, (update_args,)),
+        (cli.cmd_task_run, (task.id,)),
+        (cli.cmd_task_remove, (task.id,)),
+    ]
+    for command, args in mutations:
+        result, payload = _capture_stderr_json(command, *args)
+        assert result == 1
+        assert payload["code"] == "task_removed"
+        assert payload["details"] == {"task_id": task.id, "removed_at": removed_at}
+
+
 def test_remote_editor_task_add_persists_authorization_context(
     tmp_path: Path,
     monkeypatch,

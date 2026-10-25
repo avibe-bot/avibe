@@ -111,7 +111,10 @@ retirement_reason: 'schedule_consumed' | 'schedule_missed' | null   # Tasks only
 ```
 
 `running_since` was added during review, and is the one change to this frozen
-list. It cannot be `last_started_at`: that column is the *definition's* last
+list. The CLI's by-id reads (`vibe task show`, `vibe watch show`) add one state
+outside it: a removed definition reads `lifecycle_state: 'removed'` with
+`removed_at`. Lists, counts, and the Workbench never return removed rows, so
+the Workbench vocabulary above is unchanged. It cannot be `last_started_at`: that column is the *definition's* last
 cycle, so a `forever` watch that fired yesterday and began a fresh run a minute
 ago would report a day of running — a duration stitched together from two
 cycles. It comes from the same in-flight `agent_runs` row that made the state

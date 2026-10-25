@@ -50,16 +50,22 @@ def test_read_only_query_rejects_writes(tmp_path: Path) -> None:
         assert conn.execute("select count(*) from runs").fetchone()[0] == 25
 
 
-def test_read_only_query_rejects_pragmas(tmp_path: Path) -> None:
+def test_read_only_query_allows_only_schema_pragmas(tmp_path: Path) -> None:
     db_path = tmp_path / "state.sqlite"
     _seed_db(db_path)
 
-    try:
-        run_read_only_query("pragma table_info(runs)", db_path=db_path, page_request=PageRequest())
-    except ReadOnlyQueryError as exc:
-        assert exc.code == "query_failed"
-    else:
-        raise AssertionError("PRAGMA should be rejected")
+    for sql in ("PRAGMA table_info(runs)", "select name from pragma_table_info('runs')"):
+        result = run_read_only_query(sql, db_path=db_path, page_request=PageRequest())
+        assert [row["name"] for row in result.rows] == ["id", "status", "created_at"]
+
+    for sql in ("pragma query_only = off", "pragma writable_schema = on", "select * from pragma_query_only"):
+        try:
+            run_read_only_query(sql, db_path=db_path, page_request=PageRequest())
+        except ReadOnlyQueryError as exc:
+            assert exc.code == "query_failed"
+            assert exc.hint.startswith("Only schema PRAGMAs are allowed")
+        else:
+            raise AssertionError(f"{sql!r} should be rejected")
 
 
 def test_read_only_query_rejects_multiple_statements(tmp_path: Path) -> None:

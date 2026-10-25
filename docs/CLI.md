@@ -272,6 +272,27 @@ session and observation state are keyed by Avibe Session and are retired when
 the Session is explicitly ended or archived, rather than at every Turn
 boundary.
 
+### `vibe data query`
+
+Run one guarded read-only SQL statement against the local SQLite state database.
+Results return 20 rows per page by default and at most 100.
+
+```bash
+vibe data query --sql "select group_concat(name, ', ') as tables from pragma_table_list where schema = 'main'"
+vibe data query --sql "select group_concat(name, ', ') as columns from pragma_table_info('run_definitions')"
+vibe data query --sql "PRAGMA table_info(run_definitions)" --limit 100   # with types and keys
+vibe data query --sql "select id, status, created_at from agent_runs order by created_at desc"
+vibe data query --sql-file query.sql --limit 50
+```
+
+The connection is read-only: writes, schema changes, `ATTACH`, and transactions
+are refused. The schema PRAGMAs `table_list`, `table_info`, `table_xinfo`,
+`index_list`, `index_info`, and `foreign_key_list` run as statements or as
+`pragma_*` table-valued functions; every other PRAGMA is refused. A
+`no such table` or `no such column` error carries a `hint` with the closest
+names and the table list, or the referenced tables' columns. Tasks and Watches
+are rows of `run_definitions` (`definition_type` is `scheduled` or `watch`).
+
 ### `vibe data skill-usage`
 
 Instance Owner-only local maintenance; these commands return JSON diagnostics,
@@ -602,6 +623,13 @@ Both list and show read the same Harness projection as the Workbench:
 `false` means an observed waiter has exited. The older `state` and task
 `last_status` fields remain compatibility-only display fields and do not define
 the lifecycle.
+
+`vibe task show` and `vibe watch show` also read a removed definition: the same
+projection with `lifecycle_state: "removed"` and `removed_at`. Lists never
+include removed definitions. `pause`, `resume`, `update`, `run`, and `remove` on
+a removed definition fail with `task_removed` / `watch_removed`, whose
+`details.removed_at` says when it was removed; `task_not_found` /
+`watch_not_found` means the id never existed.
 
 The waiter command is passed positionally after `--` (or as a single shell
 string via `--shell`). Use `vibe watch add --help` for the full surface,
