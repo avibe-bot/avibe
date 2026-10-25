@@ -189,8 +189,10 @@ def test_cli_and_workbench_share_the_definition_read_projection(capsys) -> None:
         assert _canonical(cli_watch_detail, watch=True) == _canonical(
             api_watches["waiting-live"], watch=True
         )
-        assert cli_watch_detail["runtime"]["pid"] == 1234
-        # Never observed: neither liveness nor a heartbeat to print.
+        # The heartbeat record stays internal; ``process_alive`` states what it means.
+        assert "runtime" not in cli_watch_detail
+        assert cli_watch_detail["process_alive"] is True
+        # Never observed: no liveness to print.
         assert {"process_alive", "runtime"}.isdisjoint(cli_unknown_watch_detail)
         assert api_watches["waiting-never"]["runtime"] == {}
 

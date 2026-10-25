@@ -529,7 +529,8 @@ compact rows. A page holds at most 100 rows; a larger `--limit` reads 100 and
 `--all` mode. Continue with `pagination.next_command`; inspect one record with
 its `show` or `get` command. List rows omit null, empty, and zero-valued fields;
 `--brief` on `vibe task show`, `vibe watch show`, `vibe runs show`,
-`vibe session get`, and `vibe agent show` prints exactly the list row.
+`vibe session get`, `vibe agent show`, and `vibe show status` prints exactly the
+list row.
 
 Every command follows one grammar: `--session-id <id>` is the only way to name a
 Session, and single-Session commands default to the caller Session inside an

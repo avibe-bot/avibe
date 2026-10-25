@@ -1314,11 +1314,14 @@ def test_removed_watch_reads_as_removed_and_refuses_mutations(capsys) -> None:
     assert definition["id"] == watch.id
     assert definition["name"] == "Watch CI"
     assert definition["lifecycle_state"] == "removed"
+    # Nothing about it can still run, so it carries no live state.
+    assert not {"enabled", "health", "process_alive", "waiting_since", "next_run_at", "runtime"} & set(definition)
     removed_at = definition["removed_at"]
     assert removed_at
     assert cli.cmd_watch_show(watch.id, brief=True) == 0
     row = json.loads(capsys.readouterr().out)["definition"]
     assert (row["lifecycle_state"], row["removed_at"]) == ("removed", removed_at)
+    assert not {"health", "process_alive", "waiting_since"} & set(row)
 
     mutations = [
         (cli.cmd_watch_set_enabled, (watch.id, False)),

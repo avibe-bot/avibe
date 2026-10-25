@@ -65,8 +65,12 @@ list/find/tags、Show Page 的 list/marks、`vibe data query`、`vibe task list`
 `--page`。
 
 列表行只携带决定下一步所需的字段，并省略 null、空值和零值字段，因此缺失的字段即表示
-未设置。`vibe task show`、`vibe watch show`、`vibe runs show`、`vibe session get`
-和 `vibe agent show` 输出完整记录；加上 `--brief` 则只输出对应 list 命令打印的那一行。
+未设置。Show Page 的列表行只有 `session_id`、`visibility`、`active_url`（用于分享的
+URL）、`path`（要编辑的工作目录）和 `updated_at`。`vibe task show`、`vibe watch show`、
+`vibe runs show`、`vibe session get`、`vibe agent show` 和 `vibe show status` 输出完整
+记录；加上 `--brief` 则只输出对应 list 命令打印的那一行。已删除的 Task 或 Watch 显示
+`lifecycle_state: "removed"` 和 `removed_at`，不再带它已经没有的实时字段（`enabled`、
+健康状态、下次触发或 waiter 状态）。
 
 ### Session 归属的列表
 

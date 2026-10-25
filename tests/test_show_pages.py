@@ -2825,11 +2825,25 @@ def test_show_list_cli_json_reports_existing_pages(monkeypatch, tmp_path, capsys
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
     assert payload["count"] == 2
+    assert "url_guidance" not in payload
     assert [page["session_id"] for page in payload["pages"]] == ["ses-public", "ses-private"]
     public_page = payload["pages"][0]
+    # A row names the page, its visibility, the URL to share, and the workspace.
+    assert set(public_page) == {"session_id", "visibility", "active_url", "path", "updated_at"}
     assert public_page["visibility"] == "public"
-    assert public_page["active_url"] == public_page["public_url"]
     assert public_page["active_url"].startswith("https://alex.avibe.bot/p/")
+    assert payload["pages"][1]["active_url"].startswith("https://alex.avibe.bot/show/ses-private")
+
+    # ``show status --brief`` is that row; ``show status`` keeps the full record.
+    args = cli.build_parser().parse_args(["show", "status", "--session-id", "ses-public", "--brief"])
+    assert cli.cmd_show_status(args) == 0
+    brief = json.loads(capsys.readouterr().out)
+    assert {key: brief[key] for key in public_page} == public_page
+    assert not {"public_url", "private_url", "share_id", "next_actions"} & set(brief)
+    args = cli.build_parser().parse_args(["show", "status", "--session-id", "ses-public"])
+    assert cli.cmd_show_status(args) == 0
+    full = json.loads(capsys.readouterr().out)
+    assert full["active_url"] == full["public_url"] == public_page["active_url"]
 
 
 def test_show_list_cli_json_reports_pagination(monkeypatch, tmp_path, capsys):
