@@ -80,7 +80,7 @@ def _add_test_watch(
     )
 
 
-def test_watch_help_describes_session_id_guidance(capsys) -> None:
+def test_watch_help_examples_use_the_caller_session_default(capsys) -> None:
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc:
@@ -88,40 +88,9 @@ def test_watch_help_describes_session_id_guidance(capsys) -> None:
 
     assert exc.value.code == 0
     captured = capsys.readouterr()
-    assert "managed background watchers" in captured.out
-    assert "vibe watch add --session-id sesk8m4q2p7x --name 'Wait for export' --message" in captured.out
     assert "{add,update,list,show,pause,resume,remove}" in captured.out
-
-
-def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
-    parser = cli.build_parser()
-
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["watch", "add", "--help"])
-
-    assert exc.value.code == 0
-    captured = capsys.readouterr()
-    normalized_help = " ".join(captured.out.split())
-    assert "Pass either --shell '<command>' or a command after '--'." in captured.out
-    assert "--lifetime-timeout" in captured.out
-    assert "vibe watch add --session-id sesk8m4q2p7x --message 'The export finished. Inspect it and continue.'" in captured.out
-    assert "watches follow up in this conversation by default" in captured.out
-    assert "Use --message or --message-file for follow-up instructions." in captured.out
-    assert "--prefix" not in captured.out
-    assert "--session-key" not in captured.out
-    assert "Terminal failures also send a follow-up and disable the watch." in captured.out
-    assert "an allowed `--retry-exit-code` keeps waiting" in captured.out
-    assert "A once Watch stops after its first event" in captured.out
-    assert "five-second safety delay" in captured.out
-    assert "automatically pause the Watch" in captured.out
-    assert "a once Watch ends and a forever Watch re-arms" in captured.out
-    assert "A once waiter that is still waiting must use a retry exit code" in captured.out
-    assert "If this is your first time using this command, read this whole help entry before creating a watch." in captured.out
-    assert "Use 0 for no per-cycle timeout" in normalized_help
-    assert "--same-scope" in captured.out
-    assert "--scope-id" in captured.out
-    assert "--post-to" not in captured.out
-    assert "--deliver-key" not in captured.out
+    assert "vibe watch add --name 'Wait for export' --message" in captured.out
+    assert "--session-id" not in captured.out
 
 
 def test_watch_update_preserves_archived_agent_reference(tmp_path: Path, capsys) -> None:
@@ -2116,14 +2085,23 @@ def test_watch_add_refuses_the_reserved_session_with_no_side_effects(
     )
 
 
-def test_watch_add_help_states_the_no_event_marker_contract() -> None:
+def test_watch_add_help_states_the_waiter_contract(capsys) -> None:
     """The help is a live caller of the waiter contract, not a description of it.
 
     A custom waiter written from this text is what the supervisor then judges, so
     guidance that named the exit code but not the marker sent people straight into
     a watch that reports a failure and disables itself.
     """
-    text = cli._watch_add_examples_text()
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["watch", "add", "--help"])
+    text = capsys.readouterr().out
 
-    assert str(watches.NO_EVENT_EXIT_CODE) in text
-    assert watches.NO_EVENT_MARKER in text
+    assert "0      one new event" in text
+    assert f"{watches.DEFAULT_RETRY_EXIT_CODE}     still waiting (any --retry-exit-code)" in text
+    assert f"{watches.NO_EVENT_EXIT_CODE}     plus the stderr line '{watches.NO_EVENT_MARKER}'" in text
+    assert f"A bare {watches.NO_EVENT_EXIT_CODE} is a failure" in text
+    assert "failure (124 = timed out)" in text
+    assert "A once Watch stops at its first event or quiet cycle; --forever re-arms after each." in text
+    assert "rapid repeats pause the Watch" in text
+    first_example = next(line for line in text.splitlines() if line.strip().startswith("vibe watch add"))
+    assert "--session-id" not in first_example

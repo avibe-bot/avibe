@@ -114,8 +114,7 @@ def test_show_without_subcommand_prints_help(capsys):
     assert "Manage the one visual Show Page attached to an Agent Session." in captured.out
     assert "usage: vibe show [-h]" in captured.out
     assert "{list,path,status,update,mark,reply,marks,unmark,event,annotate} ..." in " ".join(captured.out.split())
-    assert "vibe show list" in captured.out
-    assert "vibe show path --session-id sesk8m4q2p7x" in captured.out
+    assert "  vibe show path\n" in captured.out
     assert "Accept: text/markdown" in captured.out
 
 

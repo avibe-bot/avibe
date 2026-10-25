@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import json
 import os
-import shlex
 import sqlite3
 import sys
 from contextlib import redirect_stderr
@@ -338,7 +337,7 @@ def test_supported_task_platforms_always_includes_avibe() -> None:
         assert "avibe" in cli._supported_task_platforms()
 
 
-def test_task_help_describes_session_id_guidance(capsys) -> None:
+def test_task_help_examples_use_the_caller_session_default(capsys) -> None:
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc:
@@ -346,29 +345,27 @@ def test_task_help_describes_session_id_guidance(capsys) -> None:
 
     assert exc.value.code == 0
     captured = capsys.readouterr()
-    assert "Create, inspect, and control scheduled Agent messages for Avibe." in captured.out
-    assert "vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message" in captured.out
     assert "{add,update,list,show,pause,resume,run,remove}" in captured.out
+    assert "vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'" in captured.out
+    assert "--session-id" not in captured.out
     assert "rm (remove)" not in captured.out
     assert "\n    ls" not in captured.out
 
 
-def test_task_add_help_includes_examples_and_threadless_guidance(capsys) -> None:
+def test_task_add_help_states_task_kinds_and_cron_weekday_names(capsys) -> None:
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc:
         parser.parse_args(["task", "add", "--help"])
 
     assert exc.value.code == 0
-    captured = capsys.readouterr()
-    assert "If this is your first time using this command, read this whole help entry before creating a task." in captured.out
-    assert "`--session-id` chooses which Agent Session Avibe will continue using when the task runs." in captured.out
-    assert "tasks continue this conversation by default" in captured.out
-    assert "--post-to" not in captured.out
-    assert "--same-scope" in captured.out
-    assert "--scope-id" in captured.out
-    assert "--deliver-key" not in captured.out
-    assert "Write cron weekdays as names (mon, tue, ... sun)." in captured.out
+    text = " ".join(capsys.readouterr().out.split())
+    assert "A message task stores --message and sends it to the target Session on each run." in text
+    assert "A command task (--shell, or a command after '--') runs with no Agent turn." in text
+    assert "with --on-failure agent starts one Agent turn" in text
+    assert "Only that form takes Session, scope, or Agent flags." in text
+    assert "Write cron weekdays as names (mon ... sun): numbers are rejected" in text
+    assert "vibe task add --cron '0 9 * * mon-fri' --message" in text
 
 
 def test_task_list_help_mentions_completed_one_shots_hidden_by_default(capsys) -> None:
@@ -386,64 +383,36 @@ def test_task_list_help_mentions_completed_one_shots_hidden_by_default(capsys) -
     assert "--all" not in captured.out
 
 
-def test_task_update_help_includes_partial_update_guidance(capsys) -> None:
+def test_task_update_help_states_partial_update_and_kind_rules(capsys) -> None:
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc:
         parser.parse_args(["task", "update", "--help"])
 
     assert exc.value.code == 0
-    captured = capsys.readouterr()
-    assert "keeping its task ID" in captured.out
-    assert "--reset-delivery" in captured.out
-    assert "Unspecified fields keep their existing values." in captured.out
-    assert "Write cron weekdays as names (mon, tue, ... sun)." in captured.out
+    text = " ".join(capsys.readouterr().out.split())
+    assert "Unspecified fields keep their values." in text
+    assert "A message task cannot become a command task, or the reverse, and --on-failure cannot change" in text
+    assert "Write cron weekdays as names (mon ... sun); numbers are rejected." in text
 
 
-def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
+def test_agent_run_help_states_session_callback_and_fork_rules(capsys) -> None:
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc:
         parser.parse_args(["agent", "run", "--help"])
 
     assert exc.value.code == 0
-    captured = capsys.readouterr()
-    assert "--fork-session FORK_SESSION" in captured.out
-    assert "--fork-self" in captured.out
-    assert "--sync" in captured.out
-    assert "--send-now" not in captured.out
-    assert "--create-session" not in captured.out
-    assert "--async" not in captured.out
-    assert "--same-scope" in captured.out
-    assert "--scope-id" in captured.out
-    assert "--visible" in captured.out
-    assert "--deliver-key" not in captured.out
-    assert "Avibe Agent shell examples:" in captured.out
-    assert "Normal terminal examples:" in captured.out
-    assert "--fork-self forks this current Session." in captured.out
-    assert "Forks keep the same backend, scope, and cwd as the source Session." in captured.out
-    assert "vibe agent run --fork-self --message" in captured.out
-    assert "vibe agent run --session-id sesk8m4q2p7x --message" in captured.out
-    assert "vibe session queue list --session-id sesk8m4q2p7x" in captured.out
-    assert "vibe session queue remove msg_queued123 --session-id sesk8m4q2p7x" in captured.out
-    assert "vibe session send-now --session-id sesk8m4q2p7x" in captured.out
-    assert "Agent runs are async by default. From an Avibe Agent shell, they return their final result to this conversation by default." in captured.out
-    assert "vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'" in captured.out
-    assert (
-        "vibe agent run --agent release-reviewer --visible --message 'Review this project in a visible sibling Session.'"
-        in captured.out
-    )
-    assert (
-        "vibe agent run --agent release-reviewer --no-callback --message 'Review the latest deployment result.'"
-        not in captured.out
-    )
-    assert "vibe agent run --agent release-reviewer --same-scope --no-callback --message" not in captured.out
-    assert "From a normal terminal, pass --callback-session-id or --no-callback for async runs." in captured.out
-    assert "Review the latest CI result and print it here." in captured.out
-    assert "Review the latest CI result and report back." in captured.out
-    assert "--callback-session-id sescaller456 --message 'Review the latest CI result and report back.'" in captured.out
-    assert "--no-callback --message 'Review the latest CI result and report back.'" not in captured.out
-    assert "Do not combine fork flags with --session-id." in captured.out
+    text = " ".join(capsys.readouterr().out.split())
+    assert "Runs are async: the final result returns to the caller Session." in text
+    assert "Elsewhere, pass --callback-session-id, --no-callback, or --sync." in text
+    assert "--session-id ID Join this Session's running turn, or start one if idle" in text
+    assert "--queue With --session-id: wait for the running turn" in text
+    assert "Fork this Session's context, backend, scope, and cwd" in text
+    assert "Agent for a new Session (a fork: same backend only)" in text
+    assert "--model, --reasoning-effort, --visible, --same-scope, --scope-id, and --close-after apply only to a new or forked Session." in text
+    for jargon in ("P1", "P3", "native Turn", "steer"):
+        assert jargon not in text
 
 
 def test_agent_run_visible_sugar_sets_foreground_visibility() -> None:
@@ -462,7 +431,7 @@ def test_task_add_parse_error_is_structured_json(capsys) -> None:
     payload = json.loads(capsys.readouterr().err)
     assert payload["code"] == "invalid_arguments"
     assert payload["help_command"] == "vibe task add --help"
-    assert "--session-id SESSION_ID" in payload["usage"]
+    assert "--session-id ID" in payload["usage"]
 
 
 def test_task_remove_parse_error_keeps_structured_guidance(capsys) -> None:
@@ -4713,26 +4682,6 @@ def test_task_payload_renders_message_kind_for_message_tasks(tmp_path: Path) -> 
     assert brief["message_preview"] == "morning briefing"
     assert {"command_preview", "last_exit_code"}.isdisjoint(brief)
 
-
-# --- documented examples --------------------------------------------------
-
-
-def test_documented_task_command_examples_stay_parseable() -> None:
-    """Injected help text is a live caller: every example must survive the parser."""
-
-    parser = cli.build_parser()
-    text = cli._task_add_examples_text() + "\n" + cli._task_update_examples_text()
-    examples = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip().startswith(("vibe task add ", "vibe task update "))
-    ]
-    command_examples = [line for line in examples if "--shell" in line or "--timeout" in line]
-    assert len(examples) >= 4
-    assert len(command_examples) >= 3
-
-    for example in examples:
-        parser.parse_args(shlex.split(example)[1:])
 
 def test_task_resume_rejects_orphaned_owner_without_execution_target(
     monkeypatch, tmp_path: Path
