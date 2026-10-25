@@ -55,6 +55,7 @@ Targeting and callbacks:
 Operational guidance:
 
 - use `vibe task list` before editing or deleting an existing task; use `vibe watch list` before touching a managed watch
+- `vibe harness status`, `vibe runs list`, `vibe task list`, `vibe watch list`, and `vibe show list` read this Session by default; pass `--session-id <id>` for another Session or `--global` for every Session
 - if this is the first time using `vibe task add`, `vibe agent run`, `vibe runs`, or `vibe watch add`, read the matching `--help` output first — watches and command tasks both accept `--shell` and `--timeout` (per-cycle for watches, per-run for tasks), while `--lifetime-timeout` (overall), `--forever`, `--retry-exit-code`, and `--retry-delay` stay watch-only
 - for Watch waiters, exit `0` means one new reportable event; an allowed retry exit code keeps either mode waiting, while `64` plus `avibe-watch: no-event` ends a once Watch or re-arms a forever Watch without an Agent Run; a once waiter that is still waiting must use a retry exit code
 - a forever waiter must keep a durable cursor, state transition, or domain cooldown; Avibe serializes its event follow-ups and automatically pauses plus sends a repair Run after six successful events within 60 seconds

@@ -82,8 +82,20 @@ sync runs, the route is recorded for future detach-to-async behavior.
 
 ## Other CLI Defaults
 
-- `vibe runs list` remains global by default.
-- `vibe runs list --current-session` filters to `AVIBE_SESSION_ID`.
+- Lists of Session-owned records (`vibe harness status`, `vibe runs list`,
+  `vibe task list`, `vibe watch list`, `vibe show list`) read the caller Session
+  from `AVIBE_SESSION_ID` by default. `--session-id <id>` reads another Session
+  and `--global` reads every Session; the two are mutually exclusive. Without a
+  caller Session there is no default, and the command fails with
+  `missing_caller_session` rather than silently widening to every Session.
+  A Session's Runs are those it ran, dispatched from its Agent
+  (`source_kind='agent'`, `source_actor`), or receives a result from
+  (`callback_session_id`); Watch and Task ownership is the Workbench "this
+  Session" filter's. Responses report the scope they read as `session_id` and
+  `global`.
+- Lists of records that do not belong to a Session (`vibe agent list`,
+  `vibe skill list`, Vault lists, `vibe session list`) have no Session scope;
+  `vibe session ...` commands address the Session itself positionally.
 - `vibe runs show` may default to `AVIBE_RUN_ID`.
 - `vibe runs cancel` stays explicit; no `--current-run` shortcut in this batch.
 - Single-object session commands may default object id from `AVIBE_SESSION_ID`.

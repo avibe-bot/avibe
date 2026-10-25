@@ -1073,10 +1073,12 @@ def _print_definition_list_payload(
     *,
     payload_for_item,
     command: list[str],
+    scope: "SessionListScope",
 ) -> None:
     item_payloads = [payload_for_item(item) for item in page_result.items]
     _print_cli_payload(
         "run_definitions",
+        **scope.payload(),
         definitions=item_payloads,
         **_paginated_fields(page_result, command=command),
     )
@@ -1955,7 +1957,7 @@ def _show_examples_text() -> str:
 
         Examples:
           vibe show list
-          vibe show list --visibility public
+          vibe show list --global --visibility public
           vibe show path --session-id sesk8m4q2p7x
           vibe show status --session-id sesk8m4q2p7x --json
           vibe show update --session-id sesk8m4q2p7x --visibility public
@@ -3519,25 +3521,70 @@ def _validate_callback_session_id(session_id: str, *, help_command: str) -> None
     _require_cli_turn_authority(session_id, help_command=help_command)
 
 
-def _resolve_runs_list_session_filter(args) -> Optional[str]:
-    explicit_session_id = (getattr(args, "session_id", None) or "").strip()
-    current_session = bool(getattr(args, "current_session", False))
-    if explicit_session_id and current_session:
+@dataclass(frozen=True)
+class SessionListScope:
+    """The Sessions a Session-owned list reads: one Session, or every Session.
+
+    ``session_id=None`` is the explicit ``--global`` inventory. ``from_caller``
+    records that the Session came from ``AVIBE_SESSION_ID`` rather than a flag, so
+    a ``next_command`` repeats exactly the scope flags the caller typed.
+    """
+
+    session_id: Optional[str] = None
+    from_caller: bool = False
+
+    def command_args(self) -> list[str]:
+        if self.session_id is None:
+            return ["--global"]
+        return [] if self.from_caller else ["--session-id", self.session_id]
+
+    def payload(self) -> dict[str, Any]:
+        return {"session_id": self.session_id, "global": self.session_id is None}
+
+
+def _add_session_scope_args(parser, *, items: str) -> None:
+    """One grammar for every list of Session-owned records.
+
+    The caller Session is the default; ``--session-id`` names another Session and
+    ``--global`` reads every Session.
+    """
+
+    scope_group = parser.add_mutually_exclusive_group()
+    scope_group.add_argument(
+        "--session-id",
+        help=f"List {items} of this Agent Session instead of the caller Session",
+    )
+    scope_group.add_argument(
+        "--global",
+        dest="global_scope",
+        action="store_true",
+        help=f"List {items} of every Session",
+    )
+
+
+def _resolve_session_list_scope(args, *, help_command: str) -> SessionListScope:
+    if getattr(args, "global_scope", False):
+        return SessionListScope()
+    explicit = getattr(args, "session_id", None)
+    if explicit is not None:
+        session_id = str(explicit).strip()
+        if not session_id:
+            raise TaskCliError(
+                "--session-id must name an Agent Session",
+                code="invalid_session_id",
+                hint="Pass an Agent Session ID, or --global to list every Session.",
+                help_command=help_command,
+            )
+        return SessionListScope(session_id=session_id)
+    session_id = _default_session_id_from_caller(caller_context_from_env())
+    if not session_id:
         raise TaskCliError(
-            "use either --session-id or --current-session, not both",
-            code="conflicting_session_filter",
-            hint="Use --current-session to resolve AVIBE_SESSION_ID, or pass a specific --session-id.",
-            help_command="vibe runs list --help",
+            "This list defaults to the caller Session, and no Avibe Agent caller Session is set.",
+            code="missing_caller_session",
+            hint="Run it from an Avibe Agent shell, pass --session-id <id> for one Session, or --global for every Session.",
+            help_command=help_command,
         )
-    if explicit_session_id:
-        return explicit_session_id
-    if current_session:
-        return _require_caller_session_id(
-            caller_context_from_env(),
-            purpose="--current-session",
-            help_command="vibe runs list --help",
-        )
-    return None
+    return SessionListScope(session_id=session_id, from_caller=True)
 
 
 def _validate_delivery_args(
@@ -4105,27 +4152,30 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
     return normalized
 
 
-def cmd_harness_status(_args) -> int:
+def cmd_harness_status(args) -> int:
     """Print one bounded operational snapshot across Harness work types."""
 
     from core.services.harness_status import build_harness_status
     from vibe import internal_client
 
     try:
+        scope = _resolve_session_list_scope(args, help_command="vibe harness status --help")
         language = _configured_cli_language()
         request_store = _task_request_store()
         sqlite_store = request_store.sqlite_backend
         if sqlite_store is None:
             raise RuntimeError(i18n_t("harness.cli.error.sqliteRequired", language))
         fetch_limit = MAX_PAGE_LIMIT + 1
-        raw_runs = sqlite_store.list_active_runs(limit=fetch_limit)
+        raw_runs = sqlite_store.list_active_runs(limit=fetch_limit, session_id=scope.session_id)
         raw_watches = sqlite_store.list_enabled_definitions(
             "watch",
             limit=fetch_limit,
+            session_id=scope.session_id,
         )
         raw_tasks = sqlite_store.list_enabled_definitions(
             "scheduled",
             limit=fetch_limit,
+            session_id=scope.session_id,
         )
         runs_truncated = len(raw_runs) > MAX_PAGE_LIMIT
 
@@ -4173,13 +4223,14 @@ def cmd_harness_status(_args) -> int:
             watches=raw_watches[:MAX_PAGE_LIMIT],
             tasks=raw_tasks[:MAX_PAGE_LIMIT],
             runtime_snapshot=runtime_snapshot,
+            session_id=scope.session_id,
             truncated={
                 "runs": runs_truncated,
                 "watches": len(raw_watches) > MAX_PAGE_LIMIT,
                 "tasks": len(raw_tasks) > MAX_PAGE_LIMIT,
             },
         )
-        _print_cli_payload("harness_status", **snapshot)
+        _print_cli_payload("harness_status", **scope.payload(), **snapshot)
         return 0
     except Exception as exc:
         _print_task_error(exc, help_command="vibe harness status --help")
@@ -4693,23 +4744,26 @@ def cmd_task_add(args):
 
 def cmd_task_list(
     *,
+    scope: SessionListScope,
     include_finished: bool = False,
     brief: bool = True,
     page_request: PageRequest = PageRequest(),
 ):
     with _definition_read_store() as store:
         page_result = store.list_scheduled_tasks_page(
+            session_id=scope.session_id,
             page_request=page_request,
             include_successful_finished=include_finished,
             enabled_first=True,
         )
-    command = ["vibe", "task", "list"]
+    command = ["vibe", "task", "list", *scope.command_args()]
     if include_finished:
         command.append("--include-finished")
     _print_definition_list_payload(
         page_result,
         payload_for_item=lambda task: _task_projection_payload(task, brief=brief),
         command=command,
+        scope=scope,
     )
     return 0
 
@@ -7404,6 +7458,7 @@ def _wait_for_run_result(store: TaskExecutionStore, run_id: str, *, wait_timeout
 
 def cmd_runs_list(args):
     try:
+        scope = _resolve_session_list_scope(args, help_command="vibe runs list --help")
         page_request = _page_request_from_args(args, help_command="vibe runs list --help")
         created_after = _parse_cli_time_filter(
             getattr(args, "created_after", None),
@@ -7420,7 +7475,7 @@ def cmd_runs_list(args):
             run_type=getattr(args, "type", None),
             agent_name=getattr(args, "agent", None),
             agent_backend=getattr(args, "backend", None),
-            session_id=_resolve_runs_list_session_filter(args),
+            session_id=scope.session_id,
             definition_id=getattr(args, "definition_id", None),
             created_after=created_after,
             created_before=created_before,
@@ -7428,14 +7483,11 @@ def cmd_runs_list(args):
             page_request=page_request,
             newest_first=True,
         )
-        command = ["vibe", "runs", "list"]
+        command = ["vibe", "runs", "list", *scope.command_args()]
         _add_optional_arg(command, "--status", getattr(args, "status", None))
         _add_optional_arg(command, "--type", getattr(args, "type", None))
         _add_optional_arg(command, "--agent", getattr(args, "agent", None))
         _add_optional_arg(command, "--backend", getattr(args, "backend", None))
-        _add_optional_arg(command, "--session-id", getattr(args, "session_id", None))
-        if getattr(args, "current_session", False):
-            command.append("--current-session")
         _add_optional_arg(command, "--definition-id", getattr(args, "definition_id", None))
         _add_optional_arg(command, "--created-after", created_after)
         _add_optional_arg(command, "--created-before", created_before)
@@ -7443,6 +7495,7 @@ def cmd_runs_list(args):
         if getattr(args, "brief", False):
             command.append("--brief")
         payload = {
+            **scope.payload(),
             "runs": [_run_payload(run, brief=True) for run in result.items],
             **_paginated_fields(result, command=command),
         }
@@ -11621,23 +11674,26 @@ def cmd_watch_add(args):
 
 def cmd_watch_list(
     *,
+    scope: SessionListScope,
     include_finished: bool = False,
     brief: bool = True,
     page_request: PageRequest = PageRequest(),
 ):
     with _definition_read_store() as store:
         page_result = store.list_watches_page(
+            session_id=scope.session_id,
             page_request=page_request,
             include_successful_finished=include_finished,
             enabled_first=True,
         )
-    command = ["vibe", "watch", "list"]
+    command = ["vibe", "watch", "list", *scope.command_args()]
     if include_finished:
         command.append("--include-finished")
     _print_definition_list_payload(
         page_result,
         payload_for_item=lambda watch: _watch_projection_payload(watch, brief=brief),
         command=command,
+        scope=scope,
     )
     return 0
 
@@ -15257,6 +15313,10 @@ def _print_show_page_status_missing(session_id: str) -> None:
 def _print_show_page_list(payload: dict) -> None:
     pages = payload.get("pages") or []
     print("Show Pages:")
+    if payload.get("global"):
+        print("  Sessions: all")
+    elif payload.get("session_id"):
+        print(f"  Session: {payload['session_id']}")
     print(f"  Count: {payload.get('count', 0)}")
     visibility = payload.get("visibility")
     if visibility:
@@ -15313,6 +15373,7 @@ def cmd_show_list(args):
 
     store = _load_show_page_store()
     try:
+        scope = _resolve_session_list_scope(args, help_command="vibe show list --help")
         page_request = _page_request_from_args(args, help_command="vibe show list --help")
         updated_after = _parse_cli_time_filter(
             getattr(args, "updated_after", None),
@@ -15326,15 +15387,14 @@ def cmd_show_list(args):
         )
         result = store.list_page(
             visibility=getattr(args, "visibility", None),
-            session_id=getattr(args, "session_id", None),
+            session_id=scope.session_id,
             updated_after=updated_after,
             updated_before=updated_before,
             query=getattr(args, "query", None),
             page_request=page_request,
         )
-        command = ["vibe", "show", "list"]
+        command = ["vibe", "show", "list", *scope.command_args()]
         _add_optional_arg(command, "--visibility", getattr(args, "visibility", None))
-        _add_optional_arg(command, "--session-id", getattr(args, "session_id", None))
         _add_optional_arg(command, "--updated-after", updated_after)
         _add_optional_arg(command, "--updated-before", updated_before)
         _add_optional_arg(command, "--q", getattr(args, "query", None))
@@ -15342,6 +15402,7 @@ def cmd_show_list(args):
             command.append("--json")
         payload = {
             "ok": True,
+            **scope.payload(),
             "count": len(result.items),
             "visibility": getattr(args, "visibility", None),
             "pages": [show_page_payload(page) for page in result.items],
@@ -18165,13 +18226,20 @@ def build_parser():
     )
     runs_subparsers = runs_parser.add_subparsers(dest="runs_command", metavar="{list,show,cancel}")
     runs_subparsers.required = True
-    runs_list_parser = runs_subparsers.add_parser("list", help="List Agent runs")
+    runs_list_parser = runs_subparsers.add_parser(
+        "list",
+        help="List Agent runs",
+        description=(
+            "List Agent runs in the caller Session, newest first. Use --session-id for another "
+            "Session or --global for every Session."
+        ),
+        error_help_command="vibe runs list --help",
+    )
+    _add_session_scope_args(runs_list_parser, items="runs")
     runs_list_parser.add_argument("--status", help="Filter by run status")
     runs_list_parser.add_argument("--type", help="Filter by run type")
     runs_list_parser.add_argument("--agent", help="Filter by Avibe Agent name")
     runs_list_parser.add_argument("--backend", choices=AGENT_BACKENDS, help="Filter by backend")
-    runs_list_parser.add_argument("--session-id", help="Filter by Agent Session ID")
-    runs_list_parser.add_argument("--current-session", action="store_true", help="Filter to this current Agent Session")
     runs_list_parser.add_argument("--definition-id", help="Filter by task or watch definition ID")
     runs_list_parser.add_argument("--created-after", help="Filter by created_at >= timestamp, or relative value such as 6h or 7d")
     runs_list_parser.add_argument("--created-before", help="Filter by created_at <= timestamp, or relative value such as 6h or 7d")
@@ -18209,7 +18277,10 @@ def build_parser():
     harness_status_parser = harness_subparsers.add_parser(
         "status",
         help=i18n_t("harness.cli.help.status", harness_help_language),
+        description=i18n_t("harness.cli.help.statusDescription", harness_help_language),
+        error_help_command="vibe harness status --help",
     )
+    _add_session_scope_args(harness_status_parser, items="Harness work")
     _add_json_noop(harness_status_parser)
 
     session_parser = subparsers.add_parser(
@@ -18686,7 +18757,10 @@ def build_parser():
     show_list_parser = show_subparsers.add_parser(
         "list",
         help="List existing Show Pages",
-        description="List existing Show Pages across Agent Sessions without creating new pages.",
+        description=(
+            "List existing Show Pages without creating new pages: the caller Session's page by default, "
+            "another Session's with --session-id, or every Session's with --global."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe show list --help",
     )
@@ -18695,7 +18769,7 @@ def build_parser():
         choices=("private", "limited", "public", "offline"),
         help="Filter by Show Page visibility.",
     )
-    show_list_parser.add_argument("--session-id", help="Filter by Agent Session ID prefix.")
+    _add_session_scope_args(show_list_parser, items="Show Pages")
     show_list_parser.add_argument("--updated-after", help="Filter by updated_at >= timestamp, or relative value such as 6h or 7d.")
     show_list_parser.add_argument("--updated-before", help="Filter by updated_at <= timestamp, or relative value such as 6h or 7d.")
     show_list_parser.add_argument("--q", dest="query", help="Search session ID, share ID, or visibility.")
@@ -19094,7 +19168,8 @@ def build_parser():
         "list",
         help="List scheduled tasks",
         description=(
-            f"List stored scheduled tasks, {DEFAULT_PAGE_LIMIT} per page. Successful one-shot tasks are hidden by default; "
+            f"List the caller Session's scheduled tasks, {DEFAULT_PAGE_LIMIT} per page. Use --session-id for another "
+            "Session or --global for every Session. Successful one-shot tasks are hidden by default; "
             "use --include-finished to page through their history."
         ),
         epilog="Use the returned task IDs with 'vibe task show', 'vibe task update', 'vibe task run', 'vibe task pause', 'vibe task resume', or 'vibe task remove'.",
@@ -19102,6 +19177,7 @@ def build_parser():
         error_help_command="vibe task list --help",
     )
     task_list_parser = task_subparsers.choices["list"]
+    _add_session_scope_args(task_list_parser, items="scheduled tasks")
     task_list_parser.add_argument(
         "--include-finished",
         action="store_true",
@@ -19396,13 +19472,15 @@ def build_parser():
         "list",
         help="List background watches",
         description=(
-            f"List stored managed background watches, {DEFAULT_PAGE_LIMIT} per page. Successful one-shot watches are hidden "
+            f"List the caller Session's background watches, {DEFAULT_PAGE_LIMIT} per page. Use --session-id for another "
+            "Session or --global for every Session. Successful one-shot watches are hidden "
             "by default; use --include-finished to page through their history."
         ),
         epilog="Use the returned watch IDs with 'vibe watch show', 'vibe watch update', 'vibe watch pause', 'vibe watch resume', or 'vibe watch remove'.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe watch list --help",
     )
+    _add_session_scope_args(watch_list_parser, items="background watches")
     watch_list_parser.add_argument(
         "--include-finished",
         action="store_true",
@@ -20089,8 +20167,14 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             except TaskCliError as exc:
                 _print_task_error(exc, help_command="vibe task list --help")
                 sys.exit(1)
+            try:
+                scope = _resolve_session_list_scope(args, help_command="vibe task list --help")
+            except TaskCliError as exc:
+                _print_task_error(exc, help_command="vibe task list --help")
+                sys.exit(1)
             sys.exit(
                 cmd_task_list(
+                    scope=scope,
                     include_finished=getattr(args, "include_finished", False),
                     brief=True,
                     page_request=page_request,
@@ -20122,8 +20206,14 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             except TaskCliError as exc:
                 _print_task_error(exc, help_command="vibe watch list --help")
                 sys.exit(1)
+            try:
+                scope = _resolve_session_list_scope(args, help_command="vibe watch list --help")
+            except TaskCliError as exc:
+                _print_task_error(exc, help_command="vibe watch list --help")
+                sys.exit(1)
             sys.exit(
                 cmd_watch_list(
+                    scope=scope,
                     include_finished=getattr(args, "include_finished", False),
                     brief=True,
                     page_request=page_request,

@@ -74,6 +74,7 @@ def _project_run(row: dict[str, Any], now: datetime) -> dict[str, Any]:
         "agent_name": row.get("agent_name"),
         "agent_backend": row.get("agent_backend"),
         "session_id": row.get("session_id"),
+        "callback_session_id": row.get("callback_session_id"),
         "definition_id": row.get("definition_id") or row.get("task_id"),
         "created_at": row.get("created_at"),
         "started_at": row.get("started_at"),
@@ -128,10 +129,18 @@ def build_harness_status(
     watches: Iterable[dict[str, Any]],
     tasks: Iterable[dict[str, Any]],
     runtime_snapshot: dict[str, Any],
+    session_id: str | None = None,
     truncated: dict[str, bool] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Combine durable and controller facts without inventing lifecycle state."""
+    """Combine durable and controller facts without inventing lifecycle state.
+
+    ``runs``, ``watches`` and ``tasks`` arrive already read for the requested
+    Session (``None`` is every Session). The controller snapshot is always the
+    whole runtime, because a working-directory conflict is between Sessions: a
+    scoped view keeps only that Session's runtime rows, and the conflicts and
+    controller faults that involve it.
+    """
 
     observed_now = now or datetime.now(timezone.utc)
     if observed_now.tzinfo is None:
@@ -251,20 +260,26 @@ def build_harness_status(
             continue
         for member in members:
             member.setdefault("anomaly_codes", []).append("active_workdir_conflict")
+        conflict_session_ids = sorted(
+            {
+                str(member.get("session_id") or member.get("base_session_id"))
+                for member in members
+            }
+        )
+        if session_id is not None and session_id not in conflict_session_ids:
+            continue
         anomalies.append(
             {
                 "code": "active_workdir_conflict",
                 "severity": "warning",
                 "workdir": workdir,
-                "session_ids": sorted(
-                    {
-                        str(member.get("session_id") or member.get("base_session_id"))
-                        for member in members
-                    }
-                ),
+                "session_ids": conflict_session_ids,
                 "backends": sorted({str(member.get("backend")) for member in members}),
             }
         )
+
+    if session_id is not None:
+        runtime_rows = [row for row in runtime_rows if row.get("session_id") == session_id]
 
     return {
         "generated_at": observed_now.isoformat(),

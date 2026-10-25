@@ -148,12 +148,12 @@ def test_cli_and_workbench_share_the_definition_read_projection(capsys) -> None:
         before_definitions = _rows(store, run_definitions)
         before_runs = _rows(store, agent_runs)
 
-        assert cli.cmd_task_list(page_request=PageRequest(limit=20)) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope(), page_request=PageRequest(limit=20)) == 0
         cli_tasks = {
             row["id"]: row
             for row in json.loads(capsys.readouterr().out)["definitions"]
         }
-        assert cli.cmd_watch_list(include_finished=True, page_request=PageRequest(limit=20)) == 0
+        assert cli.cmd_watch_list(scope=cli.SessionListScope(), include_finished=True, page_request=PageRequest(limit=20)) == 0
         cli_watches = {
             row["id"]: row
             for row in json.loads(capsys.readouterr().out)["definitions"]
@@ -248,13 +248,13 @@ def test_cli_definition_lists_page_before_enrichment(monkeypatch, capsys) -> Non
     monkeypatch.setattr(SQLiteBackgroundTaskStore, "_enrich_definitions", record_page)
 
     page_request = PageRequest(page=1, limit=2)
-    assert cli.cmd_task_list(page_request=page_request) == 0
+    assert cli.cmd_task_list(scope=cli.SessionListScope(), page_request=page_request) == 0
     task_payload = json.loads(capsys.readouterr().out)
-    assert cli.cmd_watch_list(page_request=page_request) == 0
+    assert cli.cmd_watch_list(scope=cli.SessionListScope(), page_request=page_request) == 0
     watch_payload = json.loads(capsys.readouterr().out)
 
-    assert task_payload["pagination"]["next_command"] == "vibe task list --page 2 --limit 2"
-    assert watch_payload["pagination"]["next_command"] == "vibe watch list --page 2 --limit 2"
+    assert task_payload["pagination"]["next_command"] == "vibe task list --global --page 2 --limit 2"
+    assert watch_payload["pagination"]["next_command"] == "vibe watch list --global --page 2 --limit 2"
     assert enriched_sizes == [("scheduled", 3), ("watch", 3)]
 
 
@@ -271,7 +271,7 @@ def test_task_list_pagination_is_stable_across_run_at_boundary(capsys) -> None:
         )
         _task(store, "still-waiting", created_at="2026-07-27T12:01:00+00:00")
 
-        assert cli.cmd_task_list(page_request=PageRequest(page=1, limit=1)) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope(), page_request=PageRequest(page=1, limit=1)) == 0
         first_page = json.loads(capsys.readouterr().out)
 
         # Simulate the wall clock crossing run_at between offset pages.
@@ -282,7 +282,7 @@ def test_task_list_pagination_is_stable_across_run_at_boundary(capsys) -> None:
                 .values(run_at=PAST)
             )
 
-        assert cli.cmd_task_list(page_request=PageRequest(page=2, limit=1)) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope(), page_request=PageRequest(page=2, limit=1)) == 0
         second_page = json.loads(capsys.readouterr().out)
 
         assert [first_page["definitions"][0]["id"], second_page["definitions"][0]["id"]] == [
@@ -361,6 +361,7 @@ def test_task_list_and_show_keep_unverifiable_retirements_unknown(capsys) -> Non
         )
 
         assert cli.cmd_task_list(
+            scope=cli.SessionListScope(),
             include_finished=True,
             page_request=PageRequest(limit=20),
         ) == 0

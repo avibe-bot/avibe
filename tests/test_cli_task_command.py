@@ -1361,7 +1361,7 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
     ) == "failed"
 
     with patch("vibe.cli._task_store", return_value=store):
-        result = cli.cmd_task_list()
+        result = cli.cmd_task_list(scope=cli.SessionListScope())
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1383,7 +1383,7 @@ def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys)
     )
 
     with patch("vibe.cli._task_store", return_value=store):
-        result = cli.cmd_task_list(brief=True)
+        result = cli.cmd_task_list(scope=cli.SessionListScope(), brief=True)
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1412,7 +1412,7 @@ def test_paused_recurring_task_keeps_failed_run_in_last_status(
     store.set_enabled(task.id, False)
 
     with patch("vibe.cli._task_store", return_value=store):
-        assert cli.cmd_task_list(brief=True) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope(), brief=True) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["definitions"][0]["state"] == "paused"
@@ -1432,7 +1432,7 @@ def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
         )
 
     with patch("vibe.cli._task_store", return_value=store):
-        result = cli.cmd_task_list(brief=True)
+        result = cli.cmd_task_list(scope=cli.SessionListScope(), brief=True)
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1444,9 +1444,9 @@ def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
         "returned": 20,
         "has_more": True,
         "next_page": 2,
-        "next_command": "vibe task list --page 2 --limit 20",
+        "next_command": "vibe task list --global --page 2 --limit 20",
     }
-    assert payload["message"].endswith("vibe task list --page 2 --limit 20")
+    assert payload["message"].endswith("vibe task list --global --page 2 --limit 20")
 
 
 def test_task_list_keeps_enabled_tasks_ahead_of_paused_history(
@@ -1474,7 +1474,7 @@ def test_task_list_keeps_enabled_tasks_ahead_of_paused_history(
     )
 
     with patch("vibe.cli._task_store", return_value=store):
-        assert cli.cmd_task_list(brief=True) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope(), brief=True) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["definitions"][0]["id"] == active.id
@@ -1498,14 +1498,14 @@ def test_task_list_cli_dispatches_pagination_flags(
             timezone_name="UTC",
         )
 
-    monkeypatch.setattr(sys, "argv", ["vibe", "task", "list", "--limit", "2"])
+    monkeypatch.setattr(sys, "argv", ["vibe", "task", "list", "--global", "--limit", "2"])
     with patch("vibe.cli._task_store", return_value=store), pytest.raises(SystemExit) as exc:
         cli.main()
 
     assert exc.value.code == 0
     payload = json.loads(capsys.readouterr().out)
     assert len(payload["definitions"]) == 2
-    assert payload["pagination"]["next_command"] == "vibe task list --page 2 --limit 2"
+    assert payload["pagination"]["next_command"] == "vibe task list --global --page 2 --limit 2"
 
 
 def test_task_list_order_is_stable_across_cron_boundaries(
@@ -1542,7 +1542,7 @@ def test_task_list_order_is_stable_across_cron_boundaries(
     )
 
     with patch("vibe.cli._task_store", return_value=store):
-        assert cli.cmd_task_list(brief=True) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope(), brief=True) == 0
 
     first_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["definitions"]]
 
@@ -1555,7 +1555,7 @@ def test_task_list_order_is_stable_across_cron_boundaries(
         lambda **kwargs: second_next_runs[str(kwargs["timezone_name"])],
     )
     with patch("vibe.cli._task_store", return_value=store):
-        assert cli.cmd_task_list(brief=True) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope(), brief=True) == 0
 
     second_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["definitions"]]
     assert second_ids == first_ids == [later.id, earlier.id]
@@ -1596,7 +1596,7 @@ def test_task_list_include_finished_includes_completed_one_shots(tmp_path: Path,
     store.mark_task_result(done.id, error=None)
 
     with patch("vibe.cli._task_store", return_value=store):
-        result = cli.cmd_task_list(include_finished=True)
+        result = cli.cmd_task_list(scope=cli.SessionListScope(), include_finished=True)
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1619,6 +1619,7 @@ def test_task_list_include_finished_keeps_history_paginated(tmp_path: Path, caps
 
     with patch("vibe.cli._task_store", return_value=store):
         result = cli.cmd_task_list(
+            scope=cli.SessionListScope(),
             include_finished=True,
             brief=True,
             page_request=cli.PageRequest(page=1, limit=2),
@@ -1629,7 +1630,7 @@ def test_task_list_include_finished_keeps_history_paginated(tmp_path: Path, caps
     assert len(payload["definitions"]) == 2
     assert payload["pagination"]["has_more"] is True
     assert payload["pagination"]["next_command"] == (
-        "vibe task list --include-finished --page 2 --limit 2"
+        "vibe task list --global --include-finished --page 2 --limit 2"
     )
 
 

@@ -1918,32 +1918,6 @@ def test_resolve_run_cwd_defaults_by_session_target(monkeypatch, tmp_path: Path)
     assert cli._resolve_run_cwd(args, session_policy="create", scoped_session=True, help_command="x") == str(tmp_path)
 
 
-def test_runs_list_current_session_filters_from_caller_env(tmp_path: Path, capsys) -> None:
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-    request_store.enqueue_agent_run(
-        message="current",
-        agent_name="worker",
-        session_id="ses-current",
-    )
-    request_store.enqueue_agent_run(
-        message="other",
-        agent_name="worker",
-        session_id="ses-other",
-    )
-    parser = cli.build_parser()
-    args = parser.parse_args(["runs", "list", "--current-session"])
-
-    with (
-        patch.dict("os.environ", {"AVIBE_SESSION_ID": "ses-current"}),
-        patch("vibe.cli._task_request_store", return_value=request_store),
-    ):
-        result = cli.cmd_runs_list(args)
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert [run["session_id"] for run in payload["runs"]] == ["ses-current"]
-
-
 @pytest.mark.parametrize(
     "activity_at",
     (
@@ -1964,14 +1938,3 @@ def test_brief_run_payload_parses_supported_iso_instants(activity_at: str) -> No
     )
 
     assert payload["activity_age_seconds"] == 0.0
-
-
-def test_runs_list_current_session_conflicts_with_session_id(capsys) -> None:
-    parser = cli.build_parser()
-    args = parser.parse_args(["runs", "list", "--current-session", "--session-id", "ses-explicit"])
-
-    result = cli.cmd_runs_list(args)
-
-    assert result == 1
-    payload = json.loads(capsys.readouterr().err)
-    assert payload["code"] == "conflicting_session_filter"

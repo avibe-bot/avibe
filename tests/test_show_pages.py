@@ -1553,18 +1553,22 @@ def test_store_lists_show_pages_with_page_and_query(monkeypatch, tmp_path):
 
         first_page = store.list_page(page_request=PageRequest(page=1, limit=20))
         second_page = store.list_page(page_request=PageRequest(page=2, limit=20))
-        filtered = store.list_page(session_id="ses-2", query="ses-24", page_request=PageRequest(page=1, limit=20))
+        exact = store.list_page(session_id="ses-24", page_request=PageRequest(page=1, limit=20))
+        not_a_prefix = store.list_page(session_id="ses-2", page_request=PageRequest(page=1, limit=20))
+        queried = store.list_page(query="ses-2", page_request=PageRequest(page=1, limit=20))
 
         assert first_page.has_more is True
         assert len(first_page.items) == 20
         assert second_page.has_more is False
         assert len(second_page.items) == 5
-        assert [page.session_id for page in filtered.items] == ["ses-24"]
+        assert [page.session_id for page in exact.items] == ["ses-24"]
+        assert not_a_prefix.items == []
+        assert sorted(page.session_id for page in queried.items) == [f"ses-{index}" for index in range(20, 25)]
     finally:
         store.close()
 
 
-def test_store_escapes_show_page_session_id_prefix_filter(monkeypatch, tmp_path):
+def test_store_escapes_show_page_query_filter(monkeypatch, tmp_path):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
@@ -1575,10 +1579,8 @@ def test_store_escapes_show_page_session_id_prefix_filter(monkeypatch, tmp_path)
         store.ensure("fooxbar")
         store.ensure("fooybar")
 
-        underscore_pages = store.list_page(session_id="foo_", page_request=PageRequest(page=1, limit=20))
         query_pages = store.list_page(query="foo_", page_request=PageRequest(page=1, limit=20))
 
-        assert [page.session_id for page in underscore_pages.items] == ["foo_bar"]
         assert [page.session_id for page in query_pages.items] == ["foo_bar"]
     finally:
         store.close()
@@ -2820,7 +2822,7 @@ def test_show_list_cli_json_reports_existing_pages(monkeypatch, tmp_path, capsys
     finally:
         store.close()
 
-    args = cli.build_parser().parse_args(["show", "list", "--json"])
+    args = cli.build_parser().parse_args(["show", "list", "--global", "--json"])
     assert cli.cmd_show_list(args) == 0
 
     payload = json.loads(capsys.readouterr().out)
@@ -2845,14 +2847,14 @@ def test_show_list_cli_json_reports_pagination(monkeypatch, tmp_path, capsys):
     finally:
         store.close()
 
-    args = cli.build_parser().parse_args(["show", "list", "--json"])
+    args = cli.build_parser().parse_args(["show", "list", "--global", "--json"])
     assert cli.cmd_show_list(args) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["count"] == 20
     assert payload["pagination"]["has_more"] is True
     assert payload["pagination"]["next_page"] == 2
-    assert "vibe show list --json --page 2 --limit 20" == payload["pagination"]["next_command"]
+    assert "vibe show list --global --json --page 2 --limit 20" == payload["pagination"]["next_command"]
     assert "More records are available" in payload["message"]
 
 
@@ -2869,7 +2871,7 @@ def test_show_list_cli_next_command_uses_absolute_time_filters(monkeypatch, tmp_
         store.close()
 
     args = cli.build_parser().parse_args(
-        ["show", "list", "--json", "--updated-after", "2026-05-25T08:00:00+08:00", "--limit", "10"]
+        ["show", "list", "--global", "--json", "--updated-after", "2026-05-25T08:00:00+08:00", "--limit", "10"]
     )
     assert cli.cmd_show_list(args) == 0
 
@@ -2899,17 +2901,18 @@ def test_show_list_cli_filters_visibility(monkeypatch, tmp_path, capsys):
     finally:
         store.close()
 
-    args = cli.build_parser().parse_args(["show", "list", "--visibility", "private"])
+    args = cli.build_parser().parse_args(["show", "list", "--global", "--visibility", "private"])
     assert cli.cmd_show_list(args) == 0
 
     output = capsys.readouterr().out
+    assert "Sessions: all" in output
     assert "Count: 1" in output
     assert "Filter: visibility=private" in output
     assert "- ses-private" in output
     assert "- ses-limited" not in output
     assert "- ses-public" not in output
 
-    args = cli.build_parser().parse_args(["show", "list", "--visibility", "limited"])
+    args = cli.build_parser().parse_args(["show", "list", "--global", "--visibility", "limited"])
     assert cli.cmd_show_list(args) == 0
 
     output = capsys.readouterr().out

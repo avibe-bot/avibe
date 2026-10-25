@@ -23,6 +23,28 @@ list/marks、`vibe data query`、`vibe task list` 和 `vibe watch list`。默认
 绕过。使用 `pagination.next_command` 继续翻页；完整记录详情通过对应的 `show`
 或 `get` 命令获取。
 
+### Session 归属的列表
+
+`vibe harness status`、`vibe runs list`、`vibe task list`、`vibe watch list`
+和 `vibe show list` 读取归属于某个 Agent Session 的记录，共用同一套范围语法：
+
+```bash
+vibe watch list                          # 调用方 Session（AVIBE_SESSION_ID）
+vibe watch list --session-id sesk8m4q2p7x   # 其他 Session
+vibe watch list --global                 # 所有 Session
+```
+
+在 Avibe Agent shell 内默认读取调用方 Session。在 Agent shell 之外没有默认值：
+需要传 `--session-id` 或 `--global`，否则命令以 `missing_caller_session` 失败。
+两个参数不能同时使用。每个响应都用 `session_id` 和 `global` 说明实际读取的范围，
+`pagination.next_command` 会重复你传入的范围参数。
+
+Session 的 Run 包括在它里面运行的、由它的 Agent 派发的，以及结果回调给它的 Run，
+因此委派出去的工作对委派方 Session 仍然可见。Watch 归属于它回调的 Session，
+Task 归属于创建它的 Session（创建方未知或已不存在时归属于它运行所在的 Session），
+Show Page 按 Session id 归属；Watch 和 Task 的归属与 Workbench 的“只看本会话”一致。
+`vibe harness status` 会保留控制器故障，以及涉及该 Session 的工作目录冲突。
+
 ## 远程访问 Web UI
 
 默认情况下，Web UI 只监听在运行 Avibe 的那台机器的 `127.0.0.1:5123`。
@@ -304,14 +326,15 @@ vibe session update --title 'Release review'                 # 在 Avibe Agent s
 列出和查看 Agent run 记录。
 
 ```bash
-vibe runs list --session-id sesk8m4q2p7x --brief
+vibe runs list --brief                 # 在 Avibe Agent shell 内查看调用方 Session 的 run
+vibe runs list --global --definition-id <task-or-watch-id>   # 跨每次运行各自的 Session 查看全部触发
 vibe runs show run_abc123
 vibe runs show run_abc123 --brief      # 只看状态、时间、错误和回调字段
 vibe runs show                         # 在 Avibe Agent shell 内查看调用方 Run
 ```
 
-`vibe runs list` 无过滤参数时仍保持全局列表语义；传入 `--session-id` 等参数
-才会筛选。`vibe runs show` 在 Avibe 已注入 caller context 的 Agent run 内
+`vibe runs list` 遵循 [Session 归属的列表](#session-归属的列表) 的范围语法。
+`vibe runs show` 在 Avibe 已注入 caller context 的 Agent run 内
 可以省略 run id，并默认使用 `AVIBE_RUN_ID`。它输出完整记录：发给 Agent 的文本在
 `message`，回复在 `result_text`；`--brief` 只输出与 `vibe runs list` 相同的精简行，
 用于查看状态。
@@ -454,7 +477,8 @@ vibe watch resume <watch-id>
 vibe watch remove <watch-id>
 ```
 
-`vibe task list` 和 `vibe watch list` 默认每页返回 20 条定义；还有下一页时，
+`vibe task list` 和 `vibe watch list` 默认读取调用方 Session（见
+[Session 归属的列表](#session-归属的列表)），每页返回 20 条定义；还有下一页时，
 响应会包含 `pagination.next_command`。默认隐藏成功结束的一次性定义；使用
 `--include-finished` 分页查看历史。列表输出始终有上限，不提供无分页的 `--all` 模式。
 task 和 watch 命令用 `definition` 表示单条记录、用 `definitions` 表示列表，

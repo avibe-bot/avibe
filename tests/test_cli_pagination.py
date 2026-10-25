@@ -190,7 +190,7 @@ def test_runs_list_cli_defaults_to_first_page(monkeypatch, tmp_path, capsys) -> 
     finally:
         store.close()
 
-    args = cli.build_parser().parse_args(["runs", "list", "--brief"])
+    args = cli.build_parser().parse_args(["runs", "list", "--global", "--brief"])
     assert cli.cmd_runs_list(args) == 0
 
     payload = json.loads(capsys.readouterr().out)
@@ -198,7 +198,7 @@ def test_runs_list_cli_defaults_to_first_page(monkeypatch, tmp_path, capsys) -> 
     assert len(payload["runs"]) == 20
     assert payload["runs"][0]["id"] == "run-24"
     assert payload["pagination"]["has_more"] is True
-    assert payload["pagination"]["next_command"] == "vibe runs list --brief --page 2 --limit 20"
+    assert payload["pagination"]["next_command"] == "vibe runs list --global --brief --page 2 --limit 20"
     assert "More records are available" in payload["message"]
 
 
@@ -236,7 +236,7 @@ def test_runs_list_cli_filters_status_and_query(monkeypatch, tmp_path, capsys) -
     finally:
         store.close()
 
-    args = cli.build_parser().parse_args(["runs", "list", "--status", "succeeded", "--q", "weekly", "--brief"])
+    args = cli.build_parser().parse_args(["runs", "list", "--global", "--status", "succeeded", "--q", "weekly", "--brief"])
     assert cli.cmd_runs_list(args) == 0
 
     payload = json.loads(capsys.readouterr().out)
@@ -270,7 +270,7 @@ def test_runs_list_cli_normalizes_offset_time_filters(monkeypatch, tmp_path, cap
     finally:
         store.close()
 
-    args = cli.build_parser().parse_args(["runs", "list", "--created-after", "2026-05-25T10:00:00+08:00", "--brief"])
+    args = cli.build_parser().parse_args(["runs", "list", "--global", "--created-after", "2026-05-25T10:00:00+08:00", "--brief"])
     assert cli.cmd_runs_list(args) == 0
 
     payload = json.loads(capsys.readouterr().out)
@@ -295,7 +295,7 @@ def test_runs_list_cli_next_command_uses_absolute_time_filters(monkeypatch, tmp_
     finally:
         store.close()
 
-    args = cli.build_parser().parse_args(["runs", "list", "--created-after", "2026-05-25T08:00:00+08:00", "--limit", "10"])
+    args = cli.build_parser().parse_args(["runs", "list", "--global", "--created-after", "2026-05-25T08:00:00+08:00", "--limit", "10"])
     assert cli.cmd_runs_list(args) == 0
 
     payload = json.loads(capsys.readouterr().out)
@@ -372,7 +372,7 @@ def test_runs_show_prints_the_run_text_once_and_brief_prints_the_list_row(monkey
 
     assert cli.cmd_runs_show(cli.build_parser().parse_args(["runs", "show", "run-done", "--brief"])) == 0
     brief = json.loads(capsys.readouterr().out)["run"]
-    assert cli.cmd_runs_list(cli.build_parser().parse_args(["runs", "list"])) == 0
+    assert cli.cmd_runs_list(cli.build_parser().parse_args(["runs", "list", "--global"])) == 0
     assert brief == json.loads(capsys.readouterr().out)["runs"][0]
     assert (brief["status"], "message" in brief) == ("succeeded", False)
 
