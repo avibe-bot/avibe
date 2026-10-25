@@ -16,6 +16,7 @@ from core.agent_core.messages import HostedCost
 
 from .adapter import SearchResponse
 from .events import bounded_diagnostic_detail
+from .search_services import _keyless_rate_limited
 
 ZERO = HostedCost(basis="list", usd=0)
 
@@ -70,14 +71,6 @@ def _tag(body: Mapping[str, Any] | None) -> str | None:
     return None
 
 
-def _mcp_rate_limited(body: Mapping[str, Any] | None) -> bool:
-    if not isinstance(body, Mapping):
-        return False
-    return any(
-        key.lower() in {"ai.exa/ratelimited", "ratelimited"} and value is True
-        for key, value in _nested(body)
-    )
-
 _EXA_MARKDOWN_HEADER = re.compile(
     r"\A(?:#\s+|Title:\s*)(?P<title>[^\r\n]*)\r?\n"
     r"URL:\s*(?P<url>https?://[^\r\n]*)\r?\n"
@@ -112,20 +105,31 @@ def _exa_markdown_payload(text: str) -> dict[str, Any]:
 
 
 def _mcp_payload(body: Mapping[str, Any] | None) -> tuple[Mapping[str, Any] | None, bool]:
+    """Separate RPC/tool failures from successfully returned document text."""
     if not isinstance(body, Mapping):
         return body, False
+    if body.get("error") is not None:
+        return body, True
     result = body.get("result")
     if not isinstance(result, Mapping):
-        return body, False
-    structured = result.get("structuredContent")
-    if isinstance(structured, Mapping):
-        normalized = dict(structured)
+        return body, True
+    is_error = result.get("isError") is True
+
+    def normalize(payload: Mapping[str, Any]):
+        normalized = dict(payload)
         metadata = result.get("_meta")
         if isinstance(metadata, Mapping):
             normalized["_meta"] = dict(metadata)
-        if result.get("isError") is True:
+        # Missing/wrong-shaped payloads are protocol faults, not proof of an
+        # empty target. A genuine empty content string remains target-scoped.
+        failed = is_error or not isinstance(normalized.get("content"), str)
+        if failed:
             normalized["_mcp_is_error"] = True
-        return normalized, result.get("isError") is True
+        return normalized, failed
+
+    structured = result.get("structuredContent")
+    if isinstance(structured, Mapping):
+        return normalize(structured)
     content = result.get("content")
     if isinstance(content, list):
         for item in content[:8]:
@@ -137,15 +141,16 @@ def _mcp_payload(body: Mapping[str, Any] | None) -> tuple[Mapping[str, Any] | No
             try:
                 value = json.loads(text)
             except (json.JSONDecodeError, RecursionError):
-                value = _exa_markdown_payload(text)
-            if isinstance(value, Mapping):
-                metadata = result.get("_meta")
-                if isinstance(metadata, Mapping):
-                    value = {**value, "_meta": dict(metadata)}
-                if result.get("isError") is True:
-                    value = {**value, "_mcp_is_error": True}
-                return value, result.get("isError") is True
-    return body, result.get("isError") is True
+                value = None
+            if isinstance(value, Mapping) and (is_error or isinstance(value.get("content"), str)):
+                return normalize(value)
+            # JSON documents/scalars are still page text. Only an error-shaped
+            # MCP result may reinterpret them as provider error evidence.
+            value = _exa_markdown_payload(text)
+            if is_error:
+                value["text"] = text
+            return normalize(value)
+    return body, True
 
 def _url_value(value: Any) -> str | None:
     if not isinstance(value, str) or len(value) > 8192:
@@ -238,9 +243,9 @@ def map_fetch_response(
         code = "service_refused"
     elif status in set(outcomes.get("target_unreadable") or ()):
         code, target_failure = "fetch_target_unreadable", True
-    elif vendor == "exa-mcp" and _mcp_rate_limited(body):
+    elif vendor == "exa-mcp" and _keyless_rate_limited(status, body):
         code = "service_rate_limited"
-    elif tag and tag in refusal_tags:
+    elif mcp_error and tag and tag in refusal_tags:
         code = "service_refused"
     elif vendor == "exa-mcp" and mcp_target_failure:
         code, target_failure = "fetch_target_unreadable", True
@@ -253,8 +258,6 @@ def map_fetch_response(
             code = "service_refused"
         else:
             code = "service_unavailable"
-    elif tag and tag in {str(item).upper() for item in outcomes.get("target_tags", ())}:
-        code, target_failure = "fetch_target_unreadable", True
     elif status == 200 and not decoded:
         # A provider envelope that cannot be decoded is a service fault, not
         # evidence that this particular target was unreadable.

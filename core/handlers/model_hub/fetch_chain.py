@@ -472,7 +472,9 @@ class FetchChain:
             "transport_degraded_reason": raw.get("transport_degraded_reason"),
             "charset_fallback": raw.get("charset_fallback"),
         }
-        reason = "provider_limit" if provider_truncated else None
+        # Extraction may have capped the source before sanitization shrank it;
+        # a small retained frame does not prove the original document was whole.
+        reason = "budget" if raw.get("content_overflow") else "provider_limit" if provider_truncated else None
         try:
             candidate = WebFetchRecord(**base, truncated=reason is not None, truncation_reason=reason)
             if reason is None:

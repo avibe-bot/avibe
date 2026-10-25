@@ -128,6 +128,15 @@ async def test_configured_fetch_is_dormant_at_chain_and_adapter_boundaries(tmp_p
 @pytest.mark.parametrize("sid,status,body,expected,delay", [
     (FREE_EXA, 429, {}, "service_rate_limited", 600),
     (FREE_EXA, 500, {}, "service_unavailable", 30),
+    (FREE_EXA, 200, {"jsonrpc": "2.0", "id": 1, "error": {"code": -32603, "message": "Internal error"}}, "service_unavailable", 30),
+    (FREE_EXA, 200, {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "Unauthorized"}}, "service_unavailable", 30),
+    (FREE_EXA, 200, {"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "Free MCP rate limit exceeded"}}, "service_rate_limited", 30),
+    (FREE_EXA, 200, {"jsonrpc": "2.0", "id": 1, "error": {"code": "CONTENT_FILTER_ERROR"}}, "service_refused", None),
+    (FREE_EXA, 200, {"result": {}}, "service_unavailable", 30),
+    (FREE_EXA, 200, {"result": []}, "service_unavailable", 30),
+    (FREE_EXA, 200, {"result": {"structuredContent": {}}}, "service_unavailable", 30),
+    (FREE_EXA, 200, {"result": {"structuredContent": {"content": []}}}, "service_unavailable", 30),
+    (FREE_EXA, 200, {"result": {"structuredContent": {"content": ""}}}, "fetch_target_unreadable", None),
     (FREE_EXA, 200, {"result": {"_meta": {"ai.exa/rateLimited": True}, "content": []}}, "service_rate_limited", 30),
     (FREE_EXA, 200, {"result": {"isError": True, "content": [{"type": "text", "text": '{"error":{"code":"CONTENT_FILTER_ERROR"}}'}]}}, "service_refused", None),
     (FREE_EXA, 200, {"result": {"isError": True, "structuredContent": {"error": {"code": "PROHIBITED_CONTENT"}}}}, "service_refused", None),
@@ -271,6 +280,55 @@ async def test_fallback_regate_failure_is_terminal_without_forwarding(tmp_path, 
     assert [(fact["source_id"], fact["outcome"]) for fact in result["record"]["attempts"]] == [(LOCAL, "failed"), (FREE_EXA, "skipped")]
     rows = service.usage_summary(days=7)["services"]
     assert len(rows) == 1 and rows[0]["source_id"] == LOCAL and rows[0]["requests"] == 1
+
+
+@pytest.mark.parametrize("text", [
+    '{"error":{"code":"CONTENT_FILTER_ERROR","message":"Free MCP rate limit exceeded"}}',
+    '[{"error":"Internal error"}]',
+    '123',
+    'A page discussing rate limits and CONTENT_FILTER_ERROR is still page content.',
+])
+def test_successful_mcp_text_documents_are_not_reinterpreted_as_error_envelopes(text):
+    """Successful text blocks are documents, even when a JSON page resembles an RPC error."""
+    catalog = next(item for item in fetch_service_catalog() if item["vendor"] == "exa-mcp")
+    result = map_fetch_response(
+        catalog, SearchResponse(200, {}, json.dumps({"result": {"content": [{"type": "text", "text": text}]}}).encode()),
+        requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
+    )
+    assert result.record["status"] == "completed"
+    assert result.record["content"] == text
+    assert not result.cooling and not result.target_failure
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("overflow", [False, True])
+async def test_extractor_overflow_survives_short_normalized_content_into_record_and_frame(tmp_path, overflow):
+    """Extractor pre-capping can lose the tail even when later sanitization makes the result tiny."""
+    from core.agent_core.web_fetch import BUDGET_MARKER, fetch_record_from_dict, frame_fetch_record
+    from core.web_fetch_worker.extract import extract_page
+
+    service, config = _service(
+        tmp_path, enabled={LOCAL: True, EXA: False, FREE_EXA: False, JINA: False}, order=(LOCAL,),
+    )
+    source = b"Retained paragraph.\n\n<script>" + b"x" * (200000 if overflow else 20) + b"</script>\n\nFinal paragraph."
+
+    async def fetch(url, *, deadline, on_sent):
+        on_sent()
+        page = await asyncio.to_thread(extract_page, source, "text/markdown", url)
+        assert page.content_overflow is overflow
+        assert len(page.content.encode()) < 1000
+        return {**page.payload(), "sent": True, "source_size_bytes": len(source), "final_url": url}
+
+    service._local_fetch_engine.fetch = fetch
+    result = await service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": "https://example.com/"}}, turn=service.freeze_turn_hosted_tools(config),
+    )
+    record = fetch_record_from_dict(result["record"])
+    assert record.status == "completed" and record.truncated is overflow
+    assert record.truncation_reason == ("budget" if overflow else None)
+    assert (BUDGET_MARKER in frame_fetch_record(record)) is overflow
+    assert ("Final paragraph." in record.content) is (not overflow)
+    assert "content_overflow" not in result["record"]
 
 
 class _Local:
