@@ -136,13 +136,14 @@ readers skip residual unknown ids without a write.
 
 ### 2.3 Read and controls
 
-`GET /api/models/hosted-tools` adds `web_fetch` **only after activation**. WF-1
-sets `WEB_FETCH_ACTIVE = False`: GET has no fetch entry, candidates, declaration
-or active settings UI. V2 and PUT still preserve saved fetch choices, while
-historical records, usage and activity are readable regardless of the flag.
-This dormant-read boundary was approved on 2026-10-25.
+`GET /api/models/hosted-tools` includes `web_fetch` in WF-3, with the shared
+`WEB_FETCH_ACTIVE = True` switch enabling the read, candidates, declaration and
+producer together. WF-1/WF-2 kept that switch false until activation; an explicit
+false still hides the row/candidates/declaration and rejects producer calls.
+V2 and PUT preserve saved fetch choices, while historical records, usage and
+activity remain readable regardless of the flag.
 
-Once active, the entry contains saved `services` and
+The active entry contains saved `services` and
 `executor_order`, resolved `effective_order`, `executor_candidates`, status and
 capability-bearing `service_vendors`. The candidate uses existing service fields:
 `source_id`, `model_id` (service id), `kind`, `billing`, `relay`, dated `price`,
@@ -629,8 +630,10 @@ Built-ins do not become “removed Source” rows without a credential row.
 
 Add **网页读取 / Web fetch** after Web search in Models → Tools. Header switch,
 latest real result and **always-visible** numbered fetch-order list (including
-automatic state). Each row has the existing up/down/drag controls, enabled switch,
+automatic state). Each row has the existing up/down **buttons only**, enabled switch,
 kind pill, provider/Local label, price/unit, capability badges and current status.
+There is no drag interaction: fetch follows web search's buttons-only ordering
+(owner-approved clarification, 2026-10-25).
 Disabled rows remain at the tail. Reset to automatic writes null, never effective
 defaults. No Claude-native/prefer-native row or “unverified” state.
 
@@ -694,6 +697,48 @@ Python/TypeScript mirrors, public routes and contract registry on one tested hea
 | WF-1 readers | Config/read/record/usage/activity readers, synthetic identities, versioned mirrors and downgrade fixtures. Include #2920, release before any fetch producer writes. Hide active UI/candidates until activation. |
 | WF-2 producer | Behind `WEB_FETCH_ACTIVE=false`: gateway policy/local transport/extraction, keyed APIs, shared Exa client + Jina, Vibey framing/replay, UI fixtures. Separate lanes only after reader contracts merge. Flag-off preserves prior behavior. |
 | WF-3 activation | Confirm reader release exists; flip declaration/candidates/producer together and publish public en/zh docs. Recheck vendor facts/tags, review/CI and manual fixture acceptance. |
+
+### WF-3 activation and release hold
+
+The activation change sets the one shared switch to true; it changes no schema,
+contract version, migration, catalog price or default ordering. It builds on the
+merged local engine (#2962), local/keyless chain (#2968), and configured providers
+(#2976). Public disclosure is the coordinated `avibe-docs#83` English/Chinese change.
+
+Rechecked **2026-10-26** before the activation push: the latest published release
+is `gh-v3.2.3rc7` (v20); no fetched tag contains WF-1 `9e47e5f`. The activation and
+public-doc PRs may reach Merge-ready, but **must not merge** until the owner cuts
+a release containing WF-1. Merged reader code is not a reader release. The owner
+owns that release and the coordinated merge; this lane never publishes a tag,
+release, deployment or service restart. Recheck the prerequisite before merging.
+
+Primary activation acceptance connects the real default-on Tools read, frozen
+candidates, C-6 hop, Vibey declaration, gateway chain and bounded C-1 result/usage
+without patching either flag. Only external I/O is stubbed. Existing provider,
+policy, downgrade and four-protocol replay tests remain in force. Screenshots in
+`wf3-shots/` are hermetic real-component/projection fixtures, not live-provider or
+installed-runtime verification; §7's buttons match the accepted UI.
+
+### Release note (publish only with activation)
+
+**English:** Web fetch is now available in Vibey and Models → Tools. It reads one
+URL through local fetch → configured fetch services → free Exa → free Jina Reader
+by default. Fetch switches and up/down ordering are independent of search;
+existing eligible API-key Sources are included automatically. Local fetch sends
+requests directly from your runtime host without browser credentials or JavaScript
+rendering; remote services receive the URL and may render JavaScript or charge
+per request. Review the Web fetch documentation for costs, limits and terms.
+Stored results are bounded to 48,000 UTF-8 bytes including quotation framing and
+replay without fetching or billing again. Older-version config/usage rewrites can
+lose fetch opt-outs and attribution; recheck settings after a downgrade/re-upgrade.
+
+**中文：** Vibey 和「模型 → 工具」现已支持网页读取。默认依次尝试本机、已配置的
+读取服务、免费 Exa 和免费 Jina Reader；读取开关及上下按钮排序与搜索独立，现有
+符合条件的 API 密钥来源会自动加入。本机从运行 Avibe 的主机直接发起请求，不携带
+浏览器凭据、不渲染 JavaScript；远端服务会接收网址，可能渲染 JavaScript 或按次收费。
+费用、限制及条款请查看网页读取文档。保存结果连同引用框架最多 48,000 UTF-8 字节，
+重放不会再次读取或计费。旧版本重写配置或用量可能丢失读取禁用选项及用量归属；
+降级后重新升级时请检查设置。
 
 Unknown-tool compatibility is #2920's exact ordinary-content degradation, not a
 promise that old readers understand new record fields or preserve new config

@@ -46,7 +46,10 @@ def router(first):
 @pytest.mark.parametrize("protocol", ["anthropic", "openai_responses", "openai_chat", "google"])
 @pytest.mark.parametrize("active,offered", [(False, True), (True, False), (True, True)])
 async def test_fetch_declaration_is_a_frozen_url_only_function(monkeypatch, protocol, active, offered):
-    monkeypatch.setattr(v2_config, "WEB_FETCH_ACTIVE", active)
+    if not active:
+        monkeypatch.setattr(v2_config, "WEB_FETCH_ACTIVE", False)
+    else:
+        assert v2_config.WEB_FETCH_ACTIVE is True
     turn = router(selection(protocol, offered=offered))
     tools = hosted_tools(turn)
     assert [tool.spec.name for tool in tools] == (["web_fetch"] if active and offered else [])
@@ -72,8 +75,7 @@ async def test_fetch_declaration_is_a_frozen_url_only_function(monkeypatch, prot
 
 
 @pytest.mark.parametrize("outcome", ["completed", "policy", "closed", "off", "malformed", "unreachable"])
-async def test_gateway_result_preserves_one_frame_and_live_turn(monkeypatch, outcome):
-    monkeypatch.setattr(v2_config, "WEB_FETCH_ACTIVE", True)
+async def test_gateway_result_preserves_one_frame_and_live_turn(outcome):
     stored = json.loads(FIXTURE.read_text())
     answer = copy.deepcopy(stored["hosted"])
     if outcome == "policy":
@@ -119,8 +121,7 @@ async def test_gateway_result_preserves_one_frame_and_live_turn(monkeypatch, out
 
 
 @pytest.mark.parametrize("length", [8192, 8193])
-async def test_gateway_failure_never_fabricates_a_shortened_requested_url(monkeypatch, length):
-    monkeypatch.setattr(v2_config, "WEB_FETCH_ACTIVE", True)
+async def test_gateway_failure_never_fabricates_a_shortened_requested_url(length):
     url = "https://example.test/" + "a" * (length - len("https://example.test/"))
     def unavailable(request):
         raise httpx.ConnectError("offline", request=request)
@@ -134,8 +135,7 @@ async def test_gateway_failure_never_fabricates_a_shortened_requested_url(monkey
 
 
 @pytest.mark.parametrize("protocol", ["anthropic", "openai_responses", "openai_chat", "google"])
-async def test_newly_produced_result_replays_without_fetch_or_rebill(monkeypatch, protocol):
-    monkeypatch.setattr(v2_config, "WEB_FETCH_ACTIVE", True)
+async def test_newly_produced_result_replays_without_fetch_or_rebill(protocol):
     fixture = json.loads(FIXTURE.read_text())
     calls = []
     def gateway(request):

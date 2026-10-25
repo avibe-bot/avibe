@@ -425,7 +425,7 @@
   "decision_tables": [
     {
       "id": "D31",
-      "domain": "readable hosted result tools including dormant fetch",
+      "domain": "readable hosted result tools including fetch",
       "authority": {"kind": "schema_vocabulary", "schema": "capability-evidence.schema.json", "paths": ["/properties/feature/oneOf/1/properties/name"]},
       "consumers": [{"kind": "typescript_string_union", "file": "ui/src/lib/hostedActivity.ts", "name": "HostedToolName"}]
     },

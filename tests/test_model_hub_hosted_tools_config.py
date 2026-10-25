@@ -59,7 +59,7 @@ def test_released_configs_load_with_every_tool_on_and_stay_without_the_section()
     section = json.loads((FIXTURES / "released_pre_vibey_consumer.json").read_text(encoding="utf-8"))
     config = ModelHubConfig.from_payload(section, repairing=True)
     assert config.hosted_tools == {}
-    assert enabled_tools(config) == RELEASED_TOOLS
+    assert enabled_tools(config) == KNOWN_TOOLS
     assert "hosted_tools" not in config.to_payload()
 
 
@@ -140,7 +140,7 @@ def test_disk_load_with_a_broken_hosted_tools_section_keeps_model_hub(monkeypatc
 
     assert not loaded.load_warnings
     assert [source.id for source in loaded.model_hub.sources] == ["src_xai00001"]
-    assert enabled_tools(loaded.model_hub) == ("image_generate",)
+    assert enabled_tools(loaded.model_hub) == ("image_generate", "web_fetch")
     assert config_path.read_text(encoding="utf-8") == original
     assert not list(tmp_path.glob("config.json.bak-recovery-*"))
 
@@ -182,7 +182,7 @@ async def test_the_tools_api_writes_one_field_of_one_tool_at_a_time(tmp_path):
     status = service.hosted_tools_status()["hosted_tools"]
     _validate_status(status)
     by_name = {tool["name"]: tool for tool in status["tools"]}
-    assert list(by_name) == list(RELEASED_TOOLS) and all(tool["enabled"] for tool in status["tools"])
+    assert list(by_name) == list(KNOWN_TOOLS) and all(tool["enabled"] for tool in status["tools"])
     # The executor runs on the vendor's lightweight model, priced by the overlay's dated list price.
     (candidate,) = by_name["x_search"]["executor_candidates"]
     assert (candidate["source_id"], candidate["model_id"], candidate["billing"], candidate["relay"]) == (

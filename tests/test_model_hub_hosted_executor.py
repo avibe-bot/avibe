@@ -1121,7 +1121,7 @@ async def test_a_turn_keeps_its_tools_and_executor_order_until_the_next_turn(tmp
         _bind(service, "web_search", (OPENAI, "gpt-6-astra"))
         _bind(service, "x_search", (XAI, "grok-4.6"))
         again = await router.resolve_hop("menu-alias", process_scope="vibey:freeze", turn_id="turn-freeze")
-        assert again["hosted_tools"].keys() == first["hosted_tools"].keys() == {"web_search", "image_generate"}
+        assert again["hosted_tools"].keys() == first["hosted_tools"].keys() == {"web_search", "image_generate", "web_fetch"}
         status, answer = await search(again, "web_search")
         assert status == 200 and answer["execution"]["executor_source_id"] == XAI
         assert (await search(again, "x_search"))[0] == 409

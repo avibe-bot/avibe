@@ -7305,7 +7305,7 @@ class ModelHubService:
         return {}
 
     async def _run_fetch_chain(self, call: ExecutorCall, turn: TurnHostedTools, *, say: Callable[..., str]) -> dict:
-        """Run the dormant web_fetch service/local chain behind the activation flag."""
+        """Run the web_fetch service/local chain behind the shared activation switch."""
         from .fetch_chain import FetchChain
         return await FetchChain(self, call, turn, say).run()
 

@@ -1,7 +1,7 @@
 # Model Hub contracts
 
-Status: **contract_version 21**, 2026-10-25: keyless Exa activation (KEX-3)
-and dormant fetch readers (WF-1) / Vibey and UI producer support (WF-2V).
+Status: **contract_version 21**, 2026-10-26: keyless Exa activation (KEX-3)
+and web fetch readers, producers and coordinated activation (WF-1/2/3).
 `gh-v3.2.3rc3` through `rc7` carry v20, so the unreleased v21 event now includes
 its coordinated readers, producer, and default-on Exa search activation. The versioned
 mirrors advance together; persisted TurnProvenance retains v5–v20 and adds v21.
@@ -16,8 +16,9 @@ WF-1 appends dormant `web_fetch` readers to this unreleased event:
 separate fetch consent/order, local/Exa/Jina synthetic identities, fetch/local
 executor origins and local attempts, C-1 bounded fetch records, C-6 function-only
 facts, and optional service usage `tool` attribution (absent means `web_search`).
-`WEB_FETCH_ACTIVE = False` keeps GET/candidates/declarations/active settings UI
-unchanged; historical reads and V2/PUT preservation do not depend on activation.
+WF-1 originally kept `WEB_FETCH_ACTIVE = False`, leaving GET/candidates/
+declarations/active settings UI unchanged; historical reads and V2/PUT preservation
+do not depend on activation.
 The exact shapes and downgrade losses are owned by [`../web-fetch.md`](../web-fetch.md)
 §§2/4/6/8. WF-1 adds no fetch producer, network transport or dependency.
 The localized hosted-activity vocabulary adds `service_rate_limited` as a fallback
@@ -33,7 +34,17 @@ activity projection adds optional `policy_sources` (service ids reached before
 an address-policy refusal; an empty list means not forwarded). Web and IM read
 that one decision, localize synthetic labels, and retain historical readability
 regardless of activation. See [`../web-fetch-vibey-ui.md`](../web-fetch-vibey-ui.md)
-for fixture acceptance and intentional boundaries. The production flag stays off.
+for fixture acceptance and intentional boundaries.
+
+WF-3 sets `WEB_FETCH_ACTIVE = True` across the read, candidates, frozen declaration
+and gateway producer after the WF-2G engine/chain/provider PRs (#2962/#2968/#2976).
+It changes no serialized shape or contract version. Missing fetch config uses the
+automatic local → configured services → keyless Exa → keyless Jina order without
+writing defaults; saved fetch opt-outs and ordering remain independent of search.
+Public en/zh disclosure ships with activation (`avibe-docs#83`); §7 of the owning
+plan specifies up/down buttons, not drag. **Release hold:** on 2026-10-26 no tag
+contains WF-1 `9e47e5f`; both activation and disclosure merges wait for an
+owner-published reader release. See [`../web-fetch.md`](../web-fetch.md) §8.
 
 It builds on v20 (2026-10-22): active web-search services (S2b-2).
 `gh-v3.2.3rc1` and `gh-v3.2.3rc2` carried v19, so activation opened v20 rather than

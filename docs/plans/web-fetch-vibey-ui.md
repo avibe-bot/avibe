@@ -5,6 +5,12 @@ Change contract, 2026-10-25. Implements the Vibey and UI portion of
 owns gateway policy, network transports, extraction, normalization, settlement
 and packaging. No gateway contract change is needed by this lane.
 
+Activation follow-up, 2026-10-26: WF-3 sets the shared flag to true after all
+WF-2G producers merged, with default-on boundary acceptance and public en/zh
+disclosure. Both activation and docs merges remain held for the owner to publish
+a WF-1 reader release. The invariants below describe WF-2V's original dormant
+landing; the current activation/release contract is `web-fetch.md` §§7–8.
+
 ## Invariants
 
 - The production `WEB_FETCH_ACTIVE` remains false. No function registration or

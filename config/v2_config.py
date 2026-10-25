@@ -3045,8 +3045,8 @@ class ModelHubAgentSupplyConfig:
 # through the executor, and the direct image tool.
 MODEL_HUB_SEARCH_TOOLS: tuple[str, ...] = ("web_search", "x_search")
 MODEL_HUB_HOSTED_TOOLS: tuple[str, ...] = (*MODEL_HUB_SEARCH_TOOLS, "image_generate", "web_fetch")
-# Readers precede every producer release; activation is coordinated with public disclosure.
-WEB_FETCH_ACTIVE = False
+# WF-3 enables read, declaration and producer together; release prerequisite: docs/plans/web-fetch.md §8.
+WEB_FETCH_ACTIVE = True
 
 
 def _drop_vibey_client_presets(agent: "ModelHubAgentSupplyConfig") -> None:
