@@ -329,7 +329,7 @@ class VibeArgumentParser(argparse.ArgumentParser):
             payload["hint"] = self.error_hint
         if self.error_help_command:
             payload["help_command"] = self.error_help_command
-        self.exit(2, json.dumps(payload, indent=2) + "\n")
+        self.exit(2, _json_text(payload, stream=sys.stderr) + "\n")
 
 
 class TaskCliError(ValueError):
@@ -501,7 +501,7 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
         }
         if help_command:
             payload["help_command"] = help_command
-    print(json.dumps(payload, indent=2), file=sys.stderr)
+    print(_json_text(payload, stream=sys.stderr), file=sys.stderr)
 
 
 def _definition_conflict_cli_error(
@@ -535,8 +535,25 @@ def _cli_payload(kind: str, **fields) -> dict:
     return {"schema_version": 1, "ok": True, "kind": kind, **fields}
 
 
+def _json_text(payload: Mapping[str, Any], *, stream: Any) -> str:
+    """Indented JSON for the CLI: non-ASCII text as itself, escaped only where ``stream`` cannot carry it.
+
+    Agents read this output, and a ``\\uXXXX`` escape costs six characters per
+    character. A stream whose encoding cannot hold the text (a Windows pipe on a
+    legacy code page) still gets valid JSON rather than an encoding error.
+    """
+
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return json.dumps(payload, indent=2)
+    return text
+
+
 def _print_cli_payload(kind: str, **fields) -> None:
-    print(json.dumps(_cli_payload(kind, **fields), indent=2))
+    print(_json_text(_cli_payload(kind, **fields), stream=sys.stdout))
 
 
 def _configured_trace_retention_days() -> int:
@@ -675,7 +692,13 @@ def cmd_skill(args) -> int:
         # Each name is loaded, printed, and observed on its own, in the order given:
         # an unknown name fails the command without hiding the Skills that did load.
         names = list(dict.fromkeys(args.names))
-        allowed = resolve_skills()
+        started_at = time.monotonic()
+        try:
+            allowed = resolve_skills()
+        except BaseException:
+            for name in names:
+                finish_cli_load(name, None, started_at, "internal_error")
+            raise
         missing: list[str] = []
         for name in names:
             started_at = time.monotonic()
@@ -2052,7 +2075,7 @@ def _show_annotate_examples_text() -> str:
 
 
 def _print_json(payload: dict) -> None:
-    print(json.dumps(payload, indent=2))
+    print(_json_text(payload, stream=sys.stdout))
 
 
 def _watch_add_examples_text() -> str:
@@ -14533,7 +14556,7 @@ def _print_show_page_error(exc: Exception) -> None:
     details = getattr(exc, "details", None)
     if details:
         payload["details"] = details
-    print(json.dumps(payload, indent=2), file=sys.stderr)
+    print(_json_text(payload, stream=sys.stderr), file=sys.stderr)
 
 
 def _load_show_page_store():
@@ -15628,8 +15651,17 @@ def cmd_check_update(args=None):
             _print_cli_payload("update_check", current=__version__, desktop_managed=True)
             return 0
         info = get_latest_version()
+        if info["error"]:
+            _print_task_error(
+                TaskCliError(
+                    f"Failed to check for updates: {info['error']}",
+                    code="update_check_failed",
+                    details={"current": info.get("current") or __version__},
+                )
+            )
+            return 1
         _print_cli_payload("update_check", **info, desktop_managed=False)
-        return 1 if info["error"] else 0
+        return 0
     print(f"Current version: {__version__}")
     if is_desktop_managed_runtime():
         print("Updates are delivered with the Avibe desktop app.")

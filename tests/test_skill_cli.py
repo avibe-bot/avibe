@@ -72,3 +72,30 @@ def test_skill_load_of_known_names_succeeds_with_skill_text_only(monkeypatch, tm
     captured = capsys.readouterr()
     assert captured.out == _skill_content(docs, "Use references/guide.md\n")
     assert captured.err == ""
+
+
+def test_cli_json_keeps_non_ascii_text_as_itself(monkeypatch, tmp_path, capsys):
+    cwd = _isolate_catalog(monkeypatch, tmp_path)
+    _write_skill(cwd / ".agents" / "skills", "docs", "阅读项目文档", "Body\n")
+
+    assert cmd_skill(build_parser().parse_args(["skill", "list"])) == 0
+
+    output = capsys.readouterr().out
+    assert '"description": "阅读项目文档"' in output
+    assert "\\u" not in output
+
+
+def test_cli_json_escapes_text_a_legacy_code_page_cannot_carry(monkeypatch, tmp_path):
+    import io
+    import sys
+
+    cwd = _isolate_catalog(monkeypatch, tmp_path)
+    _write_skill(cwd / ".agents" / "skills", "docs", "阅读项目文档", "Body\n")
+    raw = io.BytesIO()
+    monkeypatch.setattr(sys, "stdout", io.TextIOWrapper(raw, encoding="cp1252"))
+
+    assert cmd_skill(build_parser().parse_args(["skill", "list"])) == 0
+
+    sys.stdout.flush()
+    payload = json.loads(raw.getvalue().decode("cp1252"))
+    assert payload["skills"] == [{"name": "docs", "description": "阅读项目文档"}]
