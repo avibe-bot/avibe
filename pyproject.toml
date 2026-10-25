@@ -77,8 +77,8 @@ dependencies = [
     "httpx[http2,socks]>=0.27",
     # WF-2G: update this version only together with the locked chrome150 profile.
     "curl_cffi==0.16.3; platform_python_implementation == 'CPython' and ((sys_platform == 'darwin' and (platform_machine == 'arm64' or platform_machine == 'x86_64')) or (sys_platform == 'linux' and (platform_machine == 'x86_64' or platform_machine == 'aarch64')) or (sys_platform == 'win32' and (platform_machine == 'AMD64' or platform_machine == 'ARM64')))",
-    "brotli>=1.2.1",
-    "zstandard>=0.25.0",
+    # Keep br/zstd inside libcurl: Python codec imports change other clients'
+    # defaults (Sentry, HTTPX, Discord). The degraded path uses stdlib codecs.
     "trafilatura>=2.3.1",
     "pypdf>=6.21.2",
     "python-multipart>=0.0.9",

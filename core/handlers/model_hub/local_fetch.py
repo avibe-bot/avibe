@@ -109,6 +109,14 @@ class LocalFetchEngine:
     async def _run(self, operation, url, *, deadline, locale="en", on_sent=None):
         state = {"operation": operation, "sent": False, "host": None, "held_host": None, "slot": False,
                  "waiting": True, "phase": "policy" if operation == "gate" else "admission"}
+        try:
+            return await self._run_owned(operation, url, state, deadline=deadline, locale=locale, on_sent=on_sent)
+        finally:
+            # Publish the settled host-health outcome before waking any waiter.
+            # Child reaping completes inside _run_owned on success/timeout/Stop.
+            self._release(operation, state)
+
+    async def _run_owned(self, operation, url, state, *, deadline, locale, on_sent):
         invocation = asyncio.create_task(self._invoke(operation, url, locale, state, on_sent, deadline))
 
         async def drain():
@@ -171,90 +179,87 @@ class LocalFetchEngine:
 
     async def _invoke(self, operation, url, locale, state, on_sent, deadline):
         process = monitor = reader = None
-        try:
-            await self._admit(operation, parse_url(url).host, state)
-            with tempfile.TemporaryDirectory(prefix="avibe-fetch-") as home:
-                environment = {key: os.environ[key] for key in ("SystemRoot", "WINDIR") if key in os.environ}
-                environment.update(HOME=home, USERPROFILE=home, TMPDIR=home, TMP=home, TEMP=home,
-                                   XDG_CONFIG_HOME=home, XDG_CACHE_HOME=home)
-                spawning = asyncio.create_task(asyncio.create_subprocess_exec(
-                    sys.executable, "-I", "-B", "-c", _WORKER, str(Path(__file__).resolve().parents[3]),
-                    cwd=home, env=environment, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.DEVNULL, limit=_IPC_LIMIT,
-                ))
+        await self._admit(operation, parse_url(url).host, state)
+        with tempfile.TemporaryDirectory(prefix="avibe-fetch-") as home:
+            environment = {key: os.environ[key] for key in ("SystemRoot", "WINDIR") if key in os.environ}
+            environment.update(HOME=home, USERPROFILE=home, TMPDIR=home, TMP=home, TEMP=home,
+                               XDG_CONFIG_HOME=home, XDG_CACHE_HOME=home)
+            spawning = asyncio.create_task(asyncio.create_subprocess_exec(
+                sys.executable, "-I", "-B", "-c", _WORKER, str(Path(__file__).resolve().parents[3]),
+                cwd=home, env=environment, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL, limit=_IPC_LIMIT,
+            ))
+            try:
                 try:
-                    try:
-                        process = await asyncio.shield(spawning)
-                    except asyncio.CancelledError:
-                        process = await await_owned_task(spawning)
-                        raise
-                    monitor = asyncio.create_task(self._monitor(process))
-                    process.stdin.write((json.dumps({"operation": operation, "url": url, "locale": locale,
-                                                    "remaining_seconds": max(0, deadline - time.monotonic())}) + "\n").encode())
+                    process = await asyncio.shield(spawning)
+                except asyncio.CancelledError:
+                    process = await await_owned_task(spawning)
+                    raise
+                monitor = asyncio.create_task(self._monitor(process))
+                process.stdin.write((json.dumps({"operation": operation, "url": url, "locale": locale,
+                                                "remaining_seconds": max(0, deadline - time.monotonic())}) + "\n").encode())
+                await process.stdin.drain()
+                while True:
+                    reader = asyncio.create_task(process.stdout.readline())
+                    completed, _ = await asyncio.wait({reader, monitor}, return_when=asyncio.FIRST_COMPLETED)
+                    if monitor in completed:
+                        return self._failure(state, "fetch_unavailable")
+                    raw = reader.result()
+                    if not raw or len(raw) > _IPC_LIMIT:
+                        return self._failure(state, "fetch_unavailable")
+                    event = await asyncio.to_thread(json.loads, raw)
+                    kind = event.get("event")
+                    if kind in {"result", "failure"}:
+                        return event["result"] if kind == "result" else {key: value for key, value in event.items() if key != "event"}
+                    if kind == "host":
+                        host = event["host"]
+                        await self._change_host(host, state)
+                        state["phase"] = "policy"  # The worker re-resolves after this ACK.
+                        until = self._cooldowns.get(host, (0, 0))[0]
+                        if until > time.time():
+                            return {"error_code": "fetch_unavailable", "skipped": "cooling", "terminal": False,
+                                    "retry_at": datetime.fromtimestamp(until, timezone.utc).isoformat()}
+                    elif kind == "phase":
+                        state["phase"] = event["phase"]
+                    elif kind == "fallback":
+                        state["fallback"] = event["result"]
+                    elif kind == "transport":
+                        state["transport"] = {key: event[key] for key in ("transport_degraded", "transport_degraded_reason")}
+                    elif kind == "sent":
+                        state["phase"] = "fetch"
+                        if not state["sent"]:
+                            if on_sent is not None:
+                                result = on_sent()
+                                if inspect.isawaitable(result):
+                                    await result
+                            state["sent"] = True
+                    else:
+                        return self._failure(state, "fetch_unavailable")
+                    process.stdin.write(b"ok\n")
                     await process.stdin.drain()
-                    while True:
-                        reader = asyncio.create_task(process.stdout.readline())
-                        completed, _ = await asyncio.wait({reader, monitor}, return_when=asyncio.FIRST_COMPLETED)
-                        if monitor in completed:
-                            return self._failure(state, "fetch_unavailable")
-                        raw = reader.result()
-                        if not raw or len(raw) > _IPC_LIMIT:
-                            return self._failure(state, "fetch_unavailable")
-                        event = await asyncio.to_thread(json.loads, raw)
-                        kind = event.get("event")
-                        if kind in {"result", "failure"}:
-                            return event["result"] if kind == "result" else {key: value for key, value in event.items() if key != "event"}
-                        if kind == "host":
-                            host = event["host"]
-                            await self._change_host(host, state)
-                            state["phase"] = "policy"  # The worker re-resolves after this ACK.
-                            until = self._cooldowns.get(host, (0, 0))[0]
-                            if until > time.time():
-                                return {"error_code": "fetch_unavailable", "skipped": "cooling", "terminal": False,
-                                        "retry_at": datetime.fromtimestamp(until, timezone.utc).isoformat()}
-                        elif kind == "phase":
-                            state["phase"] = event["phase"]
-                        elif kind == "fallback":
-                            state["fallback"] = event["result"]
-                        elif kind == "transport":
-                            state["transport"] = {key: event[key] for key in ("transport_degraded", "transport_degraded_reason")}
-                        elif kind == "sent":
-                            state["phase"] = "fetch"
-                            if not state["sent"]:
-                                if on_sent is not None:
-                                    result = on_sent()
-                                    if inspect.isawaitable(result):
-                                        await result
-                                state["sent"] = True
-                        else:
-                            return self._failure(state, "fetch_unavailable")
-                        process.stdin.write(b"ok\n")
-                        await process.stdin.drain()
-                finally:
-                    async def cleanup():
-                        try:
-                            if process is not None:
-                                if process.returncode is None:
-                                    try:
-                                        process.kill()
-                                    except ProcessLookupError:
-                                        pass
-                                await process.wait()
-                        finally:
-                            for task in (reader, monitor):
-                                if task:
-                                    task.cancel()
-                            await asyncio.gather(*(task for task in (reader, monitor) if task), return_exceptions=True)
-                    # Timeout followed by Stop must not interrupt kill/reap,
-                    # strand a host, or leave a monitor reading a dead PID.
-                    cleaning = asyncio.create_task(cleanup())
+            finally:
+                async def cleanup():
                     try:
-                        await asyncio.shield(cleaning)
-                    except asyncio.CancelledError:
-                        await await_owned_task(cleaning)
-                        raise  # Even a Stop arriving after a normal result wins.
-        finally:
-            self._release(operation, state)
+                        if process is not None:
+                            if process.returncode is None:
+                                try:
+                                    process.kill()
+                                except ProcessLookupError:
+                                    pass
+                            await process.wait()
+                    finally:
+                        for task in (reader, monitor):
+                            if task:
+                                task.cancel()
+                        await asyncio.gather(*(task for task in (reader, monitor) if task), return_exceptions=True)
+                # Timeout followed by Stop must not interrupt kill/reap,
+                # strand a host, or leave a monitor reading a dead PID.
+                cleaning = asyncio.create_task(cleanup())
+                try:
+                    await asyncio.shield(cleaning)
+                except asyncio.CancelledError:
+                    await await_owned_task(cleaning)
+                    raise  # Even a Stop arriving after a normal result wins.
 
     @staticmethod
     async def _monitor(process):

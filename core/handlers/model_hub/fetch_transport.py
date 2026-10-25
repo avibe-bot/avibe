@@ -8,6 +8,7 @@ import json
 import ssl
 import sys
 import time
+import zlib
 from dataclasses import dataclass, field
 from importlib.metadata import version
 from itertools import zip_longest
@@ -22,7 +23,8 @@ from .fetch_policy import CheckedTarget, FetchFailure
 
 
 ACCEPT = "text/markdown, text/html;q=0.95, application/xhtml+xml;q=0.9, text/plain;q=0.8, application/json;q=0.5, */*;q=0.1"
-ENCODING = "gzip, br, zstd"
+ENCODING = "gzip, deflate, br, zstd"
+DEGRADED_ENCODING = "gzip, deflate"
 TEXT_LIMIT = 16 * 1024 * 1024
 PDF_LIMIT = 32 * 1024 * 1024
 HEADER_LIMIT = 64 * 1024
@@ -36,7 +38,7 @@ def browser_profile() -> dict:
 
 def request_headers(*, degraded: bool, locale: str, previous_origin: tuple | None, target: CheckedTarget) -> dict[str, str]:
     common = {
-        "Accept": ACCEPT, "Accept-Encoding": ENCODING,
+        "Accept": ACCEPT, "Accept-Encoding": DEGRADED_ENCODING if degraded else ENCODING,
         "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8" if locale.startswith("zh") else "en-US,en;q=0.9",
     }
     if degraded:
@@ -64,6 +66,8 @@ def native_available() -> tuple[bool, str | None]:
             return False, "native_profile_version_mismatch"
         curl = Curl()
         try:
+            if any(codec not in curl.version() for codec in (b" brotli/", b" zstd/")):
+                return False, "native_compression_unavailable"
             if curl.impersonate(profile["impersonate"]) != 0:
                 return False, "native_profile_unavailable"
         finally:
@@ -98,6 +102,7 @@ class _Receiver:
     status: int | None = None
     headers_complete: bool = False
     header_bytes: int = 0
+    native_decoded: bool = False
 
     def header(self, data: bytes) -> int:
         self.header_bytes += len(data)
@@ -134,12 +139,24 @@ class _Receiver:
                 lengths = [int(v) for k, v in self.headers if k == "content-length"]
                 if len(set(lengths)) > 1 or (lengths and self.budget.wire + lengths[0] > self.limit):
                     raise FetchFailure("fetch_target_unreadable")
+                if self.budget.decoded > self.limit:
+                    raise FetchFailure("fetch_target_unreadable")
+                encoding = next((v.lower().strip() for k, v in self.headers if k == "content-encoding"), "identity")
+                allowed = {"identity", "", "gzip", "deflate"} | ({"br", "zstd"} if self.native_decoded else set())
+                if encoding not in allowed:
+                    raise FetchFailure("fetch_unsupported_content")
         return len(data)
 
     def body(self, data: bytes) -> int:
-        self.budget.wire += len(data)
-        if self.budget.wire > self.limit:
-            raise FetchFailure("fetch_target_unreadable")
+        if self.native_decoded:
+            # libcurl emits bounded decoded chunks; count before retaining them.
+            self.budget.decoded += len(data)
+            if self.budget.decoded > self.limit:
+                raise FetchFailure("fetch_target_unreadable")
+        else:
+            self.budget.wire += len(data)
+            if self.budget.wire > self.limit:
+                raise FetchFailure("fetch_target_unreadable")
         self.raw.extend(data)
         return len(data)
 
@@ -155,34 +172,28 @@ class _Receiver:
             # Never pass a negative size (read-all) to a decoder.
             raise FetchFailure("fetch_target_unreadable")
         raw = bytes(self.raw)
+        if self.native_decoded:
+            return HopResponse(status, self.headers, raw)
         try:
             if encoding in ("identity", ""):
                 body = raw
             elif encoding == "gzip":
                 with gzip.GzipFile(fileobj=io.BytesIO(raw)) as stream:
                     body = stream.read(remaining + 1)
-            elif encoding == "zstd":
-                import zstandard
-
-                with zstandard.ZstdDecompressor(max_window_size=8 * 1024 * 1024).stream_reader(io.BytesIO(raw), read_across_frames=True) as stream:
-                    body = stream.read(remaining + 1)
-            elif encoding == "br":
-                import brotli
-
-                decoder = brotli.Decompressor()
-                chunks = bytearray()
-                for start in range(0, len(raw), 1024):
-                    pending = raw[start:start + 1024]
-                    while True:
-                        chunks.extend(decoder.process(pending, output_buffer_limit=min(65536, remaining - len(chunks) + 1)))
-                        if len(chunks) > remaining:
-                            raise FetchFailure("fetch_target_unreadable")
-                        if decoder.can_accept_more_data():
-                            break
-                        pending = b""
-                if not decoder.is_finished():
-                    raise FetchFailure("fetch_target_unreadable")
-                body = bytes(chunks)
+            elif encoding == "deflate":
+                # Accept the RFC zlib wrapper and the common raw-deflate variant,
+                # bounding output at the C decoder before allocating the result.
+                for window in (zlib.MAX_WBITS, -zlib.MAX_WBITS):
+                    decoder = zlib.decompressobj(window)
+                    try:
+                        body = decoder.decompress(raw, remaining + 1)
+                    except zlib.error:
+                        if window > 0:
+                            continue
+                        raise
+                    if len(body) > remaining or not decoder.eof or decoder.unused_data:
+                        raise FetchFailure("fetch_target_unreadable")
+                    break
             else:
                 raise FetchFailure("fetch_unsupported_content")
         except FetchFailure:
@@ -315,11 +326,12 @@ def httpx_hop(target: CheckedTarget, headers: dict, budget: TransferBudget, time
 
 
 def curl_hop(target: CheckedTarget, headers: dict, budget: TransferBudget, timeout: float, on_sent: Callable) -> HopResponse:
-    from curl_cffi import CurlHttpVersion, CurlOpt
+    from curl_cffi import CurlHttpVersion, CurlOpt, ffi, lib
     from curl_cffi.curl import CURL_WRITEFUNC_ERROR
     from curl_cffi.requests import Session
 
-    receiver = _Receiver(budget)
+    receiver = _Receiver(budget, native_decoded=True)
+    wire_before = budget.wire
     pins = ",".join(f"[{ip}]" if ":" in ip else ip for ip in target.ips)
     errors = []
 
@@ -341,9 +353,21 @@ def curl_hop(target: CheckedTarget, headers: dict, budget: TransferBudget, timeo
             on_sent()
         # Deliberately discard all bytes: never log cookies or headers.
 
+    # curl_cffi's high-level setopt does not wrap XFERINFOFUNCTION. Use the
+    # pinned binding's exported C ABI, retaining this callback through perform.
+    # The transfer counter counts encoded entity bytes, not decoded chunks or
+    # HTTP chunk framing. It also runs when a compressed stream emits no body.
+    @ffi.callback("int(void *, int64_t, int64_t, int64_t, int64_t)", error=1)
+    def progress(_client, _total, downloaded, _upload_total, _uploaded):
+        budget.wire = wire_before + downloaded
+        if receiver.headers_complete and receiver.status == 200 and budget.wire > receiver.limit and not errors:
+            errors.append(FetchFailure("fetch_target_unreadable"))
+        return 1 if errors else 0
+
     options = {
         CurlOpt.PROXY: "", CurlOpt.NETRC: 0, CurlOpt.FRESH_CONNECT: 1, CurlOpt.FORBID_REUSE: 1,
-        CurlOpt.HTTP_VERSION: CurlHttpVersion.V2TLS, CurlOpt.HTTP_CONTENT_DECODING: 0,
+        CurlOpt.HTTP_VERSION: CurlHttpVersion.V2TLS, CurlOpt.HTTP_CONTENT_DECODING: 1,
+        CurlOpt.NOPROGRESS: 0,
         CurlOpt.CONNECTTIMEOUT_MS: max(1, int(min(5, timeout) * 1000)),
         CurlOpt.HEADERFUNCTION: guarded(header), CurlOpt.DEBUGFUNCTION: debug, CurlOpt.VERBOSE: 1,
         # A fresh handle with no ALTSVC/HSTS storage never learns a later-hop
@@ -354,6 +378,8 @@ def curl_hop(target: CheckedTarget, headers: dict, budget: TransferBudget, timeo
         options[CurlOpt.RESOLVE] = [f"{target.address.host}:{target.address.port}:{pins}"]
     try:
         with Session(trust_env=False, curl_options=options, retry=0) as session:
+            if lib._curl_easy_setopt(session.curl._curl, CurlOpt.XFERINFOFUNCTION, progress) != 0:
+                raise FetchFailure("fetch_unavailable")
             try:
                 response = session.get(
                     target.address.url, headers=headers, impersonate=browser_profile()["impersonate"],
@@ -366,8 +392,11 @@ def curl_hop(target: CheckedTarget, headers: dict, budget: TransferBudget, timeo
                 response = getattr(error, "response", None)
                 if not receiver.headers_complete or receiver.status == 200 or response is None:
                     raise
+            budget.wire = wire_before + response.download_size
             if errors:
                 raise errors[0]
+            if response.status_code == 200 and budget.wire > receiver.limit:
+                raise FetchFailure("fetch_target_unreadable")
             if _peer(response.primary_ip) not in {_peer(ip) for ip in target.ips}:
                 raise FetchFailure("fetch_url_blocked", terminal=True)
             return receiver.finish(response.status_code)

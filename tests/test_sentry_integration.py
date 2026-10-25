@@ -719,23 +719,17 @@ def test_init_sentry_disables_spotlight_env_bypass(monkeypatch, tmp_path):
         sentry_sdk.get_global_scope().set_client(None)
 
 
-@pytest.fixture(params=["br", "gzip"])
-def sentry_wire_encoding(monkeypatch, request):
-    import sentry_sdk.transport
-
-    if request.param == "gzip":
-        monkeypatch.setattr(sentry_sdk.transport, "brotli", None)
-    return request.param
-
-
 def _decode_sentry_wire_body(body, headers):
-    import brotli
+    if headers["Content-Encoding"] == "br":
+        import brotli
+        return brotli.decompress(body)
     import gzip
 
-    return {"br": brotli.decompress, "gzip": gzip.decompress}[headers["Content-Encoding"]](body)
+    assert headers["Content-Encoding"] == "gzip"
+    return gzip.decompress(body)
 
 
-def test_performance_transactions_are_scrubbed_like_events(monkeypatch, tmp_path, sentry_wire_encoding):
+def test_performance_transactions_are_scrubbed_like_events(monkeypatch, tmp_path):
     """Transactions skip ``before_send``; their spans must not carry what events may not."""
 
     import sentry_sdk
@@ -776,7 +770,6 @@ def test_performance_transactions_are_scrubbed_like_events(monkeypatch, tmp_path
         sentry_sdk.get_global_scope().set_client(None)
 
     (body, headers), = sent
-    assert headers["Content-Encoding"] == sentry_wire_encoding
     raw = _decode_sentry_wire_body(body, headers)
     envelope = Envelope.deserialize(raw)
     payload = next(item.get_bytes().decode("utf-8") for item in envelope.items if item.type == "transaction")

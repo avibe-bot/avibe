@@ -4,6 +4,8 @@ Fixtures own their loopback pins; production has no policy bypass. These tests
 exercise real libcurl/HTTPcore sockets, not a mock implementing the pin policy.
 """
 import gzip
+import io
+import zlib
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,12 +17,48 @@ from core.handlers.model_hub import fetch_transport as transport
 from core.handlers.model_hub.fetch_policy import CheckedTarget, FetchFailure, FetchURL
 
 
+# Static codec fixtures keep optional Python codecs out of every install/test
+# environment. Both br/zstd payloads expand to exactly b"x" * 4096.
+_COMPRESSED = {
+    "gzip": gzip.compress(b"x" * 4096),
+    "deflate": zlib.compress(b"x" * 4096),
+    "deflate-raw": zlib.compress(b"x" * 4096)[2:-4],
+    "br": bytes.fromhex("1bff0ff825f0e2b14020f70000"),
+    "zstd": bytes.fromhex("28b52ffd60000f4d00001078780100fbf70116"),
+}
+_STREAMED_ZSTD = bytes.fromhex(
+    "28b52ffd0048940100840241207265616461626c652064796e616d6963616c6c7920636f6d7072657373656420706167652e0a"
+    "0100a8fe5fb92a034c000008640100fcff3910024d0000086f0100fc611d0801"
+)
+
+
 @pytest.fixture
 def stub():
     requests = []
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             requests.append((self.path, dict(self.headers)))
+            if self.path.startswith("/encoded/") or self.path == "/wire-padding":
+                if self.path == "/wire-padding":
+                    stream = io.BytesIO()
+                    with gzip.GzipFile(filename="x" * 4096, mode="wb", fileobj=stream) as compressed:
+                        compressed.write(b"tiny")
+                    raw, encoding = stream.getvalue(), "gzip"
+                else:
+                    encoding = self.path.rsplit("/", 1)[-1]
+                    raw = _STREAMED_ZSTD if encoding == "zstd-stream" else _COMPRESSED[encoding]
+                    encoding = encoding.removesuffix("-stream").removesuffix("-raw")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Encoding", encoding)
+                if self.path != "/wire-padding":
+                    self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                try:
+                    self.wfile.write(raw)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
             if self.path.startswith("/status/"):
                 self.send_response(int(self.path.rsplit("/", 1)[-1]))
                 self.send_header("Content-Type", "text/plain")
@@ -103,7 +141,7 @@ def test_real_hop_uses_numeric_pin_original_host_and_no_ambient_credentials(stub
     lower = {key.lower(): value for key, value in got.items()}
     assert not ({"authorization", "proxy-authorization", "cookie", "referer"} & lower.keys())
     assert lower["accept"] == transport.ACCEPT
-    assert lower["accept-encoding"] == "gzip, br, zstd"
+    assert lower["accept-encoding"] == ("gzip, deflate, br, zstd" if native else "gzip, deflate")
     if native:
         assert "Chrome/150.0.0.0" in lower["user-agent"]
         assert '"Chromium";v="150"' in lower["sec-ch-ua"]
@@ -192,38 +230,60 @@ def test_final_content_type_owns_size_limit_not_interim_headers(headers):
         receiver.body(b"x" * (transport.TEXT_LIMIT + 1))
 
 
-def test_streamed_zstd_without_content_size_uses_http_window():
-    import zstandard
-    body = b"A readable dynamically compressed page.\n" * 8000
-    raw = zstandard.ZstdCompressor(write_content_size=False).compress(body)
-    receiver = transport._Receiver(transport.TransferBudget())
-    receiver.header(b"Content-Encoding: zstd\r\n")
-    receiver.body(raw)
-    assert receiver.finish(200).body == body
+@pytest.mark.parametrize("native", [True, False])
+@pytest.mark.parametrize("encoding", ["gzip", "deflate", "deflate-raw", "br", "zstd"])
+def test_real_codec_contract_counts_wire_and_decoded_bytes_separately(stub, native, encoding):
+    if native:
+        pytest.importorskip("curl_cffi")
+    port, _ = stub
+    target = CheckedTarget(FetchURL(f"http://public.example:{port}/encoded/{encoding}", "public.example", port, "http", False), ("127.0.0.1",))
+    budget = transport.TransferBudget()
+    if not native and encoding in {"br", "zstd"}:
+        with pytest.raises(FetchFailure, match="fetch_unsupported_content"):
+            transport.httpx_hop(target, {}, budget, 3, lambda: None)
+        return
+    response = (transport.curl_hop if native else transport.httpx_hop)(target, {}, budget, 3, lambda: None)
+    assert response.body == b"x" * 4096
+    assert budget.wire == len(_COMPRESSED[encoding]) and budget.decoded == 4096
 
 
-def test_brotli_caps_each_sdk_allocation_before_checking_aggregate(monkeypatch):
-    import brotli
-    raw = brotli.compress(b"x" * (4 * 1024 * 1024))
-    actual, chunks = brotli.Decompressor, []
-    class ObservedDecoder:
-        def __init__(self):
-            self.decoder = actual()
-        def process(self, data, **kwargs):
-            output = self.decoder.process(data, **kwargs)
-            chunks.append((kwargs.get("output_buffer_limit"), len(output)))
-            return output
-        def can_accept_more_data(self):
-            return self.decoder.can_accept_more_data()
-        def is_finished(self):
-            return self.decoder.is_finished()
-    monkeypatch.setattr(brotli, "Decompressor", ObservedDecoder)
-    receiver = transport._Receiver(transport.TransferBudget(), limit=2048)
-    receiver.header(b"Content-Encoding: br\r\n")
-    receiver.body(raw)
-    with pytest.raises(FetchFailure):
-        receiver.finish(200)
-    assert chunks and all(limit is not None and limit <= 2049 and size <= 65536 for limit, size in chunks)
+def test_native_streamed_zstd_without_content_size(stub):
+    pytest.importorskip("curl_cffi")
+    port, _ = stub
+    target = CheckedTarget(FetchURL(f"http://public.example:{port}/encoded/zstd-stream", "public.example", port, "http", False), ("127.0.0.1",))
+    budget = transport.TransferBudget()
+    response = transport.curl_hop(target, {}, budget, 3, lambda: None)
+    assert response.body == b"A readable dynamically compressed page.\n" * 8000
+    assert budget.wire == len(_STREAMED_ZSTD) and budget.decoded == len(response.body)
+
+
+@pytest.mark.parametrize("encoding", ["gzip", "deflate", "br", "zstd"])
+def test_native_decode_bomb_aborts_bounded_callback_before_retaining_excess(stub, monkeypatch, encoding):
+    pytest.importorskip("curl_cffi")
+    port, _ = stub
+    target = CheckedTarget(FetchURL(f"http://public.example:{port}/encoded/{encoding}", "public.example", port, "http", False), ("127.0.0.1",))
+    monkeypatch.setattr(transport, "TEXT_LIMIT", 1024)
+    original, calls = transport._Receiver.body, []
+    def observed(receiver, data):
+        try:
+            return original(receiver, data)
+        finally:
+            calls.append((len(data), len(receiver.raw)))
+    monkeypatch.setattr(transport._Receiver, "body", observed)
+    with pytest.raises(FetchFailure, match="fetch_target_unreadable"):
+        transport.curl_hop(target, {}, transport.TransferBudget(), 3, lambda: None)
+    assert calls and all(size <= 65536 and retained <= 1024 for size, retained in calls)
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_wire_budget_aborts_compressed_stream_with_tiny_decoded_body(stub, monkeypatch, native):
+    if native:
+        pytest.importorskip("curl_cffi")
+    port, _ = stub
+    target = CheckedTarget(FetchURL(f"http://public.example:{port}/wire-padding", "public.example", port, "http", False), ("127.0.0.1",))
+    monkeypatch.setattr(transport, "TEXT_LIMIT", 1024)
+    with pytest.raises(FetchFailure, match="fetch_target_unreadable"):
+        (transport.curl_hop if native else transport.httpx_hop)(target, {}, transport.TransferBudget(), 3, lambda: None)
 
 
 def test_backend_reserves_connect_budget_for_both_families_and_checks_peer(monkeypatch):
@@ -259,16 +319,10 @@ def test_backend_reserves_connect_budget_for_both_families_and_checks_peer(monke
 
 @pytest.mark.parametrize("encoding", ["gzip", "br", "zstd", "deflate"])
 def test_bounded_decoders_reject_bombs_and_unadvertised_encoding(encoding):
-    if encoding == "gzip":
-        raw = gzip.compress(b"x" * 2048)
-    elif encoding == "br":
-        import brotli
-        raw = brotli.compress(b"x" * 2048)
-    elif encoding == "zstd":
-        import zstandard
-        raw = zstandard.ZstdCompressor().compress(b"x" * 2048)
+    if encoding in {"gzip", "deflate"}:
+        raw = gzip.compress(b"x" * 2048) if encoding == "gzip" else zlib.compress(b"x" * 2048)
     else:
-        raw = b"unadvertised"
+        raw = _COMPRESSED[encoding]
     receiver = transport._Receiver(transport.TransferBudget(), limit=1024)
     receiver.header(f"Content-Encoding: {encoding}\r\n".encode())
     receiver.body(raw)

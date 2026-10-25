@@ -399,6 +399,53 @@ print(json.dumps({"event":"failure","error_code":"service_rate_limited","retry_a
     assert other["sent"] and sent == ["example.com", "other.example"]
 
 
+@pytest.mark.parametrize("retained_html", [False, True])
+async def test_queued_redirect_observes_rate_limit_before_host_is_released(monkeypatch, retained_html):
+    """A queued redirect cannot slip between worker cleanup and health publication."""
+    limited_result = ({"event": "result", "result": {"content": "retained HTML", "cooldown_code": "service_rate_limited", "retry_after": "3600"}}
+                      if retained_html else {"event": "failure", "error_code": "service_rate_limited", "retry_after": "3600", "terminal": False})
+    script = '''import sys,json
+from urllib.parse import urlsplit
+request=json.loads(sys.stdin.readline())
+host=urlsplit(request["url"]).hostname
+for event in [{"event":"host","host":host}, {"event":"sent"}]:
+ print(json.dumps(event),flush=True); sys.stdin.readline()
+if host == "limited.example":
+ print(json.dumps(LIMITED_RESULT),flush=True)
+else:
+ print(json.dumps({"event":"host","host":"limited.example"}),flush=True)
+ if sys.stdin.readline():
+  print(json.dumps({"event":"result","result":{"content":"bypassed Retry-After"}}),flush=True)
+'''.replace("LIMITED_RESULT", repr(limited_result))
+    monkeypatch.setattr(local_fetch, "_WORKER", script)
+    engine = local_fetch.LocalFetchEngine()
+    started, queued = asyncio.Event(), asyncio.Event()
+    change_host = engine._change_host
+    async def observe_redirect(host, state):
+        if host == "limited.example" and state["held_host"] == "other.example":
+            queued.set()
+        await change_host(host, state)
+    monkeypatch.setattr(engine, "_change_host", observe_redirect)
+    async def first_sent():
+        started.set()
+        await queued.wait()
+    first = asyncio.create_task(engine.fetch("https://limited.example/", deadline=time.monotonic() + 5, on_sent=first_sent))
+    second = None
+    try:
+        await asyncio.wait_for(started.wait(), 3)
+        second = asyncio.create_task(engine.fetch("https://other.example/", deadline=time.monotonic() + 5))
+        limited, redirected = await asyncio.gather(first, second)
+        assert limited.get("content") == "retained HTML" if retained_html else limited["error_code"] == "service_rate_limited"
+        assert redirected.get("skipped") == "cooling" and "content" not in redirected
+        assert engine._cooldowns["limited.example"][0] >= time.time() + 3590
+        assert not engine._hosts and engine._workers["fetch"] == 0
+    finally:
+        for task in (first, second):
+            if task is not None:
+                task.cancel()
+        await asyncio.gather(*(task for task in (first, second) if task is not None), return_exceptions=True)
+
+
 async def test_busy_host_does_not_starve_policy_gate_or_other_hosts(monkeypatch):
     script = '''import sys,time,json
 from urllib.parse import urlsplit

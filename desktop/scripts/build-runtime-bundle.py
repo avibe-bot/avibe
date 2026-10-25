@@ -276,8 +276,6 @@ import sys
 from importlib.metadata import distribution
 from pathlib import Path
 import certifi
-import brotli
-import zstandard
 import h2.connection
 import pypdf
 from core.handlers.model_hub.fetch_transport import native_available
@@ -294,9 +292,7 @@ for name in json.loads(sys.argv[1]):
 if not Path(certifi.where()).is_file() or "BEGIN CERTIFICATE" not in Path(certifi.where()).read_text():
     raise SystemExit("curl/httpx CA resources missing")
 if native_available() != (True, None):
-    raise SystemExit("Pinned curl_cffi/chrome150 native profile unavailable")
-assert brotli.decompress(brotli.compress(b"offline")) == b"offline"
-assert zstandard.ZstdDecompressor().decompress(zstandard.ZstdCompressor().compress(b"offline")) == b"offline"
+    raise SystemExit("Pinned curl_cffi/chrome150 native profile/codecs unavailable")
 page = extract_page(b"<article><h1>Offline</h1><p>Readable bundled extraction fixture.</p></article>", "text/html", "https://example.com/")
 assert "bundled extraction" in page.content
 '''.strip()
