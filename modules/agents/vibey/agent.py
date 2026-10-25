@@ -90,7 +90,7 @@ from core.services.agent_steering import (
 )
 from core.backend_failure import emit_backend_failure
 from core.agent_output import Narration, Reply, ToolActivity, TurnEnd, TurnOutcome, emit_output
-from core.citations import CitationBundle, register_text_citations
+from core.citations import CitationBundle, register_citations, register_text_citations
 from core.hosted_activity import HostedActivity, hosted_line, native_activities, proxy_activity
 from core.message_output import MessageOutput, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
@@ -1615,15 +1615,22 @@ class VibeyAgent(BaseAgent):
     def _display_with_citations(
         self, message: AssistantMessage, *, final: bool, replied: bool = False, images: Sequence[HostedImage] = ()
     ) -> tuple[str, Optional[CitationBundle]]:
-        """The display text and, when the provider cited sources, the bundle that links them.
+        """The display text and citation bundle for provider citations or raw citation markers.
 
         The same text ``_display_source`` gives, with each cited span carrying a
         token that delivery writes out as a Markdown link (IM) and a badge (Web),
-        through ``core.citations`` like every other backend's citations.
+        through ``core.citations`` like every other backend. A marker without
+        trustworthy structured source evidence is registered with an empty source
+        map and becomes the localized source-unavailable fallback instead.
         """
         blocks = [(separator, block.text, block.citations or ()) for separator, block in text_parts(message)]
         if not any(citations for _, _, citations in blocks):
-            return self._display_source(message, final=final, replied=replied, images=images), None
+            body = self._display_source(message, final=final, replied=replied, images=images)
+            return register_citations(
+                body,
+                {},
+                unresolved_label=i18n_t("message.citationUnresolved", self._language()),
+            )
         body, bundle = register_text_citations(
             blocks,
             unresolved_label=i18n_t("message.citationUnresolved", self._language()),
