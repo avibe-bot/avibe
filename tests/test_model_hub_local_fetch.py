@@ -41,6 +41,7 @@ def test_formats_are_read_without_network(body, mime, expected):
     (b"<!-- only a comment -->", "text/html", "fetch_target_unreadable", False),
     (b"PK...", "application/zip", "fetch_unsupported_content", False),
     (b"<html><script src='/app.js'></script><div id='app'></div></html>", "text/html", "fetch_js_shell", False),
+    (b"<header><form><input type='password'></form></header><div id='root'></div><script src='/app.js'></script>", "text/html", "fetch_js_shell", False),
     (b"<form id='challenge-form'>Checking</form>", "text/html", "fetch_challenge", False),
     (b"<form><input type='password'></form>", "text/html", "fetch_refused", True),
     (b"Access denied", "text/plain", "fetch_challenge", False),
@@ -49,6 +50,45 @@ def test_unreadable_formats_fail_over_but_login_is_terminal(body, mime, code, te
     with pytest.raises(FetchFailure) as raised:
         extract_page(body, mime, "https://example.com/")
     assert (raised.value.code, raised.value.terminal) == (code, terminal)
+
+
+@pytest.mark.parametrize("body,mime,expected", [
+    (b"caf\xe9", "text/plain; Charset=ISO-8859-1", "café"),
+    (b"caf\xe9", "TEXT/PLAIN; CHARSET=ISO-8859-1", "café"),
+    (b"<meta charset='ISO-8859-1'><article><p>A readable caf\xe9 article.</p></article>", "TEXT/HTML", "café"),
+])
+def test_charset_declarations_are_case_insensitive(body, mime, expected):
+    page = extract_page(body, mime, "https://example.com/")
+    assert expected in page.content and not page.charset_fallback
+
+
+def test_markdown_html_keeps_visible_text_and_literal_code_without_active_markup():
+    text = '''# Install
+
+<Warning>
+Rotate the key before continuing.
+</Warning>
+
+<details><summary>Reason</summary>The visible explanation.</details>
+
+<script>never_execute()</script>
+
+```html
+<script>literal example</script>
+```
+
+Done.'''
+    content = inert_markdown(text, "https://example.com/")
+    for visible in ("Rotate the key", "Reason", "visible explanation", "<script>literal example</script>", "Done."):
+        assert visible in content
+    assert "<Warning>" not in content and "<details>" not in content and "never_execute" not in content
+
+
+@pytest.mark.parametrize("hint", ["/bad path.md", "/bad\\path.md", "/bad\npath.md", "https://example.com:/bad"])
+def test_malformed_optional_hint_keeps_readable_html(hint):
+    markup = f'<link rel="alternate" type="text/markdown" href="{hint}"><article><p>The original article remains readable.</p></article>'
+    page = extract_page(markup.encode(), "text/html", "https://example.com/")
+    assert page.follow_url is None and "original article" in page.content
 
 
 def test_public_article_with_login_widget_and_xhtml_declaration_is_readable():
@@ -275,6 +315,39 @@ def test_one_markdown_alternate_retains_original_except_policy_refusal(local_fix
         assert len(calls) == 2
 
 
+@pytest.mark.parametrize("shape", ["loop", "missing_location", "hop_limit"])
+def test_redirect_protocol_failure_is_target_scoped(local_fixture, shape):
+    responses, _, _, events = local_fixture
+    if shape == "loop":
+        responses["https://example.com/"] = HopResponse(302, [("location", "/")], b"")
+    elif shape == "missing_location":
+        responses["https://example.com/"] = HopResponse(302, [], b"")
+    else:
+        for n in range(6):
+            url = "https://example.com/" + (str(n) if n else "")
+            responses[url] = HopResponse(302, [("location", f"/{n + 1}")], b"")
+    with pytest.raises(FetchFailure, match="fetch_target_unreadable"):
+        worker.fetch_document("https://example.com/", "en", events.append)
+
+
+def test_short_attempt_dns_deadline_differs_from_real_dns_failure(local_fixture, monkeypatch):
+    _, _, _, events = local_fixture
+    original = worker.resolve_target
+    def slow(url):
+        time.sleep(.04)
+        return original(url)
+    monkeypatch.setattr(worker, "resolve_target", slow)
+    with pytest.raises(FetchFailure) as raised:
+        worker.fetch_document("https://example.com/", "en", events.append, remaining_seconds=.005)
+    assert raised.value.code == "service_busy" and not raised.value.terminal and raised.value.cooldown_suppressed
+    def unavailable(url):
+        raise FetchFailure("fetch_dns_unverified", terminal=True)
+    monkeypatch.setattr(worker, "resolve_target", unavailable)
+    with pytest.raises(FetchFailure) as raised:
+        worker.fetch_document("https://example.com/", "en", events.append)
+    assert raised.value.code == "fetch_dns_unverified" and raised.value.terminal
+
+
 async def test_gate_worker_and_initial_policy_failure_do_not_send():
     engine = local_fetch.LocalFetchEngine()
     assert await engine.check("https://8.8.8.8/", deadline=time.monotonic() + 5) == "https://8.8.8.8/"
@@ -340,7 +413,12 @@ print(json.dumps({"event":"result","result":{"content":"other host"}}),flush=Tru
 '''
     monkeypatch.setattr(local_fetch, "_WORKER", script)
     engine, started = local_fetch.LocalFetchEngine(), asyncio.Event()
-    tasks = [asyncio.create_task(engine.fetch("https://example.com/", deadline=time.monotonic() + 10, on_sent=started.set)) for _ in range(8)]
+    spawned, spawn = [], asyncio.create_subprocess_exec
+    async def capture(*args, **kwargs):
+        spawned.append(1)
+        return await spawn(*args, **kwargs)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    tasks = [asyncio.create_task(engine.fetch("https://example.com/", deadline=time.monotonic() + 10, on_sent=started.set)) for _ in range(40)]
     try:
         await asyncio.wait_for(started.wait(), 5)
         assert await engine.check("https://other.example/", deadline=time.monotonic() + 2) == "https://other.example/"
@@ -349,6 +427,7 @@ print(json.dumps({"event":"result","result":{"content":"other host"}}),flush=Tru
         queued = await engine.fetch("https://example.com/", deadline=time.monotonic() + .3)
         assert queued["error_code"] == "service_busy" and not queued["sent"]
         assert not engine._cooldowns
+        assert len(spawned) <= 4  # One same-host worker, independent gate and other host; not 40 parked workers.
     finally:
         for task in tasks:
             task.cancel()
@@ -374,15 +453,93 @@ time.sleep(60)
     assert result["error_code"] == "fetch_unavailable" and time.monotonic() - started < 3
 
 
-async def test_policy_deadline_is_terminal_not_an_ordinary_transport_failure(monkeypatch):
+@pytest.mark.parametrize("sent", [False, True])
+async def test_attempt_expiry_during_revalidation_is_not_a_dns_refusal(monkeypatch, sent):
     script = '''import sys,time,json
 sys.stdin.readline()
-print(json.dumps({"event":"phase","phase":"policy"}),flush=True); sys.stdin.readline()
+for event in EVENTS:
+ print(json.dumps(event),flush=True); sys.stdin.readline()
+time.sleep(60)
+'''.replace("EVENTS", repr(([{"event": "sent"}] if sent else []) + [{"event": "phase", "phase": "policy"}]))
+    monkeypatch.setattr(local_fetch, "_WORKER", script)
+    engine = local_fetch.LocalFetchEngine()
+    result = await engine.fetch("https://example.com/", deadline=time.monotonic() + .3)
+    assert result["error_code"] == ("fetch_timeout" if sent else "service_busy") and not result["terminal"]
+    assert result["sent"] == sent and not engine._cooldowns
+    if not sent:
+        assert result["skipped"] == "unavailable"
+    with pytest.raises(FetchFailure, match="fetch_dns_unverified"):
+        await engine.check("https://example.com/", deadline=time.monotonic() + .3)
+
+
+async def test_active_worker_cap_and_cancellation_safe_host_release(monkeypatch):
+    script = '''import sys,time,json
+from urllib.parse import urlsplit
+request=json.loads(sys.stdin.readline())
+print(json.dumps({"event":"host","host":urlsplit(request["url"]).hostname}),flush=True); sys.stdin.readline()
+print('{"event":"sent"}',flush=True); sys.stdin.readline()
 time.sleep(60)
 '''
     monkeypatch.setattr(local_fetch, "_WORKER", script)
-    result = await local_fetch.LocalFetchEngine().fetch("https://example.com/", deadline=time.monotonic() + .3)
-    assert result["error_code"] == "fetch_dns_unverified" and result["terminal"] and not result["sent"]
+    children, spawn = [], asyncio.create_subprocess_exec
+    reaping, release = asyncio.Event(), asyncio.Event()
+    async def capture(*args, **kwargs):
+        child = await spawn(*args, **kwargs)
+        children.append(child)
+        if len(children) == 1:
+            wait = child.wait
+            async def delayed_reap():
+                reaping.set()
+                await release.wait()
+                return await wait()
+            monkeypatch.setattr(child, "wait", delayed_reap)
+        return child
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    engine, began = local_fetch.LocalFetchEngine(), asyncio.Event()
+    first = asyncio.create_task(engine.fetch("https://example.com/", deadline=time.monotonic() + 10, on_sent=began.set))
+    await asyncio.wait_for(began.wait(), 5)
+    first.cancel()
+    await asyncio.wait_for(reaping.wait(), 5)
+    first.cancel()  # Stop arriving during timeout/Stop cleanup must not strand admission.
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert children[0].returncode is not None
+    began.clear()
+    again = asyncio.create_task(engine.fetch("https://example.com/", deadline=time.monotonic() + 10, on_sent=began.set))
+    try:
+        await asyncio.wait_for(began.wait(), 2)
+    finally:
+        again.cancel()
+        await asyncio.gather(again, return_exceptions=True)
+    children.clear()
+    # Distinct hosts still have one aggregate process cap.
+    tasks = [asyncio.create_task(engine.fetch(f"https://host{i}.example/", deadline=time.monotonic() + 10)) for i in range(20)]
+    try:
+        await asyncio.sleep(.3)
+        assert 1 <= len(children) <= 8
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    assert all(child.returncode is not None for child in children)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX inherited rlimits")
+def test_worker_respects_stricter_inherited_kernel_limits():
+    import subprocess
+    from pathlib import Path
+    code = '''import resource,sys,json
+sys.path.insert(0,sys.argv[1])
+resource.setrlimit(resource.RLIMIT_CPU,(20,20))
+resource.setrlimit(resource.RLIMIT_FSIZE,(65536,65536))
+from core.handlers.model_hub.fetch_worker import resource_limits
+resource_limits()
+print(json.dumps([resource.getrlimit(resource.RLIMIT_CPU),resource.getrlimit(resource.RLIMIT_FSIZE)]))
+'''
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", code, str(Path(worker.__file__).resolve().parents[3])],
+                            capture_output=True, text=True, check=True, timeout=5)
+    assert json.loads(result.stdout) == [[20, 20], [65536, 65536]]
 
 
 async def test_timeout_and_stop_kill_and_reap_worker(monkeypatch):

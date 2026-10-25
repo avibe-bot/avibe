@@ -43,6 +43,7 @@ def h2_server(tmp_path, monkeypatch):
     listener.settimeout(5)
     port = listener.getsockname()[1]
     def serve():
+        responded = False
         try:
             raw, _ = listener.accept()
             with context.wrap_socket(raw, server_side=True) as connection:
@@ -59,8 +60,14 @@ def h2_server(tmp_path, monkeypatch):
                             h2.send_headers(event.stream_id, [(":status", "200"), ("content-type", "text/plain")])
                             h2.send_data(event.stream_id, b"HTTP/2 pinned document", end_stream=True)
                             connection.sendall(h2.data_to_send())
-                            return
+                            responded = True
+                            # Drain the client's SETTINGS/window updates until
+                            # it closes. Closing with unread TLS bytes can reset
+                            # the socket and discard the response on Windows.
                     connection.sendall(h2.data_to_send())
+        except (ConnectionResetError, ssl.SSLEOFError) as error:
+            if not responded:
+                errors.append(error)
         except Exception as error:
             errors.append(error)
     thread = threading.Thread(target=serve)

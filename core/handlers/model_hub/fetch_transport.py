@@ -77,7 +77,6 @@ def native_available() -> tuple[bool, str | None]:
 class TransferBudget:
     wire: int = 0
     decoded: int = 0
-    headers: int = 0
 
 
 @dataclass
@@ -96,35 +95,45 @@ class _Receiver:
     headers: list[tuple[str, str]] = field(default_factory=list)
     raw: bytearray = field(default_factory=bytearray)
     limit: int = TEXT_LIMIT
+    status: int | None = None
+    headers_complete: bool = False
+    header_bytes: int = 0
 
     def header(self, data: bytes) -> int:
-        self.budget.headers += len(data)
-        if self.budget.headers > HEADER_LIMIT:
-            raise FetchFailure("fetch_unavailable")
+        self.header_bytes += len(data)
+        if self.header_bytes > HEADER_LIMIT:
+            raise FetchFailure("fetch_target_unreadable")
+        if self.headers_complete:
+            return len(data)  # Trailers cannot rewrite MIME, encoding, cookies or limits.
         if data.startswith(b"HTTP/"):
             self.headers.clear()
+            self.limit = TEXT_LIMIT
+            try:
+                self.status = int(data.split()[1])
+            except (ValueError, IndexError):
+                raise FetchFailure("fetch_target_unreadable") from None
         elif b":" in data:
             k, v = data.decode("latin-1").split(":", 1)
             self.headers.append((k.lower(), v.strip()))
-            if k.lower() == "content-type" and v.strip().split(";", 1)[0].lower() == "application/pdf":
-                self.limit = PDF_LIMIT
-            if k.lower() == "content-length":
+            if k.lower() == "content-type":
+                self.limit = PDF_LIMIT if v.strip().split(";", 1)[0].lower() == "application/pdf" else TEXT_LIMIT
+            if k.lower() == "content-length" and self.status in {None, 200}:
                 try:
                     length = int(v.strip())
                 except ValueError:
-                    raise FetchFailure("fetch_unavailable") from None
+                    raise FetchFailure("fetch_target_unreadable") from None
                 # Permit a PDF's length before its Content-Type header is received;
                 # the final header terminator enforces the actual format's limit.
                 if length < 0:
-                    raise FetchFailure("fetch_unavailable")
+                    raise FetchFailure("fetch_target_unreadable")
                 if self.budget.wire + length > PDF_LIMIT:
                     raise FetchFailure("fetch_target_unreadable")
         if data in (b"\r\n", b"\n"):
-            lengths = [int(v) for k, v in self.headers if k == "content-length"]
-            if len(set(lengths)) > 1:
-                raise FetchFailure("fetch_unavailable")
-            if lengths and self.budget.wire + lengths[0] > self.limit:
-                raise FetchFailure("fetch_target_unreadable")
+            self.headers_complete = self.status is None or self.status >= 200
+            if self.status in {None, 200}:
+                lengths = [int(v) for k, v in self.headers if k == "content-length"]
+                if len(set(lengths)) > 1 or (lengths and self.budget.wire + lengths[0] > self.limit):
+                    raise FetchFailure("fetch_target_unreadable")
         return len(data)
 
     def body(self, data: bytes) -> int:
@@ -135,8 +144,16 @@ class _Receiver:
         return len(data)
 
     def finish(self, status: int) -> HopResponse:
+        if status != 200:
+            # Refusals, redirects and Retry-After are header facts. Never let
+            # a broken/oversized compressed error body overwrite them.
+            return HopResponse(status, self.headers, b"")
         encoding = next((v.lower().strip() for k, v in self.headers if k == "content-encoding"), "identity")
         remaining = self.limit - self.budget.decoded
+        if remaining < 0:
+            # A preceding PDF hop may have spent more than this text cap.
+            # Never pass a negative size (read-all) to a decoder.
+            raise FetchFailure("fetch_target_unreadable")
         raw = bytes(self.raw)
         try:
             if encoding in ("identity", ""):
@@ -286,9 +303,12 @@ def httpx_hop(target: CheckedTarget, headers: dict, budget: TransferBudget, time
     with httpx.Client(transport=PinnedTransport(target), trust_env=False, follow_redirects=False,
                       timeout=httpx.Timeout(timeout, connect=min(5, timeout)), headers=headers) as client:
         with client.stream("GET", target.address.url, extensions={"trace": trace}) as response:
+            receiver.status = response.status_code
             for k, v in response.headers.raw:
                 receiver.header(k + b":" + v + b"\r\n")
             receiver.header(b"\r\n")
+            if response.status_code != 200:
+                return receiver.finish(response.status_code)
             for chunk in response.iter_raw(chunk_size=65536):
                 receiver.body(chunk)
             return receiver.finish(response.status_code)
@@ -312,6 +332,10 @@ def curl_hop(target: CheckedTarget, headers: dict, budget: TransferBudget, timeo
                 return CURL_WRITEFUNC_ERROR  # Returning zero is NOT an abort in curl_cffi.
         return call
 
+    def header(data):
+        receiver.header(data)
+        return CURL_WRITEFUNC_ERROR if receiver.headers_complete and receiver.status != 200 else len(data)
+
     def debug(kind, data):
         if kind == 2:  # CURLINFO_HEADER_OUT: after connect/TLS, before write.
             on_sent()
@@ -321,7 +345,7 @@ def curl_hop(target: CheckedTarget, headers: dict, budget: TransferBudget, timeo
         CurlOpt.PROXY: "", CurlOpt.NETRC: 0, CurlOpt.FRESH_CONNECT: 1, CurlOpt.FORBID_REUSE: 1,
         CurlOpt.HTTP_VERSION: CurlHttpVersion.V2TLS, CurlOpt.HTTP_CONTENT_DECODING: 0,
         CurlOpt.CONNECTTIMEOUT_MS: max(1, int(min(5, timeout) * 1000)),
-        CurlOpt.HEADERFUNCTION: guarded(receiver.header), CurlOpt.DEBUGFUNCTION: debug, CurlOpt.VERBOSE: 1,
+        CurlOpt.HEADERFUNCTION: guarded(header), CurlOpt.DEBUGFUNCTION: debug, CurlOpt.VERBOSE: 1,
         # A fresh handle with no ALTSVC/HSTS storage never learns a later-hop
         # destination. HTTP/3 is excluded above; no shared cache is attached.
         CurlOpt.HSTS_CTRL: 0,
@@ -330,11 +354,18 @@ def curl_hop(target: CheckedTarget, headers: dict, budget: TransferBudget, timeo
         options[CurlOpt.RESOLVE] = [f"{target.address.host}:{target.address.port}:{pins}"]
     try:
         with Session(trust_env=False, curl_options=options, retry=0) as session:
-            response = session.get(
-                target.address.url, headers=headers, impersonate=browser_profile()["impersonate"],
-                allow_redirects=False, verify=certifi.where(), timeout=timeout,
-                content_callback=guarded(receiver.body), accept_encoding=ENCODING,
-            )
+            try:
+                response = session.get(
+                    target.address.url, headers=headers, impersonate=browser_profile()["impersonate"],
+                    allow_redirects=False, verify=certifi.where(), timeout=timeout,
+                    content_callback=guarded(receiver.body), accept_encoding=ENCODING,
+                )
+            except Exception as error:
+                # A deliberate header-only abort still carries libcurl's peer
+                # and status snapshot; validate the peer exactly as on success.
+                response = getattr(error, "response", None)
+                if not receiver.headers_complete or receiver.status == 200 or response is None:
+                    raise
             if errors:
                 raise errors[0]
             if _peer(response.primary_ip) not in {_peer(ip) for ip in target.ips}:

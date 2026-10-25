@@ -21,6 +21,27 @@ def stub():
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             requests.append((self.path, dict(self.headers)))
+            if self.path.startswith("/status/"):
+                self.send_response(int(self.path.rsplit("/", 1)[-1]))
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Content-Length", "8")
+                self.send_header("Retry-After", "3600")
+                self.end_headers()
+                try:
+                    self.wfile.write(b"not gzip")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+                return
+            if self.path == "/trailer":
+                self.protocol_version = "HTTP/1.1"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain")
+                self.send_header("Transfer-Encoding", "chunked")
+                self.end_headers()
+                self.wfile.write(b"4\r\nbody\r\n0\r\nContent-Type: application/pdf\r\nContent-Encoding: gzip\r\n\r\n")
+                self.close_connection = True
+                return
             if self.path.startswith("/oversized"):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/plain")
@@ -103,6 +124,72 @@ def test_real_transfer_aborts_oversize_instead_of_returning_partial_success(stub
     with pytest.raises(FetchFailure, match="fetch_target_unreadable"):
         (transport.curl_hop if native else transport.httpx_hop)(target, {}, transport.TransferBudget(), 4, lambda: None)
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize("native", [True, False])
+@pytest.mark.parametrize("status", [401, 429, 302, 403, 503])
+def test_status_and_retry_after_survive_broken_compressed_error_body(stub, native, status):
+    if native:
+        pytest.importorskip("curl_cffi")
+    port, requests = stub
+    target = CheckedTarget(FetchURL(f"http://public.example:{port}/status/{status}", "public.example", port, "http", False), ("127.0.0.1",))
+    response = (transport.curl_hop if native else transport.httpx_hop)(target, {}, transport.TransferBudget(), 3, lambda: None)
+    assert response.status == status and response.header("retry-after") == "3600" and response.body == b""
+    assert len(requests) == 1
+
+
+@pytest.mark.parametrize("native", [True, False])
+def test_real_chunked_trailers_cannot_change_representation(stub, native):
+    if native:
+        pytest.importorskip("curl_cffi")
+    port, _ = stub
+    target = CheckedTarget(FetchURL(f"http://public.example:{port}/trailer", "public.example", port, "http", False), ("127.0.0.1",))
+    response = (transport.curl_hop if native else transport.httpx_hop)(target, {}, transport.TransferBudget(), 3, lambda: None)
+    assert response.body == b"body" and response.header("content-type") == "text/plain"
+    assert not response.header("content-encoding")
+
+
+def test_header_budget_is_per_hop_and_conflicting_length_is_target_scoped():
+    budget = transport.TransferBudget()
+    for _ in range(6):
+        receiver = transport._Receiver(budget)
+        receiver.header(b"X-CSP: " + b"a" * 14000 + b"\r\n")
+        receiver.header(b"\r\n")
+        assert receiver.finish(302).status == 302
+    receiver = transport._Receiver(budget)
+    receiver.header(b"Content-Length: 1\r\n")
+    receiver.header(b"Content-Length: 2\r\n")
+    with pytest.raises(FetchFailure, match="fetch_target_unreadable"):
+        receiver.header(b"\r\n")
+
+
+@pytest.mark.parametrize("overage", [1, 2, 512])
+def test_format_downgrade_rejects_spent_decode_budget_before_decoder(monkeypatch, overage):
+    # A PDF on the preceding hop may consume more than the next text hop's cap.
+    # In particular remaining+1 == -1 means an unbounded read to gzip/zstd.
+    reads, original = [], gzip.GzipFile.read
+    def observed(self, size=-1):
+        reads.append(size)
+        return original(self, size)
+    monkeypatch.setattr(gzip.GzipFile, "read", observed)
+    receiver = transport._Receiver(transport.TransferBudget(decoded=1024 + overage), limit=1024)
+    receiver.header(b"Content-Encoding: gzip\r\n")
+    receiver.body(gzip.compress(b"x" * 65536))
+    with pytest.raises(FetchFailure, match="fetch_target_unreadable"):
+        receiver.finish(200)
+    assert reads == []
+
+
+@pytest.mark.parametrize("headers", [
+    [b"HTTP/1.1 103 Early Hints\r\n", b"Content-Type: application/pdf\r\n", b"\r\n", b"HTTP/1.1 200 OK\r\n"],
+    [b"Content-Type: application/pdf\r\n"],
+])
+def test_final_content_type_owns_size_limit_not_interim_headers(headers):
+    receiver = transport._Receiver(transport.TransferBudget())
+    for line in [*headers, b"Content-Type: text/plain\r\n", b"\r\n"]:
+        receiver.header(line)
+    with pytest.raises(FetchFailure, match="fetch_target_unreadable"):
+        receiver.body(b"x" * (transport.TEXT_LIMIT + 1))
 
 
 def test_streamed_zstd_without_content_size_uses_http_window():

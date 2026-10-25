@@ -17,11 +17,12 @@ import idna
 
 
 class FetchFailure(Exception):
-    def __init__(self, code: str, *, terminal: bool = False, retry_after: str | None = None):
+    def __init__(self, code: str, *, terminal: bool = False, retry_after: str | None = None, cooldown_suppressed: bool = False):
         super().__init__(code)
         self.code = code
         self.terminal = terminal
         self.retry_after = retry_after
+        self.cooldown_suppressed = cooldown_suppressed
 
 
 # Deliberately explicit: ipaddress.is_global has changed across Python releases.

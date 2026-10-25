@@ -28,12 +28,18 @@ def resource_limits() -> None:
     if os.name == "posix":
         import resource
 
-        resource.setrlimit(resource.RLIMIT_CPU, (30, 31))
+        def cap(kind, soft, hard):
+            _, inherited = resource.getrlimit(kind)
+            if inherited != resource.RLIM_INFINITY:
+                soft, hard = min(soft, inherited), min(hard, inherited)
+            resource.setrlimit(kind, (soft, hard))
+
+        cap(resource.RLIMIT_CPU, 30, 31)
         # macOS has no enforceable per-process address-space limit here; the
         # parent supervises RSS. Linux additionally enforces this in the kernel.
         if sys.platform != "darwin":
-            resource.setrlimit(resource.RLIMIT_AS, (MEMORY_LIMIT, MEMORY_LIMIT))
-        resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024))
+            cap(resource.RLIMIT_AS, MEMORY_LIMIT, MEMORY_LIMIT)
+        cap(resource.RLIMIT_FSIZE, 1024 * 1024, 1024 * 1024)
     elif os.name == "nt":
         import ctypes
         from ctypes import wintypes
@@ -131,12 +137,13 @@ class OriginCookies:
         return "; ".join(parts)
 
 
-def fetch_document(url: str, locale: str, exchange, *, deadline: float | None = None) -> dict:
-    deadline = min(deadline if deadline is not None else float("inf"), time.monotonic() + 30)
+def fetch_document(url: str, locale: str, exchange, *, remaining_seconds: float = 30) -> dict:
+    deadline = time.monotonic() + max(0, min(remaining_seconds, 30))
 
     def resolve(value):
-        # A DNS deadline must produce a terminal policy failure, not an ordinary
-        # transport timeout that could forward an unverified URL. The resolver
+        # A genuine DNS failure/full DNS allowance is terminal. Exhausting the
+        # attempt's smaller remaining budget is admission/timeout, not a refusal;
+        # any next candidate must gate the original URL again. The resolver
         # thread is confined to this disposable process and dies with it.
         import queue
         import threading
@@ -152,9 +159,12 @@ def fetch_document(url: str, locale: str, exchange, *, deadline: float | None = 
                 except Exception as error:
                     replies.put((None, error))
             threading.Thread(target=lookup, daemon=True).start()
+            window = max(0, min(5, deadline - time.monotonic()))
             try:
-                result, error = replies.get(timeout=max(0, min(5, deadline - time.monotonic())))
+                result, error = replies.get(timeout=window)
             except queue.Empty:
+                if window < 5:
+                    raise FetchFailure("fetch_timeout" if sent else "service_busy", cooldown_suppressed=True) from None
                 raise FetchFailure("fetch_dns_unverified", terminal=True) from None
             if error:
                 raise error
@@ -185,7 +195,7 @@ def fetch_document(url: str, locale: str, exchange, *, deadline: float | None = 
         exchange({"event": "host", "host": address.host})
         target = resolve(current)
         if target.address.url in seen:
-            raise FetchFailure("fetch_unavailable")
+            raise FetchFailure("fetch_target_unreadable")
         seen.add(target.address.url)
         headers = request_headers(degraded=not native, locale=locale, previous_origin=previous, target=target)
         if cookie := cookies.header(address):
@@ -201,7 +211,7 @@ def fetch_document(url: str, locale: str, exchange, *, deadline: float | None = 
             if response.status in {301, 302, 303, 307, 308}:
                 location = response.header("location")
                 if not location:
-                    raise FetchFailure("fetch_unavailable")
+                    raise FetchFailure("fetch_target_unreadable")
                 previous, current = address.origin, urljoin(address.url, location)
                 # Always gate the selected redirect, even at the hop bound.
                 resolve(current)
@@ -211,7 +221,8 @@ def fetch_document(url: str, locale: str, exchange, *, deadline: float | None = 
             if response.status == 403 or (response.status == 503 and response.header("cf-mitigated").lower() == "challenge"):
                 raise FetchFailure("fetch_challenge")
             if response.status != 200:
-                raise FetchFailure("fetch_unavailable", retry_after=response.header("retry-after") or None)
+                raise FetchFailure("fetch_unavailable" if response.status >= 500 else "fetch_target_unreadable",
+                                   retry_after=response.header("retry-after") or None)
             stage = "extract"
             exchange({"event": "phase", "phase": "extract"})
             page = extract_page(response.body, response.header("content-type"), address.url)
@@ -242,7 +253,8 @@ def fetch_document(url: str, locale: str, exchange, *, deadline: float | None = 
                 raise
             page, final_url, size = retained
             result = {**page.payload(), "final_url": final_url, "source_size_bytes": size,
-                      "cooldown_code": error.code, "retry_after": error.retry_after}
+                      "cooldown_code": error.code, "retry_after": error.retry_after,
+                      "cooldown_suppressed": error.cooldown_suppressed}
             break
         except Exception as error:
             # No target error retries on the other transport. Native-load failure
@@ -254,7 +266,7 @@ def fetch_document(url: str, locale: str, exchange, *, deadline: float | None = 
                 break
             raise FetchFailure(code) from None
     else:
-        raise FetchFailure("fetch_unavailable")
+        raise FetchFailure("fetch_target_unreadable")
     for field in ("follow_url", "follow_kind"):
         result.pop(field, None)
     return {**result, "transport_degraded": not native, "transport_degraded_reason": reason}
@@ -278,10 +290,12 @@ def main() -> None:
             target = resolve_target(request["url"])
             result = {"url": target.address.url}
         else:
-            result = fetch_document(request["url"], request.get("locale", "en"), exchange, deadline=request.get("deadline"))
+            result = fetch_document(request["url"], request.get("locale", "en"), exchange,
+                                    remaining_seconds=request.get("remaining_seconds", 30))
         emit({"event": "result", "result": result})
     except FetchFailure as error:
-        emit({"event": "failure", "error_code": error.code, "terminal": error.terminal, "retry_after": error.retry_after})
+        emit({"event": "failure", "error_code": error.code, "terminal": error.terminal,
+              "retry_after": error.retry_after, "cooldown_suppressed": error.cooldown_suppressed})
     except Exception:
         emit({"event": "failure", "error_code": "fetch_unavailable", "terminal": False})
 

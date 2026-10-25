@@ -6,9 +6,10 @@ import io
 import json
 import re
 from dataclasses import asdict, dataclass
+from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit
 
-from .fetch_policy import FetchFailure, metadata_url
+from .fetch_policy import FetchFailure, metadata_url, parse_url
 
 
 @dataclass
@@ -34,9 +35,9 @@ def _decode(data: bytes, content_type: str) -> tuple[str, bool]:
         return data.decode("utf-16", errors="replace"), False
     if data.startswith(codecs.BOM_UTF8):
         return data.decode("utf-8-sig", errors="replace"), False
-    encodings = re.findall(r'charset\s*=\s*[\"\']?([a-zA-Z0-9_.-]+)', content_type)
+    encodings = re.findall(r'charset\s*=\s*[\"\']?([a-zA-Z0-9_.-]+)', content_type, flags=re.I)
     # Only a bounded HTML prefix may declare a meta charset.
-    if "html" in content_type:
+    if "html" in content_type.lower():
         for tag in re.findall(rb"<meta\b[^>]{0,1024}>", data[:8192], flags=re.I):
             encodings += re.findall(r'charset\s*=\s*[\"\']?([a-zA-Z0-9_.-]+)', tag.decode("ascii", "ignore"), flags=re.I)
     for encoding in encodings:
@@ -64,21 +65,55 @@ def quoted_text(text: str) -> tuple[str, bool]:
     return f"{fence}\n{text}\n{fence}", overflow
 
 
+class _VisibleHTML(HTMLParser):
+    """Retain visible quotation text, never active tags or script/form contents."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.hidden = []
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in {"script", "style", "form", "iframe", "object", "embed"}:
+            self.hidden.append(tag)
+        if not self.hidden and tag in {"br", "p", "div", "details", "summary", "li", "pre", "blockquote"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self.hidden:
+            del self.hidden[self.hidden.index(tag):]
+        if not self.hidden and tag in {"p", "div", "details", "summary", "li", "pre", "blockquote"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self.hidden:
+            self.parts.append(re.sub(r"([\\`*_[\]<>])", r"\\\1", data))
+
+    def take(self):
+        text, self.parts = "".join(self.parts), []
+        return text
+
+
 def inert_markdown(text: str, base: str) -> str:
     """Render parsed Markdown tokens back to inert Markdown, without image loads.
 
     Parsing instead of regex link replacement handles reference/escaped links.
-    HTML blocks are discarded, code remains quoted, and only HTTP(S) links survive.
+    Visible HTML text is quoted without tags, code remains quoted, and only HTTP(S) links survive.
     """
     from markdown_it import MarkdownIt
 
-    text = re.sub(r"<(script|style|form|iframe)\b[^>]*>.*?</\1\s*>", "", text, flags=re.I | re.S)
     parser = MarkdownIt("commonmark", {"html": True})
     tokens = parser.parse(text)
 
     def inline(children):
         result, links = [], []
+        html = _VisibleHTML()
         for token in children or ():
+            if token.type == "html_inline":
+                html.feed(token.content)
+                result.append(html.take())
+                continue
+            if html.hidden:
+                continue
             if token.type == "text":
                 # Text may itself contain syntax from an invalid/unsafe link.
                 result.append(re.sub(r"([\\`*_[\]<>])", r"\\\1", token.content))
@@ -107,6 +142,10 @@ def inert_markdown(text: str, base: str) -> str:
     for token in tokens:
         if token.type == "inline":
             output.append(inline(token.children))
+        elif token.type == "html_block":
+            html = _VisibleHTML()
+            html.feed(token.content)
+            output.append(html.take() + "\n\n")
         elif token.type == "heading_open":
             output.append("\n" + "#" * int(token.tag[1:]) + " ")
         elif token.type in {"paragraph_close", "heading_close", "blockquote_close"}:
@@ -135,12 +174,14 @@ def inert_markdown(text: str, base: str) -> str:
 
 def _same_origin_link(value: str, base: str) -> str | None:
     try:
-        candidate = urljoin(base, value)
+        if any(c.isspace() for c in value) or "\\" in value:
+            return None
+        candidate = parse_url(urljoin(base, value)).url
         a, b = urlsplit(candidate), urlsplit(base)
         origin = lambda p: (p.scheme.lower(), p.hostname, p.port or (443 if p.scheme == "https" else 80))
         if origin(a) == origin(b) and not a.username and not a.password and len(candidate) <= 8192:
             return candidate
-    except ValueError:
+    except (ValueError, FetchFailure):
         pass
     return None
 
@@ -196,7 +237,9 @@ def extract_page(data: bytes, content_type: str, url: str) -> Page:
         title = titles[0].strip()[:300] if titles else None
         # Structural challenge/login evidence, not phrases in article text.
         # A login widget beside readable public content is NOT a login wall.
-        has_password_form = bool(tree.xpath('//form[.//input[translate(@type,"PASSWORD","password")="password"]]'))
+        password_forms = tree.xpath('//form[.//input[translate(@type,"PASSWORD","password")="password"]]')
+        has_password_form = bool(password_forms)
+        main_login = any(not form.xpath("ancestor::header|ancestor::nav|ancestor::aside") for form in password_forms)
         if tree.xpath('//*[@id="challenge-form" or @id="cf-challenge-running" or @id="cf-spinner-please-wait"]'):
             raise FetchFailure("fetch_challenge")
         page = Page("", "text/markdown", mime, title=title, charset_fallback=fallback)
@@ -223,6 +266,10 @@ def extract_page(data: bytes, content_type: str, url: str) -> Page:
         content = trafilatura.extract(tree, output_format="markdown", include_links=True, include_images=False,
                                       include_comments=False, include_tables=True, favor_recall=True) or ""
         normalized = " ".join(content.split()).strip("# ").lower()
+        if has_scripts and not main_login and (not normalized or normalized in {
+            "loading", "loading...", "please enable javascript", "javascript is required",
+        }) and page.follow_url is None:
+            raise FetchFailure("fetch_js_shell")
         if has_password_form and (not normalized or normalized in {
             "sign in", "log in", "login", "please sign in", "sign in to continue", "login required", "log in to continue",
         }):

@@ -194,6 +194,13 @@ initial refusal has zero executor attempts. A safe redirect, one same-origin
 zero-delay meta-refresh and one same-origin Markdown alternate all consume the
 same local deadline/body/hop budgets. Ignore malformed alternates; an alternate
 whose resolution is policy-blocked terminates like any other followed target.
+A genuine DNS failure or expiry of the full 5-second DNS allowance remains
+terminal. Distinguish that from the local attempt deadline being exhausted by
+queueing or earlier work: before any local send it is a `service_busy` skip;
+after a sent local hop it is non-terminal `fetch_timeout`. Neither case cools
+the host. The next candidate receives only the **original `requested_url`**,
+after running the mandatory gate on it again, never an unverified redirect URL
+(owner-approved clarification, 2026-10-25).
 
 **Remote boundary:** API destinations are fixed HTTPS catalog endpoints, no
 HTTP redirects or ambient proxies, with an 8 MiB response cap. Avibe validates
@@ -287,7 +294,7 @@ One chain deadline: **180 s**; each local/service attempt: **30 s**, including
 DNS, lock wait, redirects and extraction; connect/TLS: **5 s** within that.
 Local: five redirect hops, 16 MiB HTML/text/JSON or 32 MiB PDF, separately counted
 on the wire and after decompression across all hops/alternates. Bound headers
-(64 KiB), URLs and cookies (64 entries, 4 KiB each); reject oversized announced
+(64 KiB per hop, including informational headers/trailers), URLs and cookies (64 entries, 4 KiB each); reject oversized announced
 lengths and abort streamed unknown lengths at the same cap. Bounded native body
 callbacks/transfer counters prevent an unbounded buffered response. DNS, sockets,
 decoding and parsing run in one disposable process per fetch. All platforms have
@@ -299,6 +306,11 @@ the kernel CPU limit plus parent RSS supervision only: brief overshoot between
 samples is possible, so this is **not a hard memory sandbox** (owner-approved
 implementation clarification, 2026-10-25). No extra daemon or VM is introduced.
 One local fetch is in flight per host; its queue wait consumes the attempt deadline.
+The parent admits host ownership and a fetch-worker slot atomically before
+spawning (at most eight fetch workers); initial waiters hold neither resource.
+The mandatory gate has its own bounded worker capacity, never a fetch slot.
+Cleanup survives repeated cancellation and reaps before releasing admission.
+Inherited stricter kernel hard limits are retained, never raised.
 
 No browser profile, cookie store, Authorization, client certificate, environment
 credential, custom proxy or user secret. A fresh in-memory jar accepts only valid
@@ -545,7 +557,8 @@ is a no-send `service_busy` skip, not a provider fault, cost or shared cooldown.
 
 | Outcome | Chain / settlement |
 | --- | --- |
-| Invalid argument / address refusal / unresolved policy gate | terminal, no third-party forwarding; preserve any earlier sent attempts |
+| Invalid argument / address refusal / DNS failure or full DNS allowance expiry | terminal, no third-party forwarding; preserve any earlier sent attempts |
+| Local attempt budget exhausted during admission/revalidation | no-send `service_busy` skip, or `fetch_timeout` after a local send; no cooldown; re-gate only the original requested URL before the next candidate |
 | Usable content | end with completed record |
 | Local 403/503 challenge, JS shell, empty page, unsupported type | next enabled candidate, no local retry/headless path |
 | Local 404/410, connect/TLS/timeout/server failure | next; bounded host cooldown where transient |
