@@ -3915,6 +3915,131 @@ async def test_a_proxied_hosted_call_runs_on_the_turns_executor_chain_and_keeps_
     assert sent["type"] == "tool_result" and seen in json.dumps(sent)
 
 
+@pytest.mark.parametrize("platform", ["avibe", "telegram"])
+@pytest.mark.parametrize("executor", ["local", "exa", "jina", "policy"])
+async def test_web_fetch_survives_the_real_agent_commit_delivery_and_next_turn_replay(
+    engine, session, tmp_path, published, monkeypatch, platform, executor
+):
+    """WF-3: a gateway 200 must commit and display, not become an interrupted call.
+
+    The earlier tool-only acceptance never reached SQLite media registration.
+    Exercise the real parser, Agent loop, tool runtime, transcript, dispatcher,
+    mirror and activity reader; only HTTP is stubbed. A fresh adapter then replays
+    the stored fetch with the tool disabled, without another fetch or media write.
+    """
+    import httpx
+
+    from core.agent_core.messages import ServiceExecutorOrigin, WebFetchRecord
+    from core.agent_core.web_fetch import frame_fetch_record
+    from modules.agents.vibey.models import registry_providers
+    from storage import agent_activity_service
+    from storage.models import media_objects
+
+    monkeypatch.setattr("core.message_mirror._activity_streaming_enabled", lambda: True)
+    blocked = executor == "policy"
+    url = "http://10.0.0.5/" if blocked else "https://example.test/page"
+    content = "" if blocked else "Hello 世界"
+    sid, label, kind, vendor, service_id = {
+        "local": ("src_localfetch", "Local", "local", "local", "local/fetch"),
+        "exa": ("src_exakeyless", "Exa (free)", "service", "exa-mcp", "exa/mcp"),
+        "jina": ("src_jinakeyless", "Jina Reader (free)", "service", "jina-reader", "jina/reader"),
+        "policy": (None, None, None, None, None),
+    }[executor]
+    cost = HostedCost(basis="list", usd=0)
+    record = WebFetchRecord(
+        status="failed" if blocked else "completed", requested_url=url,
+        content=content, size_bytes=len(content.encode("utf-8")), retrieved_at="2026-10-25T17:27:45Z",
+        error="blocked by local policy" if blocked else None,
+        error_code="fetch_url_blocked" if blocked else None,
+        attempts=() if blocked else (HostedAttempt(sid, label, kind, "completed", cost=cost),),
+    )
+    hosted = HostedResult(record=record, execution=None if blocked else ProxyExecution(
+        executor_origin=ServiceExecutorOrigin(vendor, "local_fetch" if kind == "local" else "fetch_api", service_id),
+        executor_source_id=sid, executor_billing="metered", cost=cost,
+    ))
+    frame = frame_fetch_record(record)
+    expected = ToolResultMessage("toolu_fetch", "web_fetch", (text(frame),), is_error=blocked, hosted=hosted)
+    envelope = message_to_dict(expected)["hosted"]
+    served = {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": "src_served00001"}
+    replies = [
+        _anthropic_reply(json.dumps({"type": "tool_use", "id": "toolu_fetch", "name": "web_fetch", "input": {"url": url}}), stop_reason="tool_use"),
+        _anthropic_reply('{"type":"text","text":"fetch handled"}', stop_reason="end_turn"),
+        _anthropic_reply('{"type":"text","text":"stored read recalled"}', stop_reason="end_turn"),
+    ]
+    models, executed = [], []
+
+    def gateway(request):
+        if request.url.path == "/vibey/v1/hosted-tools/web_fetch":
+            executed.append(request)
+            assert json.loads(request.content) == {"arguments": {"url": url}}
+            return httpx.Response(200, json=envelope)
+        assert request.url.path == "/vibey/v1/messages"
+        models.append(json.loads(request.content))
+        return httpx.Response(200, headers={
+            "content-type": "text/event-stream", "x-avibe-served-hop": json.dumps(served),
+        }, text=replies.pop(0))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(engine, tmp_path, platform, [],
+                           providers=registry_providers(media_loader=None, client=client), gateway_client=client)
+        harness.controller.hub_source_id = served["source"]
+        harness.controller.hub_hosted_tools = {"web_fetch": {"native": "unsupported", "replay": "unsupported"}}
+        harness.controller.im_client.supports_message_editing = lambda context=None: False
+        first = harness.request("read this page")
+        await harness.agent.handle_message(first)
+        assert harness.controller.terminals[-1]["is_error"] is False
+        assert harness.controller.terminal_texts[-1] == "fetch handled"
+        [committed] = [row for row in await harness.context_rows() if row.kind == "tool_result"]
+        assert committed.message == expected
+        assert executed[0].headers["x-avibe-turn-id"] == _turn(first.context)
+        assert executed[0].headers["authorization"] == "Bearer hub-token"
+
+        # Reconstruct from durable rows, with no web_fetch declaration on the new turn.
+        harness.new_agent()
+        harness.controller.hub_hosted_tools = {}
+        await harness.agent.handle_message(harness.request("recall the stored read"))
+        assert harness.controller.terminals[-1]["is_error"] is False
+        assert harness.controller.terminal_texts[-1] == "stored read recalled"
+        [replayed] = [row for row in await harness.context_rows() if row.kind == "tool_result"]
+        assert replayed == committed
+
+    assert len(executed) == 1 and len(models) == 3 and replies == []
+    assert models[0]["tools"][0]["name"] == "web_fetch"
+    assert all(tool.get("name") != "web_fetch" for tool in models[2].get("tools", []))
+    for request in models[1:]:
+        [answer] = [block for message in request["messages"] for block in message["content"]
+                    if block.get("type") == "tool_result" and block.get("tool_use_id") == "toolu_fetch"]
+        assert answer["content"] == [{"type": "text", "text": frame}]
+        assert answer.get("is_error", False) is blocked
+        assert "tool call interrupted" not in json.dumps(request)
+
+    # The dispatcher/mirror create exactly one hosted trace, read unchanged by
+    # the activity API. Page records never register images or produce uploads.
+    with engine.connect() as conn:
+        traces = conn.execute(select(agent_events).where(
+            agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call"
+        )).mappings().all()
+        groups = agent_activity_service.list_turn_groups(conn, session_id=SESSION)["groups"]
+        details = [agent_activity_service.get_turn_group(conn, session_id=SESSION, group_id=group["id"]) for group in groups]
+        assert conn.execute(select(media_objects.c.token).where(media_objects.c.session_id == SESSION)).first() is None
+    [trace] = [row for row in traces if json.loads(row["content_json"]).get("hosted")]
+    card = json.loads(trace["content_json"])["hosted"]
+    assert card["tool"] == "web_fetch" and card["status"] == record.status
+    assert card["sources"] == card["images"] == []
+    assert card["fetch"] == envelope["record"]
+    if blocked:
+        assert card["policy_sources"] == [] and card["error_code"] == "fetch_url_blocked"
+    else:
+        assert card["source_id"] == sid and card["cost"]["usd"] == 0
+    assert [row["hosted"] for detail in details for row in detail["rows"] if row.get("hosted")] == [card]
+    live = [payload["content"]["hosted"] for name, payload in published
+            if name == "message.new" and (payload.get("content") or {}).get("hosted")]
+    assert live == ([card] if platform == "avibe" else [])
+    assert harness.controller.im_client.sent.count(trace["content_text"]) == 1
+    assert not harness.controller.im_client.uploads
+    assert len(harness.rows("result")) == 2 and not harness.rows("error")
+
+
 _JPEG = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8
 _DIRECT = {
     "mode": "direct",
