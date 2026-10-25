@@ -234,7 +234,8 @@ def _configured_content(
             return "malformed", None, None, False
         row = next((item for item in rows if _url_matches(item.get("url"), requested_url)), None)
         if row is None:
-            return "target", None, None, False
+            failure = next((item for item in failures if _url_matches(item.get("url"), requested_url)), None)
+            return ("target", None, None, False) if failure is not None else ("malformed", None, None, False)
         content = row.get(result.get("content", "raw_content"))
         if not isinstance(content, str) or not content.strip():
             return "target", None, None, False

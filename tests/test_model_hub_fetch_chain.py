@@ -397,6 +397,17 @@ def test_configured_target_failures_do_not_cool_or_mark_source(tmp_path, vendor,
     assert result.cost is not None and result.cost.usd == 0 and not result.billable
 
 
+def test_tavily_nonmatching_failure_is_malformed_service_evidence():
+    catalog = next(item for item in fetch_service_catalog() if item["vendor"] == "tavily")
+    body = {"results": [], "failed_results": [{"url": "https://other.example/", "error": "blocked"}]}
+    result = map_fetch_response(
+        catalog, SearchResponse(200, {}, json.dumps(body).encode()),
+        requested_url="https://example.com/", sent=True, say=lambda key, **_: key,
+    )
+    assert result.record["error_code"] == "service_unreadable"
+    assert result.uncertain and result.cooling and result.cost is None
+
+
 @pytest.mark.parametrize("vendor,status,body,error,expected_code,expected_usd,expected_billable,expected_uncertain", [
     ("tavily", 503, {}, "", "service_unavailable", 0, False, False),
     ("exa", 429, {}, "", "service_rate_limited", 0, False, False),
