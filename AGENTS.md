@@ -242,7 +242,11 @@ there rather than expanding this index.
 
 - default to English for comments, docs, logs, and user-facing copy
 - use non-English text only when required for localization/i18n
-- backend user-facing strings must go through `vibe/i18n/`
+- backend user-facing strings for IM, Web, and notifications must go through `vibe/i18n/`
+- the `vibe` CLI is Agent-facing: its help, errors, hints, and notices are
+  English, written in code, and never read the configured UI language. A message
+  the CLI shares with a localized surface (such as the Doctor report the Web
+  panel shows) keeps its catalog key, and the CLI renders its English entry
 - frontend user-facing strings must go through `ui/src/i18n/en.json` and `ui/src/i18n/zh.json`
 - never hardcode user-visible display text in handlers, platform adapters, or React components
 

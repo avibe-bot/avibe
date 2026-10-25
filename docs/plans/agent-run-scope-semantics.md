@@ -94,11 +94,13 @@ sync runs, the route is recorded for future detach-to-async behavior.
   Session" filter's. Responses report the scope they read as `session_id` and
   `global`.
 - Lists of records that do not belong to a Session (`vibe agent list`,
-  `vibe skill list`, Vault lists, `vibe session list`) have no Session scope;
-  `vibe session ...` commands address the Session itself positionally.
+  `vibe skill list`, Vault lists, `vibe session list`) have no Session scope.
+- `--session-id <id>` is the only way to name a Session. Single-Session
+  commands (`vibe session get|update|send-now|queue list|queue remove` and the
+  `vibe show` commands) default to the caller Session from `AVIBE_SESSION_ID`;
+  without a caller they fail with `missing_caller_session`, as lists do.
 - `vibe runs show` may default to `AVIBE_RUN_ID`.
 - `vibe runs cancel` stays explicit; no `--current-run` shortcut in this batch.
-- Single-object session commands may default object id from `AVIBE_SESSION_ID`.
 - `vibe task add` / `vibe watch add` default their target session to
   `AVIBE_SESSION_ID` when they continue an existing session.
 - A task/watch `create-session-per-run` definition uses stored

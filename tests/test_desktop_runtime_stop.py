@@ -33,7 +33,6 @@ from config import paths
 from config.v2_config import V2Config
 from tests.ui_server_test_helpers import csrf_headers
 from vibe import cli, desktop_backends, desktop_runtime, remote_access, restart_supervisor, runtime, ui_server
-from vibe.i18n import t as i18n_t
 
 # Random, so no process another test file started with a fixed id is ever in scope.
 RUNTIME_ID = secrets.token_hex(32)
@@ -47,6 +46,12 @@ OPENCODE_SERVE = ["serve", "--hostname=127.0.0.1", "--port=4096"]
 OPENCODE_STAMPED = {"opencode", "opencode-native", "opencode-configured", "opencode-agent-work"}
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX signal delivery")
+
+# The CLI's refusal lines, in English whatever the UI language.
+_STOP_REFUSED = "Nothing was stopped: this command runs from a desktop-managed Avibe Runtime, and the running {part} is not that Runtime's ({reason}). Stop it from the Avibe that started it."
+_RESTART_REFUSED = "Nothing was restarted: this command runs from a desktop-managed Avibe Runtime, and the running {part} is not that Runtime's ({reason}). Restart it from the Avibe that started it."
+_CLAIM_REFUSED = "Another Avibe Runtime is running here and does not belong to this desktop app; nothing was stopped ({part}: {reason})."
+
 
 
 @pytest.fixture
@@ -337,7 +342,8 @@ def test_the_stop_and_its_ancestors_are_never_signalled(spawn, bundle, tmp_path)
         ("service", "service", None, "ERROR: Avibe service did not stop; preserving pidfile and aborting."),
         ("installer", "installer", None, "ERROR: Desktop backend installer processes did not stop."),
         ("opencode", "opencode", None, "ERROR: The OpenCode server this Runtime started did not stop."),
-        ("opencode", "opencode", "zh", "错误：此 Runtime 启动的 OpenCode 服务未能停止。"),
+        # The CLI speaks English whatever the configured UI language.
+        ("opencode", "opencode", "zh", "ERROR: The OpenCode server this Runtime started did not stop."),
     ],
 )
 def test_a_role_process_carrying_the_id_at_the_rescan_fails_the_stop(
@@ -726,9 +732,7 @@ def test_a_plain_stop_from_another_desktop_runtime_stops_nothing(running_runtime
 
     assert cli.cmd_stop() == 3
 
-    assert _stderr_lines(capsys)[-1] == i18n_t(
-        "desktopRuntime.stopRefused", "en", part="service", reason="runtime_id_mismatch"
-    )
+    assert _stderr_lines(capsys)[-1] == _STOP_REFUSED.format(part="service", reason="runtime_id_mismatch")
     assert stop_env["signals"] == []
     assert stop_env["stop_pid"] == []
     assert stop_env["remote_access"] == []
@@ -745,9 +749,7 @@ def test_a_plain_stop_refuses_while_nothing_names_the_service_lock_holder(spawn,
     with _service_lock_held_for(None):
         assert cli.cmd_stop() == 3
 
-    assert _stderr_lines(capsys)[-1] == i18n_t(
-        "desktopRuntime.stopRefused", "en", part="service", reason="identity_unavailable"
-    )
+    assert _stderr_lines(capsys)[-1] == _STOP_REFUSED.format(part="service", reason="identity_unavailable")
     assert stop_env["signals"] == []
     assert stop_env["stop_pid"] == []
     assert stop_env["remote_access"] == []
@@ -805,9 +807,7 @@ def test_a_plain_restart_from_another_desktop_runtime_schedules_nothing(
 
     assert cli.cmd_restart() == 3
 
-    assert _stderr_lines(capsys)[-1] == i18n_t(
-        "desktopRuntime.restartRefused", "en", part="service", reason="runtime_id_mismatch"
-    )
+    assert _stderr_lines(capsys)[-1] == _RESTART_REFUSED.format(part="service", reason="runtime_id_mismatch")
     assert stop_env["signals"] == []
     assert all(_alive(child) for child in running_runtime)
 
@@ -978,7 +978,7 @@ def test_a_refused_desktop_start_leaves_everything_as_it_found_it(
         recorded = status_path.read_bytes()
         assert cli.cmd_start(open_browser=False) == 3
 
-    assert _stderr_lines(capsys)[-1] == i18n_t("desktopRuntime.claimRefused", "en", part=part, reason=reason)
+    assert _stderr_lines(capsys)[-1] == _CLAIM_REFUSED.format(part=part, reason=reason)
     assert stop_env["status"] == []
     assert status_path.read_bytes() == recorded
     assert stop_env["signals"] == []
@@ -1028,9 +1028,7 @@ def test_a_desktop_start_whose_service_lost_the_lock_to_another_runtime_rolls_ba
     with held:
         assert cli.cmd_start(open_browser=False) == 3
 
-    assert _stderr_lines(capsys)[-1] == i18n_t(
-        "desktopRuntime.claimRefused", "en", part="service", reason="runtime_id_mismatch"
-    )
+    assert _stderr_lines(capsys)[-1] == _CLAIM_REFUSED.format(part="service", reason="runtime_id_mismatch")
     assert stop_env["stop_pid"] == [own_ui.pid, own_service.pid]
     assert not _signalled(stop_env, foreign[0])
     assert _alive(foreign[0])
@@ -1084,9 +1082,7 @@ def test_a_stop_asks_again_of_every_process_it_is_about_to_signal(
     with _service_lock_held_for(service):
         assert cli.cmd_stop() == 3
 
-    assert _stderr_lines(capsys)[-1] == i18n_t(
-        "desktopRuntime.stopRefused", "en", part=taken_over, reason="runtime_id_mismatch"
-    )
+    assert _stderr_lines(capsys)[-1] == _STOP_REFUSED.format(part=taken_over, reason="runtime_id_mismatch")
     foreign = service if taken_over == "service" else ui
     assert not _signalled(stop_env, foreign)
     assert _alive(foreign)

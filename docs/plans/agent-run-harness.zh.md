@@ -103,7 +103,9 @@ vibe agent run \
 
 ### 废弃 `vibe hook send`
 
-兼容窗口：
+兼容窗口已结束：`vibe hook send` 已移除，已存储的 `hook_send` run 记录仍可读取。
+
+兼容窗口（历史）：
 
 ```bash
 vibe hook send ... -> vibe agent run ...

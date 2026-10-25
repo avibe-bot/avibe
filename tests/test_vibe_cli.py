@@ -76,6 +76,75 @@ def _write_alembic_revision(db_path: Path, revision: str) -> None:
         conn.execute("insert into alembic_version values (?)", (revision,))
 
 
+def test_cli_text_is_english_whatever_the_ui_language(monkeypatch, tmp_path, capsys):
+    """Agents read CLI help and errors; they stay English when the Web UI is set to Chinese."""
+
+    import argparse
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({"language": "zh"}), encoding="utf-8")
+    monkeypatch.setattr(cli.paths, "get_config_path", lambda: config_path)
+    monkeypatch.setattr(cli.V2Config, "load", lambda *_args, **_kwargs: SimpleNamespace(language="zh"))
+    han = re.compile(r"[\u4e00-\u9fff]")
+
+    def leaves(parser, path=()):
+        yield path, parser
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name, child in action.choices.items():
+                    yield from leaves(child, (*path, name))
+
+    for path, parser in leaves(cli.build_parser()):
+        help_text = parser.format_help()
+        assert not han.search(help_text), f"vibe {' '.join(path)} --help is not English"
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["skill", "load"])
+    assert not han.search(capsys.readouterr().err)
+
+
+def test_top_level_help_lists_only_public_commands(capsys):
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--help"])
+
+    help_text = capsys.readouterr().out
+    assert "==SUPPRESS==" not in help_text
+    assert not re.search(r"[{,]desktop[,}]|^\s+desktop\s", help_text, re.MULTILINE)
+    # The desktop shell's own entry point still runs.
+    assert parser.parse_args(["desktop", "endpoint", "--json"]).desktop_command == "endpoint"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["hook", "send", "--session-id", "ses1", "--message", "hi"],
+        ["task", "ls"],
+        ["watch", "rm", "watch1"],
+        ["agent", "run", "--agent", "a", "--async", "--message", "hi"],
+        ["agent", "run", "--session-id", "ses1", "--send-now", "--message", "hi"],
+        ["agent", "run", "--agent", "a", "--create-session", "--message", "hi"],
+        ["agent", "run", "--agent", "a", "--visibility", "foreground", "--message", "hi"],
+        ["agent", "run", "--agent", "a", "--prompt", "hi"],
+        ["agent", "create", "a", "--backend", "codex", "--effort", "high"],
+        ["task", "add", "--session-key", "slack::channel::C1", "--cron", "0 * * * *", "--message", "hi"],
+        ["watch", "add", "--session-id", "ses1", "--prefix", "hi", "--shell", "true"],
+        ["session", "get", "ses1"],
+        ["session", "update", "--session-id", "ses1", "--visibility", "background"],
+        ["show", "mark", "--target", "t", "--body", "hi"],
+    ],
+)
+def test_removed_spellings_are_unknown(argv, capsys):
+    """One spelling per concept: a removed alias, flag, or command is an argument error."""
+
+    with pytest.raises(SystemExit) as exc_info:
+        cli.build_parser().parse_args(argv)
+
+    assert exc_info.value.code == 2
+    assert json.loads(capsys.readouterr().err)["code"] == "invalid_arguments"
+
+
 def test_retention_help_reads_raw_config_without_loading_or_migrating(monkeypatch, tmp_path):
     config_path = tmp_path / "config.json"
     config_path.write_text(
@@ -88,7 +157,7 @@ def test_retention_help_reads_raw_config_without_loading_or_migrating(monkeypatc
         raise AssertionError("help construction must not load or migrate V2Config")
 
     monkeypatch.setattr(cli.V2Config, "load", _load_should_not_run)
-    assert cli._configured_trace_retention_days("en") == 90
+    assert cli._configured_trace_retention_days() == 90
     cli.build_parser()
 
 
@@ -100,7 +169,7 @@ def test_retention_help_ignores_oversized_configured_window(monkeypatch, tmp_pat
     )
     monkeypatch.setattr(cli.paths, "get_config_path", lambda: config_path)
 
-    assert cli._configured_trace_retention_days("en") == 30
+    assert cli._configured_trace_retention_days() == 30
 
 
 @pytest.mark.parametrize(
@@ -113,12 +182,12 @@ def test_retention_help_ignores_oversized_configured_window(monkeypatch, tmp_pat
         ),
         (
             "zh",
-            "不提供密钥时，命令会继续本机可恢复的配对",
-            "要替换结果不确定的待处理配对",
+            "Without a key, the CLI resumes a recoverable local pairing",
+            "To replace an uncertain pending attempt",
         ),
     ],
 )
-def test_remote_pair_help_localizes_recovery_guidance(
+def test_remote_pair_help_is_english_whatever_the_ui_language(
     monkeypatch, tmp_path, capsys, language, resume_hint, replacement_hint,
 ):
     monkeypatch.setenv("COLUMNS", "240")
@@ -135,8 +204,6 @@ def test_remote_pair_help_localizes_recovery_guidance(
     assert resume_hint in output
     assert replacement_hint in output
     assert "vibe remote pair --backend-url https://avibe.bot" in output
-    if language == "zh":
-        assert "Without a key, the CLI resumes" not in output
 
 
 def test_local_cli_installation_items_pass_for_normal_uv_tool(monkeypatch, tmp_path):
@@ -359,9 +426,8 @@ def test_tied_installs_are_never_ranked_by_discovery_order(split_launchers, monk
     _reinstall_same_version(split)
     for generation in (split.old, split.new):
         os.utime(generation / "uv" / "tools" / "avibe-os" / "uv-receipt.toml", (1_500_000, 1_500_000))
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
 
-    item, = cli._stable_launcher_items()
+    item, = cli._stable_launcher_items(language="zh")
 
     assert item["status"] == "fail"
     for launcher, generation in ((split.path_launcher, split.old), (split.installer_launcher, split.new)):
@@ -374,7 +440,7 @@ def test_tied_installs_are_never_ranked_by_discovery_order(split_launchers, monk
 
     assert result["status"] == "failed"
     assert result["reason"] == "stable_launchers_tied"
-    assert "没有改动任何启动器" in result["message"]
+    assert "No launcher was changed" in result["message"]
     assert split.path_launcher.resolve() == (split.old / "bin" / "vibe").resolve()
     assert split.installer_launcher.resolve() == (split.new / "bin" / "vibe").resolve()
 
@@ -390,15 +456,14 @@ def test_tied_installs_are_never_ranked_by_discovery_order(split_launchers, monk
 
 
 @pytest.mark.parametrize("failure", ["unwritable-launcher", "missing-export", "lock-busy"])
-def test_stable_launcher_repair_failures_are_localized(split_launchers, monkeypatch, failure):
-    """No exception text reaches the localized repair message."""
+def test_stable_launcher_repair_failures_name_the_cause_without_exception_text(split_launchers, monkeypatch, failure):
+    """No exception text reaches the repair message."""
 
     split = split_launchers
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
     reason, fragment = {
-        "unwritable-launcher": ("stable_launcher_move_failed", "请确认你有权限写入它"),
-        "missing-export": ("stable_launcher_move_failed", "请确认你有权限写入它"),
-        "lock-busy": ("upgrade_lock_busy", "另一个 Avibe 安装、升级或修复正在进行"),
+        "unwritable-launcher": ("stable_launcher_move_failed", "Make sure you can write to it"),
+        "missing-export": ("stable_launcher_move_failed", "Make sure you can write to it"),
+        "lock-busy": ("upgrade_lock_busy", "Another Avibe install, upgrade or repair is running"),
     }[failure]
     if failure == "unwritable-launcher":
         if os.name != "posix" or os.geteuid() == 0:
@@ -434,7 +499,6 @@ def test_windows_repair_leaves_the_launcher_it_runs_from_and_names_the_target(sp
     peer.parent.mkdir()
     peer.symlink_to(split.old / "bin" / "vibe")
     monkeypatch.setattr(upgrade, "INSTALLER_LAUNCHER_DIRS", (str(split.installer_launcher.parent), str(peer.parent)))
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
     # Stand-in for Windows holding the stale PATH launcher's image open.
     monkeypatch.setattr(cli, "launcher_is_current_process", lambda launcher: Path(launcher) == split.path_launcher)
 
@@ -443,7 +507,7 @@ def test_windows_repair_leaves_the_launcher_it_runs_from_and_names_the_target(sp
     assert result["status"] == "failed"
     assert result["reason"] == "stable_launcher_running"
     assert result["launchers"] == [str(peer)]
-    assert str(split.path_launcher) in result["message"] and "Windows 无法" in result["message"]
+    assert str(split.path_launcher) in result["message"] and "Windows cannot replace" in result["message"]
     commands = [shlex.split(command) for command in re.findall(r"`([^`]+)`", result["message"])]
     assert [str(split.installer_launcher), "doctor", "repair", "stable-launchers"] in commands
     assert peer.resolve() == (split.new / "bin" / "vibe").resolve()
@@ -818,7 +882,6 @@ def test_doctor_reports_degraded_show_checkpoints_without_git(monkeypatch):
 
 def test_doctor_lists_stored_cron_tasks_with_numeric_weekdays(monkeypatch):
     """Tasks written before numeric weekdays were refused still fire a day off intent."""
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "en")
     assert cli._scheduled_task_weekday_items() == []
 
     store = cli.ScheduledTaskStore()
@@ -851,21 +914,22 @@ def test_doctor_surfaces_configuration_recovery_warnings(monkeypatch, tmp_path):
     monkeypatch.setattr(paths, "get_config_path", lambda: config_path)
     monkeypatch.setattr(paths, "get_runtime_doctor_path", lambda: doctor_path)
     monkeypatch.setattr(cli.V2Config, "load", lambda _path: config)
-    monkeypatch.setattr(cli, "_home_migration_items", lambda: [])
+    monkeypatch.setattr(cli, "_home_migration_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_service_lifecycle_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_service_install_family_items", lambda **_kwargs: [])
-    monkeypatch.setattr(cli, "_restart_state_items", lambda: [])
-    monkeypatch.setattr(cli, "_runtime_architecture_items", lambda: [])
-    monkeypatch.setattr(cli, "_show_git_checkpoint_items", lambda: [])
+    monkeypatch.setattr(cli, "_restart_state_items", lambda **_kwargs: [])
+    monkeypatch.setattr(cli, "_runtime_architecture_items", lambda **_kwargs: [])
+    monkeypatch.setattr(cli, "_show_git_checkpoint_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_managed_dependencies_doctor_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli, "_show_runtime_doctor_items", lambda **_kwargs: [])
-    monkeypatch.setattr(cli, "_local_cli_installation_items", lambda: [])
+    monkeypatch.setattr(cli, "_local_cli_installation_items", lambda **_kwargs: [])
     monkeypatch.setattr(cli.api, "detect_cli", lambda _path, _backend: {"found": False, "path": None, "status": "missing"})
 
-    result = cli._doctor()
+    result = cli._doctor(language="zh")
 
-    config_group = next(group for group in result["groups"] if group["name"] == "Configuration")
-    recovery_item = next(item for item in config_group["items"] if item.get("code") == "config.recovery")
+    recovery_item = next(
+        item for group in result["groups"] for item in group["items"] if item.get("code") == "config.recovery"
+    )
     assert recovery_item["status"] == "warn"
     assert recovery_item["code"] == "config.recovery"
     assert recovery_item["message"] != warning
@@ -3034,9 +3098,8 @@ def test_show_runtime_doctor_retires_legacy_source_with_actionable_replacement(
         archive_cache_status=lambda: {"candidate_count": 0, "candidate_bytes": 0, "skipped_reason": None},
     )
     monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda **_kwargs: manager)
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
 
-    items = cli._show_runtime_doctor_items(deep=False)
+    items = cli._show_runtime_doctor_items(language=language, deep=False)
 
     failure = next(item for item in items if item.get("code") == "show_runtime.provider_unsupported")
     assert failure["status"] == "fail"
@@ -3173,7 +3236,6 @@ def test_managed_dependencies_doctor_localizes_model_hub_engine_label(
     installed,
     code,
 ):
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     monkeypatch.setattr(
         cli.api,
         "dependencies_status",
@@ -3195,7 +3257,7 @@ def test_managed_dependencies_doctor_localizes_model_hub_engine_label(
         },
     )
 
-    items = cli._managed_dependencies_doctor_items()
+    items = cli._managed_dependencies_doctor_items(language=language)
 
     item = next(
         item
@@ -3696,12 +3758,7 @@ def test_repair_show_runtime_returns_structured_download_failure(monkeypatch):
     assert archive_url in result["message"]
 
 
-@pytest.mark.parametrize(("language", "message_fragment"), [("en", "Fix or remove"), ("zh", "\u4fee\u590d\u6216\u79fb\u9664")])
-def test_repair_show_runtime_renders_explicit_command_failure(
-    monkeypatch,
-    language,
-    message_fragment,
-):
+def test_repair_show_runtime_renders_explicit_command_failure(monkeypatch):
     manager = SimpleNamespace(
         repair=lambda: {
             "ok": False,
@@ -3712,13 +3769,12 @@ def test_repair_show_runtime_renders_explicit_command_failure(
         }
     )
     monkeypatch.setattr("core.show_runtime.ShowRuntimeManager", lambda: manager)
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
 
     result = cli._repair_show_runtime()
 
     assert result["status"] == "failed"
     assert result["explicit_command"] == "/custom/runtime"
-    assert message_fragment in result["message"]
+    assert "Fix or remove" in result["message"]
 
 
 def test_runtime_prepare_strict_does_not_report_policy_skip_as_ready(monkeypatch, capsys):
@@ -3811,21 +3867,21 @@ def test_runtime_prepare_reports_cpa_failure_without_blocking_avibe_upgrade(
 @pytest.mark.parametrize(
     ("cpa_result", "expected", "stream"),
     (
-        ({"ok": True, "changed": True}, "Model Hub 引擎已安装。", "out"),
-        ({"ok": True, "changed": False}, "Model Hub 引擎已就绪。", "out"),
+        ({"ok": True, "changed": True}, "Model Hub engine installed.", "out"),
+        ({"ok": True, "changed": False}, "Model Hub engine ready.", "out"),
         (
             {"ok": False, "skipped": True, "reason": "offline"},
-            "Model Hub 引擎：已跳过（offline）。",
+            "Model Hub engine: skipped (offline).",
             "out",
         ),
         (
             {"ok": False, "reason": "download_failed"},
-            "Model Hub 引擎尚未就绪：download_failed",
+            "Model Hub engine not ready: download_failed",
             "err",
         ),
     ),
 )
-def test_runtime_prepare_localizes_cpa_output(
+def test_runtime_prepare_reports_cpa_output(
     monkeypatch,
     capsys,
     cpa_result,
@@ -3842,7 +3898,6 @@ def test_runtime_prepare_localizes_cpa_output(
         }
     )
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
@@ -3869,17 +3924,16 @@ def test_runtime_prepare_localizes_cpa_output(
 
     captured = capsys.readouterr()
     assert expected in getattr(captured, stream)
-    assert "Model Hub engine" not in captured.out + captured.err
 
 
 @pytest.mark.parametrize(
     ("ripgrep_result", "expected", "stream"),
     (
-        ({"ok": True, "changed": True}, "ripgrep 已安装。", "out"),
-        ({"ok": True, "changed": False}, "ripgrep 已就绪。", "out"),
+        ({"ok": True, "changed": True}, "ripgrep installed.", "out"),
+        ({"ok": True, "changed": False}, "ripgrep ready.", "out"),
         (
             {"ok": False, "reason": "ripgrep_platform_unsupported"},
-            "ripgrep 尚未就绪：ripgrep_platform_unsupported",
+            "ripgrep not ready: ripgrep_platform_unsupported",
             "err",
         ),
     ),
@@ -3901,7 +3955,6 @@ def test_strict_runtime_prepare_reports_ripgrep_without_requiring_it(
         }
     )
     monkeypatch.setattr(cli, "_show_runtime_manager_from_args", lambda _args: manager)
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
     monkeypatch.setattr(cli, "_ensure_askill_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_tmux_during_prepare", lambda **_kwargs: {"ok": True})
     monkeypatch.setattr(cli, "_ensure_git_during_prepare", lambda **_kwargs: {"ok": True, "mode": "system"})
@@ -4089,23 +4142,8 @@ def test_runtime_clean_json_keeps_nested_failure_payload_and_exits_nonzero(monke
 
 
 @pytest.mark.parametrize("help_args", [("runtime", "--help"), ("runtime", "clean", "--help")])
-@pytest.mark.parametrize(
-    ("language", "consumer_scope", "failure_contract"),
-    [
-        ("en", "Show, Git, Model Hub, tmux, ripgrep, and cloudflared", "exit nonzero if any cleanup fails"),
-        ("zh", "Show、Git、Model Hub、tmux、ripgrep 和 cloudflared", "任一清理失败时以非零状态退出"),
-    ],
-)
-def test_runtime_clean_help_names_consumers_and_failure_exit(
-    monkeypatch,
-    capsys,
-    help_args,
-    language,
-    consumer_scope,
-    failure_contract,
-):
+def test_runtime_clean_help_names_consumers_and_failure_exit(monkeypatch, capsys, help_args):
     monkeypatch.setenv("COLUMNS", "240")
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc_info:
@@ -4113,10 +4151,9 @@ def test_runtime_clean_help_names_consumers_and_failure_exit(
 
     assert exc_info.value.code == 0
     output = capsys.readouterr().out
-    assert cli.i18n_t("runtime.clean.commandHelp", language) in output
-    assert consumer_scope in output
+    assert "Show, Git, Model Hub, tmux, ripgrep, and cloudflared" in output
     assert "Memory" not in output
-    assert failure_contract in output
+    assert "exit nonzero if any cleanup fails" in output
 
 
 @pytest.mark.parametrize("legacy_source", ["github", "github-source", "GitHub-Source"])

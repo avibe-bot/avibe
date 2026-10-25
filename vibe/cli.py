@@ -68,7 +68,7 @@ from core.watches import (
     WatchRuntimeStateStore,
 )
 from vibe import __version__, api, runtime
-from vibe.i18n import normalize_language, t as i18n_t
+from vibe.i18n import t as i18n_t
 from vibe.restart_supervisor import schedule_restart
 from vibe.screenshot import ScreenshotError, capture_screenshot
 from vibe.upgrade import (
@@ -290,7 +290,6 @@ class VibeArgumentParser(argparse.ArgumentParser):
     def __init__(self, *args, **kwargs):
         self.error_help_command = kwargs.pop("error_help_command", None)
         self.error_hint = kwargs.pop("error_hint", None)
-        self.error_i18n_key = kwargs.pop("error_i18n_key", None)
         super().__init__(*args, **kwargs)
 
     def parse_args(self, args=None, namespace=None):
@@ -318,12 +317,6 @@ class VibeArgumentParser(argparse.ArgumentParser):
         return parsed
 
     def error(self, message):
-        if self.error_i18n_key:
-            message = i18n_t(
-                self.error_i18n_key,
-                _configured_cli_language(),
-                detail=message,
-            )
         payload = {
             "schema_version": 1,
             "ok": False,
@@ -336,7 +329,7 @@ class VibeArgumentParser(argparse.ArgumentParser):
             payload["hint"] = self.error_hint
         if self.error_help_command:
             payload["help_command"] = self.error_help_command
-        self.exit(2, json.dumps(payload, indent=2) + "\n")
+        self.exit(2, _json_text(payload, stream=sys.stderr) + "\n")
 
 
 class TaskCliError(ValueError):
@@ -399,14 +392,10 @@ RESERVED_SESSION_CLI_CODE = "reserved_session"
 def _reserved_session_cli_error(exc: "UnresolvableSessionTarget") -> TaskCliError:
     """Re-type the resolver refusal and localize its user-facing guidance."""
 
-    try:
-        lang = V2Config.load().language
-    except Exception:
-        lang = "en"
     return TaskCliError(
         str(exc),
         code=RESERVED_SESSION_CLI_CODE,
-        hint=i18n_t("harness.notice.workspaceSessionReadOnly", lang),
+        hint=i18n_t("harness.notice.workspaceSessionReadOnly"),
         details={"session_id": exc.session_id, "reason": exc.reason},
     )
 
@@ -480,14 +469,10 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
         isinstance(exc, ResourceAccessError)
         and exc.code == HARNESS_ACCESS_FORBIDDEN_CODE
     ):
-        try:
-            lang = V2Config.load().language
-        except Exception:
-            lang = "en"
         exc = TaskCliError(
             str(exc),
             code=exc.code,
-            hint=i18n_t("harness.notice.remoteExecutionDisabled", lang),
+            hint="Harness work needs the Editor role on this Avibe instance.",
             help_command=help_command,
         )
     if isinstance(exc, TaskCliError):
@@ -516,7 +501,7 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
         }
         if help_command:
             payload["help_command"] = help_command
-    print(json.dumps(payload, indent=2), file=sys.stderr)
+    print(_json_text(payload, stream=sys.stderr), file=sys.stderr)
 
 
 def _definition_conflict_cli_error(
@@ -550,11 +535,28 @@ def _cli_payload(kind: str, **fields) -> dict:
     return {"schema_version": 1, "ok": True, "kind": kind, **fields}
 
 
+def _json_text(payload: Mapping[str, Any], *, stream: Any) -> str:
+    """Indented JSON for the CLI: non-ASCII text as itself, escaped only where ``stream`` cannot carry it.
+
+    Agents read this output, and a ``\\uXXXX`` escape costs six characters per
+    character. A stream whose encoding cannot hold the text (a Windows pipe on a
+    legacy code page) still gets valid JSON rather than an encoding error.
+    """
+
+    text = json.dumps(payload, ensure_ascii=False, indent=2)
+    encoding = getattr(stream, "encoding", None) or "utf-8"
+    try:
+        text.encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return json.dumps(payload, indent=2)
+    return text
+
+
 def _print_cli_payload(kind: str, **fields) -> None:
-    print(json.dumps(_cli_payload(kind, **fields), indent=2))
+    print(_json_text(_cli_payload(kind, **fields), stream=sys.stdout))
 
 
-def _configured_trace_retention_days(language: str) -> int:
+def _configured_trace_retention_days() -> int:
     """Read the persisted window for help text without loading/migrating config."""
     from storage import agent_events_retention as _retention
 
@@ -571,20 +573,7 @@ def _configured_trace_retention_days(language: str) -> int:
             pass
     except Exception:
         pass
-    del language
     return _retention.DEFAULT_RETENTION_DAYS
-
-
-def _configured_cli_language() -> str:
-    """Read an optional configured language without creating or migrating state."""
-
-    try:
-        config_path = paths.get_config_path()
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
-        language = payload.get("language") if isinstance(payload, dict) else None
-        return normalize_language(language if isinstance(language, str) else None)
-    except Exception:
-        return "en"
 
 
 def _redirect_broken_diagnostic_stream(stream: Any) -> None:
@@ -638,7 +627,7 @@ def _emit_activation_notice(outcome: Any) -> None:
     """Format and emit a peer activation notice without affecting the result."""
 
     try:
-        notice = format_activation_failures(outcome, _configured_cli_language())
+        notice = format_activation_failures(outcome)
     except Exception as exc:  # noqa: BLE001
         notice = f"Stable launcher activation notice unavailable: {exc}"
     _emit_upgrade_advisory(notice)
@@ -648,7 +637,7 @@ def _emit_deferred_activation_notice(log_path: Path | None) -> None:
     """Format and emit the deferred helper log location best-effort."""
 
     try:
-        notice = format_deferred_activation_log(log_path, _configured_cli_language())
+        notice = format_deferred_activation_log(log_path)
     except Exception as exc:  # noqa: BLE001
         notice = f"Deferred activation diagnostics unavailable: {exc}"
     _emit_upgrade_advisory(notice)
@@ -658,36 +647,40 @@ def cmd_skill(args) -> int:
     """List or load Skills through Avibe's live resolver."""
 
     from core.managed_skills import (
+        catalog_page,
         load_skill,
         render_skill_content,
-        render_skill_list,
         resolve_skills,
     )
     from core.skill_observability import finish_cli_catalog, finish_cli_load
-
-    language = _configured_cli_language()
 
     if args.skill_command == "list":
         resolved = []
         observation_error = "internal_error"
         try:
             resolved = resolve_skills()
-            output = render_skill_list(
-                resolved,
-                page=args.page,
-                more_notice=i18n_t(
-                    "skill.cli.more",
-                    language,
-                    page=args.page + 1,
-                ),
+            entries, next_page = catalog_page(resolved, args.page)
+            pagination = {
+                "page": args.page,
+                "returned": len(entries),
+                "has_more": next_page is not None,
+                "next_page": next_page,
+            }
+            if next_page is not None:
+                pagination["next_command"] = f"vibe skill list --page {next_page}"
+            _print_cli_payload(
+                "skills",
+                skills=[{"name": skill.name, "description": skill.description} for skill in entries],
+                pagination=pagination,
             )
-            if output:
-                print(output, flush=True)
             observation_error = None
             return 0
         except ValueError:
             observation_error = "invalid_page"
-            print(i18n_t("skill.cli.error.invalidPage", language), file=sys.stderr)
+            _print_task_error(
+                TaskCliError("--page must be a positive integer", code="invalid_pagination"),
+                help_command="vibe skill list --help",
+            )
             return 1
         except BrokenPipeError:
             observation_error = "output_interrupted"
@@ -696,30 +689,52 @@ def cmd_skill(args) -> int:
             finish_cli_catalog(resolved, args.page, observation_error)
 
     if args.skill_command == "load":
+        # Each name is loaded, printed, and observed on its own, in the order given:
+        # an unknown name fails the command without hiding the Skills that did load.
+        names = list(dict.fromkeys(args.names))
         started_at = time.monotonic()
-        skill = None
-        observation_error = "internal_error"
         try:
             allowed = resolve_skills()
-            skill = next((entry for entry in allowed if entry.name == args.name), None)
-            if skill is None:
-                observation_error = "not_found"
-                print(i18n_t("skill.cli.error.notFound", language, name=args.name), file=sys.stderr)
-                return 1
-            loaded = load_skill(args.name, resolved_skills=allowed)
-            if loaded is None:
-                observation_error = "unreadable_or_invalid"
-                print(i18n_t("skill.cli.error.notFound", language, name=args.name), file=sys.stderr)
-                return 1
-            skill = loaded
-            print(render_skill_content(skill), flush=True)
-            observation_error = None
-            return 0
-        except BrokenPipeError:
-            observation_error = "output_interrupted"
+        except BaseException:
+            for name in names:
+                finish_cli_load(name, None, started_at, "internal_error")
             raise
-        finally:
-            finish_cli_load(args.name, skill, started_at, observation_error)
+        missing: list[str] = []
+        for name in names:
+            started_at = time.monotonic()
+            skill = None
+            observation_error = "internal_error"
+            try:
+                skill = next((entry for entry in allowed if entry.name == name), None)
+                if skill is None:
+                    observation_error = "not_found"
+                    missing.append(name)
+                    continue
+                loaded = load_skill(name, resolved_skills=allowed)
+                if loaded is None:
+                    observation_error = "unreadable_or_invalid"
+                    missing.append(name)
+                    continue
+                skill = loaded
+                print(render_skill_content(skill), flush=True)
+                observation_error = None
+            except BrokenPipeError:
+                observation_error = "output_interrupted"
+                raise
+            finally:
+                finish_cli_load(name, skill, started_at, observation_error)
+        if missing:
+            _print_task_error(
+                TaskCliError(
+                    f"Skill not found: {', '.join(missing)}",
+                    code="skill_not_found",
+                    hint="Load only names listed in the prompt or returned by `vibe skill list`.",
+                    details={"missing": missing, "loaded": [name for name in names if name not in missing]},
+                ),
+                help_command="vibe skill list",
+            )
+            return 1
+        return 0
 
     return 1
 
@@ -821,10 +836,8 @@ def cmd_computer(args) -> int:
         computer_use_sync,
     )
 
-    language = _configured_cli_language()
-
-    def translate(key: str, **kwargs: Any) -> str:
-        return i18n_t(key, language, **kwargs)
+    # Computer Use reports keyed errors; the CLI renders each key's English entry.
+    translate = i18n_t
 
     caller_context = caller_context_from_env()
     caller_session_id = _default_session_id_from_caller(caller_context)
@@ -885,7 +898,7 @@ def cmd_computer(args) -> int:
         )
     except ComputerCliError as exc:
         raise TaskCliError(
-            i18n_t(exc.key, language, **exc.params),
+            i18n_t(exc.key, **exc.params),
             code="invalid_computer_use_arguments",
             hint=translate("computer.cli.hint.invalidArguments"),
             help_command="vibe computer --help",
@@ -939,7 +952,7 @@ def cmd_computer(args) -> int:
         screenshot_path = write_screenshot(tool, result, args.output)
     except ComputerCliError as exc:
         raise TaskCliError(
-            i18n_t(exc.key, language, **exc.params),
+            i18n_t(exc.key, **exc.params),
             code="computer_use_screenshot_missing",
             help_command="vibe computer --help",
         ) from exc
@@ -957,6 +970,16 @@ def cmd_computer(args) -> int:
             )
         )
     return 1 if result.get("isError") is True else 0
+
+
+_PROMPT_RENDER_INPUT_ERRORS = {
+    "invalidContext": "The context must be a JSON object containing only backend, agent_instructions and options.",
+    "invalidBackend": "backend must be claude, codex or opencode.",
+    "invalidField": "Invalid field type or missing required field: {field}",
+    "unknownField": "Unknown field: {field}",
+    "unreadableContext": "Cannot read the context file. Check its path and permissions.",
+    "invalidJson": "The context file must contain valid UTF-8 JSON.",
+}
 
 
 def cmd_debug_prompt(args) -> int:
@@ -984,15 +1007,13 @@ def cmd_debug_prompt(args) -> int:
                 raise PromptRenderInputError("invalidContext")
         payload = export_prompt_studio_catalog(render_context=context)
     except PromptRenderInputError as exc:
-        language = _configured_cli_language()
-        error = i18n_t(f"debug.cli.error.{exc.key}", language, field=exc.field)
-        print(i18n_t("debug.cli.error.promptExport", language, error=error), file=sys.stderr)
+        error = _PROMPT_RENDER_INPUT_ERRORS.get(exc.key, "Invalid prompt rendering input.").format(field=exc.field)
+        print(f"Prompt export failed: {error}", file=sys.stderr)
         return 1
     except (OSError, ValueError, TypeError):
         logger.debug("Prompt export failed", exc_info=True)
-        language = _configured_cli_language()
-        error = i18n_t("debug.cli.error.renderFailed", language)
-        print(i18n_t("debug.cli.error.promptExport", language, error=error), file=sys.stderr)
+        error = "Cannot render the prompt sources. Check the sources and rendering inputs."
+        print(f"Prompt export failed: {error}", file=sys.stderr)
         return 1
     print(json.dumps(payload, ensure_ascii=False, indent=2))
     return 0
@@ -1003,7 +1024,7 @@ def _add_pagination_args(parser, *, help_command: str) -> None:
     parser.add_argument(
         "--limit",
         type=int,
-        help=f"Rows per page. Defaults to {DEFAULT_PAGE_LIMIT}; maximum {MAX_PAGE_LIMIT}.",
+        help=f"Rows per page. Defaults to {DEFAULT_PAGE_LIMIT}; values above {MAX_PAGE_LIMIT} read {MAX_PAGE_LIMIT}.",
     )
     parser.error_help_command = help_command
 
@@ -1012,7 +1033,7 @@ def _add_brief_arg(parser, *, list_command: str) -> None:
     parser.add_argument(
         "--brief",
         action="store_true",
-        help=i18n_t("harness.cli.help.brief", _configured_cli_language(), list_command=list_command),
+        help=f"Print only the compact row that '{list_command}' prints for this record",
     )
 
 
@@ -1034,11 +1055,18 @@ def _add_vault_approval_wait_args(parser, *, default_seconds: int = DEFAULT_VAUL
 
 
 def _page_request_from_args(args, *, help_command: str) -> PageRequest:
+    """One page of a CLI list. A ``--limit`` above the maximum reads the maximum.
+
+    Asking for more rows than one page holds is not a different decision, so it is
+    served rather than refused; the response's ``pagination.limit`` reports the
+    limit actually used, and ``next_command`` continues from there.
+    """
+
+    limit = getattr(args, "limit", None)
+    if limit is not None:
+        limit = min(limit, MAX_PAGE_LIMIT)
     try:
-        return make_page_request(
-            page=getattr(args, "page", None),
-            limit=getattr(args, "limit", None),
-        )
+        return make_page_request(page=getattr(args, "page", None), limit=limit)
     except ValueError as exc:
         raise TaskCliError(str(exc), code="invalid_pagination", help_command=help_command) from exc
 
@@ -1064,19 +1092,8 @@ def _paginated_fields(page_result, *, command: list[str], include_next_command: 
     # ``next_command`` is the continuation whenever the command can be replayed;
     # only a page it cannot name (SQL piped on stdin) needs telling how to go on.
     if page_payload["has_more"] and "next_command" not in page_payload:
-        fields["message"] = i18n_t("common.moreRecordsAddPage", _configured_cli_language())
+        fields["message"] = "More records are available. Add --page to continue."
     return fields
-
-
-def _text_page_continuation(payload: Mapping[str, object]) -> Optional[str]:
-    """How a text printer tells a person to continue; JSON carries ``pagination.next_command``."""
-
-    pagination = payload.get("pagination")
-    next_command = pagination.get("next_command") if isinstance(pagination, Mapping) else None
-    if next_command:
-        return i18n_t("common.moreRecordsContinueWith", _configured_cli_language(), command=next_command)
-    message = payload.get("message")
-    return str(message) if message else None
 
 
 def _print_definition_list_payload(
@@ -1215,32 +1232,6 @@ def _task_update_examples_text() -> str:
     )
 
 
-def _hook_send_examples_text() -> str:
-    return dedent(
-        """\
-        Deprecated:
-          `vibe hook send` is a compatibility entrypoint.
-          New automation should use `vibe agent run`.
-
-        Session target:
-          Use --session-id with the target Agent Session ID, for example sesk8m4q2p7x.
-
-        Guidance:
-          If this is your first time creating an async one-shot run, use `vibe agent run --help`.
-          `vibe hook send` queues one deprecated asynchronous compatibility turn without persisting a scheduled task.
-          `--session-id` chooses which Agent Session Avibe will continue using for that one async turn.
-          Keep the current session id when the hook should continue in the same session.
-          If no session id is available, trigger this from an active Avibe conversation instead of guessing.
-          For new async one-shot work, prefer `vibe agent run`.
-          `--message` and `--message-file` provide the one-shot async user message that will be queued immediately.
-
-        Examples:
-          vibe agent run --session-id sesk8m4q2p7x --no-callback --message 'The export finished. Share the summary.'
-          vibe agent run --session-id sesk8m4q2p7x --no-callback --message 'Run the benchmark; I will inspect the run later.'
-        """
-    )
-
-
 def _watch_examples_text() -> str:
     return dedent(
         """\
@@ -1298,9 +1289,8 @@ def _architecture_token(text: str | None) -> str | None:
     return None
 
 
-def _runtime_architecture_items() -> list[dict[str, str]]:
+def _runtime_architecture_items(*, language: str = "en") -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
-    language = _configured_cli_language()
     unknown_value = i18n_t("doctor.value.unknown", language)
     is_apple_silicon = _is_apple_silicon_host()
     host_arch = "Apple Silicon" if is_apple_silicon else platform.machine() or unknown_value
@@ -1359,9 +1349,8 @@ def _path_points_to(path: Path, target: Path) -> bool:
     return resolved_path is not None and resolved_target is not None and resolved_path == resolved_target
 
 
-def _home_migration_items() -> list[dict]:
+def _home_migration_items(*, language: str = "en") -> list[dict]:
     items: list[dict] = []
-    language = _configured_cli_language()
     explicit_home = os.environ.get(paths.AVIBE_HOME_ENV)
     if explicit_home:
         _add_doctor_item(
@@ -1501,7 +1490,7 @@ def _launcher_command(launcher: Path | str, *args: str) -> str:
     return shlex.join([str(launcher), *args])
 
 
-def _service_generation_items() -> list[dict]:
+def _service_generation_items(*, language: str = "en") -> list[dict]:
     """Warn when the running service is older than the last activated install."""
 
     items: list[dict] = []
@@ -1509,7 +1498,6 @@ def _service_generation_items() -> list[dict]:
     downgrade = generation_downgrade(process_generation(owner_pid)) if owner_pid else None
     if downgrade is None:
         return items
-    language = _configured_cli_language()
     _add_doctor_item(
         items,
         "warn",
@@ -1532,9 +1520,8 @@ def _service_generation_items() -> list[dict]:
     return items
 
 
-def _service_install_family_items(*, detect_extra_processes: bool = True) -> list[dict]:
+def _service_install_family_items(*, language: str = "en", detect_extra_processes: bool = True) -> list[dict]:
     items: list[dict] = []
-    language = _configured_cli_language()
     current_family = _current_cli_install_family()
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
     service_pids = [pid for pid in [owner_pid] if pid]
@@ -1622,9 +1609,8 @@ def _restart_failure_summary(payload: dict, language: str) -> str:
     return " ".join(i18n_t(key, language, value=value) for key, value in pairs if value)
 
 
-def _restart_state_items() -> list[dict]:
+def _restart_state_items(*, language: str = "en") -> list[dict]:
     items: list[dict] = []
-    language = _configured_cli_language()
     restart_path = runtime.get_restart_status_path()
     payload = runtime.read_json(restart_path) or {}
     if not payload:
@@ -1739,9 +1725,8 @@ def _restart_state_items() -> list[dict]:
     return items
 
 
-def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dict]:
+def _service_lifecycle_items(*, language: str = "en", detect_extra_processes: bool = True) -> list[dict]:
     items: list[dict] = []
-    language = _configured_cli_language()
     missing_value = i18n_t("doctor.value.missing", language)
     pid_path = paths.get_runtime_pid_path()
     recorded_pid: int | None = None
@@ -1861,7 +1846,7 @@ def _service_lifecycle_items(*, detect_extra_processes: bool = True) -> list[dic
     return items
 
 
-def _show_git_checkpoint_items() -> list[dict]:
+def _show_git_checkpoint_items(*, language: str = "en") -> list[dict]:
     try:
         if runtime.resolve_service_owner_pid(include_starting=False):
             from core.show_git import show_git_checkpointing_active
@@ -1878,13 +1863,13 @@ def _show_git_checkpoint_items() -> list[dict]:
     return [
         {
             "status": "warn",
-            "message": i18n_t("doctor.item.showGitUnavailable", _configured_cli_language()),
+            "message": i18n_t("doctor.item.showGitUnavailable", language),
             "code": "runtime.show_git_unavailable",
         }
     ]
 
 
-def _scheduled_task_weekday_items() -> list[dict]:
+def _scheduled_task_weekday_items(*, language: str = "en") -> list[dict]:
     """Warn about stored cron tasks whose numeric weekday may fire a day off intent."""
 
     if not paths.get_sqlite_state_path().exists():
@@ -1905,7 +1890,6 @@ def _scheduled_task_weekday_items() -> list[dict]:
     ]
     if not affected:
         return []
-    language = _configured_cli_language()
     return [
         {
             "status": "warn",
@@ -1936,11 +1920,11 @@ def _remote_examples_text() -> str:
 
 
 def _remote_pair_examples_text() -> str:
-    return i18n_t("remote_access.cli.pairHelpEpilog", _configured_cli_language())
+    return "Guidance:\n  This is the direct pairing command for users who already have a pairing key.\n  For the guided setup flow, run `vibe remote`.\n  Without a key, the CLI resumes a recoverable local pairing, or prompts if none is pending.\n  To replace an uncertain pending attempt, explicitly supply a fresh key and the same backend URL.\n  Pairing saves the remote-access config and then starts the managed tunnel automatically.\n  The pairing key is one-time use; create a fresh key from the Avibe Cloud console if it fails.\n\nExamples:\n  vibe remote\n  vibe remote pair vrp_abc123\n  vibe remote pair --device-name \"Mac Studio\"\n  vibe remote pair --backend-url https://avibe.bot"
 
 
 def _show_examples_text() -> str:
-    markdown_help = i18n_t("show.markdown.help", _configured_cli_language())
+    markdown_help = "Public Show Page links automatically return agent-readable Markdown to Agents and command-line clients. For an authorized private read, request the URL with Accept: text/markdown."
     return dedent(
         """\
         A Show Page is one session-scoped visual page that Avibe serves through the Web UI / Avibe Cloud tunnel.
@@ -1970,14 +1954,14 @@ def _show_examples_text() -> str:
           vibe show list
           vibe show list --global --visibility public
           vibe show path --session-id sesk8m4q2p7x
-          vibe show status --session-id sesk8m4q2p7x --json
+          vibe show status --session-id sesk8m4q2p7x
           vibe show update --session-id sesk8m4q2p7x --visibility public
           vibe show update --session-id sesk8m4q2p7x --visibility offline
           vibe show mark mark-default-summary --session-id sesk8m4q2p7x --message "Review this summary."
           vibe show reply show_evt_1a2b3c4d --message "The source changed in W30."
-          vibe show marks --json
+          vibe show marks
           vibe show unmark mark_1 mark-default-summary
-          vibe show event --session-id sesk8m4q2p7x --event-json @./show-event.json --json
+          vibe show event --session-id sesk8m4q2p7x --event-json @./show-event.json
           vibe show annotate --session-id sesk8m4q2p7x --on --mode screenshot
 
         More:
@@ -2020,8 +2004,6 @@ def _show_status_examples_text() -> str:
           path, visibility, active_url, private_url, public_url, share_id, offline, created_at, updated_at.
           JSON includes history.mode (managed or self-managed), history.checkpointing_active,
           and history.git_dir (Avibe's history directory, not the user's repository).
-
-        Use --json when another program or agent will consume the result.
         """
     )
 
@@ -2060,8 +2042,7 @@ def _show_mark_examples_text() -> str:
 
         Examples:
           vibe show mark mark-default-summary --session-id sesk8m4q2p7x --message "Review this summary."
-          vibe show mark summary --session-id sesk8m4q2p7x --scope default --message-file ./comment.txt --json
-          vibe show mark --target summary --body "Legacy option aliases still work."
+          vibe show mark summary --session-id sesk8m4q2p7x --scope default --message-file ./comment.txt
         """
     )
 
@@ -2073,7 +2054,7 @@ def _show_event_examples_text() -> str:
 
         Examples:
           vibe show event --session-id sesk8m4q2p7x --type assistant.page.updated --event-json '{"summary":"Updated the plan."}'
-          vibe show event --session-id sesk8m4q2p7x --event-json @./show-event.json --json
+          vibe show event --session-id sesk8m4q2p7x --event-json @./show-event.json
         """
     )
 
@@ -2088,13 +2069,13 @@ def _show_annotate_examples_text() -> str:
           vibe show annotate --session-id sesk8m4q2p7x --on
           vibe show annotate --session-id sesk8m4q2p7x --on --mode screenshot
           vibe show annotate --session-id sesk8m4q2p7x --mode smart
-          vibe show annotate --session-id sesk8m4q2p7x --off --json
+          vibe show annotate --session-id sesk8m4q2p7x --off
         """
     )
 
 
 def _print_json(payload: dict) -> None:
-    print(json.dumps(payload, indent=2))
+    print(_json_text(payload, stream=sys.stdout))
 
 
 def _watch_add_examples_text() -> str:
@@ -2110,7 +2091,7 @@ def _watch_add_examples_text() -> str:
           `--session-id` chooses which Agent Session Avibe will continue using for follow-up messages from the watch.
           Use --create-session with --scope-id <scopes.id> to create a reusable Session in a specific existing scope.
           Use --create-session with --same-scope only from an Avibe Agent shell, where the caller Session scope is available.
-          Prefer --message or --message-file for follow-up instructions; --prefix is legacy-compatible.
+          Use --message or --message-file for follow-up instructions.
           Terminal failures also send a follow-up and disable the watch.
           In either mode, an allowed `--retry-exit-code` keeps waiting. A once Watch stops after its first event.
           A forever Watch waits for each event's Agent Run to finish before re-arming, then applies a five-second safety delay.
@@ -2139,10 +2120,9 @@ def _agent_run_examples_text() -> str:
           Use --session-id to continue an existing Agent Session.
           The default is P1: steer an active native Turn, start when idle, or fall back to the durable P3 queue.
           Add --queue to persist this Run as P3 behind the active Turn.
-          --send-now explicitly selects the same P1 content delivery for an existing Session.
-          To promote the exact existing P3 queue head without a new message, use: vibe session send-now <session-id>
-          Inspect queued work with: vibe session queue list <session-id>
-          Remove one exact queued row with: vibe session queue remove <session-id> <message-id>
+          To promote the exact existing P3 queue head without a new message, use: vibe session send-now --session-id <session-id>
+          Inspect queued work with: vibe session queue list --session-id <session-id>
+          Remove one exact queued row with: vibe session queue remove <message-id> --session-id <session-id>
           Omit --session-id/--fork-self/--fork-session to create a background Session for --agent.
           Inside an Agent shell it inherits the caller scope and invocation cwd; outside one it is standalone with its own Show workspace.
           Use --same-scope to explicitly place a new Session in the caller/source Session's scope.
@@ -2162,15 +2142,15 @@ def _agent_run_examples_text() -> str:
           --fork-session <session-id> creates a new Avibe Agent Session and asks the native backend to fork the source native session on the first turn.
           Forks keep the same backend, scope, and cwd as the source Session. Passing --agent is allowed only when that Agent uses the same backend.
           --agent, --model, and --reasoning-effort may override the forked Session's Agent/model/effort.
-          Do not combine fork flags with --session-id or --create-session.
+          Do not combine fork flags with --session-id.
 
         Avibe Agent shell examples:
           vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'
           vibe agent run --agent release-reviewer --visible --message 'Review this project in a visible sibling Session.'
-          vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Apply this correction in the current turn.'
-          vibe session queue list sesk8m4q2p7x
-          vibe session queue remove sesk8m4q2p7x msg_queued123
-          vibe session send-now sesk8m4q2p7x
+          vibe agent run --session-id sesk8m4q2p7x --message 'Apply this correction in the current turn.'
+          vibe session queue list --session-id sesk8m4q2p7x
+          vibe session queue remove msg_queued123 --session-id sesk8m4q2p7x
+          vibe session send-now --session-id sesk8m4q2p7x
 
         Normal terminal examples:
           vibe agent run --sync --agent release-reviewer --message 'Review the latest CI result and print it here.'
@@ -2184,19 +2164,17 @@ def _agent_run_examples_text() -> str:
     )
 
 
-def _add_hidden_task_alias(task_subparsers, alias: str, parser) -> None:
-    alias_parser = task_subparsers.add_parser(
-        alias,
-        help=argparse.SUPPRESS,
-        parents=[parser],
-        add_help=False,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    alias_parser.error_help_command = getattr(parser, "error_help_command", None)
-    alias_parser.error_hint = getattr(parser, "error_hint", None)
-    task_subparsers._choices_actions = [  # type: ignore[attr-defined]
-        action for action in task_subparsers._choices_actions if action.dest != alias  # type: ignore[attr-defined]
+def _hide_subcommands(subparsers, *names: str) -> None:
+    """Keep internal subcommands runnable while leaving them out of help and usage.
+
+    ``help=argparse.SUPPRESS`` on a subcommand is not honored by the help listing,
+    which prints a literal ``==SUPPRESS==`` row and still names it in the choices.
+    """
+
+    subparsers._choices_actions = [  # type: ignore[attr-defined]
+        action for action in subparsers._choices_actions if action.dest not in names  # type: ignore[attr-defined]
     ]
+    subparsers.metavar = "{" + ",".join(action.dest for action in subparsers._choices_actions) + "}"  # type: ignore[attr-defined]
 
 
 def _write_json(path, payload):
@@ -2303,27 +2281,7 @@ def _default_timezone_name() -> str:
     return "UTC"
 
 
-def _resolve_prompt_input(args, *, help_command: str, example_command: str) -> str:
-    if getattr(args, "prompt", None) is not None or getattr(args, "prompt_file", None) is not None:
-        raise TaskCliError(
-            "--prompt is deprecated; use --message instead",
-            code="deprecated_prompt_argument",
-            hint="Use --message for the user message sent to the Agent, or --message-file for file input.",
-            example=f"{example_command} --message 'Share the hourly summary.'",
-            help_command=help_command,
-        )
-    return _resolve_message_input(args, help_command=help_command, example_command=example_command)
-
-
 def _resolve_message_input(args, *, help_command: str, example_command: str) -> str:
-    if getattr(args, "prompt", None) is not None or getattr(args, "prompt_file", None) is not None:
-        raise TaskCliError(
-            "--prompt is deprecated; use --message instead",
-            code="deprecated_prompt_argument",
-            hint="Use --message for the user message sent to the Agent, or --message-file for file input.",
-            example=f"{example_command} --message 'Share the hourly summary.'",
-            help_command=help_command,
-        )
     message = (getattr(args, "message", None) or "").strip()
     message_file = getattr(args, "message_file", None)
     if message and message_file:
@@ -2377,77 +2335,11 @@ def _resolve_optional_message_input(
     *,
     help_command: str,
     example_command: str,
-    legacy_prefix: Optional[str] = None,
 ) -> Optional[str]:
-    if getattr(args, "prompt", None) is not None or getattr(args, "prompt_file", None) is not None:
-        raise TaskCliError(
-            "--prompt is deprecated; use --message instead",
-            code="deprecated_prompt_argument",
-            hint="Use --message for the user message sent to the Agent, or --message-file for file input.",
-            example=f"{example_command} --message 'Review the waiter output.'",
-            help_command=help_command,
-        )
     has_message = getattr(args, "message", None) is not None or getattr(args, "message_file", None) is not None
-    has_prefix = legacy_prefix is not None
-    if has_message and has_prefix:
-        raise TaskCliError(
-            "use either --message/--message-file or --prefix, not both",
-            code="conflicting_message_inputs",
-            hint="Use --message for new watches. --prefix is only a compatibility alias.",
-            help_command=help_command,
-        )
     if has_message:
         return _resolve_message_input(args, help_command=help_command, example_command=example_command)
-    return legacy_prefix
-
-
-def _resolve_legacy_prompt_input(args, *, help_command: str, example_command: str) -> str:
-    prompt = (getattr(args, "prompt", None) or "").strip()
-    prompt_file = getattr(args, "prompt_file", None)
-    if prompt and prompt_file:
-        raise TaskCliError(
-            "use either --prompt or --prompt-file",
-            code="conflicting_prompt_inputs",
-            hint="Pass inline text with --prompt or load it from disk with --prompt-file, but not both.",
-            help_command=help_command,
-        )
-    if prompt:
-        return prompt
-    if getattr(args, "prompt", None) is not None:
-        raise TaskCliError(
-            "prompt text cannot be empty",
-            code="empty_prompt",
-            hint="Provide non-empty text after --prompt, or use --prompt-file with a readable text file.",
-            help_command=help_command,
-        )
-    if prompt_file:
-        try:
-            content = Path(prompt_file).read_text(encoding="utf-8").strip()
-        except OSError as exc:
-            raise TaskCliError(
-                f"failed to read prompt file: {exc}",
-                code="prompt_file_read_failed",
-                hint="Use --prompt-file with a readable UTF-8 text file.",
-                example=f"{example_command} --prompt-file briefing.md",
-                help_command=help_command,
-                details={"prompt_file": prompt_file},
-            ) from exc
-        if not content:
-            raise TaskCliError(
-                "prompt file is empty",
-                code="empty_prompt",
-                hint="Put the prompt text in the file, or pass it directly with --prompt.",
-                example=f"{example_command} --prompt 'Share the hourly summary.'",
-                help_command=help_command,
-                details={"prompt_file": prompt_file},
-            )
-        return content
-    raise TaskCliError(
-        "one of --prompt or --prompt-file is required",
-        code="missing_prompt",
-        hint="Pass inline text with --prompt or load it from disk with --prompt-file.",
-        help_command=help_command,
-    )
+    return None
 
 
 def _normalize_run_at(value: str, timezone_name: str) -> str:
@@ -2926,7 +2818,7 @@ def _parse_validated_session_key(
         # reply can't attach to a workbench session (persist_agent_message can't
         # resolve a project scope) — target workbench sessions by --session-id.
         raise TaskCliError(
-            "avibe workbench sessions must be targeted with --session-id, not --session-key",
+            "avibe workbench sessions must be targeted by Agent Session ID",
             code="avibe_requires_session_id",
             hint="A workbench session key has no agent session id, so the reply wouldn't attach to the Chat. Pass the session id via --session-id.",
             example="--session-id ses3chKBjP5hy",
@@ -2976,25 +2868,17 @@ def _resolve_session_target_args(
     *,
     required: bool,
     help_command: str,
-) -> tuple[Optional[str], str]:
+) -> Optional[str]:
     session_id = (getattr(args, "session_id", None) or "").strip()
-    session_key = (getattr(args, "session_key", None) or "").strip()
-    if session_id and session_key:
+    if required and not session_id:
         raise TaskCliError(
-            "use either --session-id or --session-key, not both",
-            code="conflicting_session_target",
-            hint="Use --session-id for new commands.",
-            help_command=help_command,
-        )
-    if required and not session_id and not session_key:
-        raise TaskCliError(
-            "one of --session-id or --session-key is required",
+            "--session-id is required",
             code="missing_session_target",
             hint="Run from an Avibe Agent shell to continue this conversation by default, or pass --session-id for the target Session.",
             example="vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message 'Share the hourly summary.'",
             help_command=help_command,
         )
-    return session_id or None, session_key
+    return session_id or None
 
 
 class _CommandTarget(NamedTuple):
@@ -3196,52 +3080,36 @@ def _default_session_id_from_caller(caller_context) -> Optional[str]:
     return session_id
 
 
-def _apply_caller_session_default(args, caller_context, *, purpose: str) -> Optional[dict[str, str]]:
+def _apply_caller_session_default(args, caller_context) -> None:
+    """Target the caller Session when the command names no Session of its own.
+
+    No notice reports it: every payload already carries the resolved ``session_id``.
+    """
+
     if (getattr(args, "session_id", None) or "").strip():
-        return None
-    if (getattr(args, "session_key", None) or "").strip():
-        return None
+        return
     if bool(getattr(args, "create_session", False)) or bool(getattr(args, "create_session_per_run", False)):
-        return None
+        return
     if (getattr(args, "fork_session", None) or "").strip():
-        return None
+        return
     default_session_id = _default_session_id_from_caller(caller_context)
-    if not default_session_id:
-        return None
-    setattr(args, "session_id", default_session_id)
-    return {
-        "code": "session_defaulted_to_caller",
-        "message": f"{purpose} defaulted to this Agent Session.",
-        "session_id": default_session_id,
-    }
+    if default_session_id:
+        setattr(args, "session_id", default_session_id)
 
 
-def _resolve_show_session_id(args, *, help_command: str) -> tuple[str, Optional[dict[str, str]]]:
-    caller_context = caller_context_from_env()
-    notice = _apply_caller_session_default(args, caller_context, purpose="Show Page session")
+def _resolve_caller_session_id(args, *, help_command: str) -> str:
+    """The one Session a single-Session command acts on: ``--session-id``, else the caller."""
+
+    _apply_caller_session_default(args, caller_context_from_env())
     session_id = (getattr(args, "session_id", None) or "").strip()
     if not session_id:
         raise TaskCliError(
-            "Show Page session id is required outside an Avibe Agent environment.",
-            code="missing_session_target",
-            hint="Run this command from an Avibe Agent shell, or pass --session-id for the target Show Page.",
+            "This command defaults to the caller Session, and no Avibe Agent caller Session is set.",
+            code="missing_caller_session",
+            hint="Run it from an Avibe Agent shell, or pass --session-id <id>.",
             help_command=help_command,
         )
-    return session_id, notice
-
-
-def _resolve_caller_session_id(args, *, purpose: str, help_command: str) -> tuple[str, Optional[dict[str, str]]]:
-    caller_context = caller_context_from_env()
-    notice = _apply_caller_session_default(args, caller_context, purpose=purpose)
-    session_id = (getattr(args, "session_id", None) or "").strip()
-    if not session_id:
-        raise TaskCliError(
-            f"{purpose} id is required outside an Avibe Agent environment.",
-            code="missing_session_target",
-            hint="Run this command from an Avibe Agent shell, or pass the target Session ID positionally.",
-            help_command=help_command,
-        )
-    return session_id, notice
+    return session_id
 
 
 def _require_caller_session_id(caller_context, *, purpose: str, help_command: str) -> str:
@@ -3414,19 +3282,11 @@ def _resolve_agent_run_scope_key(args, *, caller_context, source_session_id: Opt
 def _resolve_definition_scope_key(args, *, caller_context, help_command: str) -> Optional[str]:
     raw_scope_id = (getattr(args, "scope_id", None) or "").strip()
     same_scope = bool(getattr(args, "same_scope", False))
-    legacy_deliver_key = (getattr(args, "deliver_key", None) or "").strip()
     if raw_scope_id and same_scope:
         raise TaskCliError(
             "use either --same-scope or --scope-id, not both",
             code="conflicting_scope_target",
             hint="Use --same-scope to reuse the caller scope, or --scope-id to place the new Session explicitly.",
-            help_command=help_command,
-        )
-    if legacy_deliver_key and (raw_scope_id or same_scope):
-        raise TaskCliError(
-            "use either the legacy delivery target or the new scope placement flags, not both",
-            code="conflicting_scope_target",
-            hint="Use --scope-id or --same-scope for new Agent-facing commands.",
             help_command=help_command,
         )
     if raw_scope_id:
@@ -3438,8 +3298,6 @@ def _resolve_definition_scope_key(args, *, caller_context, help_command: str) ->
             help_command=help_command,
         )
         return _require_scope_id_from_session_id(caller_session_id, help_command=help_command)
-    if legacy_deliver_key:
-        return _parse_validated_session_key(legacy_deliver_key, help_command=help_command).session_scope
     return None
 
 
@@ -3504,6 +3362,15 @@ class SessionListScope:
 
     def payload(self) -> dict[str, Any]:
         return {"session_id": self.session_id, "global": self.session_id is None}
+
+
+def _add_session_target_arg(parser) -> None:
+    """Name the one Session a single-Session command acts on; the caller Session by default."""
+
+    parser.add_argument(
+        "--session-id",
+        help="Agent Session ID. Defaults to the caller Session in an Avibe Agent shell.",
+    )
 
 
 def _add_session_scope_args(parser, *, items: str) -> None:
@@ -4061,11 +3928,10 @@ def cmd_harness_status(args) -> int:
 
     try:
         scope = _resolve_session_list_scope(args, help_command="vibe harness status --help")
-        language = _configured_cli_language()
         request_store = _task_request_store()
         sqlite_store = request_store.sqlite_backend
         if sqlite_store is None:
-            raise RuntimeError(i18n_t("harness.cli.error.sqliteRequired", language))
+            raise RuntimeError("Harness status requires the SQLite task store.")
         fetch_limit = MAX_PAGE_LIMIT + 1
         raw_runs = sqlite_store.list_active_runs(limit=fetch_limit, session_id=scope.session_id)
         raw_watches = sqlite_store.list_enabled_definitions(
@@ -4093,20 +3959,16 @@ def cmd_harness_status(args) -> int:
                 runtime_snapshot.get("ok")
             )
             if not runtime_snapshot["available"]:
-                runtime_snapshot["error"] = i18n_t(
-                    "harness.cli.error.controllerStatus",
-                    language,
-                    status=status_code,
-                )
+                runtime_snapshot["error"] = f"The controller returned status {status_code}."
         except internal_client.InternalServerTimeout:
             runtime_snapshot = {
                 "available": False,
-                "error": i18n_t("harness.cli.error.controllerTimeout", language),
+                "error": "The controller request timed out.",
             }
         except internal_client.InternalServerUnavailable:
             runtime_snapshot = {
                 "available": False,
-                "error": i18n_t("harness.cli.error.controllerUnavailable", language),
+                "error": "The controller is unreachable.",
             }
 
         # Ownership is a point-in-time controller fact. Keep only Runs that were
@@ -4265,21 +4127,16 @@ def _wait_for_watch_startup(
 #: Attribute name -> the flag as the user typed it, for the refusal message.
 _TASK_SESSION_FLAG_ARGS: tuple[tuple[str, str], ...] = (
     ("session_id", "--session-id"),
-    ("session_key", "--session-key"),
     ("create_session", "--create-session"),
     ("create_session_per_run", "--create-session-per-run"),
     ("same_scope", "--same-scope"),
     ("scope_id", "--scope-id"),
     ("agent", "--agent"),
-    ("post_to", "--post-to"),
-    ("deliver_key", "--deliver-key"),
 )
 
 _TASK_MESSAGE_FLAG_ARGS: tuple[tuple[str, str], ...] = (
     ("message", "--message"),
     ("message_file", "--message-file"),
-    ("prompt", "--prompt"),
-    ("prompt_file", "--prompt-file"),
 )
 
 
@@ -4442,11 +4299,7 @@ def cmd_task_add(args):
             session_workdir = None
         else:
             # The defaulted target is the definition's ``session_id``; no notice repeats it.
-            _apply_caller_session_default(
-                args,
-                caller_context,
-                purpose="Task target Session",
-            )
+            _apply_caller_session_default(args, caller_context)
             session_policy = _validate_definition_session_policy(
                 args,
                 schedule_type=schedule_type,
@@ -4457,7 +4310,7 @@ def cmd_task_add(args):
             # Optional only for an escalating command task, where the Agent turn is a
             # failure notice and the stored message is extra triage guidance.
             message = (
-                _resolve_prompt_input(
+                _resolve_message_input(
                     args,
                     help_command="vibe task add --help",
                     example_command="vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *'",
@@ -4465,11 +4318,12 @@ def cmd_task_add(args):
                 if not has_command or _explicit_flag_names(args, _TASK_MESSAGE_FLAG_ARGS)
                 else ""
             )
-            session_id, session_key = _resolve_session_target_args(
+            session_id = _resolve_session_target_args(
                 args,
                 required=session_policy == "existing",
                 help_command="vibe task add --help",
             )
+            session_key = ""
             # Before the reservation and before the definition row: a stored
             # schedule fires under the authority written with it, so the Session
             # it will speak in is admitted while the caller is still here to be
@@ -4536,8 +4390,8 @@ def cmd_task_add(args):
                 session_policy=session_policy,
                 session_id=session_id,
                 session_key=session_key,
-                post_to=getattr(args, "post_to", None),
-                deliver_key=getattr(args, "deliver_key", None),
+                post_to=None,
+                deliver_key=None,
                 scope_key=scope_key,
                 help_command="vibe task add --help",
             )
@@ -4573,8 +4427,6 @@ def cmd_task_add(args):
                 name=_normalize_task_name(getattr(args, "name", None)),
                 session_key=session_key,
                 session_id=session_id,
-                post_to=args.post_to,
-                deliver_key=args.deliver_key,
                 prompt=message,
                 schedule_type="cron",
                 agent_name=agent_name,
@@ -4606,8 +4458,6 @@ def cmd_task_add(args):
                 name=_normalize_task_name(getattr(args, "name", None)),
                 session_key=session_key,
                 session_id=session_id,
-                post_to=args.post_to,
-                deliver_key=args.deliver_key,
                 prompt=message,
                 schedule_type="at",
                 agent_name=agent_name,
@@ -4687,12 +4537,11 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
     try:
         updated = store.set_enabled(task_id, enabled)
     except TaskResumeBlocked as exc:
-        lang = _configured_cli_language()
         _print_task_error(
             TaskCliError(
-                i18n_t("error.taskOwnerUnavailable.message", lang),
+                i18n_t("error.taskOwnerUnavailable.message"),
                 code=exc.code,
-                hint=i18n_t("error.taskOwnerUnavailable.hint", lang, id=task_id),
+                hint=i18n_t("error.taskOwnerUnavailable.hint", id=task_id),
                 help_command=f"vibe task remove {task_id}",
                 details={
                     "task_id": task_id,
@@ -4702,12 +4551,11 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
         )
         return 1
     except TaskScheduleRetired as exc:
-        lang = _configured_cli_language()
         _print_task_error(
             TaskCliError(
-                i18n_t("error.taskScheduleRetired.message", lang),
+                i18n_t("error.taskScheduleRetired.message"),
                 code=exc.code,
-                hint=i18n_t("error.taskScheduleRetired.hint", lang, id=task_id),
+                hint=i18n_t("error.taskScheduleRetired.hint", id=task_id),
                 help_command=f"vibe task update {task_id} --help",
                 details={"task_id": task_id},
             )
@@ -4787,19 +4635,13 @@ def _validate_task_cron(cron: str, timezone: ZoneInfo, *, help_command: str) -> 
     weekday = ambiguous_weekday_field(cron)
     if weekday is None:
         return
-    lang = _configured_cli_language()
-    hint = i18n_t("error.cronNumericWeekday.hint", lang)
+    hint = "Write weekday names (mon, tue, wed, thu, fri, sat, sun); they mean the same day everywhere."
     avibe_reading, crontab_reading = weekday_readings(weekday)
     if avibe_reading is not None and crontab_reading is not None:
-        readings = i18n_t(
-            "error.cronNumericWeekday.readings",
-            lang,
-            avibe=avibe_reading,
-            crontab=crontab_reading,
-        )
+        readings = f"Avibe (APScheduler) reads it as {avibe_reading}; crontab(5) reads it as {crontab_reading}."
         hint = f"{readings} {hint}"
     raise TaskCliError(
-        i18n_t("error.cronNumericWeekday.message", lang, field=weekday),
+        f"Cron weekday field uses numbers: {weekday}",
         code="ambiguous_cron_weekday",
         hint=hint,
         example="0 9 * * mon-fri",
@@ -5026,9 +4868,7 @@ def cmd_task_update(args):
             return _cmd_task_update_pure_command(args, store, task)
 
         if getattr(args, "reset_delivery", False) and (
-            getattr(args, "post_to", None) is not None
-            or getattr(args, "deliver_key", None) is not None
-            or getattr(args, "scope_id", None) is not None
+            getattr(args, "scope_id", None) is not None
             or bool(getattr(args, "same_scope", False))
         ):
             raise TaskCliError(
@@ -5054,7 +4894,7 @@ def cmd_task_update(args):
             caller_context=caller_context,
             help_command="vibe task update --help",
         )
-        session_id_update, session_key_update = _resolve_session_target_args(
+        session_id_update = _resolve_session_target_args(
             args,
             required=False,
             help_command="vibe task update --help",
@@ -5062,9 +4902,6 @@ def cmd_task_update(args):
         if session_id_update is not None:
             session_id = session_id_update
             session_key = ""
-        elif session_key_update:
-            session_id = None
-            session_key = session_key_update
         else:
             session_id = task.session_id
             session_key = task.session_key
@@ -5072,17 +4909,8 @@ def cmd_task_update(args):
             post_to = None
             deliver_key = None
         else:
-            requested_post_to = getattr(args, "post_to", None)
-            requested_deliver_key = getattr(args, "deliver_key", None)
-            if requested_post_to is not None:
-                post_to = requested_post_to
-                deliver_key = None
-            elif requested_deliver_key is not None:
-                post_to = None
-                deliver_key = requested_deliver_key
-            else:
-                post_to = task.post_to
-                deliver_key = task.deliver_key
+            post_to = task.post_to
+            deliver_key = task.deliver_key
         metadata = dict(task.metadata or {})
         if requested_scope_key:
             metadata["session_scope_id"] = requested_scope_key
@@ -5128,10 +4956,10 @@ def cmd_task_update(args):
 
         message_changed = any(
             getattr(args, name, None) is not None
-            for name in ("message", "message_file", "prompt", "prompt_file")
+            for name in ("message", "message_file")
         )
         message = (
-            _resolve_prompt_input(
+            _resolve_message_input(
                 args,
                 help_command="vibe task update --help",
                 example_command=f"vibe task update {args.task_id}",
@@ -5482,104 +5310,6 @@ def cmd_task_run(task_id: str):
     return 0
 
 
-def cmd_hook_send(args):
-    try:
-        session_id, session_key = _resolve_session_target_args(
-            args,
-            required=True,
-            help_command="vibe hook send --help",
-        )
-        session_target, delivery_target = _validate_delivery_args(
-            session_id=session_id,
-            session_key=session_key,
-            post_to=getattr(args, "post_to", None),
-            deliver_key=getattr(args, "deliver_key", None),
-            help_command="vibe hook send --help",
-        )
-        # Deprecated, but it still queues a real Agent turn, so it is admitted
-        # like one -- including through the legacy key, which names the same
-        # Session by its scope and thread.
-        command_target = _require_cli_turn_authority(
-            session_id,
-            session_key=session_key,
-            help_command="vibe hook send --help",
-        )
-        message = _resolve_prompt_input(
-            args,
-            help_command="vibe hook send --help",
-            example_command="vibe hook send --session-id sesk8m4q2p7x",
-        )
-        agent_resolution = _resolve_agent_target(
-            agent_name=getattr(args, "agent", None),
-            session_id=session_id,
-            session_key=session_key,
-            help_command="vibe hook send --help",
-        )
-        agent = agent_resolution.agent
-        # The other half of the gate above, now that the Agent this hook will run
-        # on is known: a key whose thread has not been opened yet reserves its
-        # Session at dispatch, in the Scope named here.
-        _require_cli_target_placement(command_target, agent=agent)
-        from storage.resource_access_service import metadata_with_resource_user_context
-
-        # Deprecated, but it still enqueues an Agent turn, so it travels with the
-        # same initiating snapshot ``vibe agent run`` records. Empty for a local
-        # caller, exactly as before.
-        provenance_metadata = metadata_with_resource_user_context(None) or None
-        request = _task_request_store().enqueue_hook_send(
-            session_key=session_key,
-            session_id=session_id,
-            post_to=args.post_to,
-            deliver_key=args.deliver_key,
-            prompt=message,
-            agent_name=agent.name if agent else None,
-            agent_id=agent.id if agent else None,
-            run_type="agent_run",
-            source_kind="cli",
-            metadata=provenance_metadata,
-            expected_enabled_agent_id=(
-                agent.id
-                if agent is not None and agent_resolution.requires_enabled_write_guard
-                else None
-            ),
-            expected_reference_agent_id=(
-                agent.id
-                if agent is not None
-                and getattr(agent_resolution, "preserves_existing_reference", False)
-                else None
-            ),
-        )
-        warnings = _collect_target_warnings(session_target, delivery_target)
-        _print_cli_payload(
-            "agent_run",
-            accepted=True,
-            execution_id=request.id,
-            run_id=request.id,
-            request_type=request.request_type,
-            session_id=session_id,
-            session_key=session_key,
-            post_to=args.post_to,
-            deliver_key=args.deliver_key,
-            deprecation_warning=(
-                "vibe hook send is deprecated; use `vibe agent run --session-id <session-id> "
-                "--no-callback --message ...` for the same fire-and-forget behavior, or pass "
-                "`--callback-session-id <session-id>` when the async run should report back."
-            ),
-            run={
-                "id": request.id,
-                "status": "queued",
-                "run_type": request.request_type,
-                "agent_name": agent.name if agent else None,
-                "session_id": session_id,
-            },
-            warnings=warnings,
-        )
-        return 0
-    except Exception as exc:
-        _print_task_error(exc, help_command="vibe hook send --help")
-        return 1
-
-
 def _read_optional_text(path: str | None, *, field_name: str) -> str | None:
     if not path:
         return None
@@ -5606,7 +5336,15 @@ def _parse_metadata_json(value: str | None) -> dict:
 
 
 def _add_json_noop(parser) -> None:
+    """``--json`` on a command that already prints the JSON envelope: accepted, changes nothing."""
+
     parser.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
+
+
+def _add_json_flag(parser) -> None:
+    """``--json`` on an operator command that prints text by default."""
+
+    parser.add_argument("--json", action="store_true", help="Print the result as the JSON envelope.")
 
 
 def cmd_agent_list(args):
@@ -5797,7 +5535,7 @@ def cmd_agent_models(args):
 
 
 def _catalog_mismatches(
-    backend: str, model: Optional[str], reasoning_effort: Optional[str], *, language: str
+    backend: str, model: Optional[str], reasoning_effort: Optional[str]
 ) -> tuple[list[str], bool]:
     """What the backend's model catalog says against ``model`` and ``reasoning_effort``, and whether it is authoritative.
 
@@ -5809,26 +5547,29 @@ def _catalog_mismatches(
     """
     if backend == "opencode" or (not model and not reasoning_effort):
         return [], False
-    words = "harness.cli.agentRunModel"
     authoritative = not is_native_cli_backend(backend)
     try:
         options = api.agent_model_options(backend)
     except Exception:
         options = {}
     if not options.get("ok"):
-        return ([i18n_t(f"{words}.catalogUnavailable", language, backend=backend)] if authoritative else []), authoritative
+        unavailable = f"the {backend} model catalog could not be loaded, so the model and reasoning effort cannot be checked"
+        return ([unavailable] if authoritative else []), authoritative
     by_value = {entry.get("value"): entry for entry in options.get("models") or []}
     model_unknown = bool(model) and model not in by_value
     mismatches: list[str] = []
     if model_unknown:
-        key = "modelNotInCatalog" if authoritative else "modelMaybeNewer"
-        mismatches.append(i18n_t(f"{words}.{key}", language, model=model, backend=backend))
+        mismatches.append(
+            f"model '{model}' is not in the {backend} model catalog"
+            if authoritative
+            else f"model '{model}' is not in the {backend} model catalog; it may be a typo or newer than the catalog"
+        )
     if reasoning_effort:
         if model and not model_unknown:
             allowed = set(by_value[model].get("reasoning_efforts") or [])
             # An authoritative model that lists no efforts takes none.
             constrained = bool(allowed) or authoritative
-            message = i18n_t(f"{words}.effortInvalidForModel", language, effort=reasoning_effort, model=model)
+            message = f"reasoning_effort '{reasoning_effort}' is not valid for model '{model}'"
         else:
             # model unset or unknown: accept any effort valid for some model of this backend
             # (Codex efforts are backend-wide; Claude's widest set still lives in some model)
@@ -5836,7 +5577,7 @@ def _catalog_mismatches(
             for entry in by_value.values():
                 allowed.update(entry.get("reasoning_efforts") or [])
             constrained = bool(allowed)
-            message = i18n_t(f"{words}.effortInvalidForBackend", language, effort=reasoning_effort, backend=backend)
+            message = f"reasoning_effort '{reasoning_effort}' is not valid for backend '{backend}'"
         if constrained and reasoning_effort not in allowed:
             mismatches.append(message)
     return mismatches, authoritative
@@ -5846,13 +5587,12 @@ def _agent_value_warning_fields(agent) -> dict:
     """Best-effort, non-fatal warnings when an Agent's model/effort is unknown (``_catalog_mismatches``)."""
     if agent.backend not in ("claude", "codex"):
         return {}
-    language = _configured_cli_language()
-    warnings, _ = _catalog_mismatches(agent.backend, agent.model, agent.reasoning_effort, language=language)
+    warnings, _ = _catalog_mismatches(agent.backend, agent.model, agent.reasoning_effort)
     if not warnings:
         return {}
     return {
         "warnings": warnings,
-        "hint": i18n_t("harness.cli.agentRunModel.catalogHint", language, agent=agent.name),
+        "hint": f"Run `vibe agent models {agent.name}` to list valid models and reasoning efforts.",
     }
 
 
@@ -5865,11 +5605,10 @@ def _session_model_override_fields(
     otherwise keep. Where the catalog is authoritative (Vibey's Model Hub menu), a pair it does not offer is refused
     and its reservation released; elsewhere a mismatch is a warning on the run, as ``vibe agent create/update`` gives.
     """
-    language = _configured_cli_language()
-    mismatches, authoritative = _catalog_mismatches(backend, model, reasoning_effort, language=language)
+    mismatches, authoritative = _catalog_mismatches(backend, model, reasoning_effort)
     if not mismatches:
         return {}
-    hint = i18n_t("harness.cli.agentRunModel.catalogHint", language, agent=agent_label)
+    hint = f"Run `vibe agent models {agent_label}` to list valid models and reasoning efforts."
     if authoritative:
         raise TaskCliError(
             mismatches[0],
@@ -5899,16 +5638,12 @@ def cmd_agent_create(args):
         _print_cli_payload("agent", agent=_agent_payload(agent), **_agent_value_warning_fields(agent))
         return 0
     except AgentNameValidationError as exc:
-        try:
-            lang = V2Config.load().language
-        except Exception:
-            lang = "en"
         key = f"error.agentNameValidation.{exc.code}"
         _print_task_error(
             TaskCliError(
-                i18n_t(f"{key}.message", lang, agent=exc.agent_name),
+                i18n_t(f"{key}.message", agent=exc.agent_name),
                 code=exc.code,
-                hint=i18n_t(f"{key}.hint", lang, agent=exc.agent_name),
+                hint=i18n_t(f"{key}.hint", agent=exc.agent_name),
                 details={"agent": exc.agent_name},
             )
         )
@@ -5976,29 +5711,21 @@ def cmd_agent_set_enabled(args, *, enabled: bool):
 
 
 def _agent_lifecycle_cli_error(exc: AgentArchivedEditError | AgentAlwaysEnabledError) -> TaskCliError:
-    try:
-        lang = V2Config.load().language
-    except Exception:
-        lang = "en"
     key = f"error.agentLifecycle.{exc.code}"
     return TaskCliError(
-        i18n_t(f"{key}.message", lang, agent=exc.agent_name),
+        i18n_t(f"{key}.message", agent=exc.agent_name),
         code=exc.code,
-        hint=i18n_t(f"{key}.hint", lang, agent=exc.agent_name),
+        hint=i18n_t(f"{key}.hint", agent=exc.agent_name),
         details={"agent": exc.agent_name},
     )
 
 
 def _agent_reference_rewrite_cli_error(exc: AgentReferenceRewriteError) -> TaskCliError:
-    try:
-        lang = V2Config.load().language
-    except Exception:
-        lang = "en"
     key = f"error.agentLifecycle.{exc.code}"
     return TaskCliError(
-        i18n_t(f"{key}.message", lang),
+        i18n_t(f"{key}.message"),
         code=exc.code,
-        hint=i18n_t(f"{key}.hint", lang),
+        hint=i18n_t(f"{key}.hint"),
     )
 
 
@@ -6008,20 +5735,14 @@ def cmd_agent_remove(args):
         try:
             archived = store.archive(args.name)
         except AgentArchiveError as exc:
-            try:
-                lang = V2Config.load().language
-            except Exception:
-                lang = "en"
             raise TaskCliError(
                 i18n_t(
                     f"error.agentArchive.{exc.code}.message",
-                    lang,
                     agent=exc.agent_name,
                 ),
                 code=exc.code,
                 hint=i18n_t(
                     f"error.agentArchive.{exc.code}.hint",
-                    lang,
                     agent=exc.agent_name,
                 ),
                 details={"agent": args.name},
@@ -6099,21 +5820,10 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
     session_id = (getattr(args, "session_id", None) or "").strip()
     fork_session = (getattr(args, "fork_session", None) or "").strip()
     fork_self = bool(getattr(args, "fork_self", False))
-    create_session = bool(getattr(args, "create_session", False))
-    create_per_run = bool(getattr(args, "create_session_per_run", False))
     same_scope = bool(getattr(args, "same_scope", False))
     scope_id = (getattr(args, "scope_id", None) or "").strip()
-    deliver_key = (getattr(args, "deliver_key", None) or "").strip()
-    agent_name = (getattr(args, "agent", None) or "").strip()
     visibility = (getattr(args, "visibility", None) or "").strip()
     close_after = bool(getattr(args, "close_after", False))
-    if bool(getattr(args, "async_run", False)) and bool(getattr(args, "sync_run", False)):
-        raise TaskCliError(
-            "use either --async or --sync, not both",
-            code="conflicting_wait_policy",
-            hint="Agent runs are async by default. Pass --sync only when the CLI should wait.",
-            help_command=help_command,
-        )
     if _agent_run_is_async(args) and getattr(args, "wait_timeout", None) is not None:
         raise TaskCliError(
             "use --sync with --wait-timeout",
@@ -6135,13 +5845,6 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Use --same-scope to reuse the caller/source scope, or --scope-id to place the new Session explicitly.",
             help_command=help_command,
         )
-    if deliver_key and (same_scope or scope_id):
-        raise TaskCliError(
-            "use either the legacy delivery target or the new scope placement flags, not both",
-            code="conflicting_scope_placement",
-            hint="Use --scope-id or --same-scope for new Agent-facing commands.",
-            help_command=help_command,
-        )
     if fork_self and fork_session:
         raise TaskCliError(
             "use either --fork-self or --fork-session, not both",
@@ -6149,29 +5852,21 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
             hint="Use --fork-self from inside an Avibe Agent shell, or pass an explicit --fork-session.",
             help_command=help_command,
         )
-    if fork_self and session_id:
+    if (fork_session or fork_self) and session_id:
         raise TaskCliError(
-            "use --fork-self without --session-id",
+            "use fork without --session-id",
             code="conflicting_session_policy",
-            hint="--fork-self resolves the source Session from AVIBE_SESSION_ID.",
-            help_command=help_command,
-        )
-    if (fork_session or fork_self) and (session_id or create_session or create_per_run):
-        raise TaskCliError(
-            "use fork without --session-id or session creation flags",
-            code="conflicting_session_policy",
-            hint="Fork creates a new Session from the source Session.",
+            hint="Fork creates a new Session from the source Session; --fork-self resolves it from AVIBE_SESSION_ID.",
             help_command=help_command,
         )
     if session_id and (
         (getattr(args, "model", None) or "").strip()
         or (getattr(args, "reasoning_effort", None) or "").strip()
     ):
-        language = _configured_cli_language()
         raise TaskCliError(
-            i18n_t("harness.cli.agentRunModel.existingSession", language),
+            "--model and --reasoning-effort only apply when the run creates a new Session",
             code="model_override_with_existing_session",
-            hint=i18n_t("harness.cli.agentRunModel.existingSessionHint", language),
+            hint="An existing Session keeps its model; change it in the Web UI's Session model picker. To run on another model now, start a new Session (--agent <name> --model ...) or fork this one (--fork-session <id> --model ...).",
             help_command=help_command,
         )
     if session_id and (same_scope or scope_id):
@@ -6185,39 +5880,18 @@ def _validate_run_session_policy(args, *, help_command: str) -> str:
         raise TaskCliError(
             "visibility options only apply when creating or forking a Session",
             code="visibility_with_existing_session",
-            hint="Use `vibe session update --visible|--hidden` (or `--visibility ...`) to change an existing Session.",
+            hint="Use `vibe session update --session-id <id> --visible` or `--hidden` to change an existing Session.",
             help_command=help_command,
         )
     if close_after and session_id:
         raise TaskCliError(
             "--close-after requires a new or forked Agent Session",
             code="close_after_requires_owned_session",
-            hint="Use --close-after with --agent, --create-session, or --fork-session. Existing Sessions keep their runtime lifecycle.",
-            help_command=help_command,
-        )
-    if session_id and (create_session or create_per_run):
-        raise TaskCliError(
-            "use either --session-id or --create-session, not both",
-            code="conflicting_session_policy",
-            help_command=help_command,
-        )
-    if create_session and create_per_run:
-        raise TaskCliError(
-            "use either --create-session or --create-session-per-run, not both",
-            code="conflicting_session_policy",
-            help_command=help_command,
-        )
-    if create_per_run:
-        raise TaskCliError(
-            "--create-session-per-run is only valid on stored recurring definitions",
-            code="invalid_session_policy",
-            hint="Use --create-session for a one-shot agent run.",
+            hint="Use --close-after with --agent or a fork. Existing Sessions keep their runtime lifecycle.",
             help_command=help_command,
         )
     if fork_session or fork_self:
         return "fork"
-    if create_session:
-        return "create"
     if session_id:
         return "existing"
     return "none"
@@ -6231,13 +5905,11 @@ def _validate_definition_session_policy(
     allow_caller_session_default: bool = False,
 ) -> str:
     session_id = (getattr(args, "session_id", None) or "").strip()
-    session_key = (getattr(args, "session_key", None) or "").strip()
     create_session = bool(getattr(args, "create_session", False))
     create_per_run = bool(getattr(args, "create_session_per_run", False))
-    deliver_key = (getattr(args, "deliver_key", None) or "").strip()
     scope_id = (getattr(args, "scope_id", None) or "").strip()
     same_scope = bool(getattr(args, "same_scope", False))
-    specified = sum(1 for value in (bool(session_id or session_key), create_session, create_per_run) if value)
+    specified = sum(1 for value in (bool(session_id), create_session, create_per_run) if value)
     if specified > 1:
         raise TaskCliError(
             "use exactly one session policy",
@@ -6259,7 +5931,7 @@ def _validate_definition_session_policy(
             hint="Use --create-session or --create-session-per-run with --scope-id/--same-scope, or omit the scope placement flag.",
             help_command=help_command,
         )
-    if create_session and not (deliver_key or scope_id or same_scope):
+    if create_session and not (scope_id or same_scope):
         raise TaskCliError(
             "--scope-id or --same-scope is required when a stored definition creates one reusable Session",
             code="missing_delivery_target",
@@ -6270,7 +5942,7 @@ def _validate_definition_session_policy(
         return "create_once"
     if create_per_run:
         return "create_per_run"
-    if session_id or session_key:
+    if session_id:
         return "existing"
     if allow_caller_session_default:
         return "existing"
@@ -6296,7 +5968,6 @@ def _definition_session_policy_for_update(
     create_session = bool(getattr(args, "create_session", False))
     create_per_run = bool(getattr(args, "create_session_per_run", False))
     session_id = (getattr(args, "session_id", None) or "").strip()
-    session_key = (getattr(args, "session_key", None) or "").strip()
     scope_id = (getattr(args, "scope_id", None) or "").strip()
     same_scope = bool(getattr(args, "same_scope", False))
     if create_session and create_per_run:
@@ -6305,7 +5976,7 @@ def _definition_session_policy_for_update(
             code="conflicting_session_policy",
             help_command=help_command,
         )
-    if (session_id or session_key) and (create_session or create_per_run):
+    if session_id and (create_session or create_per_run):
         raise TaskCliError(
             "use either --session-id or session creation, not both",
             code="conflicting_session_policy",
@@ -6329,7 +6000,7 @@ def _definition_session_policy_for_update(
         return "create_once"
     if create_per_run:
         return "create_per_run"
-    if session_id or session_key:
+    if session_id:
         return "existing"
     if current_policy == "create_per_run" and current_schedule_type != next_schedule_type and next_schedule_type == "at":
         raise TaskCliError(
@@ -6768,7 +6439,6 @@ def _reserve_cli_session(
     scope_key: Optional[str],
     workdir: Optional[str] = None,
     metadata: Optional[dict] = None,
-    session_anchor_target=None,
     visibility: str = "background",
     authorization_context=None,
     model: Optional[str] = None,
@@ -6782,8 +6452,7 @@ def _reserve_cli_session(
 
     if scope_key:
         target = _parse_validated_scope_id(scope_key, help_command="vibe agent run --help")
-        anchor_target = session_anchor_target or target
-        session_anchor = _session_anchor_with_suffix(anchor_target, suffix="run")
+        session_anchor = _session_anchor_with_suffix(target, suffix="run")
         session_id = sessions_service.reserve_agent_session(
             scope_key=target.session_scope,
             agent_backend=agent.backend,
@@ -6866,15 +6535,11 @@ def _reserve_forked_cli_session(
         )
     except SessionForkError as exc:
         if exc.code == SESSION_AGENT_UNAVAILABLE_CODE:
-            try:
-                lang = V2Config.load().language
-            except Exception:
-                lang = "en"
             key = SESSION_AGENT_UNAVAILABLE_I18N_KEY
             raise TaskCliError(
-                i18n_t(f"{key}.message", lang),
+                i18n_t(f"{key}.message"),
                 code=exc.code,
-                hint=i18n_t(f"{key}.hint", lang),
+                hint=i18n_t(f"{key}.hint"),
                 help_command="vibe agent run --help",
                 details={"source_session_id": source_session_id, **exc.details},
             ) from exc
@@ -6983,15 +6648,8 @@ def cmd_agent_run(args):
             if bool(getattr(args, "queue", False))
             else AGENT_RUN_DELIVERY_STEER
         )
-        if bool(getattr(args, "send_now", False)) and session_policy != "existing":
-            raise TaskCliError(
-                "--send-now requires an existing Agent Session",
-                code="send_now_requires_existing_session",
-                hint="Pass --session-id <session-id>, or omit --send-now for a new or forked Session.",
-                help_command="vibe agent run --help",
-            )
         agent_name = (args.agent or "").strip()
-        if session_policy in {"create", "none"} and not agent_name:
+        if session_policy == "none" and not agent_name:
             raise TaskCliError(
                 "--agent is required when running without an existing --session-id",
                 code="missing_agent",
@@ -7006,20 +6664,6 @@ def cmd_agent_run(args):
                 help_command="vibe agent run --help",
             )
             setattr(args, "fork_session", source_session_id)
-        if session_policy == "none" and (args.deliver_key or args.post_to):
-            raise TaskCliError(
-                "delivery options require an explicit Session target",
-                code="delivery_target_without_session_policy",
-                hint="Use --same-scope or --scope-id for new Session placement.",
-                help_command="vibe agent run --help",
-            )
-        if session_policy == "fork" and args.post_to:
-            raise TaskCliError(
-                "delivery options require an existing Session target",
-                code="delivery_target_without_session_policy",
-                hint="Fork creates a new Session. Use scope placement flags for where it lives; callback controls where results return.",
-                help_command="vibe agent run --help",
-            )
         session_id = (args.session_id or "").strip() or None
         session_key = ""
         scope_key = (
@@ -7038,22 +6682,11 @@ def cmd_agent_run(args):
                 has_resolved_caller_placement = True
             except ValueError:
                 pass
-        legacy_reservation_target = None
-        if not scope_key and (args.deliver_key or "").strip():
-            # Hidden legacy compatibility: external docs and prompts should use
-            # --scope-id/--same-scope, while old callers still map into the same
-            # internal placement field.
-            legacy_reservation_target = _parse_validated_session_key(args.deliver_key, help_command="vibe agent run --help")
-            scope_key = legacy_reservation_target.session_scope
         run_cwd = _resolve_run_cwd(
             args,
             session_policy=session_policy,
-            scoped_session=bool(
-                _has_modern_scope_target(args) or (args.deliver_key or "").strip()
-            ),
-            invocation_cwd_default=has_resolved_caller_placement
-            and not _has_modern_scope_target(args)
-            and not (args.deliver_key or "").strip(),
+            scoped_session=_has_modern_scope_target(args),
+            invocation_cwd_default=has_resolved_caller_placement and not _has_modern_scope_target(args),
             help_command="vibe agent run --help",
         )
         agent = _agent_store().require_enabled(agent_name) if agent_name else None
@@ -7072,42 +6705,18 @@ def cmd_agent_run(args):
             # may only restate it -- so admitting the caller to the Session
             # answers both halves of the turn it is about to queue.
             _require_cli_turn_authority(session_id, help_command="vibe agent run --help")
-        if session_policy == "existing" and (args.post_to or args.deliver_key):
-            _validate_delivery_args(
-                session_id=session_id,
-                session_key=session_key,
-                post_to=args.post_to,
-                deliver_key=args.deliver_key,
-                help_command="vibe agent run --help",
-            )
         callback_session_id, callback_notice = _resolve_callback_session_id(args, caller_context, target_session_id=session_id)
         if callback_session_id:
             _validate_callback_session_id(callback_session_id, help_command="vibe agent run --help")
         close_after = bool(getattr(args, "close_after", False))
-        legacy_deliver_key = args.deliver_key
-        if (getattr(args, "same_scope", False) or (getattr(args, "scope_id", None) or "").strip()) and legacy_deliver_key != scope_key:
-            legacy_deliver_key = None
         # The caller's own authority, resolved once. A remote caller reserves
         # under it; a local caller stays ``None`` and keeps Owner semantics.
         caller_authorization = caller_resource_user_context(caller_context)
-        # A new Session (blank, --create-session, or a fork) may run on its own model, kept on the Session, which
+        # A new Session (blank or a fork) may run on its own model, kept on the Session, which
         # every later turn reads; it is checked against the Agent's catalog once the Session is reserved (below).
         model_override = (getattr(args, "model", None) or "").strip() or None
         effort_override = (getattr(args, "reasoning_effort", None) or "").strip() or None
-        if session_policy == "create":
-            session_id = _reserve_cli_session(
-                agent=agent,
-                scope_key=scope_key,
-                workdir=run_cwd,
-                metadata=session_metadata,
-                session_anchor_target=legacy_reservation_target,
-                visibility=visibility,
-                authorization_context=caller_authorization,
-                model=model_override,
-                reasoning_effort=effort_override,
-            )
-            reserved_session_id = session_id
-        elif session_policy == "none":
+        if session_policy == "none":
             session_id = _reserve_cli_session(
                 agent=agent,
                 scope_key=scope_key,
@@ -7160,14 +6769,6 @@ def cmd_agent_run(args):
                 ),
                 help_command="vibe agent run --help",
             )
-        if (session_policy in {"create", "none"} or fork_result) and args.post_to:
-            _validate_delivery_args(
-                session_id=session_id,
-                session_key=session_key,
-                post_to=args.post_to,
-                deliver_key=None,
-                help_command="vibe agent run --help",
-            )
         source_kind, source_actor, parent_run_id, provenance_metadata = _agent_run_source_from_caller(caller_context)
         if fork_result:
             provenance_metadata = {
@@ -7200,8 +6801,6 @@ def cmd_agent_run(args):
             session_policy=session_policy,
             session_key=session_key,
             session_id=session_id,
-            post_to=args.post_to,
-            deliver_key=legacy_deliver_key,
             message=message,
             source_kind=source_kind,
             source_actor=source_actor,
@@ -7517,10 +7116,7 @@ def _cancel_live_agent_run(store: TaskExecutionStore, run: dict) -> dict:
             ),
             "controller_status_code": normalized_status_code,
             "controller_response": body,
-            "message": i18n_t(
-                "harness.run.cli.canceledBeforeLiveTurn",
-                _configured_cli_language(),
-            ),
+            "message": "Run was canceled before its input reached the live Session turn.",
         }
     if (
         normalized_status_code is not None
@@ -7603,7 +7199,6 @@ def cmd_data_retention(args):
     try:
         ensure_sqlite_state()
         engine = create_sqlite_engine()
-        language = _configured_cli_language()
         days_override = getattr(args, "days", None)
         # The configured window is the default; --days overrides for this call.
         # A recovered/unreadable config must not silently run with substituted
@@ -7636,12 +7231,7 @@ def cmd_data_retention(args):
                 # Never silently clamp an explicit window: --days 0 would
                 # delete everything older than one day after normalization.
                 print(
-                    i18n_t(
-                        "data.retention.invalidDays",
-                        language,
-                        minimum=agent_events_retention.MIN_RETENTION_DAYS,
-                        maximum=agent_events_retention.MAX_RETENTION_DAYS,
-                    ),
+                    f"--days must be between {agent_events_retention.MIN_RETENTION_DAYS} and {agent_events_retention.MAX_RETENTION_DAYS}; refusing to run instead of silently clamping the window.",
                     file=sys.stderr,
                 )
                 return 1
@@ -7649,7 +7239,7 @@ def cmd_data_retention(args):
         should_run = bool(getattr(args, "run", False)) or bool(getattr(args, "compact", False))
         if config_recovered and should_run:
             print(
-                i18n_t("data.retention.configRecovered", language),
+                "The Avibe config could not be read (recovery defaults active); the retention policy is unknown. Re-run with an explicit --days window to delete anything.",
                 file=sys.stderr,
             )
             return 1
@@ -7673,82 +7263,70 @@ def cmd_data_retention(args):
         else:
             payload = {"mode": "plan", "enabled": enabled, **agent_events_retention.retention_status(engine, retention_days=retention_days)}
         if getattr(args, "json", False):
-            print(json.dumps(payload, indent=2))
+            _print_cli_payload("data_retention", **payload)
         else:
-            _print_data_retention_human(payload, language)
+            _print_data_retention_human(payload)
         return exit_code
     except Exception as exc:  # noqa: BLE001
-        print(i18n_t("data.retention.error", _configured_cli_language(), error=str(exc)), file=sys.stderr)
+        print(f"Trace retention command failed: {str(exc)}", file=sys.stderr)
         return 1
 
 
-_COMPACTION_REASON_KEYS = {
-    "checkpoint_busy": "data.retention.compactionReasonCheckpointBusy",
-    "post_checkpoint_busy": "data.retention.compactionReasonCheckpointBusy",
-    "insufficient_free_space": "data.retention.compactionReasonFreeSpace",
-    "free_space_unknown": "data.retention.compactionReasonFreeSpace",
+_COMPACTION_REASONS = {
+    "checkpoint_busy": "the database is busy with concurrent readers/writers",
+    "post_checkpoint_busy": "the database is busy with concurrent readers/writers",
+    "insufficient_free_space": "there is not enough free disk space to rewrite the database safely",
+    "free_space_unknown": "there is not enough free disk space to rewrite the database safely",
 }
 
 
-def _print_data_retention_human(payload: dict, language: str) -> None:
+def _print_data_retention_human(payload: dict) -> None:
     from storage import agent_events_retention as _retention
 
     mode = str(payload.get("mode") or "run")
     if mode == "plan":
         plan = payload.get("plan") or {}
         print(
-            i18n_t(
-                "data.retention.plan",
-                language,
-                count=int(plan.get("eligible_count") or 0),
-                size=_format_byte_size(int(plan.get("eligible_logical_bytes") or 0)),
-                days=int(plan.get("retention_days") or _retention.DEFAULT_RETENTION_DAYS),
-            )
+            "{count} trace row(s) older than {days} day(s) are eligible ({size} of payload text).".format(count=int(plan.get("eligible_count") or 0), size=_format_byte_size(int(plan.get("eligible_logical_bytes") or 0)), days=int(plan.get("retention_days") or _retention.DEFAULT_RETENTION_DAYS))
         )
         last = payload.get("last_run") or {}
         if last:
-            print(i18n_t("data.retention.lastRun", language, at=str(last.get("finished_at")), rows=int(last.get("deleted_rows") or 0)))
+            print("Last retention run: {at}, deleted {rows} row(s).".format(at=str(last.get("finished_at")), rows=int(last.get("deleted_rows") or 0)))
         else:
-            print(i18n_t("data.retention.neverRun", language))
+            print("No retention run has completed yet.")
         if payload.get("enabled") is False:
-            print(i18n_t("data.retention.disabled", language))
+            print("Trace retention is disabled in runtime config; the daily task will not delete anything.")
         compaction = payload.get("compaction") or {}
         print(
-            i18n_t(
-                "data.retention.compaction",
-                language,
-                size=_format_byte_size(int(compaction.get("reclaimable_bytes") or 0)),
-            )
+            "Reclaimable inside the database right now: {size}.".format(size=_format_byte_size(int(compaction.get("reclaimable_bytes") or 0)))
         )
         return
     status = str(payload.get("status") or "unknown")
     if status == "ok":
-        print(i18n_t("data.retention.ran", language, rows=int(payload.get("deleted_rows") or 0)))
+        print("Retention pass deleted {rows} trace row(s).".format(rows=int(payload.get("deleted_rows") or 0)))
         compaction = payload.get("compaction") or {}
         compaction_status = str(compaction.get("status") or "not_attempted")
         if compaction_status == "vacuumed":
-            print(i18n_t("data.retention.compacted", language, size=_format_byte_size(int(compaction.get("reclaimed_bytes") or 0))))
+            print("Database compacted; {size} returned to disk.".format(size=_format_byte_size(int(compaction.get("reclaimed_bytes") or 0))))
         elif compaction_status == "deferred":
             print(
-                i18n_t(
-                    "data.retention.compactionDeferred",
-                    language,
-                    reason=i18n_t(_COMPACTION_REASON_KEYS.get(str(compaction.get("reason")), "data.retention.compactionReasonOther"), language),
+                "Compaction deferred ({reason}); rows are deleted, disk space returns on a later safe pass.".format(
+                    reason=_COMPACTION_REASONS.get(str(compaction.get("reason")), "compaction was not safe to run")
                 )
             )
         elif compaction_status == "skipped":
-            print(i18n_t("data.retention.compactionSkipped", language))
+            print("Compaction skipped: too little would be reclaimed.")
     elif status == "not_due":
-        print(i18n_t("data.retention.notDue", language))
+        print("Retention already ran within the last day; nothing to do.")
     elif status == "busy":
-        print(i18n_t("data.retention.busy", language))
+        print("Another retention run is active; try again later.")
     elif status == "lease_lost":
-        print(i18n_t("data.retention.leaseLost", language))
+        print("This pass lost its lease to another retention run; deletion stopped partway and no completion was recorded. Retry once the other run finishes.")
     elif status == "cancelled":
-        print(i18n_t("data.retention.cancelled", language))
+        print("Retention stopped at a batch boundary; no completion was recorded.")
     elif status == "ok_with_contested_compaction":
-        print(i18n_t("data.retention.ran", language, rows=int(payload.get("deleted_rows") or 0)))
-        print(i18n_t("data.retention.compactionDeferred", language, reason=i18n_t("data.retention.compactionReasonOther", language)))
+        print("Retention pass deleted {rows} trace row(s).".format(rows=int(payload.get("deleted_rows") or 0)))
+        print("Compaction deferred ({reason}); rows are deleted, disk space returns on a later safe pass.".format(reason="compaction was not safe to run"))
     else:
         print(f"retention status: {status}")
 
@@ -7761,14 +7339,13 @@ def cmd_data_skill_usage(args):
         from core.skill_observability import collection_enabled
         from storage.db import get_cached_sqlite_engine
 
-        language = _configured_cli_language()
         caller = caller_resource_user_context(caller_context_from_env())
         if not resolve_resource_access_context(caller).can_manage_instance:
-            raise TaskCliError(i18n_t("data.skillUsage.ownerRequired", language), code="forbidden")
+            raise TaskCliError("Instance Member or Owner access is required.", code="forbidden")
         if args.clear and not args.yes:
-            raise TaskCliError(i18n_t("data.skillUsage.confirmationRequired", language), code="confirmation_required")
+            raise TaskCliError("Clearing Skill statistics requires --yes.", code="confirmation_required")
         if args.yes and not args.clear:
-            raise TaskCliError(i18n_t("data.skillUsage.clearRequired", language), code="invalid_arguments")
+            raise TaskCliError("--yes requires --clear.", code="invalid_arguments")
         enabled = collection_enabled()
         from storage.importer import ensure_sqlite_state
 
@@ -7859,24 +7436,6 @@ def _validate_session_type(platform: str) -> None:
         )
 
 
-def _session_list_hint() -> str:
-    return (
-        "Need richer filtering (by agent, time range, message content, or joins)? "
-        "Use: vibe data query. Find sessions by what was discussed: vibe data query "
-        "--sql \"select s.id, s.title from agent_sessions s join messages m "
-        "on m.session_id = s.id where m.content_text like '%KEYWORD%' "
-        "order by s.last_active_at desc\""
-    )
-
-
-def _session_get_hint(session_id: str) -> str:
-    return (
-        f"This session's runs: vibe runs list --session-id {session_id}. "
-        "Its messages or any cross-session query: vibe data query "
-        "(join messages on session_id)."
-    )
-
-
 def _open_session_engine():
     # Bootstrap/migrate the SQLite state first so a fresh Avibe home returns a clean
     # empty list / not-found instead of a raw "no such table" error (Codex P2).
@@ -7906,7 +7465,6 @@ def cmd_session_list(args):
             "agent_sessions",
             sessions=[_session_row(row, brief=True) for row in result.items],
             **_paginated_fields(result, command=command),
-            message=_session_list_hint(),
         )
         return 0
     except Exception as exc:
@@ -7918,9 +7476,8 @@ def cmd_session_get(args):
     from core.services import sessions as sessions_service
 
     try:
-        session_id, session_default_notice = _resolve_caller_session_id(
+        session_id = _resolve_caller_session_id(
             args,
-            purpose="Session",
             help_command="vibe session get --help",
         )
         engine = _open_session_engine()
@@ -7945,8 +7502,6 @@ def cmd_session_get(args):
     _print_cli_payload(
         "agent_session",
         session=_session_row(payload, brief=False),
-        message=_session_get_hint(session_id),
-        **({"session_default_notice": session_default_notice} if session_default_notice else {}),
     )
     return 0
 
@@ -7957,8 +7512,12 @@ def cmd_session_send_now(args):
     from core.services import sessions as sessions_service
     from vibe import internal_client
 
-    session_id = str(getattr(args, "session_id", "") or "").strip()
+    session_id = None
     try:
+        session_id = _resolve_caller_session_id(
+            args,
+            help_command="vibe session send-now --help",
+        )
         engine = _open_session_engine()
         with engine.connect() as conn:
             # Promotion is chat work, so it is authorized before the controller
@@ -8058,8 +7617,12 @@ def cmd_session_queue_list(args):
     from core.services import sessions as sessions_service
     from storage import message_deliveries
 
-    session_id = str(getattr(args, "session_id", "") or "").strip()
+    session_id = None
     try:
+        session_id = _resolve_caller_session_id(
+            args,
+            help_command="vibe session queue list --help",
+        )
         page_request = _page_request_from_args(
             args,
             help_command="vibe session queue list --help",
@@ -8108,7 +7671,7 @@ def cmd_session_queue_list(args):
         ],
         **_paginated_fields(
             result,
-            command=["vibe", "session", "queue", "list", session_id],
+            command=["vibe", "session", "queue", "list", "--session-id", session_id],
         ),
     )
     return 0
@@ -8119,9 +7682,13 @@ def cmd_session_queue_remove(args):
     from storage import message_deliveries
     from storage.background import run_update_event_transaction
 
-    session_id = str(getattr(args, "session_id", "") or "").strip()
+    session_id = None
     message_id = str(getattr(args, "message_id", "") or "").strip()
     try:
+        session_id = _resolve_caller_session_id(
+            args,
+            help_command="vibe session queue remove --help",
+        )
         engine = _open_session_engine()
         with run_update_event_transaction(engine) as conn:
             from storage.agent_session_rows import reserve_write_lock
@@ -8196,12 +7763,11 @@ def cmd_session_update(args):
             raise TaskCliError(
                 "no update field supplied",
                 code="missing_session_update",
-                hint="Pass --title, --visible/--hidden, --visibility, or --scope-id.",
+                hint="Pass --title, --visible, --hidden, or --scope-id.",
                 help_command="vibe session update --help",
             )
-        session_id, session_default_notice = _resolve_caller_session_id(
+        session_id = _resolve_caller_session_id(
             args,
-            purpose="Session",
             help_command="vibe session update --help",
         )
         engine = _open_session_engine()
@@ -8234,7 +7800,6 @@ def cmd_session_update(args):
         "agent_session",
         updated=True,
         session=_session_row(payload, brief=False),
-        **({"session_default_notice": session_default_notice} if session_default_notice else {}),
     )
     return 0
 
@@ -11314,11 +10879,7 @@ def cmd_watch_add(args):
         caller_context = caller_context_from_env()
         caller_user_context = caller_resource_user_context(caller_context)
         # The defaulted target is the definition's ``session_id``; no notice repeats it.
-        _apply_caller_session_default(
-            args,
-            caller_context,
-            purpose="Watch target Session",
-        )
+        _apply_caller_session_default(args, caller_context)
         session_policy = _validate_definition_session_policy(
             args,
             schedule_type="watch",
@@ -11327,11 +10888,12 @@ def cmd_watch_add(args):
         )
         scope_key = _resolve_definition_scope_key(args, caller_context=caller_context, help_command="vibe watch add --help")
         command, shell_command = _resolve_watch_command(args, help_command="vibe watch add --help")
-        session_id, session_key = _resolve_session_target_args(
+        session_id = _resolve_session_target_args(
             args,
             required=session_policy == "existing",
             help_command="vibe watch add --help",
         )
+        session_key = ""
         # Same gate as ``vibe task add``: the waiter's hook is a turn in this
         # Session, replayed later under the authority stored with the Watch.
         command_target = _require_cli_turn_authority(
@@ -11385,8 +10947,8 @@ def cmd_watch_add(args):
             session_policy=session_policy,
             session_id=session_id,
             session_key=session_key,
-            post_to=getattr(args, "post_to", None),
-            deliver_key=getattr(args, "deliver_key", None),
+            post_to=None,
+            deliver_key=None,
             scope_key=scope_key,
             help_command="vibe watch add --help",
         )
@@ -11398,12 +10960,10 @@ def cmd_watch_add(args):
             lifetime_timeout_seconds=float(args.lifetime_timeout),
             help_command="vibe watch add --help",
         )
-        prefix = _normalize_task_name(getattr(args, "prefix", None))
         message = _resolve_optional_message_input(
             args,
             help_command="vibe watch add --help",
             example_command="vibe watch add --session-id sesk8m4q2p7x --message 'Continue when the waiter finishes.'",
-            legacy_prefix=prefix,
         )
 
         retry_exit_codes = sorted(set(args.retry_exit_code or [DEFAULT_RETRY_EXIT_CODE]))
@@ -11414,7 +10974,7 @@ def cmd_watch_add(args):
             session_id=session_id,
             command=command,
             shell_command=shell_command,
-            prefix=prefix,
+            prefix=None,
             message=message,
             cwd=cwd,
             mode=mode,
@@ -11422,8 +10982,8 @@ def cmd_watch_add(args):
             lifetime_timeout_seconds=float(args.lifetime_timeout),
             retry_exit_codes=retry_exit_codes,
             retry_delay_seconds=float(args.retry_delay),
-            post_to=args.post_to,
-            deliver_key=args.deliver_key,
+            post_to=None,
+            deliver_key=None,
             agent_name=agent_name,
             session_policy=session_policy,
             metadata=_definition_metadata_with_scope(caller_context, scope_id=scope_key, session_workdir=session_workdir),
@@ -11497,12 +11057,11 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
     try:
         updated = store.set_enabled(watch_id, enabled)
     except JobWatchResumeRefused as exc:
-        lang = _configured_cli_language()
         _print_task_error(
             TaskCliError(
-                i18n_t("error.jobWatchResumeRefused.message", lang),
+                i18n_t("error.jobWatchResumeRefused.message"),
                 code=exc.code,
-                hint=i18n_t("error.jobWatchResumeRefused.hint", lang, id=watch_id),
+                hint=i18n_t("error.jobWatchResumeRefused.hint", id=watch_id),
                 help_command=f"vibe watch remove {watch_id}",
                 details={"watch_id": watch_id},
             )
@@ -11532,9 +11091,7 @@ def cmd_watch_update(args):
             raise _missing_definition_error("watch", args.watch_id, action="update")
 
         if getattr(args, "reset_delivery", False) and (
-            getattr(args, "post_to", None) is not None
-            or getattr(args, "deliver_key", None) is not None
-            or getattr(args, "scope_id", None) is not None
+            getattr(args, "scope_id", None) is not None
             or bool(getattr(args, "same_scope", False))
         ):
             raise TaskCliError(
@@ -11574,7 +11131,7 @@ def cmd_watch_update(args):
         else:
             name = watch.name
 
-        session_id_update, session_key_update = _resolve_session_target_args(
+        session_id_update = _resolve_session_target_args(
             args,
             required=False,
             help_command="vibe watch update --help",
@@ -11582,9 +11139,6 @@ def cmd_watch_update(args):
         if session_id_update is not None:
             session_id = session_id_update
             session_key = ""
-        elif session_key_update:
-            session_id = None
-            session_key = session_key_update
         else:
             session_id = watch.session_id
             session_key = watch.session_key
@@ -11592,17 +11146,8 @@ def cmd_watch_update(args):
             post_to = None
             deliver_key = None
         else:
-            requested_post_to = getattr(args, "post_to", None)
-            requested_deliver_key = getattr(args, "deliver_key", None)
-            if requested_post_to is not None:
-                post_to = requested_post_to
-                deliver_key = None
-            elif requested_deliver_key is not None:
-                post_to = None
-                deliver_key = requested_deliver_key
-            else:
-                post_to = watch.post_to
-                deliver_key = watch.deliver_key
+            post_to = watch.post_to
+            deliver_key = watch.deliver_key
         metadata = dict(watch.metadata or {})
         if requested_scope_key:
             metadata["session_scope_id"] = requested_scope_key
@@ -11616,28 +11161,17 @@ def cmd_watch_update(args):
             waiter_command = []
         if getattr(args, "shell", None) is not None or waiter_command:
             command, shell_command = _resolve_watch_command(args, help_command="vibe watch update --help")
-        prefix = (
-            None
-            if getattr(args, "clear_prefix", False)
-            else (
-                _normalize_task_name(getattr(args, "prefix", None))
-                if getattr(args, "prefix", None) is not None
-                else watch.prefix
-            )
-        )
+        prefix = watch.prefix
         message_changed = any(
             getattr(args, name, None) is not None
-            for name in ("message", "message_file", "prompt", "prompt_file")
+            for name in ("message", "message_file")
         )
         if message_changed:
             message = _resolve_optional_message_input(
                 args,
                 help_command="vibe watch update --help",
                 example_command=f"vibe watch update {args.watch_id}",
-                legacy_prefix=None,
             )
-        elif getattr(args, "prefix", None) is not None or getattr(args, "clear_prefix", False):
-            message = prefix
         else:
             message = getattr(watch, "message", None) or watch.prefix
         # Same three durable Agent-authority states ``vibe task update`` keeps, on the
@@ -11893,12 +11427,11 @@ def cmd_watch_update(args):
                 reserved_session_id,
                 reason="watch update failed before its Session reservation was adopted",
             )
-        lang = _configured_cli_language()
         _print_task_error(
             TaskCliError(
-                i18n_t("error.jobWatchUpdateRefused.message", lang),
+                "This Watch waits on a command that is already running, so only its name, message, and lifetime can be changed.",
                 code=exc.code,
-                hint=i18n_t("error.jobWatchUpdateRefused.hint", lang, id=exc.watch_id),
+                hint=f"Its Session, Agent, delivery, and command were fixed when the command was handed over. Change the name, message, or lifetime with `vibe watch update {exc.watch_id}`.",
                 help_command="vibe watch update --help",
                 details={"watch_id": exc.watch_id},
             )
@@ -11945,18 +11478,18 @@ def _add_dependency_download_failure(
     label: str,
     code_prefix: str,
     repair_target: str | None,
+    language: str = "en",
     retry_action: str | None = None,
     failure_status: str = "fail",
 ) -> None:
-    language = _configured_cli_language()
     error = error or {}
     kind = str(error.get("kind") or "unknown")
     url = str(error.get("url") or i18n_t("doctor.value.selectedDependencyUrl", language))
     attempts = int(error.get("attempts") or 1)
     retry_action = retry_action or (
-        i18n_t("doctor.action.repairCommand", _configured_cli_language(), target=repair_target)
+        i18n_t("doctor.action.repairCommand", language, target=repair_target)
         if repair_target
-        else i18n_t("doctor.action.askillManual", _configured_cli_language())
+        else i18n_t("doctor.action.askillManual", language)
     )
     if kind == "http" and error.get("http_status") == 404:
         _add_doctor_item(
@@ -12059,10 +11592,9 @@ def _add_dependency_download_failure(
         )
 
 
-def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
+def _managed_dependencies_doctor_items(*, language: str = "en", deep: bool = False) -> list[dict]:
     from core.dependency_network import probe_url
 
-    language = _configured_cli_language()
     labels = {
         "askill": "askill",
         "avault": "avault",
@@ -12253,6 +11785,7 @@ def _managed_dependencies_doctor_items(*, deep: bool = False) -> list[dict]:
                 label=label,
                 code_prefix=f"dependencies.{dependency_id}.download",
                 repair_target=repair_target,
+                language=language,
                 retry_action=retry_action,
                 failure_status=severity,
             )
@@ -12277,11 +11810,10 @@ def _show_runtime_install(payload: dict) -> dict:
     return install if isinstance(install, dict) else {}
 
 
-def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
+def _show_runtime_doctor_items(*, language: str = "en", deep: bool = False) -> list[dict]:
     from core.show_runtime import ShowRuntimeManager
 
     items: list[dict] = []
-    doctor_language = _configured_cli_language()
     try:
         manager = ShowRuntimeManager(offline=True if not deep else None)
         status = manager.status()
@@ -12289,8 +11821,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "fail",
-            i18n_t("doctor.item.showRuntimeStatusFailed", doctor_language, reason=exc),
-            i18n_t("doctor.action.showRuntimeStatusFailed", doctor_language),
+            i18n_t("doctor.item.showRuntimeStatusFailed", language, reason=exc),
+            i18n_t("doctor.action.showRuntimeStatusFailed", language),
             code="show_runtime.status_failed",
         )
         return items
@@ -12304,8 +11836,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "warn",
-            i18n_t("doctor.item.archiveCacheSkipped", doctor_language),
-            i18n_t("doctor.action.archiveCacheSkippedInspection", doctor_language),
+            i18n_t("doctor.item.archiveCacheSkipped", language),
+            i18n_t("doctor.action.archiveCacheSkippedInspection", language),
             code="show_runtime.archive_cache_skipped",
             archive_cache_skip_reason=archive_skipped_reason,
         )
@@ -12313,8 +11845,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "warn",
-            i18n_t("doctor.item.archiveCacheSkipped", doctor_language),
-            i18n_t("doctor.action.archiveCacheSkipped", doctor_language),
+            i18n_t("doctor.item.archiveCacheSkipped", language),
+            i18n_t("doctor.action.archiveCacheSkipped", language),
             code="show_runtime.archive_cache_skipped",
             archive_cache_skip_reason=archive_skipped_reason,
         )
@@ -12324,18 +11856,18 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             "warn",
             i18n_t(
                 "doctor.item.archiveCacheReclaimable",
-                doctor_language,
+                language,
                 count=int(archive_cache.get("candidate_count") or 0),
                 size=_format_byte_size(int(archive_cache.get("candidate_bytes") or 0)),
             ),
-            i18n_t("doctor.action.archiveCacheReclaimable", doctor_language),
+            i18n_t("doctor.action.archiveCacheReclaimable", language),
             code="show_runtime.archive_cache_reclaimable",
         )
     elif archive_cache is not None:
         _add_doctor_item(
             items,
             "pass",
-            i18n_t("doctor.item.archiveCacheClean", doctor_language),
+            i18n_t("doctor.item.archiveCacheClean", language),
             code="show_runtime.archive_cache_clean",
         )
 
@@ -12354,32 +11886,32 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             "fail",
             i18n_t(
                 "doctor.item.showRuntimeStatusFailed",
-                doctor_language,
+                language,
                 reason=inspection.get("message") or status.get("reason"),
             ),
-            i18n_t("doctor.action.showRuntimeStatusFailed", doctor_language),
+            i18n_t("doctor.action.showRuntimeStatusFailed", language),
             code="show_runtime.status_failed",
             status_reason=status.get("reason"),
         )
         return items
     installed = install.get("state") == "installed"
     provider = str(status.get("provider") or "unknown")
-    display_provider = _doctor_display_value(provider, "show_runtime_provider", doctor_language)
-    current_platform = status.get("platform") or i18n_t("doctor.value.currentPlatform", doctor_language)
+    display_provider = _doctor_display_value(provider, "show_runtime_provider", language)
+    current_platform = status.get("platform") or i18n_t("doctor.value.currentPlatform", language)
     explicit_command = status.get("explicit_command")
     if explicit_command:
         if installed:
             _add_doctor_item(
                 items,
                 "pass",
-                i18n_t("doctor.item.explicitCommandAvailable", doctor_language, command=explicit_command),
+                i18n_t("doctor.item.explicitCommandAvailable", language, command=explicit_command),
             )
         else:
             _add_doctor_item(
                 items,
                 "fail",
-                i18n_t("doctor.item.explicitCommandMissing", doctor_language, command=explicit_command),
-                i18n_t("doctor.action.explicitCommandMissing", doctor_language),
+                i18n_t("doctor.item.explicitCommandMissing", language, command=explicit_command),
+                i18n_t("doctor.action.explicitCommandMissing", language),
                 code="show_runtime.explicit_command_missing",
             )
         return items
@@ -12401,8 +11933,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 "fail",
-                i18n_t("doctor.item.manifestMissing", doctor_language),
-                i18n_t("doctor.action.manifestMissing", doctor_language),
+                i18n_t("doctor.item.manifestMissing", language),
+                i18n_t("doctor.action.manifestMissing", language),
                 code="show_runtime.manifest_missing",
             )
         elif not archive:
@@ -12412,10 +11944,10 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
                 "fail",
                 i18n_t(
                     "doctor.item.manifestPlatformUnsupported",
-                    doctor_language,
+                    language,
                     platform=current_platform,
                 ),
-                i18n_t("doctor.action.manifestPlatformUnsupported", doctor_language),
+                i18n_t("doctor.action.manifestPlatformUnsupported", language),
                 code="show_runtime.platform_unsupported",
             )
         else:
@@ -12424,7 +11956,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
                 "pass",
                 i18n_t(
                     "doctor.item.manifestReady",
-                    doctor_language,
+                    language,
                     name=archive.get("name"),
                     url=archive_url,
                 ),
@@ -12436,24 +11968,24 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             _add_doctor_item(
                 items,
                 "fail",
-                i18n_t("doctor.item.legacyArchiveProvider", doctor_language, url=archive_url),
-                i18n_t("doctor.action.legacyArchiveProvider", doctor_language),
+                i18n_t("doctor.item.legacyArchiveProvider", language, url=archive_url),
+                i18n_t("doctor.action.legacyArchiveProvider", language),
                 code="show_runtime.legacy_archive_provider",
             )
         else:
             _add_doctor_item(
                 items,
                 "warn",
-                i18n_t("doctor.item.unpinnedArchiveProvider", doctor_language),
-                i18n_t("doctor.action.unpinnedArchiveProvider", doctor_language),
+                i18n_t("doctor.item.unpinnedArchiveProvider", language),
+                i18n_t("doctor.action.unpinnedArchiveProvider", language),
                 code="show_runtime.unpinned_archive_provider",
             )
     elif provider == "npm":
         _add_doctor_item(
             items,
             "warn",
-            i18n_t("doctor.item.developmentProvider", doctor_language, provider=display_provider),
-            i18n_t("doctor.action.developmentProvider", doctor_language),
+            i18n_t("doctor.item.developmentProvider", language, provider=display_provider),
+            i18n_t("doctor.action.developmentProvider", language),
             code="show_runtime.development_provider",
             show_runtime_provider=provider,
         )
@@ -12462,8 +11994,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "fail",
-            i18n_t("doctor.item.providerUnsupported", doctor_language, provider=display_provider),
-            i18n_t("doctor.action.providerUnsupported", doctor_language),
+            i18n_t("doctor.item.providerUnsupported", language, provider=display_provider),
+            i18n_t("doctor.action.providerUnsupported", language),
             code="show_runtime.provider_unsupported",
             show_runtime_provider=provider,
         )
@@ -12474,7 +12006,7 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             "pass",
             i18n_t(
                 "doctor.item.showRuntimeInstalled",
-                doctor_language,
+                language,
                 platform=current_platform,
             ),
             code="show_runtime.installed",
@@ -12483,22 +12015,22 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
 
     show_runtime_repairable = provider_repairable and node_available and node_supported and archive_scheme_supported
     show_runtime_retry_action = (
-        i18n_t("doctor.action.showRuntimeRepair", doctor_language)
+        i18n_t("doctor.action.showRuntimeRepair", language)
         if show_runtime_repairable
-        else i18n_t("doctor.action.showRuntimeRetry", doctor_language)
+        else i18n_t("doctor.action.showRuntimeRetry", language)
     )
     _add_doctor_item(
         items,
         "fail",
         i18n_t(
             "doctor.item.showRuntimeNotReady",
-            doctor_language,
+            language,
             platform=current_platform,
         ),
         (
-            i18n_t("doctor.action.showRuntimeRepair", doctor_language)
+            i18n_t("doctor.action.showRuntimeRepair", language)
             if show_runtime_repairable
-            else i18n_t("doctor.action.showRuntimeRetry", doctor_language)
+            else i18n_t("doctor.action.showRuntimeRetry", language)
         ),
         code="show_runtime.not_ready",
         repair_target="show-runtime" if show_runtime_repairable else None,
@@ -12511,8 +12043,8 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "pass",
-            i18n_t("doctor.item.archiveProbeSkipped", doctor_language),
-            i18n_t("doctor.action.archiveProbeSkipped", doctor_language),
+            i18n_t("doctor.item.archiveProbeSkipped", language),
+            i18n_t("doctor.action.archiveProbeSkipped", language),
             code="show_runtime.archive_probe_skipped",
         )
         return items
@@ -12524,15 +12056,15 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
         _add_doctor_item(
             items,
             "pass",
-            i18n_t("doctor.item.archiveReachable", doctor_language, target=target),
+            i18n_t("doctor.item.archiveReachable", language, target=target),
             code="show_runtime.archive_reachable",
         )
     elif probe_reason == "runtime_archive_probe_unsupported":
         _add_doctor_item(
             items,
             "warn",
-            i18n_t("doctor.item.archiveProbeUnsupported", doctor_language),
-            i18n_t("doctor.action.archiveProbeUnsupported", doctor_language, retry=show_runtime_retry_action),
+            i18n_t("doctor.item.archiveProbeUnsupported", language),
+            i18n_t("doctor.action.archiveProbeUnsupported", language, retry=show_runtime_retry_action),
             code="show_runtime.archive_probe_unsupported",
         )
     elif probe.get("download_error"):
@@ -12542,10 +12074,11 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             probe.get("download_error"),
             label=i18n_t(
                 "doctor.value.showRuntimeManifest" if is_manifest_failure else "doctor.value.showRuntimeArchive",
-                doctor_language,
+                language,
             ),
             code_prefix="show_runtime.manifest" if is_manifest_failure else "show_runtime.archive",
             repair_target="show-runtime" if show_runtime_repairable else None,
+            language=language,
             retry_action=show_runtime_retry_action,
         )
     elif probe_reason == "runtime_archive_url_unsupported":
@@ -12554,18 +12087,18 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             "fail",
             i18n_t(
                 "doctor.item.archiveUrlUnsupported",
-                doctor_language,
+                language,
                 url=probe.get("url") or (archive or {}).get("url"),
             ),
-            i18n_t("doctor.action.archiveUrlUnsupported", doctor_language),
+            i18n_t("doctor.action.archiveUrlUnsupported", language),
             code="show_runtime.archive_url_unsupported",
         )
     elif probe_reason.startswith("runtime_manifest_"):
         _add_doctor_item(
             items,
             "fail",
-            i18n_t("doctor.item.manifestUnavailable", doctor_language),
-            i18n_t("doctor.action.manifestUnavailable", doctor_language),
+            i18n_t("doctor.item.manifestUnavailable", language),
+            i18n_t("doctor.action.manifestUnavailable", language),
             code="show_runtime.manifest_unavailable",
             probe_reason=probe_reason,
         )
@@ -12575,10 +12108,10 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             "fail",
             i18n_t(
                 "doctor.item.manifestPlatformUnsupported",
-                doctor_language,
+                language,
                 platform=current_platform,
             ),
-            i18n_t("doctor.action.showRuntimePlatformUnsupported", doctor_language),
+            i18n_t("doctor.action.showRuntimePlatformUnsupported", language),
             code="show_runtime.platform_unsupported",
         )
     else:
@@ -12587,11 +12120,11 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
             "fail",
             i18n_t(
                 "doctor.item.archiveCheckFailed",
-                doctor_language,
+                language,
             ),
             i18n_t(
                 "doctor.action.archiveCheckFailed",
-                doctor_language,
+                language,
                 retry=show_runtime_retry_action,
             ),
             code="show_runtime.archive_check_failed",
@@ -12600,8 +12133,11 @@ def _show_runtime_doctor_items(*, deep: bool = False) -> list[dict]:
     return items
 
 
-def _doctor(*, deep: bool = False):
+def _doctor(*, deep: bool = False, language: str = "en"):
     """Run diagnostic checks and return results in UI-compatible format.
+
+    The report is rendered in ``language``: English for the CLI, the configured
+    UI language for the Web doctor panel, which passes it explicitly.
 
     Returns:
         {
@@ -12613,9 +12149,8 @@ def _doctor(*, deep: bool = False):
     """
     groups = []
     summary = {"pass": 0, "warn": 0, "fail": 0}
-    language = _configured_cli_language()
 
-    home_items = _home_migration_items()
+    home_items = _home_migration_items(language=language)
     for item in home_items:
         status = item.get("status")
         if status in summary:
@@ -12969,13 +12504,13 @@ def _doctor(*, deep: bool = False):
         summary["pass"] += 1
 
     for item in [
-        *_service_lifecycle_items(detect_extra_processes=deep),
-        *_service_install_family_items(detect_extra_processes=deep),
-        *_service_generation_items(),
-        *_restart_state_items(),
-        *_runtime_architecture_items(),
-        *_show_git_checkpoint_items(),
-        *_scheduled_task_weekday_items(),
+        *_service_lifecycle_items(language=language, detect_extra_processes=deep),
+        *_service_install_family_items(language=language, detect_extra_processes=deep),
+        *_service_generation_items(language=language),
+        *_restart_state_items(language=language),
+        *_runtime_architecture_items(language=language),
+        *_show_git_checkpoint_items(language=language),
+        *_scheduled_task_weekday_items(language=language),
     ]:
         runtime_items.append(item)
         status = item.get("status")
@@ -12985,8 +12520,8 @@ def _doctor(*, deep: bool = False):
     groups.append({"name": i18n_t("doctor.group.runtime", language), "items": runtime_items})
 
     dependency_items = [
-        *_managed_dependencies_doctor_items(deep=deep),
-        *_show_runtime_doctor_items(deep=deep),
+        *_managed_dependencies_doctor_items(language=language, deep=deep),
+        *_show_runtime_doctor_items(language=language, deep=deep),
     ]
     for item in dependency_items:
         status = item.get("status")
@@ -12994,7 +12529,7 @@ def _doctor(*, deep: bool = False):
             summary[status] += 1
     groups.append({"name": i18n_t("doctor.group.dependencies", language), "items": dependency_items})
 
-    local_cli_items = [*_stable_launcher_items(), *_local_cli_installation_items()]
+    local_cli_items = [*_stable_launcher_items(language=language), *_local_cli_installation_items(language=language)]
     for item in local_cli_items:
         status = item.get("status")
         if status in summary:
@@ -13204,7 +12739,7 @@ def _current_sqlite_revision() -> str | None:
     return str(row[0])
 
 
-def _describe_launcher_selections(selections: list, language: str) -> str:
+def _describe_launcher_selections(selections: list, language: str = "en") -> str:
     unknown = i18n_t("doctor.value.unknown", language)
     return "; ".join(
         f"{selection.launcher} -> {selection.version or unknown} ({selection.generation})"
@@ -13212,11 +12747,10 @@ def _describe_launcher_selections(selections: list, language: str) -> str:
     )
 
 
-def _stable_launcher_items() -> list[dict]:
+def _stable_launcher_items(*, language: str = "en") -> list[dict]:
     """Fail when two discoverable stable launchers select different installs."""
 
     items: list[dict] = []
-    language = _configured_cli_language()
     selections = stable_launcher_selections()
     if len(selections) < 2:
         return items
@@ -13271,9 +12805,8 @@ def _stable_launcher_items() -> list[dict]:
     return items
 
 
-def _local_cli_installation_items() -> list[dict]:
+def _local_cli_installation_items(*, language: str = "en") -> list[dict]:
     items: list[dict] = []
-    language = _configured_cli_language()
 
     vibe_paths = _path_entries_for_executable("vibe")
     preferred_vibe = (Path.home() / ".local" / "bin" / "vibe").expanduser()
@@ -13445,7 +12978,7 @@ def _doctor_managed_reason_key(reason: str) -> str | None:
     return None
 
 
-def _doctor_managed_failure_detail(target: str, result: dict, language: str) -> str:
+def _doctor_managed_failure_detail(target: str, result: dict, language: str = "en") -> str:
     download_error = result.get("download_error") if isinstance(result.get("download_error"), dict) else None
     if download_error:
         kind = str(download_error.get("kind") or "")
@@ -13499,7 +13032,6 @@ def _start_service_after_repair(
     *,
     stopped_pids: list[int],
 ) -> dict:
-    language = _configured_cli_language()
     try:
         new_pid = runtime.start_service()
     except Exception as exc:
@@ -13507,7 +13039,7 @@ def _start_service_after_repair(
         return _doctor_repair_result(
             target,
             "failed",
-            i18n_t(failure_key, language, reason=exc),
+            i18n_t(failure_key, reason=exc),
             stopped_pids=stopped_pids,
         )
     ui_pid = runtime.read_status().get("ui_pid")
@@ -13515,7 +13047,7 @@ def _start_service_after_repair(
     return _doctor_repair_result(
         target,
         "repaired",
-        i18n_t(success_key, language),
+        i18n_t(success_key),
         stopped_pids=stopped_pids,
         service_pid=new_pid,
     )
@@ -13528,12 +13060,11 @@ def _runtime_home_exists_for_repair() -> bool:
 
 def _repair_home_migration(*, dry_run: bool = False) -> dict:
     target = "home-migration"
-    language = _configured_cli_language()
     if os.environ.get(paths.AVIBE_HOME_ENV):
         return _doctor_repair_result(
             target,
             "skipped",
-            i18n_t("doctor.repair.homeExplicit", language),
+            i18n_t("doctor.repair.homeExplicit"),
         )
 
     avibe_home = Path.home() / paths.AVIBE_HOME_DIRNAME
@@ -13542,31 +13073,31 @@ def _repair_home_migration(*, dry_run: bool = False) -> dict:
     legacy_present = legacy_home.exists() or legacy_home.is_symlink()
 
     if not avibe_present and not legacy_present:
-        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeNoRuntime", language))
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeNoRuntime"))
 
     if avibe_present and legacy_present and not legacy_home.is_symlink():
         return _doctor_repair_result(
             target,
             "failed",
-            i18n_t("doctor.repair.homeConflict", language),
+            i18n_t("doctor.repair.homeConflict"),
         )
 
     if not avibe_present and legacy_home.is_symlink():
         return _doctor_repair_result(
             target,
             "failed",
-            i18n_t("doctor.repair.homeSymlinkMissingCanonical", language),
+            i18n_t("doctor.repair.homeSymlinkMissingCanonical"),
         )
 
     if avibe_present and legacy_home.is_symlink() and _path_points_to(legacy_home, avibe_home):
-        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeHealthy", language))
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeHealthy"))
 
     if dry_run:
         if not avibe_present and legacy_present and not legacy_home.is_symlink():
-            return _doctor_repair_result(target, "planned", i18n_t("doctor.repair.homeDryMove", language))
+            return _doctor_repair_result(target, "planned", i18n_t("doctor.repair.homeDryMove"))
         if avibe_present:
-            return _doctor_repair_result(target, "planned", i18n_t("doctor.repair.homeDryLink", language))
-        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeNoNeed", language))
+            return _doctor_repair_result(target, "planned", i18n_t("doctor.repair.homeDryLink"))
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeNoNeed"))
 
     if avibe_present:
         if legacy_home.is_symlink() or not legacy_present:
@@ -13577,63 +13108,60 @@ def _repair_home_migration(*, dry_run: bool = False) -> dict:
                 return _doctor_repair_result(
                     target,
                     "failed",
-                    i18n_t("doctor.repair.homeLinkFailed", language, reason=exc),
+                    i18n_t("doctor.repair.homeLinkFailed", reason=exc),
                 )
-            return _doctor_repair_result(target, "repaired", i18n_t("doctor.repair.homeLinkCreated", language))
-        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeNoNeed", language))
+            return _doctor_repair_result(target, "repaired", i18n_t("doctor.repair.homeLinkCreated"))
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.homeNoNeed"))
 
     migrated_home = paths.migrate_default_home()
     if not _path_points_to(migrated_home, avibe_home):
         return _doctor_repair_result(
             target,
             "failed",
-            i18n_t("doctor.repair.homeMigrationIncomplete", language, path=migrated_home),
+            i18n_t("doctor.repair.homeMigrationIncomplete", path=migrated_home),
         )
     if not _path_points_to(legacy_home, avibe_home):
         return _doctor_repair_result(
             target,
             "failed",
-            i18n_t("doctor.repair.homeMigrationLinkFailed", language),
+            i18n_t("doctor.repair.homeMigrationLinkFailed"),
         )
     paths.ensure_data_dirs()
-    return _doctor_repair_result(target, "repaired", i18n_t("doctor.repair.homeMigrated", language))
+    return _doctor_repair_result(target, "repaired", i18n_t("doctor.repair.homeMigrated"))
 
 
 def _repair_stale_restart_state(*, dry_run: bool = False) -> dict:
     target = "stale-restart-state"
-    language = _configured_cli_language()
     restart_path = runtime.get_restart_status_path()
     payload = runtime.read_json(restart_path) or {}
     if not payload:
-        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.restartAbsent", language))
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.restartAbsent"))
     if not _restart_status_is_stale(payload, restart_path):
-        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.restartCurrent", language))
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.restartCurrent"))
     if dry_run:
-        return _doctor_repair_result(target, "planned", i18n_t("doctor.repair.restartDryRun", language))
+        return _doctor_repair_result(target, "planned", i18n_t("doctor.repair.restartDryRun"))
     restart_path.unlink(missing_ok=True)
     _write_refreshed_runtime_status()
-    return _doctor_repair_result(target, "repaired", i18n_t("doctor.repair.restartRepaired", language))
+    return _doctor_repair_result(target, "repaired", i18n_t("doctor.repair.restartRepaired"))
 
 
 def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
     target = "duplicate-service-processes"
-    language = _configured_cli_language()
     if runtime.service_instance_lock_attached_to_process():
-        return _doctor_repair_result(target, "failed", i18n_t("doctor.repair.cliOnly", language))
+        return _doctor_repair_result(target, "failed", i18n_t("doctor.repair.cliOnly"))
     if not _runtime_home_exists_for_repair():
-        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noRuntimeProcessState", language))
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noRuntimeProcessState"))
 
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
     extra_pids = runtime.extra_service_process_pids(owner_pid=owner_pid)
     if not extra_pids:
-        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noExtraProcess", language))
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noExtraProcess"))
     if dry_run:
         return _doctor_repair_result(
             target,
             "planned",
             i18n_t(
                 "doctor.repair.extraProcessDryRun",
-                language,
                 pids=",".join(map(str, extra_pids)),
             ),
             pids=extra_pids,
@@ -13660,14 +13188,14 @@ def _repair_duplicate_service_processes(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target,
             "failed",
-            i18n_t("doctor.repair.extraProcessPartial", language),
+            i18n_t("doctor.repair.extraProcessPartial"),
             stopped_pids=stopped,
             failed_pids=failed,
         )
     return _doctor_repair_result(
         target,
         "repaired",
-        i18n_t("doctor.repair.extraProcessStopped", language),
+        i18n_t("doctor.repair.extraProcessStopped"),
         stopped_pids=stopped,
     )
 
@@ -13676,12 +13204,11 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
     """Point every managed stable launcher at the newest installed generation."""
 
     target_name = "stable-launchers"
-    language = _configured_cli_language()
 
     def in_step(selections: list) -> dict | None:
         if len({selection.generation for selection in selections}) < 2:
             return _doctor_repair_result(
-                target_name, "skipped", i18n_t("doctor.repair.stableLaunchersInStep", language)
+                target_name, "skipped", i18n_t("doctor.repair.stableLaunchersInStep")
             )
         return None
 
@@ -13690,7 +13217,7 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
     if (skipped := in_step(stable_launcher_selections())) is not None:
         return skipped
     if dry_run:
-        return _doctor_repair_result(target_name, "planned", i18n_t("doctor.repair.dryStableLaunchers", language))
+        return _doctor_repair_result(target_name, "planned", i18n_t("doctor.repair.dryStableLaunchers"))
     try:
         with atomic_upgrade_lock(timeout_seconds=DOCTOR_LAUNCHER_REPAIR_LOCK_TIMEOUT_SECONDS):
             selections = stable_launcher_selections()
@@ -13704,12 +13231,11 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
                     "failed",
                     i18n_t(
                         "doctor.repair.stableLaunchersTied",
-                        language,
-                        launchers=_describe_launcher_selections(top_ranked_selections(selections), language),
+                        launchers=_describe_launcher_selections(top_ranked_selections(selections)),
                     ),
                     reason="stable_launchers_tied",
                 )
-            unknown = i18n_t("doctor.value.unknown", language)
+            unknown = i18n_t("doctor.value.unknown")
             moved: list[Path] = []
             running = None
             for selection in selections:
@@ -13734,7 +13260,6 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
                         "failed",
                         i18n_t(
                             "doctor.repair.stableLauncherMoveFailed",
-                            language,
                             launcher=selection.launcher,
                             version=target.version or unknown,
                             generation=target.generation,
@@ -13749,7 +13274,6 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
                     "failed",
                     i18n_t(
                         "doctor.repair.stableLauncherRunning",
-                        language,
                         launcher=running.launcher,
                         repairCommand=_launcher_command(target.launcher, *STABLE_LAUNCHER_REPAIR_ARGS),
                     ),
@@ -13765,8 +13289,7 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
                     "failed",
                     i18n_t(
                         "doctor.repair.stableLaunchersStillSplit",
-                        language,
-                        launchers=_describe_launcher_selections(remaining, language),
+                        launchers=_describe_launcher_selections(remaining),
                     ),
                     reason="stable_launchers_still_split",
                     launchers=[str(launcher) for launcher in moved],
@@ -13775,7 +13298,7 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target_name,
             "failed",
-            i18n_t("doctor.repair.stableLaunchersBusy", language),
+            i18n_t("doctor.repair.stableLaunchersBusy"),
             reason="upgrade_lock_busy",
         )
     except Exception as exc:  # noqa: BLE001
@@ -13783,7 +13306,7 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target_name,
             "failed",
-            i18n_t("doctor.repair.stableLaunchersFailed", language),
+            i18n_t("doctor.repair.stableLaunchersFailed"),
             reason="stable_launcher_repair_exception",
             error=str(exc),
         )
@@ -13792,9 +13315,8 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
         "repaired",
         i18n_t(
             "doctor.repair.stableLaunchersRepaired",
-            language,
             launchers=", ".join(map(str, moved)),
-            version=target.version or i18n_t("doctor.value.unknown", language),
+            version=target.version or i18n_t("doctor.value.unknown"),
             generation=target.generation,
         ),
         launchers=[str(launcher) for launcher in moved],
@@ -13804,11 +13326,10 @@ def _repair_stable_launchers(*, dry_run: bool = False) -> dict:
 
 def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
     target = "stale-install-runtime"
-    language = _configured_cli_language()
     if runtime.service_instance_lock_attached_to_process():
-        return _doctor_repair_result(target, "failed", i18n_t("doctor.repair.cliOnly", language))
+        return _doctor_repair_result(target, "failed", i18n_t("doctor.repair.cliOnly"))
     if not _runtime_home_exists_for_repair():
-        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noRuntimeProcessState", language))
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noRuntimeProcessState"))
 
     current_family = _current_cli_install_family()
     owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
@@ -13823,12 +13344,12 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
         elif family == PACKAGE_NAME:
             current_pids.append(pid)
     if not stale_pids:
-        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noLegacyProcess", language))
+        return _doctor_repair_result(target, "skipped", i18n_t("doctor.repair.noLegacyProcess"))
     if dry_run:
         return _doctor_repair_result(
             target,
             "planned",
-            i18n_t("doctor.repair.staleInstallDryRun", language, pids=",".join(map(str, stale_pids))),
+            i18n_t("doctor.repair.staleInstallDryRun", pids=",".join(map(str, stale_pids))),
             pids=stale_pids,
         )
 
@@ -13845,7 +13366,7 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target,
             "failed",
-            i18n_t("doctor.repair.staleInstallPartial", language),
+            i18n_t("doctor.repair.staleInstallPartial"),
             stopped_pids=stopped,
             failed_pids=failed,
         )
@@ -13855,7 +13376,7 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target,
             "repaired",
-            i18n_t("doctor.repair.staleInstallStopped", language),
+            i18n_t("doctor.repair.staleInstallStopped"),
             stopped_pids=stopped,
         )
 
@@ -13868,12 +13389,11 @@ def _repair_stale_install_runtime(*, dry_run: bool = False) -> dict:
 
 
 def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False) -> dict:
-    language = _configured_cli_language()
     if dry_run:
         return _doctor_repair_result(
             target,
             "planned",
-            i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target], language),
+            i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target]),
         )
     try:
         result = installer(force=True)
@@ -13883,9 +13403,8 @@ def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False)
             "failed",
             i18n_t(
                 "doctor.repair.dependencyResultFailed",
-                language,
                 target=target,
-                detail=i18n_t("doctor.repair.dependencyException", language, target=target, error=exc),
+                detail=i18n_t("doctor.repair.dependencyException", target=target, error=exc),
             ),
             reason=f"{target}_repair_exception",
             error=str(exc),
@@ -13894,21 +13413,20 @@ def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False)
         result = {
             "ok": False,
             "reason": f"{target}_invalid_result",
-            "error": i18n_t("doctor.value.unknownError", language),
+            "error": i18n_t("doctor.value.unknownError"),
         }
     if result.get("ok"):
         version = result.get("version")
         detail = (
-            i18n_t("doctor.repair.dependencyVersion", language, version=version)
+            i18n_t("doctor.repair.dependencyVersion", version=version)
             if version
-            else i18n_t("doctor.repair.dependencyReadyDefault", language)
+            else i18n_t("doctor.repair.dependencyReadyDefault")
         )
         return _doctor_repair_result(
             target,
             "repaired" if result.get("changed", True) else "skipped",
             i18n_t(
                 "doctor.repair.dependencyReady",
-                language,
                 target=target,
                 detail=detail,
             ),
@@ -13916,13 +13434,12 @@ def _repair_managed_dependency(target: str, installer, *, dry_run: bool = False)
             version=version,
         )
     download_error = result.get("download_error") if isinstance(result.get("download_error"), dict) else None
-    detail = _doctor_managed_failure_detail(target, result, language)
+    detail = _doctor_managed_failure_detail(target, result)
     return _doctor_repair_result(
         target,
         "failed",
         i18n_t(
             "doctor.repair.dependencyResultFailed",
-            language,
             target=target,
             detail=detail,
         ),
@@ -13964,12 +13481,11 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
     from core.show_runtime import ShowRuntimeManager
 
     target = "show-runtime"
-    language = _configured_cli_language()
     if dry_run:
         return _doctor_repair_result(
             target,
             "planned",
-            i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target], language),
+            i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target]),
         )
 
     result = ShowRuntimeManager().repair()
@@ -13983,7 +13499,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
         return _doctor_repair_result(
             target,
             "skipped",
-            i18n_t("doctor.repair.showRuntimeHealthy", language),
+            i18n_t("doctor.repair.showRuntimeHealthy"),
             provider=result.get("provider"),
             platform=result.get("platform"),
             install_dir=result.get("install_dir"),
@@ -13998,7 +13514,6 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
                     if result.get("was_installed")
                     else "doctor.repair.showRuntimeInstalled"
                 ),
-                language,
             ),
             provider=result.get("provider"),
             platform=result.get("platform"),
@@ -14046,7 +13561,7 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
     return _doctor_repair_result(
         target,
         "failed",
-        i18n_t(message_key, language, **message_kwargs),
+        i18n_t(message_key, **message_kwargs),
         provider=result.get("provider"),
         platform=result.get("platform"),
         install_dir=result.get("install_dir"),
@@ -14060,7 +13575,6 @@ def _repair_show_runtime(*, dry_run: bool = False) -> dict:
 
 
 def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False, deep: bool = False) -> dict:
-    language = _configured_cli_language()
     requested_targets = targets or list(DOCTOR_DEFAULT_REPAIR_TARGETS)
     unknown = [target for target in requested_targets if target not in DOCTOR_REPAIR_TARGETS]
     if unknown:
@@ -14074,7 +13588,6 @@ def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False, deep: b
                     "failed",
                     i18n_t(
                         "doctor.repair.unknownTarget",
-                        language,
                         target=target,
                         known_targets=", ".join(DOCTOR_REPAIR_TARGETS),
                     ),
@@ -14092,7 +13605,7 @@ def _repair_doctor_targets(targets: list[str], *, dry_run: bool = False, deep: b
                 _doctor_repair_result(
                     target,
                     "planned",
-                    i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target], language),
+                    i18n_t(DOCTOR_REPAIR_DRY_RUN_I18N_KEYS[target]),
                 )
                 for target in requested_targets
             ],
@@ -14131,7 +13644,6 @@ def _confirm_doctor_repair(targets: list[str]) -> bool:
     answer = input(
         i18n_t(
             "doctor.repairConfirm",
-            _configured_cli_language(),
             targets=target_text,
         )
     )
@@ -14158,20 +13670,19 @@ def _handover_superseded_desktop_runtime(*, allowed: bool) -> int:
     if actual_runtime_id is None or actual_runtime_id == expected_runtime_id:
         return 0
 
-    language = _configured_cli_language()
     # Only the desktop host asks for a handover, when a user launches or
     # retries its app; any other start leaves another desktop Runtime alone.
     if not allowed:
-        print(i18n_t("desktopRuntime.handoverNotRequested", language), file=sys.stderr)
+        print("Another desktop-managed Avibe Runtime is running here; this start does not replace it.", file=sys.stderr)
         return 3
     # Health names the Runtime that answered; the stop signals only processes
     # that carry its id.
     result = runtime.stop_desktop_runtime(actual_runtime_id)
     if result.refusal is not None:
-        print(i18n_t("desktopRuntime.handoverRefused", language, reason=result.refusal), file=sys.stderr)
+        print(f"Refused to stop the superseded desktop-managed Avibe Runtime: {result.refusal}", file=sys.stderr)
         return 3
     if result.failure is not None:
-        print(i18n_t("desktopRuntime.handoverFailed", language, part=result.failure), file=sys.stderr)
+        print(f"Failed to stop the superseded desktop-managed Avibe Runtime: {result.failure}", file=sys.stderr)
         return 2
     # Anything still running is not the superseded Runtime's; the start claims
     # only what carries this Runtime's id.
@@ -14191,7 +13702,7 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
     try:
         runtime.claim_desktop_runtime_start()
     except runtime.DesktopRuntimeClaimRefused as refusal:
-        _print_provenance_refusal("desktopRuntime.claimRefused", refusal)
+        _print_provenance_refusal("claim", refusal)
         return 3
 
     has_configured_platform_credentials = getattr(config, "has_configured_platform_credentials", None)
@@ -14338,7 +13849,7 @@ def cmd_start(*, open_browser: bool | None = None, hand_over: bool = False):
         # another Runtime started meanwhile is left running.
         runtime.roll_back_start(service_start, ui_start)
         if isinstance(exc, runtime.DesktopRuntimeClaimRefused):
-            _print_provenance_refusal("desktopRuntime.claimRefused", exc)
+            _print_provenance_refusal("claim", exc)
             return 3
         raise
     if service_ready:
@@ -14416,18 +13927,18 @@ def _runtime_process_was_running() -> bool:
 # The part of a stop that did not stop: its localized diagnostic and the
 # status detail, which stays English for machine readers.
 _STOP_FAILURES = {
-    "service": ("runtime.stop.serviceFailed", "service stop failed"),
-    "ui": ("runtime.stop.uiFailed", "ui stop failed"),
-    "installer": ("runtime.stop.installerFailed", "desktop backend install drain failed"),
-    "opencode": ("runtime.stop.opencodeFailed", "opencode stop failed"),
-    "unknown": ("runtime.stop.unknownFailed", "unidentified runtime process left running"),
-    "remote_access": ("runtime.stop.remoteAccessFailed", "remote access stop failed"),
+    "service": ("ERROR: Avibe service did not stop; preserving pidfile and aborting.", "service stop failed"),
+    "ui": ("ERROR: Avibe UI did not stop; preserving pidfile and aborting.", "ui stop failed"),
+    "installer": ("ERROR: Desktop backend installer processes did not stop.", "desktop backend install drain failed"),
+    "opencode": ("ERROR: The OpenCode server this Runtime started did not stop.", "opencode stop failed"),
+    "unknown": ("ERROR: A process this Runtime started could not be identified and was left running.", "unidentified runtime process left running"),
+    "remote_access": ("ERROR: The remote access tunnel could not be stopped.", "remote access stop failed"),
 }
 
 
 def _stop_failed(part: str, write_status: Callable[..., None] | None = None) -> int:
-    key, detail = _STOP_FAILURES[part]
-    print(i18n_t(key, _configured_cli_language()), file=sys.stderr)
+    message, detail = _STOP_FAILURES[part]
+    print(message, file=sys.stderr)
     (write_status or _write_status)("error", detail)
     return 2
 
@@ -14440,7 +13951,7 @@ def _write_status_unless_a_service_holds_the_lock(*status: str) -> None:
 
 
 def _report_opencode_stopped() -> None:
-    print(i18n_t("runtime.stop.opencodeStopped", _configured_cli_language()))
+    print("OpenCode server stopped")
 
 
 def _print_stop_json(payload: dict) -> None:
@@ -14501,15 +14012,22 @@ def _stop_the_home_s_connector() -> int:
     return outcome[0]
 
 
-def _print_provenance_refusal(key: str, refusal: runtime.DesktopRuntimeClaimRefused) -> None:
+_PROVENANCE_REFUSALS = {
+    "claim": "Another Avibe Runtime is running here and does not belong to this desktop app; nothing was stopped ({part}: {reason}).",
+    "stop": "Nothing was stopped: this command runs from a desktop-managed Avibe Runtime, and the running {part} is not that Runtime's ({reason}). Stop it from the Avibe that started it.",
+    "restart": "Nothing was restarted: this command runs from a desktop-managed Avibe Runtime, and the running {part} is not that Runtime's ({reason}). Restart it from the Avibe that started it.",
+}
+
+
+def _print_provenance_refusal(action: str, refusal: runtime.DesktopRuntimeClaimRefused) -> None:
     print(
-        i18n_t(key, _configured_cli_language(), part=refusal.part, reason=refusal.reason),
+        _PROVENANCE_REFUSALS[action].format(part=refusal.part, reason=refusal.reason),
         file=sys.stderr,
     )
 
 
 def _desktop_provenance_refused(
-    key: str,
+    action: str,
     *,
     include_ui: bool = True,
     runtime_ids: frozenset[str] | None = None,
@@ -14519,7 +14037,7 @@ def _desktop_provenance_refused(
     refusal = runtime.desktop_provenance_refusal(include_ui=include_ui, runtime_ids=runtime_ids)
     if refusal is None:
         return False
-    _print_provenance_refusal(key, refusal)
+    _print_provenance_refusal(action, refusal)
     return True
 
 
@@ -14573,7 +14091,7 @@ def cmd_stop(*, expect_runtime_id: str | None = None):
     # that took over in between is refused too. An OpenCode server of another
     # Runtime is left running.
     provenance = desktop_caller_provenance()
-    if _desktop_provenance_refused("desktopRuntime.stopRefused", runtime_ids=provenance):
+    if _desktop_provenance_refused("stop", runtime_ids=provenance):
         return 3
     service_was_running = _pid_file_points_to_live_process(paths.get_runtime_pid_path())
     ui_was_running = _pid_file_points_to_live_process(paths.get_runtime_ui_pid_path())
@@ -14582,7 +14100,7 @@ def cmd_stop(*, expect_runtime_id: str | None = None):
         service_stopped = runtime.stop_service(runtime_ids=provenance, shutdown_reason="full_stop")
         ui_stopped = runtime.stop_ui(runtime_ids=provenance)
     except runtime.DesktopRuntimeClaimRefused as refusal:
-        _print_provenance_refusal("desktopRuntime.stopRefused", refusal)
+        _print_provenance_refusal("stop", refusal)
         return 3
     # Holding the free service lock: neither a service that failed to stop nor one
     # started since owns these commands while they are stopped.
@@ -14610,7 +14128,7 @@ def cmd_stop(*, expect_runtime_id: str | None = None):
 
 
 def cmd_status():
-    print(_render_status())
+    _print_cli_payload("service_status", **json.loads(_render_status()))
     return 0
 
 
@@ -14687,7 +14205,6 @@ def _print_remote_pair_start() -> None:
 
 def _print_remote_pair_failure(result: dict) -> None:
     error_code = str(result.get("error") or "unknown_error")
-    language = _configured_cli_language()
     if error_code in {"invalid_pairing_key", "pairing_key_expired", "pairing_key_used"}:
         print("Pairing key is invalid or expired.", file=sys.stderr)
         print("Create a new pairing key at https://avibe.bot, then run:", file=sys.stderr)
@@ -14701,71 +14218,74 @@ def _print_remote_pair_failure(result: dict) -> None:
             print(f"Detail: {result['detail']}", file=sys.stderr)
         return
     if error_code == "pairing_local_write_unavailable":
-        print(i18n_t("remote_access.cli.localWriteUnavailableTitle", language), file=sys.stderr)
-        print(i18n_t("remote_access.cli.localWriteUnavailableBody", language), file=sys.stderr)
+        print("Remote access setup stopped before contacting Avibe Cloud.", file=sys.stderr)
+        print("The local config cannot durably accept a pairing, so no pairing key was consumed.", file=sys.stderr)
         if result.get("detail"):
             print(f"Detail: {result['detail']}", file=sys.stderr)
-        print(i18n_t("remote_access.cli.retryAfterLocalFix", language), file=sys.stderr)
+        print("Fix the local config problem, then run:", file=sys.stderr)
         print("  vibe remote", file=sys.stderr)
         return
     if error_code == "pairing_save_failed_after_redeem":
         orphan = result.get("orphaned_binding") or {}
-        print(i18n_t("remote_access.cli.saveFailedAfterRedeemTitle", language), file=sys.stderr)
+        print("The pairing was redeemed cloud-side but could not be saved locally.", file=sys.stderr)
         if orphan.get("instance_id"):
-            print(i18n_t(
-                "remote_access.cli.orphanedBinding",
-                language,
-                instance_id=orphan["instance_id"],
-                device_name=orphan.get("device_name") or "unknown",
-            ), file=sys.stderr)
-        print(i18n_t("remote_access.cli.recoveryRetained", language), file=sys.stderr)
-        print(i18n_t("remote_access.cli.retryAfterLocalFix", language), file=sys.stderr)
+            print("Orphaned binding: instance {instance_id} (device {device_name}).".format(instance_id=orphan["instance_id"], device_name=orphan.get("device_name") or "unknown"), file=sys.stderr)
+        print("The redeemed credentials are kept on this host, so no new pairing key is needed.", file=sys.stderr)
+        print("Fix the local config problem, then run:", file=sys.stderr)
         print("  vibe remote pair", file=sys.stderr)
         if result.get("detail"):
             print(f"Detail: {result['detail']}", file=sys.stderr)
         return
     if error_code == "pairing_recovery_invalid":
-        print(i18n_t("remote_access.cli.recoveryInvalid", language), file=sys.stderr)
+        print("The saved pairing recovery record is invalid and cannot be replayed.", file=sys.stderr)
         if result.get("detail"):
             print(f"Detail: {result['detail']}", file=sys.stderr)
         return
     if error_code == "pairing_recovery_unavailable":
-        print(i18n_t("remote_access.cli.recoveryUnavailable", language), file=sys.stderr)
+        print("Local pairing recovery could not start. No new pairing key was consumed.", file=sys.stderr)
         if result.get("detail"):
             print(f"Detail: {result['detail']}", file=sys.stderr)
-        print(i18n_t("remote_access.cli.retryAfterLocalFix", language), file=sys.stderr)
+        print("Fix the local config problem, then run:", file=sys.stderr)
         print("  vibe remote pair", file=sys.stderr)
         return
     if error_code in {
         "pairing_recovery_not_ready", "pairing_superseded_after_redeem", "pairing_redeem_indeterminate",
     }:
-        message_key = "recoveryNotReady" if error_code == "pairing_recovery_not_ready" else "recoveryIndeterminate"
-        print(i18n_t(f"remote_access.cli.{message_key}", language), file=sys.stderr)
-        print(i18n_t("remote_access.cli.replacePendingPairing", language), file=sys.stderr)
+        message = (
+            "A pairing operation has no durably recorded response. It may still be running or may have consumed the key. A keyless retry cannot recover it."
+            if error_code == "pairing_recovery_not_ready"
+            else "The pairing outcome is uncertain or was superseded locally. No recoverable response is guaranteed; do not reuse the submitted key."
+        )
+        print(message, file=sys.stderr)
+        print("Check the cloud console and ensure no pairing is still running. To explicitly replace the pending attempt, substitute a fresh key and the intended backend URL in this command (the default backend is https://avibe.bot):", file=sys.stderr)
         print("  vibe remote pair NEW_PAIRING_KEY --backend-url BACKEND_URL", file=sys.stderr)
         if result.get("detail"):
             print(f"Detail: {result['detail']}", file=sys.stderr)
         return
     if error_code == "pairing_recovery_revoked":
-        print(i18n_t("remote_access.cli.recoveryRevoked", language), file=sys.stderr)
+        print("The saved pairing recovery was invalidated by a local unpair operation.", file=sys.stderr)
         if result.get("detail"):
             print(f"Detail: {result['detail']}", file=sys.stderr)
         return
     if error_code == "pairing_retirement_failed":
         pairing = result.get("pairing") or {}
         if pairing.get("applied") is False:
-            key = "failedClaimCleanup" if pairing.get("retirement_pending") else "failedClaimUnrecorded"
+            message = (
+                "This pairing attempt failed and was not applied. Fix local storage, then retry without a key to clear its failed-operation record."
+                if pairing.get("retirement_pending")
+                else "This pairing attempt failed and was not applied. Its cleanup could not be recorded. After fixing local storage, supply a fresh pairing key explicitly to 'vibe remote pair'; a keyless retry cannot recover this result."
+            )
         else:
-            key = "retirementFailed"
-        print(i18n_t(f"remote_access.cli.{key}", language), file=sys.stderr)
+            message = "Pairing was applied, but its recovery record could not be retired. Retry without a new key."
+        print(message, file=sys.stderr)
         if result.get("detail"):
             print(f"Detail: {result['detail']}", file=sys.stderr)
         if pairing.get("applied") is not False or pairing.get("retirement_pending"):
-            print(i18n_t("remote_access.cli.retryPairCommand", language), file=sys.stderr)
+            print("Retry local pairing recovery with:", file=sys.stderr)
             print("  vibe remote pair", file=sys.stderr)
         return
     if error_code == "pairing_failure_retired":
-        print(i18n_t("remote_access.cli.failedClaimRetired", language), file=sys.stderr)
+        print("The failed pairing record was cleared. Get a fresh pairing key, then run the following command to enter it securely:", file=sys.stderr)
         print("  vibe remote pair", file=sys.stderr)
         return
     if error_code == "invalid_pairing_response":
@@ -14885,7 +14405,7 @@ def _run_remote_pair(args, *, guided: bool) -> int:
     if not pairing_key and not pending_operation_exists:
         payload = {"ok": False, "error": "missing_pairing_key", "hint": "Run 'vibe remote' to restart setup."}
         if getattr(args, "json", False):
-            _print_json(payload)
+            _print_cli_payload("remote_pair", **payload)
         else:
             print("Pairing failed: missing pairing key.", file=sys.stderr)
             print("Run 'vibe remote' to restart setup.", file=sys.stderr)
@@ -14905,7 +14425,7 @@ def _run_remote_pair(args, *, guided: bool) -> int:
         if result.get("ok") and not command_ok:
             payload.setdefault("pairing", {"ok": True})
             payload.setdefault("error", str(start_result.get("error") or "remote_start_failed"))
-        _print_json(payload)
+        _print_cli_payload("remote_pair", **payload)
         return 0 if command_ok else 1
 
     if not result.get("ok"):
@@ -14929,7 +14449,7 @@ def cmd_remote_status(args):
 
     result = remote_access.status()
     if getattr(args, "json", False):
-        _print_json(result)
+        _print_cli_payload("remote_status", **result)
     else:
         _print_remote_status(result)
     return 0 if result.get("ok") else 1
@@ -14940,7 +14460,7 @@ def cmd_remote_start(args):
 
     result = remote_access.start()
     if getattr(args, "json", False):
-        _print_json(result)
+        _print_cli_payload("remote_start", **result)
     else:
         if result.get("ok"):
             if result.get("started"):
@@ -14963,7 +14483,7 @@ def cmd_remote_stop(args):
 
     result = remote_access.stop()
     if getattr(args, "json", False):
-        _print_json(result)
+        _print_cli_payload("remote_stop", **result)
     else:
         if result.get("ok"):
             print("Remote access tunnel stopped." if result.get("stopped") else "Remote access tunnel is already stopped.")
@@ -14977,6 +14497,7 @@ def cmd_remote_stop(args):
 def _show_page_result(
     page,
     *,
+    kind: str = "show_page",
     message: str,
     previous_payload: dict | None = None,
     extra: dict | None = None,
@@ -14984,11 +14505,7 @@ def _show_page_result(
 ) -> dict:
     from core.show_pages import show_page_payload
 
-    payload = {
-        "ok": True,
-        **show_page_payload(page),
-        "message": message,
-    }
+    payload = _cli_payload(kind, **show_page_payload(page), message=message)
     if previous_payload:
         payload.update(previous_payload)
     if extra:
@@ -15023,81 +14540,12 @@ def _show_page_next_actions(payload: dict, *, include_annotation_guidance: bool 
     return actions
 
 
-def _print_show_page_result(payload: dict) -> None:
-    print("Show Page:")
-    print(f"  Path: {payload.get('path')}")
-    print(f"  URL: {payload.get('active_url') or 'none'}")
-    print(f"  Visibility: {payload.get('visibility')}")
-    if payload.get("previous_active_url"):
-        print(f"  Previous URL: {payload.get('previous_active_url')} (inactive)")
-    elif payload.get("previous_public_url"):
-        print(f"  Previous URL: {payload.get('previous_public_url')} (inactive)")
-    elif payload.get("previous_private_url"):
-        print(f"  Previous URL: {payload.get('previous_private_url')} (inactive)")
-    if payload.get("message"):
-        print(f"  Status: {payload.get('message')}")
-    if payload.get("url_guidance"):
-        print(f"  URL guidance: {payload.get('url_guidance')}")
-    next_actions = payload.get("next_actions") or []
-    if next_actions:
-        print("")
-        print("Use it:")
-        for action in next_actions:
-            print(f"  - {action}")
-
-
-def _print_show_page_status_missing(session_id: str) -> None:
-    print("Show Page: not created")
-    print("  Path: none")
-    print("  URL: none")
-    print("  Visibility: none")
-    print("")
-    print("Use it:")
-    print(f"  - Create the workspace with: vibe show path --session-id {session_id}")
-    print("  - Then edit src/App.tsx in the returned directory.")
-    print("  - For more options, run: vibe show --help")
-
-
-def _print_show_page_list(payload: dict) -> None:
-    pages = payload.get("pages") or []
-    print("Show Pages:")
-    if payload.get("global"):
-        print("  Sessions: all")
-    elif payload.get("session_id"):
-        print(f"  Session: {payload['session_id']}")
-    print(f"  Count: {payload.get('count', 0)}")
-    visibility = payload.get("visibility")
-    if visibility:
-        print(f"  Filter: visibility={visibility}")
-    if payload.get("url_guidance"):
-        print(f"  URL guidance: {payload.get('url_guidance')}")
-    if not pages:
-        print("")
-        print("No Show Pages found.")
-        print("Create one with: vibe show path --session-id <session-id>")
-        return
-    print("")
-    for page in pages:
-        print(f"- {page.get('session_id')}")
-        print(f"  Path: {page.get('path')}")
-        print(f"  URL: {page.get('active_url') or 'none'}")
-        print(f"  Visibility: {page.get('visibility')}")
-        print(f"  Updated: {page.get('updated_at')}")
-    continuation = _text_page_continuation(payload)
-    if continuation:
-        print("")
-        print(continuation)
-    print("")
-    print("Use it:")
-    print("  - Open a page: vibe show status --session-id <session-id>")
-    print("  - Edit files under the listed Path.")
-    print("  - For more options, run: vibe show --help")
-
-
 def _print_show_page_error(exc: Exception) -> None:
     code = getattr(exc, "code", "show_page_failed")
     payload = {
+        "schema_version": 1,
         "ok": False,
+        "kind": "error",
         "code": code,
         "error": str(exc),
         "help_command": getattr(exc, "help_command", None) or "vibe show --help",
@@ -15108,7 +14556,7 @@ def _print_show_page_error(exc: Exception) -> None:
     details = getattr(exc, "details", None)
     if details:
         payload["details"] = details
-    print(json.dumps(payload, indent=2), file=sys.stderr)
+    print(_json_text(payload, stream=sys.stderr), file=sys.stderr)
 
 
 def _load_show_page_store():
@@ -15147,21 +14595,15 @@ def cmd_show_list(args):
         _add_optional_arg(command, "--updated-after", updated_after)
         _add_optional_arg(command, "--updated-before", updated_before)
         _add_optional_arg(command, "--q", getattr(args, "query", None))
-        if getattr(args, "json", False):
-            command.append("--json")
-        payload = {
-            "ok": True,
+        _print_cli_payload(
+            "show_pages",
             **scope.payload(),
-            "count": len(result.items),
-            "visibility": getattr(args, "visibility", None),
-            "pages": [show_page_payload(page) for page in result.items],
+            count=len(result.items),
+            visibility=getattr(args, "visibility", None),
+            pages=[show_page_payload(page) for page in result.items],
             **_paginated_fields(result, command=command),
-            "url_guidance": avibe_cloud_connect_guidance(),
-        }
-        if getattr(args, "json", False):
-            _print_json(payload)
-        else:
-            _print_show_page_list(payload)
+            url_guidance=avibe_cloud_connect_guidance(),
+        )
         return 0
     except Exception as exc:
         _print_show_page_error(exc)
@@ -15176,7 +14618,7 @@ def cmd_show_path(args):
 
     store = _load_show_page_store()
     try:
-        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show path --help")
+        session_id = _resolve_caller_session_id(args, help_command="vibe show path --help")
         page = store.ensure(session_id)
         page_dir = ensure_show_page_dir(session_id)
         _prewarm_show_page_session_best_effort(
@@ -15186,13 +14628,9 @@ def cmd_show_path(args):
         payload = _show_page_result(
             page,
             message=f"Show Page workspace is ready at {page_dir}.",
-            extra={"session_default_notice": session_default_notice} if session_default_notice else None,
             include_annotation_guidance=True,
         )
-        if getattr(args, "json", False):
-            _print_json(payload)
-        else:
-            _print_show_page_result(payload)
+        _print_json(payload)
         return 0
     except Exception as exc:
         _print_show_page_error(exc)
@@ -15215,36 +14653,24 @@ def cmd_show_status(args):
 
     store = _load_show_page_store()
     try:
-        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show status --help")
+        session_id = _resolve_caller_session_id(args, help_command="vibe show status --help")
         page = store.get(session_id)
         if page is None:
-            payload = {
-                "ok": False,
-                "code": "show_page_not_found",
-                "session_id": session_id,
-                "message": "No Show Page exists for this session.",
-                "next_actions": [f"Run `vibe show path --session-id {session_id}` to create the workspace."],
-            }
-            if session_default_notice:
-                payload["session_default_notice"] = session_default_notice
-            if getattr(args, "json", False):
-                _print_json(payload)
-            else:
-                print("No Show Page exists for this session.")
-                print(f"Run: vibe show path --session-id {session_id}")
-            return 1
+            raise TaskCliError(
+                "No Show Page exists for this session.",
+                code="show_page_not_found",
+                hint=f"Run `vibe show path --session-id {session_id}` to create the workspace.",
+                help_command="vibe show path --help",
+                details={"session_id": session_id},
+            )
         payload = _show_page_result(
             page,
             message=f"Show Page is {page.visibility}.",
             extra={
                 "history": show_history_status(session_id),
-                **({"session_default_notice": session_default_notice} if session_default_notice else {}),
-            },
+                    },
         )
-        if getattr(args, "json", False):
-            _print_json(payload)
-        else:
-            _print_show_page_result(payload)
+        _print_json(payload)
         return 0
     except Exception as exc:
         _print_show_page_error(exc)
@@ -15260,9 +14686,7 @@ def cmd_show_update(args):
     store = _load_show_page_store()
     try:
         extra: dict = {}
-        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show update --help")
-        if session_default_notice:
-            extra["session_default_notice"] = session_default_notice
+        session_id = _resolve_caller_session_id(args, help_command="vibe show update --help")
 
         if getattr(args, "rotate_share", False):
             updated, previous_share_id = store.rotate_share(session_id)
@@ -15312,10 +14736,7 @@ def cmd_show_update(args):
                 context=context.value,
             )
         payload = _show_page_result(updated, message=message, extra=extra)
-        if getattr(args, "json", False):
-            _print_json(payload)
-        else:
-            _print_show_page_result(payload)
+        _print_json(payload)
         return 0
     except Exception as exc:
         _print_show_page_error(exc)
@@ -15686,16 +15107,8 @@ def _read_event_json_argument(value: str | None, file_path: str | None) -> dict:
 
 
 def _show_mark_target(args) -> str:
-    positional = (getattr(args, "target", None) or "").strip()
-    option = (getattr(args, "target_option", None) or "").strip()
-    if positional and option and positional != option:
-        raise TaskCliError(
-            "positional target and --target must match when both are provided",
-            code="conflicting_mark_targets",
-            help_command="vibe show mark --help",
-        )
     return _read_cli_text_argument(
-        value=positional or option,
+        value=args.target,
         file_path=None,
         field_name="target",
         help_command="vibe show mark --help",
@@ -15746,12 +15159,12 @@ def cmd_show_mark(args):
     page_store = ShowPageStore()
     event_store = ShowSessionEventStore()
     try:
-        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show mark --help")
+        session_id = _resolve_caller_session_id(args, help_command="vibe show mark --help")
         page = page_store.ensure(session_id)
         target = _show_mark_target(args)
         body = _read_cli_text_argument(
-            value=args.body,
-            file_path=args.body_file,
+            value=args.message,
+            file_path=args.message_file,
             field_name="--message",
             help_command="vibe show mark --help",
         )
@@ -15784,25 +15197,17 @@ def cmd_show_mark(args):
         event = _record_show_mark_event(session_id, payload, event_store)
         result = _show_page_result(
             page,
+            kind="show_mark",
             message="Assistant mark replaced." if replaced else "Assistant mark recorded.",
             extra={
-                **({"session_default_notice": session_default_notice} if session_default_notice else {}),
-                "event": event,
+                        "event": event,
                 "event_id": event["id"],
                 "mark_id": mark_id,
                 "message_id": event.get("message_id"),
                 "replaced": replaced,
             },
         )
-        if getattr(args, "json", False):
-            _print_json(result)
-        else:
-            _print_show_page_result(result)
-            print("")
-            print("Mark:")
-            print(f"  Event: {event['id']}")
-            print(f"  Message: {event.get('message_id') or 'none'}")
-            print(f"  Target: {target}")
+        _print_json(result)
         return 0
     except Exception as exc:
         _print_show_page_error(exc)
@@ -15819,7 +15224,7 @@ def cmd_show_reply(args):
     page_store = ShowPageStore()
     event_store = ShowSessionEventStore()
     try:
-        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show reply --help")
+        session_id = _resolve_caller_session_id(args, help_command="vibe show reply --help")
         annotation = event_store.get_annotation_event(session_id, args.show_event_id)
         if annotation is None:
             recent_ids = event_store.recent_annotation_event_ids(session_id)
@@ -15862,10 +15267,10 @@ def cmd_show_reply(args):
             replacement_notice = "This annotation already had a reply; the active reply was replaced. Run: vibe show marks"
         result = _show_page_result(
             page,
+            kind="show_reply",
             message="Show Page reply replaced." if replaced else "Show Page reply recorded.",
             extra={
-                **({"session_default_notice": session_default_notice} if session_default_notice else {}),
-                "event": event,
+                        "event": event,
                 "event_id": event["id"],
                 "mark_id": mark_id,
                 "reply_to": annotation["id"],
@@ -15873,18 +15278,7 @@ def cmd_show_reply(args):
                 **({"replacement_notice": replacement_notice} if replacement_notice else {}),
             },
         )
-        if getattr(args, "json", False):
-            _print_json(result)
-        else:
-            _print_show_page_result(result)
-            print("")
-            print("Reply:")
-            print(f"  Event: {event['id']}")
-            print(f"  Mark: {mark_id}")
-            print(f"  Reply to: {annotation['id']}")
-            print(f"  Target: {target}")
-            if replacement_notice:
-                print(f"  Note: {replacement_notice}")
+        _print_json(result)
         return 0
     except Exception as exc:
         _print_show_page_error(exc)
@@ -15899,35 +15293,18 @@ def cmd_show_marks(args):
 
     event_store = ShowSessionEventStore()
     try:
-        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show marks --help")
+        session_id = _resolve_caller_session_id(args, help_command="vibe show marks --help")
         page_request = _page_request_from_args(args, help_command="vibe show marks --help")
         marks = [_show_mark_listing(mark) for mark in event_store.active_marks(session_id)]
         page = page_sequence(marks, page_request)
         command = ["vibe", "show", "marks", "--session-id", session_id]
-        if getattr(args, "json", False):
-            command.append("--json")
-        result = {
-            "ok": True,
-            "session_id": session_id,
-            "count": len(page.items),
-            "marks": page.items,
+        _print_cli_payload(
+            "show_marks",
+            session_id=session_id,
+            count=len(page.items),
+            marks=page.items,
             **_paginated_fields(page, command=command),
-            **({"session_default_notice": session_default_notice} if session_default_notice else {}),
-        }
-        if getattr(args, "json", False):
-            _print_json(result)
-        else:
-            print(f"Assistant marks ({len(page.items)} shown):")
-            if not page.items:
-                print("  none")
-            for mark in page.items:
-                print(f"- {mark['id']}  {mark['kind']}  {mark['read_state']}")
-                print(f"  Target: {mark['target']}")
-                print(f"  Body: {mark['body_head']}")
-            continuation = _text_page_continuation(result)
-            if continuation:
-                print("")
-                print(continuation)
+            )
         return 0
     except Exception as exc:
         _print_show_page_error(exc)
@@ -15941,7 +15318,7 @@ def cmd_show_unmark(args):
 
     event_store = ShowSessionEventStore()
     try:
-        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show unmark --help")
+        session_id = _resolve_caller_session_id(args, help_command="vibe show unmark --help")
         active_marks = event_store.active_marks(session_id)
         results = []
         succeeded = 0
@@ -15988,23 +15365,19 @@ def cmd_show_unmark(args):
                 }
             )
 
-        result = {
-            "ok": succeeded > 0,
-            "session_id": session_id,
-            "succeeded": succeeded,
-            "failed": len(results) - succeeded,
-            "results": results,
-            **({"session_default_notice": session_default_notice} if session_default_notice else {}),
-        }
-        if getattr(args, "json", False):
-            _print_json(result)
-        else:
-            for item in results:
-                if item["ok"]:
-                    print(f"Resolved {item['input']}: {', '.join(item['mark_ids'])}")
-                else:
-                    detail = "; ".join(item.get("errors") or []) or item.get("error") or "failed"
-                    print(f"Failed {item['input']}: {detail}", file=sys.stderr)
+        _print_json(
+            {
+                **_cli_payload(
+                    "show_unmark",
+                    session_id=session_id,
+                    succeeded=succeeded,
+                    failed=len(results) - succeeded,
+                    results=results,
+                            ),
+                # A partial result is still a result; ``ok`` is false only when nothing resolved.
+                "ok": succeeded > 0,
+            }
+        )
         return 0 if succeeded > 0 else 1
     except Exception as exc:
         _print_show_page_error(exc)
@@ -16019,7 +15392,7 @@ def cmd_show_event(args):
     page_store = ShowPageStore()
     event_id_for_retry = None
     try:
-        session_id, session_default_notice = _resolve_show_session_id(args, help_command="vibe show event --help")
+        session_id = _resolve_caller_session_id(args, help_command="vibe show event --help")
         page = page_store.ensure(session_id)
         payload = _read_event_json_argument(args.event_json, args.event_json_file)
         if args.type:
@@ -16044,23 +15417,15 @@ def cmd_show_event(args):
             event = record_local_show_event(session_id, payload)
         result = _show_page_result(
             page,
+            kind="show_event",
             message="Show event recorded.",
             extra={
-                **({"session_default_notice": session_default_notice} if session_default_notice else {}),
-                "event": event,
+                        "event": event,
                 "event_id": event["id"],
                 "message_id": event.get("message_id"),
             },
         )
-        if getattr(args, "json", False):
-            _print_json(result)
-        else:
-            _print_show_page_result(result)
-            print("")
-            print("Event:")
-            print(f"  Event: {event['id']}")
-            print(f"  Type: {event['type']}")
-            print(f"  Message: {event.get('message_id') or 'none'}")
+        _print_json(result)
         return 0
     except Exception as exc:
         if event_id_for_retry:
@@ -16081,7 +15446,7 @@ def cmd_show_annotate(args):
     page_store = ShowPageStore()
     event_store = None
     try:
-        session_id, session_default_notice = _resolve_show_session_id(
+        session_id = _resolve_caller_session_id(
             args,
             help_command="vibe show annotate --help",
         )
@@ -16113,24 +15478,15 @@ def cmd_show_annotate(args):
 
         result = _show_page_result(
             page,
+            kind="show_annotation",
             message="Annotation control recorded.",
             extra={
-                **({"session_default_notice": session_default_notice} if session_default_notice else {}),
-                "event": event,
+                        "event": event,
                 "event_id": event["id"],
                 "message_id": event.get("message_id"),
             },
         )
-        if getattr(args, "json", False):
-            _print_json(result)
-        else:
-            _print_show_page_result(result)
-            print("")
-            print("Annotation:")
-            print(f"  Event: {event['id']}")
-            print(f"  Action: {event['payload']['action']}")
-            if event["payload"].get("mode"):
-                print(f"  Mode: {event['payload']['mode']}")
+        _print_json(result)
         return 0
     except Exception as exc:
         _print_show_page_error(exc)
@@ -16180,10 +15536,9 @@ def _doctor_repair_requested(args) -> bool:
 
 
 def _print_doctor_repair_result(result: dict) -> None:
-    language = _configured_cli_language()
-    title = i18n_t("doctor.repairTitle", language)
+    title = i18n_t("doctor.repairTitle")
     if result.get("dry_run"):
-        title += i18n_t("doctor.dryRunSuffix", language)
+        title += i18n_t("doctor.dryRunSuffix")
     print(f"\n  {title}")
     print("  " + "=" * 40)
     for item in result.get("results", []):
@@ -16203,22 +15558,27 @@ def cmd_doctor(args=None):
         targets = list(getattr(args, "doctor_repair_targets", []) or [])
         dry_run = bool(getattr(args, "dry_run", False))
         if not dry_run and not getattr(args, "yes", False) and not _confirm_doctor_repair(targets):
-            print(i18n_t("doctor.repairNotRun", _configured_cli_language()), file=sys.stderr)
+            print(i18n_t("doctor.repairNotRun"), file=sys.stderr)
             return 2
         result = _repair_doctor_targets(
             targets,
             dry_run=dry_run,
             deep=bool(getattr(args, "doctor_deep", False)),
         )
-        _print_doctor_repair_result(result)
+        if getattr(args, "json", False):
+            _print_cli_payload("doctor_repair", **result)
+        else:
+            _print_doctor_repair_result(result)
         return 0 if result.get("ok") else 1
 
     deep = bool(getattr(args, "doctor_deep", False)) if args is not None else False
     result = _doctor(deep=deep)
+    if getattr(args, "json", False):
+        _print_cli_payload("doctor_report", **result)
+        return 0 if result["ok"] else 1
 
     # Terminal-friendly output
-    language = _configured_cli_language()
-    print(f"\n  {i18n_t('doctor.title', language)}")
+    print(f"\n  {i18n_t('doctor.title')}")
     print("  " + "=" * 40)
 
     for group in result.get("groups", []):
@@ -16240,9 +15600,9 @@ def cmd_doctor(args=None):
     summary = result.get("summary", {})
     print("\n  " + "-" * 30)
     print(
-        f"  \033[32m{i18n_t('doctor.summary.passed', language, count=summary.get('pass', 0))}\033[0m  "
-        f"\033[33m{i18n_t('doctor.summary.warnings', language, count=summary.get('warn', 0))}\033[0m  "
-        f"\033[31m{i18n_t('doctor.summary.failed', language, count=summary.get('fail', 0))}\033[0m"
+        f"  \033[32m{i18n_t('doctor.summary.passed', count=summary.get('pass', 0))}\033[0m  "
+        f"\033[33m{i18n_t('doctor.summary.warnings', count=summary.get('warn', 0))}\033[0m  "
+        f"\033[31m{i18n_t('doctor.summary.failed', count=summary.get('fail', 0))}\033[0m"
     )
     print()
 
@@ -16253,35 +15613,24 @@ def cmd_screenshot(args):
     try:
         result = capture_screenshot(getattr(args, "output", None))
     except ScreenshotError as exc:
-        payload = {
-            "ok": False,
-            "code": "screenshot_failed",
-            "error": str(exc),
-        }
         if getattr(args, "json", False):
-            print(json.dumps(payload, indent=2), file=sys.stderr)
+            _print_task_error(TaskCliError(str(exc), code="screenshot_failed"))
         else:
             print(f"Screenshot failed: {exc}", file=sys.stderr)
         return 1
 
     if getattr(args, "json", False):
-        print(
-            json.dumps(
-                {
-                    "ok": True,
-                    "path": str(result.path),
-                    "backend": result.backend,
-                },
-                indent=2,
-            )
-        )
+        _print_cli_payload("screenshot", path=str(result.path), backend=result.backend)
     else:
         print(str(result.path))
     return 0
 
 
-def cmd_version():
+def cmd_version(args=None):
     """Show current version."""
+    if getattr(args, "json", False):
+        _print_cli_payload("version", version=__version__)
+        return 0
     print(f"avibe-os {__version__}")
     return 0
 
@@ -16295,11 +15644,27 @@ def get_latest_version() -> dict:
     return get_latest_version_info(__version__)
 
 
-def cmd_check_update():
+def cmd_check_update(args=None):
     """Check for available updates."""
+    if getattr(args, "json", False):
+        if is_desktop_managed_runtime():
+            _print_cli_payload("update_check", current=__version__, desktop_managed=True)
+            return 0
+        info = get_latest_version()
+        if info["error"]:
+            _print_task_error(
+                TaskCliError(
+                    f"Failed to check for updates: {info['error']}",
+                    code="update_check_failed",
+                    details={"current": info.get("current") or __version__},
+                )
+            )
+            return 1
+        _print_cli_payload("update_check", **info, desktop_managed=False)
+        return 0
     print(f"Current version: {__version__}")
     if is_desktop_managed_runtime():
-        print(i18n_t("desktopRuntime.checkUpdate", V2Config.load().language))
+        print("Updates are delivered with the Avibe desktop app.")
         return 0
     print("Checking for updates...")
 
@@ -16322,7 +15687,7 @@ def cmd_upgrade():
     """Upgrade avibe-os to the latest version."""
     print(f"Current version: {__version__}")
     if is_desktop_managed_runtime():
-        print(i18n_t("desktopRuntime.upgrade", V2Config.load().language))
+        print("This Runtime is managed by the Avibe desktop app. Update the app to update Avibe.")
         return 0
     print("Checking for updates...")
 
@@ -16573,7 +15938,7 @@ def cmd_runtime(args) -> int:
         payload = manager.status()
         payload["git"] = _git_runtime_status()
         if getattr(args, "json", False):
-            print(json.dumps(payload, indent=2))
+            _print_cli_payload("runtime_status", **payload)
         else:
             _print_runtime_status(payload)
         return 0
@@ -16602,35 +15967,27 @@ def cmd_runtime(args) -> int:
         policy = payload.get("policy") if isinstance(payload.get("policy"), dict) else {}
         runtime_prepared = bool(payload.get("ok"))
         if getattr(args, "json", False):
-            print(json.dumps(payload, indent=2))
+            _print_cli_payload("runtime_prepare", **payload)
         else:
-            language = _configured_cli_language()
             if runtime_prepared:
-                print(i18n_t("runtime.prepare.prepared", language))
+                print(i18n_t("runtime.prepare.prepared"))
                 status = payload.get("status") or {}
                 status_install = _show_runtime_install(status)
                 if status_install.get("install_dir"):
                     print(f"Install dir: {status_install['install_dir']}")
             elif policy.get("state") == "skipped":
                 print(
-                    i18n_t(
-                        "runtime.prepare.skipped",
-                        language,
-                        reason=policy.get("reason") or "unknown",
-                    ),
+                    "Show Runtime preparation skipped: {reason}".format(reason=policy.get("reason") or "unknown"),
                     file=sys.stderr,
                 )
             else:
                 reason = payload.get("reason") or install.get("reason") or "unknown"
                 print(
-                    i18n_t(
-                        (
-                            "runtime.prepare.unsupportedSource"
-                            if reason == "runtime_source_unsupported"
-                            else "runtime.prepare.failed"
-                        ),
-                        language,
-                        reason=reason,
+                    (
+                        f"Show Runtime preparation failed: {reason}. Remove VIBE_SHOW_RUNTIME_SOURCE and use the "
+                        "packaged runtime, or set VIBE_SHOW_RUNTIME_BIN to a runtime you built."
+                        if reason == "runtime_source_unsupported"
+                        else f"Show Runtime preparation failed: {reason}"
                     ),
                     file=sys.stderr,
                 )
@@ -16648,34 +16005,19 @@ def cmd_runtime(args) -> int:
                 print(f"avault not ready: {avault.get('message') or 'install failed'}", file=sys.stderr)
             if model_hub_engine.get("skipped"):
                 print(
-                    i18n_t(
-                        "runtime.prepare.modelHubEngineSkipped",
-                        language,
-                        reason=model_hub_engine.get("reason") or "skipped",
-                    )
+                    "Model Hub engine: skipped ({reason}).".format(reason=model_hub_engine.get("reason") or "skipped")
                 )
             elif model_hub_engine.get("ok"):
                 print(
-                    i18n_t(
-                        (
-                            "runtime.prepare.modelHubEngineInstalled"
-                            if model_hub_engine.get("changed")
-                            else "runtime.prepare.modelHubEngineReady"
-                        ),
-                        language,
-                    )
+                    "Model Hub engine installed."
+                    if model_hub_engine.get("changed")
+                    else "Model Hub engine ready."
                 )
             else:
                 print(
-                    i18n_t(
-                        "runtime.prepare.modelHubEngineNotReady",
-                        language,
-                        reason=(
-                            model_hub_engine.get("message")
+                    "Model Hub engine not ready: {reason}".format(reason=model_hub_engine.get("message")
                             or model_hub_engine.get("reason")
-                            or "install failed"
-                        ),
-                    ),
+                            or "install failed"),
                     file=sys.stderr,
                 )
             if tmux.get("skipped") or tmux.get("status") == "skipped":
@@ -16695,40 +16037,22 @@ def cmd_runtime(args) -> int:
                 )
             if ripgrep.get("ok"):
                 print(
-                    i18n_t(
-                        "runtime.prepare.ripgrepInstalled" if ripgrep.get("changed") else "runtime.prepare.ripgrepReady",
-                        language,
-                    )
+                    "ripgrep installed." if ripgrep.get("changed") else "ripgrep ready."
                 )
             else:
                 print(
-                    i18n_t(
-                        "runtime.prepare.ripgrepNotReady",
-                        language,
-                        reason=ripgrep.get("message") or ripgrep.get("reason") or "install failed",
-                    ),
+                    "ripgrep not ready: {reason}".format(reason=ripgrep.get("message") or ripgrep.get("reason") or "install failed"),
                     file=sys.stderr,
                 )
             if cloudflared.get("skipped"):
                 pass
             elif cloudflared.get("ok"):
                 print(
-                    i18n_t(
-                        (
-                            "runtime.prepare.cloudflaredInstalled"
-                            if cloudflared.get("changed")
-                            else "runtime.prepare.cloudflaredReady"
-                        ),
-                        language,
-                    )
+                    "cloudflared installed." if cloudflared.get("changed") else "cloudflared ready."
                 )
             else:
                 print(
-                    i18n_t(
-                        "runtime.prepare.cloudflaredNotReady",
-                        language,
-                        reason=cloudflared.get("message") or cloudflared.get("reason") or "install failed",
-                    ),
+                    "cloudflared not ready: {reason}".format(reason=cloudflared.get("message") or cloudflared.get("reason") or "install failed"),
                     file=sys.stderr,
                 )
         strict_ok = runtime_prepared and _git_prepare_satisfies_strict(git)
@@ -16751,9 +16075,8 @@ def cmd_runtime(args) -> int:
             for runtime_id, result in managed_runtimes.items()
         }
         if getattr(args, "json", False):
-            print(json.dumps(payload, indent=2))
+            _print_cli_payload("runtime_clean", **payload)
         else:
-            language = _configured_cli_language()
             archives_value = payload.get("archives")
             archives = archives_value if isinstance(archives_value, Mapping) else {}
             skipped_reason = str(archives.get("skipped_reason") or "")
@@ -16761,28 +16084,22 @@ def cmd_runtime(args) -> int:
             # Consumer results are reported independently of the Show archive
             # outcome: a skipped archive pass must not hide what the rest of
             # the cleanup actually reclaimed (or would reclaim).
-            prefix_key = "runtime.clean.wouldRemove" if dry_run else "runtime.clean.removed"
+            verb = "Would remove" if dry_run else "Removed"
             removed = payload.get("removed") or []
-            print(i18n_t(f"{prefix_key}Items", language, count=len(removed)))
+            print(f"{verb} {len(removed)} Show Runtime cache item(s).")
             if show_verdict.failed:
                 _print_runtime_clean_failure(
                     consumer="Show Runtime",
                     reason=show_verdict.reason,
                     dry_run=dry_run,
-                    language=language,
                 )
             is_partial_run = outcome == "partial" and not dry_run
             if is_partial_run:
                 print(
-                    i18n_t(
-                        "runtime.clean.removedArchives",
-                        language,
-                        count=int(archives.get("removed_count") or 0),
-                        size=_format_byte_size(int(archives.get("removed_bytes") or 0)),
-                    )
+                    "Removed {count} downloaded Show Runtime archive(s) ({size}).".format(count=int(archives.get("removed_count") or 0), size=_format_byte_size(int(archives.get("removed_bytes") or 0)))
                 )
                 print(
-                    i18n_t("runtime.clean.partiallyRemoved", language, failed=int(archives.get("failed_count") or 0)),
+                    " {failed} archive(s) could not be removed; check permissions and the Avibe log.".format(failed=int(archives.get("failed_count") or 0)),
                     file=sys.stderr,
                 )
             elif skipped_reason:
@@ -16791,37 +16108,29 @@ def cmd_runtime(args) -> int:
                 # remediation that matches the actual reason.
                 if skipped_reason == "archive_removal_failed":
                     print(
-                        i18n_t(
-                            "runtime.clean.removalFailed",
-                            language,
-                            failed=int(archives.get("failed_count") or 0),
-                        ),
+                        "{failed} archive(s) could not be removed; stale archives remain. Check runtime directory permissions and the Avibe log.".format(failed=int(archives.get("failed_count") or 0)),
                         file=sys.stderr,
                     )
                 else:
-                    skip_key = (
-                        "runtime.clean.skippedInspection"
+                    message = (
+                        f"Archive cleanup could not inspect the cache ({skipped_reason}); stale archives may remain. "
+                        "Check runtime directory permissions and the Avibe log."
                         if skipped_reason == "archive_inspection_failed"
-                        else "runtime.clean.skipped"
+                        else f"Archive cleanup skipped ({skipped_reason}); stale archives may remain. "
+                        "Try again after the running install or cleanup finishes."
                     )
-                    print(i18n_t(skip_key, language, reason=skipped_reason), file=sys.stderr)
+                    print(message, file=sys.stderr)
             elif not show_verdict.archives_failed and (archives or not show_verdict.failed):
                 archive_count = int(archives.get("candidate_count") or 0) if dry_run else int(archives.get("removed_count") or 0)
                 archive_bytes = int(archives.get("candidate_bytes") or 0) if dry_run else int(archives.get("removed_bytes") or 0)
                 print(
-                    i18n_t(
-                        f"{prefix_key}Archives",
-                        language,
-                        count=archive_count,
-                        size=_format_byte_size(archive_bytes),
-                    )
+                    f"{verb} {archive_count} downloaded Show Runtime archive(s) ({_format_byte_size(archive_bytes)})."
                 )
             for runtime_id, result in managed_runtimes.items():
                 _print_managed_runtime_clean_result(
                     runtime_id=runtime_id,
                     result=result,
                     dry_run=dry_run,
-                    language=language,
                     verdict=managed_verdicts[runtime_id],
                 )
         failed = show_verdict.failed or any(verdict.failed for verdict in managed_verdicts.values())
@@ -17086,16 +16395,12 @@ def _print_runtime_clean_failure(
     consumer: str,
     reason: str | None,
     dry_run: bool,
-    language: str,
 ) -> None:
-    key = "runtime.clean.consumerPreviewFailed" if dry_run else "runtime.clean.consumerFailed"
+    reason = reason or "unknown"
     print(
-        i18n_t(
-            key,
-            language,
-            consumer=consumer,
-            reason=reason or "unknown",
-        ),
+        f"{consumer} cache preview failed ({reason}); stale entries may remain."
+        if dry_run
+        else f"{consumer} cleanup failed ({reason}); stale entries remain.",
         file=sys.stderr,
     )
 
@@ -17105,21 +16410,19 @@ def _print_managed_runtime_clean_result(
     runtime_id: str,
     result: Mapping[str, Any],
     dry_run: bool,
-    language: str,
     verdict: _RuntimeCleanVerdict,
 ) -> None:
     consumer = _managed_runtime_label(runtime_id)
-    prefix_key = "runtime.clean.consumerWouldRemove" if dry_run else "runtime.clean.consumerRemoved"
+    verb = "Would remove" if dry_run else "Removed"
     removed = result.get("removed")
     removed_count = len(removed) if isinstance(removed, list) else 0
-    print(i18n_t(f"{prefix_key}Items", language, consumer=consumer, count=removed_count))
+    print(f"{verb} {removed_count} {consumer} cache item(s).")
 
     if verdict.failed:
         _print_runtime_clean_failure(
             consumer=consumer,
             reason=verdict.reason,
             dry_run=dry_run,
-            language=language,
         )
 
     archives_value = result.get("archives")
@@ -17130,33 +16433,16 @@ def _print_managed_runtime_clean_result(
     outcome = str(archives.get("outcome") or "")
     if outcome == "partial" and not dry_run:
         print(
-            i18n_t(
-                "runtime.clean.consumerRemovedArchives",
-                language,
-                consumer=consumer,
-                count=int(archives.get("removed_count") or 0),
-                size=_format_byte_size(int(archives.get("removed_bytes") or 0)),
-            )
+            "Removed {count} downloaded {consumer} archive(s) ({size}).".format(consumer=consumer, count=int(archives.get("removed_count") or 0), size=_format_byte_size(int(archives.get("removed_bytes") or 0)))
         )
         print(
-            i18n_t(
-                "runtime.clean.consumerArchivesPartial",
-                language,
-                consumer=consumer,
-                reason=skipped_reason or "archive_removal_failed",
-                failed=int(archives.get("failed_count") or 0),
-            ),
+            "{consumer} archive cleanup was partial ({reason}); {failed} archive(s) could not be removed.".format(consumer=consumer, reason=skipped_reason or "archive_removal_failed", failed=int(archives.get("failed_count") or 0)),
             file=sys.stderr,
         )
         return
     if skipped_reason:
         print(
-            i18n_t(
-                "runtime.clean.consumerArchivesSkipped",
-                language,
-                consumer=consumer,
-                reason=skipped_reason,
-            ),
+            f"{consumer} archive cleanup skipped ({skipped_reason}); stale archives may remain.",
             file=sys.stderr,
         )
         return
@@ -17164,15 +16450,9 @@ def _print_managed_runtime_clean_result(
         return
     count_key = "candidate_count" if dry_run else "removed_count"
     bytes_key = "candidate_bytes" if dry_run else "removed_bytes"
-    print(
-        i18n_t(
-            f"{prefix_key}Archives",
-            language,
-            consumer=consumer,
-            count=int(archives.get(count_key) or 0),
-            size=_format_byte_size(int(archives.get(bytes_key) or 0)),
-        )
-    )
+    count = int(archives.get(count_key) or 0)
+    size = _format_byte_size(int(archives.get(bytes_key) or 0))
+    print(f"{verb} {count} downloaded {consumer} archive(s) ({size}).")
 
 
 def _clean_git_runtime(*, keep_previous: int, dry_run: bool = False) -> dict:
@@ -17266,13 +16546,13 @@ def _generation_downgrade_blocks(command: str | None, *, allow_downgrade: bool =
         return False
     supervised = command is None or is_desktop_managed_runtime()
     if supervised:
-        key = "update.downgradeWarning"
+        template = "Warning: this vibe runs Avibe {version} ({generation}), older than the last activated install {activatedVersion} ({activatedGeneration}). Use `{launcher}`, or run `{repairCommand}` to move every launcher to it."
+    elif allow_downgrade:
+        template = "Warning: running Avibe {version} ({generation}), older than the last activated install {activatedVersion} ({activatedGeneration}), because --allow-downgrade was given."
     else:
-        key = "update.downgradeAllowed" if allow_downgrade else "update.downgradeRefused"
+        template = "Refusing to {command} from Avibe {version} ({generation}): the last activated install is {activatedVersion} ({activatedGeneration}). Run `{rerunCommand}` instead, or pass --allow-downgrade to run the older build on purpose."
     print(
-        i18n_t(
-            key,
-            _configured_cli_language(),
+        template.format(
             command=command or "",
             version=downgrade.version,
             generation=downgrade.generation,
@@ -17289,7 +16569,7 @@ def _generation_downgrade_blocks(command: str | None, *, allow_downgrade: bool =
 
 def _cmd_restart_with_delay(delay_seconds: float) -> int:
     # Checked again by the restart job, which acts on whatever runs by then.
-    if _desktop_provenance_refused("desktopRuntime.restartRefused"):
+    if _desktop_provenance_refused("restart"):
         return 3
     if delay_seconds > 0:
         return _schedule_delayed_restart(delay_seconds)
@@ -17325,11 +16605,12 @@ def build_parser():
         help="Start this install even though a newer one was activated since.",
     )
     start_parser.add_argument("--hand-over", action="store_true", help=argparse.SUPPRESS)
-    desktop_parser = subparsers.add_parser("desktop", help=argparse.SUPPRESS)
+    # The desktop shell's own entry points: runnable, but never listed.
+    desktop_parser = subparsers.add_parser("desktop")
     desktop_subparsers = desktop_parser.add_subparsers(dest="desktop_command", required=True)
-    desktop_endpoint_parser = desktop_subparsers.add_parser("endpoint", help=argparse.SUPPRESS)
+    desktop_endpoint_parser = desktop_subparsers.add_parser("endpoint")
     desktop_endpoint_parser.add_argument("--json", action="store_true", required=True, help=argparse.SUPPRESS)
-    desktop_subparsers.add_parser("remove-backends", help=argparse.SUPPRESS)
+    desktop_subparsers.add_parser("remove-backends")
     restart_parser = subparsers.add_parser("restart", help="Restart all services")
     restart_parser.add_argument(
         "--delay-seconds",
@@ -17347,7 +16628,8 @@ def build_parser():
     # builds and the parser that reads it back. Restating those flags here made
     # this parser a second, silently authoritative owner -- and the one that runs
     # first. See `_dispatch_restart_supervisor`.
-    subparsers.add_parser("status", help="Show service status")
+    status_parser = subparsers.add_parser("status", help="Show service status")
+    _add_json_noop(status_parser)
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Run diagnostics and optional safe repairs",
@@ -17382,13 +16664,15 @@ def build_parser():
     doctor_parser.add_argument("--fix", action="store_true", help="Alias for 'vibe doctor repair'.")
     doctor_parser.add_argument("--dry-run", action="store_true", help="Show repair actions without changing state.")
     doctor_parser.add_argument("-y", "--yes", action="store_true", help="Confirm repair actions non-interactively.")
-    subparsers.add_parser("version", help="Show version")
-    subparsers.add_parser("check-update", help="Check for updates")
+    _add_json_flag(doctor_parser)
+    version_parser = subparsers.add_parser("version", help="Show version")
+    _add_json_flag(version_parser)
+    check_update_parser = subparsers.add_parser("check-update", help="Check for updates")
+    _add_json_flag(check_update_parser)
     subparsers.add_parser("upgrade", help="Upgrade to latest version")
-    skill_help_language = _configured_cli_language()
     skill_parser = subparsers.add_parser(
         "skill",
-        help=i18n_t("skill.cli.help.command", skill_help_language),
+        help="List and load Skills through Avibe",
     )
     skill_subparsers = skill_parser.add_subparsers(
         dest="skill_command",
@@ -17397,33 +16681,31 @@ def build_parser():
     skill_subparsers.required = True
     skill_list_parser = skill_subparsers.add_parser(
         "list",
-        help=i18n_t("skill.cli.help.list", skill_help_language),
+        help="List available Skills",
     )
     skill_list_parser.add_argument(
         "--page",
         type=int,
         default=1,
-        help=i18n_t("skill.cli.help.page", skill_help_language),
+        help="Catalog page (default: 1)",
     )
+    _add_json_noop(skill_list_parser)
     skill_load_parser = skill_subparsers.add_parser(
         "load",
-        help=i18n_t("skill.cli.help.load", skill_help_language),
+        help="Load one or more Skills, printing each in the order given",
     )
     skill_load_parser.add_argument(
-        "name",
-        help=i18n_t("skill.cli.help.name", skill_help_language),
+        "names",
+        nargs="+",
+        metavar="name",
+        help="Skill name. Pass several to load them in one call.",
     )
-    computer_help_language = _configured_cli_language()
     computer_parser = subparsers.add_parser(
         "computer",
-        help=i18n_t("computer.cli.help.command", computer_help_language),
-        description=i18n_t("computer.cli.help.description", computer_help_language),
+        help="Use the local desktop through the active Avibe Agent Turn",
+        description="Run an allowlisted Computer Use operation through the Avibe service. The caller Session is taken from the Agent environment and the service checks that it has an active Turn.",
         error_help_command="vibe computer --help",
-        error_hint=i18n_t(
-            "computer.cli.hint.invalidArguments",
-            computer_help_language,
-        ),
-        error_i18n_key="computer.cli.error.invalidArguments",
+        error_hint="Check the command syntax and run `vibe computer --help` for the Computer Use contract.",
     )
     computer_subparsers = computer_parser.add_subparsers(
         dest="computer_command",
@@ -17433,95 +16715,79 @@ def build_parser():
 
     computer_run_parser = computer_subparsers.add_parser(
         "run",
-        help=i18n_t("computer.cli.help.run", computer_help_language),
-        description=i18n_t(
-            "computer.cli.help.runDescription",
-            computer_help_language,
-        ),
+        help="Run a JavaScript Computer Use script",
+        description="Run an ESM file with the shipped @avibe/computer module, bound to this exact Avibe Agent Turn.",
         error_help_command="vibe computer run --help",
-        error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
-        error_i18n_key="computer.cli.error.invalidArguments",
+        error_hint="Check the command syntax and run `vibe computer --help` for the Computer Use contract.",
     )
     computer_run_parser.add_argument(
         "file",
-        help=i18n_t("computer.cli.help.scriptFile", computer_help_language),
+        help="Path to a readable .mjs script.",
     )
     computer_run_parser.add_argument(
         "--arg",
         action="append",
         default=[],
         metavar="NAME=VALUE",
-        help=i18n_t("computer.cli.help.scriptArg", computer_help_language),
+        help="Pass one script argument as name=value or name=@file. Values remain strings.",
     )
+    _add_json_noop(computer_run_parser)
 
     computer_js_parser = computer_subparsers.add_parser(
         "js",
-        help=i18n_t("computer.cli.help.js", computer_help_language),
-        description=i18n_t("computer.cli.help.jsDescription", computer_help_language),
+        help="Evaluate JavaScript in this Session's persistent Computer Use kernel",
+        description="Evaluate code in a Node kernel that keeps top-level bindings between calls in this Avibe Session. computer and avibe are preloaded; top-level await is supported. Each call is bound to the current Agent Turn.",
         error_help_command="vibe computer js --help",
-        error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
-        error_i18n_key="computer.cli.error.invalidArguments",
+        error_hint="Check the command syntax and run `vibe computer --help` for the Computer Use contract.",
     )
     computer_js_parser.add_argument(
         "--code",
         required=True,
-        help=i18n_t("computer.cli.help.jsCode", computer_help_language),
+        help="JavaScript source, or @FILE to read it from a UTF-8 file.",
     )
     computer_js_parser.add_argument(
         "--timeout-ms",
         type=int,
         default=30000,
-        help=i18n_t("computer.cli.help.jsTimeout", computer_help_language),
+        help="Per-call timeout in milliseconds (default 30000, max 300000).",
     )
-    computer_subparsers.add_parser(
+    _add_json_noop(computer_js_parser)
+    computer_js_reset_parser = computer_subparsers.add_parser(
         "js-reset",
-        help=i18n_t("computer.cli.help.jsReset", computer_help_language),
-        description=i18n_t("computer.cli.help.jsReset", computer_help_language),
+        help="Discard this Session's JavaScript kernel and all of its bindings; open apps are untouched",
+        description="Discard this Session's JavaScript kernel and all of its bindings; open apps are untouched",
         error_help_command="vibe computer js-reset --help",
-        error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
-        error_i18n_key="computer.cli.error.invalidArguments",
+        error_hint="Check the command syntax and run `vibe computer --help` for the Computer Use contract.",
     )
+    _add_json_noop(computer_js_reset_parser)
 
     def _add_computer_options(command_parser) -> None:
         command_parser.add_argument(
             "--args-json",
-            help=i18n_t(
-                "computer.cli.help.argsJson",
-                computer_help_language,
-            ),
+            help="JSON object of driver arguments, or @path to a JSON file.",
         )
         command_parser.add_argument(
             "--arg",
             action="append",
             default=[],
             metavar="NAME=VALUE",
-            help=i18n_t(
-                "computer.cli.help.arg",
-                computer_help_language,
-            ),
+            help="Override one driver argument; JSON values are parsed when valid.",
         )
         command_parser.add_argument(
             "--output",
-            help=i18n_t(
-                "computer.cli.help.output",
-                computer_help_language,
-            ),
+            help="Caller-selected screenshot path for 'observe window'.",
         )
         command_parser.add_argument(
             "--json",
             action="store_true",
-            help=i18n_t(
-                "computer.cli.help.json",
-                computer_help_language,
-            ),
+            help="Print the structured service response.",
         )
 
     computer_observe_parser = computer_subparsers.add_parser(
         "observe",
-        help=i18n_t("computer.cli.help.observe", computer_help_language),
+        help="Observe apps, windows, or one exact window",
         error_help_command="vibe computer observe --help",
-        error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
-        error_i18n_key="computer.cli.error.invalidArguments",
+        error_hint="Check the command syntax and run `vibe computer --help` for the Computer Use contract.",
     )
     computer_observe_subparsers = computer_observe_parser.add_subparsers(
         dest="computer_observe_command",
@@ -17531,53 +16797,50 @@ def build_parser():
     for name, help_text in (
         (
             "apps",
-            i18n_t("computer.cli.help.observeApps", computer_help_language),
+            "List visible applications",
         ),
         (
             "windows",
-            i18n_t("computer.cli.help.observeWindows", computer_help_language),
+            "List windows",
         ),
         (
             "window",
-            i18n_t("computer.cli.help.observeWindow", computer_help_language),
+            "Observe one exact window and optionally save a screenshot",
         ),
     ):
         leaf = computer_observe_subparsers.add_parser(
             name,
             help=help_text,
             error_help_command=f"vibe computer observe {name} --help",
-            error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
-            error_i18n_key="computer.cli.error.invalidArguments",
+            error_hint="Check the command syntax and run `vibe computer --help` for the Computer Use contract.",
         )
         _add_computer_options(leaf)
 
     for name, help_text in (
-        ("zoom", "zoom"),
-        ("click", "click"),
-        ("type", "type"),
-        ("key", "key"),
-        ("hotkey", "hotkey"),
-        ("scroll", "scroll"),
-        ("drag", "drag"),
-        ("set-value", "setValue"),
-        ("launch", "launch"),
-        ("force-quit", "forceQuit"),
+        ("zoom", "Inspect one exact window at a readable scale"),
+        ("click", "Click an observed element or exact window coordinate"),
+        ("type", "Type text into an observed target"),
+        ("key", "Press one key"),
+        ("hotkey", "Press a key combination"),
+        ("scroll", "Scroll an observed target"),
+        ("drag", "Drag an observed target"),
+        ("set-value", "Set an observed control value"),
+        ("launch", "Launch an application or URL"),
+        ("force-quit", "Force-terminate an application; unsaved state is lost."),
     ):
         leaf = computer_subparsers.add_parser(
             name,
-            help=i18n_t(f"computer.cli.help.{help_text}", computer_help_language),
+            help=help_text,
             error_help_command=f"vibe computer {name} --help",
-            error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
-            error_i18n_key="computer.cli.error.invalidArguments",
+            error_hint="Check the command syntax and run `vibe computer --help` for the Computer Use contract.",
         )
         _add_computer_options(leaf)
 
     computer_clipboard_parser = computer_subparsers.add_parser(
         "clipboard",
-        help=i18n_t("computer.cli.help.clipboard", computer_help_language),
+        help="Read or write the system clipboard",
         error_help_command="vibe computer clipboard --help",
-        error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
-        error_i18n_key="computer.cli.error.invalidArguments",
+        error_hint="Check the command syntax and run `vibe computer --help` for the Computer Use contract.",
     )
     computer_clipboard_subparsers = computer_clipboard_parser.add_subparsers(
         dest="computer_clipboard_command",
@@ -17587,32 +16850,30 @@ def build_parser():
     for name, help_text in (
         (
             "read",
-            i18n_t("computer.cli.help.clipboardRead", computer_help_language),
+            "Read the system clipboard",
         ),
         (
             "write",
-            i18n_t("computer.cli.help.clipboardWrite", computer_help_language),
+            "Write the system clipboard",
         ),
     ):
         leaf = computer_clipboard_subparsers.add_parser(
             name,
             help=help_text,
             error_help_command=f"vibe computer clipboard {name} --help",
-            error_hint=i18n_t("computer.cli.hint.invalidArguments", computer_help_language),
-            error_i18n_key="computer.cli.error.invalidArguments",
+            error_hint="Check the command syntax and run `vibe computer --help` for the Computer Use contract.",
         )
         _add_computer_options(leaf)
 
-    debug_help_language = _configured_cli_language()
     debug_parser = subparsers.add_parser(
         "debug",
-        help=i18n_t("debug.cli.help.command", debug_help_language),
+        help="Inspect internal Avibe state",
     )
     debug_subparsers = debug_parser.add_subparsers(dest="debug_command", metavar="{prompt}")
     debug_subparsers.required = True
     debug_prompt_parser = debug_subparsers.add_parser(
         "prompt",
-        help=i18n_t("debug.cli.help.prompt", debug_help_language),
+        help="Inspect authored prompt sources",
     )
     debug_prompt_subparsers = debug_prompt_parser.add_subparsers(
         dest="prompt_debug_command",
@@ -17621,18 +16882,19 @@ def build_parser():
     debug_prompt_subparsers.required = True
     debug_prompt_export_parser = debug_prompt_subparsers.add_parser(
         "export",
-        help=i18n_t("debug.cli.help.promptExport", debug_help_language),
+        help="Export all prompt sources, optionally with the production rendering",
     )
     debug_prompt_export_parser.add_argument(
         "--context-file",
-        help=i18n_t("debug.cli.help.promptContext", debug_help_language),
+        help="JSON file with backend, optional agent_instructions and production builder options",
     )
     debug_prompt_export_parser.add_argument(
         "--format",
         choices=("json",),
         default="json",
-        help=i18n_t("debug.cli.help.promptFormat", debug_help_language),
+        help="Export format",
     )
+    _add_json_noop(debug_prompt_export_parser)
     runtime_parser = subparsers.add_parser(
         "runtime",
         help="Inspect and prepare managed runtimes",
@@ -17656,7 +16918,7 @@ def build_parser():
     runtime_status_parser = runtime_subparsers.add_parser("status", help="Show managed runtime status")
     add_runtime_provider_args(runtime_status_parser)
     runtime_status_parser.add_argument("--offline", action="store_true", help="Do not fetch a remote manifest.")
-    runtime_status_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+    _add_json_flag(runtime_status_parser)
 
     runtime_prepare_parser = runtime_subparsers.add_parser(
         "prepare",
@@ -17666,10 +16928,9 @@ def build_parser():
     runtime_prepare_parser.add_argument("--force", action="store_true", help="Reinstall even when the cached runtime matches.")
     runtime_prepare_parser.add_argument("--offline", action="store_true", help="Use only the verified local cache.")
     runtime_prepare_parser.add_argument("--strict", action="store_true", help="Return a non-zero exit code when preparation fails.")
-    runtime_prepare_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+    _add_json_flag(runtime_prepare_parser)
 
-    runtime_clean_language = _configured_cli_language()
-    runtime_clean_help = i18n_t("runtime.clean.commandHelp", runtime_clean_language)
+    runtime_clean_help = "Remove stale Show, Git, Model Hub, tmux, ripgrep, and cloudflared runtime installs and archives; exit nonzero if any cleanup fails."
     runtime_clean_parser = runtime_subparsers.add_parser(
         "clean",
         help=runtime_clean_help,
@@ -17679,9 +16940,9 @@ def build_parser():
     runtime_clean_parser.add_argument(
         "--dry-run",
         action="store_true",
-        help=i18n_t("runtime.clean.dryRunHelp", runtime_clean_language),
+        help="Report stale archives and cache entries without removing anything.",
     )
-    runtime_clean_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+    _add_json_flag(runtime_clean_parser)
     remote_parser = subparsers.add_parser(
         "remote",
         help="Manage Avibe Cloud remote access",
@@ -17723,7 +16984,7 @@ def build_parser():
     remote_pair_parser.add_argument(
         "--json",
         action="store_true",
-        help="Print the raw machine-readable pairing result.",
+        help="Print the pairing result as the JSON envelope.",
     )
 
     remote_status_parser = remote_subparsers.add_parser(
@@ -17733,7 +16994,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe remote status --help",
     )
-    remote_status_parser.add_argument("--json", action="store_true", help="Print the raw machine-readable status.")
+    _add_json_flag(remote_status_parser)
 
     remote_start_parser = remote_subparsers.add_parser(
         "start",
@@ -17742,7 +17003,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe remote start --help",
     )
-    remote_start_parser.add_argument("--json", action="store_true", help="Print the raw machine-readable result.")
+    _add_json_flag(remote_start_parser)
 
     remote_stop_parser = remote_subparsers.add_parser(
         "stop",
@@ -17751,7 +17012,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe remote stop --help",
     )
-    remote_stop_parser.add_argument("--json", action="store_true", help="Print the raw machine-readable result.")
+    _add_json_flag(remote_stop_parser)
 
     screenshot_parser = subparsers.add_parser(
         "screenshot",
@@ -17835,7 +17096,6 @@ def build_parser():
     agent_create_parser.add_argument("--description")
     agent_create_parser.add_argument("--model")
     agent_create_parser.add_argument("--reasoning-effort")
-    agent_create_parser.add_argument("--effort", dest="reasoning_effort", help=argparse.SUPPRESS)
     system_prompt_group = agent_create_parser.add_mutually_exclusive_group()
     system_prompt_group.add_argument("--system-prompt")
     system_prompt_group.add_argument("--system-prompt-file")
@@ -17850,7 +17110,6 @@ def build_parser():
     agent_update_parser.add_argument("--model")
     agent_update_parser.add_argument("--clear-model", action="store_true")
     agent_update_parser.add_argument("--reasoning-effort")
-    agent_update_parser.add_argument("--effort", dest="reasoning_effort", help=argparse.SUPPRESS)
     agent_update_parser.add_argument("--clear-reasoning-effort", action="store_true")
     update_prompt_group = agent_update_parser.add_mutually_exclusive_group()
     update_prompt_group.add_argument("--system-prompt")
@@ -17893,43 +17152,27 @@ def build_parser():
     )
     agent_run_parser.add_argument("--agent", help="Avibe Agent name")
     agent_run_parser.add_argument("--session-id", help="Existing Agent Session ID to continue")
-    agent_run_delivery_group = agent_run_parser.add_mutually_exclusive_group()
-    agent_run_delivery_group.add_argument(
-        "--send-now",
-        action="store_true",
-        help="Explicitly deliver this Run as P1 to an existing Session (the default behavior)",
-    )
-    agent_run_delivery_group.add_argument(
+    agent_run_parser.add_argument(
         "--queue",
         action="store_true",
         help="Queue this Run behind the active Turn instead of steering it",
     )
     agent_run_parser.add_argument("--fork-session", help="Existing Agent Session ID to fork into a new Session")
     agent_run_parser.add_argument("--fork-self", action="store_true", help="Fork this current Agent Session")
-    agent_run_parser.add_argument("--create-session", action="store_true", help="Create a new Avibe Session ID before running")
-    agent_run_parser.add_argument("--create-session-per-run", action="store_true", help=argparse.SUPPRESS)
     agent_run_parser.add_argument("--same-scope", action="store_true", help="Place a new or forked Session in the caller/source Session scope")
     agent_run_parser.add_argument("--scope-id", help="Existing scopes.id that should own the new or forked Session")
-    agent_visibility_group = agent_run_parser.add_mutually_exclusive_group()
-    agent_visibility_group.add_argument(
-        "--visibility",
-        choices=("foreground", "background"),
-        help="Visibility for the new or forked Session (default: background)",
-    )
-    agent_visibility_group.add_argument(
+    agent_run_parser.add_argument(
         "--visible",
         dest="visibility",
         action="store_const",
         const="foreground",
-        help="Make the new or forked Session user-facing from the start",
-    )
-    agent_run_parser.add_argument("--deliver-key", help=argparse.SUPPRESS)
-    agent_run_help_language = _configured_cli_language()
-    agent_run_parser.add_argument(
-        "--model", help=i18n_t("harness.cli.agentRunModel.helpModel", agent_run_help_language)
+        help="Make the new or forked Session user-facing from the start (default: background)",
     )
     agent_run_parser.add_argument(
-        "--reasoning-effort", help=i18n_t("harness.cli.agentRunModel.helpEffort", agent_run_help_language)
+        "--model", help="Model for the new Session this run creates (a blank new Session or a fork); kept on that Session for its later turns. Not valid with --session-id. See `vibe agent models <agent>`."
+    )
+    agent_run_parser.add_argument(
+        "--reasoning-effort", help="Reasoning effort for the new Session this run creates; kept on that Session. Not valid with --session-id."
     )
     agent_run_parser.add_argument(
         "--cwd",
@@ -17939,7 +17182,6 @@ def build_parser():
             "(an existing session keeps its own working directory)."
         ),
     )
-    agent_run_parser.add_argument("--post-to", choices=("thread", "channel"), help=argparse.SUPPRESS)
     agent_run_parser.add_argument("--callback-session-id", help="Caller Session ID to receive the completed async run result")
     agent_run_parser.add_argument(
         "--no-callback",
@@ -17951,20 +17193,11 @@ def build_parser():
         action="store_true",
         help="Close the newly-created Agent runtime after the run settles while keeping its Session and transcript.",
     )
-    agent_wait_group = agent_run_parser.add_mutually_exclusive_group()
-    agent_wait_group.add_argument(
-        "--async",
-        dest="async_run",
-        action="store_true",
-        help="Queue the run and return immediately (default; kept for compatibility)",
-    )
-    agent_wait_group.add_argument("--sync", dest="sync_run", action="store_true", help="Wait for the run result before exiting")
+    agent_run_parser.add_argument("--sync", dest="sync_run", action="store_true", help="Wait for the run result before exiting")
     agent_run_parser.add_argument("--wait-timeout", type=float, help="Maximum seconds the CLI waits for a synchronous run result")
     agent_message_group = agent_run_parser.add_mutually_exclusive_group(required=True)
     agent_message_group.add_argument("--message")
     agent_message_group.add_argument("--message-file")
-    agent_message_group.add_argument("--prompt", help=argparse.SUPPRESS)
-    agent_message_group.add_argument("--prompt-file", help=argparse.SUPPRESS)
     _add_json_noop(agent_run_parser)
 
     runs_parser = subparsers.add_parser(
@@ -18002,16 +17235,15 @@ def build_parser():
     _add_json_noop(runs_show_parser)
     runs_cancel_parser = runs_subparsers.add_parser(
         "cancel",
-        help=i18n_t("harness.run.cli.help.cancel", _configured_cli_language()),
+        help="Request best-effort cancellation for one run; a run already in the live Session turn stops that whole turn, like Session Stop",
     )
     runs_cancel_parser.add_argument("run_id")
     _add_json_noop(runs_cancel_parser)
 
-    harness_help_language = _configured_cli_language()
     harness_parser = subparsers.add_parser(
         "harness",
-        help=i18n_t("harness.cli.help.command", harness_help_language),
-        description=i18n_t("harness.cli.help.description", harness_help_language),
+        help="Inspect unified Harness live state and anomalies",
+        description="Inspect active Runs, armed Watches, upcoming Tasks, and live anomalies.",
         error_help_command="vibe harness --help",
     )
     harness_subparsers = harness_parser.add_subparsers(
@@ -18021,8 +17253,8 @@ def build_parser():
     harness_subparsers.required = True
     harness_status_parser = harness_subparsers.add_parser(
         "status",
-        help=i18n_t("harness.cli.help.status", harness_help_language),
-        description=i18n_t("harness.cli.help.statusDescription", harness_help_language),
+        help="Show the bounded live/anomaly snapshot",
+        description="Show live Runs, armed Watches, upcoming Tasks, and anomalies for the caller Session. Use --session-id for another Session or --global for every Session.",
         error_help_command="vibe harness status --help",
     )
     _add_session_scope_args(harness_status_parser, items="Harness work")
@@ -18034,8 +17266,9 @@ def build_parser():
         description=(
             "Manage Avibe Agent sessions. 'list' and 'get' are read-only views; "
             "'send-now' promotes the exact queued head, steering it when active; "
-            "'update' changes title, visibility, or scope. Archived sessions are "
-            "soft-deleted and never surfaced."
+            "'update' changes title, visibility, or scope. Commands that act on one "
+            "Session take --session-id and default to the caller Session. Archived "
+            "sessions are soft-deleted and never surfaced."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session --help",
@@ -18065,11 +17298,14 @@ def build_parser():
     session_get_parser = session_subparsers.add_parser(
         "get",
         help="Show one session's full detail by ID",
-        description="Show full detail for one active session. An archived or missing ID is reported as not found.",
+        description=(
+            "Show full detail for one active session: the caller Session by default, or --session-id. "
+            "An archived or missing ID is reported as not found."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session get --help",
     )
-    session_get_parser.add_argument("session_id", nargs="?", help="Agent Session ID")
+    _add_session_target_arg(session_get_parser)
     _add_brief_arg(session_get_parser, list_command="vibe session list")
     _add_json_noop(session_get_parser)
     session_send_now_parser = session_subparsers.add_parser(
@@ -18084,7 +17320,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session send-now --help",
     )
-    session_send_now_parser.add_argument("session_id", help="Target Agent Session ID")
+    _add_session_target_arg(session_send_now_parser)
     _add_json_noop(session_send_now_parser)
     session_queue_parser = session_subparsers.add_parser(
         "queue",
@@ -18108,7 +17344,7 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session queue list --help",
     )
-    session_queue_list_parser.add_argument("session_id", help="Target Agent Session ID")
+    _add_session_target_arg(session_queue_list_parser)
     _add_pagination_args(
         session_queue_list_parser,
         help_command="vibe session queue list --help",
@@ -18124,8 +17360,8 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session queue remove --help",
     )
-    session_queue_remove_parser.add_argument("session_id", help="Target Agent Session ID")
     session_queue_remove_parser.add_argument("message_id", help="Queued message ID")
+    _add_session_target_arg(session_queue_remove_parser)
     _add_json_noop(session_queue_remove_parser)
     session_update_parser = session_subparsers.add_parser(
         "update",
@@ -18134,16 +17370,11 @@ def build_parser():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe session update --help",
     )
-    session_update_parser.add_argument("session_id", nargs="?", help="Agent Session ID")
+    _add_session_target_arg(session_update_parser)
     session_update_parser.add_argument(
         "--title", help="New title. Pass an empty string to clear it (reverts to id-based display)."
     )
     session_visibility_group = session_update_parser.add_mutually_exclusive_group()
-    session_visibility_group.add_argument(
-        "--visibility",
-        choices=("foreground", "background"),
-        help="Show the Session in normal chat lists or keep it background-only.",
-    )
     session_visibility_group.add_argument(
         "--visible",
         dest="visibility",
@@ -18520,25 +17751,24 @@ def build_parser():
     show_list_parser.add_argument("--updated-before", help="Filter by updated_at <= timestamp, or relative value such as 6h or 7d.")
     show_list_parser.add_argument("--q", dest="query", help="Search session ID, share ID, or visibility.")
     _add_pagination_args(show_list_parser, help_command="vibe show list --help")
-    show_list_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+    _add_json_noop(show_list_parser)
 
-    _data_help_lang = _configured_cli_language()
     data_parser = subparsers.add_parser(
         "data",
-        help=i18n_t("data.helpCommand", _data_help_lang),
-        description=i18n_t("data.helpDescription", _data_help_lang),
+        help="Inspect Avibe data, and run explicit trace-retention maintenance",
+        description="Inspect local Avibe SQLite state with guarded read-only SQL, or run explicit maintenance: `query` is read-only, while `retention --run` deletes old internal trace events and may compact the database.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe data --help",
     )
     data_subparsers = data_parser.add_subparsers(dest="data_command", metavar="{query,retention,skill-usage}")
     data_subparsers.required = True
     skill_usage_parser = data_subparsers.add_parser(
-        "skill-usage", help=i18n_t("data.skillUsage.helpCommand", _data_help_lang),
-        description=i18n_t("data.skillUsage.helpCommand", _data_help_lang),
+        "skill-usage", help="Inspect or clear local Skill statistics (Instance Member or Owner)",
+        description="Inspect or clear local Skill statistics (Instance Member or Owner)",
         error_help_command="vibe data skill-usage --help",
     )
-    skill_usage_parser.add_argument("--clear", action="store_true", help=i18n_t("data.skillUsage.helpClear", _data_help_lang))
-    skill_usage_parser.add_argument("--yes", action="store_true", help=i18n_t("data.skillUsage.helpYes", _data_help_lang))
+    skill_usage_parser.add_argument("--clear", action="store_true", help="Clear Skill events and daily statistics.")
+    skill_usage_parser.add_argument("--yes", action="store_true", help="Confirm clearing Skill statistics.")
     _add_json_noop(skill_usage_parser)
     data_query_parser = data_subparsers.add_parser(
         "query",
@@ -18560,35 +17790,30 @@ def build_parser():
     sql_group.add_argument("--sql-file", help="Read SQL from a UTF-8 file, or '-' for stdin.")
     _add_pagination_args(data_query_parser, help_command="vibe data query --help")
     _add_json_noop(data_query_parser)
-    _retention_help_lang = _configured_cli_language()
     data_retention_parser = data_subparsers.add_parser(
         "retention",
-        help=i18n_t("data.retention.helpCommand", _retention_help_lang),
-        description=i18n_t("data.retention.helpDescription", _retention_help_lang),
+        help="Show or run bounded retention for internal agent trace events",
+        description="Status and manual control for the agent_events trace retention policy: tool_call trace rows older than the retention window are deleted; messages, non-trace events, and newer traces are never touched.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe data retention --help",
     )
     data_retention_parser.add_argument(
         "--run",
         action="store_true",
-        help=i18n_t("data.retention.helpRun", _retention_help_lang),
+        help="Run one retention pass now (bypasses the daily cadence gate, still respects the lease).",
     )
     data_retention_parser.add_argument(
         "--days",
         type=int,
         default=None,
-        help=i18n_t(
-            "data.retention.helpDays",
-            _retention_help_lang,
-            current=_configured_trace_retention_days(_retention_help_lang),
-        ),
+        help=f"Retention window override in days (default: the configured value, currently {_configured_trace_retention_days()}).",
     )
     data_retention_parser.add_argument(
         "--compact",
         action="store_true",
-        help=i18n_t("data.retention.helpCompact", _retention_help_lang),
+        help="Also physically compact the database (VACUUM) when safe; implies --run. Off by default: VACUUM holds the database's sole writer lock and can stall the running service's writes; run it during a maintenance window or with the service stopped.",
     )
-    _add_json_noop(data_retention_parser)
+    _add_json_flag(data_retention_parser)
 
     show_path_parser = show_subparsers.add_parser(
         "path",
@@ -18600,7 +17825,7 @@ def build_parser():
         error_hint="Pass --session-id, or run from an Avibe Agent shell where AVIBE_SESSION_ID is injected.",
     )
     show_path_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
-    show_path_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+    _add_json_noop(show_path_parser)
 
     show_status_parser = show_subparsers.add_parser(
         "status",
@@ -18612,7 +17837,7 @@ def build_parser():
         error_hint="Pass --session-id, or run from an Avibe Agent shell where AVIBE_SESSION_ID is injected.",
     )
     show_status_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
-    show_status_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+    _add_json_noop(show_status_parser)
 
     show_update_parser = show_subparsers.add_parser(
         "update",
@@ -18647,7 +17872,7 @@ def build_parser():
         action="store_true",
         help="Revoke the current public URL and create a new one. Allowed only while public.",
     )
-    show_update_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+    _add_json_noop(show_update_parser)
 
     show_mark_parser = show_subparsers.add_parser(
         "mark",
@@ -18660,19 +17885,16 @@ def build_parser():
     )
     show_mark_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
     show_mark_parser.add_argument("--scope", default="default", help='Mark scope. Defaults to "default".')
-    show_mark_parser.add_argument("target", nargs="?", help="Target mark id or selector.")
-    show_mark_parser.add_argument("--target", dest="target_option", help="Alias for the positional target.")
+    show_mark_parser.add_argument("target", help="Target mark id or selector.")
     mark_body_group = show_mark_parser.add_mutually_exclusive_group(required=True)
-    mark_body_group.add_argument("--message", "--body", dest="body", help="Assistant mark body text.")
+    mark_body_group.add_argument("--message", help="Assistant mark body text.")
     mark_body_group.add_argument(
         "--message-file",
-        "--body-file",
-        dest="body_file",
         help="Read assistant mark body from a UTF-8 file, or '-' for stdin.",
     )
     show_mark_parser.add_argument("--anchor-selector", help="Optional DOM selector for the anchored element.")
     show_mark_parser.add_argument("--anchor-text", help="Optional selected or summarized anchor text.")
-    show_mark_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+    _add_json_noop(show_mark_parser)
 
     show_reply_parser = show_subparsers.add_parser(
         "reply",
@@ -18687,7 +17909,7 @@ def build_parser():
     reply_message_group = show_reply_parser.add_mutually_exclusive_group(required=True)
     reply_message_group.add_argument("--message", help="Reply body text.")
     reply_message_group.add_argument("--message-file", help="Read reply text from a UTF-8 file, or '-' for stdin.")
-    show_reply_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+    _add_json_noop(show_reply_parser)
 
     show_marks_parser = show_subparsers.add_parser(
         "marks",
@@ -18698,7 +17920,7 @@ def build_parser():
     )
     show_marks_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
     _add_pagination_args(show_marks_parser, help_command="vibe show marks --help")
-    show_marks_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+    _add_json_noop(show_marks_parser)
 
     show_unmark_parser = show_subparsers.add_parser(
         "unmark",
@@ -18709,7 +17931,7 @@ def build_parser():
     )
     show_unmark_parser.add_argument("identifiers", nargs="+", metavar="ID_OR_TARGET")
     show_unmark_parser.add_argument("--session-id", help="Agent Session ID for the Show Page.")
-    show_unmark_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+    _add_json_noop(show_unmark_parser)
 
     show_event_parser = show_subparsers.add_parser(
         "event",
@@ -18730,7 +17952,7 @@ def build_parser():
         action="store_true",
         help="For human intent/annotation events, request an Agent turn after recording the event.",
     )
-    show_event_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+    _add_json_noop(show_event_parser)
 
     show_annotate_parser = show_subparsers.add_parser(
         "annotate",
@@ -18750,7 +17972,7 @@ def build_parser():
         choices=("smart", "screenshot"),
         help="Set annotation mode; with --on, enable directly in this mode.",
     )
-    show_annotate_parser.add_argument("--json", action="store_true", help="Print machine-readable state.")
+    _add_json_noop(show_annotate_parser)
 
     task_parser = subparsers.add_parser(
         "task",
@@ -18784,10 +18006,6 @@ def build_parser():
         "--session-id",
         help="Agent Session ID to continue when the task runs.",
     )
-    task_add_parser.add_argument(
-        "--session-key",
-        help="Legacy compatibility target; prefer --session-id.",
-    )
     task_add_parser.add_argument("--create-session", action="store_true", help="Create one reusable Avibe Session ID for this task")
     task_add_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID each time this task runs")
     task_add_parser.add_argument("--same-scope", action="store_true", help="Place a created Session in the caller Session scope")
@@ -18800,16 +18018,6 @@ def build_parser():
             "the directory its command runs in. Defaults to the caller's current directory."
         ),
     )
-    delivery_group = task_add_parser.add_mutually_exclusive_group()
-    delivery_group.add_argument(
-        "--post-to",
-        choices=("thread", "channel"),
-        help=argparse.SUPPRESS,
-    )
-    delivery_group.add_argument(
-        "--deliver-key",
-        help=argparse.SUPPRESS,
-    )
     schedule_group = task_add_parser.add_mutually_exclusive_group(required=True)
     schedule_group.add_argument(
         "--cron", help="Recurring schedule in 5-field crontab format; write weekdays as names (mon ... sun)"
@@ -18821,8 +18029,6 @@ def build_parser():
     prompt_group = task_add_parser.add_mutually_exclusive_group()
     prompt_group.add_argument("--message", help="Stored user message to send each time the task runs")
     prompt_group.add_argument("--message-file", help="Read stored user message from a UTF-8 text file")
-    prompt_group.add_argument("--prompt", help=argparse.SUPPRESS)
-    prompt_group.add_argument("--prompt-file", help=argparse.SUPPRESS)
     task_add_parser.add_argument("--timezone", help="IANA timezone name used for --cron and naive --at values")
     task_add_parser.add_argument(
         "--shell",
@@ -18863,7 +18069,6 @@ def build_parser():
         help="Remove the stored custom task name",
     )
     task_update_parser.add_argument("--session-id", help="Replace the stored Agent Session ID")
-    task_update_parser.add_argument("--session-key", help="Legacy compatibility target; prefer --session-id")
     task_update_parser.add_argument("--create-session", action="store_true", help="Replace the task with one reusable newly-created Avibe Session ID")
     task_update_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID each time this task runs")
     task_update_parser.add_argument("--same-scope", action="store_true", help="Place created Sessions in the caller Session scope")
@@ -18873,16 +18078,6 @@ def build_parser():
     task_update_parser.add_argument(
         "--cwd",
         help="Set working directory for Sessions created by this task, or for a command task, where its command runs",
-    )
-    update_delivery_group = task_update_parser.add_mutually_exclusive_group()
-    update_delivery_group.add_argument(
-        "--post-to",
-        choices=("thread", "channel"),
-        help=argparse.SUPPRESS,
-    )
-    update_delivery_group.add_argument(
-        "--deliver-key",
-        help=argparse.SUPPRESS,
     )
     task_update_parser.add_argument(
         "--reset-delivery",
@@ -18895,8 +18090,6 @@ def build_parser():
     task_update_parser.add_argument("--at", help="Replace the schedule with a one-shot ISO 8601 timestamp")
     task_update_parser.add_argument("--message", help="Replace the stored user message text")
     task_update_parser.add_argument("--message-file", help="Replace the stored user message from a UTF-8 text file")
-    task_update_parser.add_argument("--prompt", help=argparse.SUPPRESS)
-    task_update_parser.add_argument("--prompt-file", help=argparse.SUPPRESS)
     task_update_parser.add_argument("--timezone", help="Replace the stored IANA timezone name")
     task_update_parser.add_argument(
         "--shell",
@@ -18940,11 +18133,10 @@ def build_parser():
     task_list_parser.add_argument(
         "--q",
         dest="query",
-        help=i18n_t("harness.cli.help.query", _configured_cli_language(), items="task"),
+        help="Search common task text fields",
     )
     _add_pagination_args(task_list_parser, help_command="vibe task list --help")
     _add_json_noop(task_list_parser)
-    _add_hidden_task_alias(task_subparsers, "ls", task_list_parser)
 
     task_show_parser = task_subparsers.add_parser(
         "show",
@@ -19001,52 +18193,6 @@ def build_parser():
     )
     task_rm_parser.add_argument("task_id", help="Task ID from 'vibe task list'")
     _add_json_noop(task_rm_parser)
-    _add_hidden_task_alias(task_subparsers, "rm", task_rm_parser)
-
-    hook_parser = subparsers.add_parser(
-        "hook",
-        help="Deprecated compatibility one-shot async hooks",
-        description="Deprecated compatibility entrypoint. Use 'vibe agent run' for new one-shot asynchronous turns.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        error_help_command="vibe hook --help",
-        error_hint="Use 'vibe agent run --help' for the current async Agent Run command shape.",
-    )
-    hook_subparsers = hook_parser.add_subparsers(dest="hook_command", metavar="{send}")
-    hook_subparsers.required = True
-    hook_send_parser = hook_subparsers.add_parser(
-        "send",
-        help="Deprecated compatibility async send",
-        description="Deprecated compatibility entrypoint. Use 'vibe agent run' for new one-shot asynchronous Agent Runs.",
-        epilog=_hook_send_examples_text(),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        error_help_command="vibe hook send --help",
-        error_hint="Use 'vibe agent run' for new async Agent Runs.",
-    )
-    hook_send_parser.add_argument(
-        "--session-id",
-        help="Agent Session ID to continue for this one-shot async turn.",
-    )
-    hook_send_parser.add_argument(
-        "--session-key",
-        help="Legacy compatibility target; prefer --session-id.",
-    )
-    hook_send_parser.add_argument("--agent", help="Avibe Agent name to use for this one-shot async turn")
-    hook_delivery_group = hook_send_parser.add_mutually_exclusive_group()
-    hook_delivery_group.add_argument(
-        "--post-to",
-        choices=("thread", "channel"),
-        help=argparse.SUPPRESS,
-    )
-    hook_delivery_group.add_argument(
-        "--deliver-key",
-        help=argparse.SUPPRESS,
-    )
-    hook_prompt_group = hook_send_parser.add_mutually_exclusive_group(required=True)
-    hook_prompt_group.add_argument("--message", help="One-shot async user message to queue immediately")
-    hook_prompt_group.add_argument("--message-file", help="Read one-shot async user message from a UTF-8 text file")
-    hook_prompt_group.add_argument("--prompt", help=argparse.SUPPRESS)
-    hook_prompt_group.add_argument("--prompt-file", help=argparse.SUPPRESS)
-    _add_json_noop(hook_send_parser)
 
     watch_parser = subparsers.add_parser(
         "watch",
@@ -19077,34 +18223,14 @@ def build_parser():
         "--session-id",
         help="Agent Session ID to continue for follow-up messages from this watch.",
     )
-    watch_add_parser.add_argument(
-        "--session-key",
-        help="Legacy compatibility target; prefer --session-id.",
-    )
     watch_add_parser.add_argument("--create-session", action="store_true", help="Create one reusable Avibe Session ID for this watch")
     watch_add_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID each time this watch triggers")
     watch_add_parser.add_argument("--same-scope", action="store_true", help="Place a created Session in the caller Session scope")
     watch_add_parser.add_argument("--scope-id", help="Existing scopes.id that should own created Sessions")
     watch_add_parser.add_argument("--agent", help="Avibe Agent name to use for follow-up messages")
-    watch_delivery_group = watch_add_parser.add_mutually_exclusive_group()
-    watch_delivery_group.add_argument(
-        "--post-to",
-        choices=("thread", "channel"),
-        help=argparse.SUPPRESS,
-    )
-    watch_delivery_group.add_argument(
-        "--deliver-key",
-        help=argparse.SUPPRESS,
-    )
-    watch_add_parser.add_argument(
-        "--prefix",
-        help="Optional follow-up instruction text prepended before waiter stdout, joined with a blank line when both exist.",
-    )
     watch_message_group = watch_add_parser.add_mutually_exclusive_group()
     watch_message_group.add_argument("--message", help="Follow-up user message template sent with waiter output")
     watch_message_group.add_argument("--message-file", help="Read follow-up user message from a UTF-8 text file")
-    watch_message_group.add_argument("--prompt", help=argparse.SUPPRESS)
-    watch_message_group.add_argument("--prompt-file", help=argparse.SUPPRESS)
     watch_add_parser.add_argument("--cwd", help="Working directory for the waiter process")
     watch_add_parser.add_argument(
         "--timeout",
@@ -19164,41 +18290,20 @@ def build_parser():
         "--session-id",
         help="Agent Session ID to continue for follow-up messages from this watch.",
     )
-    watch_update_parser.add_argument(
-        "--session-key",
-        help="Legacy compatibility target; prefer --session-id.",
-    )
     watch_update_parser.add_argument("--create-session", action="store_true", help="Replace the watch with one reusable newly-created Avibe Session ID")
     watch_update_parser.add_argument("--create-session-per-run", action="store_true", help="Create a new Avibe Session ID each time this watch triggers")
     watch_update_parser.add_argument("--same-scope", action="store_true", help="Place created Sessions in the caller Session scope")
     watch_update_parser.add_argument("--scope-id", help="Existing scopes.id that should own created Sessions")
     watch_update_parser.add_argument("--agent", help="Replace the Avibe Agent used for follow-up messages")
     watch_update_parser.add_argument("--clear-agent", action="store_true", help="Clear the stored Avibe Agent override")
-    watch_update_delivery_group = watch_update_parser.add_mutually_exclusive_group()
-    watch_update_delivery_group.add_argument(
-        "--post-to",
-        choices=("thread", "channel"),
-        help=argparse.SUPPRESS,
-    )
-    watch_update_delivery_group.add_argument(
-        "--deliver-key",
-        help=argparse.SUPPRESS,
-    )
-    watch_update_delivery_group.add_argument(
+    watch_update_parser.add_argument(
         "--reset-delivery",
         action="store_true",
         help="Clear any stored delivery override and deliver back to the continued session target.",
     )
-    watch_update_parser.add_argument(
-        "--prefix",
-        help="Set follow-up instruction text prepended before waiter stdout.",
-    )
-    watch_update_parser.add_argument("--clear-prefix", action="store_true", help="Clear the stored follow-up prefix")
     watch_update_message_group = watch_update_parser.add_mutually_exclusive_group()
     watch_update_message_group.add_argument("--message", help="Replace the follow-up user message template")
     watch_update_message_group.add_argument("--message-file", help="Read replacement follow-up user message from a UTF-8 text file")
-    watch_update_message_group.add_argument("--prompt", help=argparse.SUPPRESS)
-    watch_update_message_group.add_argument("--prompt-file", help=argparse.SUPPRESS)
     watch_update_parser.add_argument("--cwd", help="Set working directory for the waiter process")
     watch_update_parser.add_argument("--clear-cwd", action="store_true", help="Clear the stored waiter working directory")
     watch_update_parser.add_argument("--timeout", type=float, help="Set per-cycle timeout in seconds")
@@ -19244,11 +18349,10 @@ def build_parser():
     watch_list_parser.add_argument(
         "--q",
         dest="query",
-        help=i18n_t("harness.cli.help.query", _configured_cli_language(), items="watch"),
+        help="Search common watch text fields",
     )
     _add_pagination_args(watch_list_parser, help_command="vibe watch list --help")
     _add_json_noop(watch_list_parser)
-    _add_hidden_task_alias(watch_subparsers, "ls", watch_list_parser)
 
     watch_show_parser = watch_subparsers.add_parser(
         "show",
@@ -19294,7 +18398,7 @@ def build_parser():
     )
     watch_remove_parser.add_argument("watch_id", help="Watch ID from 'vibe watch list'")
     _add_json_noop(watch_remove_parser)
-    _add_hidden_task_alias(watch_subparsers, "rm", watch_remove_parser)
+    _hide_subcommands(subparsers, "desktop")
     return parser
 
 
@@ -19564,23 +18668,18 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("task", "add"): "editor",
     ("task", "update"): "editor",
     ("task", "list"): "editor",
-    ("task", "ls"): "editor",
     ("task", "show"): "editor",
     ("task", "pause"): "editor",
     ("task", "resume"): "editor",
     ("task", "run"): "editor",
     ("task", "remove"): "editor",
-    ("task", "rm"): "editor",
     ("watch", "add"): "editor",
     ("watch", "update"): "editor",
     ("watch", "list"): "editor",
-    ("watch", "ls"): "editor",
     ("watch", "show"): "editor",
     ("watch", "pause"): "editor",
     ("watch", "resume"): "editor",
     ("watch", "remove"): "editor",
-    ("watch", "rm"): "editor",
-    ("hook", "send"): "editor",
     # Sessions and their queue, mirroring the HTTP surface: reading is Viewer
     # work, editing and the queue are Editor work, and both sides are narrowed
     # further by the effective Project role of each session the command touches.
@@ -19795,9 +18894,9 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             _print_task_error(exc, help_command="vibe show --help")
             sys.exit(1)
     if args.command == "version":
-        sys.exit(cmd_version())
+        sys.exit(cmd_version(args))
     if args.command == "check-update":
-        sys.exit(cmd_check_update())
+        sys.exit(cmd_check_update(args))
     if args.command == "upgrade":
         sys.exit(cmd_upgrade())
     if args.command == "runtime":
@@ -19843,7 +18942,7 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             sys.exit(cmd_agent_run(args))
         parser.error("agent command is required")
     if args.command == "runs":
-        if args.runs_command in {"list", "ls"}:
+        if args.runs_command == "list":
             sys.exit(cmd_runs_list(args))
         if args.runs_command == "show":
             sys.exit(cmd_runs_show(args))
@@ -19917,7 +19016,7 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             sys.exit(cmd_task_add(args))
         if args.task_command == "update":
             sys.exit(cmd_task_update(args))
-        if args.task_command in {"list", "ls"}:
+        if args.task_command == "list":
             try:
                 page_request = _page_request_from_args(args, help_command="vibe task list --help")
             except TaskCliError as exc:
@@ -19944,19 +19043,15 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             sys.exit(cmd_task_set_enabled(args.task_id, True))
         if args.task_command == "run":
             sys.exit(cmd_task_run(args.task_id))
-        if args.task_command in {"remove", "rm"}:
+        if args.task_command == "remove":
             sys.exit(cmd_task_remove(args.task_id))
         parser.error("task command is required")
-    if args.command == "hook":
-        if args.hook_command == "send":
-            sys.exit(cmd_hook_send(args))
-        parser.error("hook command is required")
     if args.command == "watch":
         if args.watch_command == "add":
             sys.exit(cmd_watch_add(args))
         if args.watch_command == "update":
             sys.exit(cmd_watch_update(args))
-        if args.watch_command in {"list", "ls"}:
+        if args.watch_command == "list":
             try:
                 page_request = _page_request_from_args(args, help_command="vibe watch list --help")
             except TaskCliError as exc:
@@ -19981,7 +19076,7 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
             sys.exit(cmd_watch_set_enabled(args.watch_id, False))
         if args.watch_command == "resume":
             sys.exit(cmd_watch_set_enabled(args.watch_id, True))
-        if args.watch_command in {"remove", "rm"}:
+        if args.watch_command == "remove":
             sys.exit(cmd_watch_remove(args.watch_id))
         parser.error("watch command is required")
     # Bare `vibe` is also the supervisor entry (systemd, launchd); it is never

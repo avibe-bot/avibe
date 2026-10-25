@@ -2655,7 +2655,7 @@ def test_show_path_cli_json_creates_page(monkeypatch, tmp_path, capsys):
     assert captured["timeout"] == 3
 
 
-def test_show_path_cli_prints_annotation_capabilities(monkeypatch, tmp_path, capsys):
+def test_show_path_cli_prints_the_json_envelope_without_json_flag(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     paths.ensure_data_dirs()
     _save_config()
@@ -2664,9 +2664,10 @@ def test_show_path_cli_prints_annotation_capabilities(monkeypatch, tmp_path, cap
     args = cli.build_parser().parse_args(["show", "path", "--session-id", "ses123"])
     assert cli.cmd_show_path(args) == 0
 
-    output = capsys.readouterr().out
-    assert "Use it:" in output
-    assert "- Annotations: users can mark up this page; see vibe show marks / reply / annotate." in output
+    payload = json.loads(capsys.readouterr().out)
+    assert (payload["schema_version"], payload["ok"], payload["kind"]) == (1, True, "show_page")
+    assert payload["session_id"] == "ses123"
+    assert "Annotations: users can mark up this page; see vibe show marks / reply / annotate." in payload["next_actions"]
 
 
 def test_show_path_cli_keeps_page_when_prewarm_fails(monkeypatch, tmp_path, capsys):
@@ -2700,11 +2701,7 @@ def test_show_path_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["session_id"] == "sesCaller"
-    assert payload["session_default_notice"] == {
-        "code": "session_defaulted_to_caller",
-        "message": "Show Page session defaulted to this Agent Session.",
-        "session_id": "sesCaller",
-    }
+    assert "session_default_notice" not in payload
     assert (tmp_path / "show" / "sesCaller" / "index.html").exists()
 
 
@@ -2718,7 +2715,7 @@ def test_show_path_requires_session_without_caller(monkeypatch, tmp_path, capsys
     assert cli.cmd_show_path(args) == 1
 
     payload = json.loads(capsys.readouterr().err)
-    assert payload["code"] == "missing_session_target"
+    assert payload["code"] == "missing_caller_session"
     assert payload["help_command"] == "vibe show path --help"
 
 
@@ -2854,13 +2851,8 @@ def test_show_list_cli_json_reports_pagination(monkeypatch, tmp_path, capsys):
     assert payload["count"] == 20
     assert payload["pagination"]["has_more"] is True
     assert payload["pagination"]["next_page"] == 2
-    assert "vibe show list --global --json --page 2 --limit 20" == payload["pagination"]["next_command"]
+    assert "vibe show list --global --page 2 --limit 20" == payload["pagination"]["next_command"]
     assert "message" not in payload
-
-    # Text output still tells a person how to continue, from the same next_command.
-    args = cli.build_parser().parse_args(["show", "list", "--global"])
-    assert cli.cmd_show_list(args) == 0
-    assert "Continue with: vibe show list --global --page 2 --limit 20" in capsys.readouterr().out
 
 
 def test_show_list_cli_next_command_uses_absolute_time_filters(monkeypatch, tmp_path, capsys):
@@ -2883,7 +2875,7 @@ def test_show_list_cli_next_command_uses_absolute_time_filters(monkeypatch, tmp_
     payload = json.loads(capsys.readouterr().out)
     assert "--updated-after 2026-05-25T00:00:00+00:00" in payload["pagination"]["next_command"]
     assert "--updated-after 2026-05-25T08:00:00+08:00" not in payload["pagination"]["next_command"]
-    assert payload["pagination"]["next_command"].endswith("--json --page 2 --limit 10")
+    assert payload["pagination"]["next_command"].endswith("--page 2 --limit 10")
 
 
 def test_show_list_cli_filters_visibility(monkeypatch, tmp_path, capsys):
@@ -2909,23 +2901,18 @@ def test_show_list_cli_filters_visibility(monkeypatch, tmp_path, capsys):
     args = cli.build_parser().parse_args(["show", "list", "--global", "--visibility", "private"])
     assert cli.cmd_show_list(args) == 0
 
-    output = capsys.readouterr().out
-    assert "Sessions: all" in output
-    assert "Count: 1" in output
-    assert "Filter: visibility=private" in output
-    assert "- ses-private" in output
-    assert "- ses-limited" not in output
-    assert "- ses-public" not in output
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["kind"] == "show_pages"
+    assert payload["global"] is True
+    assert (payload["count"], payload["visibility"]) == (1, "private")
+    assert [page["session_id"] for page in payload["pages"]] == ["ses-private"]
 
     args = cli.build_parser().parse_args(["show", "list", "--global", "--visibility", "limited"])
     assert cli.cmd_show_list(args) == 0
 
-    output = capsys.readouterr().out
-    assert "Count: 1" in output
-    assert "Filter: visibility=limited" in output
-    assert "- ses-private" not in output
-    assert "- ses-limited" in output
-    assert "- ses-public" not in output
+    payload = json.loads(capsys.readouterr().out)
+    assert (payload["count"], payload["visibility"]) == (1, "limited")
+    assert [page["session_id"] for page in payload["pages"]] == ["ses-limited"]
 
 
 def test_show_page_payload_requires_enabled_avibe_cloud(monkeypatch, tmp_path):
@@ -3040,13 +3027,13 @@ def test_show_status_and_update_default_to_caller_session(monkeypatch, tmp_path,
     assert cli.cmd_show_status(parser.parse_args(["show", "status", "--json"])) == 0
     status_payload = json.loads(capsys.readouterr().out)
     assert status_payload["session_id"] == "sesCaller"
-    assert status_payload["session_default_notice"]["session_id"] == "sesCaller"
+    assert "session_default_notice" not in status_payload
 
     assert cli.cmd_show_update(parser.parse_args(["show", "update", "--visibility", "public", "--json"])) == 0
     update_payload = json.loads(capsys.readouterr().out)
     assert update_payload["session_id"] == "sesCaller"
     assert update_payload["visibility"] == "public"
-    assert update_payload["session_default_notice"]["session_id"] == "sesCaller"
+    assert "session_default_notice" not in update_payload
 
 
 def test_show_update_rotate_share_fails_while_private(monkeypatch, tmp_path, capsys):
@@ -3163,9 +3150,8 @@ def test_show_mark_cli_records_event_and_message(monkeypatch, tmp_path, capsys):
             "mark",
             "--session-id",
             "ses123",
-            "--target",
             "mark-default-summary",
-            "--body",
+            "--message",
             "Review this summary.",
             "--json",
         ]
@@ -3244,7 +3230,7 @@ def test_show_mark_keeps_anchor_text_without_a_selector(monkeypatch, tmp_path, c
         )
 
     args = cli.build_parser().parse_args(
-        ["show", "mark", "--session-id", "ses123", "--target", "cta", "--body", "Aligned it.", "--json", *flags]
+        ["show", "mark", "--session-id", "ses123", "cta", "--message", "Aligned it.", "--json", *flags]
     )
     assert cli.cmd_show(args) == 0
 
@@ -3304,9 +3290,8 @@ def test_show_mark_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
         [
             "show",
             "mark",
-            "--target",
             "mark-default-summary",
-            "--body",
+            "--message",
             "Review this summary.",
             "--json",
         ]
@@ -3315,7 +3300,7 @@ def test_show_mark_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["session_id"] == "sesCaller"
-    assert payload["session_default_notice"]["session_id"] == "sesCaller"
+    assert "session_default_notice" not in payload
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.session_id)).scalar_one() == "sesCaller"
 
@@ -3372,9 +3357,8 @@ def test_show_mark_cli_posts_to_live_ui_when_running(monkeypatch, tmp_path, caps
             "mark",
             "--session-id",
             "ses123",
-            "--target",
             "mark-default-summary",
-            "--body",
+            "--message",
             "Review this summary.",
             "--json",
         ]
@@ -3491,7 +3475,7 @@ def test_show_mark_positional_target_replaces_same_target(monkeypatch, tmp_path,
     assert cli.cmd_show(first_args) == 0
     first = json.loads(capsys.readouterr().out)
     second_args = cli.build_parser().parse_args(
-        ["show", "mark", "--target", "#revenue-card", "--session-id", "ses123", "--body", "New note.", "--json"]
+        ["show", "mark", "#revenue-card", "--session-id", "ses123", "--message", "New note.", "--json"]
     )
     assert cli.cmd_show(second_args) == 0
     second = json.loads(capsys.readouterr().out)
@@ -3604,7 +3588,7 @@ def test_show_marks_uses_shared_pagination(monkeypatch, tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert len(payload["marks"]) == 20
     assert payload["pagination"]["next_command"] == (
-        "vibe show marks --session-id ses123 --json --page 2 --limit 20"
+        "vibe show marks --session-id ses123 --page 2 --limit 20"
     )
 
 
@@ -3797,7 +3781,7 @@ def test_show_annotate_cli_defaults_session_and_records_offline_control(monkeypa
 
     result = json.loads(capsys.readouterr().out)
     assert result["session_id"] == "sesCaller"
-    assert result["session_default_notice"]["session_id"] == "sesCaller"
+    assert "session_default_notice" not in result
     assert result["event"]["payload"] == {"action": "set-mode", "mode": "smart"}
     assert result["event"]["transcript_text"] == ""
     assert result["event"]["message_id"] is None
@@ -3929,7 +3913,7 @@ def test_show_event_defaults_to_caller_session(monkeypatch, tmp_path, capsys):
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["session_id"] == "sesCaller"
-    assert payload["session_default_notice"]["session_id"] == "sesCaller"
+    assert "session_default_notice" not in payload
     with engine.connect() as conn:
         assert conn.execute(select(show_session_events.c.session_id)).scalar_one() == "sesCaller"
 

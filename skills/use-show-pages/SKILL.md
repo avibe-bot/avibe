@@ -51,7 +51,7 @@ These rules apply only to this Session's Show Page workspace and its Avibe
 history. Avibe manages page checkpoints automatically; do not create versions
 manually for page edits.
 
-Before operating on history, run `vibe show status --json`. Use its `path`
+Before operating on history, run `vibe show status`. Use its `path`
 as `<show-workspace>` and inspect `history.mode`, `history.checkpointing_active`,
 and `history.git_dir`. Status is read-only; it does not initialize a repository.
 If checkpointing is inactive, do not assume new edits have automatic checkpoints

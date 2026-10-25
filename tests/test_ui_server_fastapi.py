@@ -1465,7 +1465,10 @@ def test_sessions_fork_on_archived_source_survives_ui_error_parse(monkeypatch, t
     assert isinstance(body.get("message"), str) and body["message"]
 
 
-def test_doctor_post_runs_fast_diagnostics_by_default(monkeypatch):
+def test_doctor_post_runs_fast_diagnostics_by_default_in_the_ui_language(monkeypatch):
+    from types import SimpleNamespace
+
+    from core.services import settings as settings_service
     from vibe import cli
 
     calls = []
@@ -1473,16 +1476,18 @@ def test_doctor_post_runs_fast_diagnostics_by_default(monkeypatch):
     monkeypatch.setattr(
         cli,
         "_doctor",
-        lambda *, deep=True: calls.append(deep)
+        lambda *, deep=True, language="en": calls.append((deep, language))
         or {"mode": "fast", "groups": [], "summary": {"pass": 0, "warn": 0, "fail": 0}, "ok": True},
     )
+    # The CLI renders Doctor in English; the Web panel keeps the configured UI language.
+    monkeypatch.setattr(settings_service, "load_config_or_default", lambda: SimpleNamespace(language="zh"))
 
     client = app.test_client()
     response = client.post("/api/doctor", json={}, headers=csrf_headers(client))
 
     assert response.status_code == 200
     assert response.get_json()["mode"] == "fast"
-    assert calls == [False]
+    assert calls == [(False, "zh")]
 
 
 def test_doctor_post_can_run_deep_diagnostics(monkeypatch):
@@ -1493,7 +1498,7 @@ def test_doctor_post_can_run_deep_diagnostics(monkeypatch):
     monkeypatch.setattr(
         cli,
         "_doctor",
-        lambda *, deep=True: calls.append(deep)
+        lambda *, deep=True, language="en": calls.append(deep)
         or {"mode": "deep", "groups": [], "summary": {"pass": 0, "warn": 0, "fail": 0}, "ok": True},
     )
 

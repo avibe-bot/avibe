@@ -505,18 +505,6 @@ def test_harness_status_prioritizes_running_run_before_bounded_probe(
         store.close()
 
 
-def test_harness_cli_help_uses_configured_language(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
-
-    with pytest.raises(SystemExit) as exc_info:
-        cli.build_parser().parse_args(["harness", "--help"])
-
-    assert exc_info.value.code == 0
-    output = capsys.readouterr().out
-    assert "检查活跃 Run、已启用 Watch、即将触发的 Task 和实时异常" in output
-    assert "显示有界的实时状态与异常快照" in output
-
-
 def test_enabled_tasks_are_bounded_after_next_fire_ordering(tmp_path) -> None:
     store = SQLiteBackgroundTaskStore(tmp_path / "state.sqlite")
     try:

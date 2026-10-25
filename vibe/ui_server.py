@@ -8380,11 +8380,12 @@ async def wechat_qr_login_poll():
 
 @app.route("/api/doctor", methods=["POST"])
 def doctor_post():
+    from core.services import settings as settings_service
     from vibe.cli import _doctor
 
     payload = request.json or {}
     deep = _parse_explicit_bool(payload.get("deep")) or _parse_explicit_bool(request.args.get("deep"))
-    result = _doctor(deep=deep)
+    result = _doctor(deep=deep, language=settings_service.load_config_or_default().language)
     return jsonify(result)
 
 

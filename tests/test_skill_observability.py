@@ -386,8 +386,8 @@ def test_cli_transport_failure_preserves_output_and_exit(monkeypatch, capsys):
     monkeypatch.setattr(managed_skills, "load_skill", lambda *args, **kwargs: skill())
     monkeypatch.setattr("vibe.internal_client.record_skill_observation_sync", Mock(side_effect=TimeoutError))
     assert cli.cmd_skill(SimpleNamespace(skill_command="list", page=1)) == 0
-    assert capsys.readouterr().out == "- docs: Project documentation\n"
-    assert cli.cmd_skill(SimpleNamespace(skill_command="load", name="docs")) == 0
+    assert json.loads(capsys.readouterr().out)["skills"] == [{"name": "docs", "description": "Project documentation"}]
+    assert cli.cmd_skill(SimpleNamespace(skill_command="load", names=["docs"])) == 0
     output = capsys.readouterr()
     assert "Read the docs." in output.out and output.err == ""
 
@@ -401,9 +401,24 @@ def test_cli_observes_actual_loaded_snapshot(monkeypatch):
     monkeypatch.setattr("core.managed_skills.load_skill", lambda *args, **kwargs: loaded)
     submitted = Mock(return_value={"status": "queued"})
     monkeypatch.setattr("vibe.internal_client.record_skill_observation_sync", submitted)
-    assert cli.cmd_skill(SimpleNamespace(skill_command="load", name="docs")) == 0
+    assert cli.cmd_skill(SimpleNamespace(skill_command="load", names=["docs"])) == 0
     event = submitted.call_args.args[0]
     assert event["content"]["skill_revision"] == runtime.load_result("docs", loaded, duration_ms=0)["skill_revision"]
+
+
+def test_cli_observes_each_name_of_a_multi_skill_load(monkeypatch, capsys):
+    from vibe import cli
+
+    monkeypatch.setattr("core.managed_skills.resolve_skills", lambda: [skill()])
+    monkeypatch.setattr("core.managed_skills.load_skill", lambda *args, **kwargs: skill())
+    submitted = Mock(return_value={"status": "queued"})
+    monkeypatch.setattr("vibe.internal_client.record_skill_observation_sync", submitted)
+
+    assert cli.cmd_skill(SimpleNamespace(skill_command="load", names=["docs", "missing"])) == 1
+
+    capsys.readouterr()
+    loads = [call.args[0]["content"] for call in submitted.call_args_list]
+    assert [(event["skill_name"], event["error_code"]) for event in loads] == [("docs", None), ("missing", "not_found")]
 
 
 def test_runtime_candidate_requires_acceptance(monkeypatch):
@@ -583,20 +598,17 @@ def test_clear_command_requires_explicit_confirmation(engine, capsys):
     assert counts(engine) == (0, None)
 
 
-@pytest.mark.parametrize("language", ["en", "zh"])
 @pytest.mark.parametrize(
-    "owner,clear,yes,code,key",
+    "owner,clear,yes,code,error",
     [
-        (False, False, False, "forbidden", "ownerRequired"),
-        (True, True, False, "confirmation_required", "confirmationRequired"),
-        (True, False, True, "invalid_arguments", "clearRequired"),
+        (False, False, False, "forbidden", "Instance Member or Owner access is required."),
+        (True, True, False, "confirmation_required", "Clearing Skill statistics requires --yes."),
+        (True, False, True, "invalid_arguments", "--yes requires --clear."),
     ],
 )
-def test_skill_usage_errors_follow_cli_language(monkeypatch, capsys, language, owner, clear, yes, code, key):
+def test_skill_usage_errors_name_the_refusal(monkeypatch, capsys, owner, clear, yes, code, error):
     from vibe import cli
-    from vibe.i18n import t
 
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     monkeypatch.setattr(
         "storage.resource_access_service.resolve_resource_access_context",
         lambda _caller: SimpleNamespace(can_manage_instance=owner),
@@ -606,23 +618,20 @@ def test_skill_usage_errors_follow_cli_language(monkeypatch, capsys, language, o
     assert captured.out == ""
     payload = json.loads(captured.err)
     assert payload["code"] == code
-    assert payload["error"] == t(f"data.skillUsage.{key}", language)
+    assert payload["error"] == error
 
 
-@pytest.mark.parametrize("language", ["en", "zh"])
-def test_skill_usage_help_follows_cli_language(monkeypatch, capsys, language):
+def test_skill_usage_help_names_its_manager_floor(capsys):
     from vibe import cli
-    from vibe.i18n import t
 
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     with pytest.raises(SystemExit) as exit_info:
         cli.build_parser().parse_args(["data", "skill-usage", "--help"])
     assert exit_info.value.code == 0
     output = capsys.readouterr().out
-    for key in ("helpCommand", "helpClear", "helpYes"):
-        assert t(f"data.skillUsage.{key}", language) in output
-    assert ("Member or Owner" if language == "en" else "管理者或所有者") in output
-    assert ("Owner only" if language == "en" else "仅限实例所有者") not in output
+    assert "Inspect or clear local Skill statistics (Instance Member or Owner)" in output
+    assert "Clear Skill events and daily statistics." in output
+    assert "Confirm clearing Skill statistics." in output
+    assert "Owner only" not in output
 
 
 @pytest.mark.parametrize("role", ["owner", "member"])

@@ -116,6 +116,30 @@ class _FailureSeedingTaskStore(cli.ScheduledTaskStore):
         return task
 
 
+def _bare_session() -> str:
+    """A Session row for a Watch to follow up in, with no Agent for the CLI to resolve."""
+    from config import paths
+    from storage.agent_session_rows import create_agent_session_row
+    from storage.db import create_sqlite_engine
+
+    engine = create_sqlite_engine(paths.get_sqlite_state_path())
+    try:
+        with engine.begin() as conn:
+            return create_agent_session_row(
+                conn,
+                scope_id=None,
+                session_anchor="slack_C123",
+                agent_backend="codex",
+                agent_variant="codex",
+                model="gpt-5.5-codex",
+                native_session_id="codex-native",
+                workdir=str(Path.cwd()),
+                require_workdir=False,
+            )
+    finally:
+        engine.dispose()
+
+
 def test_the_cli_is_a_projection_consumer_not_a_second_health_read_model(
     monkeypatch, capsys
 ) -> None:
@@ -156,12 +180,10 @@ def test_the_cli_is_a_projection_consumer_not_a_second_health_read_model(
         [
             "task",
             "add",
-            "--session-key",
-            "slack::channel::C123",
             "--cron",
             "0 * * * *",
-            "--message",
-            "hello",
+            "--shell",
+            "true",
         ]
     )
     with (
@@ -218,12 +240,10 @@ def test_task_and_watch_mutations_return_the_enriched_projection(capsys) -> None
         [
             "task",
             "add",
-            "--session-key",
-            "slack::channel::C123",
             "--cron",
             "0 * * * *",
-            "--message",
-            "hello",
+            "--shell",
+            "true",
         ]
     )
     with (
@@ -258,8 +278,8 @@ def test_task_and_watch_mutations_return_the_enriched_projection(capsys) -> None
         [
             "watch",
             "add",
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            _bare_session(),
             "--name",
             "Wait for export",
             "--shell",

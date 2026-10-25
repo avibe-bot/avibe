@@ -1079,7 +1079,6 @@ export default async () => {{
     assert runner_error.structured_error == expected
 
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses-script")
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
 
     def fail_script(**_kwargs):
         raise runner_error
