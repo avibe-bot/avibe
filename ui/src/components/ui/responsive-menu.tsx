@@ -39,6 +39,9 @@ export const ResponsiveMenu: React.FC<{
   className?: string;
   align?: 'start' | 'center' | 'end';
   sideOffset?: number;
+  /** Make the desktop popover a modal layer — required inside a modal Dialog,
+   *  whose focus trap would otherwise leave the popover inert. */
+  modal?: boolean;
   children: React.ReactNode;
 }> = ({
   open,
@@ -52,6 +55,7 @@ export const ResponsiveMenu: React.FC<{
   className,
   align = 'end',
   sideOffset = 6,
+  modal,
   children,
 }) => {
   const { t } = useTranslation();
@@ -60,7 +64,7 @@ export const ResponsiveMenu: React.FC<{
 
   if (!isMobile) {
     return (
-      <Popover open={open} onOpenChange={onOpenChange}>
+      <Popover open={open} onOpenChange={onOpenChange} modal={modal}>
         <PopoverTrigger asChild>{trigger}</PopoverTrigger>
         <PopoverContent
           align={align}

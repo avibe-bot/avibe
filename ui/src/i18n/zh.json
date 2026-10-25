@@ -327,7 +327,6 @@
     "placeholder": "描述你想让 agent 做什么…",
     "loadError": "项目加载失败，关掉重开可重试。",
     "createFailed": "会话创建失败，请重试。",
-    "agent": "选择 Agent",
     "defaultAgent": "默认 Agent",
     "defaultAgentNamed": "默认 · {{name}}"
   },

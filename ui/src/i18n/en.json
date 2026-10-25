@@ -327,7 +327,6 @@
     "placeholder": "Describe what you want the agent to do…",
     "loadError": "Couldn't load projects — close and reopen to retry.",
     "createFailed": "Couldn't start the session. Please try again.",
-    "agent": "Agent",
     "defaultAgent": "Default agent",
     "defaultAgentNamed": "Default · {{name}}"
   },
