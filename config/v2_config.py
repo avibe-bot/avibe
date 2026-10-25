@@ -3131,9 +3131,9 @@ class ModelHubImageModelChoice:
         return {"source_id": self.source_id, "model_id": self.model_id}
 
 
-# Built-in keyless Exa is a dormant reader contract in KEX-1. KEX-3 flips this
-# predicate together with the producer and public disclosure.
-KEYLESS_EXA_ACTIVE = False
+# Built-in keyless Exa is active by default. The reader and producer must use this
+# one predicate together so the public Source cannot be read without its chain.
+KEYLESS_EXA_ACTIVE = True
 KEYLESS_EXA_SOURCE_ID = "src_exakeyless"
 KEYLESS_EXA_VENDOR_ID = "exa-mcp"
 KEYLESS_EXA_SERVICE_ID = "exa/mcp"

@@ -103,13 +103,11 @@ def test_released_and_keyless_search_settings_read_without_a_migration_write(fix
         assert setting.services[KEYLESS_EXA_SOURCE_ID].to_payload() == {"results": 9, "enabled": False}
 
 
-def test_keyless_candidate_and_catalog_are_dormant_by_default_and_readable_when_enabled(tmp_path, monkeypatch):
-    """KEX-1: the shipped flag-off read is unchanged; a future flip reads the built-in candidate."""
+def test_keyless_candidate_and_catalog_are_active_by_default(tmp_path):
+    """KEX-3: the default read includes the built-in candidate and catalog row."""
     config = _config()
-    assert hosted_tools.KEYLESS_EXA_ACTIVE is False
-    assert all(vendor["id"] != "exa-mcp" for vendor in hosted_tools._service_vendors(config))
+    assert hosted_tools.KEYLESS_EXA_ACTIVE is True
     service, _, _ = _disk_service(tmp_path, config)
-    monkeypatch.setattr(hosted_tools, "KEYLESS_EXA_ACTIVE", True)
     visible = _web(service)
     assert any(row["source_id"] == KEYLESS_EXA_SOURCE_ID and row["model_id"] == KEYLESS_EXA_SERVICE_ID
                for row in visible["executor_candidates"])
@@ -121,7 +119,7 @@ def test_keyless_candidate_and_catalog_are_dormant_by_default_and_readable_when_
 
 @pytest.mark.asyncio
 async def test_keyless_override_role_and_cooldown_survive_an_unrelated_config_write(tmp_path):
-    """KEX-1: synthetic state is preserved by a later real V2 save, even while dormant."""
+    """KEX-3: synthetic state is preserved by a later real V2 save while active."""
     raw = json.loads((FIXTURES / "keyless_exa_v21.json").read_text(encoding="utf-8"))
     service, path, _ = _disk_service(tmp_path, _config(raw))
     source = model_hub_keyless_exa_source()
@@ -171,8 +169,8 @@ async def test_mixed_order_and_role_snapshot_survive_real_v2_restart(tmp_path):
     assert restarted.hosted_tools["web_search"].service_order == (TAVILY, EXA)
     assert not restarted.hosted_tools["web_search"].prefer_native
     assert _web(service)["executor_order"] == order
-    # Active search placement keeps the deliberate model first, then named service EXA, then disabled entries.
-    assert _web(service)["effective_order"] == [MODEL, EXA, TAVILY, DEEPSEEK]
+    # Active search placement keeps the built-in service first, then deliberate model/service entries and disabled tails.
+    assert _web(service)["effective_order"] == [KEYLESS_EXA_SOURCE_ID, MODEL, EXA, TAVILY, DEEPSEEK]
     await service.set_hosted_tool("web_search", {"executor_order": None})
     reset = V2ModelHubConfigStore().load().hosted_tools["web_search"].to_payload()
     assert "executor_order" not in reset and "executor_order_kinds" not in reset
@@ -476,9 +474,9 @@ def test_http_tools_put_and_read_preserve_patch_and_active_contract(tmp_path, mo
                     registry=_api_response_registry()).validate(written)
     web = written["hosted_tools"]["tools"][0]
     assert web["prefer_native"] is False and web["services"] == {TAVILY: {"results": 7, "enabled": False}}
-    assert {vendor["id"] for vendor in web["service_vendors"]} == {"deepseek", "tavily", "exa"}
+    assert {vendor["id"] for vendor in web["service_vendors"]} == {"deepseek", "tavily", "exa", "exa-mcp"}
     assert [(row["source_id"], row["kind"]) for row in web["executor_candidates"]] == [
-        (EXA, "service"), (DEEPSEEK, "service"), (MODEL, "model"), (TAVILY, "service"),
+        (EXA, "service"), (DEEPSEEK, "service"), (KEYLESS_EXA_SOURCE_ID, "service"), (MODEL, "model"), (TAVILY, "service"),
     ]
     assert web["executor_candidates"][-1]["settings"] == {"results": 7, "enabled": False}
 

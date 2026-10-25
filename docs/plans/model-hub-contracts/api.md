@@ -126,14 +126,17 @@ catalog reads as null, never a promise of zero cost. `source_ids` includes
 opted-out search-capable Sources, and a built-in vendor includes its synthetic Source;
 relays and subscriptions are excluded.
 
-KEX-1 adds the dormant built-in `exa-mcp` catalog row (`service_id: "exa/mcp"`) and
-synthetic Source id `src_exakeyless`. It has no credential row, `auth: "none"`, exact
-zero list price, `free_tier: "Free; IP rate-limited"`, and `facts.built_in: true` /
+KEX-1 adds the built-in `exa-mcp` catalog row (`service_id: "exa/mcp"`) and
+synthetic Source id `src_exakeyless`. KEX-2 adds its credential-free MCP producer.
+The active row has no credential record, `auth: "none"`, exact zero list price,
+`free_tier: "Free; IP rate-limited"`, and `facts.built_in: true` /
 `requires_setup: false`; it is never addable or removable. Its saved partial settings,
 role-map entry and deliberate `executor_order` placement are read and serialized by
 Source id, while a release that does not know the id safely skips it. The synthetic
 identity is also used for status/evidence, usage labels, activity and retry cooldowns;
-no config migration is performed. The KEX-1 build keeps `KEYLESS_EXA_ACTIVE = false`.
+no config migration is performed. KEX-3 sets `KEYLESS_EXA_ACTIVE = true` for the
+reader and producer together, with the public disclosure shipped in the same v21
+event.
 
 PUT accepts `prefer_native` and `services` only for `web_search`. `prefer_native`
 is a boolean, not nullable. `services` is a Source-keyed patch: an absent Source

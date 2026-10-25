@@ -19,7 +19,8 @@ export const AddSearchServiceDialog: React.FC<{
   onClose: () => void;
   onAdded: (created: SourceCreated) => void;
   onOpenSource: (sourceId: string) => void;
-}> = ({ tool, pending, sourceReads, onClose, onAdded, onOpenSource }) => {
+  onViewOrder: () => void;
+}> = ({ tool, pending, sourceReads, onClose, onAdded, onOpenSource, onViewOrder }) => {
   const { t } = useTranslation();
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const selected = tool.service_vendors?.find((vendor) => vendor.id === selectedId);
@@ -44,7 +45,7 @@ export const AddSearchServiceDialog: React.FC<{
             <SearchServicePrice price={vendor.price} />
             {builtIn ? <>
               <span className="model-hub-pill model-hub-accent-pill--neutral self-start border">{t('settings.models.searchServices.builtIn')}</span>
-              <Button variant="outline" size="sm" disabled={pending} onClick={() => onOpenSource(vendor.source_ids[0])}>{t('settings.models.searchServices.viewOrder')}<ChevronRight aria-hidden /></Button>
+              <Button variant="outline" size="sm" disabled={pending} onClick={onViewOrder}>{t('settings.models.searchServices.viewOrder')}<ChevronRight aria-hidden /></Button>
             </> : added ? <>
               <span className="model-hub-pill model-hub-accent-pill--neutral self-start border">{t(`settings.models.searchServices.${state}`)}</span>
               <Button variant="outline" size="sm" disabled={pending} onClick={() => onOpenSource(vendor.source_ids.find((id) => !serviceSettings(tool, vendor, id).enabled) ?? vendor.source_ids[0])}>{t('settings.models.searchServices.openDetail', { vendor: vendorName })}</Button>
@@ -52,7 +53,7 @@ export const AddSearchServiceDialog: React.FC<{
           </section>;
         })}
       </div>
-      <SearchServiceNotes />
+      <SearchServiceNotes vendor={tool.service_vendors?.find((vendor) => vendor.facts.built_in)} />
       <p className="model-hub-tool-note">{t('settings.models.searchServices.priceNote')}</p>
     </DialogContent>
   </Dialog>;

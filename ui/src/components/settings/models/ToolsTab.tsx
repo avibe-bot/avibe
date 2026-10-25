@@ -13,10 +13,10 @@ import { Button } from '@/components/ui/button';
 import { Select } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
 import { ToggleSwitch } from '../SettingsPrimitives';
-import { formatMonthDay, formatNameList, formatSmallUsd } from './format';
+import { cooldownTime, formatMonthDay, formatNameList, formatSmallUsd } from './format';
 import { executorOrderAfterMove, imageModelCopyKey, pairEvidence, refusalSummary, type PairEvidence, type RefusalSummary } from './hostedTools';
 import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
-import { searchServicesActive, webSearchTool } from './searchServices';
+import { KEYLESS_EXA_SOURCE_ID, searchServicesActive, serviceVendorForSource, webSearchTool } from './searchServices';
 import { SearchCandidateStatus, SearchServicePrice, SearchVendorGlyph } from './SearchServiceParts';
 import { ACCENT_ICON, ACCENT_PILL, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
@@ -167,7 +167,7 @@ const ExecutorPrice: React.FC<{ candidate: HostedExecutorCandidate }> = ({ candi
  * `null`, which is automatic. The order shown is always the server's.
  */
 const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLookup; pending: boolean; onSave: Save; onOpenService?: (sourceId: string, opener: HTMLButtonElement) => void; onRetryService?: (sourceId: string) => void }> = ({ tool, lookup, pending, onSave, onOpenService, onRetryService }) => {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const toolInline = t(`settings.models.tools.tool.${tool.name}.inline`) as string;
   const activeWeb = tool.name === 'web_search' && searchServicesActive(tool) ? tool : null;
   const candidates = tool.executor_candidates;
@@ -225,7 +225,7 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
         <div className="flex min-w-0 flex-col gap-0.5">
           <h4 className="font-semibold text-foreground">{t(activeWeb ? 'settings.models.searchServices.order' : 'settings.models.tools.order.title')}</h4>
           <p className="model-hub-tool-note">{activeWeb
-            ? <>{t(activeWeb.prefer_native ? 'settings.models.searchServices.orderNative' : 'settings.models.searchServices.orderAll')} {t(custom ? 'settings.models.searchServices.orderCustom' : 'settings.models.searchServices.orderAuto')}</>
+            ? <>{t(activeWeb.prefer_native ? 'settings.models.searchServices.orderNative' : 'settings.models.searchServices.orderAll')} {t(custom ? 'settings.models.searchServices.orderCustom' : activeWeb.service_vendors?.some((vendor) => vendor.id === 'exa-mcp') ? 'settings.models.searchServices.orderAutoKeyless' : 'settings.models.searchServices.orderAuto')}</>
             : t(custom ? 'settings.models.tools.order.captionCustom' : 'settings.models.tools.order.caption')}</p>
         </div>
         {custom && (
@@ -243,8 +243,12 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                 const vendor = candidate.kind === 'service'
                   ? activeWeb?.service_vendors?.find((item) => item.source_ids.includes(candidate.source_id))
                   : undefined;
-                const name = source?.display_name
+                const keyless = candidate.kind === 'service' && candidate.source_id === KEYLESS_EXA_SOURCE_ID;
+                const name = keyless ? t('settings.models.searchServices.vendorName.exa-mcp') as string : source?.display_name
                   ?? (vendor ? t(`settings.models.searchServices.vendorName.${vendor.id}`, { defaultValue: vendor.name }) as string : lookup.name(candidate.source_id));
+                const cooldown = candidate.kind === 'service' && candidate.cooldown_until !== null
+                  ? cooldownTime(candidate.cooldown_until, i18n.language)
+                  : null;
                 const disabledService = candidate.kind === 'service' && !candidate.settings.enabled;
                 const arrow = (direction: -1 | 1) => {
                   const blocked = disabledService || (direction === -1 ? index === 0 : index === movable.length - 1);
@@ -280,15 +284,18 @@ const ExecutorOrder: React.FC<{ tool: HostedSearchToolStatus; lookup: SourceLook
                           {candidate.kind === 'service' ? <button type="button" data-search-source={candidate.source_id} className="truncate text-left font-semibold text-foreground hover:underline" onClick={(event) => onOpenService?.(candidate.source_id, event.currentTarget)}>{name}</button> : <span className="truncate font-semibold text-foreground">{name}</span>}
                           <span className={cn('model-hub-pill border', candidate.kind === 'service' ? ACCENT_PILL.cyan : ACCENT_PILL.muted)}>{t(candidate.kind === 'service' ? 'settings.models.searchServices.kind' : 'settings.models.searchServices.modelKind')}</span>
                           <SearchCandidateStatus candidate={candidate} tool={activeWeb} source={source} />
-                          {candidate.kind === 'service' && <ToggleSwitch
-                            enabled={candidate.settings.enabled}
-                            disabled={pending}
-                            label={t('settings.models.searchServices.use') as string}
-                            onClick={() => onSave('web_search', { services: { [candidate.source_id]: { enabled: !candidate.settings.enabled } } })}
-                          />}
+                          {candidate.kind === 'service' && <span className="inline-flex items-center gap-2">
+                            <span className="model-hub-tool-note">{t('settings.models.searchServices.use')}</span>
+                            <ToggleSwitch
+                              enabled={candidate.settings.enabled}
+                              disabled={pending}
+                              label={t('settings.models.searchServices.use') as string}
+                              onClick={() => onSave('web_search', { services: { [candidate.source_id]: { enabled: !candidate.settings.enabled } } })}
+                            />
+                          </span>}
                         </div>
                         <span className="model-hub-tool-note">{candidate.kind === 'service'
-                          ? <>{t(source?.protocol === 'search' ? 'settings.models.searchServices.resultCount' : 'settings.models.searchServices.sharedKeyResults', { count: candidate.settings.results, source: name })}{vendor?.id === 'exa-mcp' && vendor.free_tier ? ` · ${t('settings.models.searchServices.freeTier')}` : null}</>
+                          ? <>{cooldown && keyless && <>{t('settings.models.searchServices.keylessCooldownUntil', { time: cooldown })} · </>}{t(keyless ? 'settings.models.searchServices.keylessResults' : source?.protocol === 'search' ? 'settings.models.searchServices.resultCount' : 'settings.models.searchServices.sharedKeyResults', { count: candidate.settings.results, source: name })}</>
                           : <span className="font-mono">{candidate.model_id}</span>}</span>
                         {candidate.kind === 'service' && candidate.cooldown_until !== null && <Button variant="outline" size="xs" className="self-start" disabled={pending} onClick={() => onRetryService?.(candidate.source_id)}>{t('settings.models.searchServices.retry')}</Button>}
                       </div>
@@ -544,7 +551,7 @@ type ServiceActions = {
 
 const WebSearchServices: React.FC<{ tool: HostedWebSearchToolStatus; lookup: SourceLookup; pending: boolean; onSave: Save } & ServiceActions> = ({ tool, lookup, pending, onSave, onAddService, onOpenService, onRetryService }) => {
   const { t, i18n } = useTranslation();
-  const noServices = !tool.service_vendors?.some((vendor) => vendor.source_ids.length > 0);
+  const noServices = !tool.service_vendors?.some((vendor) => !vendor.facts.built_in && vendor.source_ids.length > 0);
   const hasKeyless = tool.service_vendors?.some((vendor) => vendor.id === 'exa-mcp') === true;
   return <div className="flex flex-col gap-4 border-t border-border p-4">
     <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-background p-3">
@@ -552,7 +559,7 @@ const WebSearchServices: React.FC<{ tool: HostedWebSearchToolStatus; lookup: Sou
       <ToggleSwitch enabled={tool.prefer_native} disabled={pending} label={t('settings.models.searchServices.preferNative')} onClick={() => onSave('web_search', { prefer_native: !tool.prefer_native })} />
     </div>
     <ExecutorOrder tool={tool} lookup={lookup} pending={pending} onSave={onSave} onOpenService={onOpenService} onRetryService={onRetryService} />
-    {noServices && <p className="model-hub-tool-note">{t('settings.models.searchServices.empty', { prices: formatNameList((tool.service_vendors ?? []).map((vendor) => t('settings.models.searchServices.vendorPrice', { vendor: vendor.name, usd: formatSmallUsd(vendor.price.usd_per_1k) })), i18n.language) })}</p>}
+    {noServices && <p className="model-hub-tool-note">{t(hasKeyless ? 'settings.models.searchServices.keylessEmpty' : 'settings.models.searchServices.empty', { prices: formatNameList((tool.service_vendors ?? []).filter((vendor) => !vendor.facts.built_in).map((vendor) => t('settings.models.searchServices.vendorPrice', { vendor: vendor.name, usd: formatSmallUsd(vendor.price.usd_per_1k) })), i18n.language) })}</p>}
     {hasKeyless && <p className="model-hub-tool-note">{t('settings.models.searchServices.keylessQueryDestination')}</p>}
     <div className="flex flex-wrap items-center justify-between gap-3">
       <Button variant={noServices ? 'default' : 'outline'} size="sm" disabled={pending} onClick={(event) => onAddService?.(event.currentTarget)}><Plus aria-hidden />{t('settings.models.searchServices.add')}</Button>
@@ -588,7 +595,7 @@ const ToolCard: React.FC<{ tool: HostedToolStatus; lookup: SourceLookup; pending
         </span>
       </header>
       <StatusLines tool={tool} summary={summary} lookup={lookup} pending={pending} onClear={onClear} />
-      {tool.name === 'web_search' && searchServicesActive(tool) && tool.enabled && <WebSearchServices tool={tool} lookup={lookup} pending={pending} onSave={onSave} {...serviceActions} />}
+      {tool.name === 'web_search' && searchServicesActive(tool) && <WebSearchServices tool={tool} lookup={lookup} pending={pending} onSave={onSave} {...serviceActions} />}
       {tool.name === 'image_generate' && <ImageModels tool={tool} lookup={lookup} pending={pending} onSave={onSave} />}
       <Advanced tool={tool} summary={summary} lookup={lookup} pending={pending} onSave={onSave} onClear={onClear} />
     </section>
@@ -613,8 +620,20 @@ export const ToolsTab: React.FC<{
   });
   const lookup = React.useMemo<SourceLookup>(() => {
     const byId = new Map(sources.map((source) => [source.id, source]));
-    return { name: (id) => byId.get(id)?.display_name ?? id, source: (id) => byId.get(id) };
-  }, [sources]);
+    return {
+      name: (id) => {
+        const source = byId.get(id);
+        if (source) return source.display_name;
+        // Built-ins have catalog membership, not a persisted Source. Resolve
+        // them here so status, fallback, evidence and action labels agree.
+        const vendor = serviceVendorForSource(webSearchTool(status), id);
+        return vendor?.facts.built_in
+          ? t(`settings.models.searchServices.vendorName.${vendor.id}`, { defaultValue: vendor.name }) as string
+          : id;
+      },
+      source: (id) => byId.get(id),
+    };
+  }, [sources, status, t]);
   return (
     <section className="model-hub-tools flex flex-col" aria-label={t('settings.models.tools.title') as string}>
       <div className="flex min-w-0 flex-col gap-1">

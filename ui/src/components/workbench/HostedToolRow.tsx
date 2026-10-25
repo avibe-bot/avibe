@@ -3,6 +3,7 @@
 // executor, or directly on an image endpoint), what it cost when known, and the
 // sources or image it produced. Every mode draws the same card from the same record.
 import * as React from 'react';
+import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { AtSign, Check, ChevronRight, CircleSlash, Download, FileImage, Globe, Image as ImageIcon, TriangleAlert, Type, Waypoints } from 'lucide-react';
 import clsx from 'clsx';
@@ -10,6 +11,7 @@ import clsx from 'clsx';
 import { ChatImage } from '../ui/chat-image';
 import { useInstanceAuthorization } from '../../context/InstanceAuthorizationContext';
 import { apiKeyVendorPreset } from '../settings/models/apiKeyVendors';
+import { KEYLESS_EXA_SOURCE_ID } from '../settings/models/searchServices';
 import { serverText } from '../settings/models/serverCopy';
 import { hostedCompleted, type HostedActivity, type HostedActivityImage, type HostedToolName } from '../../lib/hostedActivity';
 
@@ -33,7 +35,10 @@ const presetLabel = (provider: string | undefined): string | null =>
  *  vendor id is `custom`, which names no vendor, so its name is the only thing that says where the
  *  call ran. A search service is named by its Source first, as the user named it. A vendor id with
  *  neither stays as it is, as for a row stored without a Source. The IM line reads the same rule. */
-const runnerLabel = (card: HostedActivity): string | null => {
+const SERVICE_RATE_LIMITED_REASON = ['reason', 'service_rate_limited'].join('.');
+
+const runnerLabel = (card: HostedActivity, t: TFunction): string | null => {
+  if (card.executor_kind === 'service' && card.source_id === KEYLESS_EXA_SOURCE_ID) return t('chat.agentActivity.hosted.keylessExa');
   const vendor = presetLabel(card.provider);
   if (vendor && card.executor_kind !== 'service') return vendor;
   return card.source_name ?? vendor ?? card.provider ?? null;
@@ -78,7 +83,9 @@ const useHostedCost = (card: HostedActivity): string | null => {
   const { t } = useTranslation();
   const cost = card.cost;
   if (!cost) return null;
-  const figure = cost.basis === 'included'
+  const figure = card.executor_kind === 'service' && card.source_id === KEYLESS_EXA_SOURCE_ID && cost.usd === 0 && !cost.at_least
+    ? t('chat.agentActivity.hosted.cost.free') as string
+    : cost.basis === 'included'
     ? t('chat.agentActivity.hosted.cost.included') as string
     : cost.usd === undefined
       ? null
@@ -105,7 +112,7 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
       </span>
     );
   }
-  const vendor = runnerLabel(card);
+  const vendor = runnerLabel(card, t);
   if (card.mode === 'direct') {
     // An image call names the model it picked and where it ran, not a vendor: the model is the choice.
     const where = card.source_name ?? vendor;
@@ -178,7 +185,7 @@ export const HostedImageFigure: React.FC<{ card: HostedActivity; image: HostedAc
                     <ImageIcon className="size-3" aria-hidden="true" />
                     {image.width && image.height ? `${card.model} · ${image.width}×${image.height}` : card.model}
                   </span>
-                  {(card.source_name ?? runnerLabel(card)) && <span>{card.source_name ?? runnerLabel(card)}</span>}
+                  {(card.source_name ?? runnerLabel(card, t)) && <span>{card.source_name ?? runnerLabel(card, t)}</span>}
                 </>
               )
             : <HostedModeChip card={card} />}
@@ -219,17 +226,23 @@ const HostedAttemptNotes: React.FC<{ card: HostedActivity }> = ({ card }) => {
   if (hostedCompleted(card)) {
     const note = card.switch;
     if (!note) return null;
-    const failed = `${note.sources.join(t('chat.agentActivity.hosted.listSeparator'))} ${say(note.reason_key)}`;
+    const labels = new Set((card.attempts ?? []).filter((a) => a.source_id === KEYLESS_EXA_SOURCE_ID).map((a) => a.label));
+    (card.attempts ?? []).filter((a) => a.source_id !== KEYLESS_EXA_SOURCE_ID).forEach((a) => labels.delete(a.label));
+    const sources = note.sources.map((name) => labels.has(name) ? t('chat.agentActivity.hosted.keylessExa') : name).join(t('chat.agentActivity.hosted.listSeparator'));
+    const provider = card.source_id === KEYLESS_EXA_SOURCE_ID ? t('chat.agentActivity.hosted.keylessExa') : note.to;
+    const failed = `${sources} ${say(note.reason_key)}`;
     return (
       <p className="mx-1.5 mb-1 mt-0.5 flex items-center gap-1.5 rounded-md border border-gold/40 bg-gold/10 px-2.5 py-1.5 text-[11px] text-foreground" data-hosted-switch={card.call_id}>
         <TriangleAlert className="size-3 shrink-0 text-gold-ink" aria-hidden="true" />
-        {t('chat.agentActivity.hosted.switch', { failed, provider: note.to })}
+        {note.reason_key === SERVICE_RATE_LIMITED_REASON
+          ? t('chat.agentActivity.hosted.rateLimitSwitch', { sources, provider })
+          : t('chat.agentActivity.hosted.switch', { failed, provider })}
       </p>
     );
   }
   const items = (card.attempts ?? [])
     .filter((attempt) => attempt.remedy_key || attempt.reason_key)
-    .map((attempt) => `${attempt.label} ${say(attempt.remedy_key ?? attempt.reason_key)}`);
+    .map((attempt) => `${attempt.source_id === KEYLESS_EXA_SOURCE_ID ? t('chat.agentActivity.hosted.keylessExa') : attempt.label} ${say(attempt.remedy_key ?? attempt.reason_key)}`);
   if (items.length === 0) return null;
   return (
     <p className="mx-1.5 mb-1 mt-0.5 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-[11px] text-destructive-ink" data-hosted-attempts={card.call_id}>
@@ -242,7 +255,7 @@ const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
   const { t } = useTranslation();
   const cost = useHostedCost(card);
   const completed = hostedCompleted(card);
-  const where = completed ? [card.source_name ?? runnerLabel(card), card.model].filter(Boolean).join(' · ') : '';
+  const where = completed ? [card.source_id === KEYLESS_EXA_SOURCE_ID ? t('chat.agentActivity.hosted.keylessExa') : card.source_name ?? runnerLabel(card, t), card.model].filter(Boolean).join(' · ') : '';
   const ran = card.executor_kind === 'service' ? 'ranService' : RAN_KEY[card.mode];
   const facts = [
     where && t(`chat.agentActivity.hosted.${ran}`, { where }),
@@ -312,7 +325,7 @@ const FallbackNote: React.FC<{ card: HostedActivity }> = ({ card }) => {
   // Only an instance manager reaches Models › Tools; anyone else is told who can clear it.
   const { capabilities } = useInstanceAuthorization();
   const from = card.fallback_from;
-  const vendor = runnerLabel(card);
+  const vendor = runnerLabel(card, t);
   if (!from || !hostedCompleted(card) || !vendor) return null;
   const refusedBy = from.source_name ?? from.source_id;
   const toolInline = t(`settings.models.tools.tool.${card.tool}.inline`);

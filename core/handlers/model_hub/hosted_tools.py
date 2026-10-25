@@ -266,12 +266,36 @@ def _search_chain(
     remaining = dict(models)
     disabled: list[ExecutorCandidate] = []
     ordered = _vibey_order(config)
-    if KEYLESS_EXA_ACTIVE:
-        ordered.append(model_hub_keyless_exa_source())
+    keyless = model_hub_keyless_exa_source() if KEYLESS_EXA_ACTIVE else None
+    if keyless is not None:
+        ordered.append(keyless)
     by_id = {source.id: source for source in ordered}
     first = [by_id[sid] for sid in (setting.service_order or ()) if sid in by_id and by_id[sid].protocol == "search"]
-    sources = first + [s for s in ordered if s.protocol == "search" and s not in first]
-    sources += [s for s in ordered if s.protocol != "search"]
+    # Tool-only search Sources keep their saved/source order first. Official
+    # model Sources that auto-enroll a search API (currently DeepSeek) follow,
+    # then the built-in keyless Exa, and only then model executors. Do not use
+    # protocol alone here: DeepSeek is an OpenAI-compatible model Source whose
+    # search service still belongs before keyless Exa in the automatic chain.
+    tool_services = [
+        source for source in ordered
+        if source.protocol == "search" and source.id != KEYLESS_EXA_SOURCE_ID
+    ]
+    auto_model_services = [
+        source for source in ordered
+        if source.protocol != "search"
+        and source.id != KEYLESS_EXA_SOURCE_ID
+        and model_hub_search_service(source) is not None
+    ]
+    model_sources = [
+        source for source in ordered
+        if source.id != KEYLESS_EXA_SOURCE_ID
+        and model_hub_search_service(source) is None
+    ]
+    sources = first + [source for source in tool_services if source not in first]
+    sources += auto_model_services
+    if keyless is not None:
+        sources.append(keyless)
+    sources += model_sources
     for source in sources:
         service = model_hub_search_service(source)
         settings = search_service_settings(setting, source)

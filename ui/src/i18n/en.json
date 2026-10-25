@@ -2528,6 +2528,7 @@
         "orderNative": "Used when the model cannot search natively. A failure tries the next entry.",
         "orderAll": "Used for every model. A failure tries the next entry.",
         "orderAuto": "Automatic: search services first, then model executors.",
+        "orderAutoKeyless": "Automatic: your added search services → enabled official DeepSeek → Exa (free) → model executors; use the arrows to reorder.",
         "orderCustom": "Customized order.",
         "kind": "Search service",
         "modelKind": "Model executor",
@@ -2542,13 +2543,19 @@
         "price": "${{usd}} / 1k searches",
         "free": "Free",
         "freeTier": "Free; IP rate-limited",
+        "keylessReady": "Free · no API key",
+        "keylessResults_one": "{{count}} result · IP rate-limited",
+        "keylessResults_other": "{{count}} results · IP rate-limited",
+        "keylessCooldown": "Rate-limited · retry later",
+        "keylessCooldownUntil": "Paused until {{time}}",
+        "keylessEmpty": "Exa (free) is built in, needs no key, and searches before model executors. Added search services precede it. List prices: {{prices}}. Plans and actual bills may differ.",
         "vendorPrice": "{{vendor}} ${{usd}} / 1k searches",
         "priceDate": "API list price · {{date}}",
         "priceNote": "Prices are the catalog's dated API list prices. Free allowances, plans and actual bills may differ.",
         "custody": "Search service keys stay with the gateway, like other provider keys. They are never passed to the model or Agent.",
         "keylessQueryDestination": "Queries go directly from this Avibe runtime to Exa (mcp.exa.ai); Exa can see the connection's IP.",
         "keylessEndpoint": "mcp.exa.ai",
-        "keylessCustody": "Exa (free) needs no key; no key is given to the model or Agent.",
+        "keylessCustody": "Added-service keys stay in the gateway; Exa (free) needs no key, and no key is given to the model or Agent.",
         "queryDestination": "Queries are sent to the service that runs the search.",
         "queryVendor": "Search queries are sent to {{vendor}}.",
         "placement": "A new search service joins before the model executors, including in a saved order. Change the order in Tools → Web search.",
@@ -5089,6 +5096,8 @@
     },
     "agentActivity": {
       "hosted": {
+        "keylessExa": "Exa (free)",
+        "rateLimitSwitch": "Rate-limited: {{sources}}; switched to {{provider}}. Retry after the cooldown, or use Retry now in Models › Tools.",
         "errorCode": {
           "provider_no_reason": "The provider gave no reason.",
           "provider_no_image": "The provider returned no image.",
@@ -5132,6 +5141,7 @@
           "proxyModel": "Via {{provider}} proxy · {{model}}"
         },
         "repair": {
+          "retrySearch": "was rate-limited; retry later or use Retry now in Models › Tools",
           "disabled": "needs web search enabled in Models › Tools",
           "key": "needs a replacement key",
           "reauthorize": "needs a new sign-in",
@@ -5151,7 +5161,7 @@
           "service_balance": "is out of balance",
           "service_limit": "reached its usage limit",
           "service_unavailable": "was unavailable",
-          "service_rate_limited": "was rate-limited; the next source was tried",
+          "service_rate_limited": "was rate-limited",
           "service_refused": "refused this query",
           "service_unreadable": "returned an unreadable response"
         },
@@ -5171,6 +5181,7 @@
           "pending": "Cut off"
         },
         "cost": {
+          "free": "Free",
           "included": "Included in subscription",
           "list": "≈ ${{usd}}",
           "reported": "${{usd}}",

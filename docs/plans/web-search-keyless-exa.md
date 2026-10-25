@@ -888,13 +888,14 @@ localized activity/UI types. No live upstream response is a contract fixture.
 ## 11. Implementation split
 
 Use the same layering as S2: **readers first, producer behind a flag, then one
-flip plus public docs together**.
+flip plus public docs together**. The intermediate KEX-1 and KEX-2 heads kept the
+new path dormant; KEX-3 is the coordinated activation event documented here.
 
 | Lane | Scope | Gate |
 | --- | --- | --- |
-| KEX-1 readers and catalog | Add the built-in catalog/read shape, `src_exakeyless` defaulting and old-order reader behavior; extend status/candidate, attempts, service-origin, usage, activity, and UI readers/types/fixtures; add contract mirrors, the built-in cooldown-retry RPC/route branch, and released-shape compatibility tests. No network call. | `KEYLESS_EXA_ACTIVE = false`; all existing service behavior remains unchanged. |
-| KEX-2 producer | Add the adapter's keyless MCP session boundary, schema adaptation, SSE/JSON-RPC parser, highlights-only mapping, rate-limit detection/cooldown, service outcomes, usage writes, and UI actions behind the same flag. Use only stub MCP servers. | Flag-off control stays green; flag-on focused tests prove the new path. |
-| KEX-3 activation and public docs | Re-check contract tags, flip the producer/read predicate together, publish the English/Chinese privacy/default/UI copy, and run exact-head review/CI. | No activation before the public disclosure is present. |
+| KEX-1 readers and catalog | Add the built-in catalog/read shape, `src_exakeyless` defaulting and old-order reader behavior; extend status/candidate, attempts, service-origin, usage, activity, and UI readers/types/fixtures; add contract mirrors, the built-in cooldown-retry RPC/route branch, and released-shape compatibility tests. No network call. | Intermediate reader head only; activation remains with KEX-3. |
+| KEX-2 producer | Add the adapter's keyless MCP session boundary, schema adaptation, SSE/JSON-RPC parser, highlights-only mapping, rate-limit detection/cooldown, service outcomes, usage writes, and UI actions behind the same flag. Use only stub MCP servers. | Intermediate producer head only; hermetic tests prove the path before activation. |
+| KEX-3 activation and public docs | Re-check contract tags, flip the producer/read predicate together, publish the English/Chinese privacy/default/UI copy, and run exact-head review/CI. | Completed in contract v21: `KEYLESS_EXA_ACTIVE = true`; public disclosure ships with activation. |
 
 KEX-1 and KEX-2 must not make a live Exa call in tests or CI. KEX-3 owns the
 coordinated activation; no lane merges this design PR.

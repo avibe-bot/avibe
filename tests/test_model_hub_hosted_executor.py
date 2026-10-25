@@ -19,8 +19,14 @@ from datetime import timedelta
 import aiohttp
 import pytest
 
-from config.v2_config import ModelHubBackendModelConfig, ModelHubHostedToolConfig, ModelHubModelConfig
+from config.v2_config import (
+    KEYLESS_EXA_SOURCE_ID,
+    ModelHubBackendModelConfig,
+    ModelHubHostedToolConfig,
+    ModelHubModelConfig,
+)
 from core.agent_core.messages import HostedCost, message_from_dict
+from core.handlers.model_hub import search_chain as search_chain_module
 from core.handlers.model_hub import service as service_module
 from core.handlers.model_hub.adapter import DiscoveredModel, InvokeCancelledError, RawOutcomeKind, UpstreamRejection
 from core.handlers.model_hub.capability_evidence import EvidenceFeature
@@ -116,6 +122,18 @@ def _executor_models(monkeypatch):
     monkeypatch.setattr(
         hosted_tools_module, "source_executor_models", lambda vendor, protocol: _EXECUTOR_MODELS.get(vendor, ()),
     )
+    # These gateway tests exercise model executors and their fallback/error records. The active keyless Exa
+    # service is covered at the owning search-chain boundary in test_model_hub_search_chain; keep it out of
+    # this model-only fixture without changing the shipped activation predicate.
+    original_service = hosted_tools_module.model_hub_search_service
+
+    def without_keyless(source):
+        if source.id == KEYLESS_EXA_SOURCE_ID:
+            return None
+        return original_service(source)
+
+    monkeypatch.setattr(hosted_tools_module, "model_hub_search_service", without_keyless)
+    monkeypatch.setattr(search_chain_module, "model_hub_search_service", without_keyless)
 
 
 def _bind(service, tool, executor):

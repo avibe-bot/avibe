@@ -1788,7 +1788,7 @@ export const SettingsModelsPage: React.FC = () => {
             : <section className="grid min-h-0 flex-1 place-items-center px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>}
         </DialogContent>
       </Dialog>
-      {searchServiceOpen && searchServicesActive(searchTool) && searchTool && <AddSearchServiceDialog tool={searchTool} pending={hostedTools.pending.has('web_search')} sourceReads={sourceCollectionReads} onClose={() => setSearchServiceOpen(false)} onAdded={(created) => void sourceAdded(created)} onOpenSource={(sourceId) => {
+      {searchServiceOpen && searchServicesActive(searchTool) && searchTool && <AddSearchServiceDialog tool={searchTool} pending={hostedTools.pending.has('web_search')} sourceReads={sourceCollectionReads} onClose={() => setSearchServiceOpen(false)} onAdded={(created) => void sourceAdded(created)} onViewOrder={() => { setSearchServiceOpen(false); setTab('tools'); }} onOpenSource={(sourceId) => {
         setSearchServiceOpen(false);
         selectSource({ sourceId, returnFocus: () => apiKeyTriggerRef.current, serviceView: true });
       }} />}

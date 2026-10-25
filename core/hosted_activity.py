@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 from typing import Any, Callable, Literal, Mapping, Optional
 
+from config.v2_config import KEYLESS_EXA_SOURCE_ID
 from core.agent_core.hosted_continuations import pending_hosted
 from core.agent_core.messages import (
     HOSTED_ERROR_CODES,
@@ -397,6 +398,10 @@ def _view(attempt: HostedAttempt, source_names: SourceNames, source_state: Optio
         reason = f"skip.{attempt.skipped}"
         if attempt.skipped == "disabled" and current is not None and current.get("enabled") is False:
             remedy = "repair.disabled"
+    if (attempt.source_id == KEYLESS_EXA_SOURCE_ID and not superseded
+            and current is not None and current.get("enabled") is not False
+            and (attempt.error_code == "service_rate_limited" or attempt.skipped == "cooling")):
+        remedy = "repair.retrySearch"
     return HostedAttemptView(
         **{field.name: getattr(attempt, field.name) for field in fields(HostedAttempt)}
         | {"label": source_names(attempt.source_id) or attempt.label, "superseded": superseded or None},
@@ -562,7 +567,7 @@ def _chain_cost(execution: Optional[ProxyExecution]) -> tuple[Optional[HostedCos
     return HostedCost(basis=basis, usd=round(sum(cost.usd or 0.0 for cost in priced), 6)), unpriced
 
 
-def _runner_label(activity: HostedActivity, escape: Callable[[str], str]) -> Optional[str]:
+def _runner_label(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> Optional[str]:
     """Who ran a call, as the IM line names it: its vendor's catalog label, else the Source's own name.
 
     A Source added as a compatible endpoint has the vendor id ``custom``, which names no vendor, so its name is the
@@ -573,6 +578,8 @@ def _runner_label(activity: HostedActivity, escape: Callable[[str], str]) -> Opt
 
     from vibe.model_hub_runtime.api_key_vendors import catalog_api_key_vendor_label
 
+    if activity.executor_kind == "service" and activity.source_id == KEYLESS_EXA_SOURCE_ID:
+        return i18n_t("hostedTools.keylessExa", lang)
     label = catalog_api_key_vendor_label(activity.provider) if activity.provider else None
     if label and activity.executor_kind != "service":
         return label
@@ -614,19 +621,20 @@ def _ran(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> l
         size = f"{first.width}×{first.height}" if first is not None and first.width and first.height else None
         more = _count(activity, lang) if len(activity.images) > 1 else None
         return [_untrusted(activity.model, escape) if activity.model else None, size, more]
-    vendor = _runner_label(activity, escape)
+    vendor = _runner_label(activity, lang, escape)
     if vendor and activity.mode == "proxy" and activity.fallback_source_id is not None:
         # Why it ran by proxy: the turn's own Source refused the native tool (§8.3, mockup 06).
         refused_by = _untrusted(activity.fallback_source_name or activity.fallback_source_id, escape)
         mode = i18n_t("hostedTools.mode.fallback", lang, source=refused_by, provider=vendor)
     elif activity.switch is not None:
         # Why it ran where it did: the Sources before it failed or were blocked (§6.5).
-        mode = _switch_text(activity.switch, lang, escape)
+        mode = _switch_text(activity, lang, escape)
     elif not vendor:
         mode = None
     elif activity.executor_kind == "service":
-        # A search service is named alone: "🔎 网页搜索 “…” · Tavily · 5 个来源" (§6.5).
-        mode = vendor
+        # Keep the released service labels; the built-in row has no user name.
+        mode = (i18n_t("hostedTools.mode.service", lang, provider=vendor)
+                if activity.source_id == KEYLESS_EXA_SOURCE_ID else vendor)
     elif activity.mode == "proxy" and activity.model:
         mode = i18n_t("hostedTools.mode.proxyModel", lang, provider=vendor, model=_untrusted(activity.model, escape))
     else:
@@ -651,7 +659,10 @@ def _cost(activity: HostedActivity, lang: str) -> Optional[str]:
     cost = activity.cost
     if cost is None:
         return None
-    if cost.basis == "included":
+    if (activity.executor_kind == "service" and activity.source_id == KEYLESS_EXA_SOURCE_ID
+            and cost.usd == 0 and not activity.cost_at_least):
+        text = i18n_t("hostedTools.cost.free", lang)
+    elif cost.basis == "included":
         text = i18n_t("hostedTools.cost.included", lang)
     elif cost.usd is None:
         return None
@@ -678,10 +689,23 @@ def _error_text(activity: HostedActivity, lang: str) -> str:
     return activity.error or ""
 
 
-def _switch_text(switch: HostedSwitch, lang: str, escape: Callable[[str], str]) -> str:
-    names = i18n_t("hostedTools.listSeparator", lang).join(_untrusted(name, escape) for name in switch.sources)
+def _switch_text(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> str:
+    switch = activity.switch
+    assert switch is not None
+    # Switch labels are the projection's recorded names. Localize only an
+    # unambiguous built-in label; never rename an ordinary user Source.
+    labels = {attempt.label for attempt in activity.attempts or () if attempt.source_id == KEYLESS_EXA_SOURCE_ID}
+    labels -= {attempt.label for attempt in activity.attempts or () if attempt.source_id != KEYLESS_EXA_SOURCE_ID}
+    names = i18n_t("hostedTools.listSeparator", lang).join(
+        i18n_t("hostedTools.keylessExa", lang) if name in labels else _untrusted(name, escape)
+        for name in switch.sources
+    )
+    provider = (i18n_t("hostedTools.keylessExa", lang) if activity.source_id == KEYLESS_EXA_SOURCE_ID
+                else _untrusted(switch.to, escape))
+    if switch.reason_key == "reason.service_rate_limited":
+        return i18n_t("hostedTools.rateLimitSwitch", lang, sources=names, provider=provider)
     failed = f"{names} {i18n_t(f'hostedTools.{switch.reason_key}', lang)}"
-    return i18n_t("hostedTools.switch", lang, failed=failed, provider=_untrusted(switch.to, escape))
+    return i18n_t("hostedTools.switch", lang, failed=failed, provider=provider)
 
 
 def _attempt_items(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> Optional[str]:
@@ -691,7 +715,7 @@ def _attempt_items(activity: HostedActivity, lang: str, escape: Callable[[str], 
     if activity.completed or not activity.attempts:
         return None
     items = [
-        f"{_untrusted(attempt.label, escape)} {i18n_t(f'hostedTools.{key}', lang)}"
+        f"{i18n_t('hostedTools.keylessExa', lang) if attempt.source_id == KEYLESS_EXA_SOURCE_ID else _untrusted(attempt.label, escape)} {i18n_t(f'hostedTools.{key}', lang)}"
         for attempt in activity.attempts
         if (key := attempt.remedy_key or attempt.reason_key)
     ]

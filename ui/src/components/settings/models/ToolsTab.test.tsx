@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import { readyRegion } from './regionRead';
+import { KEYLESS_ACTIVE_SEARCH } from './searchServices.fixtures';
 import { ToolsTab } from './ToolsTab';
 import type {
   HostedExecutorCandidate,
@@ -183,6 +184,38 @@ describe('ToolsTab status lines', () => {
     renderTab({ tools: [search('x_search', { status: run({ latest_ok: { source_id: GROK.id, model_id: 'grok-4', mode: 'native', at: '2026-10-15T06:02:00Z' } }) })] }, { lng: 'zh' });
 
     expect(within(card('X 搜索')).getByText('最近一次由 Grok 执行 · 正常 · 10-15')).toBeTruthy();
+  });
+
+  // Built-ins have catalog membership but no persisted Source. Existing status
+  // tests only name persisted Sources, so they miss raw ids in latest/fallback copy.
+  const builtinLabels = [
+    { vendorId: 'exa-mcp', sourceId: 'src_exakeyless', catalogName: 'Exa (free)', en: 'Exa (free)', zh: 'Exa（免费）' },
+    { vendorId: 'local-search', sourceId: 'src_local_search', catalogName: 'Local search', en: 'Local search', zh: 'Local search' },
+    { vendorId: 'jina', sourceId: 'src_jina_builtin', catalogName: 'Jina', en: 'Jina', zh: 'Jina' },
+    // A persisted user name still wins over catalog membership.
+    { vendorId: 'local-search', sourceId: RELAY.id, catalogName: 'Local search', en: 'relay-gpt', zh: 'relay-gpt' },
+  ];
+  it.each(builtinLabels.flatMap((builtin) => (['en', 'zh'] as const).flatMap((lng) =>
+    [false, true].map((switched) => ({ ...builtin, lng, switched })),
+  )))('MH-HOSTED-UI-002: resolves $vendorId ($sourceId), $lng, fallback=$switched through the shared catalog lookup', ({ vendorId, sourceId, catalogName, lng, switched, ...labels }) => {
+    const builtin = KEYLESS_ACTIVE_SEARCH.service_vendors!.find((vendor) => vendor.id === 'exa-mcp')!;
+    renderTab({ tools: [{
+      ...KEYLESS_ACTIVE_SEARCH,
+      // No executor row is needed to name historical evidence; catalog membership
+      // is authoritative even when the built-in is not a current candidate.
+      executor_candidates: [], effective_order: [],
+      service_vendors: [{ ...builtin, id: vendorId, name: catalogName, source_ids: [sourceId] }],
+      status: run({
+        latest_ok: { source_id: sourceId, model_id: 'builtin/search', mode: 'service', at: '2026-10-25T06:00:00Z' },
+        refused: switched ? [refusal(CLAUDE.id, 'claude-haiku-5-5', '2026-10-24T06:00:00Z')] : [],
+      }),
+    }] }, { lng });
+
+    const name = labels[lng];
+    const expected = switched
+      ? lng === 'zh' ? `relay-claude 不支持 · claude-haiku-5-5，已改用 ${name}` : `Not supported on relay-claude · claude-haiku-5-5; now using ${name}`
+      : lng === 'zh' ? `最近一次由 ${name} 执行 · 正常 · 10-25` : `Last run by ${name} · OK · 10-25`;
+    expect(within(card(lng === 'zh' ? '网页搜索' : 'Web search')).getByText(expected)).toBeTruthy();
   });
 
   it('MH-HOSTED-UI-020: one refusing Source: its line names the models and where the tool runs now, and clears that Source', async () => {
