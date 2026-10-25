@@ -14,16 +14,18 @@
     "result": {"items": "results", "content": "raw_content", "failures": "failed_results"},
     "content_types": ["markdown"],
     "price": {"unit": "fetch", "usd_per_1k": 1.6, "extra": [], "as_of": "2026-10-24", "url": "https://docs.tavily.com/documentation/api-credits"},
-    "limits": {"attempt_seconds": 30, "urls": 1}, "outcomes": {"credential": [401], "limit": [432, 433]}
+    "limits": {"attempt_seconds": 30, "urls": 1}, "outcomes": {"credential": [401], "refused": [403], "limit": [432, 433]},
+    "billing": {"nonempty_only": true, "unbilled_errors": []}
   },
   {
     "vendor": "exa", "label": "Exa", "kind": "service", "service_id": "exa/contents",
     "available": true, "auto_enroll": true, "endpoint": "https://api.exa.ai/contents", "auth": "x-api-key",
     "request": {"url_field": "ids", "url_array": true, "fixed": {"text": {"maxCharacters": 48000}}},
-    "result": {"items": "results", "content": "text", "statuses": "statuses", "reported_cost": "costDollars.total"},
+    "result": {"items": "results", "content": "text", "statuses": "statuses", "reported_cost": {"path": "costDollars.total", "estimate": true, "max_usd": 0.1}},
     "content_types": ["markdown"],
     "price": {"unit": "fetch", "usd_per_1k": 1, "extra": [], "as_of": "2026-10-24", "url": "https://exa.ai/pricing"},
-    "limits": {"attempt_seconds": 30, "urls": 1}, "outcomes": {"credential": [401], "refusal_tags": ["PROHIBITED_CONTENT", "CONTENT_FILTER_ERROR"]}
+    "limits": {"attempt_seconds": 30, "urls": 1}, "outcomes": {"credential": [401], "refusal_tags": ["PROHIBITED_CONTENT", "CONTENT_FILTER_ERROR"]},
+    "billing": {"nonempty_only": true, "unbilled_errors": []}
   },
   {
     "vendor": "deepseek", "label": "DeepSeek", "kind": "service", "service_id": "deepseek/fetch",
@@ -31,7 +33,8 @@
     "request": {"url_field": "url", "url_array": false, "fixed": {}}, "result": {"content": "content", "title": "title"},
     "content_types": ["markdown"],
     "price": {"unit": "fetch", "usd_per_1k": 0.75, "extra": [], "as_of": "2026-10-24", "url": "https://api-docs.deepseek.com/guides/search/"},
-    "limits": {"attempt_seconds": 30, "url_chars": 8192}, "outcomes": {"credential": [401], "balance": [402], "refused": [403], "target_unreadable": [404, 408]}
+    "limits": {"attempt_seconds": 30, "url_chars": 8192}, "outcomes": {"credential": [401], "balance": [402], "refused": [403], "target_unreadable": [404, 408]},
+    "billing": {"nonempty_only": true, "unbilled_errors": ["timeout"]}
   },
   {
     "vendor": "exa-mcp", "label": "Exa (free)", "source_id": "src_exakeyless", "kind": "service",
