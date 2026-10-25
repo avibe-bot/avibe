@@ -3326,6 +3326,8 @@
     "sessionForkUnavailable": "This session has no native agent session to fork yet.",
     "sessionHideToBackground": "Hide to background",
     "sessionHiddenToast": "Hidden to background · Find it in Agents → Runs",
+    "sessionShowInForeground": "Show in foreground",
+    "sessionShownToast": "Shown in foreground",
     "sessionArchive": "Archive session",
     "archiveSession": {
       "title": "Archive this session permanently?",

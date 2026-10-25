@@ -105,6 +105,7 @@ beforeEach(() => {
   mocks.forkSession.mockResolvedValue(session({ id: 'ses_forked' }));
   mocks.setSessionPinned.mockResolvedValue(undefined);
   mocks.archiveSession.mockResolvedValue(undefined);
+  mocks.setSessionVisibility.mockResolvedValue(undefined);
   mocks.authorizeRouteAction.mockImplementation(grantedAuthorization);
 });
 
@@ -237,6 +238,28 @@ describe('fork under the unsaved-changes guard', () => {
   });
 });
 
+// A background session is opened by id (Agents → Runs, a link) and read in the chat
+// header, whose menu used to offer "Hide to background" for it again.
+describe('the visibility row', () => {
+  it.each([
+    ['foreground', 'workbench.sessionHideToBackground', 'background', 'workbench.sessionHiddenToast'],
+    ['background', 'workbench.sessionShowInForeground', 'foreground', 'workbench.sessionShownToast'],
+  ] as const)('on a %s session offers %s and moves it to the %s', async (visibility, label, next, toast) => {
+    const onSessionPatched = vi.fn();
+    const h = mount(options({ session: session({ visibility }), onSessionPatched }));
+
+    expect(h.actions.find((action) => action.id === 'visibility')?.label).toBe(label);
+    select(h, 'visibility');
+    await flush();
+
+    expect(mocks.setSessionVisibility).toHaveBeenCalledWith('ses_standalone', next);
+    expect(mocks.showToast).toHaveBeenCalledWith(toast, 'success', expect.objectContaining({ label: 'common.undo' }));
+    // The chat header holds its own copy of the row; the label flips only if the
+    // committed visibility reaches it.
+    expect(onSessionPatched).toHaveBeenCalledWith({ visibility: next }, 'ses_standalone');
+  });
+});
+
 describe('a read-only session', () => {
   it('offers nothing to click, no dialog, and an inert shortcut', () => {
     for (const readOnly of [session({ status: 'archived' }), session({ visibility: 'system' }), null]) {
@@ -263,12 +286,12 @@ describe('a metadata-only session', () => {
   it('keeps organization actions but removes local lifecycle actions', () => {
     const h = mount(options({ writable: true, lifecycleWritable: false }));
 
-    expect(h.actions.map((action) => action.id)).toEqual(['pin', 'rename', 'hide']);
+    expect(h.actions.map((action) => action.id)).toEqual(['pin', 'rename', 'visibility']);
     expect(h.canArchive).toBe(false);
     expect(h.archiveDialog).toBeNull();
   });
 });
 
 it('never offers session binding to the main-only pet', () => {
-  expect(mount(options()).actions.map((action) => action.id)).toEqual(['pin', 'rename', 'fork', 'hide', 'archive']);
+  expect(mount(options()).actions.map((action) => action.id)).toEqual(['pin', 'rename', 'fork', 'visibility', 'archive']);
 });

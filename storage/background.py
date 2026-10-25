@@ -4579,11 +4579,14 @@ class SQLiteBackgroundTaskStore:
             )
         return page_result_from_limit_plus_one(rows, page_request)
 
-    def list_active_runs(self, *, limit: int) -> list[dict[str, Any]]:
-        """Return a bounded anomaly-first snapshot of operator-visible Runs."""
+    def list_active_runs(self, *, limit: int, session_id: Optional[str] = None) -> list[dict[str, Any]]:
+        """Return a bounded anomaly-first snapshot of operator-visible Runs.
+
+        ``session_id`` narrows it to one Session's Runs; ``None`` reads every Session.
+        """
 
         stmt = (
-            self._runs_query(exclude_run_type=(_WATCH_RUNTIME_RUN_TYPE,))
+            self._runs_query(exclude_run_type=(_WATCH_RUNTIME_RUN_TYPE,), session_id=session_id)
             .where(
                 agent_runs.c.status.in_(
                     _status_query_values("queued") + _status_query_values("running")
@@ -4630,13 +4633,18 @@ class SQLiteBackgroundTaskStore:
         definition_type: str,
         *,
         limit: int,
+        session_id: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Return a bounded snapshot of armed Tasks or Watches."""
+        """Return a bounded snapshot of armed Tasks or Watches.
+
+        ``session_id`` narrows it with the same Session ownership the Workbench
+        "this Session" filter uses; ``None`` reads every Session.
+        """
 
         if definition_type not in {"scheduled", "watch"}:
             raise ValueError("definition_type must be scheduled or watch")
         row_limit = max(0, int(limit))
-        stmt = self._definitions_query(definition_type).where(
+        stmt = self._definitions_query(definition_type, session_id=session_id).where(
             run_definitions.c.enabled != 0
         )
         converter = (
@@ -4812,7 +4820,19 @@ class SQLiteBackgroundTaskStore:
         if agent_backend:
             stmt = stmt.where(agent_runs.c.agent_backend == agent_backend)
         if session_id:
-            stmt = stmt.where(agent_runs.c.session_id == session_id)
+            # A Run belongs to the Session it runs in, the Session its result
+            # returns to, and the Session whose Agent dispatched it: a delegated
+            # Run is the dispatching Session's work as much as its target's.
+            stmt = stmt.where(
+                or_(
+                    agent_runs.c.session_id == session_id,
+                    agent_runs.c.callback_session_id == session_id,
+                    and_(
+                        agent_runs.c.source_kind == "agent",
+                        agent_runs.c.source_actor == session_id,
+                    ),
+                )
+            )
         if definition_id:
             stmt = stmt.where(agent_runs.c.definition_id == definition_id)
         if created_after:

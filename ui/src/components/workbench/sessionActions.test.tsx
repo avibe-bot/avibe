@@ -4,12 +4,12 @@ import { describe, expect, it } from 'vitest';
 
 import { Popover, PopoverTrigger } from '../ui/popover';
 import {
-  MobileChatSessionActionMenu,
+  ChatSessionActionMenu,
   SessionActionMenu,
   SessionActionsTrigger,
   type SessionActionDescriptor,
 } from './sessionActions';
-import { mobileChatSessionActions, mobileSessionActions } from './chatSessionActions';
+import { chatHeaderSessionActions, mobileChatSessionActions, mobileSessionActions } from './chatSessionActions';
 
 const row = (over: Partial<SessionActionDescriptor> & Pick<SessionActionDescriptor, 'id' | 'group' | 'label'>) =>
   ({ icon: Pin, onSelect: () => undefined, ...over }) as SessionActionDescriptor;
@@ -19,7 +19,7 @@ const fullMenu = (): SessionActionDescriptor[] => [
   row({ id: 'pin', group: 'organize', label: 'Pin to top', icon: Pin }),
   row({ id: 'rename', group: 'organize', label: 'Rename', icon: Pencil }),
   row({ id: 'fork', group: 'continue', label: 'Fork session', icon: GitFork }),
-  row({ id: 'hide', group: 'continue', label: 'Hide to background', icon: EyeOff }),
+  row({ id: 'visibility', group: 'continue', label: 'Hide to background', icon: EyeOff }),
   row({ id: 'archive', group: 'lifecycle', label: 'Archive session', icon: Archive, danger: true, hint: '⇧⌘D' }),
 ];
 
@@ -52,7 +52,7 @@ describe('SessionActionMenu', () => {
   it('draws one hairline divider per group change, never above the first row', () => {
     const html = renderMenu(fullMenu());
 
-    // organize → continue and continue → lifecycle; pin/rename and fork/hide pair up.
+    // organize → continue and continue → lifecycle; pin/rename and fork/visibility pair up.
     expect(html.match(/border-t border-border/g)).toHaveLength(2);
     expect(html.indexOf('border-t border-border')).toBeGreaterThan(html.indexOf('Pin to top'));
   });
@@ -159,27 +159,43 @@ describe('SessionActionsTrigger', () => {
   });
 });
 
-describe('MobileChatSessionActionMenu', () => {
-  it('removes rename and the archive shortcut hint from the mobile Chat surface', () => {
+describe('ChatSessionActionMenu', () => {
+  it('drops rename on every viewport and the archive shortcut hint only on mobile', () => {
     const actions = fullMenu();
-    const visibleActions = mobileChatSessionActions(actions);
+    const mobile = mobileChatSessionActions(actions);
+    const desktop = chatHeaderSessionActions(actions);
 
-    expect(visibleActions.map((action) => action.id)).toEqual(['pin', 'fork', 'hide', 'archive']);
-    expect(visibleActions.find((action) => action.id === 'archive')?.hint).toBeUndefined();
+    expect(mobile.map((action) => action.id)).toEqual(['pin', 'fork', 'visibility', 'archive']);
+    expect(mobile.find((action) => action.id === 'archive')?.hint).toBeUndefined();
+    expect(desktop.map((action) => action.id)).toEqual(['pin', 'fork', 'visibility', 'archive']);
+    expect(desktop.find((action) => action.id === 'archive')?.hint).toBe('⇧⌘D');
     expect(actions.find((action) => action.id === 'archive')?.hint).toBe('⇧⌘D');
   });
 
-  it('renders the chat trigger only below the desktop breakpoint', () => {
-    const html = renderToStaticMarkup(
-      <MobileChatSessionActionMenu actions={fullMenu()} label="Session actions" />,
+  // The header mounts one trigger per viewport: beside the title on desktop and at
+  // the far right of the compact bar. Exactly one may show at any width.
+  it('shows the compact trigger only below the desktop breakpoint and the wide one only above it', () => {
+    const compact = renderToStaticMarkup(
+      <ChatSessionActionMenu actions={fullMenu()} label="Session actions" viewport="compact" />,
+    );
+    const wide = renderToStaticMarkup(
+      <ChatSessionActionMenu actions={fullMenu()} label="Session actions" viewport="wide" />,
     );
 
-    expect(html).toContain('md:hidden');
-    expect(html).toContain('aria-label="Session actions"');
+    const rootClasses = (html: string) => html.match(/^<div class="([^"]*)"/)?.[1].split(' ') ?? [];
+    expect(rootClasses(compact)).toEqual(['md:hidden']);
+    expect(rootClasses(wide)).toEqual(expect.arrayContaining(['hidden', 'md:block']));
+    expect(rootClasses(wide)).not.toContain('md:hidden');
+    expect(compact).toContain('aria-label="Session actions"');
+    expect(wide).toContain('aria-label="Session actions"');
   });
 
   it('withdraws the trigger when the surface offers no actions', () => {
-    expect(renderToStaticMarkup(<MobileChatSessionActionMenu actions={[]} label="Session actions" />)).toBe('');
+    for (const viewport of ['compact', 'wide'] as const) {
+      expect(
+        renderToStaticMarkup(<ChatSessionActionMenu actions={[]} label="Session actions" viewport={viewport} />),
+      ).toBe('');
+    }
   });
 });
 

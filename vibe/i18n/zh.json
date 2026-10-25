@@ -109,7 +109,8 @@
       "help": {
         "command": "检查统一的 Harness 实时状态和异常",
         "description": "检查活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。",
-        "status": "显示有界的实时状态与异常快照"
+        "status": "显示有界的实时状态与异常快照",
+        "statusDescription": "显示调用方 Session 的活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。用 --session-id 查看其他 Session，用 --global 查看所有 Session。"
       },
       "error": {
         "sqliteRequired": "Harness 状态需要 SQLite Task 存储。",
@@ -710,8 +711,8 @@
     "new": {
       "started": "已开启新的会话。你下一条消息会从全新对话开始。",
       "pausedReason": "绑定的 Agent 会话已被 /new 清除",
-      "pausedTasks": "⏸️ 已暂停 {count} 个绑定到被清理会话的定时任务。用 `vibe task list` → `vibe task update <id> --session-id <new>` 重新指向，再 `vibe task resume <id>`。",
-      "pausedWatches": "⏸️ 已暂停 {count} 个绑定到被清理会话的 watch。用 `vibe watch list` → `vibe watch update <id> --session-id <new>` 重新指向，再 `vibe watch resume <id>`。"
+      "pausedTasks": "⏸️ 已暂停 {count} 个绑定到被清理会话的定时任务。用 `vibe task list --global` → `vibe task update <id> --session-id <new>` 重新指向，再 `vibe task resume <id>`。",
+      "pausedWatches": "⏸️ 已暂停 {count} 个绑定到被清理会话的 watch。用 `vibe watch list --global` → `vibe watch update <id> --session-id <new>` 重新指向，再 `vibe watch resume <id>`。"
     },
     "clear": {
       "noSessions": "没有要清除的活动会话。\n会话状态已重置。",

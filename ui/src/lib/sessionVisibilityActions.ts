@@ -1,6 +1,6 @@
 import type { ToastAction } from '../context/toastCoalesce';
 
-type SessionVisibility = 'foreground' | 'background';
+export type SessionVisibility = 'foreground' | 'background';
 type SetSessionVisibility = (sessionId: string, visibility: SessionVisibility) => Promise<unknown>;
 type ShowToast = (
   message: string,
@@ -8,24 +8,40 @@ type ShowToast = (
   action?: ToastAction,
 ) => void;
 
-export async function hideSessionToBackground(args: {
+const opposite = (visibility: SessionVisibility): SessionVisibility =>
+  visibility === 'background' ? 'foreground' : 'background';
+
+/** Move a session to ``visibility`` and offer an Undo that moves it back.
+ *  ``onCommitted`` reports every visibility the server accepted — the move and a
+ *  later Undo alike — so a surface holding its own copy of the session row (the
+ *  chat header) can keep its menu label in step with both. */
+export async function changeSessionVisibility(args: {
   sessionId: string;
+  visibility: SessionVisibility;
   setSessionVisibility: SetSessionVisibility;
   showToast: ShowToast;
-  hiddenMessage: string;
+  message: string;
   undoLabel: string;
+  onCommitted?: (visibility: SessionVisibility) => void;
 }): Promise<void> {
-  const { sessionId, setSessionVisibility, showToast, hiddenMessage, undoLabel } = args;
+  const { sessionId, visibility, setSessionVisibility, showToast, message, undoLabel, onCommitted } = args;
 
   try {
-    await setSessionVisibility(sessionId, 'background');
-    showToast(hiddenMessage, 'success', {
-      label: undoLabel,
-      onClick: () => {
-        void setSessionVisibility(sessionId, 'foreground');
-      },
-    });
+    await setSessionVisibility(sessionId, visibility);
   } catch (err) {
     showToast(err instanceof Error ? err.message : String(err), 'error');
+    return;
   }
+  onCommitted?.(visibility);
+  showToast(message, 'success', {
+    label: undoLabel,
+    onClick: () => {
+      const previous = opposite(visibility);
+      void setSessionVisibility(sessionId, previous).then(
+        () => onCommitted?.(previous),
+        // The request layer already toasted an HTTP refusal.
+        () => undefined,
+      );
+    },
+  });
 }

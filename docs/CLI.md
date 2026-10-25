@@ -25,6 +25,32 @@ and never provide an unpaginated `--all` bypass. Follow
 `pagination.next_command` for the next page and use the corresponding `show` or
 `get` command for full record detail.
 
+### Session-owned lists
+
+`vibe harness status`, `vibe runs list`, `vibe task list`, `vibe watch list`,
+and `vibe show list` read records that belong to an Agent Session, and share one
+scope grammar:
+
+```bash
+vibe watch list                          # the caller Session (AVIBE_SESSION_ID)
+vibe watch list --session-id sesk8m4q2p7x   # another Session
+vibe watch list --global                 # every Session
+```
+
+Inside an Avibe Agent shell the caller Session is the default. Outside one there
+is no default: pass `--session-id` or `--global`, otherwise the command fails
+with `missing_caller_session`. The two flags cannot be combined. Each response
+reports the scope it read as `session_id` and `global`, and
+`pagination.next_command` repeats the scope flags you passed.
+
+A Session's Runs are the Runs it ran, dispatched from its Agent, or receives a
+result from, so delegated work stays visible to the Session that delegated it.
+Its Watches are the Watches that follow up in it, its Tasks the Tasks it created
+(or that run in it when the creator is unknown or gone), and its Show Page the
+page with its id; Watches and Tasks match the Workbench's "this Session" filter.
+`vibe harness status` keeps controller faults and any working-directory conflict
+that involves the Session.
+
 ## Remote Web UI Access
 
 By default, the Web UI binds to `127.0.0.1:5123` on the machine where Avibe is running.
@@ -393,14 +419,15 @@ may be omitted and defaults to the caller Session from `AVIBE_SESSION_ID`.
 List and inspect Agent run records.
 
 ```bash
-vibe runs list --session-id sesk8m4q2p7x --brief
+vibe runs list --brief                 # inside an Avibe Agent shell, the caller Session's runs
+vibe runs list --global --definition-id <task-or-watch-id>   # every fire, across per-run Sessions
 vibe runs show run_abc123
 vibe runs show run_abc123 --brief      # status, timing, error, and callback fields only
 vibe runs show                         # inside an Avibe Agent shell, show the caller Run
 ```
 
-`vibe runs list` keeps its global listing behavior unless a filter such as
-`--session-id` is provided. `vibe runs show` can omit the run id inside an
+`vibe runs list` follows the [Session-owned list](#session-owned-lists) scope
+grammar. `vibe runs show` can omit the run id inside an
 Avibe-injected Agent run and defaults to `AVIBE_RUN_ID`. It prints the full
 record, with the text sent to the Agent as `message` and the reply as
 `result_text`; `--brief` prints the same compact row as `vibe runs list`, for
@@ -561,7 +588,8 @@ vibe watch resume <watch-id>
 vibe watch remove <watch-id>
 ```
 
-`vibe task list` and `vibe watch list` return 20 definitions per page and
+`vibe task list` and `vibe watch list` read the caller Session by default (see
+[Session-owned lists](#session-owned-lists)), return 20 definitions per page, and
 include `pagination.next_command` when more rows exist. Successful one-shot
 definitions are hidden by default. Add `--include-finished` to page through
 history. List output is always bounded; there is no unpaginated `--all` mode.

@@ -352,7 +352,7 @@ class FullRuntimeTrial:
                 # A Run's final reply can hand over to a Watch, scheduled Task
                 # or subagent. They are real product work, not noise to discard
                 # at the first terminal. This home belongs only to this trial.
-                status = self._call("cli", "harness", "status", timeout=15)
+                status = self._call("cli", "harness", "status", "--global", timeout=15)
                 if (not status.get("controller", {}).get("available")
                         or any(status.get("truncated", {}).values())):
                     raise TrialError("harness_quiescence_unconfirmed")
