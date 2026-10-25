@@ -201,6 +201,7 @@ jobs:
           npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
           npm run test:project-order
           npm run test:inbox-return
+          npm run test:home-media
           npm run test:badge-triggers
           npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts skills-dialog.spec.ts
           npm run test:voice-shortcut
