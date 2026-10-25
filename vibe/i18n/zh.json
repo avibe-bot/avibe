@@ -111,7 +111,8 @@
         "description": "检查活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。",
         "status": "显示有界的实时状态与异常快照",
         "statusDescription": "显示调用方 Session 的活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。用 --session-id 查看其他 Session，用 --global 查看所有 Session。",
-        "brief": "只输出 '{list_command}' 为这条记录打印的那一行精简记录"
+        "brief": "只输出 '{list_command}' 为这条记录打印的那一行精简记录",
+        "query": "搜索常见的 {items} 文本字段"
       },
       "error": {
         "sqliteRequired": "Harness 状态需要 SQLite Task 存储。",
@@ -293,7 +294,9 @@
     "selectOne": "选择一个",
     "selectOneOrMore": "选择一个或多个",
     "processing": "正在处理 `/{command}`...",
-    "submitted": "已提交"
+    "submitted": "已提交",
+    "moreRecordsAddPage": "还有更多记录。加上 --page 继续翻页。",
+    "moreRecordsContinueWith": "还有更多记录。继续翻页：{command}"
   },
   "dependencies": {
     "askill": {

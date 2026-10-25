@@ -111,7 +111,8 @@
         "description": "Inspect active Runs, armed Watches, upcoming Tasks, and live anomalies.",
         "status": "Show the bounded live/anomaly snapshot",
         "statusDescription": "Show live Runs, armed Watches, upcoming Tasks, and anomalies for the caller Session. Use --session-id for another Session or --global for every Session.",
-        "brief": "Print only the compact row that '{list_command}' prints for this record"
+        "brief": "Print only the compact row that '{list_command}' prints for this record",
+        "query": "Search common {items} text fields"
       },
       "error": {
         "sqliteRequired": "Harness status requires the SQLite task store.",
@@ -293,7 +294,9 @@
     "selectOne": "Select one",
     "selectOneOrMore": "Select one or more",
     "processing": "Processing `/{command}`...",
-    "submitted": "Submitted"
+    "submitted": "Submitted",
+    "moreRecordsAddPage": "More records are available. Add --page to continue.",
+    "moreRecordsContinueWith": "More records are available. Continue with: {command}"
   },
   "dependencies": {
     "askill": {

@@ -1064,7 +1064,7 @@ def _paginated_fields(page_result, *, command: list[str], include_next_command: 
     # ``next_command`` is the continuation whenever the command can be replayed;
     # only a page it cannot name (SQL piped on stdin) needs telling how to go on.
     if page_payload["has_more"] and "next_command" not in page_payload:
-        fields["message"] = "More records are available. Add --page to continue."
+        fields["message"] = i18n_t("common.moreRecordsAddPage", _configured_cli_language())
     return fields
 
 
@@ -1074,7 +1074,7 @@ def _text_page_continuation(payload: Mapping[str, object]) -> Optional[str]:
     pagination = payload.get("pagination")
     next_command = pagination.get("next_command") if isinstance(pagination, Mapping) else None
     if next_command:
-        return f"More records are available. Continue with: {next_command}"
+        return i18n_t("common.moreRecordsContinueWith", _configured_cli_language(), command=next_command)
     message = payload.get("message")
     return str(message) if message else None
 
@@ -18937,7 +18937,11 @@ def build_parser():
         action="store_true",
         help="Include successful one-shot task history while keeping pagination",
     )
-    task_list_parser.add_argument("--q", dest="query", help="Search common task text fields")
+    task_list_parser.add_argument(
+        "--q",
+        dest="query",
+        help=i18n_t("harness.cli.help.query", _configured_cli_language(), items="task"),
+    )
     _add_pagination_args(task_list_parser, help_command="vibe task list --help")
     _add_json_noop(task_list_parser)
     _add_hidden_task_alias(task_subparsers, "ls", task_list_parser)
@@ -19237,7 +19241,11 @@ def build_parser():
         action="store_true",
         help="Include successful one-shot watch history while keeping pagination",
     )
-    watch_list_parser.add_argument("--q", dest="query", help="Search common watch text fields")
+    watch_list_parser.add_argument(
+        "--q",
+        dest="query",
+        help=i18n_t("harness.cli.help.query", _configured_cli_language(), items="watch"),
+    )
     _add_pagination_args(watch_list_parser, help_command="vibe watch list --help")
     _add_json_noop(watch_list_parser)
     _add_hidden_task_alias(watch_subparsers, "ls", watch_list_parser)
