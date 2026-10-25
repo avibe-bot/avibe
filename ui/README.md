@@ -12,6 +12,15 @@ records the paired tool upgrade and its one-time, unchanged-source baseline
 remeasurement. This development requirement does not change the separately
 packaged Show Runtime's Node contract.
 
+Production TSX also enforces `avibe/localized-user-text`: put visible copy and
+sentence/list composition in locale keys, `Trans`, or locale-aware formatters,
+not literal JSX text, templates, `+`, or `.join` glue. JSX children and
+`aria-label`, `title`, `placeholder`, and `alt` are checked, including immutable
+local aliases. The [localized-text guard contract](../docs/plans/ui-localized-text-guard.md)
+documents narrow decorative/technical exceptions, the initial measured debt,
+and the bounded analysis/count-ratchet limitations. Existing debt is not a budget
+for new copy; record reductions with `npm run lint:baseline`.
+
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
 Currently, two official plugins are available:
