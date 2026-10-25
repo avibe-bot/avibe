@@ -1886,7 +1886,7 @@
     },
     "tool": {
       "web_search": "网页搜索",
-      "web_fetch": "网页读取",
+      "web_fetch": "读取网页",
       "x_search": "X 搜索",
       "image_generate": "图片生成"
     },
@@ -1900,7 +1900,7 @@
       "service_unreadable": "网页读取服务返回了无法读取的结果",
       "service_busy": "网页读取服务正忙"
     },
-    "fetch": {"characters": "{count} 字符", "truncated": "已截断"},
+    "fetch": {"characters": "{count} 字", "truncated": "已截断", "local": "本机", "jina": "Jina Reader（免费）", "policy": "本机策略拒绝", "notForwarded": "未转发第三方", "forwarded": "此前已发给 {providers}"},
     "quoted": "“{subject}”",
     "mode": {
       "service": "通过 {provider}",
@@ -1927,6 +1927,7 @@
       "atLeast": "至少 {cost}"
     },
     "repair": {
+      "retryFetch": "可稍后重试或在 模型 › 工具 › 网页读取 中立即重试",
       "retrySearch": "暂时限流，可稍后重试或在 模型 › 工具 中立即重试",
       "disabled": "需要在 模型 › 工具 中启用网页搜索",
       "fetch_disabled": "需要启用网页读取",

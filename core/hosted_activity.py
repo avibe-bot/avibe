@@ -50,6 +50,7 @@ HOSTED_ACTIVITY_VERSION = 1
 
 # The longest query or prompt an IM line quotes; the Web card shows it whole.
 LINE_SUBJECT_MAX_CHARS = 60
+_BUILTIN_LABELS = {KEYLESS_EXA_SOURCE_ID: "keylessExa", "src_localfetch": "fetch.local", "src_jinakeyless": "fetch.jina"}
 
 SourceNames = Callable[[str], Optional[str]]
 #: A Source as Model Hub holds it now: ``protocol``, ``vendor``, ``needs_action`` (its ``needs_action`` or ``error``
@@ -183,6 +184,8 @@ class HostedActivity:
     executor_kind: Optional[Literal["service", "model", "local"]] = None
     fetch: Optional[WebFetchRecord] = None
     switch: Optional[HostedSwitch] = None
+    # Policy refusal: the service ids already sent this URL; empty means no forwarding.
+    policy_sources: Optional[tuple[str, ...]] = None
 
     @property
     def completed(self) -> bool:
@@ -224,6 +227,8 @@ class HostedActivity:
             "executor_kind": self.executor_kind,
         }
         payload.update({key: value for key, value in optional.items() if value is not None})
+        if self.policy_sources is not None:
+            payload["policy_sources"] = list(self.policy_sources)
         if self.fetch is not None:
             from core.agent_core.web_fetch import fetch_record_to_dict
             payload["fetch"] = fetch_record_to_dict(self.fetch)
@@ -413,12 +418,14 @@ def _view(attempt: HostedAttempt, source_names: SourceNames, source_state: Optio
         reason = f"skip.{attempt.skipped}"
         if attempt.skipped == "disabled" and current is not None and current.get("enabled") is False:
             remedy = "repair.disabled"
-    if (attempt.source_id == KEYLESS_EXA_SOURCE_ID and not superseded
+    if (attempt.source_id in {KEYLESS_EXA_SOURCE_ID, "src_jinakeyless"} and not superseded
             and current is not None and current.get("enabled") is not False
             and (attempt.error_code == "service_rate_limited" or attempt.skipped == "cooling")):
         remedy = "repair.retrySearch"
     if tool == "web_fetch":
         reason = {"skip.disabled": "skip.fetch_disabled", "reason.service_refused": "reason.fetch_refused"}.get(reason, reason)
+        if remedy == "repair.retrySearch":
+            remedy = "repair.retryFetch"
         if remedy == "repair.disabled":
             remedy = "repair.fetch_disabled"
     return HostedAttemptView(
@@ -572,6 +579,8 @@ def proxy_activity(
         executor_kind=kind,
         fetch=fetch,
         switch=switch,
+        policy_sources=(tuple(dict.fromkeys(a.source_id for a in fetch.attempts if a.kind == "service" and a.outcome != "skipped"))
+                        if fetch is not None and fetch.error_code in {"fetch_url_blocked", "fetch_dns_unverified"} else None),
     )
 
 
@@ -607,8 +616,8 @@ def _runner_label(activity: HostedActivity, lang: str, escape: Callable[[str], s
 
     from vibe.model_hub_runtime.api_key_vendors import catalog_api_key_vendor_label
 
-    if activity.executor_kind == "service" and activity.source_id == KEYLESS_EXA_SOURCE_ID:
-        return i18n_t("hostedTools.keylessExa", lang)
+    if activity.source_id in _BUILTIN_LABELS:
+        return i18n_t(f"hostedTools.{_BUILTIN_LABELS[activity.source_id]}", lang)
     label = catalog_api_key_vendor_label(activity.provider) if activity.provider else None
     if label and activity.executor_kind != "service":
         return label
@@ -621,7 +630,7 @@ def _usd(value: float) -> str:
     if value >= 0.1:
         return f"{value:.2f}"
     # Small per-call figures keep their first significant digits: $0.006, not $0.01.
-    return f"{value:.3f}".rstrip("0").rstrip(".") if value >= 0.001 else f"{value:.4f}".rstrip("0").rstrip(".")
+    return f"{value:.3f}".rstrip("0").rstrip(".") if value >= 0.01 else f"{value:.4f}".rstrip("0").rstrip(".")
 
 
 def _clip(text: str, limit: int = LINE_SUBJECT_MAX_CHARS) -> str:
@@ -661,9 +670,9 @@ def _ran(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> l
     elif not vendor:
         mode = None
     elif activity.executor_kind in {"service", "local"}:
-        # Keep the released service labels; the built-in Exa row has no user name.
+        # Preserve the released search label; fetch names every executor alike.
         mode = (i18n_t("hostedTools.mode.service", lang, provider=vendor)
-                if activity.source_id == KEYLESS_EXA_SOURCE_ID else vendor)
+                if activity.source_id == KEYLESS_EXA_SOURCE_ID and activity.fetch is None else vendor)
     elif activity.mode == "proxy" and activity.model:
         mode = i18n_t("hostedTools.mode.proxyModel", lang, provider=vendor, model=_untrusted(activity.model, escape))
     else:
@@ -692,7 +701,7 @@ def _cost(activity: HostedActivity, lang: str) -> Optional[str]:
     cost = activity.cost
     if cost is None:
         return None
-    if (activity.executor_kind == "service" and activity.source_id == KEYLESS_EXA_SOURCE_ID
+    if (activity.source_id in _BUILTIN_LABELS
             and cost.usd == 0 and not activity.cost_at_least):
         text = i18n_t("hostedTools.cost.free", lang)
     elif cost.basis == "included":
@@ -728,18 +737,21 @@ def _switch_text(activity: HostedActivity, lang: str, escape: Callable[[str], st
     assert switch is not None
     # Switch labels are the projection's recorded names. Localize only an
     # unambiguous built-in label; never rename an ordinary user Source.
-    labels = {attempt.label for attempt in activity.attempts or () if attempt.source_id == KEYLESS_EXA_SOURCE_ID}
-    labels -= {attempt.label for attempt in activity.attempts or () if attempt.source_id != KEYLESS_EXA_SOURCE_ID}
-    names = i18n_t("hostedTools.listSeparator", lang).join(
-        i18n_t("hostedTools.keylessExa", lang) if name in labels else _untrusted(name, escape)
-        for name in switch.sources
-    )
-    provider = (i18n_t("hostedTools.keylessExa", lang) if activity.source_id == KEYLESS_EXA_SOURCE_ID
-                else _untrusted(switch.to, escape))
+    def name_label(name: str) -> str:
+        ids = {a.source_id for a in activity.attempts or () if a.label == name}
+        return _source_label(next(iter(ids)), name, lang, escape) if len(ids) == 1 else _untrusted(name, escape)
+
+    names = i18n_t("hostedTools.listSeparator", lang).join(name_label(name) for name in switch.sources)
+    provider = _source_label(activity.source_id, switch.to, lang, escape)
     if switch.reason_key == "reason.service_rate_limited":
         return i18n_t("hostedTools.rateLimitSwitch", lang, sources=names, provider=provider)
     failed = f"{names} {i18n_t(f'hostedTools.{switch.reason_key}', lang)}"
     return i18n_t("hostedTools.switch", lang, failed=failed, provider=provider)
+
+
+def _source_label(source_id: Optional[str], label: str, lang: str, escape: Callable[[str], str]) -> str:
+    key = _BUILTIN_LABELS.get(source_id)
+    return i18n_t(f"hostedTools.{key}", lang) if key else _untrusted(label, escape)
 
 
 def _attempt_items(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> Optional[str]:
@@ -749,7 +761,7 @@ def _attempt_items(activity: HostedActivity, lang: str, escape: Callable[[str], 
     if activity.completed or not activity.attempts:
         return None
     items = [
-        f"{i18n_t('hostedTools.keylessExa', lang) if attempt.source_id == KEYLESS_EXA_SOURCE_ID else _untrusted(attempt.label, escape)} {i18n_t(f'hostedTools.{key}', lang)}"
+        f"{_source_label(attempt.source_id, attempt.label, lang, escape)} {i18n_t(f'hostedTools.{key}', lang)}"
         for attempt in activity.attempts
         if (key := attempt.remedy_key or attempt.reason_key)
     ]
@@ -771,9 +783,17 @@ def hosted_line(activity: HostedActivity, lang: str, *, escape: Callable[[str], 
     emoji = "🖼" if activity.tool == "image_generate" else "🌐" if activity.tool == "web_fetch" else "🔎"
     parts: list[Optional[str]] = [f"{emoji} {i18n_t(f'hostedTools.tool.{activity.tool}', lang)}"]
     if activity.subject:
-        parts[0] += " " + i18n_t("hostedTools.quoted", lang, subject=_untrusted(_clip(activity.subject), escape))
+        subject = _untrusted(_clip(activity.subject), escape)
+        parts[0] += " " + (subject if activity.fetch is not None else i18n_t("hostedTools.quoted", lang, subject=subject))
     if activity.completed:
         parts.extend(_ran(activity, lang, escape))
+    elif activity.policy_sources is not None:
+        names = {a.source_id: a.label for a in activity.attempts or ()}
+        providers = i18n_t("hostedTools.listSeparator", lang).join(
+            _source_label(sid, names.get(sid, sid), lang, escape) for sid in activity.policy_sources
+        )
+        parts.append(i18n_t("hostedTools.fetch.policy", lang))
+        parts.append(i18n_t("hostedTools.fetch.forwarded" if providers else "hostedTools.fetch.notForwarded", lang, providers=providers))
     else:
         parts.append(
             i18n_t(f"hostedTools.status.{activity.status}", lang, error=_untrusted(_error_text(activity, lang), escape))

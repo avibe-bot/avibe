@@ -182,6 +182,7 @@ export type ModelsApi = {
   clearHostedTool(tool: HostedToolName, body: HostedToolClear): Promise<HostedToolsStatus>;
   /** S2 route: offered only when a service candidate carries a cooldown. */
   retrySearchService(sourceId: string): Promise<void>;
+  retryFetchService(sourceId: string): Promise<void>;
   /** Clear one refused reasoning effort on a Source model; answers that Source. */
   clearRefusedEffort(sourceId: string, modelId: string, effort: string): Promise<Source>;
   getRuntimeStatus(): Promise<RuntimeDependency>;
@@ -700,6 +701,9 @@ export const modelsApi: ModelsApi = {
   ).then((r) => r.hosted_tools),
   retrySearchService: (sourceId) => call(
     `/api/models/hosted-tools/web_search/services/${encodeURIComponent(sourceId)}/retry`, jsonInit('POST', {}),
+  ).then(() => undefined),
+  retryFetchService: (sourceId) => call(
+    `/api/models/hosted-tools/web_fetch/services/${encodeURIComponent(sourceId)}/retry`, jsonInit('POST', {}),
   ).then(() => undefined),
   clearRefusedEffort: (sourceId, modelId, effort) => call<{ source: Source }>(
     `/api/models/sources/${encodeURIComponent(sourceId)}/evidence/clear`,

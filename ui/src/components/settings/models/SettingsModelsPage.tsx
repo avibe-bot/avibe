@@ -12,6 +12,7 @@ import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext
 import { useToast } from '@/context/ToastContext';
 import { cn } from '@/lib/utils';
 import { AddApiKeyDialog } from './AddApiKeyDialog';
+import { webFetchTool } from './webFetch';
 import { AddSearchServiceDialog } from './AddSearchServiceDialog';
 import { searchServicesActive, webSearchTool, KEYLESS_EXA_SOURCE_ID, keylessExaSource } from './searchServices';
 import { BackendModelCatalogDialog, type CatalogFocus } from './BackendModelCatalogDialog';
@@ -1217,9 +1218,11 @@ export const SettingsModelsPage: React.FC = () => {
       ])
     : null;
   const hostedTools = useHostedTools(runtimeConfigurationVisible && (tab === 'tools' || tab === 'sources' || selectedSource !== null), selectedSourceIdentity, tab);
-  const searchTool = webSearchTool(foldRegionRead(hostedTools.read, {
+  const hostedStatus = foldRegionRead(hostedTools.read, {
     loading: () => null, unread: () => null, ready: (data) => data, degraded: (data) => data,
-  }));
+  });
+  const searchTool = webSearchTool(hostedStatus);
+  const fetchTool = webFetchTool(hostedStatus);
   const openSearchServices = (opener: HTMLButtonElement) => {
     apiKeyTriggerRef.current = opener;
     setSearchServiceOpen(true);
@@ -1623,7 +1626,7 @@ export const SettingsModelsPage: React.FC = () => {
                         selectSource({ sourceId, returnFocus: () => opener });
                       }}
                     />
-                    : tab === 'tools' ? <ToolsTab read={hostedTools.read} sources={sources} pending={hostedTools.pending} onSave={(tool, body) => void hostedTools.save(tool, body)} onClear={(tool, body) => void hostedTools.clear(tool, body)} onRetry={() => void hostedTools.refresh()} onAddService={openSearchServices} onOpenService={openSearchSource} onRetryService={(sourceId) => void hostedTools.retryService(sourceId)} />
+                    : tab === 'tools' ? <ToolsTab read={hostedTools.read} sources={sources} pending={hostedTools.pending} onSave={(tool, body) => void hostedTools.save(tool, body)} onClear={(tool, body) => void hostedTools.clear(tool, body)} onRetry={() => void hostedTools.refresh()} onAddService={openSearchServices} onOpenService={openSearchSource} onRetryService={(sourceId) => void hostedTools.retryService(sourceId)} onRetryFetch={(sourceId) => void hostedTools.retryFetch(sourceId)} />
                     : tab === 'usage' ? <UsageTab usage={usageRead} windowKey={usageWindow} onWindowChange={setUsageWindow} onRetry={retryUsage} />
                     : tab === 'logs' ? <RecentSwitchesCard events={eventsRead} sources={sourcesRead} onRetry={retryEvents} loadingMore={loadingEvents} onLoadMore={loadOlderEvents} />
                     : directEmpty ? <DirectHome agents={installedNativeAgents} switchFailures={switchFailures} connectingBackend={adoptAgent?.backend ?? null} onSwitch={switchToGateway} />
@@ -1772,6 +1775,8 @@ export const SettingsModelsPage: React.FC = () => {
                 serviceView={serviceDetailView}
                 onManageSource={() => setServiceDetailView(false)}
                 onOpenUsage={() => { selectSource(null); setTab('usage'); }}
+                onSaveFetch={(body) => void hostedTools.save('web_fetch', body)}
+                onRetryFetch={(sourceId) => void hostedTools.retryFetch(sourceId)}
                 onSaveSearch={(body) => void hostedTools.save('web_search', body)}
                 onRetryService={(sourceId) => void hostedTools.retryService(sourceId)}
                 hostedTools={hostedTools.read}
@@ -1788,7 +1793,7 @@ export const SettingsModelsPage: React.FC = () => {
             : <section className="grid min-h-0 flex-1 place-items-center px-5 py-12 text-center text-[12px] text-muted">{t('settings.models.sourceDetail.gone')}</section>}
         </DialogContent>
       </Dialog>
-      {searchServiceOpen && searchServicesActive(searchTool) && searchTool && <AddSearchServiceDialog tool={searchTool} pending={hostedTools.pending.has('web_search')} sourceReads={sourceCollectionReads} onClose={() => setSearchServiceOpen(false)} onAdded={(created) => void sourceAdded(created)} onViewOrder={() => { setSearchServiceOpen(false); setTab('tools'); }} onOpenSource={(sourceId) => {
+      {searchServiceOpen && searchServicesActive(searchTool) && searchTool && <AddSearchServiceDialog tool={searchTool} fetchTool={fetchTool} pending={hostedTools.pending.has('web_search')} sourceReads={sourceCollectionReads} onClose={() => setSearchServiceOpen(false)} onAdded={(created) => void sourceAdded(created)} onViewOrder={() => { setSearchServiceOpen(false); setTab('tools'); }} onOpenSource={(sourceId) => {
         setSearchServiceOpen(false);
         selectSource({ sourceId, returnFocus: () => apiKeyTriggerRef.current, serviceView: true });
       }} />}

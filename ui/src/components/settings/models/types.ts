@@ -1249,7 +1249,7 @@ export type HostedImageToolStatus = HostedToolBase & {
   image_offered_by: string[];
 };
 
-export type HostedToolStatus = HostedSearchToolStatus | HostedImageToolStatus;
+export type HostedToolStatus = HostedSearchToolStatus | HostedImageToolStatus | HostedWebFetchToolStatus;
 
 export type HostedFetchExecutorCandidate = Omit<HostedServiceExecutorCandidate, 'kind' | 'price' | 'settings'> & {
   kind: 'local' | 'service';
@@ -1268,7 +1268,7 @@ export type HostedWebFetchToolStatus = HostedSearchToolBase & {
   }[];
 };
 
-export type HostedToolsStatus = { tools: (HostedToolStatus | HostedWebFetchToolStatus)[] };
+export type HostedToolsStatus = { tools: HostedToolStatus[] };
 
 /** PUT /api/models/hosted-tools/<tool>, per field: an absent field is unchanged, `null` resets it. */
 export type HostedToolPut = {

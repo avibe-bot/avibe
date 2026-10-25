@@ -5,7 +5,7 @@
 import * as React from 'react';
 import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
-import { AtSign, Check, ChevronRight, CircleSlash, Download, FileImage, Globe, Image as ImageIcon, TriangleAlert, Type, Waypoints } from 'lucide-react';
+import { AtSign, Check, ChevronRight, CircleSlash, Download, FileImage, FileText, Globe, Image as ImageIcon, TriangleAlert, Type, Waypoints } from 'lucide-react';
 import clsx from 'clsx';
 
 import { ChatImage } from '../ui/chat-image';
@@ -17,7 +17,7 @@ import { hostedCompleted, type HostedActivity, type HostedActivityImage, type Ho
 
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {
   web_search: Globe,
-  web_fetch: Globe,
+  web_fetch: FileText,
   x_search: AtSign,
   image_generate: ImageIcon,
 };
@@ -38,8 +38,20 @@ const presetLabel = (provider: string | undefined): string | null =>
  *  neither stays as it is, as for a row stored without a Source. The IM line reads the same rule. */
 const SERVICE_RATE_LIMITED_REASON = ['reason', 'service_rate_limited'].join('.');
 
+const builtinKey = (sourceId: string | undefined): string | undefined => ({
+  src_exakeyless: 'keylessExa', src_localfetch: 'fetch.local', src_jinakeyless: 'fetch.jina',
+})[sourceId ?? ''];
+const sourceLabel = (sourceId: string | undefined, label: string, t: TFunction): string => {
+  const key = builtinKey(sourceId);
+  return key ? t(`chat.agentActivity.hosted.${key}`, { defaultValue: label }) as string : label;
+};
+const switchLabel = (card: HostedActivity, name: string, t: TFunction): string => {
+  const ids = [...new Set((card.attempts ?? []).filter((a) => a.label === name).map((a) => a.source_id))];
+  return ids.length === 1 ? sourceLabel(ids[0], name, t) : name;
+};
+
 const runnerLabel = (card: HostedActivity, t: TFunction): string | null => {
-  if (card.executor_kind === 'service' && card.source_id === KEYLESS_EXA_SOURCE_ID) return t('chat.agentActivity.hosted.keylessExa');
+  if (builtinKey(card.source_id)) return sourceLabel(card.source_id, '', t);
   const vendor = presetLabel(card.provider);
   if (vendor && card.executor_kind !== 'service') return vendor;
   return card.source_name ?? vendor ?? card.provider ?? null;
@@ -48,7 +60,7 @@ const runnerLabel = (card: HostedActivity, t: TFunction): string | null => {
 // Small per-call figures keep their first significant digits: $0.006, not $0.01.
 const formatUsd = (usd: number): string => {
   if (usd >= 0.1) return usd.toFixed(2);
-  const digits = usd >= 0.001 ? 3 : 4;
+  const digits = usd >= 0.01 ? 3 : 4;
   return usd.toFixed(digits).replace(/0+$/, '').replace(/\.$/, '');
 };
 
@@ -84,7 +96,7 @@ const useHostedCost = (card: HostedActivity): string | null => {
   const { t } = useTranslation();
   const cost = card.cost;
   if (!cost) return null;
-  const figure = card.executor_kind === 'service' && card.source_id === KEYLESS_EXA_SOURCE_ID && cost.usd === 0 && !cost.at_least
+  const figure = builtinKey(card.source_id) && cost.usd === 0 && !cost.at_least
     ? t('chat.agentActivity.hosted.cost.free') as string
     : cost.basis === 'included'
     ? t('chat.agentActivity.hosted.cost.included') as string
@@ -109,7 +121,7 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
     ) : (
       <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-destructive/40 bg-destructive/10 px-2 py-px text-[11px] font-medium text-destructive-ink">
         <TriangleAlert className="size-3" aria-hidden="true" />
-        {t(`chat.agentActivity.hosted.status.${card.status === 'incomplete' ? 'incomplete' : 'failed'}`)}
+        {card.policy_sources !== undefined ? t('chat.agentActivity.hosted.fetch.policy') : t(`chat.agentActivity.hosted.status.${card.status === 'incomplete' ? 'incomplete' : 'failed'}`)}
       </span>
     );
   }
@@ -133,7 +145,7 @@ export const HostedModeChip: React.FC<{ card: HostedActivity }> = ({ card }) => 
     return (
       <span className="inline-flex shrink-0 items-center gap-1 rounded-full border border-cyan/40 bg-cyan-soft px-2 py-px text-[11px] font-medium text-cyan-ink">
         <Waypoints className="size-3" aria-hidden="true" />
-        {t('chat.agentActivity.hosted.mode.service', { provider: vendor })}
+        {card.executor_kind === 'local' ? vendor : t('chat.agentActivity.hosted.mode.service', { provider: vendor })}
       </span>
     );
   }
@@ -231,10 +243,8 @@ const HostedAttemptNotes: React.FC<{ card: HostedActivity }> = ({ card }) => {
   if (hostedCompleted(card)) {
     const note = card.switch;
     if (!note) return null;
-    const labels = new Set((card.attempts ?? []).filter((a) => a.source_id === KEYLESS_EXA_SOURCE_ID).map((a) => a.label));
-    (card.attempts ?? []).filter((a) => a.source_id !== KEYLESS_EXA_SOURCE_ID).forEach((a) => labels.delete(a.label));
-    const sources = note.sources.map((name) => labels.has(name) ? t('chat.agentActivity.hosted.keylessExa') : name).join(t('chat.agentActivity.hosted.listSeparator'));
-    const provider = card.source_id === KEYLESS_EXA_SOURCE_ID ? t('chat.agentActivity.hosted.keylessExa') : note.to;
+    const sources = note.sources.map((name) => switchLabel(card, name, t)).join(t('chat.agentActivity.hosted.listSeparator'));
+    const provider = sourceLabel(card.source_id, note.to, t);
     const failed = `${sources} ${say(note.reason_key)}`;
     return (
       <p className="mx-1.5 mb-1 mt-0.5 flex items-center gap-1.5 rounded-md border border-gold/40 bg-gold/10 px-2.5 py-1.5 text-[11px] text-foreground" data-hosted-switch={card.call_id}>
@@ -245,9 +255,15 @@ const HostedAttemptNotes: React.FC<{ card: HostedActivity }> = ({ card }) => {
       </p>
     );
   }
+  if (card.policy_sources !== undefined) {
+    const providers = card.policy_sources.map((sid) => sourceLabel(sid, card.attempts?.find((a) => a.source_id === sid)?.label ?? sid, t)).join(t('chat.agentActivity.hosted.listSeparator'));
+    return <p className="mx-1.5 mb-1 mt-0.5 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-[11px] text-destructive-ink" data-hosted-policy={card.call_id}>
+      {t('chat.agentActivity.hosted.fetch.policy')} · {t(providers ? 'chat.agentActivity.hosted.fetch.forwarded' : 'chat.agentActivity.hosted.fetch.notForwarded', { providers })}
+    </p>;
+  }
   const items = (card.attempts ?? [])
     .filter((attempt) => attempt.remedy_key || attempt.reason_key)
-    .map((attempt) => `${attempt.source_id === KEYLESS_EXA_SOURCE_ID ? t('chat.agentActivity.hosted.keylessExa') : attempt.label} ${say(attempt.remedy_key ?? attempt.reason_key)}`);
+    .map((attempt) => `${sourceLabel(attempt.source_id, attempt.label, t)} ${say(attempt.remedy_key ?? attempt.reason_key)}`);
   if (items.length === 0) return null;
   return (
     <p className="mx-1.5 mb-1 mt-0.5 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-1.5 text-[11px] text-destructive-ink" data-hosted-attempts={card.call_id}>
@@ -256,9 +272,40 @@ const HostedAttemptNotes: React.FC<{ card: HostedActivity }> = ({ card }) => {
   );
 };
 
+const HostedFetchDetail: React.FC<{ card: HostedActivity; cost: string | null }> = ({ card, cost }) => {
+  const { t, i18n } = useTranslation();
+  const [quote, setQuote] = React.useState(false);
+  const record = card.fetch!;
+  const unknown = t('chat.agentActivity.hosted.fetch.unknown');
+  const number = (value: number | null) => value === null ? unknown : new Intl.NumberFormat(i18n.language).format(value);
+  const row = (ordinal: number, title: React.ReactNode, body: React.ReactNode) => <li className="flex gap-2.5 border-b border-border px-2.5 py-2 last:border-b-0"><span className="mt-px inline-flex size-[18px] shrink-0 items-center justify-center rounded border border-cyan/30 bg-cyan-soft text-[10px] font-semibold text-cyan-ink">{ordinal}</span><div className="min-w-0 flex-1"><div className="text-[12px] font-medium text-foreground">{title}</div><div className="break-words text-[11px] leading-relaxed text-muted">{body}</div></div></li>;
+  return <div className="mx-1.5 mb-1 mt-0.5 overflow-hidden rounded-md border border-border bg-foreground/[0.03]" data-hosted-fetch={card.call_id}>
+    <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5 text-[11px] text-muted"><Waypoints className="size-3 text-cyan-ink" aria-hidden />{[runnerLabel(card, t), t('chat.agentActivity.hosted.fetch.budget'), record.truncated && t('chat.agentActivity.hosted.fetch.truncated')].filter(Boolean).join(' · ')}</div>
+    <ol>
+      {row(1, <>{record.title ?? unknown} <span className="ml-2 font-normal text-muted">{record.source_content_type ?? record.content_type ?? unknown}</span></>, <dl className="grid grid-cols-[auto_1fr] gap-x-2">
+        {(['requested_url', 'final_url', 'canonical_url', 'content_type', 'retrieved_at'] as const).map((key) => <React.Fragment key={key}><dt>{t(`chat.agentActivity.hosted.fetch.${key}`)}</dt><dd className="break-all">{record[key] ?? unknown}</dd></React.Fragment>)}
+      </dl>)}
+      {row(2, t('chat.agentActivity.hosted.fetch.sizes'), <><p>{t('chat.agentActivity.hosted.fetch.source_size_bytes')}: {number(record.source_size_bytes)} · {t('chat.agentActivity.hosted.fetch.size_bytes')}: {number(record.size_bytes)}</p><p>{t('chat.agentActivity.hosted.fetch.retained', { count: Array.from(record.content).length })}</p></>)}
+      {row(3, t('chat.agentActivity.hosted.fetch.truncation_reason'), t(record.truncation_reason === 'budget' ? 'chat.agentActivity.hosted.fetch.budgetReason' : record.truncation_reason === 'provider_limit' ? 'chat.agentActivity.hosted.fetch.providerReason' : 'chat.agentActivity.hosted.fetch.complete'))}
+      {row(4, <>{t('chat.agentActivity.hosted.fetch.attempts')} <span className="ml-2 font-normal text-muted">{cost}</span></>, <>
+        <ul>{(card.attempts ?? []).map((attempt, index) => <li key={index} className="flex flex-wrap gap-x-1.5">
+          <span>{sourceLabel(attempt.source_id, attempt.label, t)}</span><span>· {attempt.reason_key ? serverText(t, `chat.agentActivity.hosted.${attempt.reason_key}`) : t('chat.agentActivity.hosted.status.completed')}</span>
+          {attempt.cost && <span>· {attempt.cost.basis === 'included' ? t('chat.agentActivity.hosted.cost.included') : attempt.cost.usd === 0 ? t('chat.agentActivity.hosted.cost.free') : attempt.cost.usd !== undefined ? `${attempt.cost.basis === 'list' || attempt.cost.estimate ? '≈ ' : ''}$${formatUsd(attempt.cost.usd)}` : unknown}</span>}
+          {attempt.retry_at && <span>· {attempt.retry_at}</span>}
+        </li>)}</ul>
+        {card.duration_ms !== undefined && <p>{t('chat.agentActivity.hosted.duration', { seconds: card.duration_ms / 1000 })}</p>}
+        {record.transport_degraded && <p>{t('chat.agentActivity.hosted.fetch.degraded')}: {record.transport_degraded_reason ?? unknown}</p>}
+      </>)}
+    </ol>
+    {record.error && <p className="border-t border-border px-3 py-2 text-[12px] text-destructive-ink">{(record.error_code && serverText(t, `chat.agentActivity.hosted.${record.error_code.startsWith('service_') ? 'fetchErrorCode' : 'errorCode'}.${record.error_code}`)) || record.error}</p>}
+    {record.content && <div className="border-t border-border px-3 py-2"><button type="button" aria-expanded={quote} className="text-[11px] text-muted hover:text-foreground" onClick={() => setQuote((open) => !open)}>{t('chat.agentActivity.hosted.fetch.quote')}</button>{quote && <pre className="mt-2 max-h-96 overflow-auto whitespace-pre-wrap break-words font-sans text-[12px]">{record.content}</pre>}</div>}
+  </div>;
+};
+
 const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
   const { t } = useTranslation();
   const cost = useHostedCost(card);
+  if (card.fetch) return <HostedFetchDetail card={card} cost={cost} />;
   const completed = hostedCompleted(card);
   const where = completed ? [card.source_id === KEYLESS_EXA_SOURCE_ID ? t('chat.agentActivity.hosted.keylessExa') : card.source_name ?? runnerLabel(card, t), card.model].filter(Boolean).join(' · ') : '';
   const ran = card.executor_kind === 'service' ? 'ranService' : RAN_KEY[card.mode];
@@ -277,22 +324,6 @@ const HostedDetail: React.FC<{ card: HostedActivity }> = ({ card }) => {
               ? <ImageIcon className="size-3 shrink-0 text-cyan-ink" aria-hidden="true" />
               : <Waypoints className="size-3 shrink-0 text-cyan-ink" aria-hidden="true" />)}
           <span className="min-w-0">{facts.join(' · ')}</span>
-        </div>
-      )}
-      {card.fetch && (
-        <div className="flex flex-col gap-2 px-2.5 py-2 text-[12px]" data-hosted-fetch={card.call_id}>
-          {card.fetch.title && <strong>{card.fetch.title}</strong>}
-          <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 break-all text-muted">
-            {(['requested_url', 'final_url', 'canonical_url', 'content_type', 'source_content_type', 'size_bytes', 'source_size_bytes', 'retrieved_at', 'truncation_reason'] as const)
-              .map((key) => card.fetch?.[key] != null && <React.Fragment key={key}><dt>{t(`chat.agentActivity.hosted.fetch.${key}`)}</dt><dd>{String(card.fetch?.[key])}</dd></React.Fragment>)}
-          </dl>
-          {card.fetch.transport_degraded && <p>{t('chat.agentActivity.hosted.fetch.degraded')}: {card.fetch.transport_degraded_reason}</p>}
-          {/* A quoted document is inert text: no active HTML, links, remote images or page instructions. */}
-          <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words font-sans">{card.fetch.content}</pre>
-          <ul>{card.attempts?.map((attempt, index) => <li key={index}>
-            {attempt.label} · {attempt.reason_key ? serverText(t, `chat.agentActivity.hosted.${attempt.reason_key}`) : t(`chat.agentActivity.hosted.status.${attempt.outcome}`)}
-            {attempt.cost?.usd !== undefined && ` · $${formatUsd(attempt.cost.usd)}`}
-          </li>)}</ul>
         </div>
       )}
       {(card.status === 'failed' || card.status === 'incomplete') && card.error && (

@@ -2402,7 +2402,7 @@
           "generate": "生成"
         },
         "tool": {
-          "web_fetch": {"name": "网页读取", "inline": "网页读取", "description": "读取网页，将文档作为引用内容呈现。"},
+          "web_fetch": {"name": "网页读取", "inline": "网页读取", "description": "读取一个网页的正文交给模型；超出上限会截断并注明。"},
           "web_search": {
             "name": "网页搜索",
             "inline": "网页搜索",
@@ -2521,6 +2521,22 @@
         "saveUnconfirmed": "无法确认{{toolInline}}设置是否已保存，正在从服务器重新读取，请确认后再重试。",
         "clearFailed": "{{toolInline}}拒绝记录未能清除，请重试。",
         "clearUnconfirmed": "无法确认{{toolInline}}拒绝记录是否已清除，正在从服务器重新读取，请确认后再重试。"
+      },
+      "webFetch": {
+        "dialogTitle": "添加搜索 / 读取服务", "dialogDescription": "搜索与读取共用服务密钥，但开关和执行顺序彼此独立。内置的免费执行者无需添加。", "noModels": "提供搜索与网页读取，不提供模型。",
+        "endpoints": {"tavily": "https://api.tavily.com/extract", "exa": "https://api.exa.ai/contents", "deepseek": "https://api.deepseek.com/v1/tools/fetch", "exa-mcp": "https://mcp.exa.ai/mcp", "jina-reader": "https://r.jina.ai/"},
+        "order": "读取顺序", "caption": "模型调用 web_fetch 时按这个顺序读取；失败自动换下一个。默认：本机 → 已配置服务 → Exa（免费） → Jina Reader（免费）；可调整顺序。",
+        "use": "用于网页读取", "unused": "未用于网页读取", "kind": "读取服务", "local": "本机", "add": "添加读取服务",
+        "searchBadge": "搜索", "fetchBadge": "读取", "viewOrder": "查看读取顺序", "price": "${{usd}} / 千页",
+        "egress": "本机读取直接从此 Avibe 运行时访问网页，网站会看到它的出口 IP 和浏览器式请求；交给服务读取时，服务会收到网址。",
+        "custody": "已配置服务的密钥由网关保管；本机、Exa（免费）和 Jina Reader（免费）都不需要密钥。",
+        "vendorName": {"local": "本机", "exa-mcp": "Exa（免费）", "jina-reader": "Jina Reader（免费）"},
+        "row": {"local": "Chrome 150 指纹 · HTML / PDF / 文本 · 不执行 JS", "tavily": "用 Tavily 的密钥 · Extract 基础", "exa": "用 Exa 的密钥 · Contents", "deepseek": "用官方 DeepSeek 的密钥 · Fetch", "exa-mcp": "与网页搜索共用按 IP 的限流", "jina-reader": "每分钟 20 次 · 由 Jina 渲染 JS · 默认最后兜底"},
+        "localDetail": "默认使用 Chrome 150 浏览器画像、HTTP/2。原生传输无法加载时改用普通 HTTP/2，并在调用记录中标记原因。不执行 JavaScript，不读取用户 Cookie 或登录凭据。支持 HTML、PDF、纯文本、Markdown 和 JSON。",
+        "limits": "整条调用最长 180 秒，每次尝试 30 秒；本机文本上限 16 MiB，PDF 32 MiB；给模型的完整结果最多 12,000 估算 token（48,000 UTF-8 字节），超出会明确截断。",
+        "exaDetail": "搜索与读取共用 Exa 的 IP 限流和冷却；两项开关独立。无须密钥。",
+        "jinaDetail": "无密钥每分钟 20 次（2026-10-24）。Jina 在其服务端处理 JavaScript；实际可用性与共享出口限流有关。默认最后兜底，调整顺序后按新位置执行。",
+        "terms": "Jina / Elastic 条款", "endpoint": "接口", "tavilyPrice": "5 个网址 1 credit（摊算）", "localPrice": "从你的机器直接读取", "builtInPrice": "内置 · 无需密钥或设置"
       },
       "searchServices": {
         "subtitle": "Vibey 在对话中可使用的工具。搜索会把查询发给执行它的厂商或搜索服务，失败时可能改由顺序中的下一个重试；图片提示词会发给图片模型的厂商。按量付费的供应商和搜索服务按各自的规则计费。",
@@ -5114,7 +5130,9 @@
           "service_busy": "网页读取服务正忙。"
         },
         "fetch": {
-          "characters": "{{count}} 字符", "truncated": "已截断", "degraded": "传输回退",
+          "characters": "{{count}} 字", "truncated": "已截断", "degraded": "传输回退",
+          "local": "本机", "jina": "Jina Reader（免费）", "policy": "本机策略拒绝", "notForwarded": "未转发第三方", "forwarded": "此前已发给 {{providers}}",
+          "budget": "单次上限约 12,000 token", "budgetReason": "正文超过单次读取上限，末尾已注明截断。", "providerReason": "服务商限制了输出；网页内容可能不完整。", "complete": "未截断", "unknown": "未提供", "attempts": "执行记录", "quote": "查看引用正文（非指令）", "retained": "交给模型 {{count}} 字", "sizes": "大小",
           "requested_url": "请求网址", "final_url": "最终网址", "canonical_url": "规范网址",
           "content_type": "内容类型", "source_content_type": "原始内容类型",
           "size_bytes": "内容字节数", "source_size_bytes": "原始字节数", "retrieved_at": "读取时间",
@@ -5174,6 +5192,7 @@
           "proxyModel": "由 {{provider}} 代理 · {{model}}"
         },
         "repair": {
+          "retryFetch": "可稍后重试或在 模型 › 工具 › 网页读取 中立即重试",
           "retrySearch": "暂时限流，可稍后重试或在 模型 › 工具 中立即重试",
           "disabled": "需要在 模型 › 工具 中启用网页搜索",
           "fetch_disabled": "需要启用网页读取",
