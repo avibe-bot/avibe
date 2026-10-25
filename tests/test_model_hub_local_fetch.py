@@ -1,0 +1,411 @@
+"""WF-LOCAL-003: extraction and local orchestration have no rendering side effects.
+
+Tables distinguish target failures from policy/credential refusals; fake transports
+are confined to this fixture, while the socket boundary is tested separately.
+"""
+import asyncio
+import io
+import json
+import sys
+import time
+
+import pytest
+
+from core.handlers.model_hub import fetch_worker as worker
+from core.handlers.model_hub import local_fetch
+from core.handlers.model_hub.fetch_extract import extract_page, inert_markdown
+from core.handlers.model_hub.fetch_policy import CheckedTarget, FetchFailure, parse_url
+from core.handlers.model_hub.fetch_transport import HopResponse
+
+
+@pytest.mark.parametrize("body,mime,expected", [
+    (b"# Page\n\nReadable text.", "text/markdown", "Readable text."),
+    (b"plain text", "text/plain", "plain text"),
+    (b'{"hello": [1,2]}', "application/json", '"hello"'),
+    (b"{not json", "application/json", "{not json"),
+    (b"<html><title>Heading</title><article><h1>Heading</h1><p>A complete readable article explains the test document.</p></article></html>", "text/html", "complete readable article"),
+    ("<meta charset='gb18030'><article><p>这是网页的正文，编码由元数据提供。</p></article>".encode("gb18030"), "text/html", "这是网页的正文"),
+])
+def test_formats_are_read_without_network(body, mime, expected):
+    page = extract_page(body, mime, "https://example.com/docs/page")
+    assert expected in page.content
+    assert page.content_type == "text/markdown"
+    assert page.source_content_type == mime
+
+
+@pytest.mark.parametrize("body,mime,code,terminal", [
+    (b"", "text/plain", "fetch_target_unreadable", False),
+    (b"  ", "application/json", "fetch_target_unreadable", False),
+    (b"", "text/html", "fetch_target_unreadable", False),
+    (b"  ", "text/html", "fetch_target_unreadable", False),
+    (b"<!-- only a comment -->", "text/html", "fetch_target_unreadable", False),
+    (b"PK...", "application/zip", "fetch_unsupported_content", False),
+    (b"<html><script src='/app.js'></script><div id='app'></div></html>", "text/html", "fetch_js_shell", False),
+    (b"<form id='challenge-form'>Checking</form>", "text/html", "fetch_challenge", False),
+    (b"<form><input type='password'></form>", "text/html", "fetch_refused", True),
+    (b"Access denied", "text/plain", "fetch_challenge", False),
+])
+def test_unreadable_formats_fail_over_but_login_is_terminal(body, mime, code, terminal):
+    with pytest.raises(FetchFailure) as raised:
+        extract_page(body, mime, "https://example.com/")
+    assert (raised.value.code, raised.value.terminal) == (code, terminal)
+
+
+def test_public_article_with_login_widget_and_xhtml_declaration_is_readable():
+    text = b'''<?xml version="1.0" encoding="UTF-8"?><html><head><title>Public article</title></head>
+    <body><header><form><input type="password">Sign in</form></header><article><h1>Public article</h1>
+    <p>This complete readable article is available without authentication. Its header includes an unrelated login widget.</p>
+    </article></body></html>'''
+    for mime in ("text/html", "application/xhtml+xml"):
+        assert "without authentication" in extract_page(text, mime, "https://example.com/").content
+
+
+@pytest.mark.parametrize("mime", ["text/plain", "text/markdown"])
+def test_large_text_is_bounded_before_markdown_token_construction(mime):
+    source = ("A readable paragraph with a [link](https://example.com/).\n\n" * 150000).encode()
+    page = extract_page(source, mime, "https://example.com/")
+    assert page.content_overflow and "readable paragraph" in page.content
+    assert len(page.content) < 50000
+
+
+def test_plain_text_preserves_literal_markup_and_numbered_lines():
+    text = 'Usage: tool <input-file> <output-file>\nstd::vector<int> v;\n\n<div>literal</div>\n\n[1]: https://example.com/ref\n1. One\n2. Two'
+    page = extract_page(text.encode(), "text/plain", "https://example.com/")
+    assert text in page.content
+    numbered = inert_markdown("7. Seven\n8. Eight", "https://example.com/")
+    assert "7. Seven" in numbered and "8. Eight" in numbered
+
+
+def test_pdf_text_is_quoted_not_interpreted_as_markup():
+    from pypdf import PdfWriter
+    from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject
+    writer = PdfWriter()
+    page = writer.add_blank_page(width=600, height=800)
+    font = DictionaryObject({NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"), NameObject("/BaseFont"): NameObject("/Helvetica")})
+    page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject("/F1"): font})})
+    stream = DecodedStreamObject()
+    stream.set_data(b"BT /F1 12 Tf 20 700 Td (tool <input-file> std::vector<int>) Tj ET")
+    page[NameObject("/Contents")] = stream
+    output = io.BytesIO()
+    writer.write(output)
+    result = extract_page(output.getvalue(), "application/pdf", "https://example.com/")
+    assert "[Page 1]" in result.content and "tool <input-file> std::vector<int>" in result.content
+
+
+def test_inert_links_images_html_and_metadata():
+    page = extract_page(b'''<html><title>A title</title><link rel="canonical" href="../canonical">
+    <article><h1>A heading</h1><p>Readable article with <a href="../next">next page</a>
+    and <a href="javascript:alert(1)">unsafe link</a>, and meaningful paragraph text.</p>
+    <script>alert('secret')</script><img src="https://images.example/x"><form>unwanted</form></article></html>''',
+                        "text/html", "https://example.com/docs/page")
+    assert page.title == "A title"
+    assert page.canonical_url == "https://example.com/canonical"
+    assert "https://example.com/next" in page.content
+    for unsafe in ("javascript:", "<script", "images.example", "unwanted", "secret"):
+        assert unsafe not in page.content
+    result = inert_markdown("[relative](../x) ![alt](https://img.example/x) <script>bad()</script> [ref][r]\n\n[r]: https://good.example/x", "https://example.com/docs/p")
+    assert "https://example.com/x" in result and "https://good.example/x" in result
+    assert "img.example" not in result and "bad()" not in result
+
+
+def test_exact_challenge_text_inside_document_is_not_a_refusal():
+    page = extract_page(b"This article discusses the message Access denied in a web application.", "text/plain", "https://example.com/")
+    assert "Access denied" in page.content
+
+
+def test_charset_fallback_alternate_and_refresh():
+    assert extract_page(b"text \xff", "text/plain", "https://example.com/").charset_fallback
+    for kind, markup in (("alternate", '<link rel="alternate" type="text/markdown" href="/page.md">'),
+                         ("refresh", '<meta http-equiv="refresh" content="0; url=/next">')):
+        page = extract_page((markup + "<article><p>Readable document for the alternative format.</p></article>").encode(),
+                            "text/html", "https://example.com/")
+        assert page.follow_kind == kind
+        assert page.follow_url.startswith("https://example.com/")
+    page = extract_page(b'<link rel="alternate" type="text/markdown" href="https://other.example/x"><p>Retained text.</p>',
+                        "text/html", "https://example.com/")
+    assert page.follow_url is None
+
+
+def test_encrypted_and_textless_pdf_fail_over():
+    from pypdf import PdfWriter
+    for encrypted in (False, True):
+        writer = PdfWriter()
+        writer.add_blank_page(width=100, height=100)
+        if encrypted:
+            writer.encrypt("not-available")
+        data = io.BytesIO()
+        writer.write(data)
+        with pytest.raises(FetchFailure, match="fetch_target_unreadable"):
+            extract_page(data.getvalue(), "application/pdf", "https://example.com/document")
+
+
+@pytest.fixture
+def local_fixture(monkeypatch):
+    calls, gates, events = [], [], []
+    responses = {}
+    def resolve(url):
+        address = parse_url(url)  # Real syntax/literal policy, only DNS is fixture-owned.
+        gates.append(address.url)
+        return CheckedTarget(address, ("8.8.8.8",))
+    def hop(target, headers, budget, timeout, on_sent):
+        on_sent()
+        calls.append((target.address.url, headers))
+        item = responses[target.address.url]
+        if isinstance(item, Exception):
+            raise item
+        return item
+    monkeypatch.setattr(worker, "resolve_target", resolve)
+    monkeypatch.setattr(worker, "native_available", lambda: (True, None))
+    monkeypatch.setattr(worker, "curl_hop", hop)
+    monkeypatch.setattr(worker, "httpx_hop", lambda *a: pytest.fail("sent target failure retried on degraded transport"))
+    return responses, calls, gates, events
+
+
+def test_cookie_jar_bounds_outgoing_header_and_validates_prefixes():
+    jar = worker.OriginCookies()
+    address = parse_url("https://example.com/doc")
+    jar.receive(address, [("set-cookie", f"cookie{i}={'x' * 3900}; Path=/") for i in range(70)])
+    assert len(jar.values) == 64
+    assert len(jar.header(address).encode()) <= 48 * 1024
+    jar = worker.OriginCookies()
+    jar.receive(address, [("set-cookie", "__Host-bad=1; Path=/"),
+                          ("set-cookie", "__Secure-bad=1"),
+                          ("set-cookie", "good=1; Secure; Path=/")])
+    assert jar.header(address) == "good=1"
+
+
+def test_rfc_response_cookies_ignore_attributes_but_remain_origin_only():
+    jar = worker.OriginCookies()
+    address = parse_url("https://www.example.com/doc")
+    jar.receive(address, [("set-cookie", 'prefs={"a":1}; Domain=.example.com; Path=/; Secure; HttpOnly; Priority=High; foo=bar'),
+                          ("set-cookie", "partitioned=yes; Secure; Partitioned; Path=/")])
+    assert jar.header(address) == 'prefs={"a":1}; partitioned=yes'
+    assert jar.header(parse_url("https://other.example.com/doc")) == ""
+    assert jar.header(parse_url("https://example.com/doc")) == ""
+
+
+def test_redirect_cookie_scope_and_one_logical_send(local_fixture):
+    responses, calls, gates, events = local_fixture
+    responses.update({
+        "https://example.com/start": HopResponse(302, [("location", "/next"), ("set-cookie", "visit=1; Path=/; Secure")], b""),
+        "https://example.com/next": HopResponse(302, [("location", "https://other.example/final")], b""),
+        "https://other.example/final": HopResponse(200, [("content-type", "text/markdown")], b"# Document\n\nUseful content."),
+    })
+    result = worker.fetch_document("https://example.com/start", "en", events.append)
+    assert result["final_url"] == "https://other.example/final"
+    assert calls[1][1]["Cookie"] == "visit=1" and "Cookie" not in calls[2][1]
+    assert [e for e in events if e["event"] == "sent"] == [{"event": "sent"}]
+    assert all(url in gates for url, _ in calls)
+    events.clear()
+    worker.fetch_document("https://other.example/final", "en", events.append)
+    assert "Cookie" not in calls[-1][1]
+
+
+def test_native_load_failure_selects_honest_transport_before_send(local_fixture, monkeypatch):
+    responses, calls, gates, events = local_fixture
+    monkeypatch.setattr(worker, "native_available", lambda: (False, "native_library_unavailable"))
+    def degraded(target, headers, budget, timeout, on_sent):
+        assert headers["User-Agent"].startswith("Avibe/")
+        assert not any(key.lower().startswith(("sec-ch-", "sec-fetch-")) for key in headers)
+        on_sent()
+        return HopResponse(200, [("content-type", "text/plain")], b"Readable degraded result.")
+    monkeypatch.setattr(worker, "httpx_hop", degraded)
+    monkeypatch.setattr(worker, "curl_hop", lambda *a: pytest.fail("unavailable native library was used"))
+    result = worker.fetch_document("https://example.com/", "en", events.append)
+    assert result["transport_degraded"] and result["transport_degraded_reason"] == "native_library_unavailable"
+
+
+@pytest.mark.parametrize("status,code,terminal", [
+    (401, "fetch_refused", True), (403, "fetch_challenge", False),
+    (404, "fetch_target_unreadable", False), (410, "fetch_target_unreadable", False),
+    (429, "service_rate_limited", False), (503, "fetch_unavailable", False),
+])
+def test_local_http_outcome_table(local_fixture, status, code, terminal):
+    responses, calls, gates, events = local_fixture
+    responses["https://example.com/"] = HopResponse(status, [("retry-after", "3600")], b"not content")
+    with pytest.raises(FetchFailure) as raised:
+        worker.fetch_document("https://example.com/", "en", events.append)
+    assert (raised.value.code, raised.value.terminal) == (code, terminal)
+    assert len(calls) == 1
+    if status in {429, 503}:
+        assert raised.value.retry_after == "3600"
+
+
+def test_503_explicit_challenge_has_no_transient_host_class(local_fixture):
+    responses, calls, gates, events = local_fixture
+    responses["https://example.com/"] = HopResponse(503, [("cf-mitigated", "challenge")], b"challenge")
+    with pytest.raises(FetchFailure, match="fetch_challenge"):
+        worker.fetch_document("https://example.com/", "en", events.append)
+
+
+def test_redirect_to_private_terminates_without_second_connect(local_fixture):
+    responses, calls, gates, events = local_fixture
+    responses["https://example.com/"] = HopResponse(302, [("location", "http://169.254.169.254/latest")], b"")
+    with pytest.raises(FetchFailure) as raised:
+        worker.fetch_document("https://example.com/", "en", events.append)
+    assert (raised.value.code, raised.value.terminal) == ("fetch_url_blocked", True)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("alternate_outcome", ["unreadable", "blocked", "success", "rate_limited"])
+def test_one_markdown_alternate_retains_original_except_policy_refusal(local_fixture, monkeypatch, alternate_outcome):
+    responses, calls, gates, events = local_fixture
+    responses["https://example.com/"] = HopResponse(200, [("content-type", "text/html")],
+        b'<title>Original title</title><link rel="canonical" href="/canonical"><link rel="alternate" type="text/markdown" href="/alternate"><article><p>Original readable HTML article text.</p></article>')
+    responses["https://example.com/alternate"] = (HopResponse(200, [("content-type", "text/markdown")], b"Better Markdown body.")
+                                               if alternate_outcome == "success" else HopResponse(404, [], b""))
+    if alternate_outcome == "rate_limited":
+        responses["https://example.com/alternate"] = HopResponse(429, [("retry-after", "3600")], b"")
+    if alternate_outcome == "blocked":
+        original = worker.resolve_target
+        def resolve(url):
+            if url.endswith("/alternate"):
+                raise FetchFailure("fetch_dns_unverified", terminal=True)
+            return original(url)
+        monkeypatch.setattr(worker, "resolve_target", resolve)
+        with pytest.raises(FetchFailure, match="fetch_dns_unverified"):
+            worker.fetch_document("https://example.com/", "en", events.append)
+        assert len(calls) == 1
+    else:
+        result = worker.fetch_document("https://example.com/", "en", events.append)
+        assert ("Better Markdown" if alternate_outcome == "success" else "Original readable") in result["content"]
+        if alternate_outcome == "rate_limited":
+            assert result["cooldown_code"] == "service_rate_limited" and result["retry_after"] == "3600"
+        assert result["title"] == "Original title" and result["canonical_url"] == "https://example.com/canonical"
+        assert len(calls) == 2
+
+
+async def test_gate_worker_and_initial_policy_failure_do_not_send():
+    engine = local_fetch.LocalFetchEngine()
+    assert await engine.check("https://8.8.8.8/", deadline=time.monotonic() + 5) == "https://8.8.8.8/"
+    with pytest.raises(FetchFailure, match="fetch_url_blocked"):
+        await engine.fetch("http://127.0.0.1/", deadline=time.monotonic() + 5)
+
+
+async def test_host_lock_serializes_requests_and_scrubs_worker_environment(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-owned-value-must-not-be-inherited")
+    script = '''import sys,time,json,os
+assert "OPENAI_API_KEY" not in os.environ
+sys.stdin.readline()
+print(json.dumps({"event":"host","host":"example.com"}),flush=True); sys.stdin.readline()
+print(json.dumps({"event":"sent"}),flush=True); sys.stdin.readline()
+time.sleep(.2)
+print(json.dumps({"event":"result","result":{"content":"done"}}),flush=True)
+'''
+    monkeypatch.setattr(local_fetch, "_WORKER", script)
+    engine, starts = local_fetch.LocalFetchEngine(), []
+    results = await asyncio.gather(*(engine.fetch("https://example.com/", deadline=time.monotonic() + 5,
+                                                  on_sent=lambda: starts.append(time.monotonic())) for _ in range(2)))
+    assert all(row["sent"] for row in results)
+    assert len(starts) == 2 and starts[1] - starts[0] >= .18
+
+
+@pytest.mark.parametrize("retained_html", [False, True])
+async def test_local_retry_after_is_host_scoped_and_degraded_failure_is_recorded(monkeypatch, retained_html):
+    script = '''import sys,json
+from urllib.parse import urlsplit
+request=json.loads(sys.stdin.readline())
+for event in [{"event":"transport","transport_degraded":True,"transport_degraded_reason":"native_library_unavailable"},
+              {"event":"host","host":urlsplit(request["url"]).hostname}, {"event":"sent"}]:
+ print(json.dumps(event),flush=True); sys.stdin.readline()
+print(json.dumps({"event":"failure","error_code":"service_rate_limited","retry_after":"3600","terminal":False}),flush=True)
+'''
+    if retained_html:
+        script = script.replace('{"event":"failure","error_code":"service_rate_limited","retry_after":"3600","terminal":False}',
+                                '{"event":"result","result":{"content":"retained HTML","cooldown_code":"service_rate_limited","retry_after":"3600"}}')
+    monkeypatch.setattr(local_fetch, "_WORKER", script)
+    engine, sent = local_fetch.LocalFetchEngine(), []
+    async def fetch(host):
+        return await engine.fetch(f"https://{host}/", deadline=time.monotonic() + 5, on_sent=lambda: sent.append(host))
+    first, second, other = await fetch("example.com"), await fetch("example.com"), await fetch("other.example")
+    assert first["transport_degraded"] and first["transport_degraded_reason"] == "native_library_unavailable"
+    if retained_html:
+        assert first["content"] == "retained HTML" and "error_code" not in first and "cooldown_code" not in first
+    assert engine._cooldowns["example.com"][0] >= time.time() + 3590
+    assert second["skipped"] == "cooling" and not second["sent"]
+    assert other["sent"] and sent == ["example.com", "other.example"]
+
+
+async def test_busy_host_does_not_starve_policy_gate_or_other_hosts(monkeypatch):
+    script = '''import sys,time,json
+from urllib.parse import urlsplit
+r=json.loads(sys.stdin.readline())
+if r["operation"] == "gate":
+ print(json.dumps({"event":"result","result":{"url":r["url"]}}),flush=True); sys.exit()
+host=urlsplit(r["url"]).hostname
+print(json.dumps({"event":"host","host":host}),flush=True); sys.stdin.readline()
+print(json.dumps({"event":"sent"}),flush=True); sys.stdin.readline()
+if host == "example.com": time.sleep(60)
+print(json.dumps({"event":"result","result":{"content":"other host"}}),flush=True)
+'''
+    monkeypatch.setattr(local_fetch, "_WORKER", script)
+    engine, started = local_fetch.LocalFetchEngine(), asyncio.Event()
+    tasks = [asyncio.create_task(engine.fetch("https://example.com/", deadline=time.monotonic() + 10, on_sent=started.set)) for _ in range(8)]
+    try:
+        await asyncio.wait_for(started.wait(), 5)
+        assert await engine.check("https://other.example/", deadline=time.monotonic() + 2) == "https://other.example/"
+        other = await engine.fetch("https://other.example/", deadline=time.monotonic() + 2)
+        assert other["sent"] and other["content"] == "other host"
+        queued = await engine.fetch("https://example.com/", deadline=time.monotonic() + .3)
+        assert queued["error_code"] == "service_busy" and not queued["sent"]
+        assert not engine._cooldowns
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def test_parent_memory_limit_kills_worker_and_keeps_known_alternate_fallback(monkeypatch):
+    script = '''import sys,time,json
+sys.stdin.readline()
+print(json.dumps({"event":"sent"}),flush=True); sys.stdin.readline()
+print(json.dumps({"event":"fallback","result":{"content":"original HTML","final_url":"https://example.com/"}}),flush=True); sys.stdin.readline()
+time.sleep(60)
+'''
+    monkeypatch.setattr(local_fetch, "_WORKER", script)
+    engine = local_fetch.LocalFetchEngine()
+    result = await engine.fetch("https://example.com/", deadline=time.monotonic() + .5)
+    assert result["sent"] and result["content"] == "original HTML" and "error_code" not in result
+    # Separate actual RSS-supervision case: lower only this fixture's threshold.
+    monkeypatch.setattr(local_fetch, "_MEMORY_LIMIT", 1)
+    monkeypatch.setattr(local_fetch, "_WORKER", "import sys,time; sys.stdin.readline(); time.sleep(60)")
+    started = time.monotonic()
+    result = await engine.fetch("https://example.com/", deadline=time.monotonic() + 5)
+    assert result["error_code"] == "fetch_unavailable" and time.monotonic() - started < 3
+
+
+async def test_policy_deadline_is_terminal_not_an_ordinary_transport_failure(monkeypatch):
+    script = '''import sys,time,json
+sys.stdin.readline()
+print(json.dumps({"event":"phase","phase":"policy"}),flush=True); sys.stdin.readline()
+time.sleep(60)
+'''
+    monkeypatch.setattr(local_fetch, "_WORKER", script)
+    result = await local_fetch.LocalFetchEngine().fetch("https://example.com/", deadline=time.monotonic() + .3)
+    assert result["error_code"] == "fetch_dns_unverified" and result["terminal"] and not result["sent"]
+
+
+async def test_timeout_and_stop_kill_and_reap_worker(monkeypatch):
+    # A test-owned worker simulates a parser that cannot yield to cancellation.
+    # The real parent must terminate it; no production network override exists.
+    script = "import sys,time; sys.stdin.readline(); print('{\"event\":\"sent\"}',flush=True); sys.stdin.readline(); time.sleep(60)"
+    monkeypatch.setattr(local_fetch, "_WORKER", script)
+    children = []
+    spawn = asyncio.create_subprocess_exec
+    async def capture(*args, **kwargs):
+        child = await spawn(*args, **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    engine = local_fetch.LocalFetchEngine()
+    sent = []
+    result = await engine.fetch("https://example.com/", deadline=time.monotonic() + 0.5, on_sent=lambda: sent.append(1))
+    assert result["error_code"] == "fetch_timeout" and result["sent"]
+    assert sent == [1] and children[0].returncode is not None
+    called = asyncio.Event()
+    task = asyncio.create_task(engine.fetch("https://example.com/", deadline=time.monotonic() + 30, on_sent=called.set))
+    await asyncio.wait_for(called.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert children[1].returncode is not None

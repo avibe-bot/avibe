@@ -268,7 +268,7 @@ Repository packaging facts checked at #2924's merge:
 | Linux x86_64 / aarch64, including WSL | `cp310-abi3` wheels for glibc 2.17+ and musl 1.2+. No system curl/browser/Homebrew prerequisite. |
 | Windows x86_64 / arm64 | Both wheel families exist; `install.ps1` currently chooses x64 CPython 3.12 on Windows Arm for other dependency constraints. Do not claim full native-Arm support. |
 | `install.sh`, `install.ps1`, `vibe/upgrade.py` | Normal wheel metadata resolves dependencies in the new install generation before launcher activation. Direct `uv tool install`/pip follows the same metadata; no fetch-time package install. |
-| `desktop/scripts/build-runtime-bundle.py`, `desktop/runtime-sources.json` | Existing macOS arm64/x64 and Windows x64 bundles use CPython 3.12.15, frozen hash-checked exports and binary-only dependency install. Add `lxml` to the bundle's binary-wheel allowlist/check alongside curl resources before bundle signing; no new Linux desktop bundle is implied. |
+| `desktop/scripts/build-runtime-bundle.py`, `desktop/runtime-sources.json` | Existing macOS arm64/x64 and Windows x64 bundles use CPython 3.12.15, frozen hash-checked exports and binary-only dependency install. The `required_binary_wheels` gate requires `curl-cffi`, `lxml`, Brotli and Zstandard native wheels; these must never enter the separate sdist-exception allowlist. After relocation, verify native imports, the offline `chrome150` preset, CA resources and extraction before hashing/signing. No new Linux desktop bundle is implied. |
 
 Use dependency markers for the supported CPython/OS/architecture wheel families;
 other combinations keep base HTTP/2 without trying to compile libcurl. Within
@@ -289,10 +289,16 @@ Local: five redirect hops, 16 MiB HTML/text/JSON or 32 MiB PDF, separately count
 on the wire and after decompression across all hops/alternates. Bound headers
 (64 KiB), URLs and cookies (64 entries, 4 KiB each); reject oversized announced
 lengths and abort streamed unknown lengths at the same cap. Bounded native body
-callbacks/transfer counters prevent an unbounded buffered response. Stop/cancel
-closes sockets; parsers run in a disposable process with hard wall-clock/resource
-bounds, terminated on expiry—not a timed-out thread continuing indefinitely.
-One local fetch in flight per host; its queue wait consumes the attempt deadline.
+callbacks/transfer counters prevent an unbounded buffered response. DNS, sockets,
+decoding and parsing run in one disposable process per fetch. All platforms have
+a 30-second hard wall timeout: Stop/expiry kills and reaps the process, closing
+its sockets rather than leaving a timed-out thread. The parent checks resident
+memory every 50 ms and kills at 768 MiB. Linux additionally applies kernel
+`RLIMIT_AS`/CPU limits; Windows uses a Job process-memory limit. macOS applies
+the kernel CPU limit plus parent RSS supervision only: brief overshoot between
+samples is possible, so this is **not a hard memory sandbox** (owner-approved
+implementation clarification, 2026-10-25). No extra daemon or VM is introduced.
+One local fetch is in flight per host; its queue wait consumes the attempt deadline.
 
 No browser profile, cookie store, Authorization, client certificate, environment
 credential, custom proxy or user secret. A fresh in-memory jar accepts only valid
