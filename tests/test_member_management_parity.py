@@ -118,10 +118,11 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 291
-    retry_route = "/api/models/hosted-tools/web_search/services/{source_id}/retry"
-    assert ("POST", retry_route) in endpoints
-    assert http_authorization_policy("POST", retry_route).minimum_role == "member"
+    assert len(endpoints) == 292
+    for tool in ("web_search", "web_fetch"):
+        retry_route = f"/api/models/hosted-tools/{tool}/services/{{source_id}}/retry"
+        assert ("POST", retry_route) in endpoints
+        assert http_authorization_policy("POST", retry_route).minimum_role == "member"
     assert ("GET", "/api/sessions/main") in endpoints
     assert http_authorization_policy("POST", "/api/vault/requests/{request_id}/approve-delete").minimum_role == "editor"
     # Approvers still read policy and remember duration; protection fields add a service check.

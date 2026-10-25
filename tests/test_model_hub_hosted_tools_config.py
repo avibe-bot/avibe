@@ -43,7 +43,8 @@ SOURCE = {
     "created_at": "2026-10-13T00:00:00Z",
     "credential_ref": "cred_src_xai00001",
 }
-ALL_TOOLS = ("web_search", "x_search", "image_generate")
+RELEASED_TOOLS = ("web_search", "x_search", "image_generate")
+KNOWN_TOOLS = (*RELEASED_TOOLS, "web_fetch")
 
 
 def _section(hosted_tools) -> dict:
@@ -58,7 +59,7 @@ def test_released_configs_load_with_every_tool_on_and_stay_without_the_section()
     section = json.loads((FIXTURES / "released_pre_vibey_consumer.json").read_text(encoding="utf-8"))
     config = ModelHubConfig.from_payload(section, repairing=True)
     assert config.hosted_tools == {}
-    assert enabled_tools(config) == ALL_TOOLS
+    assert enabled_tools(config) == RELEASED_TOOLS
     assert "hosted_tools" not in config.to_payload()
 
 
@@ -76,7 +77,7 @@ def test_hosted_tool_settings_round_trip_in_canonical_order():
             True, default_image=ModelHubImageModelChoice("src_xai00001", "grok-imagine-image"),
         ),
     }
-    assert list(config.to_payload()["hosted_tools"]) == list(ALL_TOOLS)
+    assert list(config.to_payload()["hosted_tools"]) == list(RELEASED_TOOLS)
     assert ModelHubConfig.from_payload(config.to_payload()).to_payload() == config.to_payload()
 
 
@@ -84,9 +85,9 @@ def test_hosted_tool_settings_round_trip_in_canonical_order():
 OFF = (False, None, None)
 DEGRADED = [
     # Damage never turns a cost-bearing tool on: a broken section or entry is off (AGENTS persisted-shape rule).
-    ("not-an-object", ["web_search"], dict.fromkeys(ALL_TOOLS, OFF), True),
+    ("not-an-object", ["web_search"], dict.fromkeys(KNOWN_TOOLS, OFF), True),
     # Present but null is damage, not absence.
-    ("null-section", None, dict.fromkeys(ALL_TOOLS, OFF), True),
+    ("null-section", None, dict.fromkeys(KNOWN_TOOLS, OFF), True),
     # An rc build's section: its keys and fields are unknown to v2, but each tool's opt-out survives.
     (
         "rc-era-section",
@@ -181,7 +182,7 @@ async def test_the_tools_api_writes_one_field_of_one_tool_at_a_time(tmp_path):
     status = service.hosted_tools_status()["hosted_tools"]
     _validate_status(status)
     by_name = {tool["name"]: tool for tool in status["tools"]}
-    assert list(by_name) == list(ALL_TOOLS) and all(tool["enabled"] for tool in status["tools"])
+    assert list(by_name) == list(RELEASED_TOOLS) and all(tool["enabled"] for tool in status["tools"])
     # The executor runs on the vendor's lightweight model, priced by the overlay's dated list price.
     (candidate,) = by_name["x_search"]["executor_candidates"]
     assert (candidate["source_id"], candidate["model_id"], candidate["billing"], candidate["relay"]) == (

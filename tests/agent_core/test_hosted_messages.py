@@ -330,12 +330,12 @@ def test_schema_and_reader_refuse_the_same_hosted_violations(payload):
 
 
 def test_a_stored_proxied_result_for_an_unknown_tool_loads_as_a_plain_result(caplog):
-    stored = _set(_set(PROXIED, ("tool_name",), "web_fetch"), ("is_error",), True)
+    stored = _set(_set(PROXIED, ("tool_name",), "future_unknown_tool"), ("is_error",), True)
 
     loaded = message_from_dict(stored)
 
     assert isinstance(loaded, ToolResultMessage)
-    assert loaded.tool_name == "web_fetch"
+    assert loaded.tool_name == "future_unknown_tool"
     assert loaded.hosted is None
     assert loaded.is_error is True
     assert message_to_dict(loaded) == {key: value for key, value in stored.items() if key != "hosted"}
@@ -422,10 +422,10 @@ def test_a_native_unknown_hosted_block_loads_as_portable_text(
 
 
 def test_new_hosted_result_for_an_unknown_tool_stays_strict():
-    with pytest.raises(ValueError, match="web_fetch is not a hosted tool"):
+    with pytest.raises(ValueError, match="future_unknown_tool is not a hosted tool"):
         ToolResultMessage(
             tool_call_id="call_unknown",
-            tool_name="web_fetch",
+            tool_name="future_unknown_tool",
             content=(TextBlock(text="result"),),
             hosted=_produced()[4].hosted,
         )
