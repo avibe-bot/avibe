@@ -77,7 +77,7 @@ def test_agent_enable_disable_cli_toggles_enabled_state(tmp_path: Path, capsys, 
         disabled_payload = json.loads(capsys.readouterr().out)
         assert disabled_payload["agent"]["enabled"] is False
 
-        assert cli.cmd_agent_list(_parse_agent(["list", "--brief"])) == 0
+        assert cli.cmd_agent_list(_parse_agent(["list"])) == 0
         assert json.loads(capsys.readouterr().out)["agents"] == []
 
         assert cli.cmd_agent_list(_parse_agent(["list", "--include-disabled"])) == 0
@@ -870,9 +870,8 @@ def test_removed_task_reads_as_removed_and_refuses_mutations(capsys) -> None:
     assert definition["id"] == task.id
     assert definition["name"] == "Hourly summary"
     assert definition["lifecycle_state"] == "removed"
-    assert definition["state"] == "removed"
     # The removed row keeps ``enabled``, but it will never fire again.
-    assert definition["next_run_at"] is None
+    assert "next_run_at" not in definition
     removed_at = definition["removed_at"]
     assert removed_at
 
@@ -1006,8 +1005,8 @@ def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pat
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["session_policy"] == "create_per_run"
-    assert payload["definition"]["deliver_key"] is None
-    assert payload["definition"]["cwd"] is None
+    assert store.get_task(payload["definition"]["id"]).deliver_key is None
+    assert "cwd" not in payload["definition"]
     assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-task"
     assert "session_workdir" not in payload["definition"]["metadata"]
     assert payload["definition"]["agent_name"] == "project-agent"
@@ -1040,11 +1039,10 @@ def test_task_add_create_per_run_without_scope_records_standalone_definition(tmp
     assert result == 0
     task = json.loads(capsys.readouterr().out)["definition"]
     assert task["session_policy"] == "create_per_run"
-    assert task["session_id"] is None
-    assert task["deliver_key"] is None
-    assert task["cwd"] is None
-    assert "session_scope_id" not in task["metadata"]
-    assert "session_workdir" not in task["metadata"]
+    assert {"session_id", "cwd"}.isdisjoint(task)
+    assert store.get_task(task["id"]).deliver_key is None
+    assert "session_scope_id" not in task.get("metadata", {})
+    assert "session_workdir" not in task.get("metadata", {})
 
 
 def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
@@ -1111,7 +1109,7 @@ def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path,
     assert target.visibility == "foreground"
     assert target.suppress_delivery is False
     assert target.workdir == str(tmp_path)
-    assert payload["definition"]["cwd"] is None
+    assert "cwd" not in payload["definition"]
     assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-once-task"
     assert "session_workdir" not in payload["definition"]["metadata"]
 
@@ -1292,11 +1290,8 @@ def test_task_add_defaults_target_to_caller_session(tmp_path: Path, capsys, sqli
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["session_id"] == "sesCaller"
     assert payload["definition"]["session_policy"] == "existing"
-    assert payload["session_default_notice"] == {
-        "code": "session_defaulted_to_caller",
-        "message": "Task target Session defaulted to this Agent Session.",
-        "session_id": "sesCaller",
-    }
+    # The defaulted target is the definition's session_id; no notice repeats it.
+    assert set(payload) == {"schema_version", "ok", "kind", "definition"}
 
 
 def test_task_add_rejects_scope_without_session_creation() -> None:
@@ -1406,12 +1401,15 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
     ids = [item["id"] for item in payload["definitions"]]
     assert done.id not in ids
     assert failed.id in ids
-    assert next(item for item in payload["definitions"] if item["id"] == failed.id)["state"] == "failed"
+    failed_row = next(item for item in payload["definitions"] if item["id"] == failed.id)
+    assert (failed_row["lifecycle_state"], failed_row["last_error"]) == ("finished", "delivery failed")
 
 
-def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys) -> None:
+def test_task_list_row_carries_only_decision_fields(tmp_path: Path, capsys) -> None:
+    """A list row is the compact projection: no nulls, zero counters, healthy verdicts or legacy keys."""
+
     store = cli.ScheduledTaskStore()
-    task = store.add_task(
+    named = store.add_task(
         name="Hourly summary",
         session_key="slack::channel::C123",
         prompt="recurring summary prompt",
@@ -1419,26 +1417,14 @@ def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys)
         cron="0 * * * *",
         timezone_name="Asia/Shanghai",
     )
-
-    with patch("vibe.cli._task_store", return_value=store):
-        result = cli.cmd_task_list(scope=cli.SessionListScope(), brief=True)
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    entry = payload["definitions"][0]
-    assert entry["id"] == task.id
-    assert entry["display_name"] == "Hourly summary"
-    assert "prompt" not in entry
-    assert entry["next_run_at"] is not None
-    assert entry["state"] == "active"
-
-
-def test_paused_recurring_task_keeps_failed_run_in_last_status(
-    tmp_path: Path,
-    capsys,
-) -> None:
-    store = cli.ScheduledTaskStore()
-    task = store.add_task(
+    unnamed = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="Share   the nightly\nsummary.",
+        schedule_type="cron",
+        cron="0 3 * * *",
+        timezone_name="UTC",
+    )
+    paused = store.add_task(
         name="Paused after failure",
         session_key="slack::channel::C123",
         prompt="recurring",
@@ -1446,15 +1432,26 @@ def test_paused_recurring_task_keeps_failed_run_in_last_status(
         cron="0 * * * *",
         timezone_name="UTC",
     )
-    store.mark_task_result(task.id, error="delivery failed")
-    store.set_enabled(task.id, False)
+    store.mark_task_result(paused.id, error="delivery failed")
+    store.set_enabled(paused.id, False)
 
     with patch("vibe.cli._task_store", return_value=store):
-        assert cli.cmd_task_list(scope=cli.SessionListScope(), brief=True) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope()) == 0
 
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["definitions"][0]["state"] == "paused"
-    assert payload["definitions"][0]["last_status"] == "failed"
+    rows = {row["id"]: row for row in json.loads(capsys.readouterr().out)["definitions"]}
+    assert set(rows[named.id]) == {"id", "name", "kind", "schedule_summary", "lifecycle_state", "next_run_at"}
+    assert (rows[named.id]["name"], rows[named.id]["kind"], rows[named.id]["schedule_summary"]) == (
+        "Hourly summary",
+        "message",
+        "cron:0 * * * *",
+    )
+    assert rows[named.id]["lifecycle_state"] == "waiting"
+    # An unnamed task is labelled by what it does.
+    assert "name" not in rows[unnamed.id]
+    assert rows[unnamed.id]["message_preview"] == "Share the nightly summary."
+    assert rows[paused.id]["lifecycle_state"] == "paused"
+    assert rows[paused.id]["last_error"] == "delivery failed"
+    assert "next_run_at" not in rows[paused.id]
 
 
 def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
@@ -1470,7 +1467,7 @@ def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
         )
 
     with patch("vibe.cli._task_store", return_value=store):
-        result = cli.cmd_task_list(scope=cli.SessionListScope(), brief=True)
+        result = cli.cmd_task_list(scope=cli.SessionListScope())
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1484,14 +1481,22 @@ def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
         "next_page": 2,
         "next_command": "vibe task list --global --page 2 --limit 20",
     }
-    assert payload["message"].endswith("vibe task list --global --page 2 --limit 20")
+    assert "message" not in payload
 
 
-def test_task_list_keeps_enabled_tasks_ahead_of_paused_history(
+def test_task_list_orders_enabled_rows_first_then_newest_activity(
     tmp_path: Path,
     capsys,
 ) -> None:
     store = cli.ScheduledTaskStore()
+    older = store.add_task(
+        name="Older active",
+        session_key="slack::channel::C123",
+        prompt="older",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
     for index in range(21):
         paused = store.add_task(
             name=f"Paused {index:02d}",
@@ -1502,22 +1507,23 @@ def test_task_list_keeps_enabled_tasks_ahead_of_paused_history(
             timezone_name="UTC",
         )
         store.set_enabled(paused.id, False)
-    active = store.add_task(
-        name="Active",
+    newer = store.add_task(
+        name="Newer active",
         session_key="slack::channel::C123",
-        prompt="active",
+        prompt="newer",
         schedule_type="cron",
         cron="0 * * * *",
         timezone_name="UTC",
     )
 
     with patch("vibe.cli._task_store", return_value=store):
-        assert cli.cmd_task_list(scope=cli.SessionListScope(), brief=True) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope()) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["definitions"][0]["id"] == active.id
-    assert payload["definitions"][0]["state"] == "active"
+    names = [row["name"] for row in payload["definitions"]]
+    assert names[:3] == ["Newer active", "Older active", "Paused 20"]
     assert payload["pagination"]["has_more"] is True
+    assert {row["id"] for row in payload["definitions"][:2]} == {older.id, newer.id}
 
 
 def test_task_list_cli_dispatches_pagination_flags(
@@ -1580,7 +1586,7 @@ def test_task_list_order_is_stable_across_cron_boundaries(
     )
 
     with patch("vibe.cli._task_store", return_value=store):
-        assert cli.cmd_task_list(scope=cli.SessionListScope(), brief=True) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope()) == 0
 
     first_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["definitions"]]
 
@@ -1593,10 +1599,11 @@ def test_task_list_order_is_stable_across_cron_boundaries(
         lambda **kwargs: second_next_runs[str(kwargs["timezone_name"])],
     )
     with patch("vibe.cli._task_store", return_value=store):
-        assert cli.cmd_task_list(scope=cli.SessionListScope(), brief=True) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope()) == 0
 
     second_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["definitions"]]
-    assert second_ids == first_ids == [later.id, earlier.id]
+    # Newest activity first -- ``earlier`` was written last -- whatever the next fire times say.
+    assert second_ids == first_ids == [earlier.id, later.id]
 
 
 def test_task_show_includes_derived_schedule_fields(tmp_path: Path, capsys) -> None:
@@ -1615,11 +1622,14 @@ def test_task_show_includes_derived_schedule_fields(tmp_path: Path, capsys) -> N
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["definition"]["display_name"] == "Hourly summary"
-    assert payload["definition"]["message_preview"] == "recurring summary prompt"
+    assert payload["definition"]["name"] == "Hourly summary"
+    assert payload["definition"]["message"] == "recurring summary prompt"
     assert payload["definition"]["next_run_at"] is not None
-    assert payload["definition"]["state"] == "active"
-    assert payload["definition"]["last_status"] == "never_run"
+    assert payload["definition"]["lifecycle_state"] == "waiting"
+    # Compatibility spellings and legacy duplicates are not printed.
+    assert {"state", "last_status", "display_name", "prompt", "session_key", "post_to", "deliver_key"}.isdisjoint(
+        payload["definition"]
+    )
 
 
 def test_task_list_include_finished_includes_completed_one_shots(tmp_path: Path, capsys) -> None:
@@ -1659,7 +1669,6 @@ def test_task_list_include_finished_keeps_history_paginated(tmp_path: Path, caps
         result = cli.cmd_task_list(
             scope=cli.SessionListScope(),
             include_finished=True,
-            brief=True,
             page_request=cli.PageRequest(page=1, limit=2),
         )
 
@@ -1693,8 +1702,9 @@ def test_task_run_enqueues_request(tmp_path: Path, capsys) -> None:
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert payload["task_id"] == task.id
-    assert (request_root / "pending" / f"{payload['execution_id']}.json").exists()
+    assert set(payload) == {"schema_version", "ok", "kind", "run"}
+    assert payload["run"]["definition_id"] == task.id
+    assert (request_root / "pending" / f"{payload['run']['id']}.json").exists()
 
 
 def test_task_run_enqueues_manual_rerun_for_retired_one_shot(
@@ -1731,7 +1741,7 @@ def test_task_run_enqueues_manual_rerun_for_retired_one_shot(
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    manual = requests.get_run(payload["execution_id"])
+    manual = requests.get_run(payload["run"]["id"])
     assert manual is not None and manual["source_kind"] == "cli"
     assert "task_schedule_consumed" not in manual["metadata"]
     current = cli.ScheduledTaskStore().get_task(task.id)
@@ -1788,7 +1798,7 @@ def test_task_update_modifies_existing_task_without_changing_id(tmp_path: Path, 
     assert payload["definition"]["id"] == task.id
     assert payload["definition"]["name"] == "Morning summary"
     assert payload["definition"]["cron"] == "*/30 * * * *"
-    assert payload["definition"]["prompt"] == "updated"
+    assert payload["definition"]["message"] == "updated"
 
 
 def test_task_update_rejects_agent_together_with_clear_agent(tmp_path: Path, sqlite_schema_db_factory) -> None:
@@ -2440,8 +2450,8 @@ def test_task_update_session_key_clears_previous_session_id(tmp_path: Path, caps
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["definition"]["session_id"] is None
-    assert payload["definition"]["session_key"] == "slack::channel::C456"
+    assert payload["definition"].get("session_id") is None
+    assert store.get_task(task.id).session_key == "slack::channel::C456"
 
 
 def test_task_update_replaces_post_to_with_deliver_key(tmp_path: Path, capsys) -> None:
@@ -2467,8 +2477,8 @@ def test_task_update_replaces_post_to_with_deliver_key(tmp_path: Path, capsys) -
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["id"] == task.id
-    assert payload["definition"]["post_to"] is None
-    assert payload["definition"]["deliver_key"] == "slack::channel::C999"
+    stored = store.get_task(task.id)
+    assert (stored.post_to, stored.deliver_key) == (None, "slack::channel::C999")
 
 
 def test_task_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: Path, capsys) -> None:
@@ -2502,8 +2512,8 @@ def test_task_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["definition"]["post_to"] is None
-    assert payload["definition"]["deliver_key"] is None
+    assert payload["definition"].get("post_to") is None
+    assert payload["definition"].get("deliver_key") is None
     assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-reset-task"
 
 
@@ -3032,7 +3042,7 @@ def test_hook_send_allows_unresolved_legacy_scope_backend(tmp_path: Path, capsys
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    queued = json.loads((request_store.pending_dir / f"{payload['run_id']}.json").read_text())
+    queued = json.loads((request_store.pending_dir / f"{payload['run']['id']}.json").read_text())
     assert queued["session_key"] == "slack::channel::C123"
     assert queued["agent_name"] == default_agent.name
 
@@ -3081,20 +3091,19 @@ def test_agent_run_standalone_async_reserves_background_session(tmp_path: Path, 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["session_id"].startswith("ses")
-    assert payload["session_policy"] == "none"
-    assert payload["agent"] == agent.name
-    queued = json.loads((request_store.pending_dir / f"{payload['run_id']}.json").read_text())
+    assert payload["run"]["session_id"].startswith("ses")
+    assert payload["run"]["agent_name"] == agent.name
+    queued = json.loads((request_store.pending_dir / f"{payload['run']['id']}.json").read_text())
     assert queued["request_type"] == "agent_run"
-    assert queued["session_id"] == payload["session_id"]
+    assert queued["session_id"] == payload["run"]["session_id"]
     assert queued["agent_name"] == "worker"
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             "select scope_id, visibility, workdir from agent_sessions where id = ?",
-            (payload["session_id"],),
+            (payload["run"]["session_id"],),
         ).fetchone()
-    assert row == (None, "background", str(tmp_path / "show" / payload["session_id"]))
-    assert (tmp_path / "show" / payload["session_id"]).is_dir()
+    assert row == (None, "background", str(tmp_path / "show" / payload["run"]["session_id"]))
+    assert (tmp_path / "show" / payload["run"]["session_id"]).is_dir()
 
 
 def test_agent_run_caller_scope_default_keeps_caller_cwd_and_same_scope_uses_scope_cwd(
@@ -3183,21 +3192,21 @@ def test_agent_run_caller_scope_default_keeps_caller_cwd_and_same_scope_uses_sco
                     agent_sessions.c.workdir,
                 ).where(
                     agent_sessions.c.id.in_(
-                        [implicit["session_id"], explicit["session_id"], visible["session_id"]]
+                        [implicit["run"]["session_id"], explicit["run"]["session_id"], visible["run"]["session_id"]]
                     )
                 )
             )
         }
 
-    assert rows[implicit["session_id"]].scope_id == scope_id
-    assert rows[implicit["session_id"]].visibility == "background"
-    assert rows[implicit["session_id"]].workdir == str(invocation_cwd)
-    assert rows[explicit["session_id"]].scope_id == scope_id
-    assert rows[explicit["session_id"]].visibility == "background"
-    assert rows[explicit["session_id"]].workdir == str(scope_cwd)
-    assert rows[visible["session_id"]].scope_id == scope_id
-    assert rows[visible["session_id"]].visibility == "foreground"
-    assert rows[visible["session_id"]].workdir == str(invocation_cwd)
+    assert rows[implicit["run"]["session_id"]].scope_id == scope_id
+    assert rows[implicit["run"]["session_id"]].visibility == "background"
+    assert rows[implicit["run"]["session_id"]].workdir == str(invocation_cwd)
+    assert rows[explicit["run"]["session_id"]].scope_id == scope_id
+    assert rows[explicit["run"]["session_id"]].visibility == "background"
+    assert rows[explicit["run"]["session_id"]].workdir == str(scope_cwd)
+    assert rows[visible["run"]["session_id"]].scope_id == scope_id
+    assert rows[visible["run"]["session_id"]].visibility == "foreground"
+    assert rows[visible["run"]["session_id"]].workdir == str(invocation_cwd)
 
 
 def test_agent_run_create_session_uses_scope_anchor_for_channel_deliver_key(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
@@ -3229,7 +3238,7 @@ def test_agent_run_create_session_uses_scope_anchor_for_channel_deliver_key(tmp_
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    target = cli.resolve_session_id_target(payload["session_id"], db_path=db_path)
+    target = cli.resolve_session_id_target(payload["run"]["session_id"], db_path=db_path)
     assert target.session_key.to_key() == "slack::channel::C123"
     assert target.session_key.thread_id is None
     assert target.session_anchor.startswith("slack_C123:run_")
@@ -3264,12 +3273,11 @@ def test_agent_run_create_session_preserves_legacy_thread_deliver_key(tmp_path: 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["deliver_key"] == "slack::channel::C123::thread::171717.123"
-    target = cli.resolve_session_id_target(payload["session_id"], db_path=db_path)
+    target = cli.resolve_session_id_target(payload["run"]["session_id"], db_path=db_path)
     assert target.session_key.to_key() == "slack::channel::C123::thread::171717.123"
     assert target.session_key.thread_id == "171717.123"
     assert target.session_anchor.startswith("slack_171717.123:run_")
-    queued = request_store.get_run(payload["run_id"])
+    queued = request_store.get_run(payload["run"]["id"])
     assert queued is not None
     assert queued["deliver_key"] == "slack::channel::C123::thread::171717.123"
 
@@ -3348,7 +3356,7 @@ def test_agent_run_create_session_scope_id_uses_unique_project_anchors(tmp_path:
                 ).mappings()
             )
 
-    assert {payload["session_id"] for payload in payloads} == {row["id"] for row in rows}
+    assert {payload["run"]["session_id"] for payload in payloads} == {row["id"] for row in rows}
     anchors = {row["session_anchor"] for row in rows}
     assert len(anchors) == 2
     assert all(anchor.startswith("avibe_proj_unique:run_") for anchor in anchors)
@@ -3377,7 +3385,7 @@ def test_agent_run_standalone_does_not_create_platform_pseudo_scope(tmp_path: Pa
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             "select scope_id, visibility from agent_sessions where id = ?",
-            (payload["session_id"],),
+            (payload["run"]["session_id"],),
         ).fetchone()
 
     assert row == (None, "background")
@@ -3477,8 +3485,8 @@ def test_agent_run_existing_session_allows_matching_agent_hint(tmp_path: Path, c
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["session_id"] == session_id
-    assert payload["agent"] == "codex-worker"
+    assert payload["run"]["session_id"] == session_id
+    assert payload["run"]["agent_name"] == "codex-worker"
 
 
 def test_agent_run_rejects_different_same_backend_agent_for_existing_session(tmp_path: Path, sqlite_schema_db_factory) -> None:
@@ -3641,8 +3649,8 @@ def test_agent_run_existing_session_uses_session_agent_when_agent_omitted(tmp_pa
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["agent"] == "worker"
-    queued = json.loads((request_store.pending_dir / f"{payload['run_id']}.json").read_text())
+    assert payload["run"]["agent_name"] == "worker"
+    queued = json.loads((request_store.pending_dir / f"{payload['run']['id']}.json").read_text())
     assert queued["agent_name"] == "worker"
 
 
@@ -5003,10 +5011,9 @@ def test_task_add_pure_command_task_ignores_caller_session_default(
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     definition = payload["definition"]
-    assert definition["session_id"] is None
-    assert definition["session_policy"] is None
-    assert definition["session_key"] == ""
-    assert definition["agent_name"] is None
+    assert definition.get("session_id") is None
+    assert definition.get("session_policy") is None
+    assert definition.get("agent_name") is None
     assert "session_default_notice" not in payload
     # The caller is still RECORDED, just not bound: creation origin survives.
     assert definition["metadata"]["created_by"]["caller"]["session_id"] == "sesCaller"
@@ -5045,10 +5052,10 @@ def test_task_add_escalating_command_task_binds_caller_session(
     assert definition["session_id"] == "sesCaller"
     assert definition["session_policy"] == "existing"
     assert definition["shell_command"] == "./scripts/sync.sh"
-    assert definition["prompt"] == "The nightly sync failed. Diagnose it."
+    assert definition["message"] == "The nightly sync failed. Diagnose it."
     assert definition["metadata"]["on_failure"] == "agent"
     assert definition["kind"] == "command"
-    assert payload["session_default_notice"]["code"] == "session_defaulted_to_caller"
+    assert "session_default_notice" not in payload
 
 
 def test_task_add_escalating_command_task_accepts_an_explicit_cwd(
@@ -5265,9 +5272,9 @@ def test_task_add_pure_shell_command_persists_command_fields(
     payload = json.loads(capsys.readouterr().out)
     definition = payload["definition"]
     assert definition["shell_command"] == "./scripts/sync.sh"
-    assert definition["command"] is None
+    assert definition.get("command") is None
     assert definition["timeout_seconds"] == 0
-    assert definition["prompt"] == ""
+    assert "message" not in definition
     assert definition["cwd"] == str(tmp_path)
     assert definition["metadata"]["on_failure"] == "none"
     assert "session_workdir" not in definition["metadata"]
@@ -5294,10 +5301,8 @@ def test_task_add_command_argv_persists_the_argv_list(
     assert result == 0
     definition = json.loads(capsys.readouterr().out)["definition"]
     assert definition["command"] == ["python3", "sync.py", "--target", "prod"]
-    assert definition["shell_command"] is None
-    assert definition["timeout_seconds"] is None
-    assert definition["command_preview"] == "python3 sync.py --target prod"
-    assert definition["display_name"] == "python3 sync.py --target prod"
+    assert definition.get("shell_command") is None
+    assert definition.get("timeout_seconds") is None
 
 
 def test_task_add_message_task_stores_no_command_fields(
@@ -5319,13 +5324,13 @@ def test_task_add_message_task_stores_no_command_fields(
 
     assert result == 0
     definition = json.loads(capsys.readouterr().out)["definition"]
-    assert definition["prompt"] == "morning briefing"
-    assert definition["shell_command"] is None
-    assert definition["command"] is None
-    assert definition["timeout_seconds"] is None
+    assert definition["message"] == "morning briefing"
+    assert definition.get("shell_command") is None
+    assert definition.get("command") is None
+    assert definition.get("timeout_seconds") is None
     assert definition["kind"] == "message"
     assert definition["on_failure"] == "none"
-    assert "on_failure" not in definition["metadata"]
+    assert "on_failure" not in definition.get("metadata", {})
 
 
 # --- update ---------------------------------------------------------------
@@ -5362,8 +5367,8 @@ def test_task_update_replaces_pure_command_task_shell(tmp_path: Path, capsys, mo
     # ``update_command_fields`` is all-or-nothing, so an unnamed column must survive.
     assert definition["timeout_seconds"] == 60
     assert definition["cwd"] == str(tmp_path)
-    assert definition["session_policy"] is None
-    assert definition["session_id"] is None
+    assert definition.get("session_policy") is None
+    assert definition.get("session_id") is None
 
 
 def test_task_update_timeout_only_preserves_stored_command(
@@ -5385,7 +5390,7 @@ def test_task_update_timeout_only_preserves_stored_command(
     assert result == 0
     definition = json.loads(capsys.readouterr().out)["definition"]
     assert definition["command"] == ["python3", "sync.py"]
-    assert definition["shell_command"] is None
+    assert definition.get("shell_command") is None
     assert definition["timeout_seconds"] == 900
 
 
@@ -5434,7 +5439,7 @@ def test_task_update_rewords_escalation_guidance_on_an_agent_command_task(
 
     assert result == 0
     definition = json.loads(capsys.readouterr().out)["definition"]
-    assert definition["prompt"] == "Check the upstream API first."
+    assert definition["message"] == "Check the upstream API first."
     assert definition["shell_command"] == "./scripts/old.sh"
     assert definition["timeout_seconds"] == 60
     assert definition["on_failure"] == "agent"
@@ -5501,14 +5506,16 @@ def test_task_payload_renders_command_kind_and_preview(tmp_path: Path) -> None:
     task = _stored_command_task(store, name=None, shell_command="./scripts/sync.sh --verbose")
     task.last_exit_code = 2
 
-    payload = cli._task_payload(task)
-    brief = cli._task_payload(task, brief=True)
+    projected = cli._task_fallback_projection(task)
+    payload = cli._task_projection_payload(projected)
+    brief = cli._task_projection_payload(projected, brief=True)
 
     assert payload["kind"] == "command"
     assert payload["on_failure"] == "none"
-    assert payload["command_preview"] == "./scripts/sync.sh --verbose"
-    assert payload["display_name"] == "./scripts/sync.sh --verbose"
+    assert payload["shell_command"] == "./scripts/sync.sh --verbose"
     assert brief["kind"] == "command"
+    # An unnamed command task is labelled by its command.
+    assert brief["command_preview"] == "./scripts/sync.sh --verbose"
     assert brief["last_exit_code"] == 2
 
 
@@ -5522,12 +5529,11 @@ def test_task_payload_renders_message_kind_for_message_tasks(tmp_path: Path) -> 
         timezone_name="UTC",
     )
 
-    payload = cli._task_payload(task)
+    brief = cli._task_projection_payload(cli._task_fallback_projection(task), brief=True)
 
-    assert payload["kind"] == "message"
-    assert payload["command_preview"] == ""
-    assert payload["display_name"] == "morning briefing"
-    assert cli._task_payload(task, brief=True)["last_exit_code"] is None
+    assert brief["kind"] == "message"
+    assert brief["message_preview"] == "morning briefing"
+    assert {"command_preview", "last_exit_code"}.isdisjoint(brief)
 
 
 # --- documented examples --------------------------------------------------
@@ -5656,9 +5662,9 @@ def test_agent_run_starts_a_new_session_on_a_chosen_model_that_its_later_turns_k
     )
 
     assert result == 0, payload
-    session_id = payload["session_id"]
+    session_id = payload["run"]["session_id"]
     assert bool(payload.get("warnings")) is warned
-    queued = json.loads((request_store.pending_dir / f"{payload['run_id']}.json").read_text())
+    queued = json.loads((request_store.pending_dir / f"{payload['run']['id']}.json").read_text())
     assert (queued["model"], queued["reasoning_effort"]) == (model, effort)
     with sqlite3.connect(db_path) as conn:
         row = conn.execute("select model, reasoning_effort from agent_sessions where id = ?", (session_id,)).fetchone()
@@ -5749,13 +5755,13 @@ def test_agent_run_refuses_a_fork_onto_a_vibey_model_its_menu_does_not_offer(
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 "update agent_sessions set native_session_id = ? where id = ?",
-                (f"vibey:{payload['session_id']}", payload["session_id"]),
+                (f"vibey:{payload['run']['session_id']}", payload["run"]["session_id"]),
             )
 
     with patch("core.scheduled_tasks.paths.get_sqlite_state_path", return_value=db_path):
         result, payload = _run_on_new_session(
             tmp_path, capsys, db_path, agent_store, request_store,
-            ["--fork-session", payload["session_id"], "--model", "claude-opus-9", "--message", "branch"],
+            ["--fork-session", payload["run"]["session_id"], "--model", "claude-opus-9", "--message", "branch"],
         )
 
     assert result == 1

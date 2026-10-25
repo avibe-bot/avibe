@@ -30,7 +30,7 @@ Preferred CLI shape:
 - managed background watch for this conversation: `vibe watch add --message '...' -- <cmd>` (or `--shell '<cmd>'` to pass a single shell string)
 - watch that creates a visible sibling Session: `vibe watch add --create-session --same-scope --message '...' -- <cmd>`
 - update a watch: `vibe watch update <id> --name '...' --timeout 1200`
-- inspect a run: `vibe runs show <run-id>`; add `--brief` for only its status, timing, error, and callback fields
+- inspect a run: `vibe runs show <run-id>`; add `--brief` to print only its `vibe runs list` row
 - cancel a run: `vibe runs cancel <run-id>`
 
 Targeting and callbacks:
@@ -62,6 +62,10 @@ Operational guidance:
 - use `vibe task update <id>` to keep the same task ID while changing name, schedule, message, agent, or target
 - use `vibe watch update <id> ...` when you must rename, retarget, or change the waiter/options
 - Agent-facing collection commands return 20 compact rows per page, cap `--limit` at 100, and have no unpaginated `--all` mode; follow `pagination.next_command` when more rows exist
+- list rows omit null, empty, and zero-valued fields, so a missing key means unset; `--brief` on `vibe task show`, `vibe watch show`, `vibe runs show`, `vibe session get`, or `vibe agent show` prints exactly the list row
+- find a task or watch by text with `vibe task list --q <text>` or `vibe watch list --q <text>`; enabled definitions come first, newest activity first
+- `vibe agent run` and `vibe task run` print one `run` object; read the Run id from `run.id`
+- read lifecycle from `lifecycle_state`; `health` appears only when it is not `healthy`, and a watch's configured retry exit shows as `last_exit_code` with no `last_error`
 - read task/watch records from `definition` for detail commands and `definitions` for list commands; command-specific duplicate aliases are not emitted
 - use `--include-finished` for paginated task/watch one-shot history
 - both list commands hide successful one-shot definitions by default while failures stay visible; use `--include-finished` and follow `pagination.next_command` for bounded history

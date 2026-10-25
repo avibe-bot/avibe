@@ -340,7 +340,7 @@ class FullRuntimeTrial:
         # Expiry of a CLI waiter does not cancel an Agent turn.
         accepted = self._call("cli", "agent", "run", "--agent", "vibey", "--cwd", str(self.workdir),
                               "--message-file", str(instruction_path), "--no-callback")
-        run_id, session_id = accepted["run_id"], accepted["session_id"]
+        run_id, session_id = accepted["run"]["id"], accepted["run"]["session_id"]
         self._result.update(run_id=run_id, session_id=session_id)
         deadline = time.monotonic() + self.profile.wall_seconds
         terminal_row = None

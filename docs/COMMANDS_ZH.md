@@ -504,6 +504,8 @@ bind vr-a3x9k2
 所有面向 Agent 的集合命令都使用 `--page` / `--limit`，默认返回 20 条紧凑记录，
 单页最多 100 条，并且不提供无分页的 `--all` 模式。按
 `pagination.next_command` 继续翻页；单条完整详情通过对应的 `show` 或 `get` 命令获取。
+列表行省略 null、空值和零值字段；`vibe task show`、`vibe watch show`、`vibe runs show`、
+`vibe session get` 和 `vibe agent show` 加上 `--brief` 时只输出对应的列表行。
 
 ## 5.1 顶层 CLI 命令
 
@@ -789,19 +791,20 @@ vibe task update <task_id> [options]
 ### `vibe task list`
 
 ```bash
-vibe task list [--session-id <id> | --global] [--include-finished] [--page N] [--limit N]
+vibe task list [--session-id <id> | --global] [--include-finished] [--q <text>] [--page N] [--limit N]
 ```
 
 在 Avibe Agent shell 内列出调用方 Session 的任务；用 `--session-id` 查看其他
-Session，用 `--global` 查看所有 Session（在 Agent shell 之外必须二选一）。默认每页返回 20 条紧凑记录，单页最多 100 条。按 `pagination.next_command`
-继续翻页；需要完整详情时使用 `vibe task show <task_id>`。
-list 和 show 会返回与 Workbench 相同的 lifecycle 投影。watch 还包含三态的
-`process_alive`；兼容字段 `state` / `last_status` 不定义 lifecycle。
+Session，用 `--global` 查看所有 Session（在 Agent shell 之外必须二选一）。默认每页返回 20 条紧凑记录，单页最多 100 条，
+已启用的任务排在前面，每组内按最近活动时间倒序。`--q` 搜索任务的文本字段。按
+`pagination.next_command` 继续翻页；需要完整详情时使用 `vibe task show <task_id>`。
+list 和 show 会返回与 Workbench 相同的 lifecycle 投影：`lifecycle_state` 就是 lifecycle，
+只有结论不是 `healthy` 时才输出 `health`。`vibe watch list` 遵循同一契约。
 
 ### `vibe task show`
 
 ```bash
-vibe task show <task_id>
+vibe task show <task_id> [--brief]
 ```
 
 已删除的 task 仍可在这里读取，返回 `lifecycle_state: "removed"` 和 `removed_at`。
@@ -843,7 +846,7 @@ model、reasoning effort、system prompt 可以编辑。
 | 子命令 | 作用 |
 | --- | --- |
 | `vibe agent list` | 列出 Agent |
-| `vibe agent show <name>` | 查看单个 Agent |
+| `vibe agent show <name> [--brief]` | 查看单个 Agent |
 | `vibe agent models [<name>]` | 列出某个 Agent 或后端可用的模型与推理强度 |
 | `vibe agent create` | 创建 Agent |
 | `vibe agent update <name>` | 修改可编辑字段 |
@@ -894,8 +897,8 @@ vibe agent run (--session-id <session_id> | --create-session | --fork-session <s
 如果不传 `--session-id` 或创建策略，run 会使用 private
 no-delivery session，更适合 sub-agent 调用。
 
-Run 默认异步：命令会队列化 run，立即返回包含 `run_id` / `session_id` 的
-payload，并按 callback 策略稍后投递最终结果。只有终端需要等待完成时才使用
+Run 默认异步：命令会队列化 run，立即输出一个带 `id` 和 `session_id` 的 `run`
+对象，并按 callback 策略稍后投递最终结果。只有终端需要等待完成时才使用
 `--sync`。`--async` 仍兼容旧脚本，但不再需要显式传入。
 
 `--close-after` 适用于新建或 fork 的 Session。Run 结束后它会释放该 Agent
@@ -931,7 +934,7 @@ Session、`--create-session` 或 fork）设置模型，该 Session 会沿用它�
 | 子命令 | 作用 |
 | --- | --- |
 | `vibe runs list` | 列出调用方 Session 最近的 run；`--session-id <id>` 查看其他 Session，`--global` 查看所有 Session |
-| `vibe runs show <run_id>` | 查看单个 run |
+| `vibe runs show <run_id> [--brief]` | 查看单个 run |
 | `vibe runs cancel <run_id>` | 请求取消 run；若该 run 的输入已进入正在运行的 Session turn，会像 Session Stop 一样停止整个 turn，同一 turn 中的其他 run 也会一起停止 |
 
 ## 6. 推荐心智模型

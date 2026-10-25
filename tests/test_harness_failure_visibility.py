@@ -9186,8 +9186,8 @@ def test_definition_health_reaches_the_cli_list_after_a_success(capsys) -> None:
     entry = json.loads(capsys.readouterr().out)["definitions"][0]
     assert entry["recent_failures"] == 3, "a success downgrades, it does not erase"
     assert entry["health"] == "degraded"
-    # And the demoted compatibility field keeps #1061's three-valued vocabulary.
-    assert entry["last_status"] in {"failed", "succeeded", "never_run"}
+    # The compatibility field is gone from the CLI; health is the only answer.
+    assert "last_status" not in entry
 
 
 def test_brief_task_payload_carries_last_error(capsys) -> None:
@@ -9258,7 +9258,7 @@ def test_a_watch_reports_processing_health_separately_from_waiter_health(capsys)
 
     entry = json.loads(capsys.readouterr().out)["definitions"][0]
     assert entry["health"] == "unknown", "a never-run waiter has no success evidence"
-    assert entry["consecutive_failures"] == 0
+    assert "consecutive_failures" not in entry, "a zero counter is not printed"
     assert entry["processing_health"] == "failing"
     assert entry["processing_consecutive_failures"] == 1
 
@@ -12208,7 +12208,8 @@ def test_a_watch_that_outlives_its_delivery_target_dies_visibly(
     # ``vibe watch list`` for an unrelated reason. The two must agree.
     assert cli.cmd_watch_show(watch.id) == 0
     shown = json.loads(capsys.readouterr().out)["definition"]
-    assert (shown["health"], shown["processing_health"], shown["lifecycle_state"]) == (
+    # The CLI prints a verdict only when it is not ``healthy``: absent means healthy.
+    assert (shown.get("health", "healthy"), shown["processing_health"], shown["lifecycle_state"]) == (
         "healthy",
         "failing",
         "finished",
@@ -12532,10 +12533,11 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
       canonical notice rather than one message per event — the streak lane, which is
       only reachable because ``delivery_target_missing`` stays OUT of
       ``RUN_INTERRUPTION_REASONS``;
-    * and the definition's ``last_error`` legitimately holds the sentinel string for
-      its last cycle, so the notice must not present that as the failure's cause.
-      This is #1060's first complaint in its exact shape: the sentinel is a true fact
-      about the waiter and a false explanation of the death.
+    * and the retry cycle records only its exit code: ``last_error`` stays empty for
+      a waiter that is merely still waiting, so neither the row nor the notice can
+      present the sentinel as a failure. This is #1060's first complaint in its exact
+      shape: the sentinel is a true fact about the waiter and a false explanation of
+      the death.
 
     The waiter is a real subprocess whose exit code walks a marker file: 75 first,
     then 0 twice (two events, two follow-up deliveries, two failures), then 75 again
@@ -12637,7 +12639,7 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
 
     def _last_completed_cycle_is_retry() -> bool:
         row = watch_store.get_watch(watch.id)
-        return row is not None and row.last_cycle_outcome == (75, sentinel)
+        return row is not None and row.last_cycle_outcome == (75, None)
 
     service = ManagedWatchService(
         controller=SimpleNamespace(),
@@ -12665,8 +12667,9 @@ def test_a_forever_watch_repeating_the_field_failure_notifies_once(
     assert saved.retired_at is None and saved.last_finished_at is None, (
         f"nor stamp a retirement on a watch that is still running: {saved}"
     )
-    assert saved.last_error == sentinel and saved.last_exit_code == 75, (
-        f"the premise for the last assertion below — the last cycle was a retry: {saved}"
+    assert saved.last_exit_code == 75 and saved.last_error is None, (
+        "the last cycle was a configured retry, which records its exit code and no "
+        f"error: {saved}"
     )
 
     for hook in hooks:

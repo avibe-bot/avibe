@@ -114,8 +114,8 @@ from storage.db import create_sqlite_engine
 from storage.lock import MigrationLockTimeout
 from storage.background import (
     DefinitionWriteConflict,
+    HEALTH_HEALTHY,
     SQLiteBackgroundTaskStore,
-    TASK_RETIREMENT_SCHEDULE_MISSED,
     JobWatchResumeRefused,
     TaskResumeBlocked,
     TaskScheduleRetired,
@@ -1008,6 +1008,14 @@ def _add_pagination_args(parser, *, help_command: str) -> None:
     parser.error_help_command = help_command
 
 
+def _add_brief_arg(parser, *, list_command: str) -> None:
+    parser.add_argument(
+        "--brief",
+        action="store_true",
+        help=f"Print only the compact row that '{list_command}' prints for this record",
+    )
+
+
 def _add_vault_approval_wait_args(parser, *, default_seconds: int = DEFAULT_VAULT_APPROVAL_WAIT_SECONDS) -> None:
     parser.add_argument(
         "--approval-wait",
@@ -1047,25 +1055,28 @@ def _next_command(parts: list[str], page_result) -> str | None:
     return shlex.join(command)
 
 
-def _pagination_message(page_payload: dict) -> str | None:
-    if not page_payload.get("has_more"):
-        return None
-    next_command = page_payload.get("next_command")
-    if next_command:
-        return f"More records are available. Continue with: {next_command}"
-    return "More records are available. Add --page to continue."
-
-
 def _paginated_fields(page_result, *, command: list[str], include_next_command: bool = True) -> dict:
     page_payload = pagination_payload(
         page_result,
         next_command=_next_command(command, page_result) if include_next_command else None,
     )
     fields = {"pagination": page_payload}
-    message = _pagination_message(page_payload)
-    if message:
-        fields["message"] = message
+    # ``next_command`` is the continuation whenever the command can be replayed;
+    # only a page it cannot name (SQL piped on stdin) needs telling how to go on.
+    if page_payload["has_more"] and "next_command" not in page_payload:
+        fields["message"] = "More records are available. Add --page to continue."
     return fields
+
+
+def _text_page_continuation(payload: Mapping[str, object]) -> Optional[str]:
+    """How a text printer tells a person to continue; JSON carries ``pagination.next_command``."""
+
+    pagination = payload.get("pagination")
+    next_command = pagination.get("next_command") if isinstance(pagination, Mapping) else None
+    if next_command:
+        return f"More records are available. Continue with: {next_command}"
+    message = payload.get("message")
+    return str(message) if message else None
 
 
 def _print_definition_list_payload(
@@ -1084,8 +1095,8 @@ def _print_definition_list_payload(
     )
 
 
-def _print_definition_payload(definition, **fields) -> None:
-    _print_cli_payload("run_definition", definition=definition, **fields)
+def _print_definition_payload(definition, *, warnings: Optional[list[dict]] = None) -> None:
+    _print_cli_payload("run_definition", definition=definition, **({"warnings": warnings} if warnings else {}))
 
 
 def _parse_cli_time_filter(value: str | None, *, field_name: str, help_command: str) -> str | None:
@@ -2571,40 +2582,6 @@ def _task_command_preview(task) -> str:
     return command_line_preview(shell_command, command)
 
 
-def _task_display_name(task) -> str:
-    # A command task stores no message, so the command itself is the only human-readable
-    # label the list has; without this fallback those rows rendered with an empty name.
-    return task.name or _task_message_preview(task.prompt) or _task_command_preview(task)
-
-
-def _task_state(task) -> str:
-    if _is_failed_one_shot(task):
-        return "failed"
-    if _is_completed_one_shot(task):
-        return "completed"
-    if task.enabled:
-        return "active"
-    return "paused"
-
-
-def _task_last_status(task) -> str:
-    """Historical compatibility field; never used to determine lifecycle.
-
-    Deliberately three-valued and identical to ``_task_projection_last_status``.
-    An earlier revision of this change added a fourth value, ``degraded``, here —
-    before #1061 demoted the field. Keeping that would have put new semantics on a
-    field declared compatibility-only AND made the two spellings of ``last_status``
-    disagree about their own vocabulary. Health is reported in its own fields,
-    computed once in ``_enrich_definitions`` and read back by everything else.
-    """
-
-    if task.last_run_at and task.last_error:
-        return "failed"
-    if task.last_run_at:
-        return "succeeded"
-    return "never_run"
-
-
 def _task_next_run_at(task) -> Optional[str]:
     return compute_next_run_at(
         enabled=task.enabled,
@@ -2631,173 +2608,147 @@ def _task_schedule_summary(task) -> str:
     return schedule_type
 
 
-def _task_payload(task, *, brief: bool = False):
-    """The stored row alone, for the one case that has no projection to read.
+def _present_fields(payload: Mapping[str, object]) -> dict:
+    """``payload`` without the keys that say nothing: null, empty text, empty collections."""
 
-    Carries no health: derived health is a fact about ``agent_runs`` that only
-    ``_enrich_definitions`` computes, and a payload builder that answered it from
-    a second query of its own is how the CLI came to disagree with every other
-    surface. Callers reach this only when the read-back finds nothing — the
-    file-backed store has no run history at all — where degrading to the stored
-    fields beats inventing a badge.
-    """
-
-    derived = {
-        "display_name": _task_display_name(task),
-        "message_preview": _task_message_preview(task.prompt),
-        "state": _task_state(task),
-        "last_status": _task_last_status(task),
-        "next_run_at": _task_next_run_at(task),
-        "schedule_summary": _task_schedule_summary(task),
-        # Command-task facts. ``kind`` is what every surface branches on, and
-        # ``on_failure`` is carried even for message tasks so the key never has to be
-        # probed for existence.
-        "kind": _task_kind(task),
-        "on_failure": _task_on_failure(task),
-        "command_preview": _task_command_preview(task),
+    return {
+        key: value
+        for key, value in payload.items()
+        if value is not None and value != "" and value != [] and value != {}
     }
-    if brief:
-        return {
-            "id": task.id,
-            "name": task.name,
-            "display_name": derived["display_name"],
-            "kind": derived["kind"],
-            "last_exit_code": task.last_exit_code,
-            "state": derived["state"],
-            "last_status": derived["last_status"],
-            # ``last_error`` used to be dropped here, which left the list a user
-            # actually runs unable to say WHY anything was failing.
-            "last_error": task.last_error,
-            "next_run_at": derived["next_run_at"],
-            "schedule_type": task.schedule_type,
-            "schedule_summary": derived["schedule_summary"],
-            "session_id": task.session_id,
-            "session_key": task.session_key,
-            "agent_name": task.agent_name,
-            "post_to": task.post_to,
-            "deliver_key": task.deliver_key,
-            "timezone": task.timezone,
-            "enabled": task.enabled,
-        }
-    payload = task.to_dict()
-    from storage.message_deliveries import public_message_metadata
 
-    payload["metadata"] = public_message_metadata(payload.get("metadata") or {})
+
+#: Legacy spellings no CLI payload prints: ``prompt`` repeats ``message``, and the
+#: three delivery columns name the target Session the way ``session_id`` replaced.
+_CLI_LEGACY_FIELDS = frozenset({"prompt", "session_key", "post_to", "deliver_key"})
+#: How the Workbench renders a record's target Session; ``vibe session get``
+#: reports the Session itself.
+_WORKBENCH_SESSION_LABEL_FIELDS = frozenset(
+    {
+        "session_title",
+        "session_platform",
+        "session_scope_kind",
+        "session_label",
+        "session_project_name",
+        "session_is_workbench",
+        "session_openable",
+    }
+)
+#: ``prefix`` is the legacy spelling of a watch's ``message``.
+_CLI_OMITTED_DEFINITION_FIELDS = _CLI_LEGACY_FIELDS | _WORKBENCH_SESSION_LABEL_FIELDS | {"prefix"}
+#: ``request_type`` repeats ``run_type`` and ``task_id`` repeats ``definition_id``;
+#: ``callback_session`` and ``source_session`` are Workbench labels of two more Sessions.
+_CLI_OMITTED_RUN_FIELDS = (
+    _CLI_LEGACY_FIELDS
+    | _WORKBENCH_SESSION_LABEL_FIELDS
+    | {"request_type", "task_id", "callback_session", "source_session"}
+)
+
+
+#: Each health verdict with its failure counters. Health and lifecycle are
+#: orthogonal axes -- a nightly cron that fails every run is ``waiting`` between
+#: fires and ``failing`` the whole time -- so the verdict rides beside
+#: ``lifecycle_state`` rather than inside it. A watch keeps its waiter verdict in
+#: ``health`` and the verdict on the Agent Runs its events started in
+#: ``processing_health``; a task has only the first.
+_DEFINITION_HEALTH_VERDICTS = (
+    ("health", ("consecutive_failures", "recent_failures")),
+    ("processing_health", ("processing_consecutive_failures", "processing_recent_failures")),
+)
+_DEFINITION_HEALTH_FIELDS = frozenset(
+    field for verdict, counters in _DEFINITION_HEALTH_VERDICTS for field in (verdict, *counters)
+)
+
+
+def _definition_health_fields(row: Mapping[str, object]) -> dict:
+    """Health on the CLI: a verdict only when it is not ``healthy``, counters only when set."""
+
+    fields: dict[str, object] = {}
+    for verdict, counters in _DEFINITION_HEALTH_VERDICTS:
+        value = row.get(verdict)
+        if value is None or value == HEALTH_HEALTHY:
+            continue
+        fields[verdict] = value
+        fields.update({counter: row.get(counter) or None for counter in counters})
+    return fields
+
+
+def _definition_detail_payload(row: Mapping[str, object], **derived: object) -> dict:
+    """``vibe task show`` / ``vibe watch show``: every fact the projection holds, once."""
+
+    payload = {
+        key: value
+        for key, value in row.items()
+        if key not in _CLI_OMITTED_DEFINITION_FIELDS and key not in _DEFINITION_HEALTH_FIELDS
+    }
+    payload.update(_definition_health_fields(row))
     payload.update(derived)
-    return payload
-
-
-_CANONICAL_DEFINITION_FIELDS = (
-    "lifecycle_state",
-    "lifecycle_detail",
-    "lifecycle_finished_at",
-    "next_run_at",
-    "waiting_since",
-    "running_since",
-)
-
-#: Derived failure health, forwarded verbatim beside the canonical lifecycle
-#: fields — NOT folded into ``lifecycle_state`` and NOT smuggled into
-#: ``last_status``.
-#:
-#: Health and lifecycle are ORTHOGONAL axes. A cron that fails every night is
-#: ``waiting`` between fires and ``failing`` the whole time; that combination is
-#: precisely the case this exists to surface. Folding health into
-#: ``lifecycle_state`` would need a fifth value in a closed four-value vocabulary
-#: the Workbench switches on three ways (icon, pill class, i18n key), or would lose
-#: one of the two axes.
-#:
-#: ``last_status`` is the other wrong home: it is explicitly a compatibility field
-#: that never determines lifecycle, so putting new semantics there would leave the
-#: canonical projection unable to see that a definition is broken — which is the
-#: original defect one layer up.
-#:
-#: These ride the same store row as the canonical fields, because the health query
-#: is computed in ``_enrich_definitions`` — the one chokepoint every list, show and
-#: Workbench read already passes through.
-_DEFINITION_FAILURE_FIELDS = (
-    "health",
-    "consecutive_failures",
-    "recent_failures",
-    # Watches keep waiter health above and expose their downstream Agent Run
-    # history independently. Tasks omit these keys.
-    "processing_health",
-    "processing_consecutive_failures",
-    "processing_recent_failures",
-    # The one field that says WHY, dropped from the brief list payload before.
-    "last_error",
-    "resume_blocked",
-)
-
-
-def _task_projection_state(task: Mapping[str, object]) -> str:
-    """Compatibility ``state`` derived from the canonical lifecycle fields."""
-
-    lifecycle_state = task.get("lifecycle_state")
-    if lifecycle_state in {"waiting", "running"}:
-        return "active"
-    if lifecycle_state == "finished":
-        lifecycle_detail = task.get("lifecycle_detail")
-        if lifecycle_detail == "canceled":
-            return "canceled"
-        if lifecycle_detail in {"timeout", "error", "missed"}:
-            return "failed"
-        if lifecycle_detail == "normal":
-            return "completed"
-        return "unknown"
-    if lifecycle_state in {"paused", "removed"}:
-        return lifecycle_state
-    return "unknown"
-
-
-def _task_projection_last_status(task: Mapping[str, object]) -> str:
-    """Historical compatibility field; never used to determine lifecycle."""
-
-    if task.get("last_run_at") and task.get("last_error"):
-        return "failed"
-    if task.get("last_run_at"):
-        return "succeeded"
-    return "never_run"
+    return _present_fields(payload)
 
 
 def _task_projection_payload(task: Mapping[str, object], *, brief: bool = False) -> dict:
-    prompt = str(task.get("prompt") or "")
+    """One scheduled task for the CLI: the list row when ``brief``, else full detail.
+
+    The row carries what an Agent decides its next step from; ``vibe task show``
+    carries the rest. Both read the Harness projection the Workbench reads, so
+    ``lifecycle_state`` stays the one lifecycle answer.
+    """
+
+    kind = _task_kind(task)
+    if not brief:
+        return _definition_detail_payload(task, kind=kind, on_failure=_task_on_failure(task))
     name = task.get("name")
-    command_preview = _task_command_preview(task)
-    derived = {
-        "display_name": str(name) if name else (_task_message_preview(prompt) or command_preview),
-        "message_preview": _task_message_preview(prompt),
-        "state": _task_projection_state(task),
-        "last_status": _task_projection_last_status(task),
-        "schedule_summary": _task_schedule_summary(task),
-        "kind": _task_kind(task),
-        "on_failure": _task_on_failure(task),
-        "command_preview": command_preview,
-    }
-    if brief:
-        payload = {
+    # An unnamed task is labelled by what it does.
+    preview = {}
+    if not name:
+        preview = (
+            {"command_preview": _task_command_preview(task)}
+            if kind == "command"
+            else {"message_preview": _task_message_preview(str(task.get("message") or task.get("prompt") or ""))}
+        )
+    return _present_fields(
+        {
             "id": task.get("id"),
             "name": name,
-            "display_name": derived["display_name"],
-            "kind": derived["kind"],
-            "last_exit_code": task.get("last_exit_code"),
-            "state": derived["state"],
-            "last_status": derived["last_status"],
-            "schedule_type": task.get("schedule_type"),
-            "schedule_summary": derived["schedule_summary"],
+            **preview,
+            "kind": kind,
+            "schedule_summary": _task_schedule_summary(task),
             "session_id": task.get("session_id"),
-            "session_key": task.get("session_key"),
             "agent_name": task.get("agent_name"),
-            "post_to": task.get("post_to"),
-            "deliver_key": task.get("deliver_key"),
-            "timezone": task.get("timezone"),
-            "enabled": task.get("enabled"),
+            "lifecycle_state": task.get("lifecycle_state"),
+            "lifecycle_detail": task.get("lifecycle_detail"),
+            "lifecycle_finished_at": task.get("lifecycle_finished_at"),
+            # Only ``show --brief`` of a removed definition has one; lists never do.
+            "removed_at": task.get("removed_at"),
+            "next_run_at": task.get("next_run_at"),
+            "waiting_since": task.get("waiting_since"),
+            "running_since": task.get("running_since"),
+            "last_run_at": task.get("last_run_at"),
+            "last_exit_code": task.get("last_exit_code") or None,
+            "last_error": task.get("last_error"),
+            **_definition_health_fields(task),
+            "resume_blocked": task.get("resume_blocked"),
         }
-        payload.update({field: task.get(field) for field in _CANONICAL_DEFINITION_FIELDS})
-        payload.update({field: task.get(field) for field in _DEFINITION_FAILURE_FIELDS})
-        return payload
-    payload = dict(task)
-    payload.update(derived)
+    )
+
+
+def _task_fallback_projection(task) -> dict:
+    """The stored row in projection form, for the one case that has no projection to read.
+
+    Carries no health: derived health is a fact about ``agent_runs`` that only
+    ``_enrich_definitions`` computes, and a payload builder that answered it from a
+    second query of its own is how the CLI came to disagree with every other
+    surface. Callers reach this only when the read-back finds nothing -- the
+    file-backed store has no run history at all -- where degrading to the stored
+    fields beats inventing a badge.
+    """
+
+    from storage.message_deliveries import public_message_metadata
+
+    payload = task.to_dict()
+    payload["message"] = task.prompt
+    payload["metadata"] = public_message_metadata(payload.get("metadata") or {})
+    payload["next_run_at"] = _task_next_run_at(task)
     return payload
 
 
@@ -2883,7 +2834,7 @@ def _task_mutation_payload(task) -> dict:
 
     projected = _read_definition_projection(lambda store: store.get_scheduled_task(task.id))
     if projected is None:
-        return _task_payload(task)
+        projected = _task_fallback_projection(task)
     return _task_projection_payload(projected)
 
 
@@ -2936,27 +2887,6 @@ def _supported_task_platforms() -> set[str]:
         return platforms | set(enabled())
     platforms.add(getattr(config, "platform", "slack"))
     return platforms
-
-
-def _is_completed_one_shot(task) -> bool:
-    return (
-        task.schedule_type == "at"
-        and bool(task.retired_at)
-        and bool(task.last_run_at)
-        and not task.last_error
-        and task.retirement_reason != TASK_RETIREMENT_SCHEDULE_MISSED
-    )
-
-
-def _is_failed_one_shot(task) -> bool:
-    return (
-        task.schedule_type == "at"
-        and bool(task.retired_at)
-        and (
-            task.retirement_reason == TASK_RETIREMENT_SCHEDULE_MISSED
-            or (bool(task.last_run_at) and bool(task.last_error))
-        )
-    )
 
 
 def _parse_validated_session_key(
@@ -3997,117 +3927,44 @@ def _resolve_task_command(args, *, help_command: str) -> tuple[list[str], Option
     return [], None, False
 
 
-def _watch_command_preview(watch) -> str:
-    return command_line_preview(watch.shell_command, watch.command)
-
-
-def _watch_display_name(watch) -> str:
-    return watch.name or _watch_command_preview(watch)
-
-
-def _watch_state(watch, runtime_entry: Optional[dict[str, object]]) -> str:
-    if runtime_entry and runtime_entry.get("running"):
-        return "running"
-    if watch.enabled and watch.mode == "forever":
-        return "armed"
-    if watch.enabled:
-        return "pending"
-    if watch.last_error:
-        return "failed"
-    if watch.last_event_at:
-        return "completed"
-    return "paused"
-
-
-def _watch_payload(watch, runtime_entry: Optional[dict[str, object]], *, brief: bool = False) -> dict:
-    derived = {
-        "display_name": _watch_display_name(watch),
-        "command_preview": _watch_command_preview(watch),
-        "state": _watch_state(watch, runtime_entry),
-        "runtime": runtime_entry or {},
-    }
-    if brief:
-        return {
-            "id": watch.id,
-            "name": watch.name,
-            "display_name": derived["display_name"],
-            "state": derived["state"],
-            "mode": watch.mode,
-            "session_id": watch.session_id,
-            "session_key": watch.session_key,
-            "agent_name": watch.agent_name,
-            "message_preview": _task_message_preview(getattr(watch, "message", None) or watch.prefix or ""),
-            "timeout_seconds": watch.timeout_seconds,
-            "lifetime_timeout_seconds": watch.lifetime_timeout_seconds,
-            "enabled": watch.enabled,
-            "last_event_at": watch.last_event_at,
-            "last_error": watch.last_error,
-        }
-    payload = watch.to_dict()
-    from storage.message_deliveries import public_message_metadata
-
-    payload["metadata"] = public_message_metadata(payload.get("metadata") or {})
-    payload.update(derived)
-    return payload
-
-
-def _watch_projection_state(watch: Mapping[str, object]) -> str:
-    """Compatibility ``state`` derived from canonical lifecycle and liveness."""
-
-    lifecycle_state = watch.get("lifecycle_state")
-    if lifecycle_state == "running":
-        return "running"
-    if lifecycle_state == "waiting":
-        if watch.get("process_alive") is True:
-            return "running"
-        return "armed" if watch.get("mode") == "forever" else "pending"
-    if lifecycle_state == "finished":
-        return "failed" if watch.get("lifecycle_detail") in {"timeout", "error"} else "completed"
-    if lifecycle_state in {"paused", "removed"}:
-        return lifecycle_state
-    return "unknown"
-
-
 def _watch_projection_payload(watch: Mapping[str, object], *, brief: bool = False) -> dict:
-    shell_command = str(watch.get("shell_command") or "")
-    command = watch.get("command")
-    command_values = [str(value) for value in command] if isinstance(command, list) else []
-    command_preview = shell_command or shlex.join(command_values)
+    """One watch for the CLI: the list row when ``brief``, else full detail.
+
+    ``process_alive`` is a fact about the waiter process, deliberately not a state.
+    The row carries it only as ``false`` on an enabled watch -- an observed waiter
+    that exited while the row still claims to be armed, the case the Workbench
+    marks dead. ``vibe watch show`` prints the observed value, and omits it when
+    no waiter runtime has ever been observed.
+    """
+
+    if not brief:
+        return _definition_detail_payload(watch)
     name = watch.get("name")
-    derived = {
-        "display_name": str(name) if name else _task_message_preview(command_preview, max_chars=120),
-        "command_preview": _task_message_preview(command_preview, max_chars=120),
-        "state": _watch_projection_state(watch),
-    }
-    if brief:
-        payload = {
+    return _present_fields(
+        {
             "id": watch.get("id"),
             "name": name,
-            "display_name": derived["display_name"],
-            "state": derived["state"],
+            # An unnamed watch is labelled by the waiter it runs.
+            "command_preview": None if name else _task_command_preview(watch),
             "mode": watch.get("mode"),
             "session_id": watch.get("session_id"),
-            "session_key": watch.get("session_key"),
             "agent_name": watch.get("agent_name"),
-            "message_preview": _task_message_preview(
-                str(watch.get("message") or watch.get("prefix") or "")
-            ),
-            "timeout_seconds": watch.get("timeout_seconds"),
-            "lifetime_timeout_seconds": watch.get("lifetime_timeout_seconds"),
-            "enabled": watch.get("enabled"),
+            "lifecycle_state": watch.get("lifecycle_state"),
+            "lifecycle_detail": watch.get("lifecycle_detail"),
+            "lifecycle_finished_at": watch.get("lifecycle_finished_at"),
+            # Only ``show --brief`` of a removed definition has one; lists never do.
+            "removed_at": watch.get("removed_at"),
+            "waiting_since": watch.get("waiting_since"),
+            "running_since": watch.get("running_since"),
             "last_event_at": watch.get("last_event_at"),
+            "last_exit_code": watch.get("last_exit_code") or None,
             "last_error": watch.get("last_error"),
-            "process_alive": watch.get("process_alive"),
+            "process_alive": (
+                False if watch.get("enabled") and watch.get("process_alive") is False else None
+            ),
+            **_definition_health_fields(watch),
         }
-        payload.update({field: watch.get(field) for field in _CANONICAL_DEFINITION_FIELDS})
-        # Watches get health on the same terms as tasks: ``_enrich_definitions``
-        # computes it for both, and a watch whose hook fails nightly is exactly as
-        # invisible as a task that does.
-        payload.update({field: watch.get(field) for field in _DEFINITION_FAILURE_FIELDS})
-        return payload
-    payload = dict(watch)
-    payload.update(derived)
-    return payload
+    )
 
 
 def _watch_mutation_payload(watch, runtime_entry: Optional[dict[str, object]]) -> dict:
@@ -4126,7 +3983,12 @@ def _watch_mutation_payload(watch, runtime_entry: Optional[dict[str, object]]) -
 
     projected = _read_definition_projection(lambda store: store.get_watch(watch.id))
     if projected is None:
-        return _watch_payload(watch, runtime_entry)
+        from storage.message_deliveries import public_message_metadata
+
+        projected = watch.to_dict()
+        projected["message"] = watch.message or watch.prefix
+        projected["metadata"] = public_message_metadata(projected.get("metadata") or {})
+        projected["runtime"] = runtime_entry or {}
     return _watch_projection_payload(projected)
 
 
@@ -4150,6 +4012,8 @@ def _agent_payload(agent, *, brief: bool = False) -> dict:
 
 
 def _run_payload(run: dict, *, brief: bool = False) -> dict:
+    """One Run for the CLI: the ``vibe runs list`` row when ``brief``, else full detail."""
+
     from storage.message_deliveries import public_message_metadata
 
     normalized = dict(run)
@@ -4161,29 +4025,32 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
         else ("start" if activity_at else None)
     )
     if brief:
-        return {
-            "id": normalized.get("id"),
-            "run_type": normalized.get("run_type") or normalized.get("request_type"),
-            "status": normalized.get("status"),
-            "agent_name": normalized.get("agent_name"),
-            "session_id": normalized.get("session_id"),
-            "definition_id": normalized.get("definition_id") or normalized.get("task_id"),
-            "created_at": normalized.get("created_at"),
-            "started_at": normalized.get("started_at"),
-            "last_activity_at": activity_at,
-            "activity_basis": activity_basis,
-            "activity_age_seconds": _seconds_since_iso(activity_at),
-            "completed_at": normalized.get("completed_at"),
-            "error": normalized.get("error"),
-            "callback_session_id": normalized.get("callback_session_id"),
-            "callback_status": normalized.get("callback_status"),
-            "callback_run_id": normalized.get("callback_run_id"),
-        }
+        return _present_fields(
+            {
+                "id": normalized.get("id"),
+                "run_type": normalized.get("run_type") or normalized.get("request_type"),
+                "status": normalized.get("status"),
+                "agent_name": normalized.get("agent_name"),
+                "session_id": normalized.get("session_id"),
+                "definition_id": normalized.get("definition_id") or normalized.get("task_id"),
+                "created_at": normalized.get("created_at"),
+                "started_at": normalized.get("started_at"),
+                "last_activity_at": activity_at,
+                "activity_basis": activity_basis,
+                "activity_age_seconds": _seconds_since_iso(activity_at),
+                "completed_at": normalized.get("completed_at"),
+                "error": normalized.get("error"),
+                "callback_session_id": normalized.get("callback_session_id"),
+                "callback_status": normalized.get("callback_status"),
+                "callback_run_id": normalized.get("callback_run_id"),
+            }
+        )
     normalized["metadata"] = public_message_metadata(normalized.get("metadata") or {})
-    # `prompt` is the legacy copy of `message`: every writer stores the same text in both, and the
-    # store already falls back to it for `message`, so the record carries that text once.
-    normalized.pop("prompt", None)
-    return normalized
+    normalized["run_type"] = normalized.get("run_type") or normalized.get("request_type")
+    normalized["definition_id"] = normalized.get("definition_id") or normalized.get("task_id")
+    return _present_fields(
+        {key: value for key, value in normalized.items() if key not in _CLI_OMITTED_RUN_FIELDS}
+    )
 
 
 def cmd_harness_status(args) -> int:
@@ -4551,7 +4418,6 @@ def cmd_task_add(args):
             # Deliberately BEFORE any caller default is applied: inside an Avibe Agent
             # shell ``AVIBE_SESSION_ID`` would otherwise bind this task to the calling
             # conversation, and a pure cron command could not be created from chat at all.
-            session_default_notice = None
             session_policy = None
             session_id = None
             session_key = ""
@@ -4575,7 +4441,8 @@ def cmd_task_add(args):
             )
             session_workdir = None
         else:
-            session_default_notice = _apply_caller_session_default(
+            # The defaulted target is the definition's ``session_id``; no notice repeats it.
+            _apply_caller_session_default(
                 args,
                 caller_context,
                 purpose="Task target Session",
@@ -4759,12 +4626,7 @@ def cmd_task_add(args):
         reserved_session_id = None
         warnings = _collect_target_warnings(session_target, delivery_target)
         task_payload = _task_mutation_payload(task)
-        payload_fields = {
-            "warnings": warnings,
-        }
-        if session_default_notice:
-            payload_fields["session_default_notice"] = session_default_notice
-        _print_definition_payload(task_payload, **payload_fields)
+        _print_definition_payload(task_payload, warnings=warnings)
         return 0
     except Exception as exc:
         if reserved_session_id:
@@ -4780,11 +4642,12 @@ def cmd_task_list(
     *,
     scope: SessionListScope,
     include_finished: bool = False,
-    brief: bool = True,
+    query: Optional[str] = None,
     page_request: PageRequest = PageRequest(),
 ):
     with _definition_read_store() as store:
         page_result = store.list_scheduled_tasks_page(
+            query=query,
             session_id=scope.session_id,
             page_request=page_request,
             include_successful_finished=include_finished,
@@ -4793,22 +4656,23 @@ def cmd_task_list(
     command = ["vibe", "task", "list", *scope.command_args()]
     if include_finished:
         command.append("--include-finished")
+    _add_optional_arg(command, "--q", query)
     _print_definition_list_payload(
         page_result,
-        payload_for_item=lambda task: _task_projection_payload(task, brief=brief),
+        payload_for_item=lambda task: _task_projection_payload(task, brief=True),
         command=command,
         scope=scope,
     )
     return 0
 
 
-def cmd_task_show(task_id: str):
+def cmd_task_show(task_id: str, *, brief: bool = False):
     with _definition_read_store() as store:
         task = store.get_scheduled_task(task_id, include_removed=True)
     if task is None:
         _print_task_error(_missing_definition_error("scheduled", task_id, action="show"))
         return 1
-    task_payload = _task_projection_payload(task)
+    task_payload = _task_projection_payload(task, brief=brief)
     _print_definition_payload(task_payload)
     return 0
 
@@ -5102,7 +4966,7 @@ def _cmd_task_update_pure_command(args, store, task) -> int:
         update_command_fields=True,
         metadata=metadata,
     )
-    _print_definition_payload(_task_mutation_payload(updated), warnings=[])
+    _print_definition_payload(_task_mutation_payload(updated))
     return 0
 
 
@@ -5601,23 +5465,19 @@ def cmd_task_run(task_id: str):
         _print_task_error(_missing_definition_error("scheduled", task_id, action="run"))
         return 1
     request = _task_request_store().enqueue_task_run(task.id, task=task)
+    # The same one ``run`` object ``vibe agent run`` answers with.
     _print_cli_payload(
         "agent_run",
-        accepted=True,
-        execution_id=request.id,
-        run_id=request.id,
-        request_type=request.request_type,
-        task_id=task.id,
-        definition={"id": task.id, "definition_type": "scheduled"},
-        run={
-            "id": request.id,
-            "status": "queued",
-            "run_type": request.request_type,
-            "definition_id": task.id,
-            "agent_name": task.agent_name,
-            "session_id": task.session_id,
-            "session_policy": task.session_policy,
-        },
+        run=_present_fields(
+            {
+                "id": request.id,
+                "status": "queued",
+                "run_type": request.request_type,
+                "definition_id": task.id,
+                "agent_name": task.agent_name,
+                "session_id": task.session_id,
+            }
+        ),
     )
     return 0
 
@@ -5794,7 +5654,7 @@ def cmd_agent_show(args):
         _print_task_error(TaskCliError(str(exc), code="agent_not_found", details={"agent": args.name}))
         return 1
     try:
-        _print_cli_payload("agent", agent=_agent_payload(agent))
+        _print_cli_payload("agent", agent=_agent_payload(agent, brief=bool(getattr(args, "brief", False))))
         return 0
     except Exception as exc:
         _print_task_error(TaskCliError(str(exc), code="agent_not_found", details={"agent": args.name}))
@@ -6862,35 +6722,20 @@ def _agent_run_is_async(args) -> bool:
 
 
 def _resolve_callback_session_id(args, caller_context, *, target_session_id: Optional[str] = None):
+    """The Session a Run's result returns to, plus a notice only when the caller's flags do not imply it.
+
+    An explicit ``--callback-session-id`` or ``--no-callback``, and the caller-Session
+    default inside an Agent shell, all leave ``run.callback_session_id`` saying what
+    happened. The one surprise is a run on the caller's own Session, which gets no
+    callback because the result already lands there.
+    """
+
     explicit_callback = (getattr(args, "callback_session_id", None) or "").strip() or None
-    no_callback = bool(getattr(args, "no_callback", False))
     is_async = _agent_run_is_async(args)
     if explicit_callback:
-        return explicit_callback, {
-            "code": "callback_explicit",
-            "message": (
-                "Callback route recorded for this Agent Run."
-                if not is_async
-                else "Async callback will be sent to the explicit Session."
-            ),
-            "callback_session_id": explicit_callback,
-        }
-    if no_callback:
-        message = (
-            "Started async Agent Run without a callback. This run will not post its final result back into a "
-            "Session automatically. Track it with `vibe runs show <run-id> --brief` or by polling/listing runs for the "
-            "target Session. To receive a follow-up message next time, use `--callback-session-id <session-id>` "
-            "or run from a resolved caller context so Avibe can default the callback to the current Session."
-        )
-        if not is_async:
-            message = (
-                "Recorded an explicit no-callback policy. This synchronous run will not send a callback if it later "
-                "detaches into an asynchronous background run."
-            )
-        return None, {
-            "code": "async_run_without_callback",
-            "message": message,
-        }
+        return explicit_callback, None
+    if bool(getattr(args, "no_callback", False)):
+        return None, None
     if caller_context is not None:
         caller_session_id = caller_context.session_id
         if target_session_id and target_session_id == caller_session_id:
@@ -6901,15 +6746,7 @@ def _resolve_callback_session_id(args, caller_context, *, target_session_id: Opt
                     "The target Session will receive the run result directly, so Avibe did not create a duplicate callback turn."
                 ),
             }
-        return caller_context.session_id, {
-            "code": "callback_defaulted_to_caller_session",
-            "message": (
-                "Async callback defaulted to this conversation."
-                if is_async
-                else "Callback route defaulted to this conversation."
-            ),
-            "callback_session_id": caller_session_id,
-        }
+        return caller_session_id, None
     if not is_async:
         return None, None
     raise TaskCliError(
@@ -7376,45 +7213,26 @@ def cmd_agent_run(args):
             expected_enabled_agent_id=(agent.id if agent is not None and bool(agent_name) else None),
         )
         reserved_session_id = None
-        resolved_scope_id = _scope_id_payload_from_session(session_id)
+        # One ``run`` object. Everything the caller's own flags already decided --
+        # session policy, delivery intent, fork source, close-after, sync/async --
+        # stays out; what Avibe resolved for it (the Session, its scope and
+        # visibility, the callback route) stays in.
         payload = {
-            "accepted": True,
-            "request_type": request.request_type,
-            "run_id": request.id,
-            "execution_id": request.id,
-            "agent": agent.name if agent else None,
-            "session_policy": session_policy,
-            "session_id": session_id,
-            "scope_id": resolved_scope_id,
-            "visibility": target.visibility if session_id else visibility,
-            "deliver_key": legacy_deliver_key,
-            "callback_session_id": callback_session_id,
-            "close_after": close_after,
-            "async": run_async,
-            "caller_context": caller_context.to_metadata() if caller_context else None,
-            "callback_notice": callback_notice,
-            "run": {
-                "id": request.id,
-                "status": "queued",
-                "run_type": request.request_type,
-                "agent_name": agent.name if agent else None,
-                "session_id": session_id,
-                "scope_id": resolved_scope_id,
-                "visibility": target.visibility if session_id else visibility,
-                "callback_session_id": callback_session_id,
-                "source_kind": source_kind,
-                "source_actor": source_actor,
-                "parent_run_id": parent_run_id,
-                "close_after": close_after,
-            },
+            "run": _present_fields(
+                {
+                    "id": request.id,
+                    "status": "queued",
+                    "run_type": request.request_type,
+                    "agent_name": agent.name if agent else None,
+                    "session_id": session_id,
+                    "scope_id": _scope_id_payload_from_session(session_id),
+                    "visibility": target.visibility if session_id else visibility,
+                    "callback_session_id": callback_session_id,
+                }
+            ),
         }
-        if bool(getattr(args, "send_now", False)) or delivery_intent != AGENT_RUN_DELIVERY_STEER:
-            payload["delivery_intent"] = delivery_intent
-            payload["run"]["delivery_intent"] = delivery_intent
-        if fork_result:
-            payload["forked_from_session_id"] = fork_result.fork.source_session_id
-        if fork_result:
-            payload["run"]["forked_from_session_id"] = fork_result.fork.source_session_id
+        if callback_notice:
+            payload["callback_notice"] = callback_notice
         if not run_async:
             run_payload = _wait_for_run_result(request_store, request.id, wait_timeout=args.wait_timeout)
             if callback_session_id and _sync_run_detached(run_payload):
@@ -7446,8 +7264,6 @@ def _wait_for_run_result(store: TaskExecutionStore, run_id: str, *, wait_timeout
             run["wait_state"] = "detached"
             run["handoff_reason"] = "wait_limit_reached"
             run["wait_elapsed_seconds"] = round(elapsed, 3)
-            run["accepted"] = True
-            run["async"] = True
             return _run_payload(run)
         time.sleep(0.25)
 
@@ -7488,8 +7304,6 @@ def cmd_runs_list(args):
         _add_optional_arg(command, "--created-after", created_after)
         _add_optional_arg(command, "--created-before", created_before)
         _add_optional_arg(command, "--q", getattr(args, "query", None))
-        if getattr(args, "brief", False):
-            command.append("--brief")
         payload = {
             **scope.payload(),
             "runs": [_run_payload(run, brief=True) for run in result.items],
@@ -7516,7 +7330,10 @@ def cmd_runs_show(args):
     if run is None:
         _print_task_error(TaskCliError(f"run '{run_id}' not found", code="run_not_found", details={"run_id": run_id}))
         return 1
-    run_payload = _run_payload(run, brief=getattr(args, "brief", False))
+    if getattr(args, "brief", False):
+        _print_cli_payload("agent_run", run=_run_payload(run, brief=True))
+        return 0
+    run_payload = _run_payload(run)
     session_runtime = _live_session_runtime_for_run(run_payload)
     if session_runtime is not None:
         run_payload["session_runtime"] = session_runtime
@@ -8085,16 +7902,11 @@ def cmd_session_list(args):
             )
         command = ["vibe", "session", "list"]
         _add_optional_arg(command, "--type", platform)
-        page_fields = _paginated_fields(result, command=command)
-        pagination_message = page_fields.pop("message", None)
-        message = _session_list_hint()
-        if pagination_message:
-            message = f"{pagination_message} {message}"
         _print_cli_payload(
             "agent_sessions",
             sessions=[_session_row(row, brief=True) for row in result.items],
-            **page_fields,
-            message=message,
+            **_paginated_fields(result, command=command),
+            message=_session_list_hint(),
         )
         return 0
     except Exception as exc:
@@ -8127,6 +7939,9 @@ def cmd_session_get(args):
     except Exception as exc:
         _print_task_error(exc, help_command="vibe session get --help")
         return 1
+    if getattr(args, "brief", False):
+        _print_cli_payload("agent_session", session=_session_row(payload, brief=True))
+        return 0
     _print_cli_payload(
         "agent_session",
         session=_session_row(payload, brief=False),
@@ -8777,21 +8592,10 @@ def _vault_page_payload(
     args,
     help_command: str,
     command: list[str],
-) -> tuple[list[dict], dict, str | None]:
+) -> tuple[list[dict], dict]:
     page_request = _page_request_from_args(args, help_command=help_command)
     result = page_sequence(items, page_request)
-    fields = _paginated_fields(result, command=command)
-    return result.items, fields["pagination"], fields.get("message")
-
-
-def _vault_lookup_next_steps(*, has_more: bool, has_filters: bool) -> list[str]:
-    steps: list[str] = []
-    if has_more:
-        steps.append("Use pagination.next_command to fetch the next page.")
-    if not has_filters:
-        steps.append("Use `vibe vault find --q <keyword>` or filter by --tag/--kind/--protection to narrow results.")
-    steps.append("Use `vibe vault tags` to inspect available tags.")
-    return steps
+    return result.items, _paginated_fields(result, command=command)["pagination"]
 
 
 def _vault_capability_payload(secret: dict) -> dict:
@@ -8833,7 +8637,7 @@ def cmd_vault_list(args):
         _add_optional_arg(command, "--q", query)
         _add_optional_arg(command, "--kind", getattr(args, "kind", None))
         _add_optional_arg(command, "--protection", getattr(args, "protection", None))
-        page_items, page_payload, message = _vault_page_payload(
+        page_items, page_payload = _vault_page_payload(
             items=secrets,
             args=args,
             help_command=help_command,
@@ -8842,14 +8646,8 @@ def cmd_vault_list(args):
         payload = {
             "secrets": page_items,
             "pagination": page_payload,
-            "next_steps": _vault_lookup_next_steps(
-                has_more=bool(page_payload.get("has_more")),
-                has_filters=bool(tags or query or getattr(args, "kind", None) or getattr(args, "protection", None)),
-            ),
         }
-        if message:
-            payload["message"] = f"{message} To narrow results instead, use `vibe vault find --q <keyword>`."
-        elif not page_items:
+        if not page_items:
             payload["message"] = "No Vault secrets matched. Try `vibe vault find --q <keyword>` or ask the user to add one with `vibe vault request NAME --reason ...`."
         _print_cli_payload("vault_secrets", **payload)
         return 0
@@ -8886,7 +8684,7 @@ def cmd_vault_find(args):
         _add_optional_arg(command, "--kind", getattr(args, "kind", None))
         _add_optional_arg(command, "--protection", getattr(args, "protection", None))
         capabilities = [_vault_capability_payload(secret) for secret in secrets]
-        page_items, page_payload, message = _vault_page_payload(
+        page_items, page_payload = _vault_page_payload(
             items=capabilities,
             args=args,
             help_command=help_command,
@@ -8895,14 +8693,8 @@ def cmd_vault_find(args):
         payload = {
             "secrets": page_items,
             "pagination": page_payload,
-            "next_steps": _vault_lookup_next_steps(
-                has_more=bool(page_payload.get("has_more")),
-                has_filters=bool(tags or query or getattr(args, "kind", None) or getattr(args, "protection", None)),
-            ),
         }
-        if message:
-            payload["message"] = message
-        elif not page_items:
+        if not page_items:
             payload["message"] = "No Vault capabilities matched. Try a broader keyword, inspect `vibe vault tags`, or request a missing static secret with `vibe vault request NAME --reason ...`."
         _print_cli_payload("vault_find", **payload)
         return 0
@@ -8928,7 +8720,7 @@ def cmd_vault_tags(args):
             command.append(getattr(args, "query"))
         _add_optional_arg(command, "--q", getattr(args, "query_filter", None))
         _add_optional_arg(command, "--type", getattr(args, "type", None))
-        page_items, page_payload, message = _vault_page_payload(
+        page_items, page_payload = _vault_page_payload(
             items=tags,
             args=args,
             help_command=help_command,
@@ -8937,14 +8729,8 @@ def cmd_vault_tags(args):
         payload = {
             "tags": page_items,
             "pagination": page_payload,
-            "next_steps": [
-                "Use `vibe vault find --tag <tag>` to inspect secrets under a tag.",
-                "Use `vibe vault edit NAME --tag <tag>` or `--skill <skill>` to update secret tags.",
-            ],
         }
-        if message:
-            payload["message"] = message
-        elif not page_items:
+        if not page_items:
             payload["message"] = "No Vault tags matched. Add tags with `vibe vault edit NAME --tag <tag>` or request a new secret with tags in --spec-json."
         _print_cli_payload("vault_tags", **payload)
         return 0
@@ -9187,10 +8973,6 @@ def cmd_vault_edit(args):
             "vault_secret",
             secret=secret,
             message="Vault metadata updated. Secret value, kind, protection tier, and existing grant member snapshots were not changed.",
-            next_steps=[
-                "Use `vibe vault list --q <keyword>` or `vibe vault find --tag <tag>` to verify the metadata.",
-                "Use `vibe vault run` / `fetch` / `sign` according to the secret kind when continuing the task.",
-            ],
         )
         return 0
     except vault_service.SecretNotFoundError:
@@ -11531,7 +11313,8 @@ def cmd_watch_add(args):
     try:
         caller_context = caller_context_from_env()
         caller_user_context = caller_resource_user_context(caller_context)
-        session_default_notice = _apply_caller_session_default(
+        # The defaulted target is the definition's ``session_id``; no notice repeats it.
+        _apply_caller_session_default(
             args,
             caller_context,
             purpose="Watch target Session",
@@ -11653,12 +11436,7 @@ def cmd_watch_add(args):
         watch, runtime_entry = _wait_for_watch_startup(store, runtime_store, watch.id)
         warnings = _collect_target_warnings(session_target, delivery_target)
         watch_payload = _watch_mutation_payload(watch, runtime_entry)
-        payload_fields = {
-            "warnings": warnings,
-        }
-        if session_default_notice:
-            payload_fields["session_default_notice"] = session_default_notice
-        _print_definition_payload(watch_payload, **payload_fields)
+        _print_definition_payload(watch_payload, warnings=warnings)
         return 0
     except Exception as exc:
         if reserved_session_id:
@@ -11674,11 +11452,12 @@ def cmd_watch_list(
     *,
     scope: SessionListScope,
     include_finished: bool = False,
-    brief: bool = True,
+    query: Optional[str] = None,
     page_request: PageRequest = PageRequest(),
 ):
     with _definition_read_store() as store:
         page_result = store.list_watches_page(
+            query=query,
             session_id=scope.session_id,
             page_request=page_request,
             include_successful_finished=include_finished,
@@ -11687,22 +11466,23 @@ def cmd_watch_list(
     command = ["vibe", "watch", "list", *scope.command_args()]
     if include_finished:
         command.append("--include-finished")
+    _add_optional_arg(command, "--q", query)
     _print_definition_list_payload(
         page_result,
-        payload_for_item=lambda watch: _watch_projection_payload(watch, brief=brief),
+        payload_for_item=lambda watch: _watch_projection_payload(watch, brief=True),
         command=command,
         scope=scope,
     )
     return 0
 
 
-def cmd_watch_show(watch_id: str):
+def cmd_watch_show(watch_id: str, *, brief: bool = False):
     with _definition_read_store() as store:
         watch = store.get_watch(watch_id, include_removed=True)
     if watch is None:
         _print_task_error(_missing_definition_error("watch", watch_id, action="show"))
         return 1
-    watch_payload = _watch_projection_payload(watch)
+    watch_payload = _watch_projection_payload(watch, brief=brief)
     _print_definition_payload(watch_payload)
     return 0
 
@@ -15303,9 +15083,10 @@ def _print_show_page_list(payload: dict) -> None:
         print(f"  URL: {page.get('active_url') or 'none'}")
         print(f"  Visibility: {page.get('visibility')}")
         print(f"  Updated: {page.get('updated_at')}")
-    if payload.get("message"):
+    continuation = _text_page_continuation(payload)
+    if continuation:
         print("")
-        print(payload["message"])
+        print(continuation)
     print("")
     print("Use it:")
     print("  - Open a page: vibe show status --session-id <session-id>")
@@ -16143,9 +15924,10 @@ def cmd_show_marks(args):
                 print(f"- {mark['id']}  {mark['kind']}  {mark['read_state']}")
                 print(f"  Target: {mark['target']}")
                 print(f"  Body: {mark['body_head']}")
-            if result.get("message"):
+            continuation = _text_page_continuation(result)
+            if continuation:
                 print("")
-                print(result["message"])
+                print(continuation)
         return 0
     except Exception as exc:
         _print_show_page_error(exc)
@@ -18004,7 +17786,6 @@ def build_parser():
     agent_subparsers.required = True
 
     agent_list_parser = agent_subparsers.add_parser("list", help="List Avibe Agents")
-    agent_list_parser.add_argument("--brief", action="store_true", help=argparse.SUPPRESS)
     agent_list_parser.add_argument("--backend", choices=AGENT_BACKENDS, help="Filter by backend")
     agent_list_parser.add_argument(
         "--include-disabled",
@@ -18017,6 +17798,7 @@ def build_parser():
 
     agent_show_parser = agent_subparsers.add_parser("show", help="Show one Avibe Agent")
     agent_show_parser.add_argument("name", help="Agent name")
+    _add_brief_arg(agent_show_parser, list_command="vibe agent list")
     _add_json_noop(agent_show_parser)
 
     agent_default_parser = agent_subparsers.add_parser("default", help="Set the default Avibe Agent")
@@ -18212,16 +17994,11 @@ def build_parser():
     runs_list_parser.add_argument("--created-after", help="Filter by created_at >= timestamp, or relative value such as 6h or 7d")
     runs_list_parser.add_argument("--created-before", help="Filter by created_at <= timestamp, or relative value such as 6h or 7d")
     runs_list_parser.add_argument("--q", dest="query", help="Search common run text fields")
-    runs_list_parser.add_argument("--brief", action="store_true", help=argparse.SUPPRESS)
     _add_pagination_args(runs_list_parser, help_command="vibe runs list --help")
     _add_json_noop(runs_list_parser)
     runs_show_parser = runs_subparsers.add_parser("show", help="Show one Agent run")
     runs_show_parser.add_argument("run_id", nargs="?")
-    runs_show_parser.add_argument(
-        "--brief",
-        action="store_true",
-        help=i18n_t("harness.run.cli.help.showBrief", _configured_cli_language()),
-    )
+    _add_brief_arg(runs_show_parser, list_command="vibe runs list")
     _add_json_noop(runs_show_parser)
     runs_cancel_parser = runs_subparsers.add_parser(
         "cancel",
@@ -18293,6 +18070,7 @@ def build_parser():
         error_help_command="vibe session get --help",
     )
     session_get_parser.add_argument("session_id", nargs="?", help="Agent Session ID")
+    _add_brief_arg(session_get_parser, list_command="vibe session list")
     _add_json_noop(session_get_parser)
     session_send_now_parser = session_subparsers.add_parser(
         "send-now",
@@ -19159,11 +18937,7 @@ def build_parser():
         action="store_true",
         help="Include successful one-shot task history while keeping pagination",
     )
-    task_list_parser.add_argument(
-        "--brief",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
+    task_list_parser.add_argument("--q", dest="query", help="Search common task text fields")
     _add_pagination_args(task_list_parser, help_command="vibe task list --help")
     _add_json_noop(task_list_parser)
     _add_hidden_task_alias(task_subparsers, "ls", task_list_parser)
@@ -19177,6 +18951,7 @@ def build_parser():
         error_help_command="vibe task show --help",
     )
     task_show_parser.add_argument("task_id", help="Task ID from 'vibe task list'")
+    _add_brief_arg(task_show_parser, list_command="vibe task list")
     _add_json_noop(task_show_parser)
 
     task_pause_parser = task_subparsers.add_parser(
@@ -19462,11 +19237,7 @@ def build_parser():
         action="store_true",
         help="Include successful one-shot watch history while keeping pagination",
     )
-    watch_list_parser.add_argument(
-        "--brief",
-        action="store_true",
-        help=argparse.SUPPRESS,
-    )
+    watch_list_parser.add_argument("--q", dest="query", help="Search common watch text fields")
     _add_pagination_args(watch_list_parser, help_command="vibe watch list --help")
     _add_json_noop(watch_list_parser)
     _add_hidden_task_alias(watch_subparsers, "ls", watch_list_parser)
@@ -19480,6 +19251,7 @@ def build_parser():
         error_help_command="vibe watch show --help",
     )
     watch_show_parser.add_argument("watch_id", help="Watch ID from 'vibe watch list'")
+    _add_brief_arg(watch_show_parser, list_command="vibe watch list")
     _add_json_noop(watch_show_parser)
 
     watch_pause_parser = watch_subparsers.add_parser(
@@ -20152,12 +19924,12 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
                 cmd_task_list(
                     scope=scope,
                     include_finished=getattr(args, "include_finished", False),
-                    brief=True,
+                    query=getattr(args, "query", None),
                     page_request=page_request,
                 )
             )
         if args.task_command == "show":
-            sys.exit(cmd_task_show(args.task_id))
+            sys.exit(cmd_task_show(args.task_id, brief=args.brief))
         if args.task_command == "pause":
             sys.exit(cmd_task_set_enabled(args.task_id, False))
         if args.task_command == "resume":
@@ -20191,12 +19963,12 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
                 cmd_watch_list(
                     scope=scope,
                     include_finished=getattr(args, "include_finished", False),
-                    brief=True,
+                    query=getattr(args, "query", None),
                     page_request=page_request,
                 )
             )
         if args.watch_command == "show":
-            sys.exit(cmd_watch_show(args.watch_id))
+            sys.exit(cmd_watch_show(args.watch_id, brief=args.brief))
         if args.watch_command == "pause":
             sys.exit(cmd_watch_set_enabled(args.watch_id, False))
         if args.watch_command == "resume":

@@ -526,7 +526,9 @@ The `vibe` executable controls the local service and async automation features.
 All Agent-facing collection commands use `--page` / `--limit`, default to 20
 compact rows, and cap each page at 100. They never expose an unpaginated `--all`
 mode. Continue with `pagination.next_command`; inspect one record with its
-`show` or `get` command.
+`show` or `get` command. List rows omit null, empty, and zero-valued fields;
+`--brief` on `vibe task show`, `vibe watch show`, `vibe runs show`,
+`vibe session get`, and `vibe agent show` prints exactly the list row.
 
 ## 5.1 Top-level CLI commands
 
@@ -853,21 +855,22 @@ exists.
 ### `vibe task list`
 
 ```bash
-vibe task list [--session-id <id> | --global] [--include-finished] [--page N] [--limit N]
+vibe task list [--session-id <id> | --global] [--include-finished] [--q <text>] [--page N] [--limit N]
 ```
 
 Lists the caller Session's tasks inside an Avibe Agent shell; pass `--session-id`
 for another Session or `--global` for every Session (required outside an Agent
-shell). Returns compact rows, 20 per page by default and at most 100. Use
-`pagination.next_command` to continue; use `vibe task show <task_id>` for detail.
-List and show expose the Workbench lifecycle projection. Watch rows additionally
-include tri-state `process_alive`; compatibility `state` / `last_status` fields
-do not define lifecycle.
+shell). Returns compact rows, 20 per page by default and at most 100, enabled
+tasks first and each group newest activity first. `--q` searches task text
+fields. Use `pagination.next_command` to continue; use `vibe task show <task_id>`
+for detail. List and show expose the Workbench lifecycle projection:
+`lifecycle_state` is the lifecycle, and `health` appears only when it is not
+`healthy`. `vibe watch list` follows the same contract.
 
 ### `vibe task show`
 
 ```bash
-vibe task show <task_id>
+vibe task show <task_id> [--brief]
 ```
 
 A removed task still reads here, with `lifecycle_state: "removed"` and
@@ -910,7 +913,7 @@ creation; description, model, reasoning effort, and system prompt can be edited.
 | Subcommand | Purpose |
 | --- | --- |
 | `vibe agent list` | List Agents |
-| `vibe agent show <name>` | Show one Agent |
+| `vibe agent show <name> [--brief]` | Show one Agent |
 | `vibe agent models [<name>]` | List available models + reasoning efforts for an Agent or backend |
 | `vibe agent create` | Create an Agent |
 | `vibe agent update <name>` | Edit mutable Agent fields |
@@ -964,9 +967,9 @@ Important options:
 If neither `--session-id` nor a creation policy is provided, the run uses a
 private no-delivery session and is best suited for sub-agent style calls.
 
-Runs are asynchronous by default: the command queues the run, returns a payload
-with `run_id` / `session_id`, and uses the callback policy to deliver the final
-result later. Use `--sync` only when the terminal should wait for completion.
+Runs are asynchronous by default: the command queues the run, prints one `run`
+object with its `id` and `session_id`, and uses the callback policy to deliver
+the final result later. Use `--sync` only when the terminal should wait for completion.
 `--async` is still accepted for older scripts but is no longer required.
 
 `--close-after` applies to a new or forked Session. It releases that Agent
@@ -1008,7 +1011,7 @@ direct Agent Run calls.
 | Subcommand | Purpose |
 | --- | --- |
 | `vibe runs list` | List the caller Session's recent runs; `--session-id <id>` for another Session, `--global` for every Session |
-| `vibe runs show <run_id>` | Show one run |
+| `vibe runs show <run_id> [--brief]` | Show one run |
 | `vibe runs cancel <run_id>` | Request cancellation; once the run's input reached the live Session turn, this stops that turn like Session Stop, including other runs sharing it |
 
 ## 6. Recommended Mental Model

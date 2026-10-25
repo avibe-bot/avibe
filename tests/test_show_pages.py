@@ -2855,7 +2855,12 @@ def test_show_list_cli_json_reports_pagination(monkeypatch, tmp_path, capsys):
     assert payload["pagination"]["has_more"] is True
     assert payload["pagination"]["next_page"] == 2
     assert "vibe show list --global --json --page 2 --limit 20" == payload["pagination"]["next_command"]
-    assert "More records are available" in payload["message"]
+    assert "message" not in payload
+
+    # Text output still tells a person how to continue, from the same next_command.
+    args = cli.build_parser().parse_args(["show", "list", "--global"])
+    assert cli.cmd_show_list(args) == 0
+    assert "Continue with: vibe show list --global --page 2 --limit 20" in capsys.readouterr().out
 
 
 def test_show_list_cli_next_command_uses_absolute_time_filters(monkeypatch, tmp_path, capsys):
