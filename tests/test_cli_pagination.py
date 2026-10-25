@@ -8,6 +8,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from config import paths
 from core.system_prompt_injection import build_system_prompt_injection
 from modules.im.base import MessageContext
@@ -495,6 +497,37 @@ def test_data_query_cli_omits_next_command_for_stdin_sql(monkeypatch, tmp_path, 
     assert payload["pagination"]["has_more"] is True
     assert "next_command" not in payload["pagination"]
     assert payload["message"] == "More records are available. Add --page to continue."
+
+
+@pytest.mark.parametrize(
+    ("sql", "fragments"),
+    [
+        ("select * from sessions", ["Did you mean agent_sessions", "Tables: ", "run_definitions"]),
+        ("select * from watches", ["Did you mean run_definitions"]),
+        (
+            "select m.turn_id from messages m join agent_sessions s on s.id = m.session_id",
+            ["No column 'turn_id' on messages.", "is a column of agent_events", "messages columns: id,"],
+        ),
+        (
+            "select content from agent_events",
+            ["Did you mean content_text, content_json?", "agent_events columns: id,"],
+        ),
+    ],
+)
+def test_data_query_cli_explains_unknown_tables_and_columns(
+    monkeypatch, tmp_path, capsys, sql, fragments
+) -> None:
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    SQLiteBackgroundTaskStore().close()
+
+    args = cli.build_parser().parse_args(["data", "query", "--sql", sql])
+    assert cli.cmd_data_query(args) == 1
+
+    payload = json.loads(capsys.readouterr().err)
+    assert payload["code"] == "query_failed"
+    for fragment in fragments:
+        assert fragment in payload["hint"]
 
 
 def test_data_query_cli_rejects_writes(monkeypatch, tmp_path, capsys) -> None:

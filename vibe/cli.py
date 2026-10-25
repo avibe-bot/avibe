@@ -131,7 +131,7 @@ from storage.pagination import (
     page_sequence,
     pagination_payload,
 )
-from storage.read_only_query import ReadOnlyQueryError, run_read_only_query
+from storage.read_only_query import SCHEMA_PRAGMAS, ReadOnlyQueryError, run_read_only_query
 from storage.settings_service import make_scope_id
 
 logger = logging.getLogger(__name__)
@@ -2745,8 +2745,8 @@ def _task_projection_state(task: Mapping[str, object]) -> str:
         if lifecycle_detail == "normal":
             return "completed"
         return "unknown"
-    if lifecycle_state == "paused":
-        return "paused"
+    if lifecycle_state in {"paused", "removed"}:
+        return lifecycle_state
     return "unknown"
 
 
@@ -2814,6 +2814,40 @@ def _definition_read_store():
         yield store
     finally:
         store.close()
+
+
+def _missing_definition_error(definition_type: str, definition_id: str, *, action: str) -> TaskCliError:
+    """Why a command found no live task or watch: it was removed, or never existed.
+
+    Watches are routinely removed at close-out and checked again later, so a bare
+    ``not_found`` would leave a caller unable to tell that from a mistyped id.
+    """
+
+    noun = "task" if definition_type == "scheduled" else "watch"
+    with _definition_read_store() as store:
+        read = store.get_scheduled_task if definition_type == "scheduled" else store.get_watch
+        definition = read(definition_id, include_removed=True)
+    removed_at = (definition or {}).get("removed_at")
+    if removed_at:
+        return TaskCliError(
+            f"{noun} '{definition_id}' was removed at {removed_at}",
+            code=f"{noun}_removed",
+            hint=(
+                f"The {noun} is already removed; nothing to do."
+                if action == "remove"
+                else f"A removed {noun} cannot be changed. Use 'vibe {noun} show {definition_id}' "
+                f"to read it, or 'vibe {noun} add' to create a new one."
+            ),
+            help_command=f"vibe {noun} show {definition_id}",
+            details={f"{noun}_id": definition_id, "removed_at": removed_at},
+        )
+    return TaskCliError(
+        f"{noun} '{definition_id}' not found",
+        code=f"{noun}_not_found",
+        hint=f"Use 'vibe {noun} list' to find a valid {noun} ID before calling {action}.",
+        help_command=f"vibe {noun} list",
+        details={f"{noun}_id": definition_id},
+    )
 
 
 def _read_definition_projection(
@@ -4029,8 +4063,8 @@ def _watch_projection_state(watch: Mapping[str, object]) -> str:
         return "armed" if watch.get("mode") == "forever" else "pending"
     if lifecycle_state == "finished":
         return "failed" if watch.get("lifecycle_detail") in {"timeout", "error"} else "completed"
-    if lifecycle_state == "paused":
-        return "paused"
+    if lifecycle_state in {"paused", "removed"}:
+        return lifecycle_state
     return "unknown"
 
 
@@ -4770,17 +4804,9 @@ def cmd_task_list(
 
 def cmd_task_show(task_id: str):
     with _definition_read_store() as store:
-        task = store.get_scheduled_task(task_id)
+        task = store.get_scheduled_task(task_id, include_removed=True)
     if task is None:
-        _print_task_error(
-            TaskCliError(
-                f"task '{task_id}' not found",
-                code="task_not_found",
-                hint="Use 'vibe task list' to find a valid task ID before calling show.",
-                help_command="vibe task list",
-                details={"task_id": task_id},
-            )
-        )
+        _print_task_error(_missing_definition_error("scheduled", task_id, action="show"))
         return 1
     task_payload = _task_projection_payload(task)
     _print_definition_payload(task_payload)
@@ -4792,15 +4818,7 @@ def cmd_task_set_enabled(task_id: str, enabled: bool):
     task = store.get_task(task_id)
     if task is None:
         action = "resume" if enabled else "pause"
-        _print_task_error(
-            TaskCliError(
-                f"task '{task_id}' not found",
-                code="task_not_found",
-                hint=f"Use 'vibe task list' to find a valid task ID before calling {action}.",
-                help_command="vibe task list",
-                details={"task_id": task_id},
-            )
-        )
+        _print_task_error(_missing_definition_error("scheduled", task_id, action=action))
         return 1
     try:
         updated = store.set_enabled(task_id, enabled)
@@ -4852,15 +4870,7 @@ def cmd_task_remove(task_id: str):
     store = _task_store()
     removed = store.remove_task(task_id)
     if not removed:
-        _print_task_error(
-            TaskCliError(
-                f"task '{task_id}' not found",
-                code="task_not_found",
-                hint="Use 'vibe task list' to find a valid task ID before calling remove.",
-                help_command="vibe task list",
-                details={"task_id": task_id},
-            )
-        )
+        _print_task_error(_missing_definition_error("scheduled", task_id, action="remove"))
         return 1
     _print_cli_payload("run_definition", removed_id=task_id)
     return 0
@@ -5102,13 +5112,7 @@ def cmd_task_update(args):
         store = _task_store()
         task = store.get_task(args.task_id)
         if task is None:
-            raise TaskCliError(
-                f"task '{args.task_id}' not found",
-                code="task_not_found",
-                hint="Use 'vibe task list' to find a valid task ID before calling update.",
-                help_command="vibe task list",
-                details={"task_id": args.task_id},
-            )
+            raise _missing_definition_error("scheduled", args.task_id, action="update")
 
         # A definition is either a scheduled Agent message or a scheduled command, and
         # the two shapes are not convertible in place: switching would leave the other
@@ -5594,15 +5598,7 @@ def cmd_task_run(task_id: str):
     store = _task_store()
     task = store.get_task(task_id)
     if task is None:
-        _print_task_error(
-            TaskCliError(
-                f"task '{task_id}' not found",
-                code="task_not_found",
-                hint="Use 'vibe task list' to find a valid task ID before calling run.",
-                help_command="vibe task list",
-                details={"task_id": task_id},
-            )
-        )
+        _print_task_error(_missing_definition_error("scheduled", task_id, action="run"))
         return 1
     request = _task_request_store().enqueue_task_run(task.id, task=task)
     _print_cli_payload(
@@ -7998,7 +7994,9 @@ def cmd_data_query(args):
         _print_cli_payload("data_query", **payload)
         return 0
     except ReadOnlyQueryError as exc:
-        _print_task_error(TaskCliError(str(exc), code=exc.code, help_command="vibe data query --help"))
+        _print_task_error(
+            TaskCliError(str(exc), code=exc.code, hint=exc.hint, help_command="vibe data query --help")
+        )
         return 1
     except Exception as exc:
         _print_task_error(exc, help_command="vibe data query --help")
@@ -11700,17 +11698,9 @@ def cmd_watch_list(
 
 def cmd_watch_show(watch_id: str):
     with _definition_read_store() as store:
-        watch = store.get_watch(watch_id)
+        watch = store.get_watch(watch_id, include_removed=True)
     if watch is None:
-        _print_task_error(
-            TaskCliError(
-                f"watch '{watch_id}' not found",
-                code="watch_not_found",
-                hint="Use 'vibe watch list' to find a valid watch ID before calling show.",
-                help_command="vibe watch list",
-                details={"watch_id": watch_id},
-            )
-        )
+        _print_task_error(_missing_definition_error("watch", watch_id, action="show"))
         return 1
     watch_payload = _watch_projection_payload(watch)
     _print_definition_payload(watch_payload)
@@ -11722,15 +11712,7 @@ def cmd_watch_set_enabled(watch_id: str, enabled: bool):
     watch = store.get_watch(watch_id)
     if watch is None:
         action = "resume" if enabled else "pause"
-        _print_task_error(
-            TaskCliError(
-                f"watch '{watch_id}' not found",
-                code="watch_not_found",
-                hint=f"Use 'vibe watch list' to find a valid watch ID before calling {action}.",
-                help_command="vibe watch list",
-                details={"watch_id": watch_id},
-            )
-        )
+        _print_task_error(_missing_definition_error("watch", watch_id, action=action))
         return 1
     try:
         updated = store.set_enabled(watch_id, enabled)
@@ -11767,13 +11749,7 @@ def cmd_watch_update(args):
         store = _watch_store()
         watch = store.get_watch(args.watch_id)
         if watch is None:
-            raise TaskCliError(
-                f"watch '{args.watch_id}' not found",
-                code="watch_not_found",
-                hint="Use 'vibe watch list' to find a valid watch ID before calling update.",
-                help_command="vibe watch list",
-                details={"watch_id": args.watch_id},
-            )
+            raise _missing_definition_error("watch", args.watch_id, action="update")
 
         if getattr(args, "reset_delivery", False) and (
             getattr(args, "post_to", None) is not None
@@ -12176,15 +12152,7 @@ def cmd_watch_remove(watch_id: str):
     store = _watch_store()
     removed = store.remove_watch(watch_id)
     if not removed:
-        _print_task_error(
-            TaskCliError(
-                f"watch '{watch_id}' not found",
-                code="watch_not_found",
-                hint="Use 'vibe watch list' to find a valid watch ID before calling remove.",
-                help_command="vibe watch list",
-                details={"watch_id": watch_id},
-            )
-        )
+        _print_task_error(_missing_definition_error("watch", watch_id, action="remove"))
         return 1
     _print_cli_payload("run_definition", removed_id=watch_id)
     return 0
@@ -18798,11 +18766,18 @@ def build_parser():
         "query",
         help="Run one read-only SQL query",
         description="Run one guarded read-only SQL query against the local SQLite state database.",
+        epilog=(
+            "Discover the schema before guessing names:\n"
+            "  vibe data query --sql \"select name from pragma_table_list where schema = 'main' order by name\" --limit 100\n"
+            "  vibe data query --sql \"PRAGMA table_info(run_definitions)\" --limit 100\n"
+            f"Only schema PRAGMAs run: {', '.join(sorted(SCHEMA_PRAGMAS))}.\n"
+            "Tasks and Watches are rows of run_definitions (definition_type is scheduled or watch)."
+        ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe data query --help",
     )
     sql_group = data_query_parser.add_mutually_exclusive_group(required=True)
-    sql_group.add_argument("--sql", help="SQL SELECT/WITH statement to run.")
+    sql_group.add_argument("--sql", help="SQL SELECT/WITH statement or schema PRAGMA to run.")
     sql_group.add_argument("--sql-file", help="Read SQL from a UTF-8 file, or '-' for stdin.")
     _add_pagination_args(data_query_parser, help_command="vibe data query --help")
     _add_json_noop(data_query_parser)

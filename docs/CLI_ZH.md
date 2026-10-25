@@ -191,6 +191,24 @@ SQLite 数据库的 `agent_events` 与 `skill_usage_daily` 中，没有统计面
 记录器每次写入前都会重新读取此设置，无需重启。关闭统计不影响 Skill 发现或
 加载，也不会删除已有历史。若希望既不再记录，也不保留历史，请先关闭，再清除。
 
+### `vibe data query`
+
+对本地 SQLite 状态数据库执行一条受保护的只读 SQL 语句。结果默认每页 20 行，最多 100 行。
+
+```bash
+vibe data query --sql "select name from pragma_table_list where schema = 'main' order by name" --limit 100
+vibe data query --sql "PRAGMA table_info(run_definitions)" --limit 100
+vibe data query --sql "select id, status, created_at from agent_runs order by created_at desc"
+vibe data query --sql-file query.sql --limit 50
+```
+
+连接是只读的：写入、schema 变更、`ATTACH` 和事务都会被拒绝。schema PRAGMA
+`table_list`、`table_info`、`table_xinfo`、`index_list`、`index_info` 和
+`foreign_key_list` 可以作为语句执行，也可以作为 `pragma_*` 表值函数使用；其他
+PRAGMA 一律拒绝。`no such table` 或 `no such column` 错误会带上 `hint`，给出最接近的
+名称以及表清单，或所引用表的列。Task 和 Watch 都是 `run_definitions` 的行
+（`definition_type` 为 `scheduled` 或 `watch`）。
+
 ### `vibe data skill-usage`
 
 仅限实例所有者使用的本地维护命令，返回 JSON 诊断信息，不是 Skill 热度排名。
@@ -488,6 +506,12 @@ list 和 show 与 Workbench 读取同一份 Harness 投影：`lifecycle_state`�
 watch 还会返回 `process_alive`。对 watch 来说，`process_alive: null`
 表示从未观测到 waiter runtime，`false` 表示曾观测到的 waiter 已退出。
 旧的 `state` 和 task 的 `last_status` 仅作为兼容展示字段保留，不定义 lifecycle。
+
+`vibe task show` 和 `vibe watch show` 也能读取已删除的 definition：返回同一份投影，
+其中 `lifecycle_state: "removed"`，并带有 `removed_at`。列表从不包含已删除的
+definition。对已删除的 definition 执行 `pause`、`resume`、`update`、`run` 或
+`remove` 会以 `task_removed` / `watch_removed` 失败，`details.removed_at` 给出删除
+时间；`task_not_found` / `watch_not_found` 表示该 id 从未存在。
 
 waiter 命令放在 `--` 后面；或者通过 `--shell` 传入一整段 shell 字符串。
 完整参数请看 `vibe watch add --help`，包括 `--timeout`、`--lifetime-timeout`、

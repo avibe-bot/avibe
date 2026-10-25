@@ -804,6 +804,9 @@ list 和 show 会返回与 Workbench 相同的 lifecycle 投影。watch 还包�
 vibe task show <task_id>
 ```
 
+已删除的 task 仍可在这里读取，返回 `lifecycle_state: "removed"` 和 `removed_at`。
+对它执行其他 `vibe task` 命令会以 `task_removed` 失败；`task_not_found` 表示该 id 从未存在。
+
 ### `vibe task pause`
 
 ```bash

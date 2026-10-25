@@ -1278,6 +1278,35 @@ def test_watch_show_missing_returns_structured_error() -> None:
     assert payload["code"] == "watch_not_found"
 
 
+def test_removed_watch_reads_as_removed_and_refuses_mutations(capsys) -> None:
+    # Watches are removed at close-out and checked again later; a bare
+    # ``watch_not_found`` could not be told apart from a mistyped id.
+    store = ManagedWatchStore()
+    watch = _add_test_watch(store, name="Watch CI")
+    assert store.remove_watch(watch.id) is True
+
+    assert cli.cmd_watch_show(watch.id) == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["id"] == watch.id
+    assert definition["name"] == "Watch CI"
+    assert definition["lifecycle_state"] == "removed"
+    assert definition["state"] == "removed"
+    removed_at = definition["removed_at"]
+    assert removed_at
+
+    mutations = [
+        (cli.cmd_watch_set_enabled, (watch.id, False)),
+        (cli.cmd_watch_set_enabled, (watch.id, True)),
+        (cli.cmd_watch_update, (_parse_watch_update([watch.id, "--name", "Renamed"]),)),
+        (cli.cmd_watch_remove, (watch.id,)),
+    ]
+    for command, args in mutations:
+        result, payload = _capture_stderr_json(command, *args)
+        assert result == 1
+        assert payload["code"] == "watch_removed"
+        assert payload["details"] == {"watch_id": watch.id, "removed_at": removed_at}
+
+
 def test_watch_pause_resume_and_remove_update_store(tmp_path: Path, capsys) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")

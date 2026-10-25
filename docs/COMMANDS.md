@@ -870,6 +870,10 @@ do not define lifecycle.
 vibe task show <task_id>
 ```
 
+A removed task still reads here, with `lifecycle_state: "removed"` and
+`removed_at`. Other `vibe task` commands on it fail with `task_removed`;
+`task_not_found` means the id never existed.
+
 ### `vibe task pause`
 
 ```bash
