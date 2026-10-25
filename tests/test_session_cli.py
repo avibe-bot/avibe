@@ -63,14 +63,23 @@ def test_list_excludes_archived_and_orders_by_activity(monkeypatch, tmp_path, ca
     assert "message" not in payload
 
 
-def test_list_row_has_only_lean_fields(monkeypatch, tmp_path, capsys):
+def test_list_row_has_only_lean_present_fields(monkeypatch, tmp_path, capsys):
+    from core.services import sessions as sessions_service
+
     engine = _setup(monkeypatch, tmp_path)
     _seed(engine, "sesaaa", platform="slack", native="C1")
+    with engine.begin() as conn:
+        standalone = sessions_service.create_session(
+            conn, scope_id=None, agent_backend="codex", agent_name="codex", visibility="foreground"
+        )
     _, payload = _run(cli.cmd_session_list, ["session", "list"], capsys)
-    row = payload["sessions"][0]
+    rows = {row["id"]: row for row in payload["sessions"]}
+    row = rows["sesaaa"]
     assert set(row) == {"id", "title", "platform", "project_id", "agent_name", "agent_status", "last_active_at"}
     assert row["platform"] == "slack"
     assert "agent_backend" not in row and "status" not in row
+    # An untitled standalone Session has no title, platform, or project: the keys are absent.
+    assert set(rows[standalone["id"]]) == {"id", "agent_name", "agent_status", "last_active_at"}
 
 
 def test_list_type_filter(monkeypatch, tmp_path, capsys):

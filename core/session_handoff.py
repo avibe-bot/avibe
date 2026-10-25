@@ -185,7 +185,7 @@ def _history_query(session_id: str) -> str | None:
         "SELECT created_at, type, substr(content_text,1,2000) FROM messages"
         f" WHERE session_id='{session_id}' ORDER BY created_at, id LIMIT 50 OFFSET 0"
     )
-    return f'vibe data query --sql "{sql}"'
+    return f'vibe data query --sql "{sql}" --format text'
 
 
 def _open_work_lines(items: Sequence[Mapping[str, Any]]) -> list[str]:

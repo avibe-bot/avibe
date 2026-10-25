@@ -2530,10 +2530,42 @@ _WORKBENCH_SESSION_LABEL_FIELDS = frozenset(
 _CLI_OMITTED_DEFINITION_FIELDS = _CLI_LEGACY_FIELDS | _WORKBENCH_SESSION_LABEL_FIELDS | {"prefix"}
 #: ``request_type`` repeats ``run_type`` and ``task_id`` repeats ``definition_id``;
 #: ``callback_session`` and ``source_session`` are Workbench labels of two more Sessions.
+#: ``result_payload`` is the reply's delivery ledger (``result_text`` and
+#: ``other_outputs`` carry its text); ``message_ids``, ``delivery_id``, and
+#: ``callback_terminal_turn_id`` are delivery bookkeeping; ``ok`` repeats
+#: ``status``; ``agent_id`` is not the Agent's key (``agent_name`` is); and
+#: ``updated_at`` is the record's write stamp, which ``last_activity_at`` and
+#: ``completed_at`` already report.
 _CLI_OMITTED_RUN_FIELDS = (
     _CLI_LEGACY_FIELDS
     | _WORKBENCH_SESSION_LABEL_FIELDS
     | {"request_type", "task_id", "callback_session", "source_session"}
+    | {"result_payload", "message_ids", "delivery_id", "callback_terminal_turn_id"}
+    | {"pid", "ok", "agent_id", "updated_at"}
+)
+#: Run metadata the CLI never prints: delivery and scheduler bookkeeping, the
+#: caller's raw routing identity (``source_*`` fields carry the lineage), turn
+#: ids, and copies of fields the Run prints at the top level.
+_CLI_INTERNAL_RUN_METADATA_KEYS = frozenset(
+    {
+        "delivery_intent",
+        "delivery_outcome",
+        "delivered_reports",
+        "owed_failure_notice",
+        "turn_failure_notification",
+        "watch_recent_event_timestamps",
+        "watch_lifetime_started_at",
+        "task_schedule_consumed",
+        "job_watch_authorization",
+        "caller_context",
+        "created_by",
+        "turn_id",
+        "callback_terminal_turn_id",
+        "callback_parent_run_id",
+        "last_activity_at",
+        "session_fork",
+        "source_session_id",
+    }
 )
 
 
@@ -3883,19 +3915,20 @@ def _watch_mutation_payload(watch, runtime_entry: Optional[dict[str, object]]) -
 def _agent_payload(agent, *, brief: bool = False) -> dict:
     payload = agent.to_dict()
     if brief:
-        return {
-            "id": payload["id"],
-            "name": payload["name"],
-            "display_name": payload["display_name"],
-            "backend": payload["backend"],
-            "model": payload["model"],
-            "reasoning_effort": payload["reasoning_effort"],
-            "enabled": payload["enabled"],
-            "archived": payload["archived"],
-            "archived_at": payload["archived_at"],
-            "source": payload["source"],
-            "updated_at": payload["updated_at"],
-        }
+        # ``name`` is the Agent's key. Only a disabled Agent says ``enabled: false``;
+        # only an archived one has ``archived_at``.
+        return _present_fields(
+            {
+                "name": payload["name"],
+                "backend": payload["backend"],
+                "model": payload["model"],
+                "reasoning_effort": payload["reasoning_effort"],
+                "enabled": None if payload["enabled"] else False,
+                "archived_at": payload["archived_at"],
+                "source": payload["source"],
+                "updated_at": payload["updated_at"],
+            }
+        )
     return payload
 
 
@@ -3933,12 +3966,45 @@ def _run_payload(run: dict, *, brief: bool = False) -> dict:
                 "callback_run_id": normalized.get("callback_run_id"),
             }
         )
-    normalized["metadata"] = public_message_metadata(normalized.get("metadata") or {})
+    metadata = public_message_metadata(normalized.get("metadata") or {})
+    normalized["metadata"] = {
+        key: value for key, value in metadata.items() if key not in _CLI_INTERNAL_RUN_METADATA_KEYS
+    }
     normalized["run_type"] = normalized.get("run_type") or normalized.get("request_type")
     normalized["definition_id"] = normalized.get("definition_id") or normalized.get("task_id")
-    return _present_fields(
-        {key: value for key, value in normalized.items() if key not in _CLI_OMITTED_RUN_FIELDS}
-    )
+    # A callback names the Session its result came from only in metadata.
+    normalized["source_session_id"] = normalized.get("source_session_id") or metadata.get("source_session_id")
+    # ``source_actor`` is printed only when it is not the source Session or parent Run.
+    if normalized.get("source_actor") in {normalized.get("source_session_id"), normalized.get("parent_run_id")}:
+        normalized["source_actor"] = None
+    normalized["cancel_requested"] = normalized.get("cancel_requested") or None
+    normalized["definition_deleted"] = normalized.get("definition_deleted") or None
+    detail: dict = {}
+    for key, value in normalized.items():
+        if key not in _CLI_OMITTED_RUN_FIELDS:
+            detail[key] = value
+        if key == "result_text":
+            detail["other_outputs"] = _run_other_outputs(normalized)
+    return _present_fields(detail)
+
+
+def _run_other_outputs(run: Mapping[str, object]) -> list[str]:
+    """Reply text the Run delivered that ``result_text`` does not already hold.
+
+    Almost every delivered output is the final reply ``result_text`` repeats; a
+    message sent mid-turn, or the only reply of a Run that ended without
+    ``result_text``, is not.
+    """
+
+    payload = run.get("result_payload")
+    outputs = payload.get("outputs") if isinstance(payload, dict) else None
+    result_text = str(run.get("result_text") or "")
+    texts: list[str] = []
+    for output in outputs if isinstance(outputs, list) else []:
+        text = output.get("text") if isinstance(output, dict) else None
+        if isinstance(text, str) and text.strip() and text not in result_text and text not in texts:
+            texts.append(text)
+    return texts
 
 
 def cmd_harness_status(args) -> int:
@@ -7380,6 +7446,36 @@ def cmd_data_skill_usage(args):
         return 1
 
 
+def _query_records_text(result, page_fields: dict) -> str:
+    """``vibe data query --format text``: each row as an expanded record, values verbatim.
+
+    JSON escapes every newline and quote of a transcript or message body, so
+    Agents re-printed rows just to read them. A multi-line value starts on the
+    line after its column name, indented two spaces; SQL NULL prints ``(null)``.
+    """
+
+    lines: list[str] = []
+    offset = (result.pagination.page - 1) * result.pagination.limit
+    for number, row in enumerate(result.rows, start=offset + 1):
+        lines.append(f"-[ RECORD {number} ]")
+        for column, value in row.items():
+            text = "(null)" if value is None else str(value)
+            value_lines = text.splitlines()
+            if len(value_lines) > 1:
+                lines.append(f"{column}:")
+                lines.extend(f"  {line}" if line else "" for line in value_lines)
+            else:
+                lines.append(f"{column}: {text}" if text else f"{column}:")
+    if not result.rows:
+        lines.append("(0 rows)")
+    pagination = page_fields["pagination"]
+    if pagination.get("next_command"):
+        lines.append(f"next_command: {pagination['next_command']}")
+    elif page_fields.get("message"):
+        lines.append(page_fields["message"])
+    return "\n".join(lines)
+
+
 def cmd_data_query(args):
     try:
         sql = getattr(args, "sql", None)
@@ -7396,17 +7492,19 @@ def cmd_data_query(args):
             _add_optional_arg(command, "--sql", getattr(args, "sql", None))
         elif sql_file and sql_file != "-":
             _add_optional_arg(command, "--sql-file", sql_file)
+        text_format = getattr(args, "format", "json") == "text"
+        if text_format:
+            command.extend(["--format", "text"])
         omit_next_command = bool(sql_file == "-")
-        payload = {
-            "columns": result.columns,
-            "rows": result.rows,
-            **_paginated_fields(
-                result.pagination,
-                command=command,
-                include_next_command=not omit_next_command,
-            ),
-        }
-        _print_cli_payload("data_query", **payload)
+        page_fields = _paginated_fields(
+            result.pagination,
+            command=command,
+            include_next_command=not omit_next_command,
+        )
+        if text_format:
+            print(_query_records_text(result, page_fields))
+            return 0
+        _print_cli_payload("data_query", columns=result.columns, rows=result.rows, **page_fields)
         return 0
     except ReadOnlyQueryError as exc:
         _print_task_error(
@@ -7440,7 +7538,7 @@ _SESSION_GET_OMIT = ("status", "session_anchor", "agent_id")
 
 def _session_row(payload: dict, *, brief: bool) -> dict:
     if brief:
-        return {key: payload.get(key) for key in _SESSION_LIST_FIELDS}
+        return _present_fields({key: payload.get(key) for key in _SESSION_LIST_FIELDS})
     return {key: value for key, value in payload.items() if key not in _SESSION_GET_OMIT}
 
 
@@ -8184,21 +8282,31 @@ def _vault_page_payload(
     return result.items, _paginated_fields(result, command=command)["pagination"]
 
 
-def _vault_capability_payload(secret: dict) -> dict:
+def _vault_secret_row(secret: dict) -> dict:
+    """One ``vibe vault list`` / ``find`` row: what an Agent picks a secret by, never its value.
+
+    Only a static secret has fields to reference, and ``NAME`` alone selects the
+    default one, so ``default_field`` is named only when there are several. A
+    keypair says ``per_use_sign: true`` when ``vibe vault sign`` can use it.
+    """
+
     default_field = secret.get("default_field") or "value"
-    return {
-        "name": secret["name"],
-        "kind": secret.get("kind"),
-        "protection": secret.get("protection"),
-        "default_field": default_field,
-        "fields": secret.get("fields") or [default_field],
-        **({"fields_state": "corrupt"} if secret.get("fields_state") == "corrupt" else {}),
-        "tags": secret.get("tags") or [],
-        "description": secret.get("description"),
-        "policy": secret.get("policy") or {},
-        "access_grantable": bool(secret.get("access_grantable")),
-        "per_use_sign": bool(secret.get("per_use_sign")),
-    }
+    fields = (secret.get("fields") or [default_field]) if secret.get("kind") != "keypair" else []
+    return _present_fields(
+        {
+            "name": secret["name"],
+            "kind": secret.get("kind"),
+            "protection": secret.get("protection"),
+            "fields": fields,
+            "default_field": default_field if len(fields) > 1 else None,
+            "fields_state": "corrupt" if secret.get("fields_state") == "corrupt" else None,
+            "tags": secret.get("tags"),
+            "description": secret.get("description"),
+            "policy": secret.get("policy"),
+            "signing_addresses": secret.get("signing_addresses"),
+            "per_use_sign": bool(secret.get("per_use_sign")) or None,
+        }
+    )
 
 
 def cmd_vault_list(args):
@@ -8224,7 +8332,7 @@ def cmd_vault_list(args):
         _add_optional_arg(command, "--kind", getattr(args, "kind", None))
         _add_optional_arg(command, "--protection", getattr(args, "protection", None))
         page_items, page_payload = _vault_page_payload(
-            items=secrets,
+            items=[_vault_secret_row(secret) for secret in secrets],
             args=args,
             help_command=help_command,
             command=command,
@@ -8269,9 +8377,8 @@ def cmd_vault_find(args):
             _add_optional_arg(command, "--tag", tag)
         _add_optional_arg(command, "--kind", getattr(args, "kind", None))
         _add_optional_arg(command, "--protection", getattr(args, "protection", None))
-        capabilities = [_vault_capability_payload(secret) for secret in secrets]
         page_items, page_payload = _vault_page_payload(
-            items=capabilities,
+            items=[_vault_secret_row(secret) for secret in secrets],
             args=args,
             help_command=help_command,
             command=command,
@@ -8281,7 +8388,7 @@ def cmd_vault_find(args):
             "pagination": page_payload,
         }
         if not page_items:
-            payload["message"] = "No Vault capabilities matched. Try a broader keyword, inspect `vibe vault tags`, or request a missing static secret with `vibe vault request NAME --reason ...`."
+            payload["message"] = "No Vault secrets matched. Try a broader keyword, inspect `vibe vault tags`, or request a missing static secret with `vibe vault request NAME --reason ...`."
         _print_cli_payload("vault_find", **payload)
         return 0
     except TaskCliError as exc:
@@ -8307,7 +8414,8 @@ def cmd_vault_tags(args):
         _add_optional_arg(command, "--q", getattr(args, "query_filter", None))
         _add_optional_arg(command, "--type", getattr(args, "type", None))
         page_items, page_payload = _vault_page_payload(
-            items=tags,
+            # A skill tag says it is one by its ``skill:`` prefix.
+            items=[{"tag": tag["tag"], "secret_count": tag["secret_count"]} for tag in tags],
             args=args,
             help_command=help_command,
             command=command,
@@ -17472,8 +17580,8 @@ def build_parser():
 
     vault_find_parser = vault_subparsers.add_parser(
         "find",
-        help="Find requestable secrets and signing keys",
-        description="Search value-free Vault capabilities for agents: name, kind, protection tier, tags, fetch policy, access grantability, and per-use signing.",
+        help="Search secrets and signing keys by keyword",
+        description="Search Vault secrets by keyword, 20 per page by default. Rows are the same value-free rows 'vibe vault list' prints.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault find --help",
     )
@@ -17822,7 +17930,9 @@ def build_parser():
             "  vibe data query --sql \"select group_concat(name, ', ') as columns from pragma_table_info('run_definitions')\"\n"
             "  vibe data query --sql \"PRAGMA table_info(run_definitions)\" --limit 100   # with types and keys\n"
             f"Only schema PRAGMAs run: {', '.join(sorted(SCHEMA_PRAGMAS))}.\n"
-            "Tasks and Watches are rows of run_definitions (definition_type is scheduled or watch)."
+            "Tasks and Watches are rows of run_definitions (definition_type is scheduled or watch).\n"
+            "Read long text such as a transcript as records with real newlines:\n"
+            "  vibe data query --sql \"select created_at, author, content_text from messages where session_id = 'ses...' order by created_at\" --format text"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe data query --help",
@@ -17830,6 +17940,12 @@ def build_parser():
     sql_group = data_query_parser.add_mutually_exclusive_group(required=True)
     sql_group.add_argument("--sql", help="SQL SELECT/WITH statement or schema PRAGMA to run.")
     sql_group.add_argument("--sql-file", help="Read SQL from a UTF-8 file, or '-' for stdin.")
+    data_query_parser.add_argument(
+        "--format",
+        choices=("json", "text"),
+        default="json",
+        help="json (default) prints the JSON envelope; text prints each row as a record with values verbatim.",
+    )
     _add_pagination_args(data_query_parser, help_command="vibe data query --help")
     _add_json_noop(data_query_parser)
     data_retention_parser = data_subparsers.add_parser(

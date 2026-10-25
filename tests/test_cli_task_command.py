@@ -200,7 +200,7 @@ def test_agent_remove_cli_archives_agent(tmp_path: Path, capsys, sqlite_schema_d
         payload = json.loads(capsys.readouterr().out)
         assert payload["removed_agent"] == "worker"
         assert payload["archived_agent"]["name"].startswith("_worker-")
-        assert payload["archived_agent"]["display_name"] == "worker"
+        assert payload["archived_agent"]["archived_at"]
         assert agent_store.get("worker") is None
     finally:
         agent_store.close()
@@ -294,7 +294,16 @@ def test_agent_list_is_bounded_and_compact_by_default(tmp_path: Path, capsys, sq
 
     payload = json.loads(capsys.readouterr().out)
     assert len(payload["agents"]) == 20
-    assert "system_prompt" not in payload["agents"][0]
+    # The Agent's key and what it runs on; the unset effort and the default enabled
+    # state are absent.
+    stored = agent_store.get("worker-00")
+    assert payload["agents"][0] == {
+        "name": "worker-00",
+        "backend": "codex",
+        "model": stored.model,
+        "source": "user",
+        "updated_at": stored.updated_at,
+    }
     assert payload["pagination"]["next_command"] == "vibe agent list --page 2 --limit 20"
 
 
