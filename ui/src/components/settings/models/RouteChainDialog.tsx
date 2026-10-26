@@ -578,6 +578,11 @@ export const RouteChainDialog: React.FC<{
       }
       setGuard(null);
       setSaveErrorCode(failure?.code ?? null);
+      if (failure?.code === "cache_ttl_unsupported") {
+        setPhase("ready");
+        focusAfterRender(retryButtonRef);
+        return;
+      }
       const nextPhase = failure?.serverNamed ? "rejected" : "unknown";
       setPhase(nextPhase);
       focusAfterRender(retryButtonRef);
@@ -782,8 +787,9 @@ export const RouteChainDialog: React.FC<{
     setPreview(null);
     setPreviewPending(false);
     setPreviewFailed(false);
-    setManualDraft(restoreUndo.current?.manual ?? savedOverride !== null);
-    setCacheTtlDraft(restoreUndo.current?.cacheTtl ?? savedOverride?.cache_ttl ?? null);
+    const restored = restoreUndo.current;
+    setManualDraft(restored?.manual ?? savedOverride !== null);
+    setCacheTtlDraft(restored ? restored.cacheTtl : savedOverride?.cache_ttl ?? null);
     advanceInteraction({ type: 'reset', draft: restoreUndo.current?.hops ?? origin });
     restoreUndo.current = null;
     announce('settings.models.routing.undoDone');
@@ -1164,6 +1170,11 @@ export const RouteChainDialog: React.FC<{
                 <option value="12h">{t("settings.models.routing.cacheTtl.12h")}</option>
               </select>
               <span className="text-xs text-muted">{t("settings.models.routing.cacheTtl.help")}</span>
+              {saveErrorCode === "cache_ttl_unsupported" && (
+                <span role="alert" className="text-xs text-danger">
+                  {t("errors.cache_ttl_unsupported")}
+                </span>
+              )}
             </label>
           )}
         </div>
