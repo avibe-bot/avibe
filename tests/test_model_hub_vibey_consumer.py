@@ -35,10 +35,6 @@ from config.v2_config import (
 from core.handlers.model_hub.adapter import RawOutcomeKind
 from core.handlers.model_hub.capability_evidence import identity_digest
 from core.handlers.model_hub.pricing import PriceTable
-from core.handlers.model_hub.opaque_provenance import (
-    OpaqueProvenanceRegistry,
-    filter_opaque_history,
-)
 from core.handlers.model_hub.provenance import BoundedProvenanceStore, SERVED_HOP_HEADER
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.service import ModelHubError
@@ -434,20 +430,83 @@ async def test_native_history_is_filtered_without_opaque_provenance(tmp_path, ba
         _outcome(RawOutcomeKind.SUCCESS),
     ])
     selected = _canonicalize_fixed_test_routes(service)
-    signed, _plain = _signed_history(protocol)
+    signed, _ = _signed_history(protocol)
+    if protocol == "anthropic":
+        expected = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "text", "text": "Visible reasoning"},
+                        {"type": "text", "text": "Answer", "signature": "opaque-text"},
+                        {"type": "tool_use", "id": "call_1", "name": "verify", "input": {"signature": "user-data"}, "thoughtSignature": "opaque-call"},
+                    ],
+                },
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "ok"}]},
+            ],
+        }
+    elif protocol == "openai_responses":
+        expected = {
+            "input": [
+                {"role": "assistant", "content": [{"type": "output_text", "text": "Visible reasoning"}]},
+                {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Answer", "signature": "opaque-text"}]},
+                {"type": "function_call", "call_id": "call_1", "name": "verify", "arguments": '{"signature":"user-data"}', "signature": "opaque-call"},
+                {"type": "function_call_output", "call_id": "call_1", "output": "ok"},
+            ],
+            "store": False,
+        }
+    else:
+        expected = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "Answer", "thoughtSignature": "opaque-text"}],
+                    "tool_calls": [{
+                        "type": "function", "id": "call_1",
+                        "function": {"name": "verify", "arguments": '{"signature":"user-data"}'},
+                        "extra_content": {"google": {}},
+                    }],
+                },
+                {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+            ],
+        }
     await service.resolve(
         backend=backend, model_id=selected.get(backend, "shared-model"),
         request=ModelHubRequest(signed, protocol=protocol), stream=False,
     )
     assert [entry[0] for entry in service.adapter.invocations] == [primary.id, fallback.id]
-    expected = filter_opaque_history(
-        signed,
-        protocol=protocol,
-        identity=None,
-        registry=OpaqueProvenanceRegistry(),
-    )
     assert service.adapter.requests == [expected, expected]
 
+
+@pytest.mark.asyncio
+async def test_response_consumer_registers_chat_tool_signature_provenance(tmp_path):
+    """MH-OPAQUE-OBSERVE-003: the gateway observes exact Chat tool metadata before forwarding completion."""
+
+    source = _source("src_primary01", "Primary", vendor="openai", protocol="openai_chat")
+    answer = (
+        b'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"extra_content":{"google":{"thought_signature":"chat-response-signature"}}}]}}]}\n\n'
+        b'data: [DONE]\n\n'
+    )
+    service = _vibey_service(tmp_path, [source], handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=source.id, stream_started=True), (answer,)),
+    ])
+    gateway = ModelHubTurnGateway(service)
+    router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
+    try:
+        hop = await router.resolve_hop("menu-alias", process_scope="vibey:opaque-response", turn_id="turn-chat-response")
+        async with aiohttp.ClientSession() as client:
+            async with client.post(
+                f'{hop["base_url"]}/{PROTOCOL_ENDPOINTS["openai_chat"]}',
+                headers={"Authorization": f'Bearer {hop["token"]}', **hop["request_headers"]},
+                json={"model": hop["runtime_model"], "stream": True, "messages": [{"role": "user", "content": "hi"}]},
+            ) as response:
+                assert response.status == 200
+                assert await response.read() == answer
+        assert service.opaque_provenance.accepts(
+            "openai_chat", "chat-response-signature", identity_digest(source),
+        )
+    finally:
+        await gateway.close()
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("metadata", ["unknown", "source", "catalog"])

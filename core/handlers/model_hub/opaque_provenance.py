@@ -138,6 +138,19 @@ class _StagedOpaque:
     value: str
 
 
+@dataclass
+class _BufferedOpaqueScope:
+    kind: str | None = None
+    has_function_call: bool = False
+    thought: bool = False
+    pending: list[tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class _BufferedGoogleContent:
+    parts: list[_BufferedOpaqueScope] = field(default_factory=list)
+
+
 class OpaqueResponseObserver:
     """Observe response wire data without retaining the response body."""
 
@@ -148,9 +161,14 @@ class OpaqueResponseObserver:
         self._staged: dict[tuple[str, str], _StagedOpaque] = {}
         self._fragments: dict[tuple[str, str], list[str]] = {}
         self._retained_bytes = 0
+        self._buffered_pending_bytes = 0
         self._sse_buffer = bytearray()
         self._available = True
         self._terminal_seen = False
+        self._buffered_anthropic_item: _BufferedOpaqueScope | None = None
+        self._buffered_responses_item: _BufferedOpaqueScope | None = None
+        self._buffered_google_content: _BufferedGoogleContent | None = None
+        self._buffered_google_part: _BufferedOpaqueScope | None = None
 
     @property
     def available(self) -> bool:
@@ -227,6 +245,114 @@ class OpaqueResponseObserver:
                 continue
             self._stage_payload(payload)
 
+    def _hold_buffered(self, scope: _BufferedOpaqueScope, slot: str, value: str) -> None:
+        value_bytes = len(value.encode("utf-8"))
+        if self._retained_bytes + self._buffered_pending_bytes + value_bytes > _MAX_OBSERVED_OPAQUE_BYTES:
+            self._available = False
+            self._staged.clear()
+            self._fragments.clear()
+            self._buffered_pending_bytes = 0
+            self._buffered_anthropic_item = None
+            self._buffered_responses_item = None
+            self._buffered_google_content = None
+            self._buffered_google_part = None
+            scope.pending.clear()
+            return
+        scope.pending.append((slot, value))
+        self._buffered_pending_bytes += value_bytes
+
+    def _flush_buffered(self, scope: _BufferedOpaqueScope) -> None:
+        for slot, value in scope.pending:
+            self._buffered_pending_bytes -= len(value.encode("utf-8"))
+            self._stage(value, slot=slot, fragment=False)
+        scope.pending.clear()
+
+    def _discard_buffered(self, scope: _BufferedOpaqueScope) -> None:
+        self._buffered_pending_bytes -= sum(len(value.encode("utf-8")) for _, value in scope.pending)
+        scope.pending.clear()
+
+    def _commit_buffered_scope(self, scope: _BufferedOpaqueScope | None, *, kind: str) -> None:
+        if scope is None:
+            return
+        if scope.kind == kind:
+            self._flush_buffered(scope)
+        else:
+            self._discard_buffered(scope)
+
+    def _observe_buffered_event(self, prefix: str, event: str, value: Any) -> None:
+        """Observe exact provider paths while retaining at most one item scope."""
+
+        if not self._available:
+            return
+        if self.protocol == "openai_responses":
+            if prefix == "output.item" and event == "start_map":
+                self._buffered_responses_item = _BufferedOpaqueScope()
+            elif prefix == "output.item.type" and event == "string" and self._buffered_responses_item is not None:
+                self._buffered_responses_item.kind = value
+            elif prefix == "output.item.encrypted_content" and event == "string" and self._buffered_responses_item is not None:
+                self._hold_buffered(self._buffered_responses_item, prefix, value)
+            elif prefix == "output.item" and event == "end_map":
+                self._commit_buffered_scope(self._buffered_responses_item, kind="reasoning")
+                self._buffered_responses_item = None
+            return
+
+        if self.protocol == "anthropic":
+            if prefix == "content.item" and event == "start_map":
+                self._buffered_anthropic_item = _BufferedOpaqueScope()
+            elif prefix == "content.item.type" and event == "string" and self._buffered_anthropic_item is not None:
+                self._buffered_anthropic_item.kind = value
+            elif (
+                prefix in {"content.item.signature", "content.item.data"}
+                and event == "string"
+                and self._buffered_anthropic_item is not None
+            ):
+                self._hold_buffered(self._buffered_anthropic_item, prefix, value)
+            elif prefix == "content.item" and event == "end_map":
+                scope = self._buffered_anthropic_item
+                if scope is not None:
+                    if (scope.kind == "thinking" and any(slot.endswith(".signature") for slot, _ in scope.pending)) or (
+                        scope.kind == "redacted_thinking" and any(slot.endswith(".data") for slot, _ in scope.pending)
+                    ):
+                        self._flush_buffered(scope)
+                    else:
+                        self._discard_buffered(scope)
+                self._buffered_anthropic_item = None
+            return
+
+        if self.protocol == "openai_chat":
+            if event == "string" and prefix in _CHAT_BUFFERED_OPAQUE_PATHS:
+                self._stage(value, slot=prefix, fragment=False)
+            return
+
+        if self.protocol == "google":
+            if prefix == "candidates.item.content" and event == "start_map":
+                self._buffered_google_content = _BufferedGoogleContent()
+            elif prefix == "candidates.item.content.parts.item" and event == "start_map":
+                self._buffered_google_part = _BufferedOpaqueScope()
+            elif prefix == "candidates.item.content.parts.item.functionCall" and event == "start_map":
+                if self._buffered_google_part is not None:
+                    self._buffered_google_part.has_function_call = True
+            elif prefix == "candidates.item.content.parts.item.thought" and event == "boolean":
+                if self._buffered_google_part is not None:
+                    self._buffered_google_part.thought = value is True
+            elif prefix == "candidates.item.content.parts.item.thoughtSignature" and event == "string":
+                if self._buffered_google_part is not None:
+                    self._hold_buffered(self._buffered_google_part, prefix, value)
+            elif prefix == "candidates.item.content.parts.item" and event == "end_map":
+                if self._buffered_google_content is not None and self._buffered_google_part is not None:
+                    if self._buffered_google_part.pending:
+                        self._buffered_google_content.parts.append(self._buffered_google_part)
+                self._buffered_google_part = None
+            elif prefix == "candidates.item.content" and event == "end_map":
+                content = self._buffered_google_content
+                if content is not None:
+                    for part in content.parts:
+                        if part.thought or part.has_function_call:
+                            self._flush_buffered(part)
+                        else:
+                            self._discard_buffered(part)
+                self._buffered_google_content = None
+
     def observe_buffered(self, payload: BinaryIO | bytes | bytearray | memoryview) -> None:
         """Parse a complete JSON response incrementally with ijson."""
 
@@ -238,9 +364,7 @@ class OpaqueResponseObserver:
             else:
                 source = payload
             for prefix, event, value in ijson.parse(source):
-                if event != "string":
-                    continue
-                _buffered_opaque_value(self.protocol, prefix, value, self)
+                self._observe_buffered_event(prefix, event, value)
             self._terminal_seen = True
         except (OSError, ValueError, TypeError, ijson.common.IncompleteJSONError, ijson.common.JSONError):
             self._available = False
@@ -258,6 +382,17 @@ class OpaqueResponseObserver:
 
 
 _SSE_PROTOCOLS = {"anthropic", "openai_chat", "openai_responses"}
+_CHAT_BUFFERED_OPAQUE_PATHS = frozenset(
+    {
+        f"choices.item.{container}.reasoning_details.item.{field}"
+        for container in ("message", "delta")
+        for field in ("signature", "data", "encrypted_content")
+    }
+    | {
+        f"choices.item.{container}.tool_calls.item.extra_content.google.thought_signature"
+        for container in ("message", "delta")
+    }
+)
 
 
 def _response_is_terminal(protocol: str, payload: Any) -> bool:
@@ -342,44 +477,44 @@ def _response_opaque_values(protocol: str, payload: Any) -> list[tuple[str, str,
                     if not isinstance(container, Mapping):
                         continue
                     details = container.get("reasoning_details")
-                    if not isinstance(details, list):
-                        continue
-                    for detail_index, detail in enumerate(details):
-                        if not isinstance(detail, Mapping):
-                            continue
-                        for key in ("signature", "data", "encrypted_content"):
-                            if isinstance(detail.get(key), str):
-                                values.append((f"chat:{choice_index}:{container_name}:{detail_index}:{key}", detail[key], False))
+                    if isinstance(details, list):
+                        for detail_index, detail in enumerate(details):
+                            if not isinstance(detail, Mapping):
+                                continue
+                            for key in ("signature", "data", "encrypted_content"):
+                                if isinstance(detail.get(key), str):
+                                    values.append((f"chat:{choice_index}:{container_name}:{detail_index}:{key}", detail[key], False))
+                    tool_calls = container.get("tool_calls")
+                    if isinstance(tool_calls, list):
+                        for call_index, call in enumerate(tool_calls):
+                            if not isinstance(call, Mapping):
+                                continue
+                            extra_content = call.get("extra_content")
+                            google = extra_content.get("google") if isinstance(extra_content, Mapping) else None
+                            signature = google.get("thought_signature") if isinstance(google, Mapping) else None
+                            if isinstance(signature, str):
+                                values.append((
+                                    f"chat:{choice_index}:{container_name}:tool:{call_index}:thought_signature",
+                                    signature,
+                                    False,
+                                ))
     elif protocol == "google":
         candidates = payload.get("candidates") if isinstance(payload, Mapping) else None
         if isinstance(candidates, list):
             for candidate_index, candidate in enumerate(candidates):
                 content = candidate.get("content") if isinstance(candidate, Mapping) else None
-                parts = content.get("parts") if isinstance(content, Mapping) else None
+                if not isinstance(content, Mapping) or content.get("role") != "model":
+                    continue
+                parts = content.get("parts")
                 if isinstance(parts, list):
                     for part_index, part in enumerate(parts):
-                        if isinstance(part, Mapping) and part.get("thought") is True and isinstance(part.get("thoughtSignature"), str):
+                        if (
+                            isinstance(part, Mapping)
+                            and isinstance(part.get("thoughtSignature"), str)
+                            and (part.get("thought") is True or isinstance(part.get("functionCall"), Mapping))
+                        ):
                             values.append((f"google:{candidate_index}:{part_index}", part["thoughtSignature"], False))
     return values
-
-
-def _buffered_opaque_value(protocol: str, prefix: str, value: str, observer: OpaqueResponseObserver) -> None:
-    if protocol == "openai_responses":
-        if prefix.endswith(".item.type"):
-            return
-        if prefix.endswith(".item.encrypted_content"):
-            # The response-owned output item is the only Responses location
-            # whose encrypted content is protocol opaque history.
-            observer._stage(value, slot=prefix, fragment=False)
-    elif protocol == "anthropic":
-        if prefix.endswith("content.item.signature") or prefix.endswith("content.item.data"):
-            observer._stage(value, slot=prefix, fragment=False)
-    elif protocol == "openai_chat":
-        if ".reasoning_details.item." in prefix and prefix.rsplit(".", 1)[-1] in {"signature", "data", "encrypted_content"}:
-            observer._stage(value, slot=prefix, fragment=False)
-    elif protocol == "google":
-        if prefix.endswith("parts.item.thoughtSignature"):
-            observer._stage(value, slot=prefix, fragment=False)
 
 
 def _accepted(registry: OpaqueProvenanceRegistry, protocol: str, value: Any, identity: str | None) -> bool:
@@ -495,6 +630,17 @@ def _filter_chat_messages(messages: list[Any], registry: OpaqueProvenanceRegistr
                 if kept:
                     kept_details.append(kept)
             item["reasoning_details"] = kept_details
+        tool_calls = item.get("tool_calls")
+        if isinstance(tool_calls, list):
+            for call in tool_calls:
+                if not isinstance(call, Mapping):
+                    continue
+                extra_content = call.get("extra_content")
+                google = extra_content.get("google") if isinstance(extra_content, Mapping) else None
+                if not isinstance(google, Mapping) or "thought_signature" not in google:
+                    continue
+                if not _accepted(registry, "openai_chat", google.get("thought_signature"), identity):
+                    google.pop("thought_signature", None)
         output.append(item)
     return output
 
@@ -510,11 +656,16 @@ def _filter_google_contents(contents: list[Any], registry: OpaqueProvenanceRegis
         if isinstance(parts, list):
             kept = []
             for part in parts:
-                if isinstance(part, Mapping) and part.get("thought") is True and "thoughtSignature" in part:
+                if (
+                    isinstance(part, Mapping)
+                    and "thoughtSignature" in part
+                    and (part.get("thought") is True or isinstance(part.get("functionCall"), Mapping))
+                ):
                     if not _accepted(registry, "google", part.get("thoughtSignature"), identity):
                         part = dict(part)
                         part.pop("thoughtSignature", None)
-                        part.pop("thought", None)
+                        if part.get("thought") is True and not isinstance(part.get("functionCall"), Mapping):
+                            part.pop("thought", None)
                 kept.append(part)
             item["parts"] = kept
         output.append(item)

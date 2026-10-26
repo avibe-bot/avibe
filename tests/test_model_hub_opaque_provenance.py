@@ -334,6 +334,155 @@ def test_filter_preserves_visible_tool_data_schemas_and_user_signature() -> None
     assert filtered["tools"] == request["tools"]
 
 
+def test_tool_call_opaque_metadata_is_exact_and_independent_of_arguments() -> None:
+    """MH-OPAQUE-SHAPE-002: tool arguments survive while known extension signatures follow provenance."""
+
+    registry = OpaqueProvenanceRegistry()
+    registry.observe("openai_chat", "chat-known", "A")
+    request = {
+        "messages": [{
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call-known",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": '{"signature":"user-data"}'},
+                    "extra_content": {"google": {"thought_signature": "chat-known"}},
+                },
+                {
+                    "id": "call-foreign",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": '{"signature":"foreign-argument"}'},
+                    "extra_content": {"google": {"thought_signature": "foreign-signature"}},
+                },
+            ],
+        }],
+    }
+    filtered = filter_opaque_history(
+        request, protocol="openai_chat", identity="A", registry=registry,
+    )
+    assert filtered == {
+        "messages": [{
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "call-known",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": '{"signature":"user-data"}'},
+                    "extra_content": {"google": {"thought_signature": "chat-known"}},
+                },
+                {
+                    "id": "call-foreign",
+                    "type": "function",
+                    "function": {"name": "echo", "arguments": '{"signature":"foreign-argument"}'},
+                    "extra_content": {"google": {}},
+                },
+            ],
+        }],
+    }
+    assert request["messages"][0]["tool_calls"][1]["extra_content"]["google"]["thought_signature"] == "foreign-signature"
+
+
+def test_google_function_call_signature_is_filtered_without_touching_tool_data() -> None:
+    """MH-OPAQUE-SHAPE-003: Google call signatures are opaque on model parts, not in user data."""
+
+    registry = OpaqueProvenanceRegistry()
+    registry.observe("google", "google-known", "A")
+    request = {
+        "contents": [
+            {
+                "role": "model",
+                "parts": [
+                    {"functionCall": {"name": "echo", "args": {"signature": "user-data"}}, "thoughtSignature": "google-known"},
+                    {"functionCall": {"name": "echo", "args": {"signature": "user-data"}}, "thoughtSignature": "foreign-signature"},
+                    {"text": "visible", "thought": True, "thoughtSignature": "unknown-thought"},
+                ],
+            },
+            {"role": "user", "parts": [{"functionResponse": {"name": "echo", "response": {"signature": "user-data"}}, "thoughtSignature": "user-data"}]},
+        ],
+    }
+    filtered = filter_opaque_history(
+        request, protocol="google", identity="A", registry=registry,
+    )
+    assert filtered == {
+        "contents": [
+            {
+                "role": "model",
+                "parts": [
+                    {"functionCall": {"name": "echo", "args": {"signature": "user-data"}}, "thoughtSignature": "google-known"},
+                    {"functionCall": {"name": "echo", "args": {"signature": "user-data"}}},
+                    {"text": "visible"},
+                ],
+            },
+            {"role": "user", "parts": [{"functionResponse": {"name": "echo", "response": {"signature": "user-data"}}, "thoughtSignature": "user-data"}]},
+        ],
+    }
+
+
+def test_buffered_observation_uses_exact_protocol_paths_and_block_types() -> None:
+    """MH-OPAQUE-OBSERVE-002: response fields certify only their owning protocol blocks."""
+
+    registry = OpaqueProvenanceRegistry()
+
+    anthropic = registry.begin_response("anthropic", "A")
+    anthropic.observe_buffered(json.dumps({
+        "content": [
+            {"type": "tool_use", "input": {"content": [{"data": "tool-argument"}]}},
+            {"type": "redacted_thinking", "data": "anthropic-opaque"},
+        ],
+    }).encode())
+    anthropic.finish(complete=True)
+
+    responses = registry.begin_response("openai_responses", "A")
+    responses.observe_buffered(json.dumps({
+        "output": [
+            {"type": "function_call", "encrypted_content": "function-field"},
+            {"type": "reasoning", "encrypted_content": "responses-opaque"},
+        ],
+    }).encode())
+    responses.finish(complete=True)
+
+    chat = registry.begin_response("openai_chat", "A")
+    chat.observe_buffered(json.dumps({
+        "choices": [{"message": {"tool_calls": [{
+            "extra_content": {"google": {"thought_signature": "chat-tool-opaque"}},
+        }]}}],
+    }).encode())
+    chat.finish(complete=True)
+
+    google = registry.begin_response("google", "A")
+    google.observe_buffered(json.dumps({
+        "candidates": [
+            {"content": {"role": "model", "parts": [
+                {"functionCall": {"name": "echo", "args": {}}, "thoughtSignature": "google-call-opaque"},
+            ]}},
+            {"content": {"role": "user", "parts": [
+                {"functionResponse": {"name": "echo", "response": {}}, "thoughtSignature": "google-user-field"},
+            ]}},
+        ],
+    }).encode())
+    google.finish(complete=True)
+
+    chat_stream = registry.begin_response("openai_chat", "A")
+    chat_stream.feed(b'data: {"choices":[{"delta":{"tool_calls":[{"extra_content":{"google":{"thought_signature":"chat-stream-opaque"}}}]}}]}\n\n')
+    chat_stream.feed(b'data: [DONE]\n\n')
+    chat_stream.finish(complete=True)
+
+    google_stream = registry.begin_response("google", "A")
+    google_stream.feed(b'data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"echo","args":{}},"thoughtSignature":"google-stream-opaque"}]}}]}\n\n')
+    google_stream.finish(complete=True)
+
+    assert registry.accepts("anthropic", "anthropic-opaque", "A")
+    assert not registry.accepts("anthropic", "tool-argument", "A")
+    assert registry.accepts("openai_responses", "responses-opaque", "A")
+    assert not registry.accepts("openai_responses", "function-field", "A")
+    assert registry.accepts("openai_chat", "chat-tool-opaque", "A")
+    assert registry.accepts("openai_chat", "chat-stream-opaque", "A")
+    assert registry.accepts("google", "google-call-opaque", "A")
+    assert not registry.accepts("google", "google-user-field", "A")
+    assert registry.accepts("google", "google-stream-opaque", "A")
+
+
 def test_responses_orphan_reasoning_is_rerendered_as_visible_summary() -> None:
     """MH-OPAQUE-CONTINUATION-001: unsafe reasoning ids are removed, not left malformed."""
 
