@@ -56,7 +56,7 @@
     "@radix-ui/react-slot": "^1.5.0",
     "@shikijs/langs": "^4.5.0",
     "@shikijs/themes": "^4.5.0",
-    "@uiw/react-json-view": "^2.0.0-alpha.43",
+    "@uiw/react-json-view": "^2.0.0-alpha.44",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",
     "@xterm/addon-web-links": "^0.12.0",
