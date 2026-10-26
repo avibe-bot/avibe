@@ -34,6 +34,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -87,6 +88,11 @@ SIGN_WORKERS = 8
 # same invocation succeeds on retry.
 TIMESTAMP_UNAVAILABLE = "timestamp service is not available"
 TIMESTAMP_ATTEMPTS = 3
+# stapler fetches and checks tickets through Apple's CloudKit service; a dropped
+# connection there fails the action with an NSURLErrorDomain error and Error 68.
+STAPLER_NETWORK_ERROR = "NSURLErrorDomain"
+STAPLER_ATTEMPTS = 3
+STAPLER_RETRY_SECONDS = 15
 
 
 class SigningError(RuntimeError):
@@ -409,8 +415,20 @@ def notarize(path: Path, *, key_path: str, key_id: str, issuer: str) -> None:
         print(f"notary issues for {path.name}: {json.dumps(issues, indent=2)}", flush=True)
     if status != "Accepted":
         raise SigningError(f"notarization of {path.name} ended {status!r}, not Accepted")
-    run(["xcrun", "stapler", "staple", str(path)], capture=True)
-    run(["xcrun", "stapler", "validate", str(path)], capture=True)
+    stapler("staple", path)
+    stapler("validate", path)
+
+
+def stapler(action: str, path: Path) -> None:
+    for attempt in range(1, STAPLER_ATTEMPTS + 1):
+        try:
+            run(["xcrun", "stapler", action, str(path)], redacted=f"stapler {action} {path.name}", capture=True)
+            return
+        except SigningError as error:
+            if STAPLER_NETWORK_ERROR not in str(error) or attempt == STAPLER_ATTEMPTS:
+                raise
+            print(f"stapler {action} {path.name} lost its connection to Apple; retrying ({attempt}/{STAPLER_ATTEMPTS})", flush=True)
+            time.sleep(STAPLER_RETRY_SECONDS)
 
 
 def assess(path: Path, *, kind: str) -> None:
@@ -432,7 +450,7 @@ def verify_release(app: Path, dmg: Path) -> None:
 
     verify_dmg_signature(dmg)
     for path, kind in ((app, "exec"), (dmg, "open")):
-        run(["xcrun", "stapler", "validate", str(path)], capture=True)
+        stapler("validate", path)
         assess(path, kind=kind)
     verify_app(app)
     with tempfile.TemporaryDirectory(prefix="avibe-dmg-verify-") as mountpoint:
@@ -440,7 +458,7 @@ def verify_release(app: Path, dmg: Path) -> None:
         try:
             inner = Path(mountpoint) / "Avibe.app"
             verify_app(inner)
-            run(["xcrun", "stapler", "validate", str(inner)], capture=True)
+            stapler("validate", inner)
             assess(inner, kind="exec")
         finally:
             subprocess.run(["hdiutil", "detach", mountpoint], check=False)

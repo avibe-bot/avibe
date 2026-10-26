@@ -902,9 +902,10 @@ def compile_payload(private_python: Path, library: Path) -> None:
 def sign_payload(target_config: dict[str, Any], payload: Path, identity: str, keychain: str | None) -> None:
     """Sign every Mach-O in the payload before anything hashes or archives it.
 
-    Signing rewrites each binary, so it has to precede the probe that runs the
-    shipped tree, the archive, and the tree hash; the probe then exercises the
-    hardened runtime and entitlements users get.
+    Signing rewrites each binary, so it precedes the probe that runs the
+    shipped tree, the archive, and the tree hash. CI runners do not enforce
+    library validation or the JIT restriction, so the probe proves the signed
+    tree still runs, not that its entitlements suffice (see entitlements/).
     """
     if target_config["os"] != "macos":
         raise SystemExit("Only macOS Runtime payloads are code signed here")
