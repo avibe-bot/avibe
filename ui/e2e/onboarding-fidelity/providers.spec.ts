@@ -119,9 +119,10 @@ test.describe('providers screen', () => {
     // Every proposed row arrives consented to, as the shipped takeover opens it.
     await expect(primaryAction(page)).toContainText(String(importableCount(server.facts())));
 
-    // Withdrawing one card withdraws that provider's rows and nothing else.
+    // Withdrawing one card withdraws that provider's rows and nothing else. Claude's
+    // native subscription stays native beside its key, so it does not hold the key back.
     await page.locator('.setup-provider-card[data-provider="openai"]').click();
-    await expect(primaryAction(page)).toContainText('2');
+    await expect(primaryAction(page)).toContainText(String(importableCount(server.facts()) - 1));
     await primaryAction(page).click();
 
     const takeover = page.getByRole('dialog');
@@ -131,7 +132,7 @@ test.describe('providers screen', () => {
     // One atomic batch holding exactly the consented rows — the withdrawn provider's
     // key was never in it, and nothing was submitted a second time.
     expect(server.facts().applied).toHaveLength(1);
-    expect([...server.facts().applied[0]].sort()).toEqual(['opencode-qwen', 'opencode-zhipu']);
+    expect([...server.facts().applied[0]].sort()).toEqual(['claude-key', 'opencode-qwen', 'opencode-zhipu']);
 
     await takeover.getByRole('button', { name: 'Done', exact: true }).click();
     await expect(page.getByRole('dialog')).toHaveCount(0);

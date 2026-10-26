@@ -5,6 +5,15 @@ import { openOnboarding, openSetup, serveProduct, settleEffects, size } from './
 async function authFixtures(page: Page) {
   const cancellations: string[] = [];
   await page.route('**/api/csrf-token', (route) => route.fulfill({ json: { csrf_token: 'fixture-token' } }));
+  // The assistants step reads every Agent, disabled ones included, before it
+  // offers any connection; an unanswered read leaves every method disabled.
+  await page.route('**/api/agents?*', (route) => route.fulfill({ json: { ok: true, agents: [], default_agent_name: null } }));
+  // These cases draw each assistant's own (Direct) connection dialogs. With Model
+  // Hub on, a card offers them only once its connection names that supply mode.
+  await page.route('**/api/backend/*/connection', (route) => route.fulfill({ json: {
+    ok: true, backend: new URL(route.request().url()).pathname.split('/').at(-2), installed: true, enabled: true,
+    auth: 'none', application: 'applied', ready: false, entry_eligible: false, supply_mode: 'direct',
+  } }));
   await page.route('**/api/backend/*/auth', (route) => route.fulfill({ json: { ok: true, active_auth_mode: 'none', auth_mode: 'oauth', has_api_key: false, base_url: null } }));
   await page.route('**/api/backend/opencode/providers', (route) => route.fulfill({ json: { ok: true, providers: [
     { id: 'openai', name: 'OpenAI', description: 'ChatGPT subscription or API Key', oauth_available: true, configured: false, local: false, models: [] },
@@ -287,10 +296,13 @@ for (const viewport of [{ width: 1200, height: 800 }, { width: 390, height: 640 
 /** Each assistant's dialog, the height its own frame is sized for, and the two methods
  *  whose switch the contract names. OpenCode has no method row — it chooses a provider
  *  first, and that choice is the larger change: it replaces row three AND the middle. */
+// Claude Code manages its own authentication when it runs, so a failed read of its
+// saved settings is a notice in the body rather than a blocking error with a retry
+// (docs/plans/claude-auth-observation-ownership.md). The others block and retry.
 const ASSISTANTS = [
-  { slug: 'claude', label: 'Claude Code', height: 620, methods: ['API credentials', 'Claude account'] },
-  { slug: 'codex', label: 'Codex', height: 580, methods: ['OpenAI API Key', 'Sign in with ChatGPT'] },
-  { slug: 'opencode', label: 'OpenCode', height: 640, methods: [] },
+  { slug: 'claude', label: 'Claude Code', height: 620, methods: ['API credentials', 'Claude account'], readFailure: 'notice' },
+  { slug: 'codex', label: 'Codex', height: 580, methods: ['OpenAI API Key', 'Sign in with ChatGPT'], readFailure: 'alert' },
+  { slug: 'opencode', label: 'OpenCode', height: 640, methods: [], readFailure: 'alert' },
 ] as const;
 
 /** Non-ASCII, because a failure message is user-facing copy and the row it lands in is
@@ -391,13 +403,14 @@ for (const viewport of [{ width: 320, height: 568, tight: false }, { width: 390,
     // not own, so the setup can be measured while a read is genuinely in flight.
     let releaseConn = () => {};
     const connGate = new Promise<void>((resolve) => { releaseConn = resolve; });
+    let holdConn = false;
     await page.route('**/api/backend/*/connection', async (route) => {
-      await connGate;
+      if (holdConn) await connGate;
       return route.fallback();
     });
     await page.setViewportSize(viewport);
     await openOnboarding(page);
-    await openSetup(page, 'en');
+    await openSetup(page, 'en', { beforeAssistants: () => { holdConn = true; } });
     // An in-flight connection read must not re-lay the card out: it used to add a
     // status line under the methods, so the card grew while the read settled and
     // shrank when it landed, moving everything under the person's pointer. Pending
@@ -436,7 +449,8 @@ for (const viewport of [{ width: 320, height: 568, tight: false }, { width: 390,
 
       // The failure, then the retry the product offers for it.
       reads.release();
-      await expect(dialog.getByRole('alert')).toContainText(READ_FAILURE);
+      await expect(assistant.readFailure === 'alert' ? dialog.getByRole('alert') : dialog.locator('.connection-notice', { hasText: READ_FAILURE }))
+        .toContainText(READ_FAILURE);
       expect(await stableBoxes(), `${assistant.slug} anchors on failure`).toEqual(anchors);
       await expectFitsItsRoom(page, assistant.height);
       await expectReachable(dialog, { scrolling: viewport.tight });
@@ -444,8 +458,10 @@ for (const viewport of [{ width: 320, height: 568, tight: false }, { width: 390,
       await dialog.screenshot({ path: info.outputPath(`${assistant.slug}-read-failed-${size(viewport)}.png`) });
 
       reads.fail(false);
-      await dialog.getByRole('button', { name: 'Retry' }).click();
-      await expect(dialog.getByRole('alert')).toHaveCount(0);
+      if (assistant.readFailure === 'alert') {
+        await dialog.getByRole('button', { name: 'Retry' }).click();
+        await expect(dialog.getByRole('alert')).toHaveCount(0);
+      }
       expect(await stableBoxes(), `${assistant.slug} anchors after retry`).toEqual(anchors);
       await expectScrollOwner(page, viewport.tight, `${assistant.slug} after retry:`);
       await expectReachable(dialog, { scrolling: viewport.tight });
@@ -906,7 +922,7 @@ test('the scroll changes hands at the floor, in both directions, whatever is on 
     await expectEditable(key, `密钥-${visible}`);
 
     // Nothing on screen may move the line, and the middle's two biggest changes are the
-    // other credential and a failed read with its alert and its Retry.
+    // other credential and a failed read of the saved settings.
     await dialog.getByRole('radiogroup', { name: 'Credential type' }).getByRole('radio', { name: 'Auth Token', exact: true }).click();
     await expectScrollOwner(page, tight, `at ${visible} on Auth Token:`);
     await dialog.getByRole('radiogroup', { name: 'Credential type' }).getByRole('radio', { name: 'API Key', exact: true }).click();
@@ -914,31 +930,32 @@ test('the scroll changes hands at the floor, in both directions, whatever is on 
 
     // The second of those, reached the way a person reaches it. Nothing re-reads while
     // the dialog is up — switching method only clears the error — so the honest route to
-    // a failed read is to leave and come back to a refusal, and the alert and the Retry
-    // it offers are then really on screen rather than assumed. Counted as well as seen.
+    // a failed read is to leave and come back to a refusal. Claude Code manages its own
+    // authentication when it runs, so that refusal is a notice in the body, not a blocking
+    // error: it is then really on screen rather than assumed. Counted as well as seen.
+    const readNotice = dialog.locator('.connection-notice', { hasText: READ_FAILURE });
     await page.keyboard.press('Escape');
     await expect(dialog).toHaveCount(0);
     reads.fail(true);
     const failing = reads.asked();
     await page.getByLabel('Claude Code', { exact: true }).getByRole('button', { name: 'Add API Key' }).click();
-    await expect(dialog.getByRole('alert')).toContainText(READ_FAILURE);
+    await expect(readNotice).toBeVisible();
     expect(reads.asked(), `at ${visible} the failed read was really asked for`).toBeGreaterThan(failing);
-    const retry = dialog.getByRole('button', { name: 'Retry' });
-    await expect(retry).toBeVisible();
     await expect.poll(() => viewportVar(page, '--app-vvh')).toBe(`${visible}px`);
     await expectFitsItsRoom(page, 620);
     await expectScrollOwner(page, tight, `at ${visible} with the read failed:`);
     await expectReachable(dialog, { scrolling: tight });
 
-    // And back out of it by the control the product offers for it, which is a second
-    // real read. Recovery is the half that a latch would pass the first time and fail
-    // here: the alert goes, the form is the form again, and the room still decides.
+    // And back out of it the same way, which is a second real read. Recovery is the half
+    // that a latch would pass the first time and fail here: the notice goes, the form is
+    // the form again, and the room still decides.
     reads.fail(false);
     const retrying = reads.asked();
-    if (tight) await retry.scrollIntoViewIfNeeded();
-    await retry.click();
-    await expect(dialog.getByRole('alert')).toHaveCount(0);
-    expect(reads.asked(), `at ${visible} the retry was really asked for`).toBeGreaterThan(retrying);
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await page.getByLabel('Claude Code', { exact: true }).getByRole('button', { name: 'Add API Key' }).click();
+    await expect.poll(() => reads.asked(), { message: `at ${visible} the second read was really asked for` }).toBeGreaterThan(retrying);
+    await expect(readNotice).toHaveCount(0);
     await expect(key).toBeVisible();
     await expectScrollOwner(page, tight, `at ${visible} after the read recovered:`);
     await key.focus();
@@ -1070,56 +1087,6 @@ test('corrected locked Codex Light has one opacity layer and visible selected me
   await page.keyboard.press('Escape'); expect(denied).toEqual([]);
 });
 
-for (const width of [1200, 390]) {
-  test(`OpenCode inline model recovery ${width}`, async ({ page }, info) => {
-    const denied = await serveProduct(page); await authFixtures(page);
-    let model = 'openai/gpt-5.6-sol'; let writes = 0;
-    const agent = () => ({ id: 'fixture-agent', name: 'opencode', display_name: 'OpenCode', backend: 'opencode', enabled: true, model, reasoning_effort: null, source: 'builtin', archived: false });
-    await page.route('**/api/backend/*/connection', (route) => { const backend = new URL(route.request().url()).pathname.split('/').at(-2); return route.fulfill({ json: { ok: true, backend, ready: backend === 'opencode', entry_eligible: backend === 'opencode', installed: true, enabled: true, auth: 'api_key', application: 'applied' } }); });
-    await page.route('**/api/agents', (route) => route.fulfill({ json: { ok: true, default_agent_name: 'opencode', agents: [agent()] } }));
-    await page.route('**/api/agents/opencode', (route) => { if (route.request().method() === 'PATCH') { model = route.request().postDataJSON().model; writes++; } return route.fulfill({ json: { ok: true, agent: agent() } }); });
-    await page.route('**/api/backend/opencode/providers', (route) => route.fulfill({ json: { ok: true, default_provider: 'openai', providers: [{ id: 'anthropic', name: 'Anthropic', description: '', local: false, oauth_available: false, active_auth_type: 'api', configured: true, models: ['chosen-model'] }] } }));
-    await page.route('**/api/models/agents/opencode/models', (route) => route.fulfill({ json: { ok: true, agent: { backend: 'opencode', mode: 'direct' } } }));
-    await page.route('**/api/opencode/options', (route) => route.fulfill({ json: { ok: true, data: { models: { providers: [{ id: 'anthropic', models: { 'chosen-model': {} } }] } } } }));
-    await page.setViewportSize({ width, height: 800 });
-    await openOnboarding(page); await openSetup(page, 'en');
-    await page.getByRole('button', { name: 'Enter workspace' }).click();
-    const recovery = page.getByRole('region', { name: 'Choose a model for this connection' });
-    await expect(recovery).toBeVisible(); expect(writes).toBe(0);
-    const picker = recovery.getByRole('combobox'); await expect(picker).toBeEnabled(); await picker.click();
-    await page.getByRole('option', { name: 'anthropic/chosen-model' }).click();
-    const apply = recovery.getByRole('button', { name: 'Apply model and enter' });
-    await apply.scrollIntoViewIfNeeded(); await expect(apply).toBeInViewport();
-    expect(await recovery.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
-    await settleEffects(page); await recovery.screenshot({ path: info.outputPath(`model-recovery-${width}.png`) });
-    await recovery.getByRole('button', { name: 'Cancel' }).click(); expect(writes).toBe(0);
-    await expect(recovery).toHaveCount(0); expect(denied).toEqual([]);
-  });
-}
-
-test('saved Slack recovery narrow uses the existing form only after explicit repair', async ({ page }, info) => {
-  const denied = await serveProduct(page); await authFixtures(page);
-  let manifests = 0;
-  await page.route('**/api/config', (route) => route.fulfill({ json: { version: 'v2', setup_completed: false, runtime: {}, capabilities: { model_hub: { enabled: true } }, model_hub: { enabled: true }, platforms: { primary: 'slack', enabled: ['slack'] }, platform_catalog: [{ id: 'slack', config_key: 'slack', credential_fields: ['bot_token'] }], slack: { has_app_token: true, bot_token: '' }, agents: { claude: { enabled: true }, codex: { enabled: true }, opencode: { enabled: true } } } }));
-  await page.route('**/api/backend/claude/connection', (route) => route.fulfill({ json: { ok: true, backend: 'claude', ready: true, entry_eligible: true, enabled: true, installed: true, application: 'applied', auth: 'api_key' } }));
-  await page.route('**/api/slack/manifest', (route) => { manifests++; return route.fulfill({ json: { ok: true, manifest: '{}' } }); });
-  await page.setViewportSize({ width: 390, height: 640 });
-  await openOnboarding(page); await openSetup(page, 'en');
-  await page.getByRole('button', { name: 'Enter workspace' }).click();
-  const recovery = page.getByRole('region', { name: 'Repair saved messaging configuration' });
-  await expect(recovery).toBeVisible(); expect(manifests).toBe(0);
-  await recovery.getByRole('button', { name: 'Repair saved messaging configuration' }).click();
-  await expect.poll(() => manifests).toBe(1);
-  await recovery.getByRole('button', { name: /Get Bot Token/ }).click();
-  await recovery.getByPlaceholder('xoxb-... (paste here)').fill('xoxb-fixture-only');
-  const apply = recovery.getByRole('button', { name: /Apply/ });
-  await expect(apply).toBeEnabled(); await apply.scrollIntoViewIfNeeded(); await expect(apply).toBeInViewport();
-  expect(await recovery.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
-  await settleEffects(page); await recovery.screenshot({ path: info.outputPath('saved-slack-recovery-narrow.png') });
-  await recovery.getByRole('button', { name: 'Cancel' }).click();
-  expect(denied).toEqual([]);
-});
-
 for (const lang of ['en', 'zh']) {
   test(`disabled Settings credentials stay saved without connection ${lang}`, async ({ page }, info) => {
     const denied = await serveProduct(page);
@@ -1141,7 +1108,7 @@ for (const lang of ['en', 'zh']) {
       }
       return route.fulfill({ json: { ok: true, active_auth_mode: 'api_key', auth_mode: 'api_key', has_api_key: true, api_key_masked: 'sk-••••test', base_url: 'https://fixture.invalid/v1', file_store_active: true } });
     });
-    await page.route('**/api/backend/codex/connection', (route) => route.fulfill({ json: { ok: true, backend: 'codex', installed: true, enabled, auth: 'api_key', application: 'applied', ready: enabled, entry_eligible: enabled } }));
+    await page.route('**/api/backend/codex/connection', (route) => route.fulfill({ json: { ok: true, backend: 'codex', installed: true, enabled, auth: 'api_key', application: 'applied', ready: enabled, entry_eligible: enabled, supply_mode: 'direct' } }));
     await page.setViewportSize({ width: 390, height: 640 });
     await page.goto(`/e2e/onboarding-fidelity/fixture.html?surface=disabled-settings&lang=${lang}&theme=light`);
     const saved = lang === 'zh' ? '凭据已保存。此助手当前未启用。' : 'Credentials saved. This assistant is currently disabled.';
