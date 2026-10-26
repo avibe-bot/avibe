@@ -6,6 +6,7 @@ stable fields. It never includes the request arguments or response content.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import Mapping
@@ -52,8 +53,8 @@ def _json_objects(body: bytes | None) -> tuple[Mapping[str, Any], ...]:
     return tuple(values)
 
 
-def _jsonrpc_error_code(body: bytes | None) -> str | None:
-    for value in _json_objects(body):
+def _jsonrpc_error_code(values: tuple[Mapping[str, Any], ...]) -> str | None:
+    for value in values:
         error = value.get("error")
         if not isinstance(error, Mapping):
             continue
@@ -63,10 +64,10 @@ def _jsonrpc_error_code(body: bytes | None) -> str | None:
     return None
 
 
-def _mcp_is_error(body: bytes | None) -> bool:
+def _mcp_is_error(values: tuple[Mapping[str, Any], ...]) -> bool:
     return any(
         isinstance(value.get("result"), Mapping) and value["result"].get("isError") is True
-        for value in _json_objects(body)
+        for value in values
     )
 
 
@@ -75,16 +76,41 @@ def transport_cause(response: SearchResponse) -> str:
 
     if response.error:
         return _safe_field(response.error)
-    if (code := _jsonrpc_error_code(response.body)) is not None:
+    values = _json_objects(response.body)
+    if (code := _jsonrpc_error_code(values)) is not None:
         return f"jsonrpc_error={code}"
-    if _mcp_is_error(response.body):
+    if _mcp_is_error(values):
         return "mcp_isError=true"
     if response.http_status is not None:
         return f"http_status={response.http_status}"
     return "unknown"
 
 
-def log_service_failure(
+async def log_service_failure(
+    *,
+    tool: str,
+    source_id: str,
+    service_id: str,
+    outcome: str,
+    error_code: str,
+    response: SearchResponse,
+    elapsed_ms: int,
+) -> None:
+    """Emit one redacted warning without parsing the response on the event loop."""
+
+    await asyncio.to_thread(
+        _write_service_failure,
+        tool=tool,
+        source_id=source_id,
+        service_id=service_id,
+        outcome=outcome,
+        error_code=error_code,
+        response=response,
+        elapsed_ms=elapsed_ms,
+    )
+
+
+def _write_service_failure(
     *,
     tool: str,
     source_id: str,

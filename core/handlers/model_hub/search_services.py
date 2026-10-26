@@ -406,7 +406,9 @@ class ServiceCooldowns:
             if reset_deadline is not None and (advice is None or reset_deadline > advice):
                 advice = reset_deadline
             base_seconds = 60 if source.vendor == "jina-reader" else 30
-            state.until = advice if advice is not None else now + timedelta(seconds=min(base_seconds * 2 ** (state.failures - 1), 300))
+            candidate_until = advice if advice is not None else now + timedelta(seconds=min(base_seconds * 2 ** (state.failures - 1), 300))
+            if state.until is None or state.until <= now or candidate_until > state.until:
+                state.until = candidate_until
             self._failure_version += 1
             state.failure_version = self._failure_version
         elif result.record["status"] == "completed":

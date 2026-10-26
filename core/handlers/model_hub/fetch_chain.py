@@ -256,7 +256,7 @@ class FetchChain:
             try:
                 await asyncio.wait_for(self.owner._keyless_exa_call_semaphore.acquire(), timeout=remaining)
             except asyncio.TimeoutError:
-                log_service_failure(
+                await log_service_failure(
                     tool=self.call.tool,
                     source_id=slot.source_id,
                     service_id=slot.model_id,
@@ -365,7 +365,7 @@ class FetchChain:
         if not sent:
             if stopped:
                 raise asyncio.CancelledError
-            log_service_failure(
+            await log_service_failure(
                 tool=self.call.tool,
                 source_id=source.id,
                 service_id=slot.model_id,
@@ -387,7 +387,7 @@ class FetchChain:
             if stopped:
                 result = replace(result, cooling=False)
             if not stopped and (result.record["status"] != "completed" or response.error == "timeout"):
-                log_service_failure(
+                await log_service_failure(
                     tool=self.call.tool,
                     source_id=source.id,
                     service_id=slot.model_id,

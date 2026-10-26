@@ -233,7 +233,7 @@ class SearchChain:
             try:
                 await asyncio.wait_for(self.owner._keyless_exa_call_semaphore.acquire(), timeout=remaining)
             except asyncio.TimeoutError:
-                log_service_failure(
+                await log_service_failure(
                     tool=self.call.tool,
                     source_id=slot.source_id,
                     service_id=slot.model_id,
@@ -377,7 +377,7 @@ class SearchChain:
                 # but never infer an unreadable response or a retry deadline.
                 result = replace(result, cooling=False)
             if not stopped and (result.record["status"] != "completed" or response.error == "timeout"):
-                log_service_failure(
+                await log_service_failure(
                     tool=self.call.tool,
                     source_id=source.id,
                     service_id=slot.model_id,

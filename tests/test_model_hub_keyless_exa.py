@@ -351,3 +351,19 @@ def test_keyless_cooldown_prefers_later_epoch_millisecond_reset() -> None:
     )
     assert cooldowns.settle(source, "exa/mcp", generation, result, SearchResponse(429, {"Retry-After": "5", "X-RateLimit-Reset": str(int(later.timestamp() * 1000))}, b"{}", response_received_at=NOW), NOW)
     assert cooldowns.until(source, "exa/mcp", NOW) == later
+
+
+def test_keyless_cooldown_keeps_longest_concurrent_deadline() -> None:
+    """A later concurrent failure must not shorten an explicit provider deadline."""
+    source = model_hub_keyless_exa_source()
+    cooldowns = ServiceCooldowns()
+    first_generation = cooldowns.advance(source, "exa/mcp")
+    first_response = SearchResponse(429, {"Retry-After": "120"}, b"{}", response_received_at=NOW)
+    first_result = map_response(SERVICE, first_response, sent=True, results=3, say=lambda key, **_: key)
+    assert cooldowns.settle(source, "exa/mcp", first_generation, first_result, first_response, NOW)
+
+    second_generation = cooldowns.advance(source, "exa/mcp")
+    second_response = SearchResponse(503, {}, b"{}", response_received_at=NOW)
+    second_result = map_response(SERVICE, second_response, sent=True, results=3, say=lambda key, **_: key)
+    assert cooldowns.settle(source, "exa/mcp", second_generation, second_result, second_response, NOW)
+    assert cooldowns.until(source, "exa/mcp", NOW) == NOW + timedelta(seconds=120)
