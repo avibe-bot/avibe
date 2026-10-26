@@ -526,6 +526,12 @@ to {
   opacity:1;
   transform:none;
   pointer-events:auto}
+@media (hover:hover) {
+.pet-mini-avatar-wrap.is-hover-suppressed .pet-mini-dock:not(.is-active) {
+  opacity:0;
+  transform:translateY(-6px) scale(.92);
+  pointer-events:none}
+}
 .pet-mini-dock button {
   display:flex;
   width:32px;
