@@ -3373,7 +3373,28 @@ def test_agent_deliver_run_treats_connect_failure_as_pre_handoff(monkeypatch):
         )
 
 
-def test_agent_deliver_fetch_uses_finite_timeout(monkeypatch):
+
+
+def test_agent_connect_failure_in_stale_session_preserves_pre_handoff(monkeypatch):
+    from vibe.avault_agent import AvaultAgentError
+
+    class FakeManager:
+        def client(self, *, timeout=None):
+            raise AvaultAgentError("failed to connect to avault agent: [Errno 2] No such file or directory")
+
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "_avault_agent_manager", lambda: FakeManager())
+    monkeypatch.setattr(api, "macos_login_session_state", lambda: "stale_login_session")
+
+    with pytest.raises(api.AvaultStaleLoginSessionBeforeHandoffError) as exc:
+        api.avault_agent_deliver_run(
+            grant_id="vgr_grant",
+            secrets=[{"name": "GRANT_KEY", "env": "GRANT_KEY", "envelope": _sealed()}],
+            command=["python3", "-c", "pass"],
+        )
+
+    assert isinstance(exc.value, api.AvaultPreHandoffError)
+    assert exc.value.code == "stale_login_session"
     seen_timeout = []
 
     class FakeClient:

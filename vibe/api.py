@@ -9564,7 +9564,12 @@ def _raise_if_agent_authorization_required(exc: Exception) -> None:
     if isinstance(exc, AvaultStaleLoginSessionError):
         raise
     if macos_login_session_state() == "stale_login_session":
-        raise AvaultStaleLoginSessionError(backend_t("errors.staleLoginSession")) from exc
+        error = (
+            AvaultStaleLoginSessionBeforeHandoffError
+            if _avault_agent_error_is_absent(str(exc))
+            else AvaultStaleLoginSessionError
+        )
+        raise error(backend_t("errors.staleLoginSession")) from exc
     if isinstance(exc, AvaultAgentAuthorizationRequiredError):
         raise _avault_authorization_required(str(exc)) from exc
 

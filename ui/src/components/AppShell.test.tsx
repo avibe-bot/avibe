@@ -251,6 +251,24 @@ describe('AppShell stale login session notice', () => {
     expect(document.querySelector('main')?.className).toContain('flex-col');
     expect(screen.getByTestId('terminal-surface').parentElement?.className).toContain('min-h-0 flex-1 p-0');
   });
+  it('keeps the notice above mobile chat surfaces', async () => {
+    api.getMacOSLoginSessionStatus.mockResolvedValue({ ok: true, state: 'stale_login_session' });
+
+    render(
+      <MemoryRouter initialEntries={['/chat/session-2']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/chat/:sessionId" element={<div data-testid="chat-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const notice = await screen.findByRole('alert');
+    expect(notice.className).toContain('fixed inset-x-0 top-0 z-50');
+    expect(screen.getByTestId('chat-surface')).toBeTruthy();
+  });
+
   it('rechecks the state while the Workbench stays visible', async () => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     const intervalSpy = vi.spyOn(window, 'setInterval').mockImplementation((callback) => {

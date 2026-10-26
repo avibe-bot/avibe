@@ -93,7 +93,7 @@ type CenterButton = { label: string; icon: React.ComponentType<{ className?: str
 
 const MACOS_SESSION_NOTICE_REFRESH_MS = 30_000;
 
-const MacOSStaleLoginSessionNotice: React.FC = () => {
+const MacOSStaleLoginSessionNotice: React.FC<{ overlay?: boolean }> = ({ overlay = false }) => {
   const { t } = useTranslation();
   const api = useApi();
   const [stale, setStale] = useState(false);
@@ -120,7 +120,13 @@ const MacOSStaleLoginSessionNotice: React.FC = () => {
 
   if (!stale) return null;
   return (
-    <div role="alert" className="shrink-0 mx-4 mb-4 flex items-start gap-3 rounded-xl border border-destructive/35 bg-destructive/8 px-4 py-3 text-[13px] leading-snug text-destructive-ink md:mx-10">
+    <div
+      role="alert"
+      className={clsx(
+        'shrink-0 mx-4 mb-4 flex items-start gap-3 rounded-xl border border-destructive/35 bg-destructive/8 px-4 py-3 text-[13px] leading-snug text-destructive-ink md:mx-10',
+        overlay && 'fixed inset-x-0 top-0 z-50 m-0 rounded-none border-x-0 border-t-0 px-4 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))] md:hidden',
+      )}
+    >
       <AlertTriangle className="mt-0.5 size-4 shrink-0" />
       <span>{t('errors.stale_login_session')}</span>
     </div>
@@ -657,7 +663,7 @@ export const AppShell: React.FC = () => {
           )
         )}
       >
-        <MacOSStaleLoginSessionNotice />
+        <MacOSStaleLoginSessionNotice overlay={(isChat || isSearch) && !isDesktop} />
         <div className={clsx(
           'w-full',
           isFullHeightApp
