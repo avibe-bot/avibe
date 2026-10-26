@@ -31,9 +31,13 @@ for (const locale of ['en', 'zh'] as const) {
       await page.goto('/e2e/citations/fixture.html');
     });
 
+    // A titled source is announced with the domain the link actually goes to;
+    // an untitled one is already named by that domain.
     const badge = (page: import('@playwright/test').Page, source: typeof SOURCES[number]) =>
       page.getByRole('link', {
-        name: copy('chat.citation.badge', { index: source.index, source: source.title }, locale),
+        name: source.title === source.label
+          ? copy('chat.citation.badge', { index: source.index, source: source.title }, locale)
+          : copy('chat.citation.badgeWithDomain', { index: source.index, source: source.title, domain: source.label }, locale),
         exact: true,
       }).first();
 

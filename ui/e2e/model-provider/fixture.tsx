@@ -42,7 +42,10 @@ modelsApi.createApiKeySource = async (draft) => {
 modelsApi.probeSource = async (id, model) => {
   calls.push('test:' + id + '/' + model);
   saved = { ...saved, verification_pending: null };
-  return { source_id: id, model_id: model, protocol: saved.protocol, reachable: true, latency_ms: 123, error: null };
+  // A probe tests a model; a search service Source has none to test.
+  const protocol = saved.protocol;
+  if (protocol === 'search') throw new Error('Search services are not model-probed');
+  return { source_id: id, model_id: model, protocol, reachable: true, latency_ms: 123, error: null };
 };
 modelsApi.refreshSource = async () => { calls.push('refetch'); return { source: saved, discovered: saved.models.length }; };
 modelsApi.addCustomModel = async (_id, draft) => {

@@ -122,13 +122,18 @@ export async function serveProduct(page: Page) {
   await page.route('**/api/opencode/permission-status', (route) =>
     route.fulfill({ json: { ok: true, permission_allowed: true } }),
   );
+  await guardRetiredMemory(page, denied);
+  return denied;
+}
+
+/** Refuses and records every request to the retired Memory API, and only those. */
+export async function guardRetiredMemory(page: Page, denied: string[]) {
   await page.route('**/*', (route) => {
     const request = route.request();
     if (!isRetiredMemoryPath(new URL(request.url()).pathname)) return route.fallback();
     denied.push(`${request.method()} ${request.url()}`);
     return route.abort();
   });
-  return denied;
 }
 
 /**
@@ -242,7 +247,14 @@ export async function setDocumentHidden(page: Page, hidden: boolean) {
   }, hidden);
 }
 
-export async function openSetup(page: Page, lang: string) {
+export async function openSetup(
+  page: Page,
+  lang: string,
+  // Runs once the providers step is settled, just before the assistants step opens:
+  // the providers step reads each assistant's connection too, so a case that holds
+  // those reads for the assistants step must not hold the providers step's.
+  options: { beforeAssistants?: () => void } = {},
+) {
   // Assistant captures enter through the same prerequisite as the product. Keep this
   // source local to this helper so provider-empty cases still begin without one.
   await page.route('**/api/models/sources', (route) => route.fulfill({ json: { sources: [{
@@ -263,6 +275,7 @@ export async function openSetup(page: Page, lang: string) {
     await primary.click();
     await page.getByRole('dialog').getByRole('button', { name: lang === 'zh' ? '暂不迁移' : 'Not now', exact: true }).click();
   }
+  options.beforeAssistants?.();
   await page.getByRole('button', { name: onward }).click();
   await page.clock.runFor(950);
   await page.locator('[data-setup-screen="assistants"]').waitFor();

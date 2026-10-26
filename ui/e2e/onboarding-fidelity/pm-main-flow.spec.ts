@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { isRetiredMemoryPath, ORIGIN, serveProduct } from './support';
+import { guardRetiredMemory, isRetiredMemoryPath, ORIGIN, serveProduct } from './support';
 import { readFileSync } from 'node:fs';
 const en=JSON.parse(readFileSync(new URL('../../src/i18n/en.json', import.meta.url),'utf8'));
 
@@ -88,9 +88,18 @@ for (const [width,chosen] of [[1200,"claude"],[390,"claude"],[1200,"codex"]] as 
 }
 
 test('retired Memory API guard rejects root and nested requests without overmatching', async ({page}) => {
- const denied=await serveProduct(page);
+ // The guard alone, in front of an API that answers everything: what it does not
+ // refuse must come back answered. Under serveProduct the general refusal of
+ // unanswered API reads would hide an overmatch behind its own abort.
+ const denied:string[]=[];
+ await page.route('**/*',route=>{
+  const url=new URL(route.request().url());
+  if(url.origin!==ORIGIN)return route.abort();
+  if(url.pathname.startsWith('/api/'))return route.fulfill({json:{ok:true}});
+  return route.request().method()==='GET'?route.fallback():route.abort();
+ });
+ await guardRetiredMemory(page,denied);
  await page.goto('/e2e/onboarding-fidelity/fixture.html');
- await page.route(`${ORIGIN}/api/**`,route=>route.fallback());
  const results=await page.evaluate(async()=>{
   const url=(path:string)=>`${location.origin}${path}`;
   const requests=[
@@ -110,7 +119,8 @@ test('retired Memory API guard rejects root and nested requests without overmatc
  });
  expect(results.slice(0,3).every(result=>'failed' in result)).toBe(true);
  expect(results[3]).toEqual({path:'/api/memory-bank/status',status:200});
- expect(denied.filter(r=>isRetiredMemoryPath(new URL(r.slice(r.indexOf(' ') + 1)).pathname))).toEqual([
+ // The three are sent together, so they reach the guard in any order.
+ expect(denied.filter(r=>isRetiredMemoryPath(new URL(r.slice(r.indexOf(' ') + 1)).pathname)).sort()).toEqual([
   'GET http://127.0.0.1:5212/api/memory?probe=root',
   'POST http://127.0.0.1:5212/api/memory/status?probe=nested',
   'PUT http://127.0.0.1:5212/api/memory/items/1?probe=deep',
