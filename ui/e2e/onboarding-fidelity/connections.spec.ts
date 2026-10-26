@@ -5,9 +5,6 @@ import { openOnboarding, openSetup, serveProduct, settleEffects, size } from './
 async function authFixtures(page: Page) {
   const cancellations: string[] = [];
   await page.route('**/api/csrf-token', (route) => route.fulfill({ json: { csrf_token: 'fixture-token' } }));
-  // The assistants step reads every Agent, disabled ones included, before it
-  // offers any connection; an unanswered read leaves every method disabled.
-  await page.route('**/api/agents?*', (route) => route.fulfill({ json: { ok: true, agents: [], default_agent_name: null } }));
   // These cases draw each assistant's own (Direct) connection dialogs. With Model
   // Hub on, a card offers them only once its connection names that supply mode.
   await page.route('**/api/backend/*/connection', (route) => route.fulfill({ json: {

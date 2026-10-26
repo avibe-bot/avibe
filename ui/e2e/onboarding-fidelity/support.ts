@@ -79,6 +79,10 @@ export async function serveProduct(page: Page) {
   });
   await page.route('**/api/csrf-token', (route) => route.fulfill({ json: { csrf_token: 'fixture-token' } }));
   await page.route('**/api/models/migration/scan', (route) => route.fulfill({ json: { scan: { items: [] } } }));
+  // The assistants step reads every Agent, disabled ones included, before it offers a
+  // connection. Unanswered, each card adds a read-failure row and the step outgrows
+  // the floor its action pair is held on.
+  await page.route('**/api/agents?*', (route) => route.fulfill({ json: { ok: true, agents: [], default_agent_name: null } }));
   // A Hub-enabled config makes the settings surfaces read the Hub projection. The
   // answers stay Direct-mode so every case authored before the gate keeps its path.
   await page.route('**/api/models/agents', (route) => route.fulfill({ json: { ok: true, agents: [] } }));
@@ -247,6 +251,32 @@ export async function setDocumentHidden(page: Page, hidden: boolean) {
   }, hidden);
 }
 
+/**
+ * One existing model provider: the prerequisite the providers screen asks for before
+ * it lets setup continue to the assistants (#2265).
+ */
+export async function serveSetupSource(page: Page) {
+  await page.route('**/api/models/sources', (route) => route.fulfill({ json: { sources: [{
+    id: 'src_setup_fixture', vendor: 'openai', kind: 'api_key', display_name: 'OpenAI',
+    protocol: 'openai_chat', supply_channel: 'hub', billing: 'metered',
+    state: { status: 'active' }, models: [], last_discovered_at: null,
+  }] } }));
+}
+
+/**
+ * The providers step settles on its own reads and timers, and a deterministic run holds
+ * the clock: a read that lands after the handoff still needs time to move before the step
+ * can enable its action. Advance in small steps until it does, rather than racing it.
+ */
+export async function waitForPrimaryEnabled(page: Page) {
+  const primary = page.locator('.onboarding-primary-action');
+  await expect.poll(async () => {
+    if (await primary.isEnabled()) return true;
+    await page.clock.runFor(100);
+    return false;
+  }, { timeout: 10_000 }).toBe(true);
+}
+
 export async function openSetup(
   page: Page,
   lang: string,
@@ -257,17 +287,13 @@ export async function openSetup(
 ) {
   // Assistant captures enter through the same prerequisite as the product. Keep this
   // source local to this helper so provider-empty cases still begin without one.
-  await page.route('**/api/models/sources', (route) => route.fulfill({ json: { sources: [{
-    id: 'src_setup_fixture', vendor: 'openai', kind: 'api_key', display_name: 'OpenAI',
-    protocol: 'openai_chat', supply_channel: 'hub', billing: 'metered',
-    state: { status: 'active' }, models: [], last_discovered_at: null,
-  }] } }));
+  await serveSetupSource(page);
   await page.getByRole('button', { name: lang === 'zh' ? '立即开始' : 'Get started' }).click();
   // The handoff timer uses the same browser clock as the story in deterministic runs.
   await page.clock.runFor(950);
   const onward = lang === 'zh' ? '继续，选择 AI 助手' : 'Continue to assistants';
   const primary = page.locator('.onboarding-primary-action');
-  await expect(primary).toBeEnabled();
+  await waitForPrimaryEnabled(page);
   // A capture may also detect native keys. Decline that optional migration through
   // its own review; the existing source above is what permits continuing.
   if ((await primary.textContent())?.trim() !== onward) {

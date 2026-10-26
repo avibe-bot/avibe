@@ -651,17 +651,24 @@ test('the history fades over a taller, darker band than the card list', async ({
   }, where);
 
   await page.locator('.pet-mini-collapsed').click();
-  expect(await scrollTo('.pet-mini-scroll', 'middle')).toBeGreaterThan(64);
+  // Both lists open with a height transition; measure their scroll range once it has run.
+  await expect.poll(() => scrollTo('.pet-mini-scroll', 'middle')).toBeGreaterThan(64);
   await expect.poll(() => mask('.pet-mini-scroll')).toContain('rgb(0, 0, 0) 32px');
   expect(await mask('.pet-mini-scroll')).toContain('calc(100% - 32px)');
   expect(await mask('.pet-mini-scroll')).not.toContain('rgba');
 
   await page.locator('.pet-mini-reply-toggle').click();
   await expect(page.locator('.pet-mini-reply-bubble .pet-mini-detail')).toHaveClass(/is-open/);
-  expect(await scrollTo('.pet-mini-bubble-history', 'middle')).toBeGreaterThan(96);
-  // A 48px band that is already well faded across its outer two thirds.
-  await expect.poll(() => mask('.pet-mini-bubble-history')).toContain('rgb(0, 0, 0) 48px');
+  await expect.poll(() => scrollTo('.pet-mini-bubble-history', 'middle')).toBeGreaterThan(96);
+  // A 48px band that is already well faded across its outer two thirds. The opening
+  // history settles on its latest line, so place it in the middle again until both
+  // bands are drawn rather than racing that first scroll.
+  await expect.poll(async () => {
+    await scrollTo('.pet-mini-bubble-history', 'middle');
+    return mask('.pet-mini-bubble-history');
+  }).toContain('calc(100% - 48px)');
   const middle = await mask('.pet-mini-bubble-history');
+  expect(middle).toContain('rgb(0, 0, 0) 48px');
   for (const stop of ['rgba(0, 0, 0, 0.12) 16.8px', 'rgba(0, 0, 0, 0.55) 33.6px', 'calc(100% - 48px)', 'rgba(0, 0, 0, 0.55) calc(100% - 33.6px)', 'rgba(0, 0, 0, 0.12) calc(100% - 16.8px)']) {
     expect(middle).toContain(stop);
   }
