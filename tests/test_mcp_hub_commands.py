@@ -102,3 +102,23 @@ def test_unhandleable_schema_is_json_only_and_unvalidated():
         command = build_command(tool)
         assert command["validated"] is False and command["flags"] == []
         validate_arguments(tool, {"anything": 1})  # not validated, not a failure
+
+
+def test_local_defs_ref_stays_validated():
+    tool = {
+        "name": "count",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "label": {"type": "string"},
+                "count": {"$ref": "#/$defs/positive"},
+            },
+            "$defs": {"positive": {"type": "integer", "minimum": 1}},
+            "required": ["count"],
+        },
+    }
+    command = build_command(tool)
+    assert command["validated"] is True
+    assert any(flag["key"] == "label" for flag in command["flags"])
+    with pytest.raises(McpHubError):
+        validate_arguments(tool, {"count": -1})

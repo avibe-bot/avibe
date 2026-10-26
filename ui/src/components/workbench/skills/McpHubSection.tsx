@@ -54,21 +54,27 @@ export const McpHubSection: React.FC = () => {
   };
 
   const refresh = useCallback(async () => {
-    const res = await api.listMcpServers();
-    if (res.ok) setServers(res.servers ?? []);
-    else showToast(describe(res.error), 'error');
-  }, [api]);
+    try {
+      const res = await api.listMcpServers();
+      if (res.ok) setServers(res.servers ?? []);
+      else showToast(describe(res.error), 'error');
+    } catch {
+      showToast(t('mcpHub.failed'), 'error');
+    }
+  }, [api, describe, showToast, t]);
 
   useEffect(() => {
     let cancelled = false;
     void api.listMcpServers().then((res) => {
       if (!cancelled && res.ok) setServers(res.servers ?? []);
       else if (!cancelled) showToast(describe(res.error), 'error');
+    }).catch(() => {
+      if (!cancelled) showToast(t('mcpHub.failed'), 'error');
     });
     return () => {
       cancelled = true;
     };
-  }, [api]);
+  }, [api, describe, showToast, t]);
 
   const act = async <T extends McpResult>(key: string, run: () => Promise<T>, success?: string): Promise<T> => {
     setBusy(key);

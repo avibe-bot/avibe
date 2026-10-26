@@ -33,26 +33,28 @@ def _validator_for(schema: Any):
     try:
         cls = jsonschema.validators.validator_for(schema, default=jsonschema.Draft202012Validator)
         cls.check_schema(schema)
-        registry = Registry(retrieve=_no_remote)
+        from referencing.jsonschema import DRAFT202012
+
+        registry = Registry(retrieve=_no_remote).with_resource("", DRAFT202012.create_resource(schema))
         validator = cls(schema, registry=registry)
         validator.is_valid({})
-        _assert_refs_resolvable(schema, registry)
+        _assert_refs_resolvable(schema, registry.resolver())
     except Exception:
         return None
     return validator
 
 
-def _assert_refs_resolvable(node: Any, registry) -> None:
+def _assert_refs_resolvable(node: Any, resolver) -> None:
     """Walk nested ``$ref`` so an unresolvable optional property is not published as validated."""
 
     if isinstance(node, dict):
         if "$ref" in node:
-            registry.resolver().lookup(node["$ref"])
+            resolver.lookup(node["$ref"])
         for value in node.values():
-            _assert_refs_resolvable(value, registry)
+            _assert_refs_resolvable(value, resolver)
     elif isinstance(node, list):
         for item in node:
-            _assert_refs_resolvable(item, registry)
+            _assert_refs_resolvable(item, resolver)
 
 
 def build_command(tool: dict[str, Any]) -> dict[str, Any]:
