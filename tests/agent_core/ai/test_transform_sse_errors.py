@@ -357,6 +357,24 @@ def test_overflow_classifies_cerebras_bodyless_status() -> None:
     assert classify_error(status=400, body="400 status code (no body)").kind == "overflow"
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        'ThrottlingException: too many tokens',
+        '{"error":{"type":"ThrottlingException","message":"too many tokens"}}',
+        '{"error":{"message":"ThrottlingException: too many tokens"}}',
+    ],
+)
+def test_http_400_throttling_is_excluded_from_overflow_without_becoming_rate_limit(body: str) -> None:
+    error = classify_error(status=400, body=body)
+    assert error.kind == "invalid_request"
+    assert error.kind != "overflow"
+
+
+def test_generic_http_400_too_many_tokens_remains_overflow() -> None:
+    assert classify_error(status=400, body="too many tokens").kind == "overflow"
+
+
 @pytest.mark.parametrize("status", [401, 403])
 def test_auth_statuses_are_not_retryable(status: int) -> None:
     error = classify_error(status=status, body="denied")

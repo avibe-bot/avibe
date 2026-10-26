@@ -185,10 +185,12 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
         context_price_steps=tuple(sorted(steps)),
     )
     base_url = hop["base_url"]
+    original_protocol = protocol
     if protocol == "google":
         if not gateway_base_url:
             raise HopResolutionError("a google hop needs the gateway prefix to call Chat Completions")
         protocol, base_url = "openai_chat", f"{gateway_base_url.rstrip('/')}/v1"
+    origin_api = original_protocol if original_protocol != protocol else None
     endpoint = ModelEndpoint(
         protocol=protocol,
         base_url=base_url,
@@ -200,6 +202,7 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
         source_identity=hop["source_identity"],
         hosted_tools=hosted_tools,
         image_models=image_models,
+        origin_api=origin_api,
     )
     return ModelSelection(endpoint=endpoint, capabilities=capabilities)
 
