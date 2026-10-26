@@ -23,8 +23,8 @@ BackendName = AgentBackend
 ResolutionChannel = Literal["direct", "native_cli", "hub", "unavailable"]
 SupplyStatus = Literal["ok", "degraded", "waiting", "interrupted"]
 RouteOrigin = Literal["automatic", "manual", "passthrough"]
-CacheTtl = Literal["5m", "30m", "1h"]
-_CACHE_TTL_VALUES = frozenset(("5m", "30m", "1h"))
+CacheTtl = Literal["5m", "30m", "1h", "12h"]
+_CACHE_TTL_VALUES = frozenset(("5m", "30m", "1h", "12h"))
 _GPT_MODEL = re.compile(
     r"gpt-(?P<major>\d+)(?:\.(?P<minor>\d+))?(?:-[a-z0-9]+(?:[.-][a-z0-9]+)*)?",
     re.ASCII,
@@ -328,8 +328,10 @@ def validate_cache_ttl_override(
     if not isinstance(ttl, str) or ttl not in _CACHE_TTL_VALUES or not route.hops:
         raise ValueError("cache_ttl is not supported for this route")
     official_openai = is_official_openai_responses_route(config, backend, route)
-    if official_openai and ttl != "30m":
-        raise ValueError("official OpenAI Responses routes support only 30m")
+    if ttl == "12h" and not official_openai:
+        raise ValueError("12h is supported only by an official OpenAI Responses GPT-5.6+ route")
+    if official_openai and ttl not in {"30m", "12h"}:
+        raise ValueError("official OpenAI Responses routes support only 30m or 12h")
     if (
         backend == "vibey"
         and all(
@@ -664,7 +666,7 @@ def resolve_model_hub_turn(
         route_origin=route.route_origin,
         cache_ttl=cache_ttl,
         cache_ttl_wire=(
-            cache_ttl == "30m"
+            cache_ttl in {"30m", "12h"}
             and is_official_openai_responses_route(config, backend, route)
         ),
         matching_sources=matching_sources,

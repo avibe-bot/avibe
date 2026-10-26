@@ -111,10 +111,12 @@ def test_model_price_reads_models_dev_cost_and_fills_missing_cache_prices():
     """MH-PRICE-001: A missing cache price is input; a one-hour cache write is twice input unless listed."""
 
     assert model_price({"input": 5, "output": 25, "cache_read": 0.5, "cache_write": 6.25}) == ModelPrice(
-        input=5, output=25, cache_read=0.5, cache_write=6.25, cache_write_1h=10, charges_cache_writes=True
+        input=5, output=25, cache_read=0.5, cache_write=6.25, cache_write_1h=10,
+        cache_write_30m=6.25, cache_write_12h=12.5, charges_cache_writes=True
     )
     assert model_price({"input": 2, "output": 6}) == ModelPrice(
-        input=2, output=6, cache_read=2, cache_write=2, cache_write_1h=4
+        input=2, output=6, cache_read=2, cache_write=2, cache_write_1h=4,
+        cache_write_30m=2.5, cache_write_12h=5
     )
     assert model_price({"input": 2, "output": 6, "cache_write_1h": 3}).cache_write_1h == 3
     for bad in (None, {}, {"input": 1}, {"input": -1, "output": 1}, {"input": True, "output": 1},
@@ -243,6 +245,166 @@ def test_usage_metered_before_cache_writes_were_captured_is_a_lower_bound():
     assert row_cost(row, model_price({"input": 2, "output": 6, "cache_write_1h": 4})).api_cost_lower_bound is True
     assert row_cost(row, model_price({"input": 2, "output": 6})).api_cost_lower_bound is False
 
+
+
+
+def test_openai_mixed_lifetime_usage_is_parsed_persisted_and_priced(tmp_path):
+    """OpenAI's documented example survives the wire, ledger, read-back, and list-price valuation."""
+
+    payload = {
+        "usage": {
+            "input_tokens": 12_000,
+            "input_tokens_details": {
+                "cached_tokens": 4_000,
+                "cache_write_tokens": 7_000,
+                "cache_write_tokens_details": {
+                    "ttl_30m_tokens": 3_000,
+                    "ttl_12h_tokens": 4_000,
+                },
+            },
+            "output_tokens": 0,
+        }
+    }
+    usage = extract_protocol_usage("openai_responses", payload)
+    assert usage == ProtocolUsageReport.of(
+        input_tokens=12_000,
+        cached_input_tokens=4_000,
+        output_tokens=0,
+        cache_write_input_tokens=7_000,
+        cache_write_30m_input_tokens=3_000,
+        cache_write_12h_input_tokens=4_000,
+    )
+
+    now = datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc)
+    path = tmp_path / "usage.json"
+    ledger = BoundedUsageLedger(path, now=lambda: now)
+    ledger.record_many([UsageCall("src_openai", "gpt-5.6-oracle", usage, now)])
+    persisted = json.loads(path.read_text(encoding="utf-8"))[0]
+    assert persisted["cache_write_input_tokens"] == 7_000
+    assert persisted["cache_write_30m_input_tokens"] == 3_000
+    assert persisted["cache_write_12h_input_tokens"] == 4_000
+    table = PriceTable(
+        catalog={"openai": {"models": {"gpt-5.6-oracle": {"cost": {"input": 1, "output": 2, "cache_read": 0.1}}}}},
+        vendor_map=VENDOR_MAP,
+        overrides={},
+        price_table_date="2026-10-26",
+    )
+    summary = ledger.summary(
+        days=1,
+        now=now,
+        identities=[SourceIdentity("src_openai", "OpenAI", ["gpt-5.6-oracle"])],
+        prices=table,
+    )
+    assert summary["totals"]["cache_write_30m_input_tokens"] == 3_000
+    assert summary["totals"]["cache_write_12h_input_tokens"] == 4_000
+    assert summary["totals"]["api_cost_usd"] == pytest.approx(0.01515)
+    assert summary["totals"]["api_cost_lower_bound"] is False
+    tiered = model_price({
+        "input": 1,
+        "output": 2,
+        "cache_read": 0.1,
+        "tiers": [{"input": 2, "output": 4, "cache_read": 0.2, "tier": {"type": "context", "size": 1_000}}],
+    })
+    assert row_cost(
+        {
+            "input_tokens": 12_000,
+            "cached_input_tokens": 4_000,
+            "cache_write_input_tokens": 7_000,
+            "cache_write_30m_input_tokens": 3_000,
+            "cache_write_12h_input_tokens": 4_000,
+            "context_tier": 1_000,
+            "output_tokens": 0,
+        },
+        tiered,
+    ).api_cost_usd == pytest.approx(0.0303)
+
+
+def test_openai_usage_witnesses_missing_evidence_and_deduplicates_stream_frames():
+    """Missing totals/breakdowns stay lower-bound evidence; repeated cumulative frames do not double count."""
+
+    complete = {
+        "input_tokens": 12_000,
+        "input_tokens_details": {
+            "cached_tokens": 4_000,
+            "cache_write_tokens": 7_000,
+            "cache_write_tokens_details": {"ttl_30m_tokens": 3_000, "ttl_12h_tokens": 4_000},
+        },
+        "output_tokens": 0,
+    }
+    duplicated = extract_protocol_usage("openai_responses", {"usage": complete, "response": {"usage": complete}})
+    assert duplicated == extract_protocol_usage("openai_responses", {"usage": complete})
+
+    missing_total = extract_protocol_usage(
+        "openai_responses",
+        {"usage": {"input_tokens": 12_000, "input_tokens_details": {"cached_tokens": 4_000, "cache_write_tokens_details": complete["input_tokens_details"]["cache_write_tokens_details"]}, "output_tokens": 0}},
+    )
+    assert missing_total is not None
+    assert missing_total.cache_write_ttl_uncaptured_reports == 1
+    assert missing_total.cache_write_input_tokens == 7_000
+
+    missing_breakdown = extract_protocol_usage(
+        "openai_responses",
+        {"usage": {"input_tokens": 12_000, "input_tokens_details": {"cached_tokens": 4_000, "cache_write_tokens": 7_000}, "output_tokens": 0}},
+    )
+    assert missing_breakdown is not None
+    assert missing_breakdown.cache_write_input_tokens == 7_000
+    assert missing_breakdown.cache_write_ttl_uncaptured_reports == 1
+    assert row_cost(
+        {
+            "requests": 1,
+            "token_reports": 1,
+            "input_tokens": 12_000,
+            "cached_input_tokens": 4_000,
+            "cache_write_input_tokens": 7_000,
+            "cache_write_ttl_uncaptured_reports": 1,
+            "output_tokens": 0,
+        },
+        _table().price("gpt-5.5"),
+    ).api_cost_lower_bound is True
+
+    zero = extract_protocol_usage(
+        "openai_responses",
+        {"usage": {"input_tokens": 0, "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0, "cache_write_tokens_details": {"ttl_30m_tokens": 0, "ttl_12h_tokens": 0}}, "output_tokens": 0}},
+    )
+    assert zero == ProtocolUsageReport.of(input_tokens=0, cached_input_tokens=0, output_tokens=0)
+
+
+def test_cache_write_subsets_and_folded_incomplete_reports_are_exact():
+    """Disjoint bounded subsets and one incomplete witness remain exact in either fold order."""
+
+    invalid = ProtocolUsageReport.of(
+        input_tokens=100,
+        cached_input_tokens=10,
+        output_tokens=0,
+        cache_write_input_tokens=80,
+        cache_write_1h_input_tokens=60,
+        cache_write_30m_input_tokens=40,
+        cache_write_12h_input_tokens=30,
+    )
+    assert invalid.cache_write_1h_input_tokens + invalid.cache_write_30m_input_tokens + invalid.cache_write_12h_input_tokens <= invalid.cache_write_input_tokens
+    assert invalid.cache_write_input_tokens <= invalid.input_tokens - invalid.cached_input_tokens
+    assert invalid.cache_write_ttl_uncaptured_reports == 1
+
+    now = datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc)
+    complete = ProtocolUsageReport.of(
+        input_tokens=100, cached_input_tokens=10, output_tokens=1,
+        cache_write_input_tokens=80, cache_write_30m_input_tokens=30, cache_write_12h_input_tokens=50,
+    )
+    incomplete = ProtocolUsageReport.of(
+        input_tokens=50, cached_input_tokens=5, output_tokens=1,
+        cache_write_input_tokens=20, cache_write_ttl_uncaptured_reports=1,
+    )
+    calls = [
+        UsageCall("src_openai", "gpt-5.6-oracle", complete, now),
+        UsageCall("src_openai", "gpt-5.6-oracle", incomplete, now),
+        UsageCall("src_openai", "gpt-5.6-oracle", complete, now),
+    ]
+    forward = calls[0].folded_with(calls[1]).folded_with(calls[2])
+    reverse = calls[2].folded_with(calls[1]).folded_with(calls[0])
+    assert forward.usage == reverse.usage
+    assert forward.usage is not None
+    assert forward.usage.cache_write_ttl_uncaptured_reports == 1
+    assert forward.usage.cache_write_30m_input_tokens == 60
 
 def test_priced_usage_with_unknown_parts_is_a_floor():
     """MH-PRICE-005: Requests without a token report, or tokens with no price, make the priced figure a lower bound."""
@@ -672,13 +834,18 @@ def test_model_price_reads_context_tiers_by_the_flat_price_rules():
 
     rates = {"input": 2, "output": 8}
     # A missing tier member falls back as the flat price's does, to the tier's own input.
-    tier_rates = ModelPrice(input=2, output=8, cache_read=2, cache_write=2, cache_write_1h=4)
+    tier_rates = ModelPrice(
+        input=2, output=8, cache_read=2, cache_write=2, cache_write_1h=4, cache_write_30m=2.5, cache_write_12h=5
+    )
     assert model_price({"input": 1, "output": 4, "tiers": [{**rates, "tier": _context(32_000)}]}).context_tiers == (
         (32_000, tier_rates),
     )
     assert model_price(TIERED_CATALOG["openai"]["models"]["gpt-6-astra"]["cost"]).context_tiers == ((
         272_000,
-        ModelPrice(input=20, output=75, cache_read=2, cache_write=25, cache_write_1h=40, charges_cache_writes=True),
+        ModelPrice(
+            input=20, output=75, cache_read=2, cache_write=25, cache_write_1h=40,
+            cache_write_30m=25, cache_write_12h=50, charges_cache_writes=True,
+        ),
     ),)
     assert [size for size, _ in model_price(TIERED_CATALOG["openai"]["models"]["gpt-6-nova"]["cost"]).context_tiers] == [
         32_000, 128_000,

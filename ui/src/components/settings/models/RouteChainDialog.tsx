@@ -1174,6 +1174,7 @@ export const RouteChainDialog: React.FC<{
                     <option value="5m">{t("settings.models.routing.cacheTtl.5m")}</option>
                     <option value="30m">{t("settings.models.routing.cacheTtl.30m")}</option>
                     <option value="1h">{t("settings.models.routing.cacheTtl.1h")}</option>
+                    <option value="12h">{t("settings.models.routing.cacheTtl.12h")}</option>
                   </select>
                   {saveErrorCode === "cache_ttl_unsupported" && (
                     <span role="alert" className="text-xs text-danger">

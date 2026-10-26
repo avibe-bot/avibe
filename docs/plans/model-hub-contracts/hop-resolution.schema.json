@@ -21,8 +21,8 @@
     },
     "provider": { "type": "string" },
     "cache_ttl": {
-      "enum": ["5m", "30m", "1h", null],
-      "description": "Validated Model Hub route-local cache lifetime override; unset uses the built-in C-9 estimate."
+      "enum": ["5m", "30m", "1h", "12h", null],
+      "description": "Validated Model Hub route-local cache lifetime override; unset uses the built-in C-9 estimate. Confirmed official OpenAI Responses GPT-5.6+ routes may explicitly request 30m or 12h; relays do not receive OpenAI-specific cache options."
     },
     "cache_ttl_wire": {
       "type": "boolean",

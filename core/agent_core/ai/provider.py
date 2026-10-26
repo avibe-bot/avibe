@@ -108,7 +108,7 @@ class ModelEndpoint:
     #: Route-local cache lifetime override. The Model Hub validates provider
     #: semantics before it reaches the adapter; unknown/relay routes use it only
     #: for C-9 clearing, while official OpenAI Responses routes may also wire it.
-    cache_ttl: Optional[Literal["5m", "30m", "1h"]] = None
+    cache_ttl: Optional[Literal["5m", "30m", "1h", "12h"]] = None
     #: True only when Model Hub confirmed that the provider-specific TTL can be
     #: sent on the wire (currently official OpenAI Responses GPT-5.6+).
     cache_ttl_wire: bool = False

@@ -182,9 +182,21 @@
           "$ref": "#/definitions/Count",
           "description": "Subset of cache_write_input_tokens written with the one-hour cache lifetime (Anthropic `cache_creation.ephemeral_1h_input_tokens`); the rest used the five-minute lifetime."
         },
+        "cache_write_30m_input_tokens": {
+          "$ref": "#/definitions/Count",
+          "description": "OpenAI Responses cache-write tokens reported for the 30-minute lifetime. This counter is distinct from Anthropic's one-hour counter."
+        },
+        "cache_write_12h_input_tokens": {
+          "$ref": "#/definitions/Count",
+          "description": "OpenAI Responses cache-write tokens reported for the 12-hour lifetime. The 30m and 12h counters are disjoint and together must not exceed cache_write_input_tokens."
+        },
         "cache_write_uncaptured_reports": {
           "$ref": "#/definitions/Count",
           "description": "Subset of token_reports metered before cache writes were captured. Their cache writes, if any, are inside input_tokens but not in cache_write_input_tokens."
+        },
+        "cache_write_ttl_uncaptured_reports": {
+          "$ref": "#/definitions/Count",
+          "description": "Token reports for OpenAI Responses rows whose total cache-write count or 30m/12h lifetime breakdown was missing or invalid. These reports remain a lower bound and no TTL is inferred from the request default."
         },
         "api_cost_usd": {
           "description": "What this usage would cost at the vendor's list API price, in `pricing.currency`, at the current price table — never the price in force when the call ran. A valuation for comparison, never an amount charged. Present exactly when `pricing` is. Usage whose model has no price is left out and counted in excluded_tokens, never priced as zero.",
@@ -262,8 +274,17 @@
         "cache_write_1h_input_tokens": {
           "$ref": "#/definitions/Counters/properties/cache_write_1h_input_tokens"
         },
+        "cache_write_30m_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_30m_input_tokens"
+        },
+        "cache_write_12h_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_12h_input_tokens"
+        },
         "cache_write_uncaptured_reports": {
           "$ref": "#/definitions/Counters/properties/cache_write_uncaptured_reports"
+        },
+        "cache_write_ttl_uncaptured_reports": {
+          "$ref": "#/definitions/Counters/properties/cache_write_ttl_uncaptured_reports"
         },
         "api_cost_usd": {
           "$ref": "#/definitions/Counters/properties/api_cost_usd"
@@ -423,8 +444,17 @@
         "cache_write_1h_input_tokens": {
           "$ref": "#/definitions/Counters/properties/cache_write_1h_input_tokens"
         },
+        "cache_write_30m_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_30m_input_tokens"
+        },
+        "cache_write_12h_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_12h_input_tokens"
+        },
         "cache_write_uncaptured_reports": {
           "$ref": "#/definitions/Counters/properties/cache_write_uncaptured_reports"
+        },
+        "cache_write_ttl_uncaptured_reports": {
+          "$ref": "#/definitions/Counters/properties/cache_write_ttl_uncaptured_reports"
         },
         "api_cost_usd": {
           "$ref": "#/definitions/Counters/properties/api_cost_usd"
@@ -483,8 +513,17 @@
         "cache_write_1h_input_tokens": {
           "$ref": "#/definitions/Counters/properties/cache_write_1h_input_tokens"
         },
+        "cache_write_30m_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_30m_input_tokens"
+        },
+        "cache_write_12h_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_12h_input_tokens"
+        },
         "cache_write_uncaptured_reports": {
           "$ref": "#/definitions/Counters/properties/cache_write_uncaptured_reports"
+        },
+        "cache_write_ttl_uncaptured_reports": {
+          "$ref": "#/definitions/Counters/properties/cache_write_ttl_uncaptured_reports"
         },
         "api_cost_usd": {
           "$ref": "#/definitions/Counters/properties/api_cost_usd"
@@ -608,8 +647,17 @@
         "cache_write_1h_input_tokens": {
           "$ref": "#/definitions/Counters/properties/cache_write_1h_input_tokens"
         },
+        "cache_write_30m_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_30m_input_tokens"
+        },
+        "cache_write_12h_input_tokens": {
+          "$ref": "#/definitions/Counters/properties/cache_write_12h_input_tokens"
+        },
         "cache_write_uncaptured_reports": {
           "$ref": "#/definitions/Counters/properties/cache_write_uncaptured_reports"
+        },
+        "cache_write_ttl_uncaptured_reports": {
+          "$ref": "#/definitions/Counters/properties/cache_write_ttl_uncaptured_reports"
         },
         "api_cost_usd": {
           "$ref": "#/definitions/Counters/properties/api_cost_usd"
@@ -675,7 +723,10 @@
         "output_tokens": 4120,
         "cache_write_input_tokens": 20100,
         "cache_write_1h_input_tokens": 0,
+        "cache_write_30m_input_tokens": 0,
+        "cache_write_12h_input_tokens": 0,
         "cache_write_uncaptured_reports": 0,
+        "cache_write_ttl_uncaptured_reports": 0,
         "api_cost_usd": 0.43723,
         "excluded_tokens": 0,
         "api_cost_lower_bound": false
@@ -702,7 +753,10 @@
               "output_tokens": 4120,
               "cache_write_input_tokens": 20100,
               "cache_write_1h_input_tokens": 0,
+              "cache_write_30m_input_tokens": 0,
+              "cache_write_12h_input_tokens": 0,
               "cache_write_uncaptured_reports": 0,
+              "cache_write_ttl_uncaptured_reports": 0,
               "api_cost_usd": 0.43723,
               "excluded_tokens": 0,
               "api_cost_lower_bound": false,
@@ -711,7 +765,10 @@
           ],
           "cache_write_input_tokens": 20100,
           "cache_write_1h_input_tokens": 0,
+          "cache_write_30m_input_tokens": 0,
+          "cache_write_12h_input_tokens": 0,
           "cache_write_uncaptured_reports": 0,
+          "cache_write_ttl_uncaptured_reports": 0,
           "api_cost_usd": 0.43723,
           "excluded_tokens": 0,
           "api_cost_lower_bound": false
@@ -727,7 +784,10 @@
           "output_tokens": 4120,
           "cache_write_input_tokens": 20100,
           "cache_write_1h_input_tokens": 0,
+          "cache_write_30m_input_tokens": 0,
+          "cache_write_12h_input_tokens": 0,
           "cache_write_uncaptured_reports": 0,
+          "cache_write_ttl_uncaptured_reports": 0,
           "api_cost_usd": 0.43723,
           "excluded_tokens": 0,
           "api_cost_lower_bound": false

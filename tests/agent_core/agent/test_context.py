@@ -549,16 +549,17 @@ def test_a_route_cache_lives_as_long_as_its_family_documents_else_an_hour(protoc
     assert cache_ttl_s(ModelEndpoint(protocol, "http://model.invalid", model, "", provider=provider)) == lifetime
 
 
-def test_a_route_cache_override_wins_over_provider_family():
+@pytest.mark.parametrize("cache_ttl, expected", [("1h", 3_600), ("12h", 43_200)])
+def test_a_route_cache_override_wins_over_provider_family(cache_ttl, expected):
     endpoint = ModelEndpoint(
         "openai_responses",
         "http://model.invalid",
         "gpt-6-astra",
         "",
         provider="openai",
-        cache_ttl="1h",
+        cache_ttl=cache_ttl,
     )
-    assert cache_ttl_s(endpoint) == 3_600
+    assert cache_ttl_s(endpoint) == expected
 
 
 def _random_rows(seed: int) -> list[ContextEntry]:

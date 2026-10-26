@@ -56,8 +56,8 @@
       "description": "Vendor identity of the primary hop; becomes `origin.provider` unless the served-hop report differs."
     },
     "cache_ttl": {
-      "enum": ["5m", "30m", "1h", null],
-      "description": "Validated Model Hub route-local cache lifetime override. Unset uses C-9's built-in provider estimate. Official OpenAI Responses GPT-5.6+ routes may explicitly request the provider's 30m default; the higher-cost 12h mode is not exposed until usage metering can distinguish its cache-write rate."
+      "enum": ["5m", "30m", "1h", "12h", null],
+      "description": "Validated Model Hub route-local cache lifetime override. Unset uses C-9's built-in provider estimate. Confirmed official OpenAI Responses GPT-5.6+ routes may explicitly request 30m or 12h; other providers and relays keep their supported semantics."
     },
     "cache_ttl_wire": {
       "type": "boolean",

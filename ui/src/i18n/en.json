@@ -1381,7 +1381,8 @@
           "5m": "5 minutes",
           "30m": "30 minutes",
           "1h": "1 hour",
-          "help": "This route-wide estimate controls when old tool results are cleared. Official OpenAI Responses GPT-5.6+ uses a 30-minute cache by default; selecting 30 minutes explicitly sends that provider option. The higher-cost 12-hour mode is not exposed until usage metering can distinguish its cache-write rate. Earlier OpenAI models' policy-dependent prompt_cache_retention is not inferred. Relays do not receive OpenAI-specific cache options."
+          "12h": "12 hours",
+          "help": "This route-wide estimate controls when old tool results are cleared. Official OpenAI Responses GPT-5.6+ uses a 30-minute cache by default; selecting 30 minutes or 12 hours explicitly sends that provider option. The 12-hour mode costs 2.5x the model input rate for writes versus 1.25x for 30 minutes; cached reads keep the model-specific read price. Earlier OpenAI models' policy-dependent prompt_cache_retention is not inferred. Relays do not receive OpenAI-specific cache options."
         },
         "undoDone": "Previous manual draft restored.",
         "restorePending": "Not saved yet. The saved route is still in use.",

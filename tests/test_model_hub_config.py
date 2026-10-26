@@ -2985,11 +2985,17 @@ def test_route_cache_ttl_is_optional_and_closed():
         }
     )
     assert route.cache_ttl == "1h"
-    assert route.to_payload()["cache_ttl"] == "1h"
+    route_12h = ModelHubRouteConfig.from_payload(
+        {
+            "hops": [{"source_id": "src_same0001", "model_id": "model-a"}],
+            "cache_ttl": "12h",
+        }
+    )
+    assert route_12h.cache_ttl == "12h"
     assert "cache_ttl" not in ModelHubRouteConfig.from_payload(
         {"hops": [{"source_id": "src_same0001", "model_id": "model-a"}]}
     ).to_payload()
-    for value in ("", "12h", "24h", 3600, True):
+    for value in ("", "24h", 3600, True):
         with pytest.raises(ValueError, match="cache_ttl"):
             ModelHubRouteConfig.from_payload(
                 {

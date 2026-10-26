@@ -90,10 +90,11 @@ CLEARABLE_TOOLS = frozenset({"read"}) | COMMAND_TOOLS
 #: How long a route's provider prompt cache stays warm after its last use, in seconds, by cache family (section 3):
 #: the documented lifetime of the cache mode Vibey requests for the conversation, where clearable results live.
 #: ``anthropic``: the message breakpoints' ``cache_control`` is ephemeral with no ``ttl``, 5 minutes, refreshed on use.
-#: ``openai-gpt-5.6``: OpenAI Responses GPT-5.6+ defaults to a 30-minute prefix cache. An explicit 30m route option sends ``prompt_cache_options.ttl``; the longer official 12h mode is not exposed until usage metering can distinguish its higher cache-write rate.
+#: ``openai-gpt-5.6``: OpenAI Responses GPT-5.6+ defaults to a 30-minute prefix cache; a validated official route may opt into ``12h`` via ``prompt_cache_options.ttl``. The latter has a 2.5x cache-write rate versus 1.25x for 30m, while reads use the same cached-input rate.
 #: Route overrides are intentionally closed: they are persisted as operator-visible
-#: duration labels, not arbitrary provider claims.
-CACHE_TTL_OVERRIDES: Mapping[str, float] = {"5m": 300.0, "30m": 1_800.0, "1h": 3_600.0}
+#: duration labels, not arbitrary provider claims. ``12h`` is admitted only for
+#: official OpenAI Responses GPT-5.6+ routes by Model Hub validation.
+CACHE_TTL_OVERRIDES: Mapping[str, float] = {"5m": 300.0, "30m": 1_800.0, "1h": 3_600.0, "12h": 43_200.0}
 #: Earlier supported OpenAI models may expose the separate Chat Completions ``prompt_cache_retention`` modes ``in_memory`` or ``24h`` depending on model and organization policy; Avibe does not infer or send that policy-dependent option, so those routes stay on the conservative built-in estimate unless explicitly supported later.
 CACHE_TTLS: Mapping[str, float] = {"anthropic": 300.0, "openai-gpt-5.6": 1_800.0}
 #: Any other route, or one not identified unambiguously: clearing a warm cache costs a full-price re-read of the

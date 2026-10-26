@@ -80,7 +80,7 @@ def _request(
     ("cache_ttl", "cache_ttl_wire", "expected"),
     [
         (None, False, None),
-        ("30m", True, {"ttl": "30m"}),
+        ("12h", True, {"ttl": "12h"}),
         ("30m", False, None),  # relays may keep the local estimate, never OpenAI's wire option
     ],
 )

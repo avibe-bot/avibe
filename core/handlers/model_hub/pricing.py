@@ -115,6 +115,8 @@ class ModelPrice:
     cache_read: float
     cache_write: float
     cache_write_1h: float
+    cache_write_30m: float = 0.0
+    cache_write_12h: float = 0.0
     # Whether the table lists a cache write above input. The one-hour figure
     # counts only when listed: its default is a multiple of input for every
     # model, so a defaulted one says nothing about the vendor.
@@ -227,6 +229,8 @@ def _flat_price(cost: object) -> Optional[ModelPrice]:
     cache_read = _price(cost.get("cache_read"))
     cache_write = _price(cost.get("cache_write"))
     cache_write_1h = _price(cost.get("cache_write_1h"))
+    cache_write_30m = _price(cost.get("cache_write_30m"))
+    cache_write_12h = _price(cost.get("cache_write_12h"))
     return ModelPrice(
         input=input_price,
         output=output_price,
@@ -235,7 +239,11 @@ def _flat_price(cost: object) -> Optional[ModelPrice]:
         cache_write_1h=(
             input_price * _CACHE_WRITE_1H_INPUT_MULTIPLE if cache_write_1h is None else cache_write_1h
         ),
-        charges_cache_writes=any(price is not None and price > input_price for price in (cache_write, cache_write_1h)),
+        cache_write_30m=input_price * 1.25 if cache_write_30m is None else cache_write_30m,
+        cache_write_12h=input_price * 2.5 if cache_write_12h is None else cache_write_12h,
+        charges_cache_writes=any(
+            price is not None and price > input_price for price in (cache_write, cache_write_1h)
+        ),
     )
 
 
@@ -462,18 +470,25 @@ def row_cost(row: Mapping[str, Any], price: Optional[ModelPrice]) -> Cost:
     cache_read = min(int(row.get("cached_input_tokens") or 0), input_tokens)
     cache_write = min(int(row.get("cache_write_input_tokens") or 0), input_tokens - cache_read)
     cache_write_1h = min(int(row.get("cache_write_1h_input_tokens") or 0), cache_write)
+    remaining = max(0, cache_write - cache_write_1h)
+    cache_write_30m = min(int(row.get("cache_write_30m_input_tokens") or 0), remaining)
+    cache_write_12h = min(int(row.get("cache_write_12h_input_tokens") or 0), remaining - cache_write_30m)
+    unknown_write = max(0, remaining - cache_write_30m - cache_write_12h)
     fresh = input_tokens - cache_read - cache_write
     usd = (
         fresh * price.input
         + cache_read * price.cache_read
-        + (cache_write - cache_write_1h) * price.cache_write
+        + unknown_write * price.cache_write
+        + cache_write_30m * price.cache_write_30m
+        + cache_write_12h * price.cache_write_12h
         + cache_write_1h * price.cache_write_1h
         + output_tokens * price.output
     ) / 1_000_000
     uncaptured = int(row.get("cache_write_uncaptured_reports") or 0) > 0
+    ttl_uncaptured = int(row.get("cache_write_ttl_uncaptured_reports") or 0) > 0
     return Cost(
         api_cost_usd=usd,
-        api_cost_lower_bound=unreported or (uncaptured and price.charges_cache_writes),
+        api_cost_lower_bound=unreported or ttl_uncaptured or (uncaptured and price.charges_cache_writes),
     )
 
 
@@ -734,6 +749,8 @@ def hosted_response_cost(
         "cached_input_tokens": usage.cached_input_tokens,
         "cache_write_input_tokens": usage.cache_write_input_tokens,
         "cache_write_1h_input_tokens": usage.cache_write_1h_input_tokens,
+        "cache_write_30m_input_tokens": usage.cache_write_30m_input_tokens,
+        "cache_write_12h_input_tokens": usage.cache_write_12h_input_tokens,
         "requests": 1,
         "token_reports": 1,
         "context_tier": context_tier_size(model_price, usage.input_tokens),
