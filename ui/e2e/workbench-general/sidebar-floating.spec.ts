@@ -22,7 +22,7 @@ async function serveProduct(page: Page, lang: Lang = 'en') {
   const inheritedReads = new Set([
     '/api/session', '/api/config', '/api/csrf-token', '/api/projects',
     '/api/workbench/projects-bootstrap', '/api/sessions', '/api/agents',
-    '/api/inbox', '/api/version', '/api/events',
+    '/api/inbox', '/api/version', '/api/events', '/api/macos/login-session',
     '/api/desktop/computer-use/status',
   ]);
   await page.route('**/api/**', (route) => {
