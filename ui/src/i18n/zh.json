@@ -1375,6 +1375,15 @@
         },
         "follows": "跟随 {{backend}} 的默认路由，默认路由调整后自动生效。",
         "manualHint": "仅此模型。默认路由的调整不会覆盖这些路由项。",
+        "cacheTtl": {
+          "label": "对话缓存时长",
+          "default": "使用内置估计",
+          "5m": "5 分钟",
+          "30m": "30 分钟",
+          "1h": "1 小时",
+          "12h": "12 小时（仅限官方 OpenAI GPT-5.6+）",
+          "help": "这个路由级估计决定何时清理旧工具结果。12 小时还会让官方 OpenAI Responses GPT-5.6+ 采用 2.5 倍缓存写入倍率（30 分钟为 1.25 倍）；读取使用相同的缓存输入价格。较早 OpenAI 模型依赖组织策略的 prompt_cache_retention 不会被自动推断。中继不会收到该 OpenAI 参数。"
+        },
         "undoDone": "已恢复之前的手动草稿。",
         "restorePending": "尚未保存，当前仍使用已保存的路由。",
         "preview": {
@@ -2840,6 +2849,7 @@
   },
   "errors": {
     "invalid_field_name": "字段名须为 1–64 个小写字母、数字或下划线，且以字母开头。",
+    "cache_ttl_unsupported": "此路由不支持该缓存时长。请使用内置估计或符合供应商能力的值。",
     "field_exists": "此字段名已存在，请使用其他名称。",
     "field_not_found": "此字段已不存在。请刷新密钥并选择当前字段。",
     "too_many_fields": "每个密钥最多可包含 32 个字段（含默认字段）。",

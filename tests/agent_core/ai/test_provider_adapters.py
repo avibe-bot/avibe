@@ -76,6 +76,27 @@ def _request(
     )
 
 
+@pytest.mark.parametrize(
+    ("cache_ttl", "cache_ttl_wire", "expected"),
+    [
+        (None, False, None),
+        ("30m", True, {"ttl": "30m"}),
+        ("12h", True, {"ttl": "12h"}),
+        ("12h", False, None),  # a relay may use the local estimate, never OpenAI's wire option
+    ],
+)
+def test_responses_prompt_cache_retention_is_wired_only_when_model_hub_confirms_it(
+    cache_ttl: str | None, cache_ttl_wire: bool, expected: dict[str, str] | None,
+) -> None:
+    request = _request("openai_responses", model_id="gpt-6-astra")
+    request = replace(
+        request,
+        endpoint=replace(request.endpoint, cache_ttl=cache_ttl, cache_ttl_wire=cache_ttl_wire),
+    )
+    payload = build_responses_payload(request, request.messages)
+    assert payload.get("prompt_cache_options") == expected
+
+
 def test_registry_exposes_only_v1_protocols() -> None:
     assert set(ADAPTERS) == {"anthropic", "openai_chat", "openai_responses"}
     with pytest.raises(ValueError, match="unsupported provider protocol: google"):

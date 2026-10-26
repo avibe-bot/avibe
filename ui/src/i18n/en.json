@@ -1375,6 +1375,15 @@
         },
         "follows": "Follows {{backend}} default routing. Changes to default routing apply here automatically.",
         "manualHint": "Only this model. Changes to default routing do not overwrite these route entries.",
+        "cacheTtl": {
+          "label": "Conversation cache lifetime",
+          "default": "Use built-in estimate",
+          "5m": "5 minutes",
+          "30m": "30 minutes",
+          "1h": "1 hour",
+          "12h": "12 hours (official OpenAI GPT-5.6+ only)",
+          "help": "This route-wide estimate controls when old tool results are cleared. 12 hours also opts official OpenAI Responses GPT-5.6+ into a 2.5x cache-write rate (30 minutes is 1.25x); reads use the same cached-input rate. Earlier OpenAI models' policy-dependent prompt_cache_retention is not inferred. Relays do not receive that OpenAI option."
+        },
         "undoDone": "Previous manual draft restored.",
         "restorePending": "Not saved yet. The saved route is still in use.",
         "preview": {
@@ -2840,6 +2849,7 @@
   },
   "errors": {
     "invalid_field_name": "Use 1–64 lowercase letters, digits or underscores for field names, starting with a letter.",
+    "cache_ttl_unsupported": "That cache lifetime is not supported by this route. Use the built-in estimate or a provider-compatible value.",
     "field_exists": "A field with this name already exists. Choose a different name.",
     "field_not_found": "This field no longer exists. Refresh the secret and choose one of its current fields.",
     "too_many_fields": "A secret can have at most 32 fields, including the default field.",

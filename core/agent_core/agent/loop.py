@@ -209,8 +209,12 @@ def _mind_text(files: Mapping[str, Optional[str]]) -> Optional[str]:
 
 
 def _cache_of(origin: Origin) -> tuple[str, str]:
-    """The upstream prompt cache an origin's requests use: its provider and model (C-9 section 3). The protocol that
-    reaches the gateway, converted or not (a Google hop is called over Chat), does not change the cache."""
+    """The upstream prompt cache an origin's requests use: provider and model.
+
+    Response rows currently carry served provider/model but not a Source id, so
+    same-provider/model Sources intentionally share one C-9 clock. Model Hub
+    cache overrides are therefore route-wide, not a claim of per-Source clocks.
+    """
     return origin.provider, origin.model
 
 
@@ -389,8 +393,8 @@ class Agent:
         # The images the run's committed tool results generated, which its final delivers: a reply even without text
         # (``has_reply``). Read from the committed rows, so a result another writer settled counts as it committed.
         self._generated_images: list[HostedImage] = []
-        # When each upstream prompt cache was last used in this Agent: the end of its latest model call, by the provider
-        # and model that served it (``_cache_of``, C-9 section 3).
+        # model call: the response row's served provider/model identity is the
+        # durable boundary today, not a per-Source clock.
         self._last_model_at: dict[tuple[str, str], float] = {}
         self._seq = 0
 

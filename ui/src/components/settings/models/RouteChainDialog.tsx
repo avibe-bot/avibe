@@ -52,6 +52,7 @@ import type {
   Source,
   ManualRouteOverride,
   AgentChain,
+  CacheTtl,
 } from "./types";
 
 const sourceName = (sources: Source[], sourceId: string): string =>
@@ -129,17 +130,20 @@ export const RouteChainDialog: React.FC<{
   const [phase, setPhase] = React.useState<Phase>("loading");
   const [origin, setOrigin] = React.useState<RouteHop[]>([]);
   const [savedOverride, setSavedOverride] = React.useState<ManualRouteOverride | null>(null);
+  const [cacheTtlDraft, setCacheTtlDraft] = React.useState<CacheTtl | null>(null);
   // This is draft routing intent, not whether the rows can be edited.
   const [manualDraft, setManualDraft] = React.useState(false);
   const [preview, setPreview] = React.useState<AgentChain | null>(null);
   const [previewPending, setPreviewPending] = React.useState(false);
   const [previewFailed, setPreviewFailed] = React.useState(false);
+  const [saveErrorCode, setSaveErrorCode] = React.useState<string | null>(null);
   const previewGeneration = React.useRef(0);
-  const restoreUndo = React.useRef<{ hops: RouteHop[]; manual: boolean } | null>(null);
+  const restoreUndo = React.useRef<{ hops: RouteHop[]; manual: boolean; cacheTtl: CacheTtl | null } | null>(null);
   const grabIntent = React.useRef<{
     manual: boolean;
+    cacheTtl: CacheTtl | null;
     preview: AgentChain | null;
-    undo: { hops: RouteHop[]; manual: boolean } | null;
+    undo: { hops: RouteHop[]; manual: boolean; cacheTtl: CacheTtl | null } | null;
   } | null>(null);
   const submittedOverride = React.useRef<ManualRouteOverride | null>(null);
   const interactionRef = React.useRef(createRouteChainInteraction());
@@ -200,10 +204,11 @@ export const RouteChainDialog: React.FC<{
       const previous = interactionRef.current;
       const next = advanceRouteChainInteraction(previous, action);
       if (action.type === "begin-grab") {
-        grabIntent.current = { manual: manualDraft, preview, undo: restoreUndo.current };
+        grabIntent.current = { manual: manualDraft, cacheTtl: cacheTtlDraft, preview, undo: restoreUndo.current };
       }
       if (action.type === "cancel-grab" && previous.grab && grabIntent.current) {
         setManualDraft(grabIntent.current.manual);
+        setCacheTtlDraft(grabIntent.current.cacheTtl);
         setPreview(grabIntent.current.preview);
         restoreUndo.current = grabIntent.current.undo;
       } else if (action.type !== "reset" && !sameRouteDraft(previous.draft, next.draft)) {
@@ -220,7 +225,7 @@ export const RouteChainDialog: React.FC<{
       setInteraction(next);
       return next;
     },
-    [manualDraft, preview],
+    [cacheTtlDraft, manualDraft, preview],
   );
   const addCandidates = agent ? routeCandidates(agent, sources, draft) : [];
   const targetSources = agent ? eligibleSources(sources, agent) : [];
@@ -232,7 +237,9 @@ export const RouteChainDialog: React.FC<{
     : { invalidIndexes: [], valid: false };
   const restoring = restoreUndo.current !== null;
   const unresolvedPreview = restoring && preview === null;
-  const dirty = manualDraft ? savedOverride === null || !sameRouteDraft(savedOverride.hops, draft) : savedOverride !== null;
+  const dirty = manualDraft
+    ? savedOverride === null || !sameManualOverride(savedOverride, { hops: draft, cache_ttl: cacheTtlDraft })
+    : savedOverride !== null;
   const canDiscardDraft = (phase === "ready" || phase === "rejected") && (dirty || restoring);
   // A handoff leaves this dialog, so it is offered only on a settled, unedited
   // route: mid-write phases own an exchange the user must finish, and an unsaved
@@ -290,6 +297,7 @@ export const RouteChainDialog: React.FC<{
       }));
       setChain(next);
       setSavedOverride(next.manual_override);
+      setCacheTtlDraft(next.manual_override?.cache_ttl ?? null);
       setManualDraft(next.manual_override !== null);
       setPreview(null);
       setPreviewFailed(false);
@@ -492,10 +500,12 @@ export const RouteChainDialog: React.FC<{
     previewGeneration.current += 1;
     setChain(nextReport.chain);
     setSavedOverride(nextReport.chain.manual_override);
+    setCacheTtlDraft(nextReport.chain.manual_override?.cache_ttl ?? null);
     setManualDraft(nextReport.chain.manual_override !== null);
     setPreview(null);
     setPreviewPending(false);
     setPreviewFailed(false);
+    setSaveErrorCode(null);
     restoreUndo.current = null;
     setGuard(null);
     setOrigin(committedHops);
@@ -514,8 +524,12 @@ export const RouteChainDialog: React.FC<{
       ...hop,
     }));
     setSubmitted(hops);
-    if (!confirmation) submittedOverride.current = manualDraft ? { hops } : null;
+    const submittedManualOverride = manualDraft
+      ? { hops, ...(cacheTtlDraft === null ? {} : { cache_ttl: cacheTtlDraft }) }
+      : null;
+    if (!confirmation) submittedOverride.current = submittedManualOverride;
     setSubmittedStage(confirmation ? "confirmed" : "initial");
+    setSaveErrorCode(null);
     setPhase("saving");
     // A confirmed save keeps its question mounted, busy, until the answer lands;
     // an initial one shows the progress status in the dialog itself.
@@ -525,7 +539,7 @@ export const RouteChainDialog: React.FC<{
         const guardFields = plan ? confirmGuardPlan(plan) : undefined;
         return submittedOverride.current === null
           ? modelsApi.restoreAgentChain(agent.backend, modelId, guardFields)
-          : modelsApi.putAgentChain(agent.backend, modelId, { hops, ...guardFields });
+          : modelsApi.putAgentChain(agent.backend, modelId, { ...submittedManualOverride!, ...guardFields });
       });
       beginCommitted(
         {
@@ -563,6 +577,7 @@ export const RouteChainDialog: React.FC<{
         return;
       }
       setGuard(null);
+      setSaveErrorCode(failure?.code ?? null);
       const nextPhase = failure?.serverNamed ? "rejected" : "unknown";
       setPhase(nextPhase);
       focusAfterRender(retryButtonRef);
@@ -725,9 +740,10 @@ export const RouteChainDialog: React.FC<{
     const token = ++previewGeneration.current;
     // Record intent before reading: failure must not leave a saveable empty Manual draft.
     if (restoreUndo.current === null) {
-      restoreUndo.current = { hops: draft.map((hop) => ({ ...hop })), manual: manualDraft };
+      restoreUndo.current = { hops: draft.map((hop) => ({ ...hop })), manual: manualDraft, cacheTtl: cacheTtlDraft };
     }
     setManualDraft(false);
+    setCacheTtlDraft(null);
     setPreview(null);
     setPreviewPending(true);
     setPreviewFailed(false);
@@ -744,7 +760,7 @@ export const RouteChainDialog: React.FC<{
     } finally {
       if (token === previewGeneration.current) setPreviewPending(false);
     }
-  }, [advanceInteraction, agent, draft, manualDraft, modelId, phase, previewPending]);
+  }, [advanceInteraction, agent, cacheTtlDraft, draft, manualDraft, modelId, phase, previewPending]);
   const wasCovered = React.useRef(covered);
   React.useEffect(() => {
     const leaving = !wasCovered.current && covered;
@@ -767,6 +783,7 @@ export const RouteChainDialog: React.FC<{
     setPreviewPending(false);
     setPreviewFailed(false);
     setManualDraft(restoreUndo.current?.manual ?? savedOverride !== null);
+    setCacheTtlDraft(restoreUndo.current?.cacheTtl ?? savedOverride?.cache_ttl ?? null);
     advanceInteraction({ type: 'reset', draft: restoreUndo.current?.hops ?? origin });
     restoreUndo.current = null;
     announce('settings.models.routing.undoDone');
@@ -780,6 +797,7 @@ export const RouteChainDialog: React.FC<{
     setPreviewPending(false);
     setPreviewFailed(false);
     setManualDraft(false);
+    setCacheTtlDraft(null);
     advanceInteraction({ type: 'reset', draft: origin });
     setSelectorEpoch((current) => current + 1);
   };
@@ -793,7 +811,10 @@ export const RouteChainDialog: React.FC<{
       if (manualDraft) return;
       // Returning from a pending restore brings back the route that was left.
       if (restoreUndo.current) undoRestore();
-      else setManualDraft(true);
+      else {
+        setManualDraft(true);
+        setCacheTtlDraft(null);
+      }
     } else if (manualDraft) {
       followDefaults();
       focusAfterFollow();
@@ -1075,7 +1096,9 @@ export const RouteChainDialog: React.FC<{
       </div>
     ) : phase === "rejected" ? (
       <div className="model-hub-route-body flex flex-1 flex-col items-center justify-center gap-3 text-muted">
-        <p>{t("settings.models.routeDialog.fail.save")}</p>
+        <p>{saveErrorCode === "cache_ttl_unsupported"
+          ? t("errors.cache_ttl_unsupported")
+          : t("settings.models.routeDialog.fail.save")}</p>
         <Button
           ref={retryButtonRef}
           type="button"
@@ -1125,6 +1148,24 @@ export const RouteChainDialog: React.FC<{
           <p className="model-hub-route-mode-copy text-muted">
             {t(manualDraft ? "settings.models.routing.manualHint" : "settings.models.routing.follows", { backend })}
           </p>
+          {agent?.backend === "vibey" && manualDraft && (
+            <label className="mt-3 flex flex-col gap-1 text-sm">
+              <span className="font-semibold">{t("settings.models.routing.cacheTtl.label")}</span>
+              <select
+                className="rounded border border-border bg-surface px-2 py-1.5 text-foreground"
+                value={cacheTtlDraft ?? ""}
+                onChange={(event) => setCacheTtlDraft((event.target.value || null) as CacheTtl | null)}
+                disabled={phase !== "ready" || previewPending}
+              >
+                <option value="">{t("settings.models.routing.cacheTtl.default")}</option>
+                <option value="5m">{t("settings.models.routing.cacheTtl.5m")}</option>
+                <option value="30m">{t("settings.models.routing.cacheTtl.30m")}</option>
+                <option value="1h">{t("settings.models.routing.cacheTtl.1h")}</option>
+                <option value="12h">{t("settings.models.routing.cacheTtl.12h")}</option>
+              </select>
+              <span className="text-xs text-muted">{t("settings.models.routing.cacheTtl.help")}</span>
+            </label>
+          )}
         </div>
         {!unresolvedPreview && <div inert={previewPending} className="model-hub-route-list flex flex-col">
           {draft.length ? (

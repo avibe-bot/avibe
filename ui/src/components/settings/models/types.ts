@@ -415,8 +415,10 @@ export type RouteHopRef = RouteHop & {
   position: number;
 };
 
+export type CacheTtl = '5m' | '30m' | '1h' | '12h';
 export type AgentRoute = {
   hops: RouteHop[];
+  cache_ttl?: CacheTtl | null;
 };
 export type ManualRouteOverride = AgentRoute;
 export type RouteOrigin = 'automatic' | 'manual' | 'passthrough' | null;
@@ -1401,6 +1403,7 @@ export type AgentSourcesPut = {
 /** PUT /api/models/agents/<backend>/chain?model=<id> — replaces exact hops. */
 export type AgentChainPut = {
   hops: RouteHop[];
+  cache_ttl?: CacheTtl | null;
   force?: boolean;
   would_remove_hops?: RouteHopRef[];
   would_interrupt?: SupplyGap[];

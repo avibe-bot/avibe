@@ -52,7 +52,8 @@ describe("routeChainDraft", () => {
     expect(sameManualOverride(null, { hops: [] })).toBe(true);
     expect(sameManualOverride({ hops: [] }, null)).toBe(true);
     const hops = [{ source_id: 'src_a', model_id: 'model-a' }];
-    expect(sameManualOverride(null, { hops })).toBe(false);
+    expect(sameManualOverride({ hops }, { hops, cache_ttl: "12h" })).toBe(false);
+    expect(sameManualOverride({ hops, cache_ttl: "12h" }, { hops, cache_ttl: "12h" })).toBe(true);
     expect(routeChainMatchesAttempt({ backend: 'claude', model_id: 'opus-5', manual_override: null } as Parameters<typeof routeChainMatchesAttempt>[0], {
       backend: 'claude', modelId: 'opus-5', submitted: [], manual_override: { hops: [] },
     })).toBe(true);
