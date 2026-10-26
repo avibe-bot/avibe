@@ -1,7 +1,7 @@
 import { DesktopDragRegion } from './DesktopDragRegion';
 import { DesktopWindowChrome } from './DesktopWindowChrome';
 import { desktopDragRegion } from '../lib/desktopShell';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { AlertTriangle, FolderTree, Grid2x2, Inbox, LayoutGrid, Plus, Settings } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -92,6 +92,7 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
 type CenterButton = { label: string; icon: React.ComponentType<{ className?: string }>; to?: string; onClick?: () => void };
 
 const MACOS_SESSION_NOTICE_REFRESH_MS = 30_000;
+const MACOS_SESSION_NOTICE_HEIGHT_VAR = '--macos-stale-login-session-notice-h';
 
 const MacOSStaleLoginSessionNotice: React.FC<{ overlay?: boolean }> = ({ overlay = false }) => {
   const { t } = useTranslation();
@@ -118,9 +119,29 @@ const MacOSStaleLoginSessionNotice: React.FC<{ overlay?: boolean }> = ({ overlay
     };
   }, [api]);
 
+  const noticeRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const notice = noticeRef.current;
+    const main = notice?.closest('main');
+    if (!overlay || !stale || !notice || !main) return undefined;
+
+    const updateHeight = () => {
+      main.style.setProperty(MACOS_SESSION_NOTICE_HEIGHT_VAR, `${notice.getBoundingClientRect().height}px`);
+    };
+    updateHeight();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updateHeight);
+    observer?.observe(notice);
+    return () => {
+      observer?.disconnect();
+      main.style.removeProperty(MACOS_SESSION_NOTICE_HEIGHT_VAR);
+    };
+  }, [overlay, stale]);
+
   if (!stale) return null;
   return (
     <div
+      ref={noticeRef}
       role="alert"
       className={clsx(
         'shrink-0 mx-4 mb-4 flex items-start gap-3 rounded-xl border border-destructive/35 bg-destructive/8 px-4 py-3 text-[13px] leading-snug text-destructive-ink md:mx-10',
