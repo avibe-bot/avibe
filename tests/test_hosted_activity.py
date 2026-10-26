@@ -818,11 +818,31 @@ def test_a_search_services_card_and_line_say_the_same_in_both_languages(case):
             id="keyless after a paid attempt keeps the paid total",
         ),
         pytest.param(
-            (_tried(TAVILY, "completed"), _tried(KEYLESS, "completed", usd=0.0)), _service_ran(KEYLESS, "exa-mcp", 0.0), "completed",
-            {"executor_kind": "service", "source_id": KEYLESS, "source_name": "Exa", "provider": "exa-mcp"},
-            {"basis": "list", "usd": 0, "calls": 1, "at_least": True}, "at least $0",
-            id="keyless with an unknown earlier charge is not free",
+            (_tried(KEYLESS, error_code="service_unavailable", usd=0.0),
+             _tried(DEEPSEEK, "completed", kind="model")),
+            ProxyExecution(
+                executor_origin=Origin(provider="deepseek", api="openai_chat", model="deepseek-chat"),
+                executor_source_id=DEEPSEEK,
+                executor_billing="metered",
+                cost=None,
+            ), "completed",
+            {"executor_kind": "model", "source_id": DEEPSEEK, "source_name": "DeepSeek", "provider": "deepseek", "model": "deepseek-chat"},
+            None, None,
+            id="a free failed attempt does not become at least zero",
         ),
+        pytest.param(
+            (_tried(TAVILY, error_code="service_unavailable", usd=0.008),
+             _tried(DEEPSEEK, "completed", kind="model")),
+            ProxyExecution(
+                executor_origin=Origin(provider="deepseek", api="openai_chat", model="deepseek-chat"),
+                executor_source_id=DEEPSEEK,
+                executor_billing="metered",
+                cost=None,
+            ), "completed", {"executor_kind": "model", "source_id": DEEPSEEK, "source_name": "DeepSeek", "provider": "deepseek", "model": "deepseek-chat"},
+            {"basis": "list", "usd": 0.008, "calls": 1, "at_least": True}, "at least ≈ $0.008",
+            id="a priced failed attempt remains a lower bound beside an unpriced success",
+        ),
+
         pytest.param(
             None, _service_ran(TAVILY, "tavily", 0.008), "completed",
             {"executor_kind": "service", "source_id": TAVILY, "source_name": "Tavily", "provider": "tavily"},

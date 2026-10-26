@@ -28,6 +28,7 @@ from .hosted_executor import ExecutorCall, call_timeout
 from .hosted_turn import ExecutorSlot, TurnHostedTools
 from .retry import source_identity
 from .search_services import ATTEMPT_SECONDS
+from .service_diagnostics import log_service_failure
 from vibe.model_hub_runtime.fetch_catalog import fetch_service
 
 
@@ -248,23 +249,37 @@ class FetchChain:
 
     async def _service_attempt(self, slot: ExecutorSlot, source, service):
         loop = asyncio.get_running_loop()
+        started_at = loop.time()
         attempt_deadline = min(self.deadline, loop.time() + ATTEMPT_SECONDS)
         if is_keyless_exa_source(source):
             remaining = max(0.0, attempt_deadline - loop.time())
             try:
-                await asyncio.wait_for(self.owner._keyless_exa_attempt_lock.acquire(), timeout=remaining)
+                await asyncio.wait_for(self.owner._keyless_exa_call_semaphore.acquire(), timeout=remaining)
             except asyncio.TimeoutError:
+                await log_service_failure(
+                    tool=self.call.tool,
+                    source_id=slot.source_id,
+                    service_id=slot.model_id,
+                    outcome="failed",
+                    error_code="service_unavailable",
+                    response=SearchResponse(None, {}, None, "timeout"),
+                    elapsed_ms=round((loop.time() - started_at) * 1000),
+                )
                 return None, {
                     "source_id": slot.source_id, "label": source.display_name[:64], "kind": "service",
                     "outcome": "skipped", "skipped": "service_busy",
                 }
             try:
-                return await self._service_attempt_locked(slot, source, service, attempt_deadline=attempt_deadline)
+                return await self._service_attempt_locked(
+                    slot, source, service, attempt_deadline=attempt_deadline, started_at=started_at,
+                )
             finally:
-                self.owner._keyless_exa_attempt_lock.release()
-        return await self._service_attempt_locked(slot, source, service, attempt_deadline=attempt_deadline)
+                self.owner._keyless_exa_call_semaphore.release()
+        return await self._service_attempt_locked(
+            slot, source, service, attempt_deadline=attempt_deadline, started_at=started_at,
+        )
 
-    async def _service_attempt_locked(self, slot, source, service, *, attempt_deadline: float):
+    async def _service_attempt_locked(self, slot, source, service, *, attempt_deadline: float, started_at: float):
         sent = False
         response: SearchResponse | None = None
         cooldown_generation = None
@@ -350,6 +365,15 @@ class FetchChain:
         if not sent:
             if stopped:
                 raise asyncio.CancelledError
+            await log_service_failure(
+                tool=self.call.tool,
+                source_id=source.id,
+                service_id=slot.model_id,
+                outcome="failed",
+                error_code="service_unavailable",
+                response=response,
+                elapsed_ms=round((asyncio.get_running_loop().time() - started_at) * 1000),
+            )
             return None, {
                 "source_id": slot.source_id, "label": source.display_name[:64], "kind": "service",
                 "outcome": "skipped", "skipped": "service_busy" if timed_out else "unavailable",
@@ -362,6 +386,16 @@ class FetchChain:
             )
             if stopped:
                 result = replace(result, cooling=False)
+            if not stopped and (result.record["status"] != "completed" or response.error == "timeout"):
+                await log_service_failure(
+                    tool=self.call.tool,
+                    source_id=source.id,
+                    service_id=slot.model_id,
+                    outcome="failed",
+                    error_code=result.record.get("error_code") or "service_unavailable",
+                    response=response,
+                    elapsed_ms=round((asyncio.get_running_loop().time() - started_at) * 1000),
+                )
             await self._settle_owned(source, slot, result, response, cooldown_generation, health_generation, sent)
             return result
 

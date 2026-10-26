@@ -1608,7 +1608,9 @@ class ModelHubService:
         self._search_trial_identities: dict[str, tuple] = {}
         self._search_reenable_checks: dict[str, asyncio.Task] = {}
         self._service_cooldowns = ServiceCooldowns()
-        self._keyless_exa_attempt_lock = asyncio.Lock()
+        # Exa's anonymous endpoint is per-IP limited; cap active MCP calls
+        # without serializing a turn or the session's independent JSON-RPC ids.
+        self._keyless_exa_call_semaphore = asyncio.Semaphore(3)
         self._jina_fetch_sent_at: deque[datetime] = deque()
         self._local_fetch_engine = None
         self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
