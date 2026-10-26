@@ -5593,7 +5593,7 @@ def vault_sign(payload: dict) -> dict:
 
     try:
         signature = avault_sign(key_envelope, digest, scheme, name=name)
-    except AvaultAuthorizationRequiredError as exc:
+    except AvaultAuthorizationRequiredBeforeHandoffError as exc:
         # Nothing was signed, so the approval stays pending: the user authorizes
         # avault and approves the same request again instead of the Agent re-asking.
         _settle_claimed_request(vault_service.release_sign_request_claim)
@@ -9429,15 +9429,19 @@ class AvaultPreHandoffError(AvaultError):
     """avault failed before receiving an envelope or performing delivery."""
 
 
-class AvaultAuthorizationRequiredError(AvaultPreHandoffError):
+class AvaultAuthorizationRequiredError(AvaultError):
     """macOS Keychain has not yet approved this avault binary for the master key.
 
-    avault could not load the master key, so nothing was decrypted, delivered,
-    or signed. The user fixes it once with an explicit "Authorize avault"
-    action; retrying the call cannot.
+    The user fixes it once with an explicit "Authorize avault" action; retrying
+    the call cannot. One-shot ``deliver run`` raises this class itself, because
+    it cannot prove its child never ran, so that delivery stays fail-closed.
     """
 
     code = "avault_authorization_required"
+
+
+class AvaultAuthorizationRequiredBeforeHandoffError(AvaultAuthorizationRequiredError, AvaultPreHandoffError):
+    """avault could not load the master key, so nothing was decrypted, delivered, or signed."""
 
 
 # One-shot exit status for keychain_authorization_required (avault 0.1.8+, EX_NOPERM).
@@ -9447,11 +9451,14 @@ _AVAULT_AUTHORIZE_TIMEOUT_SECONDS = 600.0
 _AVAULT_AUTHORIZE_DETAIL_LIMIT = 500
 
 
-def _avault_authorization_required(detail: str | None = None) -> AvaultAuthorizationRequiredError:
+def _avault_authorization_required(
+    detail: str | None = None,
+    *,
+    before_handoff: bool = True,
+) -> AvaultAuthorizationRequiredError:
     avault_authorization.record_authorization_required()
-    return AvaultAuthorizationRequiredError(
-        detail or "avault needs a one-time macOS Keychain authorization on the Mac running Avibe"
-    )
+    error = AvaultAuthorizationRequiredBeforeHandoffError if before_handoff else AvaultAuthorizationRequiredError
+    return error(detail or "avault needs a one-time macOS Keychain authorization on the Mac running Avibe")
 
 
 def _avault_detail(proc: "subprocess.CompletedProcess") -> str:
@@ -9698,9 +9705,10 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
     goes on avault's stdin to stay out of ``ps``. Returns the child's exit code
     (``128 + signal`` if signalled). Delivery is fail-closed: once avault returns
     an exit code, callers must treat the secret as handed to the child unless a
-    future avault protocol provides a distinct pre-handoff failure signal. The
-    one such signal today is keychain_authorization_required, raised as
-    ``AvaultAuthorizationRequiredError`` (see ``_deliver_run_needed_authorization``).
+    future avault protocol provides a distinct pre-handoff failure signal.
+    keychain_authorization_required is not one here: 77 may be the child's own
+    status, so it is raised as ``AvaultAuthorizationRequiredError`` (still
+    fail-closed) only when ``_deliver_run_needed_authorization`` confirms it.
     """
     path = _require_avault_path()
     payload = json.dumps(
@@ -9728,17 +9736,18 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
         pass
     exit_code = proc.wait()
     if exit_code == _AVAULT_EXIT_AUTHORIZATION_REQUIRED and _deliver_run_needed_authorization(path):
-        raise _avault_authorization_required()
+        raise _avault_authorization_required(before_handoff=False)
     return {"exit_code": exit_code, "delivered": True}
 
 
 def _deliver_run_needed_authorization(path: str) -> bool:
-    """Whether one-shot ``deliver run``'s exit 77 was avault's own, not its child's.
+    """Whether one-shot ``deliver run``'s exit 77 most likely was avault's own.
 
-    ``deliver run`` exits with its child's status, so 77 alone is ambiguous.
-    avault loads the master key before it decrypts anything or starts the
-    child, so when a fresh master-key check also needs authorization, no child
-    ran and no secret left avault.
+    ``deliver run`` exits with its child's status, so 77 alone is ambiguous. A
+    fresh master-key check that also needs authorization makes avault's own
+    failure the likely cause, but it cannot prove that no child ran (the
+    Keychain may have locked while one did), so callers keep the delivery
+    fail-closed and only report the authorization the user must give.
     """
     return _avault_supports_keychain_authorization(path) and _avault_master_key_needs_authorization() is True
 

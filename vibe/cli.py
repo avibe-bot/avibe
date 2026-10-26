@@ -464,8 +464,7 @@ def _avault_authorization_required_cli_error(help_command: str | None) -> TaskCl
     authorize``; an Agent must instead hand the step to the user and stop.
     """
     return TaskCliError(
-        "avault needs a one-time macOS Keychain authorization on the Mac running Avibe; "
-        "nothing was delivered or signed",
+        "avault needs a one-time macOS Keychain authorization on the Mac running Avibe",
         code=AVAULT_AUTHORIZATION_REQUIRED_CODE,
         hint=(
             "Do not retry and do not run avault yourself. Ask the user to choose Authorize avault on "

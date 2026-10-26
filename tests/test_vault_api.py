@@ -2606,7 +2606,7 @@ def test_agent_sign_marks_claimed_request_failed_when_signature_validation_rejec
 
 
 def test_sign_approval_stays_pending_when_avault_needs_keychain_authorization(monkeypatch):
-    sign = Mock(side_effect=api.AvaultAuthorizationRequiredError("macOS Keychain needs a one-time authorization"))
+    sign = Mock(side_effect=api.AvaultAuthorizationRequiredBeforeHandoffError("macOS Keychain needs a one-time authorization"))
     monkeypatch.setattr(api, "avault_sign", sign)
     monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
     api.create_vault_secret(

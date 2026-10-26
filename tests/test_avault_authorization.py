@@ -124,8 +124,10 @@ def test_avault_without_the_contract_keeps_todays_failures(mac_avault):
 def test_deliver_run_77_is_authorization_only_when_the_master_key_check_agrees(mac_avault):
     state = mac_avault()
 
-    with pytest.raises(api.AvaultAuthorizationRequiredError):
+    with pytest.raises(api.AvaultAuthorizationRequiredError) as exc:
         api.avault_deliver_run(_secret(), ["sh", "-c", "exit 0"])
+    # The probe cannot prove no child ran, so the delivery stays fail-closed.
+    assert not isinstance(exc.value, api.AvaultPreHandoffError)
     assert api.get_avault_authorization_status()["required"] is True
 
     (state / "authorized").touch()
@@ -145,8 +147,9 @@ def test_agent_authorization_frame_becomes_the_same_pre_handoff_error(mac_avault
     monkeypatch.setattr(api, "_avault_agent_client", Client)
     monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
 
-    with pytest.raises(api.AvaultAuthorizationRequiredError):
+    with pytest.raises(api.AvaultPreHandoffError) as exc:
         api.avault_agent_deliver_inject(grant_id="vgr_1", path="/tmp/out.env", fmt="dotenv", secrets=[])
+    assert isinstance(exc.value, api.AvaultAuthorizationRequiredError)
     assert api.get_avault_authorization_status()["required"] is True
 
 

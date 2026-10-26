@@ -389,13 +389,14 @@ exit 77, agent frame `code`), and only `avault key authorize` may show the dialo
 (avault `docs/DESIGN.md`, "Keychain authorization"). Avibe's side:
 
 - **Detection.** Every capturing one-shot verb loads the master key first, so exit 77
-  there is the contract; older avault exits 70 for every failure. One-shot `deliver
-  run` exits with its child's status, so a 77 there counts only when a fresh `pubkey`
-  check (0.1.8+ only) also reports it: avault loads the key before it starts the
-  child, so no secret left avault. Resident-agent frames map `code` the same way.
-  All of them become `AvaultAuthorizationRequiredError`, a pre-handoff failure:
-  one-shot grants are released, and a claimed standard sign request returns to
-  pending so the user can approve it again.
+  there is the contract; older avault exits 70 for every failure. Resident-agent
+  frames map `code` the same way. Both fail before avault decrypts anything, so they
+  raise a pre-handoff `AvaultAuthorizationRequiredError`: one-shot grants are
+  released, and a claimed standard sign request returns to pending so the user can
+  approve it again. One-shot `deliver run` exits with its child's status, so a 77
+  there is reported as authorization required only when a fresh `pubkey` check
+  (0.1.8+ only) agrees, and even then it stays fail-closed: the check cannot prove
+  that no child ran, for example when the Keychain locked during a run.
 - **One error.** The Vault API and the `vibe vault` CLI report
   `avault_authorization_required`; the CLI hint tells an Agent to ask the user and
   not retry or run avault itself.

@@ -65,8 +65,9 @@ export function AvaultAuthorizationNotice({ forceVisible = false, className }: {
         </div>
       ) : null}
       <div className="flex flex-wrap items-center gap-2.5 pl-6">
+        {/* type="button": the notice also renders inside the secret form, which it must not submit. */}
         {capabilities.can_manage_instance ? (
-          <Button size="sm" variant="brand" disabled={running} onClick={onAuthorize}>
+          <Button type="button" size="sm" variant="brand" disabled={running} onClick={onAuthorize}>
             {running ? <Loader2 className="size-3.5 animate-spin" /> : <KeyRound className="size-3.5" />}
             {t('vaults.avaultAuthorization.action')}
           </Button>

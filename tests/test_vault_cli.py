@@ -2065,12 +2065,19 @@ def test_run_releases_standard_always_ask_grant_when_avault_fails_before_handoff
     assert status == "active"
 
 
-@pytest.mark.parametrize("command", ["run", "inject"])
-def test_delivery_hands_avault_authorization_to_the_user_and_keeps_the_grant(tmp_path, capfd, monkeypatch, command):
+@pytest.mark.parametrize(
+    ("command", "error", "grant_status"),
+    [
+        # One-shot deliver run cannot prove its child never ran: the grant stays fail-closed.
+        ("run", "AvaultAuthorizationRequiredError", "expired"),
+        ("inject", "AvaultAuthorizationRequiredBeforeHandoffError", "active"),
+    ],
+)
+def test_delivery_hands_avault_authorization_to_the_user(tmp_path, capfd, monkeypatch, command, error, grant_status):
     from vibe import api
 
     grant = _set_always_ask_standard_grant("ASK_KEY", session_id="ses_cli", purpose=command)
-    deliver = Mock(side_effect=api.AvaultAuthorizationRequiredError("run `avault key authorize` in a logged-in session"))
+    deliver = Mock(side_effect=getattr(api, error)("run `avault key authorize` in a logged-in session"))
     if command == "run":
         monkeypatch.setattr(api, "avault_deliver_run", deliver)
         code = cli.cmd_vault_run(_ns(env=["ASK_KEY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli"))
@@ -2087,13 +2094,13 @@ def test_delivery_hands_avault_authorization_to_the_user_and_keeps_the_grant(tmp
     assert "avault key authorize" not in error["error"]
     with cli._open_vault_engine().connect() as conn:
         status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
-    assert status == "active"
+    assert status == grant_status
 
 
 def test_inline_sign_reports_avault_authorization_like_delivery(capfd, monkeypatch):
     from vibe import api
 
-    monkeypatch.setattr(api, "avault_sign", Mock(side_effect=api.AvaultAuthorizationRequiredError("authorize avault")))
+    monkeypatch.setattr(api, "avault_sign", Mock(side_effect=api.AvaultAuthorizationRequiredBeforeHandoffError("authorize avault")))
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="ETH_KEY", kind="keypair", signer_kind="local", sealed=_sealed("key"))
 

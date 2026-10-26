@@ -103,6 +103,47 @@ describe('AvaultAuthorizationNotice', () => {
     expect(api.authorizeAvault).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps polling through a failed status read', async () => {
+    api.getAvaultAuthorization.mockResolvedValueOnce(status());
+    api.authorizeAvault.mockResolvedValue(status({ attempt: attempt('running') }));
+    renderNotice();
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.avaultAuthorization.action }));
+    await settle();
+
+    api.getAvaultAuthorization
+      .mockRejectedValueOnce(new Error('network'))
+      .mockResolvedValueOnce(status({ required: false, attempt: attempt('succeeded') }));
+    for (let poll = 0; poll < 2; poll += 1) {
+      await act(async () => {
+        vi.advanceTimersByTime(1600);
+      });
+      await settle();
+    }
+
+    expect(screen.getByText(en.vaults.avaultAuthorization.succeeded)).toBeTruthy();
+  });
+
+  it('does not submit a surrounding form', async () => {
+    api.getAvaultAuthorization.mockResolvedValue(status());
+    api.authorizeAvault.mockResolvedValue(status({ attempt: attempt('running') }));
+    const submit = vi.fn((event: { preventDefault: () => void }) => event.preventDefault());
+    render(
+      <I18nextProvider i18n={i18n}>
+        <form onSubmit={submit}>
+          <AvaultAuthorizationNotice forceVisible />
+        </form>
+      </I18nextProvider>,
+    );
+    await settle();
+
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.avaultAuthorization.action }));
+    await settle();
+
+    expect(api.authorizeAvault).toHaveBeenCalledTimes(1);
+    expect(submit).not.toHaveBeenCalled();
+  });
+
   it('explains a failed attempt by its reason and shows avault detail', async () => {
     api.getAvaultAuthorization.mockResolvedValue(status());
     api.authorizeAvault.mockResolvedValue(

@@ -44,7 +44,8 @@ export function useAvaultAuthorization() {
   useEffect(() => {
     if (!running) return;
     let alive = true;
-    const timer = window.setTimeout(() => {
+    // An interval, not a chained timeout, so a failed read cannot end the polling.
+    const timer = window.setInterval(() => {
       api
         .getAvaultAuthorization()
         .then((next) => {
@@ -54,9 +55,9 @@ export function useAvaultAuthorization() {
     }, ATTEMPT_POLL_MS);
     return () => {
       alive = false;
-      window.clearTimeout(timer);
+      window.clearInterval(timer);
     };
-  }, [api, running, status]);
+  }, [api, running]);
 
   const authorize = useCallback(async () => {
     try {
