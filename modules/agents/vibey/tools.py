@@ -139,6 +139,10 @@ class HostedTool:
     text the model reads, with the same function that renders a replayed call.
     """
 
+    # Proxied search and fetch calls are read-only and have per-call records, so
+    # neighbouring calls from one response may share the loop's concurrent group.
+    concurrent = True
+
     spec: ToolSpec
     #: The hop the Turn runs on now: where the executor endpoint lives, and the token and headers that authorize the
     #: call. A re-resolve can move the Turn to another Source, and the gateway answers only the hop it now holds.

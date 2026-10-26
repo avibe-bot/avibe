@@ -378,6 +378,7 @@ failover, and is refused unpinned (C-6 item 7). What changes is what happens aft
   the same-named function. It never declares a hosted image tool.
 - Nothing forces a tool: `ModelRequest.tool_choice` and `forced_tool` existed only for probes and go (§11).
 - Its four local tools are unchanged (C-7).
+- Proxied search and fetch calls from one response run concurrently in the tool runtime; `image_generate` remains exclusive because it writes media.
 
 ### 4.2 Parsing: the C-1 blocks
 
