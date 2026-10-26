@@ -54,8 +54,11 @@ def _dumps(value: Any) -> bytes:
 
 
 def _http_session_lost(exc: Exception) -> bool:
-    message = str(getattr(getattr(exc, "error", None), "message", "") or exc)
-    return message == "Session terminated" or "session not found" in message.lower()
+    """Recognize transport-level MCP session loss, not tool error text."""
+
+    error = getattr(exc, "error", None)
+    message = str(getattr(error, "message", "") or exc)
+    return message == "Session terminated"
 
 
 def _client_for(definition: dict[str, Any], stack: contextlib.AsyncExitStack, mode: str = "auto"):

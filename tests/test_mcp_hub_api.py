@@ -49,7 +49,7 @@ def test_parse_save_generate_tools_and_state_through_the_api(owner):
     assert client.post("/api/mcp/save", json={"text": PASTE}, headers=headers).get_json()["saved"] == ["echo"]
     assert client.post("/api/mcp/save", json={"text": PASTE}, headers=headers).status_code == 409
     generated = client.post("/api/mcp/echo/generate", headers=headers).get_json()
-    assert generated["ok"] and generated["toolCount"] == 6
+    assert generated["ok"] and generated["toolCount"] == 7
 
     owner.stop()  # tools are the published artifact; no server or owner needed
     tools = client.get("/api/mcp/echo/tools").get_json()

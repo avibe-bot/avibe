@@ -156,6 +156,8 @@ CODEX_HOME = "/tmp/codex"
     assert transport["command"] == "/bin/node_repl"
     assert transport["env"] == {"HUB_TEST_PRESENT": "from-parent", "CODEX_HOME": "/tmp/codex"}
     native.write(repository.read_definition("node_repl"))
+    rewritten = tomllib.loads(codex.read_text())["mcp_servers"]["node_repl"]
+    assert "env" not in rewritten or "HUB_TEST_PRESENT" not in rewritten["env"]
     stored = tomllib.loads(codex.read_text())["mcp_servers"]["node_repl"]
     assert stored["startup_timeout_sec"] == 120
     assert stored["env_vars"] == ["HUB_TEST_PRESENT", "HUB_TEST_MISSING"]
@@ -207,7 +209,7 @@ def test_relative_native_cwd_resolves_against_its_file_and_generates(native_file
     for name, path in (("rel-claude", claude), ("rel-codex", codex), ("rel-opencode", opencode)):
         assert repository.read_definition(name)["transport"]["cwd"] == str(path.parent)
         result = _run(runtime, "generate", {"name": name})
-        assert result["ok"] and result["toolCount"] == 6, (name, result)
+        assert result["ok"] and result["toolCount"] == 7, (name, result)
 
     # A replace save keeps each file's own relative spelling (Claude/OpenCode included).
     servers = [{"name": name, "server": {"command": sys.executable, "args": ["rel_echo.py", "-v"], "cwd": str(path.parent)}}

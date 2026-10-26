@@ -53,7 +53,7 @@ def test_save_only_saves_and_initial_generate_publishes_then_enables(runtime):
     first = _run(runtime, "generate", {"name": "echo"})
     published = repository.read_published("echo")
     assert published["revision"] == first["revision"]
-    assert [tool["name"] for tool in published["tools"]] == ["add", "crash", "echo", "fail", "nap", "reject"]
+    assert [tool["name"] for tool in published["tools"]] == ["add", "crash", "echo", "fail", "nap", "reject", "session_text"]
     assert published["definition"]["transport"]["cwd"]  # frozen at generation
     assert published["manifest"]["serverInfo"] == {"version": "0.1.0"}
     assert repository.read_enabled("echo") is True
@@ -227,12 +227,14 @@ def test_streamable_http_generate_and_call(runtime):
             time.sleep(0.1)
         _run(runtime, "save", {"servers": [{"name": "web", "server": {
             "type": "http", "url": f"http://127.0.0.1:{port}/mcp", "headers": {"X-Test": "v"}}}]})
-        assert _run(runtime, "generate", {"name": "web"})["toolCount"] == 6
+        assert _run(runtime, "generate", {"name": "web"})["toolCount"] == 7
         for text in ("one", "two"):
             result = _run(runtime, "call", {"name": "web", "tool": "echo", "arguments": {"text": text},
                                             "sessionId": "ses-http"})
             assert result["result"]["content"] == [{"type": "text", "text": text}]
         assert _run(runtime, "call", {"name": "web", "tool": "reject", "arguments": {}})["error"]["type"] == "tool_error"
+        session_text = _run(runtime, "call", {"name": "web", "tool": "session_text", "arguments": {}})
+        assert session_text["error"]["type"] == "tool_error"
     finally:
         server.terminate()
         server.wait(timeout=10)
@@ -273,6 +275,6 @@ def test_strict_legacy_server_that_exits_on_discover_still_generates(runtime):
     _run(runtime, "save", {"servers": [{"name": "strict", "server": {"command": sys.executable, "args": [strict]}}]})
     result = _run(runtime, "generate", {"name": "strict"})
     assert result["ok"], result
-    assert result["toolCount"] == 6
+    assert result["toolCount"] == 7
     call = _run(runtime, "call", {"name": "strict", "tool": "echo", "arguments": {"text": "hi"}})
     assert call["status"] == "ok", call

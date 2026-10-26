@@ -31,6 +31,13 @@ def reject() -> str:
     raise MCPError(-32602, "rejected by server")
 
 
+@server.tool(description="Return a tool error containing a session phrase.")
+def session_text() -> str:
+    from mcp import MCPError
+
+    raise MCPError(-32602, "browser session not found")
+
+
 @server.tool(description="Exit the server process mid-call.")
 def crash() -> str:
     os._exit(1)
