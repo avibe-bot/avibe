@@ -20,7 +20,7 @@ from tests.test_model_hub_l3 import _source, _usage_of
 from tests.test_model_hub_retry_policy import Clock, WIRE
 from tests.test_model_hub_vibey_consumer import _vibey_service
 from tests.test_model_hub_retry_lifecycle import configured_service, gateway_client, loopback_engine
-from tests.test_model_hub_streamed_overload import OVERLOAD, output, ending
+from tests.test_model_hub_streamed_overload import OVERLOAD, output, ending, event
 
 
 @pytest.mark.parametrize("pinned", [False, True])
@@ -209,14 +209,21 @@ def test_other_protocols_still_stream_before_terminal_and_never_replay(tmp_path,
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("stage", ["write", "read", "limit"])
-def test_spool_io_failure_is_local_metered_and_never_replayed(tmp_path, monkeypatch, stage):
+@pytest.mark.parametrize("stage,terminal", [
+    ("write", True), ("read", True), ("limit", True),
+    ("write", False), ("limit", False),
+])
+def test_spool_io_failure_is_local_metered_and_never_replayed(tmp_path, monkeypatch, stage, terminal):
     """MH-RETRY-OVERLOAD-002: added disk I/O cannot lose usage or blame the provider."""
     async def run():
         service, clock, models = configured_service(tmp_path)
         original = turn_gateway.tempfile.SpooledTemporaryFile
         files = []
         calls = 0
+        upstream_closed = asyncio.Event()
+        body = output("answer") + ending() if terminal else event({
+            "type": "response.created", "response": {"usage": {"input_tokens": 13, "output_tokens": 1}},
+        }) + output("answer")
 
         def faulty_spool(*args, **kwargs):
             payload = original(*args, **kwargs)
@@ -231,24 +238,38 @@ def test_spool_io_failure_is_local_metered_and_never_replayed(tmp_path, monkeypa
 
         monkeypatch.setattr(turn_gateway.tempfile, "SpooledTemporaryFile", faulty_spool)
         if stage == "limit":
-            monkeypatch.setattr(turn_gateway, "_MAX_REPLAY_BUFFER_BYTES", len(output("answer") + ending()) - 1)
+            monkeypatch.setattr(turn_gateway, "_MAX_REPLAY_BUFFER_BYTES", len(body) - 1)
 
         async def respond(request):
             nonlocal calls
             calls += 1
-            return web.Response(body=output("answer") + ending(), content_type="text/event-stream")
+            if terminal:
+                return web.Response(body=body, content_type="text/event-stream")
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            try:
+                await response.write(body)
+                # No terminal exists when storage fails. Only gateway teardown
+                # may close this still-live upstream, not a fixture timeout.
+                await asyncio.Future()
+            finally:
+                upstream_closed.set()
 
         async with loopback_engine(tmp_path, service, respond) as (adapter, _):
             async with gateway_client(service, "codex", models["codex"]) as (gateway, client, url, headers):
                 async with client.post(url, headers=headers, json={"model": "shared-model", "stream": True}) as response:
-                    body = await response.read()
+                    response_body = await response.read()
                     assert response.status == (200 if stage == "read" else 502)
-                    assert b"engine_down" in body
+                    assert b"engine_down" in response_body
                 await gateway._drain_turn_requests("turn_lifecycle")
+                if not terminal:
+                    await asyncio.wait_for(upstream_closed.wait(), 2)
                 assert adapter._active_transports == 0 and clock.delays == [] and calls == 1
                 assert files and all(payload.closed for payload in files)
                 source = service.store.load().sources[0]
                 assert _usage_of(service, source.id)["requests"] == 1
+                if not terminal:
+                    assert _usage_of(service, source.id)["input_tokens"] == 13
                 assert source.state.status == "standby"
                 gateway.correlation.settle("turn_lifecycle", settled_by=SETTLED_BY_TERMINAL_RESULT)
                 assert service.provenance.get("turn_lifecycle")["terminal_error"]["reason"] == "engine_down"

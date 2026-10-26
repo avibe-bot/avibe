@@ -1424,7 +1424,7 @@ class ModelHubTurnGateway:
             # Meter/settle its actual observation before reporting delivery loss.
             execution.retry_buffered_overload = False
             await self._settle_metered_turn(
-                execution, terminalizer, termination_origin="upstream_terminal", defer_projection=True,
+                execution, terminalizer, termination_origin="local_delivery_failure", defer_projection=True,
             )
             raise ModelHubError(
                 "engine_down", status=502, turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
@@ -1592,18 +1592,14 @@ class ModelHubTurnGateway:
             rendered = self._commit_and_render_turn_outcome(
                 execution, terminalizer, replace(ENGINE_DOWN_TURN_OUTCOME, local_error_detail=detail),
             )
-            await self._write_stream_terminal_copy(
-                response, protocol, rendered, wire_state, forwarded_terminal=wire_state.terminal_outcome,
+        else:
+            if execution.completed_at is None:
+                execution.completed_at = self._now()
+            _outcome, _settlement, rendered = await self._settle_metered_turn(
+                execution,
+                terminalizer,
+                termination_origin="upstream_terminal",
             )
-            await self._downstream_io(response.write_eof())
-            return response
-        if execution.completed_at is None:
-            execution.completed_at = self._now()
-        _outcome, _settlement, rendered = await self._settle_metered_turn(
-            execution,
-            terminalizer,
-            termination_origin="upstream_terminal",
-        )
         await self._write_stream_terminal_copy(
             response,
             protocol,
@@ -1924,7 +1920,10 @@ class ModelHubTurnGateway:
         # settlement/history -> t5 render settlement -> t6 downstream EOF.
         if handle is not None:
             await handle.close_stream()
-        if termination_origin == "downstream_cancel" and handle is not None and handle.outcome_available:
+        if (
+            termination_origin in {"downstream_cancel", "local_delivery_failure"}
+            and handle is not None and handle.outcome_available
+        ):
             # A producer outcome that became available during close owns history;
             # a downstream write/cancel after that barrier cannot rewrite it.
             termination_origin = "upstream_terminal"
@@ -1950,7 +1949,7 @@ class ModelHubTurnGateway:
             record_attempt=record_attempt,
             retry_buffered_overload=execution.retry_buffered_overload,
         )
-        if termination_origin == "downstream_cancel":
+        if termination_origin in {"downstream_cancel", "local_delivery_failure"}:
             return settlement.outcome, settlement
         assert settlement.outcome is not None
         assert settlement.decision is not None

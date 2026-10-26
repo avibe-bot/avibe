@@ -59,7 +59,9 @@ If no retry can be admitted, only the resolver's terminal error is delivered.
   continuation is never replayed on another Source: existing `pin_unavailable`
   handback asks its caller to re-render portable content instead.
 - A spool failure is a local delivery failure, not replay permission or evidence
-  against the provider. Upstream usage is retained.
+  against the provider. Upstream usage is retained. If closing a still-live
+  producer yields no protocol terminal, settlement records that local ending
+  without fabricating an upstream outcome; admission and transport are released.
 
 ## Known by design
 

@@ -758,7 +758,10 @@ def test_usage_metering_has_one_owner_per_call_population() -> None:
     # handle. Review 4970...: it used to ask whether the turn was *settled*, which
     # a forced terminal had already made true for a call the vendor billed.
     owes = _functions(gateway_tree)["owes_metering"]
-    readers = (recorder, owes)
+    # A buffered overload retires a whole upstream attempt before adopting a
+    # second one. That transition owns clearing the prior write handle; the
+    # real gateway replay tests prove both calls are still metered once.
+    readers = (recorder, owes, _functions(gateway_tree)["next_attempt"])
     handles = [
         node
         for node in ast.walk(gateway_tree)
@@ -806,7 +809,9 @@ def test_settling_a_turn_is_what_meters_it_for_every_ending_there_will_be() -> N
     endings = [node for node in ast.walk(gateway_tree) if _call_name(node) == "_settle_metered_turn"]
     assert len(endings) >= 2
     assert all(
-        any(ending in set(ast.walk(functions[name])) for name in ("_settle_boundary_termination", "_resolved_response"))
+        any(ending in set(ast.walk(functions[name])) for name in (
+            "_settle_boundary_termination", "_resolved_response", "_buffer_responses_stream",
+        ))
         for ending in endings
     )
 
@@ -821,20 +826,24 @@ def test_a_metered_row_is_dated_by_the_call_and_not_by_what_followed_it() -> Non
     # test can make one. What is left to protect is where the instant comes from.
     gateway_tree = _tree(TURN_GATEWAY)
     functions = _functions(gateway_tree)
-    # Captured where the upstream body ends, which is the one function that has a
-    # body to end. A capture anywhere else is a second answer to when the call
-    # finished, and the endings are exactly the places that would get it wrong.
+    # Captured where the upstream body ends, whether it is forwarded live or
+    # spooled before commit. Clearing the completed attempt for a replay is not
+    # another timestamp capture; each call retains its own completion instant.
     captures = [
         node
         for node in ast.walk(gateway_tree)
         if isinstance(node, ast.Assign)
+        and not (isinstance(node.value, ast.Constant) and node.value.value is None)
         and any(
             isinstance(target, ast.Attribute) and target.attr == "completed_at"
             for target in node.targets
         )
     ]
     assert captures
-    assert all(capture in set(ast.walk(functions["_resolved_response"])) for capture in captures)
+    assert all(
+        any(capture in set(ast.walk(functions[name])) for name in ("_resolved_response", "_buffer_responses_stream"))
+        for capture in captures
+    )
     # And carried from there to the ledger rather than re-read at the write.
     handoff = next(
         node for node in ast.walk(functions["_record_usage"]) if _call_name(node) == "record"

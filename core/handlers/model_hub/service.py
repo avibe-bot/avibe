@@ -1034,7 +1034,7 @@ class HandleSettlement:
     turn_outcome: TurnOutcomeProjectionInput | None
 
 
-HandleTerminationOrigin = Literal["downstream_cancel", "upstream_terminal"]
+HandleTerminationOrigin = Literal["downstream_cancel", "upstream_terminal", "local_delivery_failure"]
 
 
 AttemptObserver = Callable[
@@ -10622,15 +10622,20 @@ class ModelHubService:
                 resolved.source_id, resolved.settlement_generation, resolved.handle,
                 backend=resolved.backend, model_id=resolved.requested_model_id,
             )
-        if termination_origin == "downstream_cancel" and outcome is None:
+        if termination_origin in {"downstream_cancel", "local_delivery_failure"} and outcome is None:
+            # Closing a still-live producer does not manufacture its terminal.
+            # Metering already retained every observed token; release admission
+            # without classifying a local disk failure as an upstream refusal.
             return HandleSettlement(
-                outcome=outcome,
+                outcome=None,
                 decision=None,
-                turn_outcome=produce_turn_outcome("turn.canceled"),
+                turn_outcome=produce_turn_outcome(
+                    "turn.canceled" if termination_origin == "downstream_cancel" else "turn.engine_down",
+                ),
             )
-        if termination_origin == "downstream_cancel":
-            # The gateway selects this origin only after closing the producer.
-            # A committed outcome at that barrier owns history over cancellation.
+        if termination_origin in {"downstream_cancel", "local_delivery_failure"}:
+            # A producer result committed during close still owns its Source
+            # settlement; a local delivery failure projects separately afterwards.
             termination_origin = "upstream_terminal"
         if termination_origin != "upstream_terminal":
             raise AssertionError("unknown handle termination origin")
