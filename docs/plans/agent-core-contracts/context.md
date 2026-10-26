@@ -149,22 +149,25 @@ before a retry alike:
    as overflow, goes straight to the drop (§8 c, §10).
 
 The cache lifetime is the documented lifetime of the cache mode Vibey requests for the conversation, where clearable
-results live, resolved on every request from the route's provider, protocol, and whole model id
-(`harness/context.py`, `CACHE_TTLS`):
+results live, resolved on every request from the route's provider, protocol, whole model id, and validated Model Hub
+route override (`harness/context.py`, `CACHE_TTLS`):
 
 | Route | Lifetime |
 | --- | --- |
 | provider `anthropic` on the Anthropic protocol: the message breakpoints' `cache_control` is ephemeral, with no `ttl` | 300 s, refreshed on use |
-| provider `openai`, a model id `gpt-<major>[.<minor>][-<suffix>]` from GPT-5.6: `prompt_cache_options.ttl` is 30 minutes, its default and only value, and Vibey sends none | 1,800 s |
-| any other route, or one not identified unambiguously (older OpenAI models, other vendors on either protocol, relays) | 3,600 s |
+| provider `openai`, protocol `openai_responses`, and a model id `gpt-<major>[.<minor>][-<suffix>]` from GPT-5.6: `prompt_cache_options.ttl` defaults to 30 minutes; an explicit route override may request `30m` or the opt-in `12h` mode | 1,800 s by default |
+| any other route, or one not identified unambiguously (older OpenAI models, `openai_chat`, other vendors, relays) | 3,600 s |
+| a nonempty route's validated `cache_ttl` override | the configured 5m, 30m, 1h, or 12h estimate; official OpenAI Responses GPT-5.6+ routes accept explicit `30m` or `12h` wire modes |
 
-Clearing a warm cache forces a full-price re-read of the context, while skipping a clear on a cold one only keeps
+Earlier supported OpenAI models may expose a separate policy-dependent `prompt_cache_retention` mode (`in_memory` or `24h`), but Avibe does not infer or send that option; those routes remain on the conservative built-in estimate unless a route capability explicitly supports it. The official 12-hour Responses mode has a 2.5x cache-write rate versus 1.25x for the 30-minute default, while reads use the same cached-input rate; Avibe sends that opt-in only on confirmed official GPT-5.6+ Responses routes and meters the two write lifetimes separately. Clearing a warm cache forces a full-price re-read of the context, while skipping a clear on a cold one only keeps
 some old output, so an unknown lifetime counts as an hour, and relays and subscription sources that keep a shorter
 one err toward warm. The idle time is the route's own cache's: it runs from the later of the latest model call's end
 and the latest response's commit served by the same provider and model as the request's route (the protocol that
 reaches the gateway, converted or not, does not change the cache), which overstates warmth by a response's duration,
-the same safe direction; another route's use never refreshes it. A route with no use in the Session yet takes the
-latest use of any route.
+the same safe direction; another route's use never refreshes it. Response rows carry the served Source identity and
+provider/model origin, but this C-9 clock intentionally keys by provider/model, so Sources with the same provider/model
+share one clock; a route override is route-wide, not a claim that those Sources have independent cache clocks. A route
+with no use in the Session yet takes the latest use of any route.
 
 A request the provider rejects as overflow (`ProviderError.kind == "overflow"`, classified by
 `ai/errors.is_overflow_message`, HTTP 413, and `context_length_exceeded`) before anything was streamed, and with no
@@ -530,7 +533,10 @@ ends the run `context_exhausted`, as in P1. The adapter supplies the following; 
 `modules/agents/vibey` (`agent.py`, `context.py`, `store.py`), and every Turn of it runs with a `ContextConfig`.
 
 - The route's identity: its endpoint's `provider`, `protocol`, and `model_id` (the hop's `provider` and
-  `runtime_model`), from which the loop resolves the cache lifetime on every request (§3); nothing configures it.
+  `runtime_model`), from which the loop resolves the cache lifetime on every request (§3). Model Hub may carry a
+  validated route-wide `cache_ttl`; it is a route-wide override, not a per-Source clock. Canonical response rows and
+  served-hop metadata do carry the credential-free Source identity, but the C-9 cache clock intentionally remains keyed
+  by provider/model, so same-provider/model Sources share it.
 - The limits (§1): the route's capabilities come from the Model Hub model definition the user edits
   (`context_window`, `max_output_tokens`; `input_limit` stays unknown until Model Hub stores one, so `L_in = W`), and
   the Agent asks for `min(max_output_tokens, floor(W / 4))` (the maximum 8,192 when unknown) on every hop it resolves,

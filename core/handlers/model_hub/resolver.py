@@ -23,6 +23,12 @@ BackendName = AgentBackend
 ResolutionChannel = Literal["direct", "native_cli", "hub", "unavailable"]
 SupplyStatus = Literal["ok", "degraded", "waiting", "interrupted"]
 RouteOrigin = Literal["automatic", "manual", "passthrough"]
+CacheTtl = Literal["5m", "30m", "1h", "12h"]
+_CACHE_TTL_VALUES = frozenset(("5m", "30m", "1h", "12h"))
+_GPT_MODEL = re.compile(
+    r"gpt-(?P<major>\d+)(?:\.(?P<minor>\d+))?(?:-[a-z0-9]+(?:[.-][a-z0-9]+)*)?",
+    re.ASCII,
+)
 
 
 @dataclass(frozen=True)
@@ -30,6 +36,7 @@ class EffectiveModelRoute:
     manual_override: ModelHubRouteConfig | None
     route_origin: RouteOrigin | None
     hops: tuple[ModelHubRouteHopConfig, ...]
+    cache_ttl: CacheTtl | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +93,8 @@ class ModelHubTurnResolution:
     source: ModelHubSourceConfig | None
     manual_override: ModelHubRouteConfig | None = None
     route_origin: RouteOrigin | None = None
+    cache_ttl: CacheTtl | None = None
+    cache_ttl_wire: bool = False
     matching_sources: tuple[ModelHubSourceConfig, ...] = ()
     candidates: tuple[ModelHubSourceConfig, ...] = ()
     candidate_hops: tuple[ExactHopInspection, ...] = ()
@@ -274,6 +283,69 @@ def source_supports_passthrough(source: ModelHubSourceConfig) -> bool:
     return source.kind == "api_key" and source.supply_channel == "hub" and source.protocol != "search"
 
 
+def is_official_openai_responses_route(
+    config: ModelHubConfig,
+    backend: BackendName,
+    route: ModelHubRouteConfig,
+) -> bool:
+    """Whether every hop is the official OpenAI Responses GPT-5.6+ route.
+
+    A missing/custom endpoint is deliberately not treated as official: an
+    OpenAI-compatible relay may speak the same wire protocol without honoring
+    OpenAI's prompt-cache retention option.
+    """
+
+    if backend != "vibey" or not route.hops:
+        return False
+    sources = {source.id: source for source in config.sources}
+    for hop in route.hops:
+        source = sources.get(hop.source_id)
+        match = _GPT_MODEL.fullmatch(hop.model_id)
+        if (
+            source is None
+            or source.vendor != "openai"
+            or source.protocol != "openai_responses"
+            or source.base_url is not None
+            or match is None
+            or (int(match.group("major")), int(match.group("minor") or 0)) < (5, 6)
+        ):
+            return False
+    return True
+
+
+def validate_cache_ttl_override(
+    config: ModelHubConfig,
+    backend: BackendName,
+    route: ModelHubRouteConfig,
+) -> None:
+    """Validate route-local cache lifetime without granting relay OpenAI semantics."""
+
+    ttl = route.cache_ttl
+    if ttl is None:
+        return
+    if backend != "vibey":
+        raise ValueError("cache_ttl is supported only for Vibey routes")
+    if not isinstance(ttl, str) or ttl not in _CACHE_TTL_VALUES or not route.hops:
+        raise ValueError("cache_ttl is not supported for this route")
+    official_openai = is_official_openai_responses_route(config, backend, route)
+    if ttl == "12h" and not official_openai:
+        raise ValueError("12h is supported only by an official OpenAI Responses GPT-5.6+ route")
+    if official_openai and ttl not in {"30m", "12h"}:
+        raise ValueError("official OpenAI Responses routes support only 30m or 12h")
+    if (
+        backend == "vibey"
+        and all(
+            (source := next((item for item in config.sources if item.id == hop.source_id), None)) is not None
+            and source.vendor == "anthropic"
+            and source.protocol == "anthropic"
+            and source.base_url is None
+            for hop in route.hops
+        )
+        and ttl != "5m"
+    ):
+        raise ValueError("official Anthropic conversation breakpoints support only 5m")
+
+
 def effective_model_route(
     config: ModelHubConfig,
     backend: BackendName,
@@ -284,7 +356,7 @@ def effective_model_route(
     agent = config.agents[backend]
     override = normalized_model_hub_override(agent.routes.get(requested_model))
     if override is not None:
-        return EffectiveModelRoute(override, "manual", override.hops)
+        return EffectiveModelRoute(override, "manual", override.hops, override.cache_ttl)
     if not requested_model or not any(model.id == requested_model for model in agent.models):
         return EffectiveModelRoute(None, None, ())
     by_id = {source.id: source for source in config.sources}
@@ -578,6 +650,12 @@ def resolve_model_hub_turn(
     first = first_inspection.source if first_inspection is not None else None
     if first is not None:
         channel = first.supply_channel
+    cache_ttl = route.cache_ttl
+    if route.manual_override is not None:
+        try:
+            validate_cache_ttl_override(config, backend, route.manual_override)
+        except ValueError:
+            cache_ttl = None
     return ModelHubTurnResolution(
         backend=backend,
         channel=channel,
@@ -586,6 +664,11 @@ def resolve_model_hub_turn(
         source=first,
         manual_override=route.manual_override,
         route_origin=route.route_origin,
+        cache_ttl=cache_ttl,
+        cache_ttl_wire=(
+            cache_ttl in {"30m", "12h"}
+            and is_official_openai_responses_route(config, backend, route)
+        ),
         matching_sources=matching_sources,
         candidates=candidates,
         candidate_hops=runnable_inspections,

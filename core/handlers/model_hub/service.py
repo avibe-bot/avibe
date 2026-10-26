@@ -251,6 +251,7 @@ from .resolver import (
     source_model_retired,
     source_supports_passthrough,
     source_runnable,
+    validate_cache_ttl_override,
 )
 from .revocations import CredentialRevocationJournal, PendingCredentialRevocation, RevocationOperation
 from .retry import (
@@ -5948,16 +5949,25 @@ class ModelHubService:
             or normalized_model_id(model_id) != model_id
             or not isinstance(payload, dict)
             or set(payload)
-            - {"hops", "force", "would_remove_hops", "would_interrupt"}
+            - {"hops", "cache_ttl", "force", "would_remove_hops", "would_interrupt"}
             or "hops" not in payload
             or ("force" in payload and not isinstance(payload["force"], bool))
         ):
             raise ModelHubError("mapping_target_unavailable", status=409)
         try:
-            route = ModelHubRouteConfig.from_payload({"hops": payload["hops"]})
+            route = ModelHubRouteConfig.from_payload({
+                "hops": payload["hops"],
+                "cache_ttl": payload.get("cache_ttl"),
+            })
             if any(normalized_model_id(hop["model_id"]) != hop["model_id"] for hop in payload["hops"]):
                 raise ValueError("noncanonical model")
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as error:
+            if payload.get("cache_ttl") is not None:
+                raise ModelHubError(
+                    "cache_ttl_unsupported",
+                    status=422,
+                    data={"reason": str(error)},
+                ) from None
             raise ModelHubError("mapping_target_unavailable", status=409) from None
         return await self._write_agent_chain(backend, model_id, route, payload)
 
@@ -5975,6 +5985,15 @@ class ModelHubService:
             model_id not in self._agent_menu_model_ids(agent)
         ):
             raise ModelHubError("mapping_target_unavailable", status=409)
+        if route is not None:
+            try:
+                validate_cache_ttl_override(config, cast(BackendName, backend), route)
+            except ValueError as error:
+                raise ModelHubError(
+                    "cache_ttl_unsupported",
+                    status=422,
+                    data={"reason": str(error)},
+                ) from None
         by_id = {source.id: source for source in config.sources}
         old_pairs = {
             (hop.source_id, hop.model_id)
@@ -6009,7 +6028,13 @@ class ModelHubService:
             route = ModelHubRouteConfig.from_payload(raw) if raw is not None else None
             if raw is not None and any(normalized_model_id(hop["model_id"]) != hop["model_id"] for hop in raw["hops"]):
                 raise ValueError("noncanonical model")
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as error:
+            if isinstance(raw, dict) and raw.get("cache_ttl") is not None:
+                raise ModelHubError(
+                    "cache_ttl_unsupported",
+                    status=422,
+                    data={"reason": str(error)},
+                ) from None
             raise ModelHubError("mapping_target_unavailable", status=409) from None
         config = self._clone_config(self.store.load())
         agent = self._validate_route_override(config, backend, model_id, route)

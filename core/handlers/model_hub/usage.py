@@ -124,16 +124,19 @@ _COUNTER_KEYS: Final = (
     "output_tokens",
     "cache_write_input_tokens",
     "cache_write_1h_input_tokens",
+    "cache_write_30m_input_tokens",
+    "cache_write_12h_input_tokens",
     "cache_write_uncaptured_reports",
+    "cache_write_ttl_uncaptured_reports",
 )
 # Counters added after files were already written. A released row lacks them, and
 # what it lacks is knowledge, not usage: its cache writes are inside its input but
 # were never split out, so every token report it carries counts as uncaptured.
 # Additive only — no stored row is rewritten to acquire them.
-_CACHE_WRITE_KEYS: Final = (
-    "cache_write_input_tokens",
-    "cache_write_1h_input_tokens",
-    "cache_write_uncaptured_reports",
+_NEW_CACHE_WRITE_KEYS: Final = (
+    "cache_write_30m_input_tokens",
+    "cache_write_12h_input_tokens",
+    "cache_write_ttl_uncaptured_reports",
 )
 # The cross-field guarantees the read contract makes, as (subset, superset).
 # Each one is repaired on read, so a corrupt or hand-edited file degrades into a
@@ -144,7 +147,10 @@ _COUNTER_SUBSETS: Final = (
     ("cached_input_tokens", "input_tokens"),
     ("token_reports", "requests"),
     ("cache_write_uncaptured_reports", "token_reports"),
+    ("cache_write_ttl_uncaptured_reports", "token_reports"),
     ("cache_write_1h_input_tokens", "cache_write_input_tokens"),
+    ("cache_write_30m_input_tokens", "cache_write_input_tokens"),
+    ("cache_write_12h_input_tokens", "cache_write_input_tokens"),
 )
 
 
@@ -156,7 +162,10 @@ def _released_cache_write_counters(value: dict) -> dict[str, int]:
     return {
         "cache_write_input_tokens": 0,
         "cache_write_1h_input_tokens": 0,
+        "cache_write_30m_input_tokens": 0,
+        "cache_write_12h_input_tokens": 0,
         "cache_write_uncaptured_reports": max(0, uncaptured),
+        "cache_write_ttl_uncaptured_reports": 0,
     }
 
 
@@ -169,6 +178,12 @@ def _repair_cache_writes(counters: dict) -> None:
     )
     counters["cache_write_1h_input_tokens"] = min(
         counters["cache_write_1h_input_tokens"], counters["cache_write_input_tokens"]
+    )
+    remaining = max(0, counters["cache_write_input_tokens"] - counters["cache_write_1h_input_tokens"])
+    counters["cache_write_30m_input_tokens"] = min(counters["cache_write_30m_input_tokens"], remaining)
+    counters["cache_write_12h_input_tokens"] = min(
+        counters["cache_write_12h_input_tokens"],
+        max(0, remaining - counters["cache_write_30m_input_tokens"]),
     )
 
 
@@ -729,7 +744,7 @@ def _normalize_hourly_totals(value: object, *, service: bool = False) -> Optiona
         return _normalize_service_totals(value)
     if not isinstance(value, dict):
         return None
-    if all(key not in value for key in _CACHE_WRITE_KEYS):
+    if any(key not in value for key in _NEW_CACHE_WRITE_KEYS):
         value = {**_released_cache_write_counters(value), **value}
     totals: dict[str, int] = {}
     for key in _COUNTER_KEYS:
@@ -782,7 +797,8 @@ def _normalize_row(row: object) -> Optional[dict]:
     context_tier = row.get("context_tier", 0)
     if not isinstance(context_tier, int) or isinstance(context_tier, bool) or context_tier < 0:
         return None
-    if all(key not in row for key in _CACHE_WRITE_KEYS):
+    legacy_cache_write_shape = any(key not in row for key in _NEW_CACHE_WRITE_KEYS)
+    if legacy_cache_write_shape:
         row = {**_released_cache_write_counters(row), **row}
     counters: dict[str, int] = {}
     for key in _COUNTER_KEYS:
@@ -798,6 +814,8 @@ def _normalize_row(row: object) -> Optional[dict]:
         **({"context_tier": context_tier} if context_tier else {}),
         **counters,
     }
+    if legacy_cache_write_shape:
+        normalized["_legacy_cache_write_shape"] = True
     if row.get("history_degraded") is True:
         # Internal witness that an earlier read lost evidence. It never crosses
         # the public usage-summary boundary.
@@ -1150,11 +1168,32 @@ def _recency(
     return (row["day"], metered)
 
 
+def _persistable_row(row: dict) -> dict:
+    """Keep released cache-write rows byte-compatible until a new write touches them."""
+
+    if not row.get("_legacy_cache_write_shape"):
+        return row
+
+    def strip(value: object) -> object:
+        if isinstance(value, list):
+            return [strip(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+        return {
+            key: strip(item)
+            for key, item in value.items()
+            if key not in _NEW_CACHE_WRITE_KEYS and key != "_legacy_cache_write_shape"
+        }
+
+    return strip(row)
 def _cache_write_increment(usage: Optional[ProtocolUsageReport]) -> dict[str, int]:
     return {
         "cache_write_input_tokens": usage.cache_write_input_tokens if usage else 0,
         "cache_write_1h_input_tokens": usage.cache_write_1h_input_tokens if usage else 0,
+        "cache_write_30m_input_tokens": usage.cache_write_30m_input_tokens if usage else 0,
+        "cache_write_12h_input_tokens": usage.cache_write_12h_input_tokens if usage else 0,
         "cache_write_uncaptured_reports": 0,
+        "cache_write_ttl_uncaptured_reports": usage.cache_write_ttl_uncaptured_reports if usage else 0,
     }
 
 
@@ -1491,6 +1530,8 @@ class BoundedUsageLedger:
             if existing is None:
                 rows[_row_key(row)] = row
                 continue
+            if existing.get("_legacy_cache_write_shape") and not row.get("_legacy_cache_write_shape"):
+                existing.pop("_legacy_cache_write_shape", None)
             _accumulate(existing, row)
             existing["last_metered_at"] = _newer_timestamp(
                 existing["last_metered_at"],
@@ -1567,7 +1608,7 @@ class BoundedUsageLedger:
             # call. Preserve the existing degradation witness on a survivor so
             # reopening cannot publish the retained row as complete history.
             retained = [{**row, "history_degraded": True} for row in retained]
-        write_state_document(self.path, sorted(retained, key=_row_key))
+        write_state_document(self.path, [_persistable_row(row) for row in sorted(retained, key=_row_key)])
 
     def record(
         self,
@@ -1666,6 +1707,8 @@ class BoundedUsageLedger:
                 if existing is None:
                     rows[_row_key(increment)] = increment
                 else:
+                    if existing.get("_legacy_cache_write_shape"):
+                        existing.pop("_legacy_cache_write_shape", None)
                     _accumulate(existing, increment)
                     existing["last_metered_at"] = _newer_timestamp(
                         existing["last_metered_at"],
@@ -2443,6 +2486,15 @@ class UsageCall:
                 cache_write_input_tokens=sum(report.cache_write_input_tokens for report in reports),
                 cache_write_1h_input_tokens=sum(
                     report.cache_write_1h_input_tokens for report in reports
+                ),
+                cache_write_30m_input_tokens=sum(
+                    report.cache_write_30m_input_tokens for report in reports
+                ),
+                cache_write_12h_input_tokens=sum(
+                    report.cache_write_12h_input_tokens for report in reports
+                ),
+                cache_write_ttl_uncaptured_reports=sum(
+                    report.cache_write_ttl_uncaptured_reports for report in reports
                 ),
             )
         return replace(

@@ -2562,14 +2562,21 @@ class ModelHubRouteHopConfig:
 @dataclass
 class ModelHubRouteConfig:
     hops: tuple[ModelHubRouteHopConfig, ...] = ()
+    cache_ttl: Optional[Literal["5m", "30m", "1h", "12h"]] = None
 
     @classmethod
     def from_payload(cls, payload: object, *, repairing: bool = False) -> "ModelHubRouteConfig":
-        if not isinstance(payload, dict) or set(payload) != {"hops"}:
+        if not isinstance(payload, dict) or set(payload) - {"hops", "cache_ttl"} or "hops" not in payload:
             raise ValueError("Config 'model_hub.agents.routes' entries must contain hops")
         hops = payload.get("hops")
         if not isinstance(hops, list):
             raise ValueError("Config 'model_hub.agents.routes.hops' must be an array")
+        cache_ttl = payload.get("cache_ttl")
+        if cache_ttl is not None and (
+            not isinstance(cache_ttl, str)
+            or cache_ttl not in {"5m", "30m", "1h", "12h"}
+        ):
+            raise ValueError("Config 'model_hub.agents.routes.cache_ttl' is invalid")
         return cls(
             hops=tuple(
                 _collapse_settled_duplicates(
@@ -2579,11 +2586,15 @@ class ModelHubRouteConfig:
                     "Config 'model_hub.agents.routes.hops' must contain unique pairs",
                     repairing=repairing,
                 )
-            )
+            ),
+            cache_ttl=cache_ttl,
         )
 
     def to_payload(self) -> dict:
-        return {"hops": [hop.to_payload() for hop in self.hops]}
+        payload = {"hops": [hop.to_payload() for hop in self.hops]}
+        if self.cache_ttl is not None:
+            payload["cache_ttl"] = self.cache_ttl
+        return payload
 
 
 def normalized_model_hub_override(route: ModelHubRouteConfig | None) -> ModelHubRouteConfig | None:

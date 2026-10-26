@@ -365,16 +365,19 @@ reasoning follows the canonical optional-field rule.
 
 | Documented wire field | Canonical mapping or ignore policy |
 | --- | --- |
-| `input_tokens` | `input_tokens = max(0, input_tokens - cache_read_tokens - cache_write_tokens)` |
+| `input_tokens` | `input_tokens`, inclusive of cached reads and cache writes; pricing derives ordinary input as `input_tokens - cache_read_tokens - cache_write_tokens` |
 | `input_tokens_details` | Input breakdown container; not itself a count |
 | `input_tokens_details.cached_tokens` | `cache_read_tokens`, default zero |
 | `input_tokens_details.cache_write_tokens` | `cache_write_tokens`, default zero; distinct from cache reads |
+| `input_tokens_details.cache_write_tokens_details.ttl_30m_tokens` | `cache_write_30m_input_tokens`; disjoint from the 12h count |
+| `input_tokens_details.cache_write_tokens_details.ttl_12h_tokens` | `cache_write_12h_input_tokens`; disjoint from the 30m count |
 | `output_tokens` | `output_tokens`, inclusive of reasoning |
 | `output_tokens_details` | Output decomposition container; not itself a count |
 | `output_tokens_details.reasoning_tokens` | `reasoning_tokens`; absent field is `None`. Accepted compatible null counter normalizes to zero, matching Pi. |
 | `total_tokens` | Ignored: redundant inclusive input + output; canonical components already preserve the total |
 
-Fixture: actual pinned-Pi projection `10 - 3 - 2 = 5`, output `4`, reasoning
+Fixture: actual pinned-Pi projection `12 - 3 - 2 = 7` ordinary input, with the
+lifetime write breakdown retained separately; output `4`, reasoning
 `2`; the full documented object also supplies `total_tokens: 14`. Pi's old
 Chat source comment calls cache writes a compatibility extension; the current
 official Chat and Responses schemas fetched above now document that counter.

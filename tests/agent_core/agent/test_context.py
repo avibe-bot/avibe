@@ -534,7 +534,7 @@ def test_a_checkpoint_or_another_route_invalidates_the_anchor():
         ("anthropic", "anthropic", "claude-opus-5-5", 300),  # message breakpoints: ephemeral, no ttl
         ("openai_responses", "openai", "gpt-6-astra", 1_800),
         ("openai_responses", "openai", "gpt-6.1-sol", 1_800),
-        ("openai_chat", "openai", "gpt-5.6-mini", 1_800),
+        ("openai_chat", "openai", "gpt-5.6-mini", 3_600),  # OpenAI cache retention is official Responses-only
         ("openai_responses", "openai", "gpt-5.5", 3_600),  # before GPT-5.6: in-memory, 5 minutes to an hour
         ("openai_responses", "openai", "gpt-4o", 3_600),
         ("openai_responses", "openai", "o3", 3_600),
@@ -547,6 +547,19 @@ def test_a_checkpoint_or_another_route_invalidates_the_anchor():
 )
 def test_a_route_cache_lives_as_long_as_its_family_documents_else_an_hour(protocol, provider, model, lifetime):
     assert cache_ttl_s(ModelEndpoint(protocol, "http://model.invalid", model, "", provider=provider)) == lifetime
+
+
+@pytest.mark.parametrize("cache_ttl, expected", [("1h", 3_600), ("12h", 43_200)])
+def test_a_route_cache_override_wins_over_provider_family(cache_ttl, expected):
+    endpoint = ModelEndpoint(
+        "openai_responses",
+        "http://model.invalid",
+        "gpt-6-astra",
+        "",
+        provider="openai",
+        cache_ttl=cache_ttl,
+    )
+    assert cache_ttl_s(endpoint) == expected
 
 
 def _random_rows(seed: int) -> list[ContextEntry]:

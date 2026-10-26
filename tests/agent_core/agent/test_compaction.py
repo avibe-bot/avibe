@@ -1591,10 +1591,14 @@ async def test_a_converted_route_cache_is_its_upstream_provider_and_model():
     assert len(await routed_turn(store, now, GEMINI, [[Done(assistant("five"))]], "turn-5", GEMINI_SERVED)) == 4
 
 
-async def test_pressure_clearing_runs_on_a_warm_cache():
+@pytest.mark.parametrize("cache_ttl", [None, "1h", "12h"])
+async def test_pressure_clearing_runs_on_a_warm_cache(cache_ttl):
     # From 0.8 T old results clear whatever the cache's lifetime (section 3): on this window T = 59,904, and nine
     # results of 6,000 tokens hold 0.9 T. The third Turn is the first whose old results are not protected.
-    route = ModelSelection(ENDPOINT, replace(SELECTION.capabilities, context_window=72_000, input_limit=None))
+    route = ModelSelection(
+        replace(ENDPOINT, cache_ttl=cache_ttl),
+        replace(SELECTION.capabilities, context_window=72_000, input_limit=None),
+    )
     script = [*_long_context(9), *([Done(assistant(word))] for word in ("one", "two", "three"))]
     model = Model(script, [[Done(assistant(CHECKPOINT))]])
     agent = make_agent(

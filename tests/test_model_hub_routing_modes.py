@@ -17,7 +17,11 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.adapter import RawCallOutcome, RawOutcomeKind, SourceBinding
-from core.handlers.model_hub.resolver import effective_model_route, resolve_model_hub_turn
+from core.handlers.model_hub.resolver import (
+    effective_model_route,
+    resolve_model_hub_turn,
+    validate_cache_ttl_override,
+)
 from core.handlers.model_hub.service import ModelHubError
 from scripts.check_model_hub_authorities import AuthorityInput, _typescript_string_union
 from tests.test_model_hub_resolution import _service, _source
@@ -41,7 +45,67 @@ def _pairs(plan):
     return [(hop.source_id, hop.model_id) for hop in plan.hops]
 
 
-def test_sparse_matching_tier_excludes_speculation_and_survives_health_changes():
+def test_prompt_cache_override_is_route_wide_and_openai_wire_eligible():
+    source = _source("src_openai001", ("gpt-6-astra",), vendor="openai")
+    config = ModelHubConfig(sources=[source])
+    agent = config.agents["vibey"]
+    agent.mode = "hub"
+    agent.models = [ModelHubBackendModelConfig(id="gpt-6-astra")]
+    agent.sources.order = [source.id]
+    route = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "gpt-6-astra"),),
+        cache_ttl="30m",
+    )
+    agent.routes["gpt-6-astra"] = route
+
+    validate_cache_ttl_override(config, "vibey", route)
+    resolution = resolve_model_hub_turn(config, "vibey", "gpt-6-astra")
+    assert resolution.cache_ttl == "30m"
+    assert resolution.cache_ttl_wire is True
+
+    route = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "gpt-6-astra"),),
+        cache_ttl="12h",
+    )
+    agent.routes["gpt-6-astra"] = route
+    validate_cache_ttl_override(config, "vibey", route)
+    resolution = resolve_model_hub_turn(config, "vibey", "gpt-6-astra")
+    assert resolution.cache_ttl == "12h"
+    assert resolution.cache_ttl_wire is True
+    route = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "gpt-6-astra"),),
+        cache_ttl="30m",
+    )
+    agent.routes["gpt-6-astra"] = route
+    source.base_url = "https://relay.example.test/v1"
+    validate_cache_ttl_override(config, "vibey", route)
+    resolution = resolve_model_hub_turn(config, "vibey", "gpt-6-astra")
+    assert resolution.cache_ttl == "30m"
+    assert resolution.cache_ttl_wire is False
+
+
+def test_prompt_cache_override_rejects_unsupported_official_values():
+    source = _source("src_openai001", ("gpt-6-astra",), vendor="openai")
+    config = ModelHubConfig(sources=[source])
+    route = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "gpt-6-astra"),),
+        cache_ttl="1h",
+    )
+    with pytest.raises(ValueError, match="30m or 12h"):
+        validate_cache_ttl_override(config, "vibey", route)
+
+
+def test_prompt_cache_override_is_rejected_for_non_vibey_routes():
+    source = _source("src_openai001", ("gpt-6-astra",), vendor="openai")
+    config = ModelHubConfig(sources=[source])
+    route = ModelHubRouteConfig(
+        hops=(ModelHubRouteHopConfig(source.id, "gpt-6-astra"),),
+        cache_ttl="30m",
+    )
+    with pytest.raises(ValueError, match="only for Vibey"):
+        validate_cache_ttl_override(config, "claude", route)
+
+
     absent = _source("src_absent001", ())
     known = _source("src_known001")
     config = _sparse_config(absent, known)

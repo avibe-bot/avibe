@@ -46,6 +46,7 @@ from core.handlers.model_hub.provenance import (
 )
 from core.handlers.model_hub.resolver import (
     BackendName,
+    CacheTtl,
     ModelHubTurnResolution,
     resolve_model_hub_turn,
     source_after_cooldown_recovery,
@@ -129,6 +130,11 @@ class ModelHubLaunch:
     provider: Optional[str] = None
     input_limit: Optional[int] = None
     supports_images: Optional[bool] = None
+    # Vibey only: the route-local prompt-cache lifetime override. Canonical
+    # response rows and served-hop metadata carry Source identity, but the C-9
+    # clock intentionally remains keyed by provider/model rather than Source.
+    cache_ttl: CacheTtl | None = None
+    cache_ttl_wire: bool = False
     # Vibey only: each enabled hosted tool's mode, declaration, executor and replay.
     hosted_tools: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
     # Vibey only: the Source's credential-free identity, from the snapshot its origin came from (C-6).
@@ -154,6 +160,8 @@ class ModelHubLaunch:
             "runtime_model": self.runtime_model,
             "source_id": self.source_id,
             "source_identity": self.source_identity,
+            "cache_ttl": self.cache_ttl,
+            "cache_ttl_wire": self.cache_ttl_wire,
             "provider": self.provider,
             "request_headers": dict(self.gateway_request_metadata),
             "capabilities": {
@@ -1333,6 +1341,8 @@ class ModelHubRuntimeRouter:
                 reasoning_efforts=reasoning_efforts,
                 protocol=source.protocol,
                 provider=source.vendor,
+                cache_ttl=resolution.cache_ttl,
+                cache_ttl_wire=resolution.cache_ttl_wire,
                 supports_images=(
                     "image" in backend_model.input_modalities
                     if backend_model is not None and backend_model.input_modalities
