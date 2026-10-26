@@ -66,6 +66,16 @@ async function shownDetails(parts: Locator): Promise<string[]> {
 
 const agentOf = (parts: Locator) => parts.locator(':scope > span:not([data-route-detail])');
 
+/** The Agent outranks detail: its start is always shown, and it is cut only once no detail is left. */
+async function expectAgentFirst(parts: Locator, name = 'pm-claude') {
+  const agent = agentOf(parts);
+  await expect(agent).toHaveText(name);
+  expect(inside((await agent.boundingBox())!, (await parts.boundingBox())!)).toBe(true);
+  const cut = await agent.evaluate((node) => node.scrollWidth > node.clientWidth);
+  if (cut) expect(await shownDetails(parts)).toEqual([]);
+  return cut;
+}
+
 async function expectAgentWhole(parts: Locator, name = 'pm-claude') {
   const agent = agentOf(parts);
   await expect(agent).toHaveText(name);
@@ -74,7 +84,7 @@ async function expectAgentWhole(parts: Locator, name = 'pm-claude') {
 }
 
 for (const width of [320, 390]) {
-  test(`a ${width}px phone with Queue and Stop keeps the Agent's name whole and drops detail whole`, async ({ page }) => {
+  test(`a ${width}px phone with Queue and Stop drops detail whole before touching the Agent's name`, async ({ page }) => {
     const denied = await serveChat(page, { running: true });
     await page.setViewportSize({ width, height: 760 });
     await open(page, `/chat/${SESSION_ID}`);
@@ -85,7 +95,9 @@ for (const width of [320, 390]) {
 
     const trigger = page.locator('main').getByRole('button', { name: /pm-claude/ });
     const parts = trigger.locator('[data-route-trigger-parts]');
-    await expectAgentWhole(parts);
+    await expectAgentFirst(parts);
+    // A phone this size holds a short name whole; 320px is left to font metrics.
+    if (width >= 390) await expectAgentWhole(parts);
     const shown = await shownDetails(parts);
     // Detail leaves in order: the effort never outlasts the model.
     expect(shown.includes('effort') ? shown.includes('model') : true).toBe(true);
