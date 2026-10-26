@@ -141,6 +141,7 @@ def _rewind_and_measure(payload: BinaryIO) -> int:
 
 
 _CODEX_TURN_METADATA: Final = "x-codex-turn-metadata"
+_OPENCODE_ROUTE_METADATA: Final = "x-avibe-opencode-route"
 _CODEX_ROUTE_FIELDS: Final = ("avibe_route_id", "avibe_turn_id")
 
 
@@ -176,6 +177,11 @@ def _request_metadata(backend: str, request: web.Request) -> dict | None:
 
     if backend == "codex":
         return _codex_request_metadata(request.headers.get(_CODEX_TURN_METADATA))
+    if backend == "opencode":
+        return _codex_request_metadata(
+            request.headers.get(_OPENCODE_ROUTE_METADATA)
+            or request.headers.get(_CODEX_TURN_METADATA)
+        )
     if backend == "vibey":
         turn_id = request.headers.get(VIBEY_TURN_HEADER)
         return {"avibe_turn_id": turn_id} if turn_id else None
@@ -590,6 +596,7 @@ class ModelHubTurnGateway:
         gateway_request_model_id: Optional[str] = None,
         request_scoped: bool = False,
         primary_origin: HopOrigin | None = None,
+        primary_identity: str | None = None,
         hosted_tools: TurnHostedTools | None = None,
     ) -> tuple[str, str]:
         if backend not in MODEL_HUB_BACKENDS:
@@ -638,6 +645,7 @@ class ModelHubTurnGateway:
                     via_mapping=via_mapping,
                     gateway_request_model_id=gateway_request_model_id,
                     primary_origin=primary_origin,
+                    primary_identity=primary_identity,
                     hosted_tools=hosted_tools,
                 )
             except PreparedGatewayRouteConflict:
@@ -1473,6 +1481,14 @@ class ModelHubTurnGateway:
             response.headers.update(origin_headers)
             return response
 
+        opaque_observer = None
+        opaque_registry = getattr(self.service, "opaque_provenance", None)
+        if opaque_registry is not None:
+            opaque_observer = opaque_registry.begin_response(
+                protocol,
+                resolved.source_identity
+                or (resolved.origin.identity if resolved.origin is not None else None),
+            )
         if not stream:
             try:
                 response = None
@@ -1488,6 +1504,10 @@ class ModelHubTurnGateway:
                     assert settlement is not None
                     assert settlement.decision is not None
                     if settlement.decision.action == "return":
+                        if opaque_observer is not None:
+                            await run_owned_in_thread(payload.seek, 0)
+                            await run_owned_in_thread(opaque_observer.observe_buffered, payload)
+                            opaque_observer.finish(complete=True)
                         await run_owned_in_thread(payload.seek, 0)
                         rewritten_payload = await run_owned_in_thread(
                             rewrite_buffered_tool_names_file, payload, execution.response_tool_aliases,
@@ -1570,12 +1590,22 @@ class ModelHubTurnGateway:
         execution.wire_state = wire_state
         body = self._read_buffered_stream(buffered) if buffered is not None else handle.stream
         tool_name_rewriter = StreamingToolNameRewriter(execution.response_tool_aliases)
+        rendered: _RenderedTurnOutcome | None = None
+        opaque_committed = False
         try:
             async for chunk in body:
+                if opaque_observer is not None and not opaque_committed:
+                    await run_owned_in_thread(opaque_observer.feed, chunk)
                 output_started_before = wire_state.model_output_started
                 await wire_state.observe_async(chunk)
                 if wire_state.model_output_started and not output_started_before:
                     terminalizer.mark_stream_started()
+                if opaque_observer is not None and not opaque_committed and wire_state.terminal_outcome is not None:
+                    # The protocol terminal is the completion visible to the
+                    # native caller. Commit its provenance before forwarding that
+                    # chunk; settlement/EOF may remain outstanding afterwards.
+                    opaque_observer.finish(complete=wire_state.terminal_outcome == "served")
+                    opaque_committed = True
                 rewritten = tool_name_rewriter.feed(chunk)
                 if rewritten:
                     await self._downstream_io(response.write(rewritten))
@@ -1583,6 +1613,8 @@ class ModelHubTurnGateway:
             if trailing:
                 await self._downstream_io(response.write(trailing))
         except OSError as exc:
+            if opaque_observer is not None and not opaque_committed:
+                opaque_observer.finish(complete=False)
             if buffered is None or isinstance(exc, _DownstreamDisconnected):
                 raise
             # The producer was already settled/metered before local playback.
@@ -1600,6 +1632,14 @@ class ModelHubTurnGateway:
                 terminalizer,
                 termination_origin="upstream_terminal",
             )
+            if opaque_observer is not None and not opaque_committed:
+                opaque_observer.finish(
+                    complete=(
+                        _settlement is not None
+                        and _settlement.decision is not None
+                        and _settlement.decision.action == "return"
+                    )
+                )
         await self._write_stream_terminal_copy(
             response,
             protocol,
