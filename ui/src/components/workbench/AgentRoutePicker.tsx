@@ -449,7 +449,9 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
               {getBackendUiMeta(backend).label}
             </span>
           )}
-          <span className="truncate font-semibold text-foreground">{triggerLabel}</span>
+          {/* The composer's quiet trigger names who answers; whether that Agent is
+              inherited from the default is the menu's Agent row to say. */}
+          <span className="truncate font-semibold text-foreground">{compact ? agentLabel : triggerLabel}</span>
           {currentModel && (
             <>
               <span className="text-muted">·</span>
