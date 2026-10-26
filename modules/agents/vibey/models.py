@@ -194,7 +194,7 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
     raw_cache_ttl = hop.get("cache_ttl")
     if raw_cache_ttl is not None and (
         not isinstance(raw_cache_ttl, str)
-        or raw_cache_ttl not in {"5m", "30m", "1h"}
+        or raw_cache_ttl not in {"5m", "30m", "1h", "12h"}
     ):
         raise HopResolutionError("hop cache_ttl is invalid")
     cache_ttl = raw_cache_ttl
@@ -202,8 +202,8 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
     if not isinstance(raw_cache_ttl_wire, bool):
         raise HopResolutionError("hop cache_ttl_wire is invalid")
     cache_ttl_wire = raw_cache_ttl_wire
-    if cache_ttl_wire and cache_ttl != "30m":
-        raise HopResolutionError("hop cache_ttl_wire requires 30m")
+    if cache_ttl_wire and cache_ttl not in {"30m", "12h"}:
+        raise HopResolutionError("hop cache_ttl_wire requires 30m or 12h")
     endpoint = ModelEndpoint(
         protocol=protocol,
         base_url=base_url,

@@ -1084,6 +1084,26 @@ def test_a_hosted_response_is_priced_by_the_one_pricing_owner(billing, reported,
         assert result[0] == expected[0] and result[1] == pytest.approx(expected[1])
 
 
+def test_a_hosted_response_with_incomplete_cache_write_lifetime_is_unpriced() -> None:
+    from core.handlers.model_hub.pricing import hosted_response_cost
+
+    result = hosted_response_cost(
+        billing="metered",
+        reported_usd=None,
+        model_price=_table().price("gpt-5.5"),
+        usage=ProtocolUsageReport.of(
+            input_tokens=1000,
+            cached_input_tokens=0,
+            output_tokens=0,
+            cache_write_input_tokens=600,
+            cache_write_ttl_uncaptured_reports=1,
+        ),
+        tool_prices={},
+        counts={},
+    )
+    assert result is None
+
+
 def test_a_price_table_parses_every_price_when_built_and_none_on_lookup(monkeypatch):
     """MH-PRICE-016: building the table (never on the loop) parses every price, so a lookup on the loop parses none."""
     from core.handlers.model_hub import pricing

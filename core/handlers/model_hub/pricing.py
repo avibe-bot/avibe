@@ -743,6 +743,11 @@ def hosted_response_cost(
         return ("reported", reported_usd)
     if model_price is None or usage is None:
         return None
+    if usage.cache_write_ttl_uncaptured_reports:
+        # HostedCost has no lower-bound bit. Do not publish a list amount when
+        # cache-write lifetime evidence is incomplete; the usage ledger carries
+        # the lower-bound witness for aggregate valuation instead.
+        return None
     row = {
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
