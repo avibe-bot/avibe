@@ -195,12 +195,18 @@ later signed updates keep them.
 Node needs a code-generation exception (`allow-jit` on Apple silicon,
 `allow-unsigned-executable-memory` on Intel, whose V8 does not use `MAP_JIT`) and
 `disable-library-validation`, because the Show Runtime and npm-installed Agent
-backends load native addons this Team did not sign. Python and the helper need
-none. GitHub's macOS runners enforce neither library validation nor the JIT
-restriction, so CI proves signing and notarization but not that entitlements are
-sufficient. Check an entitlement change on a Mac with System Integrity
-Protection enabled, for example by running the signed `python` and `node` from an
-extracted `runtime.zip` in a scratch directory.
+backends load native addons this Team did not sign. Python on Intel needs
+`allow-unsigned-executable-memory`: its libffi builds ctypes and cffi callbacks
+in writable executable memory without `MAP_JIT`, and without the entitlement the
+first callback hangs. Python on Apple silicon and the helper need none. GitHub's
+macOS runners enforce neither library validation nor the JIT restriction, so CI
+proves signing and notarization but not that entitlements are sufficient. Check
+an entitlement change on a Mac with System Integrity Protection enabled, for
+example by running the release-signed `python` and `node` from an extracted
+`runtime.zip` in a scratch directory, the Intel ones under Rosetta
+(`arch -x86_64`). An ad-hoc re-signed copy is no substitute: it needs
+`disable-library-validation` to load the Team-signed tree, and that changes what
+the hardened runtime allows.
 
 **Manual builds** (`workflow_dispatch`) sign and notarize the same way when the
 complete set is configured. With none of it, the app is ad-hoc signed, the

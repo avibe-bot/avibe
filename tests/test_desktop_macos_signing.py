@@ -45,7 +45,10 @@ def test_each_binary_carries_only_its_evidenced_entitlements():
     def keys(path):
         return set(plistlib.loads(path.read_bytes()))
 
-    assert keys(signing.PYTHON_ENTITLEMENTS) == set()
+    assert keys(signing.PYTHON_ENTITLEMENTS["aarch64"]) == set()
+    assert keys(signing.PYTHON_ENTITLEMENTS["x86_64"]) == {
+        "com.apple.security.cs.allow-unsigned-executable-memory",
+    }
     assert keys(signing.HELPER_ENTITLEMENTS) == set()
     assert keys(signing.NODE_ENTITLEMENTS["aarch64"]) == {
         "com.apple.security.cs.allow-jit",

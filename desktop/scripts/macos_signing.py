@@ -55,8 +55,11 @@ NODE_IDENTIFIER = "bot.avibe.desktop.runtime.node"
 
 APP_ENTITLEMENTS = DESKTOP_DIR / "src-tauri" / "Entitlements.plist"
 HELPER_ENTITLEMENTS = ENTITLEMENTS_DIR / "cua-driver.plist"
-PYTHON_ENTITLEMENTS = ENTITLEMENTS_DIR / "runtime-python.plist"
-# V8 needs a different code-generation exception per architecture.
+# libffi (Python) and V8 (Node) each generate code differently per architecture.
+PYTHON_ENTITLEMENTS = {
+    "aarch64": ENTITLEMENTS_DIR / "runtime-python-aarch64.plist",
+    "x86_64": ENTITLEMENTS_DIR / "runtime-python-x86_64.plist",
+}
 NODE_ENTITLEMENTS = {
     "aarch64": ENTITLEMENTS_DIR / "runtime-node-aarch64.plist",
     "x86_64": ENTITLEMENTS_DIR / "runtime-node-x86_64.plist",
@@ -286,7 +289,7 @@ def sign_runtime(
     """
 
     executables = {
-        python_executable.resolve(): (PYTHON_IDENTIFIER, PYTHON_ENTITLEMENTS),
+        python_executable.resolve(): (PYTHON_IDENTIFIER, PYTHON_ENTITLEMENTS[arch]),
         node_executable.resolve(): (NODE_IDENTIFIER, NODE_ENTITLEMENTS[arch]),
     }
     libraries, programs = [], []
