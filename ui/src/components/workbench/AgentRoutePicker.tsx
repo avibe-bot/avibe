@@ -449,28 +449,62 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
               {getBackendUiMeta(backend).label}
             </span>
           )}
-          {/* The composer's quiet trigger names who answers; whether that Agent is
-              inherited from the default is the menu's Agent row to say. */}
-          <span className="truncate font-semibold text-foreground">{compact ? agentLabel : triggerLabel}</span>
-          {currentModel && (
+          {compact ? (
+            /* The composer's quiet trigger names who answers; whether that Agent is
+               inherited from the default is the menu's Agent row to say. When the
+               action row runs short (a phone with Queue and Stop showing), detail
+               gives way before the Agent: effort first, then the model. Each detail
+               part that no longer fits wraps onto a second line this one-line box
+               clips, so a detail is either whole or gone — never an ellipsis. */
+            <span
+              data-route-trigger-parts=""
+              className="flex h-5 min-w-0 flex-wrap content-start items-center justify-end gap-x-1.5 overflow-hidden"
+            >
+              {/* The name keeps its line: detail wraps away first, and only a name
+                  wider than the whole row, or than 10rem, ends in an ellipsis. */}
+              <span className="h-5 min-w-0 max-w-40 truncate font-semibold leading-5 text-foreground">{agentLabel}</span>
+              {currentModel && (
+                <span
+                  data-route-detail="model"
+                  className="h-5 shrink-0 whitespace-nowrap font-mono text-[10px] leading-5 text-muted before:mr-1.5 before:font-sans before:content-['·']"
+                  title={currentModelLabel !== currentModel ? currentModel : undefined}
+                >
+                  {currentModelLabel}
+                </span>
+              )}
+              {currentEffort && (
+                <span
+                  data-route-detail="effort"
+                  className="h-5 shrink-0 whitespace-nowrap text-[10px] capitalize leading-5 text-muted before:mr-1.5 before:content-['·']"
+                >
+                  {t(`chat.picker.effortOptions.${currentEffort}`, { defaultValue: currentEffort })}
+                </span>
+              )}
+            </span>
+          ) : (
             <>
-              <span className="text-muted">·</span>
-              <span
-                className="truncate font-mono text-[10px] text-muted"
-                title={currentModelLabel !== currentModel ? currentModel : undefined}
-              >
-                {currentModelLabel}
-              </span>
-            </>
-          )}
-          {currentEffort && (
-            <>
-              <span className="text-muted">·</span>
-              {/* Localize via the same key the column uses so the closed trigger
-                  doesn't show raw low/max in zh builds; unknown falls back to raw. */}
-              <span className="shrink-0 text-[10px] capitalize text-muted">
-                {t(`chat.picker.effortOptions.${currentEffort}`, { defaultValue: currentEffort })}
-              </span>
+              <span className="truncate font-semibold text-foreground">{triggerLabel}</span>
+              {currentModel && (
+                <>
+                  <span className="text-muted">·</span>
+                  <span
+                    className="truncate font-mono text-[10px] text-muted"
+                    title={currentModelLabel !== currentModel ? currentModel : undefined}
+                  >
+                    {currentModelLabel}
+                  </span>
+                </>
+              )}
+              {currentEffort && (
+                <>
+                  <span className="text-muted">·</span>
+                  {/* Localize via the same key the column uses so the closed trigger
+                      doesn't show raw low/max in zh builds; unknown falls back to raw. */}
+                  <span className="shrink-0 text-[10px] capitalize text-muted">
+                    {t(`chat.picker.effortOptions.${currentEffort}`, { defaultValue: currentEffort })}
+                  </span>
+                </>
+              )}
             </>
           )}
           {/* In-flight feedback replaces the chevron rather than greying the menu:
