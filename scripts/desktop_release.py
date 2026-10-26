@@ -18,7 +18,9 @@ from runpy import run_path
 _versions = run_path(str(Path(__file__).with_name("release_package_version.py")))
 package_version_from_release_tag = _versions["package_version_from_release_tag"]
 _github = run_path(str(Path(__file__).with_name("github_release.py")))
-DESKTOP_SOURCE_SCHEMA_VERSION = 2
+# Schema 3 marks records whose macOS artifacts are Developer ID signed and
+# notarized. Schema 1 and 2 records were published with ad-hoc macOS apps.
+DESKTOP_SOURCE_SCHEMA_VERSION = 3
 CUA_DRIVER_SOURCES = Path(__file__).resolve().parents[1] / "desktop" / "cua-driver" / "sources.json"
 TARGETS = {
     "aarch64-apple-darwin": ("macos", "aarch64", ".dmg"),
@@ -27,6 +29,23 @@ TARGETS = {
 }
 RC_TAG = re.compile(r"gh-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)rc(0|[1-9][0-9]*)")
 SHA = re.compile(r"[0-9a-f]{40}")
+# The OS-signing layers a `.SIGNATURE` file names, by signing profile. A tag
+# build must record its target's release profile; a manual build records the
+# profile it actually produced.
+SIGNING_PROFILES = {
+    "macos": {
+        "developer-id": (
+            "runtime-developer-id-signed",
+            "app-developer-id-notarized-stapled",
+            "dmg-developer-id-notarized-stapled",
+        ),
+        "ad-hoc": ("runtime-unsigned", "app-adhoc", "dmg-unsigned-unnotarized"),
+    },
+    "windows": {"unsigned": ("installer-unsigned",)},
+}
+RELEASE_SIGNING_PROFILE = {"macos": "developer-id", "windows": "unsigned"}
+# The layers already-published schema 1 and 2 records carry.
+LEGACY_SIGNATURE = {"macos": "app-adhoc\ndmg-unsigned-unnotarized\n", "windows": "installer-unsigned\n"}
 SEMVER = re.compile(
     r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
     r"(?:-(?P<pre>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?"
@@ -76,8 +95,9 @@ def prepare(
         resolved = resolve(tag, source_sha)
         if git_output("rev-parse", "HEAD") != source_sha or version != resolved["version"]:
             raise ValueError("desktop checkout/version does not match the release tag")
-        # The reusable TEST path receives no secrets and overrides any identity
-        # configuration. The manual path retains its optional credential policy.
+        # Tauri never signs with an identity: macOS Developer ID signing and
+        # notarization belong to desktop/scripts/macos_signing.py, and Windows
+        # installers stay unsigned.
         override["bundle"] = {
             "macOS": {"signingIdentity": "-"},
             "windows": {"certificateThumbprint": None, "signCommand": None},
@@ -91,6 +111,9 @@ def prepare(
         if TARGETS[target][0] == "macos":
             bundle = override.setdefault("bundle", {})
             macos = bundle.setdefault("macOS", {})
+            # Tauri seals the bundle ad hoc with the hardened runtime and the
+            # checked-in entitlements; a signed build then re-signs it.
+            macos["signingIdentity"] = "-"
             macos["files"] = {
                 "Helpers/cua-driver": f"binaries/cua-driver-{target}",
             }
@@ -115,10 +138,12 @@ def digest(path: Path) -> str:
     return result.hexdigest()
 
 
-def signature(target: str) -> str:
-    if TARGETS[target][0] == "macos":
-        return "app-adhoc\ndmg-unsigned-unnotarized\n"
-    return "installer-unsigned\n"
+def signature(target: str, profile: str | None = None) -> str:
+    system = TARGETS[target][0]
+    layers = SIGNING_PROFILES[system].get(profile or RELEASE_SIGNING_PROFILE[system])
+    if layers is None:
+        raise ValueError("Unknown signing profile for this desktop target")
+    return "".join(f"{layer}\n" for layer in layers)
 
 
 def asset_names(version: str, target: str) -> list[str]:
@@ -223,8 +248,9 @@ def record(*, version: str, target: str, tag: str, source_sha: str,
            driver_cdhash: str | None = None) -> None:
     if SHA.fullmatch(source_sha) is None:
         raise ValueError("Invalid source SHA")
-    if tag and (version != desktop_version_from_tag(tag) or signing != signature(target).strip()):
-        raise ValueError("TEST version/signature policy mismatch")
+    signature_text = signature(target, signing)
+    if tag and (version != desktop_version_from_tag(tag) or signature_text != signature(target)):
+        raise ValueError("Release version/signature policy mismatch")
     manifest_path = runtime / "runtime-manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     validate_manifest(manifest, target, tag)
@@ -260,7 +286,7 @@ def record(*, version: str, target: str, tag: str, source_sha: str,
     elif any(value is not None for value in driver_values):
         raise ValueError("Windows desktop artifacts cannot carry macOS Cua Driver provenance")
     (output / names[2]).write_text(json.dumps(source, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    (output / names[3]).write_text(signing + "\n", encoding="utf-8")
+    (output / names[3]).write_text(signature_text, encoding="utf-8")
     (output / names[4]).write_text(
         "".join(f"{digest(output / name)}  {name}\n" for name in sorted(names[:4])), encoding="utf-8",
     )
@@ -295,7 +321,7 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
             raise ValueError("Desktop asset hash mismatch")
         source = json.loads((directory / names[2]).read_text(encoding="utf-8"))
         schema_version = source.get("schema_version")
-        if schema_version not in {1, DESKTOP_SOURCE_SCHEMA_VERSION}:
+        if schema_version not in {1, 2, DESKTOP_SOURCE_SCHEMA_VERSION}:
             raise ValueError("Desktop source provenance schema mismatch")
         expected_source = {"schema_version": schema_version, "tag": tag, "source_sha": source_sha,
                            "version": version, "target": target,
@@ -360,7 +386,7 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
                     )
                 ):
                     raise ValueError("Desktop Cua Driver provenance mismatch")
-            elif driver.get("schema_version") == 2:
+            elif driver.get("schema_version") == 2:  # driver provenance schema, not the record's
                 if (
                     any(driver.get(field) != pinned[field] for field in patched_fields)
                     or driver.get("target") != target
@@ -383,8 +409,13 @@ def verify(directory: Path, tag: str, source_sha: str, *, updater_enabled: bool 
             raise ValueError("Windows desktop source unexpectedly carries Cua Driver provenance")
         if source != expected_source:
             raise ValueError("Desktop source provenance mismatch")
-        if (directory / names[3]).read_text(encoding="utf-8") != signature(target):
-            raise ValueError("Desktop TEST signature policy mismatch")
+        expected_signature = (
+            signature(target)
+            if schema_version == DESKTOP_SOURCE_SCHEMA_VERSION
+            else LEGACY_SIGNATURE[TARGETS[target][0]]
+        )
+        if (directory / names[3]).read_text(encoding="utf-8") != expected_signature:
+            raise ValueError("Desktop release signature policy mismatch")
         validate_manifest(json.loads((directory / names[1]).read_text(encoding="utf-8")), target, tag)
     return [directory / name for name in sorted(expected)]
 
@@ -443,7 +474,7 @@ def main() -> None:
     producer.add_argument("--installer", type=Path, required=True)
     producer.add_argument("--runtime", type=Path, required=True)
     producer.add_argument("--output", type=Path, required=True)
-    producer.add_argument("--signing", required=True)
+    producer.add_argument("--signing", required=True, help="signing profile: developer-id or ad-hoc (macOS), unsigned (Windows)")
     producer.add_argument("--prepared-driver", type=Path)
     producer.add_argument("--driver", type=Path)
     producer.add_argument("--driver-provenance-path", type=Path)

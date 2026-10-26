@@ -899,11 +899,48 @@ def compile_payload(private_python: Path, library: Path) -> None:
         raise SystemExit(f"{len(missing)} Runtime sources have no bytecode, including {missing[0]}.py")
 
 
+def sign_payload(target_config: dict[str, Any], payload: Path, identity: str, keychain: str | None) -> None:
+    """Sign every Mach-O in the payload before anything hashes or archives it.
+
+    Signing rewrites each binary, so it has to precede the probe that runs the
+    shipped tree, the archive, and the tree hash; the probe then exercises the
+    hardened runtime and entitlements users get.
+    """
+    if target_config["os"] != "macos":
+        raise SystemExit("Only macOS Runtime payloads are code signed here")
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import macos_signing
+
+    try:
+        count = macos_signing.sign_runtime(
+            payload,
+            arch=target_config["arch"],
+            python_executable=payload / target_config["python_entrypoint"],
+            node_executable=payload / target_config["node_entrypoint"],
+            identity=identity,
+            keychain=keychain,
+        )
+    except macos_signing.SigningError as error:
+        raise SystemExit(f"Runtime code signing failed: {error}") from None
+    print(f"--- signed {count} Runtime Mach-O files ---", file=sys.stderr, flush=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--cache", type=Path, default=DESKTOP_DIR / "target" / "runtime-cache")
+    # A signed packaging run exports these after importing its Developer ID.
+    parser.add_argument(
+        "--codesign-identity",
+        default=os.environ.get("AVIBE_CODESIGN_IDENTITY"),
+        help="macOS: sign every Runtime Mach-O with this Developer ID identity before archiving",
+    )
+    parser.add_argument(
+        "--codesign-keychain",
+        default=os.environ.get("AVIBE_CODESIGN_KEYCHAIN"),
+        help="keychain that holds --codesign-identity",
+    )
     args = parser.parse_args()
 
     sources = json.loads(SOURCES_PATH.read_text(encoding="utf-8"))
@@ -963,7 +1000,10 @@ def main() -> int:
         prune_payload(payload)
         private_python = payload / target_config["python_entrypoint"]
         compile_payload(private_python, python_library(private_python, payload))
-        # Probe the tree as it ships, bytecode included, with no network calls.
+        if args.codesign_identity:
+            sign_payload(target_config, payload, args.codesign_identity, args.codesign_keychain)
+        # Probe the tree as it ships, bytecode and signatures included, with no
+        # network calls.
         verify_fetch_dependencies(private_python, work_dir, required_binary_wheels)
         verify_payload(target_config, payload, work_dir, sources["npm_version"])
 

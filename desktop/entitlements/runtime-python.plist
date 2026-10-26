@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The private Runtime's Python interpreter. Every entitlement here must
+	     carry evidence that this process needs it; today there is none.
+
+	     Library validation stays on. The interpreter loads only libraries from
+	     its own Runtime tree, which the release signs with the same Team
+	     before archiving, plus Apple's system frameworks (the Keychain store
+	     reaches Security.framework through ctypes). Desktop builds never run
+	     pip or uv against this interpreter, and Agent backends and user tools
+	     run as separate processes, so no third-party library is ever mapped
+	     into it.
+
+	     No executable-memory exception. ctypes callbacks and cffi callbacks
+	     (curl_cffi's transfer-progress hook in web fetch) allocate their
+	     closures from libffi's prepared trampolines, not writable executable
+	     pages. Both run under the hardened runtime with no entitlement on
+	     arm64 and on x86_64.
+
+	     The fixed identifier bot.avibe.desktop.runtime.python, not the
+	     versioned file name, keeps this interpreter's designated requirement
+	     and therefore its Keychain item access stable across Python upgrades. -->
+</dict>
+</plist>
