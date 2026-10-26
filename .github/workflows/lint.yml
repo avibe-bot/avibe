@@ -110,6 +110,48 @@ jobs:
           pip install pre-commit
           pre-commit run --all-files
 
+  web-fetch-runtime:
+    needs: [changes, build-linux-artifacts]
+    if: needs.changes.outputs.docs_only == 'false'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-latest, python: "3.10"}
+          - {os: ubuntu-latest, python: "3.11"}
+          - {os: ubuntu-latest, python: "3.12"}
+          - {os: ubuntu-latest, python: "3.13"}
+          - {os: ubuntu-latest, python: "3.14"}
+          - {os: ubuntu-24.04-arm, python: "3.12"}
+          - {os: macos-15-intel, python: "3.12"}
+          - {os: macos-15, python: "3.12"}
+          - {os: windows-latest, python: "3.12"}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
+        with:
+          name: vibe-wheel-linux
+          path: dist
+      - name: Install frozen binary dependencies and wheel
+        run: |
+          python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
+          uv export --frozen --no-dev --no-emit-project --output-file fetch-requirements.txt
+          uv pip install --system --require-hashes --only-binary=:all: --no-binary claude-agent-sdk --no-binary http-ece -r fetch-requirements.txt
+          uv pip install --system --no-deps dist/*.whl
+          uv pip install --system pytest pytest-asyncio jsonschema
+          python -c "from pathlib import Path; p=Path('ui/dist'); p.mkdir(parents=True,exist_ok=True); (p/'index.html').touch()"
+      - name: Verify native resources, pinned transports and disposable workers offline
+        run: |
+          python -m pytest -q tests/test_model_hub_fetch_policy.py tests/test_model_hub_fetch_transport.py tests/test_model_hub_fetch_tls.py tests/test_model_hub_local_fetch.py tests/test_desktop_runtime_bundle_builder.py -k 'not packaged_cli_survives'
+
   ui-checks:
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
@@ -118,7 +160,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: "22.14.0"
+          node-version: "22.23.4"
           cache: "npm"
           cache-dependency-path: ui/package-lock.json
 
@@ -143,7 +185,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: "22.14.0"
+          node-version: "22.23.4"
           cache: "npm"
           cache-dependency-path: ui/package-lock.json
       - name: Install UI dependencies
@@ -159,8 +201,9 @@ jobs:
           npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
           npm run test:project-order
           npm run test:inbox-return
+          npm run test:home-media
           npm run test:badge-triggers
-          npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts
+          npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts skills-dialog.spec.ts
           npm run test:voice-shortcut
           npm run test:chat-interactions
           npm run test:chat-selection
@@ -180,7 +223,7 @@ jobs:
           path: .show-runtime-test
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: "22.14.0"
+          node-version: "22.23.4"
           cache: npm
           cache-dependency-path: .show-runtime-test/package-lock.json
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
@@ -217,7 +260,7 @@ jobs:
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
-          node-version: "22.14.0"
+          node-version: "22.23.4"
           cache: "npm"
           cache-dependency-path: ui/package-lock.json
 

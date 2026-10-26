@@ -5,7 +5,8 @@ import json
 import sys
 import time
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -85,7 +86,10 @@ def test_get_admin_user_ids_includes_all_platforms(monkeypatch, tmp_path, sqlite
     assert set(admin_ids) == {"slack::U1", "discord::D1"}
 
 
-def test_update_notification_admin_dms_include_buttons_except_wechat(monkeypatch, tmp_path, sqlite_schema_db_factory):
+@pytest.mark.parametrize("language, action_label", [("en", "Update Now"), ("zh", "立即更新")])
+def test_update_notification_admin_dms_include_buttons_except_wechat(
+    monkeypatch, tmp_path, sqlite_schema_db_factory, language, action_label
+):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
@@ -101,12 +105,19 @@ def test_update_notification_admin_dms_include_buttons_except_wechat(monkeypatch
     clients = {platform: _FakeIMClient() for platform in ["slack", "discord", "telegram", "lark", "wechat"]}
     controller.im_clients = clients
     controller.im_client = clients["slack"]
+    controller.config.language = language
     checker = UpdateChecker(controller, UpdateConfig())
 
     delivered = asyncio.run(checker._send_update_notification("1.0.0", "1.0.1"))
 
     assert delivered is True
+    for client in clients.values():
+        assert "1.0.0" in client.dm_calls[0][1]
+        assert "`" not in client.dm_calls[0][1]
     slack_kwargs = clients["slack"].dm_calls[0][2]
+    assert "1.0.0" in slack_kwargs["blocks"][0]["text"]["text"]
+    assert "`" not in slack_kwargs["blocks"][0]["text"]["text"]
+    assert slack_kwargs["blocks"][1]["elements"][0]["text"]["text"] == action_label
     assert slack_kwargs["blocks"][1]["elements"][0]["action_id"] == "vibe_update_now"
     assert slack_kwargs["blocks"][1]["elements"][0]["value"] == "1.0.1"
     assert f"<{RELEASE_URL_101}|1.0.1>" in slack_kwargs["blocks"][0]["text"]["text"]
@@ -117,11 +128,54 @@ def test_update_notification_admin_dms_include_buttons_except_wechat(monkeypatch
         assert f"[1.0.1]({RELEASE_URL_101})" in text
         kwargs = clients[platform].dm_calls[0][2]
         keyboard = kwargs["keyboard"]
-        assert keyboard.buttons[0][0].text == "Update Now"
+        assert keyboard.buttons[0][0].text == action_label
         assert keyboard.buttons[0][0].callback_data == "vibe_update_now:1.0.1"
 
     assert f"1.0.1 ({RELEASE_URL_101})" in clients["wechat"].dm_calls[0][1]
     assert "keyboard" not in clients["wechat"].dm_calls[0][2]
+
+
+@pytest.mark.parametrize("language, action_label", [("en", "Update Now"), ("zh", "立即更新")])
+@pytest.mark.parametrize("platform", ["slack", "discord"])
+def test_update_notification_legacy_fallback_preserves_plain_versions_and_actions(
+    monkeypatch, tmp_path, sqlite_schema_db_factory, language, action_label, platform
+):
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
+    SettingsStore.reset_instance()
+    store = SettingsStore.get_instance()
+    store.set_channels_for_platform("discord", {"123456789012345678": ChannelSettings(enabled=True)})
+    controller = _StubController(store)
+    controller.config.platform = platform
+    controller.config.language = language
+    client = _FakeIMClient()
+    client.web_client = SimpleNamespace(chat_postMessage=AsyncMock(return_value={"ok": True}))
+    client.send_message_with_buttons = AsyncMock(return_value="msg-1")
+    controller.im_clients = {platform: client}
+    controller.im_client = client
+    controller.get_im_client_for_context = lambda context: client
+    checker = UpdateChecker(controller, UpdateConfig())
+    monkeypatch.setattr(checker, "_get_workspace_owner_id", AsyncMock(return_value="U1"))
+    monkeypatch.setattr(checker, "_open_dm_channel", AsyncMock(return_value="D1"))
+
+    assert asyncio.run(checker._send_update_notification("1.0.0", "1.0.1")) is True
+
+    if platform == "slack":
+        payload = client.web_client.chat_postMessage.call_args.kwargs
+        assert "`" not in payload["text"]
+        text = payload["blocks"][0]["text"]["text"]
+        assert f"<{RELEASE_URL_101}|1.0.1>" in text
+        button = payload["blocks"][1]["elements"][0]
+        assert button["text"]["text"] == action_label
+        assert button["action_id"] == "vibe_update_now"
+        assert button["value"] == "1.0.1"
+    else:
+        _, text, keyboard = client.send_message_with_buttons.call_args.args
+        assert f"[1.0.1]({RELEASE_URL_101})" in text
+        assert keyboard.buttons[0][0].text == action_label
+        assert keyboard.buttons[0][0].callback_data == "vibe_update_now:1.0.1"
+    assert "1.0.0" in text
+    assert "`" not in text
 
 
 def test_update_notification_release_url_normalizes_github_tags():
@@ -540,24 +594,54 @@ def test_update_marker_records_platform_for_non_slack_callbacks(monkeypatch, tmp
     assert data["message_id"] == "42"
 
 
-def test_post_update_notification_uses_unicode_emoji_for_non_slack(monkeypatch, tmp_path, sqlite_schema_db_factory):
+@pytest.mark.parametrize("language", ["en", "zh"])
+@pytest.mark.parametrize("platform", ["slack", "discord", "telegram", "lark", "wechat"])
+@pytest.mark.parametrize("route", ["edit", "admin_dm"])
+@pytest.mark.parametrize("outcome", ["success", "mismatch"])
+def test_post_update_notifications_use_plain_versions(
+    monkeypatch, tmp_path, sqlite_schema_db_factory, language, platform, route, outcome
+):
     monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
     sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     SettingsStore.reset_instance()
     store = SettingsStore.get_instance()
     controller = _StubController(store)
-    telegram_client = _FakeIMClient()
-    controller.im_clients = {"telegram": telegram_client}
+    controller.config.language = language
+    client = _FakeIMClient()
+    client.web_client = SimpleNamespace(chat_update=AsyncMock(return_value={"ok": True}))
+    controller.im_clients = {platform: client}
     checker = UpdateChecker(controller, UpdateConfig())
-    checker._write_update_marker("1.0.1", channel_id="123456", message_id="42", platform="telegram")
-    monkeypatch.setattr("vibe.__version__", "1.0.1", raising=False)
+    if route == "admin_dm":
+        store.set_users_for_platform(platform, {"admin": UserSettings(is_admin=True)})
+        checker._write_update_marker("1.0.1", platform=platform)
+    else:
+        checker._write_update_marker("1.0.1", channel_id="123456", message_id="42", platform=platform)
+    monkeypatch.setattr("vibe.__version__", "1.0.1" if outcome == "success" else "1.0.0", raising=False)
 
-    asyncio.run(checker.check_and_send_post_update_notification())
+    assert asyncio.run(checker.check_and_send_post_update_notification()) is True
 
-    assert telegram_client.edit_calls
-    _, _, text, _ = telegram_client.edit_calls[0]
-    assert text == "✅ Avibe has been updated to `1.0.1`"
-    assert ":white_check_mark:" not in text
+    if route == "admin_dm":
+        text = client.dm_calls[0][1]
+    elif platform == "slack":
+        payload = client.web_client.chat_update.call_args.kwargs
+        text = payload["text"]
+        if outcome == "success":
+            block_text = payload["blocks"][0]["text"]["text"]
+            assert "1.0.1" in block_text
+            assert "`" not in block_text
+    else:
+        text = client.edit_calls[0][2]
+    assert "1.0.1" in text
+    assert "`" not in text
+    if outcome == "success":
+        assert text == {
+            "en": "✅ Avibe has been updated to 1.0.1",
+            "zh": "✅ Avibe 已更新到 1.0.1",
+        }[language]
+    else:
+        assert "1.0.0" in text
+        assert {"en": "did not take effect", "zh": "没有生效"}[language] in text
+    assert not (tmp_path / "state" / "pending_update_notification.json").exists()
 
 
 def test_post_update_marker_waits_for_its_transport(monkeypatch, tmp_path, sqlite_schema_db_factory):
@@ -856,8 +940,8 @@ def test_restartless_auto_update_blocks_same_version_retry_and_notifies(monkeypa
     assert telegram_client.dm_calls
     _, text, _ = telegram_client.dm_calls[0]
     assert "did not take effect" in text
-    assert "`3.0.4`" in text
-    assert "`3.0.3`" in text
+    assert "3.0.4" in text
+    assert "3.0.3" in text
     assert checker.state.blocked_auto_update_version == "3.0.4"
     assert checker.state.blocked_auto_update_reason == "restart_not_scheduled"
 
@@ -937,7 +1021,7 @@ def test_post_update_notification_accepts_newer_running_version(monkeypatch, tmp
 
     assert telegram_client.edit_calls
     _, _, text, _ = telegram_client.edit_calls[0]
-    assert text == "✅ Avibe has been updated to `3.0.4`"
+    assert text == "✅ Avibe has been updated to 3.0.4"
     assert checker.state.blocked_auto_update_version is None
     marker = tmp_path / "state" / "pending_update_notification.json"
     assert not marker.exists()
@@ -959,8 +1043,8 @@ def test_post_update_notification_skips_success_when_running_version_mismatches(
     assert telegram_client.edit_calls
     _, _, text, _ = telegram_client.edit_calls[0]
     assert "did not take effect" in text
-    assert "`3.0.4`" in text
-    assert "`3.0.3`" in text
+    assert "3.0.4" in text
+    assert "3.0.3" in text
     assert checker.state.blocked_auto_update_version == "3.0.4"
     assert checker.state.blocked_auto_update_reason == "post_update_version_mismatch"
     assert checker.state.blocked_auto_update_current_version == "3.0.3"

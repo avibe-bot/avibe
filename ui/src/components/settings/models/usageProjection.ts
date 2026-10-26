@@ -1,9 +1,13 @@
 import type {
+  ServiceCounters,
   UsageBucket,
+  UsageBucketEntry,
   UsageBucketRow,
   UsageCounters,
   UsageReport,
+  UsageServiceBucketRow,
   UsageSummary,
+  UsageTotals,
   UsageWindowKey,
 } from './types';
 
@@ -43,8 +47,54 @@ export const emptyCounters = (): UsageCounters => ({
   output_tokens: 0,
 });
 
-export function aggregateCounters(rows: readonly UsageCounters[]): UsageCounters {
-  const total = rows.reduce<UsageCounters>((sum, row) => ({
+/** Model counters, or a search-service row: what a usage total can be summed from. */
+type CountedRow = UsageCounters | UsageServiceBucketRow;
+
+export const isServiceRow = (row: CountedRow): row is UsageServiceBucketRow =>
+  (row as { kind?: unknown }).kind === 'service';
+
+export const isModelRow = (row: UsageBucketEntry): row is UsageBucketRow => !isServiceRow(row);
+
+/** A search service's totals, and its billable requests the current catalog no longer prices. */
+export type ServiceTotals = ServiceCounters & { excluded_service_requests: number };
+
+/**
+ * The (Source, service) pairs whose service the current catalog no longer
+ * prices. A bucket row cannot say so; `services` does, for the whole window.
+ */
+export const unpricedServices = (report: UsageSummary): ReadonlySet<string> => new Set(report.services
+  .filter((service) => service.priced === false)
+  .map((service) => pairKey(service.source_id, service.service_id)));
+
+export function aggregateServiceRows(
+  rows: readonly UsageServiceBucketRow[],
+  unpriced: ReadonlySet<string>,
+): ServiceTotals {
+  const sum = (value: (row: UsageServiceBucketRow) => number) => rows.reduce((total, row) => total + value(row), 0);
+  const total: ServiceTotals = {
+    requests: sum((row) => row.requests),
+    billable_requests: sum((row) => row.billable_requests),
+    uncertain_requests: sum((row) => row.uncertain_requests),
+    reported_requests: sum((row) => row.reported_requests),
+    excluded_service_requests: sum((row) => (unpriced.has(pairKey(row.source_id, row.service_id)) ? row.billable_requests : 0)),
+  };
+  if (rows.length > 0 && rows.every(usageIsPriced)) {
+    total.api_cost_usd = sum((row) => row.api_cost_usd ?? 0);
+    total.reported_usd = sum((row) => row.reported_usd ?? 0);
+    total.api_cost_lower_bound = rows.some((row) => row.api_cost_lower_bound === true);
+  }
+  return total;
+}
+
+/**
+ * A search request is not a model call, so a service row adds no request or
+ * token to the sum, only its cost. The billable requests of a service the
+ * catalog no longer prices (`unpricedServices`) are left out of that cost, as
+ * an unpriced model's tokens are.
+ */
+export function aggregateCounters(rows: readonly CountedRow[], unpriced: ReadonlySet<string> = new Set()): UsageTotals {
+  const models = rows.filter((row): row is UsageCounters => !isServiceRow(row));
+  const total = models.reduce<UsageTotals>((sum, row) => ({
     requests: sum.requests + row.requests,
     token_reports: sum.token_reports + row.token_reports,
     input_tokens: sum.input_tokens + row.input_tokens,
@@ -53,19 +103,24 @@ export function aggregateCounters(rows: readonly UsageCounters[]): UsageCounters
   }), emptyCounters());
   // A priced row carries its cost; the sum is priced only when every row is.
   if (rows.length > 0 && rows.every(usageIsPriced)) {
+    const services = aggregateServiceRows(rows.filter(isServiceRow), unpriced);
     total.api_cost_usd = rows.reduce((sum, row) => sum + (row.api_cost_usd ?? 0), 0);
-    total.excluded_tokens = rows.reduce((sum, row) => sum + (row.excluded_tokens ?? 0), 0);
+    total.excluded_tokens = models.reduce((sum, row) => sum + (row.excluded_tokens ?? 0), 0);
     total.api_cost_lower_bound = rows.some((row) => row.api_cost_lower_bound === true);
+    total.service_reported_usd = services.reported_usd ?? 0;
+    total.excluded_service_requests = services.excluded_service_requests;
   }
   return total;
 }
 
 /** Whether the server priced these counters at API prices. */
-export const usageIsPriced = (counters: UsageCounters): boolean => typeof counters.api_cost_usd === 'number';
+export const usageIsPriced = (counters: { api_cost_usd?: number }): boolean => typeof counters.api_cost_usd === 'number';
 
-/** Every priced token of these counters belongs to a model with no known price. */
-export const usageHasNoPrice = (counters: UsageCounters): boolean =>
-  usageIsPriced(counters) && (counters.excluded_tokens ?? 0) > 0 && (counters.api_cost_usd ?? 0) === 0;
+/** Everything these counters would price is left out: models and services with no known price. */
+export const usageHasNoPrice = (
+  counters: { api_cost_usd?: number; excluded_tokens?: number; excluded_service_requests?: number },
+): boolean => usageIsPriced(counters) && (counters.api_cost_usd ?? 0) === 0
+  && ((counters.excluded_tokens ?? 0) > 0 || (counters.excluded_service_requests ?? 0) > 0);
 
 /** Whether the report carries API-price value at all: a server that predates it never does. */
 export const reportIsPriced = (report: UsageSummary): boolean => report.pricing !== undefined;
@@ -215,6 +270,10 @@ export function formatBucketHeading(bucket: UsageBucket, locale: string): { rang
  */
 export const REMOVED_SOURCES_KEY = `${PAIR_SEPARATOR}removed`;
 
+/** Grouped by model, every live Source's search services as one identity: none of them is a model. */
+export const SEARCH_SERVICES_KEY = `${PAIR_SEPARATOR}services`;
+const FETCH_SERVICES_KEY = `${PAIR_SEPARATOR}web_fetch`;
+
 /**
  * The longest ledger key, in code points as the ledger counts them, that is
  * still the identifier itself; a longer one is a head plus a digest.
@@ -224,6 +283,8 @@ const LEDGER_VERBATIM_MAX_LENGTH = 200;
 export type UsageText = {
   unknownModel: string;
   removedSources: string;
+  searchServices: string;
+  webFetch: string;
 };
 
 export type UsageIdentity = {
@@ -238,19 +299,20 @@ export type UsageIdentity = {
 };
 
 export type UsageIdentities = {
-  keyOf: (row: UsageBucketRow) => string;
+  keyOf: (row: UsageBucketEntry) => string;
   get: (key: string) => UsageIdentity;
   /** These rows' identities in first-metered order, the removed aggregate last. */
-  of: (rows: readonly UsageBucketRow[]) => UsageIdentity[];
+  of: (rows: readonly UsageBucketEntry[]) => UsageIdentity[];
 };
 
-const allRows = (report: UsageReport): UsageBucketRow[] => report.buckets.flatMap((bucket) => bucket.rows);
+const allRows = (report: UsageReport): UsageBucketEntry[] => report.buckets.flatMap((bucket) => bucket.rows);
 
 /**
  * The Sources config still holds, by ID. A configured Source always carries its
- * name, so the report leaves the label null exactly when config let it go.
+ * name, so the report leaves the label null exactly when config let it go. A
+ * tool-only Source is named only by its search usage.
  */
-const liveSources = (report: UsageReport) => new Map(report.sources
+const liveSources = (report: UsageReport) => new Map([...report.sources, ...report.services]
   .filter((source) => source.label != null)
   .map((source) => [source.source_id, source.label!.trim()] as const));
 
@@ -302,17 +364,19 @@ function distinctLabels(entries: ReadonlyArray<readonly [string, string]>): Map<
  * under one, keeps its own identity; every row of a Source config no longer
  * holds folds into one removed aggregate, so its counters still add up while
  * no Source ID reaches the screen. Labels come from the whole report, so a
- * filter never renames what stays on screen.
+ * filter never renames what stays on screen. A search-service row belongs to
+ * its Source, and grouped by model, to the one search-services identity.
  */
 export function usageIdentities(report: UsageReport, group: 'model' | 'source', text: UsageText): UsageIdentities {
   const live = liveSources(report);
   const removed = (sourceId: string) => !live.has(sourceId);
-  const keyOf = (row: UsageBucketRow) => (removed(row.source_id)
+  const keyOf = (row: UsageBucketEntry) => (removed(row.source_id)
     ? REMOVED_SOURCES_KEY
-    : group === 'source' ? row.source_id : pairKey(row.source_id, row.model_id));
+    : group === 'source' ? row.source_id : isServiceRow(row)
+      ? row.tool === 'web_fetch' ? FETCH_SERVICES_KEY : SEARCH_SERVICES_KEY
+      : pairKey(row.source_id, row.model_id));
   const rows = allRows(report);
-  const hasRemoved = report.sources.some((source) => removed(source.source_id))
-    || rows.some((row) => removed(row.source_id));
+  const hasRemoved = [...report.sources, ...report.services, ...rows].some((entry) => removed(entry.source_id));
   const removedEntry = hasRemoved ? [[REMOVED_SOURCES_KEY, text.removedSources] as const] : [];
   // The aggregate keeps the product's own name; live Sources tie-break by ID.
   const sourceLabels = distinctLabels([...removedEntry, ...[...live].sort(byKey)]);
@@ -338,6 +402,7 @@ export function usageIdentities(report: UsageReport, group: 'model' | 'source', 
     }
   } else {
     const pairs = new Map(rows
+      .filter(isModelRow)
       .filter((row) => !removed(row.source_id))
       .map((row) => [pairKey(row.source_id, row.model_id), row] as const));
     const models = new Map([...pairs].map(([key, row]) => [key, {
@@ -360,6 +425,11 @@ export function usageIdentities(report: UsageReport, group: 'model' | 'source', 
         removed: false,
         unlisted: model.unlisted,
       });
+    }
+    for (const [key, label] of [[SEARCH_SERVICES_KEY, text.searchServices], [FETCH_SERVICES_KEY, text.webFetch]]) {
+      if (rows.some((row) => isServiceRow(row) && keyOf(row) === key)) {
+        identities.set(key, { key, label, sourceLabel: '', removed: false, unlisted: false });
+      }
     }
   }
   const get = (key: string) => identities.get(key)!;
@@ -386,12 +456,12 @@ export function usageIdentities(report: UsageReport, group: 'model' | 'source', 
 export function foldUsageSelection(report: UsageReport, selection: UsageFilter): UsageFilter {
   const live = liveSources(report);
   const rows = allRows(report);
-  const known = new Set([...report.sources.map((source) => source.source_id), ...rows.map((row) => row.source_id)]);
+  const known = new Set([...report.sources, ...report.services, ...rows].map((entry) => entry.source_id));
   const fold = (sourceId: string, key: string) => (live.has(sourceId) ? key : REMOVED_SOURCES_KEY);
-  // What each filter lists: every Source the report names, and every pair it metered.
+  // What each filter lists: every Source the report names, and every model pair it metered.
   const offered = {
     sourceIds: new Set([...known].map((sourceId) => fold(sourceId, sourceId))),
-    modelKeys: new Set(rows.map((row) => fold(row.source_id, pairKey(row.source_id, row.model_id)))),
+    modelKeys: new Set(rows.filter(isModelRow).map((row) => fold(row.source_id, pairKey(row.source_id, row.model_id)))),
   };
   const reconcile = (keys: readonly string[], options: ReadonlySet<string>, sourceOf: (key: string) => string) => [
     ...new Set(keys.map((key) => (known.has(sourceOf(key)) ? fold(sourceOf(key), key) : key))),
@@ -424,28 +494,35 @@ export function resolveUsageFilter(report: UsageReport, picked: UsageFilter): Us
   )))];
   return {
     sourceIds: expand(selection.sourceIds, removedRows.map((row) => row.source_id)),
-    modelKeys: expand(selection.modelKeys, removedRows.map((row) => pairKey(row.source_id, row.model_id))),
+    modelKeys: expand(selection.modelKeys, removedRows.filter(isModelRow).map((row) => pairKey(row.source_id, row.model_id))),
   };
 }
 
-export function filterBucketRows(bucket: UsageBucket, filter: UsageFilter): UsageBucketRow[] {
+/** A search request is no model's, so a model filter leaves out every service row; a Source filter keeps its own. */
+export function filterBucketRows(bucket: UsageBucket, filter: UsageFilter): UsageBucketEntry[] {
   return bucket.rows.filter((row) => (
     (filter.sourceIds.length === 0 || filter.sourceIds.includes(row.source_id))
-    && (filter.modelKeys.length === 0 || filter.modelKeys.includes(pairKey(row.source_id, row.model_id)))
+    && (filter.modelKeys.length === 0 || (isModelRow(row) && filter.modelKeys.includes(pairKey(row.source_id, row.model_id))))
   ));
 }
 
-export function filteredRows(report: UsageReport, filter: UsageFilter): UsageBucketRow[] {
+export function filteredRows(report: UsageReport, filter: UsageFilter): UsageBucketEntry[] {
   return report.buckets.flatMap((bucket) => filterBucketRows(bucket, filter));
 }
 
+/** The rows a metric counts: a service row has a cost, but no call or token. */
+export const metricRows = (rows: readonly UsageBucketEntry[], metric: UsageMetric): UsageBucketEntry[] => (
+  metric === 'cost' ? [...rows] : rows.filter(isModelRow)
+);
+
 const typeSeries = (
-  rows: UsageBucketRow[],
+  rows: UsageBucketEntry[],
   metric: UsageMetric,
   historyComplete: boolean,
+  unpriced: ReadonlySet<string>,
 ): Array<[string, number | null]> => {
   if (metric === 'cost') {
-    return [['cost', !historyComplete && rows.length === 0 ? null : usageMetricValue(aggregateCounters(rows), 'cost')]];
+    return [['cost', !historyComplete && rows.length === 0 ? null : usageMetricValue(aggregateCounters(rows, unpriced), 'cost')]];
   }
   if (!historyComplete && rows.length === 0) {
     if (metric === 'requests') return [['requests', null]];
@@ -474,22 +551,23 @@ const typeSeries = (
 };
 
 /** Whether these rows' cost is only a floor, as the server marked it. */
-export const costIsFloor = (rows: readonly UsageCounters[], metric: UsageMetric): boolean => (
+export const costIsFloor = (rows: readonly CountedRow[], metric: UsageMetric): boolean => (
   metric === 'cost' && aggregateCounters(rows).api_cost_lower_bound === true
 );
 
 /** Whether these rows' cost has nothing priced in it, as opposed to a floor of some priced part. */
-export const costIsUnpriced = (rows: readonly UsageCounters[], metric: UsageMetric): boolean => (
-  metric === 'cost' && usageHasNoPrice(aggregateCounters(rows))
+export const costIsUnpriced = (rows: readonly CountedRow[], metric: UsageMetric, unpriced: ReadonlySet<string>): boolean => (
+  metric === 'cost' && usageHasNoPrice(aggregateCounters(rows, unpriced))
 );
 
 const bucketMetricValue = (
   bucket: UsageBucket,
-  rows: UsageBucketRow[],
+  rows: UsageBucketEntry[],
   metric: UsageMetric,
+  unpriced: ReadonlySet<string>,
 ): number | null => {
   if (!bucket.history_complete && rows.length === 0) return null;
-  return usageMetricValue(aggregateCounters(rows), metric);
+  return usageMetricValue(aggregateCounters(rows, unpriced), metric);
 };
 
 export function seriesFor(
@@ -499,11 +577,12 @@ export function seriesFor(
   metric: UsageMetric,
   text: UsageText,
 ): UsageSeries[] {
-  const rows = filteredRows(report, filter);
+  const inScope = (bucket: UsageBucket) => metricRows(filterBucketRows(bucket, filter), metric);
+  const unpricedKeys = unpricedServices(report);
   if (group === 'type') {
     const valuesByKey = new Map<string, Array<number | null>>();
     for (const bucket of report.buckets) {
-      for (const [key, value] of typeSeries(filterBucketRows(bucket, filter), metric, bucket.history_complete)) {
+      for (const [key, value] of typeSeries(inScope(bucket), metric, bucket.history_complete, unpricedKeys)) {
         valuesByKey.set(key, [...(valuesByKey.get(key) ?? []), value]);
       }
     }
@@ -514,8 +593,8 @@ export function seriesFor(
       requests: 'Requests',
       cost: 'API price',
     };
-    const floors = report.buckets.map((bucket) => costIsFloor(filterBucketRows(bucket, filter), metric));
-    const unpriced = report.buckets.map((bucket) => costIsUnpriced(filterBucketRows(bucket, filter), metric));
+    const floors = report.buckets.map((bucket) => costIsFloor(inScope(bucket), metric));
+    const unpriced = report.buckets.map((bucket) => costIsUnpriced(inScope(bucket), metric, unpricedKeys));
     return [...valuesByKey.entries()].map(([key, values], index) => ({
       key,
       label: labels[key],
@@ -531,28 +610,23 @@ export function seriesFor(
       key: 'total',
       label: metric,
       colorIndex: 0,
-      values: report.buckets.map((bucket) => bucketMetricValue(
-        bucket,
-        filterBucketRows(bucket, filter),
-        metric,
-      )),
-      floors: report.buckets.map((bucket) => costIsFloor(filterBucketRows(bucket, filter), metric)),
-      unpriced: report.buckets.map((bucket) => costIsUnpriced(filterBucketRows(bucket, filter), metric)),
+      values: report.buckets.map((bucket) => bucketMetricValue(bucket, inScope(bucket), metric, unpricedKeys)),
+      floors: report.buckets.map((bucket) => costIsFloor(inScope(bucket), metric)),
+      unpriced: report.buckets.map((bucket) => costIsUnpriced(inScope(bucket), metric, unpricedKeys)),
     }];
   }
 
   const identities = usageIdentities(report, group, text);
-  return identities.of(rows).map((identity, index) => {
-    const rowsOf = (bucket: UsageBucket) => filterBucketRows(bucket, filter)
-      .filter((row) => identities.keyOf(row) === identity.key);
+  return identities.of(report.buckets.flatMap(inScope)).map((identity, index) => {
+    const rowsOf = (bucket: UsageBucket) => inScope(bucket).filter((row) => identities.keyOf(row) === identity.key);
     return {
       key: identity.key,
       label: identity.label,
       colorIndex: index,
       removed: identity.removed,
-      values: report.buckets.map((bucket) => bucketMetricValue(bucket, rowsOf(bucket), metric)),
+      values: report.buckets.map((bucket) => bucketMetricValue(bucket, rowsOf(bucket), metric, unpricedKeys)),
       floors: report.buckets.map((bucket) => costIsFloor(rowsOf(bucket), metric)),
-      unpriced: report.buckets.map((bucket) => costIsUnpriced(rowsOf(bucket), metric)),
+      unpriced: report.buckets.map((bucket) => costIsUnpriced(rowsOf(bucket), metric, unpricedKeys)),
     };
   });
 }
@@ -564,8 +638,86 @@ export function reportHasPartialHistory(report: UsageReport, filter: UsageFilter
 
 export function reportHasUnknownTokens(report: UsageReport, filter: UsageFilter): boolean {
   return report.buckets.some((bucket) => {
-    const rows = filterBucketRows(bucket, filter);
+    const rows = filterBucketRows(bucket, filter).filter(isModelRow);
     const counters = aggregateCounters(rows);
     return rows.length > 0 && !usageTokensAreKnown(counters);
   });
+}
+
+export type ServiceUsageRow = {
+  key: string;
+  /** The Source's identity, as the Source filter names it. */
+  label: string;
+  /** The current catalog's name for the service, else its ID; empty for the removed aggregate. */
+  service: string;
+  tool?: 'web_fetch';
+  removed: boolean;
+  totals: ServiceTotals;
+};
+
+/**
+ * The search-service table: one row per live Source and service, busiest
+ * first, and every Source config let go folded into the one removed identity
+ * last. It follows the Source filter and pinned bucket as the model table does.
+ */
+export function serviceUsageRows(
+  report: UsageReport,
+  filter: UsageFilter,
+  pinnedKey: string | null,
+  text: UsageText,
+): ServiceUsageRow[] {
+  const buckets = pinnedKey === null ? report.buckets : report.buckets.filter((bucket) => bucket.key === pinnedKey);
+  const sources = usageIdentities(report, 'source', text);
+  const unpriced = unpricedServices(report);
+  const groups = new Map<string, UsageServiceBucketRow[]>();
+  for (const row of buckets.flatMap((bucket) => filterBucketRows(bucket, filter)).filter(isServiceRow)) {
+    const source = sources.keyOf(row);
+    const baseKey = source === REMOVED_SOURCES_KEY ? source : pairKey(row.source_id, row.service_id);
+    const key = row.tool === 'web_fetch' ? `${baseKey}:web_fetch` : baseKey;
+    groups.set(key, [...(groups.get(key) ?? []), row]);
+  }
+  return [...groups].map(([key, rows]) => {
+    const [first] = rows;
+    const removed = sources.keyOf(first) === REMOVED_SOURCES_KEY;
+    const catalogLabel = report.services
+      .find((service) => service.source_id === first.source_id && service.service_id === first.service_id
+        && (service.tool ?? 'web_search') === (first.tool ?? 'web_search'))
+      ?.service_label?.trim();
+    return {
+      key,
+      label: sources.get(sources.keyOf(first)).label,
+      service: removed ? '' : catalogLabel || first.service_id,
+      ...(first.tool === 'web_fetch' ? { tool: 'web_fetch' as const } : {}),
+      removed,
+      totals: aggregateServiceRows(rows, unpriced),
+    };
+  }).sort((left, right) => Number(left.removed) - Number(right.removed) || right.totals.requests - left.totals.requests);
+}
+
+export type ServiceMonth = {
+  /** The host's current month, `YYYY-MM`. */
+  month: string;
+  totals: ServiceTotals;
+  /** The report carries API-price value at all. */
+  priced: boolean;
+  /** A day of the month is missing history, so its counts are only a floor. */
+  partial: boolean;
+};
+
+/**
+ * One Source's search requests this month, from a daily report: the day
+ * buckets in the month of `to_day`, the host's local today rather than the
+ * browser's. A 60-day report covers every day of any month.
+ */
+export function serviceMonthUsage(report: UsageReport, sourceId: string, tool: 'web_search' | 'web_fetch' = 'web_search'): ServiceMonth {
+  const month = report.to_day.slice(0, 7);
+  const buckets = report.buckets.filter((bucket) => bucket.key.slice(0, 7) === month);
+  const rows = buckets.flatMap((bucket) => bucket.rows).filter(isServiceRow)
+    .filter((row) => row.source_id === sourceId && (row.tool ?? 'web_search') === tool);
+  return {
+    month,
+    totals: aggregateServiceRows(rows, unpricedServices(report)),
+    priced: reportIsPriced(report),
+    partial: buckets.some((bucket) => !bucket.history_complete),
+  };
 }

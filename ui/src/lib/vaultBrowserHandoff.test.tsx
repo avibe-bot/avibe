@@ -320,6 +320,9 @@ describe('desktop shell protected-vault browser handoff', () => {
     expect(api.createVaultAgentBindingsBatch).not.toHaveBeenCalled();
     expect(api.createVaultRevealContext).not.toHaveBeenCalled();
     expect(useVaultSandboxWarm).not.toHaveBeenCalledWith(true);
+    // The desktop shell must not even warm or refresh the protected sandbox before handing the
+    // flow to the browser; WKWebView cannot pair with the sandbox authorization surface.
+    expect(vault.refresh).not.toHaveBeenCalled();
 
     cleanup();
     delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;

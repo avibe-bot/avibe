@@ -1,0 +1,57 @@
+[
+  {
+    "vendor": "local", "label": "Local", "source_id": "src_localfetch", "kind": "local",
+    "service_id": "local/fetch", "available": true, "auto_enroll": true,
+    "endpoint": null, "auth": "none", "request": {}, "result": {},
+    "content_types": ["html", "pdf", "text", "markdown", "json"],
+    "price": {"unit": "fetch", "usd_per_1k": 0, "extra": [], "as_of": "2026-10-24", "url": "https://avibe.bot"},
+    "limits": {"attempt_seconds": 30}, "outcomes": {}
+  },
+  {
+    "vendor": "tavily", "label": "Tavily", "kind": "service", "service_id": "tavily/extract",
+    "available": true, "auto_enroll": true, "endpoint": "https://api.tavily.com/extract", "auth": "bearer",
+    "request": {"url_field": "urls", "url_array": true, "fixed": {"extract_depth": "basic", "format": "markdown"}},
+    "result": {"items": "results", "content": "raw_content", "failures": "failed_results"},
+    "content_types": ["markdown"],
+    "price": {"unit": "fetch", "usd_per_1k": 1.6, "extra": [], "as_of": "2026-10-24", "url": "https://docs.tavily.com/documentation/api-credits"},
+    "limits": {"attempt_seconds": 30, "urls": 1}, "outcomes": {"credential": [401], "refused": [403], "limit": [432, 433]},
+    "billing": {"nonempty_only": true, "unbilled_errors": []}
+  },
+  {
+    "vendor": "exa", "label": "Exa", "kind": "service", "service_id": "exa/contents",
+    "available": true, "auto_enroll": true, "endpoint": "https://api.exa.ai/contents", "auth": "x-api-key",
+    "request": {"url_field": "ids", "url_array": true, "fixed": {"text": {"maxCharacters": 48000}}},
+    "result": {"items": "results", "content": "text", "statuses": "statuses", "reported_cost": {"path": "costDollars.total", "estimate": true, "max_usd": 0.1}},
+    "content_types": ["markdown"],
+    "price": {"unit": "fetch", "usd_per_1k": 1, "extra": [], "as_of": "2026-10-24", "url": "https://exa.ai/pricing"},
+    "limits": {"attempt_seconds": 30, "urls": 1}, "outcomes": {"credential": [401], "refusal_tags": ["PROHIBITED_CONTENT", "CONTENT_FILTER_ERROR"]},
+    "billing": {"nonempty_only": true, "unbilled_errors": []}
+  },
+  {
+    "vendor": "deepseek", "label": "DeepSeek", "kind": "service", "service_id": "deepseek/fetch",
+    "available": true, "auto_enroll": true, "endpoint": "https://api.deepseek.com/v1/tools/fetch", "auth": "bearer",
+    "request": {"url_field": "url", "url_array": false, "fixed": {}}, "result": {"content": "content", "title": "title"},
+    "content_types": ["markdown"],
+    "price": {"unit": "fetch", "usd_per_1k": 0.75, "extra": [], "as_of": "2026-10-24", "url": "https://api-docs.deepseek.com/guides/search/"},
+    "limits": {"attempt_seconds": 30, "url_chars": 8192}, "outcomes": {"credential": [401], "balance": [402], "refused": [403], "target_unreadable": [404, 408]},
+    "billing": {"nonempty_only": true, "unbilled_errors": ["timeout"]}
+  },
+  {
+    "vendor": "exa-mcp", "label": "Exa (free)", "source_id": "src_exakeyless", "kind": "service",
+    "service_id": "exa/mcp", "available": true, "auto_enroll": true,
+    "endpoint": "https://mcp.exa.ai/mcp?tools=web_search_advanced_exa,web_fetch_exa", "auth": "none",
+    "request": {"tool": "web_fetch_exa", "url_field": "urls", "url_array": true, "fixed": {"maxCharacters": 48000}},
+    "result": {"content": "content"}, "content_types": ["markdown"],
+    "price": {"unit": "search", "usd_per_1k": 0, "extra": [], "as_of": "2026-10-22", "url": "https://exa.ai/docs/get-started/exa-mcp#authentication"},
+    "limits": {"attempt_seconds": 30, "urls": 1}, "outcomes": {"refusal_tags": ["PROHIBITED_CONTENT", "CONTENT_FILTER_ERROR"], "target_tags": ["CRAWL_UNKNOWN_ERROR"]}
+  },
+  {
+    "vendor": "jina-reader", "label": "Jina Reader (free)", "source_id": "src_jinakeyless", "kind": "service",
+    "service_id": "jina/reader", "available": true, "auto_enroll": true,
+    "endpoint": "https://r.jina.ai/", "auth": "none",
+    "request": {"url_field": "url", "url_array": false, "fixed": {}, "headers": {"Accept": "application/json", "X-Return-Format": "markdown", "X-Retain-Images": "none", "X-Base": "final"}},
+    "result": {"content": "data.content", "title": "data.title", "url": "data.url"}, "content_types": ["markdown"],
+    "price": {"unit": "fetch", "usd_per_1k": 0, "extra": [], "as_of": "2026-10-24", "url": "https://jina.ai/reader/"},
+    "limits": {"attempt_seconds": 30, "requests_per_minute": 20}, "outcomes": {}
+  }
+]

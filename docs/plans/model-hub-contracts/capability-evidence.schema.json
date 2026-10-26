@@ -27,10 +27,10 @@
           "additionalProperties": false,
           "properties": {
             "kind": { "const": "hosted_tool" },
-            "name": { "enum": ["web_search", "x_search", "image_generate"] },
+            "name": { "enum": ["web_search", "x_search", "image_generate", "web_fetch"] },
             "aspect": { "enum": ["call", "replay"] }
           },
-          "if": { "properties": { "name": { "const": "image_generate" } } },
+          "if": { "properties": { "name": { "enum": ["image_generate", "web_fetch"] } } },
           "then": { "properties": { "aspect": { "const": "call" } } }
         }
       ]
@@ -41,7 +41,7 @@
     "wire": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "The wire the record was observed under: a digest of the engine release, the Avibe release, and the model's rendered fields that the Source identity does not cover (its registered reasoning tiers). With source_identity (vendor, protocol, base URL, credential, credential generation) it covers every Source field the engine renderer reads (model-hub-capability-model.md §3.3). An unsupported record under another stamp reads as unknown." },
     "source_identity": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$", "description": "Digest of the Source identity at write time; a changed identity drops the record." },
     "detail": { "type": "string", "minLength": 1, "maxLength": 64, "description": "unsupported only: HTTP status and upstream machine code, never upstream text." },
-    "mode": { "enum": ["native", "executor", "direct"], "description": "verified only: how the call ran." }
+    "mode": { "enum": ["native", "executor", "service", "direct"], "description": "verified only: how the call ran." }
   },
   "if": { "properties": { "status": { "const": "unsupported" } } },
   "then": { "required": ["detail"], "not": { "required": ["mode"] } },

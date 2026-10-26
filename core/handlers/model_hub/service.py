@@ -10,6 +10,7 @@ import logging
 import threading
 import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -22,6 +23,8 @@ from config import paths
 from modules.agents.catalog import NATIVE_CLI_BACKENDS
 from config.v2_config import (
     CONFIG_LOCK,
+    KEYLESS_EXA_DISPLAY_NAME,
+    KEYLESS_EXA_SOURCE_ID,
     MODEL_HUB_BACKENDS,
     ModelHubAgentSupplyConfig,
     ModelHubBackendModelConfig,
@@ -42,6 +45,10 @@ from config.v2_config import (
     normalize_storable_backend_model_text,
     normalize_model_hub_base_url,
     normalize_model_hub_vendor_id,
+    model_hub_keyless_exa_source,
+    model_hub_builtin_source,
+    model_hub_builtin_sources,
+    model_hub_search_service,
     normalized_model_hub_override,
     validate_model_hub_protocol_vendor,
     validate_model_hub_source_client_nonce,
@@ -126,6 +133,7 @@ from .capability_evidence import (
     EvidenceFeature,
     EvidenceRecord,
     identity_digest,
+    utc_text,
 )
 from .errors import ModelDiscoveryError
 from .evidence_rules import LearnedEvidence
@@ -158,6 +166,9 @@ from .hosted_images import (
     unsupported_argument,
 )
 from .hosted_turn import IMAGE_TOOL, ExecutorSlot, TurnHostedTools
+from . import hosted_tools as hosted_tools_module
+from .search_services import ServiceCooldowns
+from .search_chain import SearchChain
 from .hosted_tools import (
     ExecutorCandidate,
     HostedEvidence,
@@ -254,12 +265,13 @@ from .usage import (
     USAGE_DEFAULT_WINDOW_DAYS,
     USAGE_WINDOW_KEYS,
     BoundedUsageLedger,
+    ServiceCatalogEntry,
     SourceIdentity,
     UsageWriter,
     local_usage_day,
 )
 
-CONTRACT_VERSION = 17
+CONTRACT_VERSION = 21
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -382,8 +394,8 @@ def _described_as_unfit_for_agent_turns(match: Mapping[str, Any]) -> bool:
     )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 17
-PROBE_RESULT_CONTRACT_VERSION = 17
+AGENT_CHAIN_CONTRACT_VERSION = 21
+PROBE_RESULT_CONTRACT_VERSION = 21
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 # Background inventory refresh. The first tick doubles as the startup delay, so
@@ -897,7 +909,10 @@ def _executor_failure(outcome: RawCallOutcome | None, say: Callable[..., str], *
 
 
 def _cost_payload(cost: HostedCost) -> dict[str, Any]:
-    return {"basis": cost.basis} if cost.usd is None else {"basis": cost.basis, "usd": cost.usd}
+    payload = {"basis": cost.basis} if cost.usd is None else {"basis": cost.basis, "usd": cost.usd}
+    if cost.estimate is not None:
+        payload["estimate"] = cost.estimate
+    return payload
 
 
 @dataclass(frozen=True)
@@ -927,20 +942,30 @@ class _ExecutorAttempt:
     billable: bool
     # Whether its failure passes the search to the next candidate.
     moves_on: bool
+    kind: str = "model"
+    superseded: bool = False
+
+    @property
+    def billing(self) -> str:
+        return "metered" if self.kind == "service" else self.source.billing
 
     def execution(self) -> dict[str, Any]:
         execution: dict[str, Any] = {
             "mode": "proxy",
-            "executor_origin": {"provider": self.source.vendor, "api": self.source.protocol, "model": self.model_id},
+            "executor_origin": {
+                "provider": self.source.vendor,
+                "api": "search_api" if self.kind == "service" else self.source.protocol,
+                "model": self.model_id,
+            },
             "executor_source_id": self.source.id,
-            "executor_billing": self.source.billing,
+            "executor_billing": self.billing,
         }
         if self.cost is not None:
             execution["cost"] = _cost_payload(self.cost)
         return execution
 
     def failed_attempt(self) -> dict[str, Any]:
-        attempt: dict[str, Any] = {"source_id": self.source.id, "billing": self.source.billing}
+        attempt: dict[str, Any] = {"source_id": self.source.id, "billing": self.billing}
         if self.cost is not None:
             attempt["cost"] = _cost_payload(self.cost)
         return attempt
@@ -1110,9 +1135,7 @@ def _mask_credential(value: str) -> str:
 
 def search_capability_for_source(source: ModelHubSourceConfig) -> dict[str, Any] | None:
     """Return the bundled search service when this Source is search-capable."""
-    if not source.credential_ref:
-        return None
-    return search_service(source.vendor, source.protocol, source.base_url)
+    return model_hub_search_service(source)
 
 
 def _search_service_for_source(source: ModelHubSourceConfig) -> dict[str, Any] | None:
@@ -1376,7 +1399,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 17,
+        "contract_version": 21,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),
@@ -1581,6 +1604,13 @@ class ModelHubService:
         self._source_create_nonces: set[str] = set()
         self._search_reenable_trials: set[str] = set()
         self._search_reenable_trials_inflight: set[str] = set()
+        self._search_trial_epochs: dict[str, int] = {}
+        self._search_trial_identities: dict[str, tuple] = {}
+        self._search_reenable_checks: dict[str, asyncio.Task] = {}
+        self._service_cooldowns = ServiceCooldowns()
+        self._keyless_exa_attempt_lock = asyncio.Lock()
+        self._jina_fetch_sent_at: deque[datetime] = deque()
+        self._local_fetch_engine = None
         self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
         self._latest_source_attempt_generation: dict[str, int] = {}
         self._source_attempt_identities: dict[str, tuple | None] = {}
@@ -1626,6 +1656,12 @@ class ModelHubService:
         if source is None:
             raise ModelHubError("source_not_found", status=404)
         return source
+
+    @staticmethod
+    def _evidence_sources(config: ModelHubConfig) -> list[ModelHubSourceConfig]:
+        """Config Sources plus the stable synthetic identity for evidence joins."""
+
+        return [*config.sources, *model_hub_builtin_sources()]
 
     @staticmethod
     def _agent(config: ModelHubConfig, backend: str) -> ModelHubAgentSupplyConfig:
@@ -1871,6 +1907,11 @@ class ModelHubService:
 
         self.recovery.reconcile(canonical)
         self.recovery.notify()
+        self._service_cooldowns.reconcile(canonical)
+        live = {source.id: source_identity(source) for source in canonical.sources}
+        for sid, identity in tuple(self._search_trial_identities.items()):
+            if live.get(sid) != identity:
+                self._drop_search_reenable_trial(sid)
         return canonical
 
     def _persist_config(self, payload: dict) -> ModelHubConfig:
@@ -1945,7 +1986,7 @@ class ModelHubService:
         return True
 
     def search_reenable_trial_armed(self, source_id: str) -> bool:
-        """Return whether one process-local search trial is waiting for S2's gate."""
+        """Return whether one process-local search trial is waiting for admission."""
 
         return source_id in self._search_reenable_trials
 
@@ -1967,11 +2008,13 @@ class ModelHubService:
         return True
 
     def settle_search_reenable_trial(self, source_id: str) -> None:
-        """Forget a trial after S2 settles its admitted search attempt."""
+        """Forget a trial after its admitted search attempt settles."""
 
         self._search_reenable_trials_inflight.discard(source_id)
 
     def _drop_search_reenable_trial(self, source_id: str) -> None:
+        self._search_trial_epochs[source_id] = self._search_trial_epochs.get(source_id, 0) + 1
+        self._search_trial_identities.pop(source_id, None)
         self._search_reenable_trials.discard(source_id)
         self._search_reenable_trials_inflight.discard(source_id)
 
@@ -1979,10 +2022,22 @@ class ModelHubService:
         self._next_settlement_generation += 1
         return self._next_settlement_generation
 
-    def _reserve_settlement_generation(self, source_id: str) -> int:
+    def _reserve_jina_fetch_slot(self, now: datetime, limit: int = 20) -> datetime | None:
+        """Reserve one runtime-wide keyless Reader call in its rolling minute."""
+        cutoff = now - timedelta(minutes=1)
+        while self._jina_fetch_sent_at and self._jina_fetch_sent_at[0] <= cutoff:
+            self._jina_fetch_sent_at.popleft()
+        if len(self._jina_fetch_sent_at) >= limit:
+            return self._jina_fetch_sent_at[0] + timedelta(minutes=1)
+        self._jina_fetch_sent_at.append(now)
+        return None
+
+    def _reserve_settlement_generation(self, source_id: str, *, source: ModelHubSourceConfig | None = None) -> int:
+        """Reserve on the loop; an already-admitted snapshot avoids a second config read."""
         generation = self._mint_settlement_generation()
         self._latest_source_attempt_generation[source_id] = generation
-        source = next((item for item in self.store.load().sources if item.id == source_id), None)
+        if source is None:
+            source = next((item for item in self.store.load().sources if item.id == source_id), None)
         if source is not None:
             self._source_attempt_identities[source_id] = source_identity(source)
         return generation
@@ -2390,7 +2445,8 @@ class ModelHubService:
         # is cancelled outright. An engine listing's worker is owned and
         # bounded, so these return only once nothing still uses the engine
         # that `adapter.stop()` retires.
-        retiring = [task for task in (discovery, viewed) if task is not None and not task.done()]
+        retiring = [task for task in (discovery, viewed, *self._search_reenable_checks.values())
+                    if task is not None and not task.done()]
         for task in retiring:
             task.cancel()
         await asyncio.gather(*retiring, return_exceptions=True)
@@ -4888,7 +4944,66 @@ class ModelHubService:
                 "interrupted": interrupted,
             }
 
+    async def _reenable_search_service(self, source_id: str, payload: object) -> dict:
+        """One shared free check, or one fail-closed trial, fenced against later attempts and identity changes."""
+        if payload not in (None, {}):
+            raise ModelHubError("invalid_parameter", status=400)
+        async with self._mutation_lock:
+            joined = self._search_reenable_checks.get(source_id)
+            if joined is None:
+                source = self._source(await asyncio.to_thread(self.store.load), source_id)
+                catalog = _require_search_service_for_source(source)
+                if source.protocol != "search" or source.state.status != "needs_action" or source.state.detail_key not in {
+                    "models.source.needs_action.balance_exhausted", "models.source.needs_action.spend_limit_reached",
+                }:
+                    raise ModelHubError("discovery_failed")
+                if self.search_reenable_trial_pending(source_id):
+                    return {"source": await asyncio.to_thread(self._source_payload, source), "removed_hops": [], "interrupted": [], "trial_armed": True}
+                generation = self._reserve_settlement_generation(source_id, source=source)
+                self._service_cooldowns.advance(source, catalog["service_id"], clear=True)
+                check = catalog.get("free_check")
+                needed = "balance" if source.state.detail_key.endswith("balance_exhausted") else "limit"
+                if not isinstance(check, Mapping) or not check.get(needed):
+                    self._search_reenable_trials.add(source_id)
+                    self._search_trial_identities[source_id] = source_identity(source)
+                    self._search_trial_epochs[source_id] = self._search_trial_epochs.get(source_id, 0) + 1
+                    return {"source": await asyncio.to_thread(self._source_payload, source), "removed_hops": [], "interrupted": [], "trial_armed": True}
+
+                async def checked() -> dict:
+                    try:
+                        outcome = await self._search_free_check(source)
+                        async with self._mutation_lock:
+                            previous = await asyncio.to_thread(self.store.load)
+                            current = next((s for s in previous.sources if s.id == source_id), None)
+                            if current is None:
+                                raise ModelHubError("source_not_found", status=404)
+                            if source_identity(current) == source_identity(source) and self._settlement_current(current, generation):
+                                config = await asyncio.to_thread(self._clone_config, previous)
+                                updated = self._source(config, source_id)
+                                if outcome in {"pass", "balance", "limit"}:
+                                    updated.verification_pending = None
+                                detail = {
+                                    "invalid": "credential_revoked", "balance": "balance_exhausted", "limit": "spend_limit_reached",
+                                }.get(outcome)
+                                if outcome == "pass":
+                                    updated.state = ModelHubSourceStateConfig(status="standby")
+                                elif detail:
+                                    updated.state = ModelHubSourceStateConfig(status="needs_action", detail_key=f"models.source.needs_action.{detail}")
+                                if updated != current:
+                                    await self._save_runtime_config(previous, config)
+                                    current = self._source(await asyncio.to_thread(self.store.load), source_id)
+                            return {"source": await asyncio.to_thread(self._source_payload, current), "removed_hops": [], "interrupted": [], "trial_armed": False}
+                    finally:
+                        if self._search_reenable_checks.get(source_id) is asyncio.current_task():
+                            self._search_reenable_checks.pop(source_id, None)
+
+                joined = asyncio.create_task(checked())
+                self._search_reenable_checks[source_id] = joined
+        return await asyncio.shield(joined)
+
     async def reenable_search_source(self, source_id: str, payload: object = None) -> dict:
+        if hosted_tools_module.SEARCH_SERVICES_ACTIVE:
+            return await self._reenable_search_service(source_id, payload)
         if payload not in (None, {}):
             raise ModelHubError("discovery_failed")
         async with self._mutation_lock:
@@ -5812,6 +5927,17 @@ class ModelHubService:
         return self._agent_payload(
             config, self._agent(config, backend), live_recovery=self.recovery.annotations(config),
         )
+
+    async def read_agent_sources(self, backend: str) -> dict:
+        """``get_agent_sources`` for a caller on the controller loop, which owns the recovery state.
+
+        Reading that state may wake its waiters, so it is read here; the config read and the payload are
+        built off the loop.
+        """
+        config = await asyncio.to_thread(self.store.load)
+        agent = self._agent(config, backend)
+        live_recovery = self.recovery.annotations(config)
+        return await asyncio.to_thread(self._agent_payload, config, agent, live_recovery=live_recovery)
 
     async def set_agent_chain(self, backend: str, model_id: object, payload: object) -> dict:
         if (
@@ -6818,6 +6944,8 @@ class ModelHubService:
                 evidence=self.hosted_evidence(),
                 spec_for=hosted_tool_spec,
                 image_price=self._image_price,
+                search_trial_pending=self.search_reenable_trial_pending,
+                search_cooldown_until=self._search_visible_cooldown,
             )
         }
 
@@ -6903,7 +7031,7 @@ class ModelHubService:
         """Clear under the Source mutation lock, so the identities it keeps are the ones the config holds."""
 
         try:
-            await asyncio.to_thread(self.capability_evidence.clear, matches, live=lambda: config.sources)
+            await asyncio.to_thread(self.capability_evidence.clear, matches, live=lambda: self._evidence_sources(config))
         except OSError:
             logger.warning("Model Hub could not persist an evidence clear; nothing changed", exc_info=True)
             raise ModelHubError("state_write_failed", status=500) from None
@@ -6935,7 +7063,7 @@ class ModelHubService:
             await asyncio.to_thread(
                 self.capability_evidence.write_refusals,
                 records,
-                live=lambda: self.store.load().sources,
+                live=lambda: self._evidence_sources(self.store.load()),
                 wire_for=evidence.wire_for,
             )
 
@@ -6955,7 +7083,7 @@ class ModelHubService:
             mode=mode,  # type: ignore[arg-type]
         )
         await asyncio.to_thread(
-            self.capability_evidence.note_success, record, live=lambda: self.store.load().sources, now=record.observed_at,
+            self.capability_evidence.note_success, record, live=lambda: self._evidence_sources(self.store.load()), now=record.observed_at,
         )
 
     def _effort_refused(self, source: ModelHubSourceConfig, model_id: str, request: Any) -> bool:
@@ -7064,7 +7192,7 @@ class ModelHubService:
                 source_identity=identity_digest(source),
                 detail=learned.detail,
             ),
-            live=lambda: self.store.load().sources,
+            live=lambda: self._evidence_sources(self.store.load()),
             wire_for=evidence.wire_for,
         )
         return learned
@@ -7142,6 +7270,49 @@ class ModelHubService:
         # The frozen model while it stays listed and runnable, even if the Source now lists one its vendor prefers.
         return executor_candidate(source, slot.model_id, tool, evidence=self.hosted_evidence(), spec_for=hosted_tool_spec)
 
+    def _search_visible_cooldown(self, source_id: str, service_id: str) -> str | None:
+        source = (
+            model_hub_builtin_source(source_id)
+            or next((item for item in self.store.load().sources if item.id == source_id), None)
+        )
+        if source is None:
+            return None
+        until = self._service_cooldowns.until(source, service_id, self.now())
+        if until is None:
+            return None
+        # Keyless Exa's UI must expose even a short active cooldown so Retry now
+        # remains available for provider rate limits.
+        return utc_text(until) if model_hub_builtin_source(source_id) is not None or (until - self.now()).total_seconds() > 60 else None
+
+    async def clear_service_cooldown(
+        self, source_id: str, service_id: str | None = None, payload: object = None, tool: str = "web_search",
+    ) -> dict:
+        if payload not in (None, {}) or tool not in ("web_search", "web_fetch"):
+            raise ModelHubError("invalid_parameter", status=400)
+        async with self._mutation_lock:
+            config = await asyncio.to_thread(self.store.load)
+            source = model_hub_builtin_source(source_id) or self._source(config, source_id)
+            if tool == "web_fetch":
+                from vibe.model_hub_runtime.fetch_catalog import fetch_service
+                service = fetch_service(source)
+                if service is not None and service["kind"] == "local":
+                    service = None  # Local cooldown is target-host scoped, never a whole-executor outage.
+            else:
+                service = model_hub_search_service(source)
+            if service is None or (service_id is not None and service["service_id"] != service_id):
+                raise ModelHubError("source_not_found", status=404)
+            self._service_cooldowns.advance(source, service["service_id"], clear=True)
+        return {}
+
+    async def _run_fetch_chain(self, call: ExecutorCall, turn: TurnHostedTools, *, say: Callable[..., str]) -> dict:
+        """Run the web_fetch service/local chain behind the shared activation switch."""
+        from .fetch_chain import FetchChain
+        return await FetchChain(self, call, turn, say).run()
+
+    async def _run_search_chain(self, call: ExecutorCall, turn: TurnHostedTools, *, say: Callable[..., str]) -> dict:
+        """Run the service/model chain; all response decoding and mapping stay off the loop."""
+        return await SearchChain(self, call, turn, say).run()
+
     async def run_hosted_tool(
         self,
         tool: str,
@@ -7158,8 +7329,9 @@ class ModelHubService:
         on after a failure normal routing fails over from, a narrow-rule
         refusal, a refusal of the executor model, or a failure mid-response;
         any other outcome ends it. Every candidate called is metered on its own
-        Source. A proxy call never changes Source health: it is a tool call,
-        not the turn's model hop.
+        Source. A proxy call may update service-local retry state; configured
+        Source health changes only from an actual sent provider outcome and
+        remains identity/generation fenced.
         """
 
         def say(key: str, **params: str) -> str:
@@ -7172,6 +7344,12 @@ class ModelHubService:
             raise ModelHubError(refused.code, status=refused.status) from None
         if turn is None or tool not in turn.tools:
             raise ModelHubError("tool_not_enabled", status=409)
+        if tool == "web_fetch" and not hosted_tools_module.WEB_FETCH_ACTIVE:
+            raise ModelHubError("tool_not_enabled", status=409)
+        if tool == "web_fetch":
+            return await self._run_fetch_chain(call, turn, say=say)
+        if tool == "web_search" and turn.prefer_native is not None:
+            return await self._run_search_chain(call, turn, say=say)
         loop = asyncio.get_running_loop()
         deadline = loop.time() + call_timeout(tool)
         attempts: list[_ExecutorAttempt] = []
@@ -7365,6 +7543,7 @@ class ModelHubService:
         *,
         deadline: float,
         say: Callable[..., str],
+        admission: Callable[[], Awaitable[ModelHubSourceConfig | None]] | None = None,
     ) -> _ExecutorAttempt | None:
         """Call one executor candidate; None when this snapshot does not admit it, so nothing ran."""
 
@@ -7387,6 +7566,8 @@ class ModelHubService:
                 body.extend(chunk)
 
         async def admitted_now() -> ModelHubSourceConfig | None:
+            if admission is not None:
+                return await admission()
             final = await asyncio.to_thread(self._admitted_executor, slot, tool)
             return final.source if final is not None else None
 
@@ -8504,15 +8685,38 @@ class ModelHubService:
             )
             for source in config.sources
         ]
+        identities.extend(SourceIdentity(source_id=source.id, label=source.display_name)
+                          for source in model_hub_builtin_sources())
+        # The release's search services label and value service rows, as the price
+        # table values model tokens; a row a later catalog dropped stays unpriced.
+        service_catalog = [
+            ServiceCatalogEntry(
+                service_id=entry.search["service_id"],
+                label=entry.label,
+                usd_per_1k=float(entry.search["price"]["usd_per_1k"]),
+                price_date=entry.search["price"]["as_of"],
+            )
+            for entry in api_key_vendor_catalog()
+            if entry.search is not None
+        ]
+        from vibe.model_hub_runtime.fetch_catalog import fetch_service_catalog
+        known_services = {entry.service_id for entry in service_catalog}
+        service_catalog.extend(
+            ServiceCatalogEntry(entry["service_id"], entry["label"], float(entry["price"]["usd_per_1k"]), entry["price"]["as_of"])
+            for entry in fetch_service_catalog() if entry["service_id"] not in known_services
+        )
         now = self.now()
         prices = self.price_table()
         if window is not None:
-            return self.usage.report(window=window, now=now, identities=identities, prices=prices)
+            return self.usage.report(
+                window=window, now=now, identities=identities, prices=prices, service_catalog=service_catalog
+            )
         return self.usage.summary(
             days=USAGE_DEFAULT_WINDOW_DAYS if days is None else days,
             now=now,
             identities=identities,
             prices=prices,
+            service_catalog=service_catalog,
         )
 
     async def _fetch_subscription_quota(self, source_id: str, vendor: str, credential_ref: str) -> Mapping[str, Any]:
@@ -10144,7 +10348,9 @@ class ModelHubService:
                         current, event_reason,
                         generation=generation,
                         retry_after=outcome.retry_after if outcome is not None else None,
+                        retry_after_ms=getattr(outcome, "retry_after_ms", None) if outcome is not None else None,
                         response_received_at=outcome.response_received_at if outcome is not None else None,
+                        upstream_retry_at=decision.retry_at,
                     )
                 if not changed:
                     return event_reason, False

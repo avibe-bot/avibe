@@ -17,7 +17,7 @@ from typing import Any
 
 import httpx
 
-from core.agent_core.ai.claude_thinking import uses_adaptive_thinking
+from core.agent_core.ai.claude_thinking import is_claude_model, uses_adaptive_thinking
 from core.agent_core.ai.hosted import anthropic_hosted_block, citation, reported_counts
 from core.agent_core.ai.image_limits import LoadedImage
 from core.agent_core.ai._common import (
@@ -29,6 +29,7 @@ from core.agent_core.ai._common import (
     dispatch_wire_event,
     endpoint_origin,
     hosted_pin,
+    PARTIAL_ERROR_MESSAGE_CHARS,
     PAUSE_TURN,
     PIN_SOURCE_HEADER,
     PinUnavailable,
@@ -55,6 +56,8 @@ from core.agent_core.ai.provider import (
     MediaLoader,
 )
 from core.agent_core.cancel import CancelToken
+from core.agent_core.hosted_continuations import pending_hosted
+from core.agent_core.ai.transform import in_flight_position, native_replay
 from core.agent_core.messages import (
     MAX_HOSTED_COUNT,
     AssistantMessage,
@@ -263,12 +266,24 @@ class AnthropicAdapter(ProviderAdapter):
                 yield terminal
             return
         stop_reason: str | None = None
+        # Why the provider refused, from ``message_delta.delta.stop_details``: the response's ``error_message``.
+        refusal_detail: str | None = None
         message_started = False
         message_stopped = False
         # The hosted tools this request declared natively; ``server_tool_use`` blocks of other tools stay unparsed.
         hosted = frozenset(native_hosted_tools(request))
         # Each hosted call's ``server_tool_use`` by stream index; its input JSON streams into the assembler.
         uses: dict[int, dict[str, Any]] = {}
+        # A mixed group crosses a committed response boundary. Carry only calls actually sent natively on this hop;
+        # their result-only fragments belong to this response, never a rewrite of the earlier pending row.
+        live = in_flight_position(request.messages)
+        previous = request.messages[live] if live is not None else None
+        deferred = (
+            pending_hosted(previous)
+            if isinstance(previous, AssistantMessage)
+            and native_replay(previous, in_flight=True, endpoint=request.endpoint, target=target, protocol=self.protocol)
+            else {}
+        )
         # A paused response continues as the same one (§4.3): a continuation's blocks follow the paused ones, its hosted
         # counters add to theirs, and its usage, the final request's, stands for the whole response.
         paused = False
@@ -285,7 +300,7 @@ class AnthropicAdapter(ProviderAdapter):
         try:
             async def translate(events: AsyncIterator[Any]) -> AsyncIterator[Any]:
                 nonlocal message_started, message_stopped, stop_reason, paused, next_index, response_usage
-                nonlocal response_counts
+                nonlocal response_counts, refusal_detail
                 async for event in events:
                     if cancel.cancelled:
                         terminal = assembler.terminal(assembler.aborted(cancel.reason))
@@ -450,12 +465,17 @@ class AnthropicAdapter(ProviderAdapter):
                             continue
                         if kind == "web_search_tool_result":
                             use = next((item for item in uses.values() if item.get("id") == block.get("tool_use_id")), None)
-                            if use is not None and assembler.source_id is not None:
-                                assembler.set_block_kind(index, "hosted_result")
-                                assembler.hosted_block(
-                                    ("hosted", use.get("id")),
-                                    anthropic_hosted_block(use, block, source_id=assembler.source_id),
-                                )
+                            prior = deferred.get(block.get("tool_use_id"))
+                            if use is None and prior is not None and prior.native.source_id == assembler.source_id:
+                                use = prior.native.payload[0]
+                                completed = anthropic_hosted_block(use, block, source_id=assembler.source_id)
+                                completed = replace(completed, native=replace(completed.native, payload=(dict(block),)))
+                            elif use is not None and assembler.source_id is not None:
+                                completed = anthropic_hosted_block(use, block, source_id=assembler.source_id)
+                            else:
+                                continue
+                            assembler.set_block_kind(index, "hosted_result")
+                            assembler.hosted_block(("hosted", use.get("id")), completed)
                             continue
                         if kind == "text":
                             assembler.set_block_kind(index, "text")
@@ -766,6 +786,9 @@ class AnthropicAdapter(ProviderAdapter):
                                     return
                                 paused = delta.get("stop_reason") == "pause_turn"
                                 stop_reason = _normalize_stop_reason(delta.get("stop_reason"))
+                                refusal_detail = (
+                                    _refusal_detail(delta.get("stop_details")) if stop_reason == "refusal" else None
+                                )
                         response_usage = _anthropic_usage(usage, current=response_usage)
                         assembler.set_usage(response_usage)
                         if isinstance(usage, Mapping) and "server_tool_use" in usage:
@@ -804,7 +827,8 @@ class AnthropicAdapter(ProviderAdapter):
                             yield PAUSE_TURN
                             return
                         final = assembler.finalize(
-                            stop_reason or ("tool_use" if assembler.has_tools() else "stop")
+                            stop_reason or ("tool_use" if assembler.has_tools() else "stop"),
+                            error_message=refusal_detail,
                         )
                         terminal = assembler.terminal(final if isinstance(final, ProviderError) else Done(final))
                         if terminal is not None:
@@ -826,7 +850,7 @@ class AnthropicAdapter(ProviderAdapter):
                     if paused:
                         yield PAUSE_TURN
                         return
-                    final = assembler.finalize(stop_reason)
+                    final = assembler.finalize(stop_reason, error_message=refusal_detail)
                     terminal = assembler.terminal(
                         final if isinstance(final, ProviderError) else Done(final)
                     )
@@ -859,7 +883,7 @@ class AnthropicAdapter(ProviderAdapter):
                 )
                 rejected = continued = paused = message_started = message_stopped = False
                 unavailable: PinUnavailable | None = None
-                stop_reason = None
+                stop_reason = refusal_detail = None
                 try:
                     async for event in driver:
                         if isinstance(event, PinUnavailable):
@@ -983,7 +1007,15 @@ def build_messages_payload(
             continue
         if converted["role"] == "assistant" and not converted["content"]:
             continue
-        payload_messages.append(converted)
+        if (
+            isinstance(message, ToolResultMessage) and payload_messages
+            and payload_messages[-1]["role"] == "user"
+            and isinstance(payload_messages[-1]["content"], list)
+            and all(block.get("type") == "tool_result" for block in payload_messages[-1]["content"])
+        ):
+            payload_messages[-1]["content"].extend(converted["content"])
+        else:
+            payload_messages.append(converted)
 
     system: Any = request.system
     if request.cache == "default" and request.system:
@@ -1013,15 +1045,16 @@ def build_messages_payload(
         payload["tools"] = tools
     effort = (request.reasoning_effort or "").lower()
     adaptive = uses_adaptive_thinking(request.endpoint.model_id)
-    if effort in {"none", "off", "disabled"} or (
-        effort and not adaptive and _continues_unthought_tool_loop(payload_messages)
-    ):
-        # Under manual thinking, Anthropic requires the assistant message a tool loop continues to start with its
-        # thinking block. One whose thinking cannot go back (another origin's, or a Session whose signatures the
-        # provider refused) continues with thinking off, as Anthropic's refusal itself advises; the models that take
-        # manual thinking all accept that. Adaptive thinking has no such rule, and several adaptive models refuse
-        # ``disabled``, so it stays on.
+    if effort in {"none", "off", "disabled"}:
         payload["thinking"] = {"type": "disabled"}
+    elif effort and not adaptive and _continues_unthought_tool_loop(payload_messages):
+        if is_claude_model(request.endpoint.model_id):
+            # Under manual thinking, Anthropic requires the assistant message a tool loop continues to start with its
+            # thinking block. One whose thinking cannot go back (another origin's, or a Session whose signatures the
+            # provider refused) continues with thinking off, as Anthropic's refusal itself advises; the models that
+            # take manual thinking all accept that. A non-Claude Anthropic-compatible model has no verified thinking
+            # shape here, so leave the field out rather than guessing.
+            payload["thinking"] = {"type": "disabled"}
     elif effort:
         if adaptive:
             payload["thinking"] = {"type": "adaptive"}
@@ -1288,6 +1321,21 @@ def _normalize_stop_reason(value: Any) -> str:
         "safety": "safety",
     }.get(str(value))
     return normalized or "error"
+
+
+def _refusal_detail(details: Any) -> str | None:
+    """A refusal's ``stop_details`` as the response's ``error_message``: the category of the safeguard that stopped it
+    and Anthropic's explanation, each when given as a non-empty string, bounded like a partial's error. A diagnostic
+    never fails the response, so any other shape is ignored."""
+
+    if not isinstance(details, Mapping):
+        return None
+    category, explanation = _string(details.get("category")).strip(), _string(details.get("explanation")).strip()
+    fields = (("category", category), ("explanation", explanation))
+    detail = "; ".join(f"{name}: {value}" for name, value in fields if value)
+    if not detail:
+        return None
+    return detail if len(detail) <= PARTIAL_ERROR_MESSAGE_CHARS else detail[: PARTIAL_ERROR_MESSAGE_CHARS - 1] + "…"
 
 
 def sent_effort(model_id: str, effort: str) -> str | None:

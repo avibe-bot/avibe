@@ -27,6 +27,7 @@ from core.agent_core.messages import (
     HostedImage,
     HostedNative,
     HostedRecord,
+    WebFetchRecord,
     HostedSource,
     HostedToolBlock,
     ToolCallBlock,
@@ -312,7 +313,7 @@ def reported_cost(usage: Any) -> Optional[HostedCost]:
 
 def record_text(
     tool: str,
-    record: HostedRecord,
+    record: HostedRecord | WebFetchRecord,
     *,
     query: Optional[str],
     further_queries: Sequence[str] = (),
@@ -326,6 +327,10 @@ def record_text(
     folded actions, the sources it found (titles, links, excerpts and ages) and the posts its answer cites.
     """
 
+    if isinstance(record, WebFetchRecord):
+        from core.agent_core.web_fetch import frame_fetch_record
+        record.check_tool(tool)
+        return frame_fetch_record(record)
     if record.status in ("failed", "incomplete"):
         lines = [f"[{tool} failed: {record.error}]"]
         if query:
@@ -456,7 +461,9 @@ class PortableHosted(NamedTuple):
     is_error: bool = False
 
 
-def portable_hosted(message: AssistantMessage, *, in_flight: bool, interrupted: str) -> dict[int, PortableHosted]:
+def portable_hosted(
+    message: AssistantMessage, *, in_flight: bool, interrupted: str, parallel_group: bool = False
+) -> dict[int, PortableHosted]:
     """Each hosted call of a replayed response in portable form (§4.4, §5), keyed by the block's identity.
 
     Every call is exactly one unit with its own record:
@@ -465,7 +472,8 @@ def portable_hosted(message: AssistantMessage, *, in_flight: bool, interrupted: 
     * otherwise a synthetic same-named call and its result.
 
     The posts the answer cites are listed once, on its first call that was not cut off, whichever form it takes.
-    ``interrupted`` is the result of a synthetic call cut off with its turn.
+    ``interrupted`` is the result of a synthetic call cut off with its turn. A deferred mixed ``parallel_group``
+    is rendered intact by the caller, so calls after a client call can also be synthetic without splitting it.
     """
 
     blocks = [block for block in message.content if isinstance(block, HostedToolBlock)]
@@ -475,7 +483,7 @@ def portable_hosted(message: AssistantMessage, *, in_flight: bool, interrupted: 
     in_place = in_flight
     for block in message.content:
         if not isinstance(block, HostedToolBlock):
-            in_place = in_place or isinstance(block, ToolCallBlock)
+            in_place = in_place or (not parallel_group and isinstance(block, ToolCallBlock))
             continue
         cited = summary.cited_sources if summary is not None and block is owner else ()
         if in_place:

@@ -322,7 +322,7 @@ async def test_model_hub_hears_only_of_failures_the_served_source_produced(engin
 # --- what the user is told -------------------------------------------------------------------------------
 
 
-async def test_failed_checkpoints_are_silent_and_a_context_that_then_cannot_fit_ends_with_the_one_notice(
+async def test_refused_checkpoints_are_silent_and_a_context_that_then_cannot_fit_is_dropped_and_the_turn_answers(
     engine, session, tmp_path
 ):
     sizes = iter((11_200, 500, 2_000))
@@ -333,16 +333,30 @@ async def test_failed_checkpoints_are_silent_and_a_context_that_then_cannot_fit_
     def call(call_id: str) -> list:
         return [Done(assistant(calls=[ToolCallBlock(call_id, "read", {"path": "a.py"})]))]
 
-    failing = [Done(assistant(CHECKPOINT, stop_reason="length"))]
-    scripts = [[Done(assistant("hi"))], call("r1"), failing, call("r2"), failing, call("r3")]
+    refused = [Done(dataclasses.replace(assistant("", stop_reason="refusal"), error_message="category: cyber"))]
+    scripts = [[Done(assistant("hi"))], call("r1"), refused, call("r2"), refused, call("r3"), [Done(assistant("done"))]]
     harness = _Harness(engine, tmp_path, "avibe", scripts, tools=[FakeTool("read", execute=read)], language="zh")
     # An earlier Turn gives the checkpoints something to summarize: a cut inside this Turn keeps its input.
     await _turn(harness, "hello")
     await _turn(harness, tokens(12_000))
-    # Two requests of the Turn cross T and their checkpoints fail, silently; the Turn then stops compacting, and the
-    # request the last result leaves cannot fit: it ends the Turn with the one notice, and nothing was compacted.
+    # Two requests of the Turn cross T and the provider refuses their checkpoints, silently: the Turn takes no more.
+    # The request the last result leaves cannot fit, so its earliest part is dropped, with no model call, and the
+    # Turn answers; nothing asks the user to start over.
     assert sum(is_checkpoint(request) for request in harness.provider.requests) == 2
-    assert not [row for row in await harness.context_rows() if row.kind == "compaction"]
+    modes = [row.payload["mode"] for row in await harness.context_rows() if row.kind == "compaction"]
+    assert modes and set(modes) == {"dropped"}
+    assert not _texts(harness, "notify")
+    assert harness.controller.terminals[-1]["is_error"] is False
+
+
+async def test_a_request_the_provider_keeps_refusing_as_too_long_ends_the_turn_with_the_one_notice(
+    engine, session, tmp_path
+):
+    overflow = [ProviderError("overflow", "prompt is too long: 40000 tokens > 32000 maximum", False, status=400)]
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(assistant("hi"))], *[overflow] * 20], language="zh")
+    await _turn(harness, "hello")
+    await _turn(harness, "and now?")
+    # Checkpoints and drops cannot make room the provider accepts: its fourth refusal ends the Turn.
     assert _texts(harness, "notify") == [f"❌ {i18n_t('vibeyAgent.error.contextExhausted', 'zh')}"]
 
 
@@ -383,7 +397,7 @@ async def test_the_earlier_record_example_runs_through_the_real_read_only_guard(
     hint = VibeyContextHost(engine, environment=lambda _: {}).earlier_record(SESSION, 3)
     (line,) = [line for line in hint.splitlines() if line.startswith("vibe data query ")]
     argv = shlex.split(line)
-    assert argv[:4] == ["vibe", "data", "query", "--sql"] and len(argv) == 5
+    assert argv[:4] == ["vibe", "data", "query", "--sql"] and argv[5:] == ["--format", "text"]
     sql = argv[4]
     assert "WITH" not in sql.upper().split()[0] and "json" not in sql.lower()
     result = run_read_only_query(sql, db_path=Path(engine.url.database), page_request=PageRequest())

@@ -1254,6 +1254,26 @@ class CodexAgentStopTests(unittest.IsolatedAsyncioTestCase):
         # The aborted reservation leaves the generation admitting owners.
         self.assertTrue(activation.commit_if_current(identity, lambda: "owner").admitted)
 
+    async def test_backend_switch_release_drops_the_thread_an_earlier_phase_left(self):
+        """Codex -> other -> Codex: the in-memory thread mapping, consulted before the
+        row, still names the replaced conversation, so the switched Session's first
+        turn releases it, and a live binding is released through its process."""
+        agent = init_generation_state(object.__new__(CodexAgent))
+        agent._session_locks = {}
+        agent._session_mgr = RealCodexSessionManager()
+        agent._session_mgr.set_thread_id("session-1", "thread-old")
+        request = SimpleNamespace(base_session_id="session-1", context=SimpleNamespace(platform_specific={}))
+
+        await agent.release_native_runtime(request)
+        self.assertIsNone(agent._session_mgr.get_thread_id("session-1"))
+
+        generation = install_codex_transport(
+            agent, "/tmp/work", SimpleNamespace(stop=AsyncMock(), _process=None), sessions={"session-1": "thread-old"}
+        )
+        with patch.object(CodexAgent, "_release_session_thread", new=AsyncMock()) as release:
+            await agent.release_native_runtime(request)
+        release.assert_awaited_once_with(generation, "session-1")
+
     async def test_last_session_end_settles_activity_owners_before_the_kill(self):
         """End kills the process only after the ending Session's Activities settle."""
         agent = init_generation_state(object.__new__(CodexAgent))

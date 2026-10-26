@@ -247,6 +247,25 @@ describe('PERMISSIONS-013 VaultsPage capability-gated management actions', () =>
     expect(screen.queryByRole('dialog')).toBeNull();
     expect(screen.getByRole('list', { name: 'Vaults' })).toBeTruthy();
   });
+
+  it('keeps long secret names inside the delete confirmation and leaves actions reachable', async () => {
+    const user = userEvent.setup();
+    const longName = 'AVIBE_UI_REGRESSION_STANDARD_20260810_1234567890_abcdefghijklmnopqrstuvwxyz';
+    api.listVaultSecrets.mockResolvedValue({ secrets: [{ ...protectedSecret, name: longName }] });
+    renderPage(member);
+
+    const row = (await screen.findByText(longName, { exact: true })).closest('li') as HTMLElement;
+    await user.click(within(row).getByRole('button', { name: 'More actions' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+
+    const dialog = await screen.findByRole('dialog');
+    const title = within(dialog).getByRole('heading', { name: `Delete "${longName}"?` });
+    expect(dialog.className).toContain('min-w-0');
+    expect(title.className).toContain('break-words');
+    expect(title.className).toContain('[overflow-wrap:anywhere]');
+    expect(within(dialog).getByRole('button', { name: /^Delete/ })).toBeTruthy();
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeTruthy();
+  });
 });
 
 describe('VaultsPage list discovery', () => {

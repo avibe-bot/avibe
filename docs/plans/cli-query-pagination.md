@@ -41,7 +41,16 @@ All list/query commands should return:
 - `pagination.next_page`
 - `pagination.next_command`
 
-Text output should append a concise "more records" hint when `has_more` is true.
+`pagination.next_command` is the only continuation: no top-level prose repeats
+it. A page whose command cannot be replayed (SQL piped on stdin, which has no
+`next_command`) adds one `message` telling the caller to add `--page`.
+
+### Task and Watch Lists
+
+`vibe task list` and `vibe watch list` take `--q` with the same substring
+semantics as `vibe runs list --q`, searching the store's definition text fields
+(the Workbench search), and carry it into `next_command`. Enabled definitions
+come first, each group ordered by most recent activity.
 
 ### Runs List
 
@@ -89,10 +98,19 @@ Safety layers:
 - open SQLite with `file:...?mode=ro`
 - set `PRAGMA query_only = ON`
 - use `sqlite3.Connection.set_authorizer()` to deny writes, schema changes,
-  attaching databases, transactions, and write PRAGMAs
+  attaching databases, transactions, and every PRAGMA except the schema-reading
+  `table_list`, `table_info`, `table_xinfo`, `index_list`, `index_info`, and
+  `foreign_key_list` (statement or `pragma_*` table-valued form), so Agents can
+  discover the schema with the query they already reach for
 - execute one statement with `execute()`, never `executescript()`
 - use progress handler limits to avoid runaway queries
 - force pagination/default limit behavior on result output
+- on `no such table` / `no such column`, return a `hint` with the closest names
+  and the table list or the referenced tables' columns; on a refused PRAGMA,
+  name the allowed ones. The hint is advisory: if reading the schema fails, the
+  query's own error is returned unchanged
+- the connection keeps Python's default 5 s busy timeout, the same bound as
+  `storage/db.py`; WAL readers do not wait on writers
 
 The SQL command is Agent-facing and should emit JSON by default through the same
 CLI payload style.

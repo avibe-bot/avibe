@@ -49,6 +49,8 @@ const WINDOW_SELECTOR_FIELDS = new Set([
   ...BASE_SELECTOR_FIELDS,
   "title",
   "titleContains",
+  "windowId",
+  "onScreen",
 ]);
 const ELEMENT_SELECTOR_FIELDS = new Set([
   ...BASE_SELECTOR_FIELDS,
@@ -238,6 +240,32 @@ function structured(result) {
     : {};
 }
 
+function observationHasScreenshot(result) {
+  const payload = structured(result);
+  // The driver may return capture metadata alongside an explicitly invalid
+  // frame. That metadata does not authorize pixel coordinates.
+  if (payload.screenshot_frame_valid === false) {
+    return false;
+  }
+  if (
+    typeof payload.screenshot_file_path === "string" &&
+    payload.screenshot_file_path
+  ) {
+    return true;
+  }
+  return (
+    Array.isArray(result?.content) &&
+    result.content.some(
+      (item) =>
+        item &&
+        item.type === "image" &&
+        typeof item.data === "string" &&
+        item.data.length > 0 &&
+        (!item.mimeType || item.mimeType === "image/png"),
+    )
+  );
+}
+
 function effectResult(result) {
   const payload = sanitizePublic(structured(result));
   const status = EFFECT_STATUSES.has(payload.effect)
@@ -336,6 +364,18 @@ function validateSelector(selector, allowedFields, noun, depth = 0) {
   ) {
     invalidSelector(noun, "index must be a non-negative integer", "index");
   }
+  if (
+    selector.windowId !== undefined &&
+    (!Number.isInteger(selector.windowId) || selector.windowId < 0)
+  ) {
+    invalidSelector(noun, "windowId must be a non-negative integer", "windowId");
+  }
+  if (
+    selector.onScreen !== undefined &&
+    typeof selector.onScreen !== "boolean"
+  ) {
+    invalidSelector(noun, "onScreen must be a boolean", "onScreen");
+  }
   if (selector.within !== undefined) {
     validateSelector(
       selector.within,
@@ -410,7 +450,9 @@ function windowMatches(record, selector) {
       value: (item) => item.title,
     }) &&
     exactString(record.title, selector.title) &&
-    containsString(record.title, selector.titleContains)
+    containsString(record.title, selector.titleContains) &&
+    exactString(record.window_id, selector.windowId) &&
+    exactString(record.is_on_screen, selector.onScreen)
   );
 }
 
@@ -705,7 +747,11 @@ class AppHandle {
 
 class WindowHandle {
   constructor(app, _selector, record) {
-    windowState.set(this, { snapshot: undefined, snapshotKey: undefined });
+    windowState.set(this, {
+      snapshot: undefined,
+      snapshotKey: undefined,
+      snapshotHasScreenshot: false,
+    });
     const descriptor = windowDescriptor(app, record);
     this.pid = descriptor.pid;
     this.windowId = descriptor.window_id;
@@ -775,12 +821,24 @@ class WindowHandle {
 
   async _windowAction(label, tool, options = {}) {
     return sdkStep(label, async () => {
-      await observeWindow(this, false);
+      // The driver admits screenshot pixels only against a current snapshot
+      // that carries a screenshot; element resolution leaves a tree-only one.
+      await observeWindow(
+        this,
+        addressesPixels(options) &&
+          !windowState.get(this).snapshotHasScreenshot,
+      );
       return effectResult(
         await callHandleTool(this, tool, windowArguments(this, options)),
       );
     });
   }
+}
+
+const PIXEL_FIELDS = ["x", "y", "from_x", "from_y", "to_x", "to_y"];
+
+function addressesPixels(options) {
+  return PIXEL_FIELDS.some((field) => options[field] !== undefined);
 }
 
 async function observeWindow(handle, force, options = {}, deadline) {
@@ -790,19 +848,30 @@ async function observeWindow(handle, force, options = {}, deadline) {
   if (!force && state.snapshot && state.snapshotKey === key) {
     return state.snapshot;
   }
-  state.snapshot = await callHandleTool(
+  const observation = await callHandleTool(
     handle,
     "get_window_state",
     windowArguments(handle, options),
     deadline,
   );
+  state.snapshot = observation;
   state.snapshotKey = key;
-  return state.snapshot;
+  state.snapshotHasScreenshot = observationHasScreenshot(observation);
+  return observation;
 }
+
+// Element resolution reads only the accessibility tree. Element actions act
+// through element tokens, so they skip the screen capture and its encoding.
+const ELEMENT_RESOLUTION_OPTIONS = Object.freeze({ include_screenshot: false });
 
 async function resolveWindowElement(handle, selector, force, deadline) {
   validateSelector(selector, ELEMENT_SELECTOR_FIELDS, "Element");
-  const observation = await observeWindow(handle, force, {}, deadline);
+  const observation = await observeWindow(
+    handle,
+    force,
+    ELEMENT_RESOLUTION_OPTIONS,
+    deadline,
+  );
   const elements = structured(observation).elements;
   return selectElement(Array.isArray(elements) ? elements : [], selector);
 }

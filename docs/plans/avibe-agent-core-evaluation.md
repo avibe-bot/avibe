@@ -68,6 +68,7 @@ Switching vendors mid-session keeps the full conversation if the transcript is v
 - Every assistant message records `origin{provider, api, model}`.
 - Same origin: replay thinking and its signature verbatim. Different origin: thinking becomes plain assistant text;
   redacted or encrypted reasoning and Gemini thought signatures are dropped; a signature is never synthesized.
+  (C-1 later drops a different origin's thinking in every form instead; see `agent-core-contracts/cross-provider.md`.)
 - Tool-call ids are normalized to the target protocol's format, with the same mapping applied to their results.
 - A tool call without a result gets a synthetic error result; images become a placeholder for non-vision models.
 - Responses API with `store: false`, never `previous_response_id`; compaction runs on the client and produces text.

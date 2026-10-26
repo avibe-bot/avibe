@@ -49,8 +49,8 @@ _PREVIOUS_FORK_OVERRIDE_GUIDANCE = (
     "forked-Session overrides, and only when the requested Agent backend matches the source Session backend."
 )
 _NEW_SESSION_MODEL_GUIDANCE = (
-    "- `--model` and `--reasoning-effort` set the model of the new Session a run creates (a blank new Session, "
-    "`--create-session`, or a fork), and that Session keeps it; they are not valid with `--session-id`. With "
+    "- `--model` and `--reasoning-effort` set the model of the new Session a run creates (a blank new Session "
+    "or a fork), and that Session keeps it; they are not valid with `--session-id`. With "
     "`--fork-self` or `--fork-session`, `--agent`, `--model`, and `--reasoning-effort` override the forked Session "
     "only when the requested Agent backend matches the source Session backend."
 )
@@ -68,6 +68,15 @@ _FOLLOW_THROUGH_PRINCIPLE = (
     "- **Follow through.** Continue while the goal remains unmet and a viable path exists, "
     "across turns as well as within one. When repeatedly blocked, rethink the approach instead of "
     "retrying it. Stop only to wait on a stated condition or at an explained blocker."
+)
+_PREVIOUS_SESSION_TITLE_STEPS = (
+    "without waiting for the user. First inspect:\n`vibe session get`\n\n"
+    "If `metadata.title_source` is `user` or `agent`, leave the title unchanged. Otherwise set it once:\n"
+    '`vibe session update --title "<short title>"`\n\nDo not mention'
+)
+_SESSION_TITLE_STEPS = (
+    'without waiting for the user:\n`vibe session update --title "<short title>" --if-untitled`\n\n'
+    "It keeps a title the user or an Agent already set. Do not mention"
 )
 _CODEX_SKILL_REUSE_GUIDANCE = (
     "Choose skills by task relevance, but load a skill only if it has not already been read "
@@ -148,7 +157,7 @@ def test_export_reconstructs_production_text_with_source_for_every_block(monkeyp
         assert production.count(prompt_text("skills-prompt")) == 1
         assert (
             "Consider whether any available Skills would help in the current situation. "
-            "Load those you choose with `vibe skill load -- <name>`; "
+            "Load those you choose with `vibe skill load -- <name> [<name> ...]`; "
             "reuse any already loaded in this conversation."
         ) in production
         assert "If the user requests a Skill by exact name, use that Skill." in production
@@ -427,7 +436,20 @@ def test_debug_cli_rejects_invalid_context_without_partial_json(tmp_path, capsys
     assert captured.err
 
 
-@pytest.mark.parametrize("language", ["en", "zh"])
+_EXPORT_ERRORS = {
+    "invalidField": "Invalid field type or missing required field: {field}",
+    "unknownField": "Unknown field: {field}",
+    "invalidJson": "The context file must contain valid UTF-8 JSON.",
+    "unreadableContext": "Cannot read the context file. Check its path and permissions.",
+    "invalidContext": "The context must be a JSON object containing only backend, agent_instructions and options.",
+    "invalidBackend": "backend must be claude, codex or opencode.",
+}
+
+
+def _export_error(kind: str, field: str = "") -> str:
+    return "Prompt export failed: " + _EXPORT_ERRORS[kind].format(field=field) + "\n"
+
+
 @pytest.mark.parametrize("options,field,kind", [
     ({"context": {"user_id": "u", "channel_id": "c", "platform_specific": [1]}}, "options.context.platform_specific", "invalidField"),
     ({"context": {"user_id": "u", "channel_id": "c", "platform_specific": "text"}}, "options.context.platform_specific", "invalidField"),
@@ -438,11 +460,10 @@ def test_debug_cli_rejects_invalid_context_without_partial_json(tmp_path, capsys
     ({"enabled_agents": 123}, "options.enabled_agents", "invalidField"),
     ({"unknown": True}, "options.unknown", "unknownField"),
 ])
-def test_cli_localizes_validation_before_rendering(monkeypatch, tmp_path, capsys, language, options, field, kind):
+def test_cli_reports_validation_before_rendering(monkeypatch, tmp_path, capsys, options, field, kind):
     def unexpected_render(*_args, **_kwargs):
         pytest.fail("Invalid input reached production rendering")
 
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     monkeypatch.setattr(managed_skills, "resolve_skills", unexpected_render)
     context_file = tmp_path / "context.json"
     context_file.write_text(json.dumps({
@@ -452,11 +473,9 @@ def test_cli_localizes_validation_before_rendering(monkeypatch, tmp_path, capsys
     assert cli.cmd_debug_prompt(args) == 1
     output = capsys.readouterr()
     assert output.out == ""
-    error = cli.i18n_t(f"debug.cli.error.{kind}", language, field=field)
-    assert output.err == cli.i18n_t("debug.cli.error.promptExport", language, error=error) + "\n"
+    assert output.err == _export_error(kind, field)
 
 
-@pytest.mark.parametrize("language", ["en", "zh"])
 @pytest.mark.parametrize("agents,location", [
     ("codex", ""), ("", ""), ({"name": "codex"}, ""), ({}, ""),
     (True, ""), (123, ""), (1.5, ""),
@@ -465,11 +484,10 @@ def test_cli_localizes_validation_before_rendering(monkeypatch, tmp_path, capsys
     ([{"name": "   "}], ".0"), ([{"name": "!!!"}], ".0"),
     ([{"name": "codex"}, {}], ".1"),
 ])
-def test_cli_rejects_invalid_json_agent_inputs(monkeypatch, tmp_path, capsys, language, agents, location):
+def test_cli_rejects_invalid_json_agent_inputs(monkeypatch, tmp_path, capsys, agents, location):
     def unexpected_discovery(*_args, **_kwargs):
         pytest.fail("Invalid Agent input reached production rendering")
 
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     monkeypatch.setattr(managed_skills, "resolve_skills", unexpected_discovery)
     request = _inputs()
     request["options"]["enabled_agents"] = agents
@@ -479,8 +497,7 @@ def test_cli_rejects_invalid_json_agent_inputs(monkeypatch, tmp_path, capsys, la
     assert cli.cmd_debug_prompt(args) == 1
     output = capsys.readouterr()
     assert output.out == ""
-    error = cli.i18n_t("debug.cli.error.invalidField", language, field=f"options.enabled_agents{location}")
-    assert output.err == cli.i18n_t("debug.cli.error.promptExport", language, error=error) + "\n"
+    assert output.err == _export_error("invalidField", f"options.enabled_agents{location}")
 
 
 @pytest.mark.parametrize("agents,expected_rows", [
@@ -513,14 +530,12 @@ def test_cli_renders_valid_json_agent_arrays(monkeypatch, tmp_path, capsys, agen
         assert render_prompt_context(omitted) == rendered
 
 
-@pytest.mark.parametrize("language", ["en", "zh"])
 @pytest.mark.parametrize("content,kind", [
     (b"{", "invalidJson"), (b"\xff", "invalidJson"), (None, "unreadableContext"),
     (b"null", "invalidContext"), (b'{}', "invalidBackend"),
     (b'{"backend":"codex","extra":1}', "invalidContext"),
 ])
-def test_cli_localizes_invalid_context_files(monkeypatch, tmp_path, capsys, language, content, kind):
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+def test_cli_reports_invalid_context_files(monkeypatch, tmp_path, capsys, content, kind):
     context_file = tmp_path / "context.json"
     if content is not None:
         context_file.write_bytes(content)
@@ -528,8 +543,7 @@ def test_cli_localizes_invalid_context_files(monkeypatch, tmp_path, capsys, lang
     assert cli.cmd_debug_prompt(args) == 1
     output = capsys.readouterr()
     assert output.out == ""
-    error = cli.i18n_t(f"debug.cli.error.{kind}", language)
-    assert output.err == cli.i18n_t("debug.cli.error.promptExport", language, error=error) + "\n"
+    assert output.err == _export_error(kind)
 
 
 def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatch):
@@ -552,7 +566,9 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
         assert text.count(_FOLLOW_THROUGH_PRINCIPLE) == 1
         assert text.count(_NEW_SESSION_MODEL_GUIDANCE) == 1
         assert text.count(_HARNESS_SOURCE_GUIDANCE) == 1
+        assert text.count(_SESSION_TITLE_STEPS) == 1
         text = text.replace(_HARNESS_SOURCE_GUIDANCE, "")
+        text = text.replace(_SESSION_TITLE_STEPS, _PREVIOUS_SESSION_TITLE_STEPS)
         text = text.replace(_NEW_SESSION_MODEL_GUIDANCE, _PREVIOUS_FORK_OVERRIDE_GUIDANCE)
         text = text.replace(_HISTORY_AS_MEMORY_GUIDANCE, _PREVIOUS_HISTORY_GUIDANCE)
         text = text.replace(_FOLLOW_THROUGH_PRINCIPLE, _PREVIOUS_FOLLOW_THROUGH_PRINCIPLE)
@@ -564,6 +580,7 @@ def test_approved_guidance_changes_preserve_all_other_injection_bytes(monkeypatc
     # verification principle and conversation-history guidance and Follow-through
     # principle, and the Harness rule that a run's --model applies
     # only to forks (now: to any new Session a run creates), and without the
-    # Harness line that says what a `[Harness: ...]` input is.
+    # Harness line that says what a `[Harness: ...]` input is, and restoring the
+    # two-call Session Title steps that `--if-untitled` replaced.
     # Every other byte/order stays pinned, including all Claude/OpenCode output.
     assert digest == "262c7cbabbbb0bfefa4a69511d805d28f76a3559bd511184006242f831b4836e"

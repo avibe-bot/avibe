@@ -71,6 +71,7 @@ from vibe.desktop_backends import (
     is_desktop_backend_path,
 )
 from vibe.desktop_runtime import is_private_desktop_runtime_path
+from vibe.desktop_update_status import read_desktop_update_status
 from vibe.cli_health import CliHealth, probe_cli, probe_cli_sync
 from vibe.cli_repair import REPAIR_PATH_CONFLICT, identify_repair_source, native_bootstrap_env
 from vibe.cli_paths import (
@@ -6880,13 +6881,24 @@ def get_version_info() -> dict:
             "build": {"kind": "package" | "source", ...},
             "managed_by": "desktop" | None
         }
+
+    A desktop-managed Runtime reports the desktop app's last completed check
+    (``vibe/desktop_update_status.py``) and never queries PyPI.
     """
     from vibe import __version__
 
     build = get_build_identity()
     managed_by = "desktop" if is_desktop_managed_runtime() else None
     if managed_by:
-        result = {"current": __version__, "latest": None, "has_update": False, "error": None}
+        # The desktop app alone decides what this computer can install; relay
+        # its last conclusion, never PyPI's.
+        status = read_desktop_update_status()
+        result = {
+            "current": __version__,
+            "latest": status["latest"] if status else None,
+            "has_update": status["has_update"] if status else False,
+            "error": None,
+        }
     elif build.kind == "source":
         result = {"current": __version__, "latest": None, "has_update": False, "error": None}
     else:
@@ -8669,18 +8681,24 @@ AVAULT_GRANT_DELIVERY_MIN_VERSION = "0.1.4"
 # Older binaries cannot open browser-sealed protected values and fail with
 # "open failed for <name>", so protected Vaults must not treat them as ready.
 AVAULT_PROTECTED_RECORD_MIN_VERSION = "0.1.6"
-# Installer pin must reference a published release. v0.1.6 adds the
-# protected-record v2 AAD fix so agent delivery can open browser-sealed protected values.
-AVAULT_VERSION = "0.1.6"
+# ``deliver fetch`` hands a credential to avault's own HTTPS client. avault 0.1.7
+# refreshed that client's trust store (webpki-roots 1.0.10 / rustls-webpki
+# 0.103.16) to reject the compromised eMudhra/emSign intermediates, so older
+# binaries must not receive credentials for HTTPS egress.
+AVAULT_FETCH_TLS_MIN_VERSION = "0.1.7"
+# Installer pin must reference a published release. v0.1.7 refreshes the
+# outbound TLS trust (webpki-roots 1.0.10 / rustls-webpki 0.103.16) so delivery
+# fetches reject the compromised eMudhra/emSign intermediates.
+AVAULT_VERSION = "0.1.7"
 # (sha256, size) of each AVAULT_VERSION archive by target, copied from that
 # release's manifest.json so the download is verified whichever source served it.
 _AVAULT_ARCHIVES = {
-    "linux-arm64": ("3405d740ac91c5490a0c16839bb878a2c574ee21053a7a4362d7bbeb7ce3f110", 3251581),
-    "linux-x64": ("42d5bd3bed5ccdd4748a99cfd64f2e32ab1649e4cd2dd13fcc060806c39109f2", 3574160),
-    "macos-arm64": ("2bf9ace2e055c9988ca3b24aa483676e1123b7a588b5082f57cc18d7d856f7c9", 1458126),
-    "macos-x64": ("558b4559b0bcdaeb713758183530d6944c2eacd68fcbfb35cd43ebd017fde163", 1597445),
-    "windows-arm64": ("0b1a2a91ad0a24c392172164e4040fb3c50bec81fd3a14d58e6e13d04053d864", 1316664),
-    "windows-x64": ("c0b9404d30980531f2a6df5e2b4f8bf6e5a34b31a916f7971b522a3a6cad71ad", 1394102),
+    "linux-arm64": ("22bbed967ba7403e323549eb8b161c2d918c1f5ed692f38d4e3b1049ad7d23dd", 3256706),
+    "linux-x64": ("ccc329b92a70c2d5b583b66725b0780a0f182975f2cbe6e7501232d9963ceb4c", 3580615),
+    "macos-arm64": ("d6e5fe7911c571d05734213af5c1b17332b3d7a71635f60c68887bd2dc977998", 1462107),
+    "macos-x64": ("56874a51ef37aab01be137898b3220c4a78bdbff0fc5362a862a42dd18a0abcc", 1583787),
+    "windows-arm64": ("6f7f7cbc69decb280a78e4936cfef7c15e95820168df981a3020393937f4c7aa", 1325310),
+    "windows-x64": ("c49cf29062fa5f22eab76e7785c040006a6fcf9fabf84667c120f8e99f5ccf0a", 1406456),
 }
 
 
@@ -8746,6 +8764,8 @@ def _avault_ready_min_version() -> str:
     # Managed avault readiness must satisfy both the resident grant-id delivery
     # protocol and the protected-record v2 AAD open fix; take the higher floor so
     # stale binaries (e.g. 0.1.5) are upgraded/blocked before protected delivery.
+    # The fetch TLS floor is deliberately not part of it: only the fetch guards
+    # enforce it, so run/inject/grant keep working on an older binary.
     if _version_at_least(AVAULT_PROTECTED_RECORD_MIN_VERSION, AVAULT_GRANT_DELIVERY_MIN_VERSION):
         return AVAULT_PROTECTED_RECORD_MIN_VERSION
     return AVAULT_GRANT_DELIVERY_MIN_VERSION
@@ -9351,6 +9371,19 @@ def _require_avault_grant_protocol_surface(feature: str) -> None:
     )
 
 
+def _require_avault_fetch_surface(feature: str, *, floor: str | None = None) -> None:
+    # Fetch egress needs the refreshed TLS trust on top of whatever floor the
+    # path already requires (the resident path also opens a protected record).
+    minimum = AVAULT_FETCH_TLS_MIN_VERSION
+    if floor and not _version_at_least(minimum, floor):
+        minimum = floor
+    _require_avault_min_version(
+        feature,
+        minimum,
+        managed_available=_version_at_least(AVAULT_VERSION, minimum),
+    )
+
+
 # ---------------------------------------------------------------------------
 # avault client — Avibe's only path to value cryptography.
 #
@@ -9772,9 +9805,20 @@ def avault_agent_deliver_fetch(
     """Broker an HTTP request under a protected grant."""
     from vibe.avault_agent import AvaultAgentError
 
-    _require_avault_grant_delivery_surface("resident agent deliver fetch")
+    _require_avault_fetch_surface("resident agent deliver fetch", floor=_avault_ready_min_version())
+    manager = _avault_agent_manager()
+    if not manager.serves_current_binary():
+        # The version check above probed the executable on disk; a resident agent
+        # started from an older binary must not receive the credential. Drop it and
+        # its DEK cache (expiring the grants it held) so the request is approved
+        # again against an agent running the current binary.
+        _fail_closed_resident_agent_after_release_failure()
+        raise AvaultPreHandoffError(
+            "resident avault agent predates the installed avault binary; "
+            "the grant is missing or expired and must be approved again"
+        )
     try:
-        return _avault_agent_manager().client(timeout=_AVAULT_FETCH_TIMEOUT_SECONDS).deliver_fetch(
+        return manager.client(timeout=_AVAULT_FETCH_TIMEOUT_SECONDS).deliver_fetch(
             grant_id=grant_id,
             name=name,
             envelope=_envelope_payload(sealed),
@@ -9819,6 +9863,7 @@ def avault_deliver_fetch(name: str, sealed, request: dict) -> dict:
     ``request`` must include ``allowed_hosts`` (avault rejects the target otherwise).
     Returns ``{"status", "headers", "body"}`` — the response only, never the secret.
     """
+    _require_avault_fetch_surface("deliver fetch")
     body = json.dumps(
         {"name": name, "envelope": _envelope_payload(sealed), "request": request}
     ).encode("utf-8")
@@ -10278,8 +10323,8 @@ def dependencies_status(*, offline: bool = False, dependency_ids: list[str] | No
             "required": True,
             "installed": av["installed"],
             "version": av.get("version"),
-            "latest_version": None,
-            "has_update": False,
+            "latest_version": AVAULT_VERSION,
+            "has_update": bool(av["installed"] and not _version_at_least(av.get("version"), AVAULT_VERSION)),
             "status": av["status"],
         }
     if requested.intersection({"show-runtime", "node"}):
@@ -10479,7 +10524,13 @@ def reconcile_startup_dependencies() -> dict:
 
         _set_startup_dependency_reconciling("avault", True)
         try:
-            avault = ensure_avault_installed(force=False)
+            # Pin-aware: Desktop never runs `vibe runtime prepare`, so startup is
+            # where an existing install below AVAULT_VERSION moves to the pin. The
+            # operator opt-out that `vibe runtime prepare` honors applies here too.
+            if os.environ.get("VIBE_INSTALL_SKIP_AVAULT", "").strip().lower() in _TRUTHY_ENV_VALUES:
+                avault = {**avault_status(), "ok": True, "skipped": True, "reason": "VIBE_INSTALL_SKIP_AVAULT"}
+            else:
+                avault = refresh_avault_if_stale()
         except Exception as exc:  # noqa: BLE001
             logger.warning("Startup dependency reconcile failed to ensure avault: %s", exc, exc_info=True)
             avault = {"ok": False, "message": str(exc)}

@@ -392,7 +392,7 @@ def test_cleanup_reports_inspection_failure_distinct_from_lock_contention(tmp_pa
     assert result["skipped_reason"] == "archive_inspection_failed"
 
 
-def test_archive_cleanup_outcomes_are_fully_rendered_everywhere() -> None:
+def test_archive_cleanup_outcomes_are_fully_rendered_everywhere(monkeypatch, capsys) -> None:
     """Enumeration pin: every report outcome/reason must render distinctly.
 
     A new outcome or skip reason that the CLI/Doctor forgot to wire fails this
@@ -401,27 +401,40 @@ def test_archive_cleanup_outcomes_are_fully_rendered_everywhere() -> None:
     from core import show_runtime as module
     from vibe import cli as vibe_cli
 
+    def render(archives: dict) -> tuple[str, str]:
+        class FakeRuntimeManager:
+            def clean(self, *, keep_previous=1, dry_run=False):
+                return {"ok": True, "removed": [], "archives": archives}
+
+        monkeypatch.setattr(vibe_cli, "_show_runtime_manager_from_args", lambda parsed: FakeRuntimeManager())
+        monkeypatch.setattr(
+            vibe_cli, "_clean_git_runtime", lambda *, keep_previous, dry_run=False: {"ok": True, "removed": []}
+        )
+        vibe_cli.cmd_runtime(vibe_cli.build_parser().parse_args(["runtime", "clean"]))
+        captured = capsys.readouterr()
+        return captured.out, captured.err
+
     reasons = {
         module._SKIPPED_ARCHIVE_REASON_INSTALL_RUNNING,
         module._SKIPPED_ARCHIVE_REASON_INSPECTION_FAILED,
         module._SKIPPED_ARCHIVE_REASON_REMOVAL_FAILED,
     }
-    # Every skip reason produces a non-empty localized skip line.
-    language = "en"
+    # Every skip reason produces a distinct, non-empty skip line.
     rendered = set()
     for reason in reasons:
-        message = vibe_cli.i18n_t("runtime.clean.skipped", language, reason=reason)
-        assert message and message != "runtime.clean.skipped"
-        assert reason in message
-        rendered.add(message)
+        _out, err = render({"skipped_reason": reason, "failed_count": 2})
+        assert err.strip()
+        if reason != module._SKIPPED_ARCHIVE_REASON_REMOVAL_FAILED:
+            assert reason in err
+        rendered.add(err)
     assert len(rendered) == len(reasons)
     # Inspection failures carry different remediation from lock contention.
-    wait_action = vibe_cli.i18n_t("runtime.doctor.archiveCacheSkippedAction", language)
-    inspect_action = vibe_cli.i18n_t("runtime.doctor.archiveCacheSkippedInspectionAction", language)
+    wait_action = vibe_cli.i18n_t("runtime.doctor.archiveCacheSkippedAction", "en")
+    inspect_action = vibe_cli.i18n_t("runtime.doctor.archiveCacheSkippedInspectionAction", "en")
     assert wait_action and inspect_action and wait_action != inspect_action
     # Partial removals report the failed count.
-    partial = vibe_cli.i18n_t("runtime.clean.partiallyRemoved", language, failed=3)
-    assert "3" in partial and partial != "runtime.clean.partiallyRemoved"
+    out, err = render({"outcome": "partial", "removed_count": 1, "removed_bytes": 10, "failed_count": 3})
+    assert "3 archive(s) could not be removed" in err
     # The outcome vocabulary stays closed.
     assert module._ARCHIVE_CLEANUP_OUTCOMES == frozenset({"cleaned", "partial", "skipped"})
 

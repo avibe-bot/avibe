@@ -1167,6 +1167,8 @@ async def test_hop_resolution_states_each_enabled_hosted_tool(tmp_path):
         assert resolving_threads and threading.main_thread() not in resolving_threads
         _validate("hop-resolution.schema.json", hop)
         assert hop["hosted_tools"] == {
+            # Fetch is enabled by default, but is function-only on every model.
+            "web_fetch": {"native": "unsupported", "replay": "unsupported"},
             "web_search": {
                 "native": "assumed",
                 "declaration": {"type": "web_search"},

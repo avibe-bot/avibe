@@ -90,9 +90,9 @@ for xAI's). The loop answers it by rendering the request again, never by the gen
   never hands it back;
 - after `opaque_refused`, with each refused (identity, kind) in `opaque_refused`, so none of that identity's payloads
   of that kind is sent again: its earlier search calls take their portable form (the query and sources, readable;
-  no encrypted data), and its thinking goes without signatures. The loop keeps each new pair as a `replay_refusal`
-  row before resending, so the Session's later turns, and its forks, start without them (`transcript.md`). Each
-  pair is answered once; refused again, the error ends the run.
+  no encrypted data), and its thinking is left out, as a different origin's (`cross-provider.md`). The loop keeps
+  each new pair as a `replay_refusal` row before resending, so the Session's later turns, and its forks, start
+  without them (`transcript.md`). Each pair is answered once; refused again, the error ends the run.
 
 A `pause_turn` continuation's `pin_unavailable` comes after output, so it is no refusal (`conversion-tables.md`).
 
@@ -143,7 +143,7 @@ own bounded continuation policy (`loop-control.md`).
 | --- | --- | --- |
 | `overflow` | the request exceeded the model's context (Pi's overflow patterns and Anthropic's refusal of input plus `max_tokens` over the window, HTTP 413, `context_length_exceeded`) | overflow recovery (plan §5.2) |
 | `rate_limit`, `overloaded`, `network`, `stalled`, `server`, `interrupted` | transient (`network`: the provider could not be reached; `stalled`: a connected provider sent nothing for the silence bound; `interrupted`: the provider's stream ended after output without a terminal, as Model Hub reports with its own `modelHub.errors.stream_interrupted` frame) | retry with backoff, honoring `retry_after_s`, only when nothing was streamed (no deltas, no `partial`), at most 3 retries within 120 s; then the run ends with that error. After streamed text or a tool call the error is terminal for the request, matching Model Hub's first-byte rule; after thinking alone it is retried once (below) |
-| `auth`, `invalid_request` | not retryable | end the run with the error |
+| `auth`, `invalid_request` | not retryable | end the run with the error. The one narrow exception is a strict final tool-argument parse failure: the adapter keeps a safe partial with every call, marks malformed call identities in `malformed_tool_calls`, and grants only Vibey's transcript-only recovery permission; no malformed call is executed. |
 | `aborted` | cancelled by the caller | end the run as aborted |
 | `unknown` | anything else | end the run with the error; after thinking alone, retry once (below) |
 
@@ -160,6 +160,14 @@ continuation; an unknown local exception does not acquire the thinking-drop exce
 A `ProviderError` whose `partial` is committed (a response that failed after output) carries the error's text as that
 partial's `error_message`, redacted like the error itself and bounded to 1,000 characters, so the transcript row says
 why the response ended. A Stop's partial carries none.
+
+A strict final tool-argument parse failure is the only `invalid_request` that carries recovery metadata. Its `partial`
+keeps text, thinking, and all canonical tool calls, replacing every malformed argument payload with `{}`. The
+`malformed_tool_calls` identities tell the loop which calls are unsafe: it commits the assistant row, records one
+model-visible error `tool_result` for each such call, executes valid sibling calls once, and then returns a bounded
+transcript-only continuation permission. The malformed provider bytes are never logged or persisted. If the continuation
+fails, ordinary provider-error handling reports the actionable failure; unrelated malformed metadata remains terminal
+`invalid_request` with the normal partial policy.
 
 The `ai` lane adds a conversion table per protocol (request fields, stream events, stop reasons, usage fields) to this
 directory with its first PR; its tests enumerate the tables.

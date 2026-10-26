@@ -340,7 +340,7 @@ class FullRuntimeTrial:
         # Expiry of a CLI waiter does not cancel an Agent turn.
         accepted = self._call("cli", "agent", "run", "--agent", "vibey", "--cwd", str(self.workdir),
                               "--message-file", str(instruction_path), "--no-callback")
-        run_id, session_id = accepted["run_id"], accepted["session_id"]
+        run_id, session_id = accepted["run"]["id"], accepted["run"]["session_id"]
         self._result.update(run_id=run_id, session_id=session_id)
         deadline = time.monotonic() + self.profile.wall_seconds
         terminal_row = None
@@ -352,7 +352,7 @@ class FullRuntimeTrial:
                 # A Run's final reply can hand over to a Watch, scheduled Task
                 # or subagent. They are real product work, not noise to discard
                 # at the first terminal. This home belongs only to this trial.
-                status = self._call("cli", "harness", "status", timeout=15)
+                status = self._call("cli", "harness", "status", "--global", timeout=15)
                 if (not status.get("controller", {}).get("available")
                         or any(status.get("truncated", {}).values())):
                     raise TrialError("harness_quiescence_unconfirmed")

@@ -19,6 +19,10 @@ import { GuardDialog } from './GuardDialog';
 import { GuardImpact } from './GuardImpact';
 import { HostedCapabilityChips } from './HostedCapabilityChips';
 import { modelCapabilities } from './hostedTools';
+import { searchServicesActive, serviceVendorForSource, webSearchTool, KEYLESS_EXA_SOURCE_ID } from './searchServices';
+import { SearchServiceSettings, SearchVendorGlyph, ServiceMonthLine } from './SearchServiceParts';
+import { FetchServiceSettings } from './WebFetchOrder';
+import { webFetchTool, fetchVendorForSource } from './webFetch';
 import { confirmGuardPlan, sendAgreed, unansweredRefusal } from './guardedWrite';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { SourcePrivateValue, SourcePrivacyToggle } from './SourcePrivacy';
@@ -54,8 +58,9 @@ import {
   type TrackSourceMutation,
 } from './mutationSettlement';
 import { reconcileUnknownWrite } from './reconcileUnknownWrite';
-import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
-import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction } from './repair';
+import { foldRegionRead, loadingRegion, readRegion, regionFailed, type RegionRead } from './regionRead';
+import { serviceMonthUsage, type ServiceMonth } from './usageProjection';
+import { REPAIR_DESTINATION, REPAIR_LABEL_KEY, reauthBodyKey, reauthCost, repairAction, wasBlocked } from './repair';
 import { activeSourceAdoption, sourceStatePresentation } from './sourceStatePresentation';
 import { useDeadlineClock } from './useDeadlineClock';
 import { SourceTestDialog } from './SourceTestDialog';
@@ -63,6 +68,7 @@ import { ACCENT_ICON, ACCENT_TILE, sourceVisual } from './vendorMeta';
 import type {
   AgentBackend,
   HostedToolName,
+  HostedToolPut,
   HostedToolsStatus,
   RouteHopRef,
   Source,
@@ -148,6 +154,30 @@ const committedPlan = (hops: RouteHopRef[], gaps: SupplyGap[]): ManageGuardPlan 
 
 const NO_TOOLS: ReadonlySet<HostedToolName> = new Set();
 
+/** A candidate service's host-local month, read in the keyed detail child only while it is visible. */
+function useServiceMonth(sourceId: string, tool: 'web_search' | 'web_fetch' = 'web_search'): RegionRead<ServiceMonth> {
+  const [month, setMonth] = React.useState<RegionRead<ServiceMonth>>(loadingRegion);
+  React.useEffect(() => {
+    let current = true;
+    void readRegion(async () => serviceMonthUsage(await modelsApi.getUsageSummary('60d'), sourceId, tool))
+      .then((read) => { if (current) setMonth(read); });
+    return () => { current = false; };
+  }, [sourceId, tool]);
+  return month;
+}
+
+type SearchSettingsProps = React.ComponentProps<typeof SearchServiceSettings>;
+
+const ServiceMonthSearchSettings: React.FC<Omit<SearchSettingsProps, 'month'>> = (props) => {
+  const month = useServiceMonth(props.source.id);
+  return <SearchServiceSettings {...props} month={month} />;
+};
+
+const ServiceMonthFetchSettings: React.FC<React.ComponentProps<typeof FetchServiceSettings> & { onOpenUsage?: () => void }> = (props) => {
+  const month = useServiceMonth(props.sourceId, 'web_fetch');
+  return <><FetchServiceSettings {...props} /><div className="px-5 py-3"><ServiceMonthLine month={month} keyless={props.sourceId === KEYLESS_EXA_SOURCE_ID} onOpenUsage={props.onOpenUsage} /></div></>;
+};
+
 type SourceReconciliation =
   | { kind: 'source'; source: Source }
   | { kind: 'gone'; sources: Source[]; snapshot: number };
@@ -180,7 +210,16 @@ export const SourceDetailPanel: React.FC<{
   /** Tools with a write out, and the clear a refusal chip runs for one of this Source's models. */
   hostedPending?: ReadonlySet<HostedToolName>;
   onClearHostedRefusal?: (tool: HostedToolName, modelId: string) => void;
-}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools, onRetryHostedTools, hostedPending, onClearHostedRefusal }) => {
+  onSaveSearch?: (body: HostedToolPut) => void;
+  onSaveFetch?: (body: HostedToolPut) => void;
+  onRetryFetch?: (sourceId: string) => void;
+  onRetryService?: (sourceId: string) => void;
+  /** A model Source reached from Tools shows its search detail, without model removal. */
+  serviceView?: boolean;
+  onManageSource?: () => void;
+  /** Leave the detail for the Usage tab, from a search service's monthly line. */
+  onOpenUsage?: () => void;
+}> = ({ source, trackMutation, onReauth, onMutationCommitted, headingRef, activeBackends, hostedTools, onRetryHostedTools, hostedPending, onClearHostedRefusal, onSaveSearch, onSaveFetch, onRetryFetch, onRetryService, serviceView, onManageSource, onOpenUsage }) => {
   const { t, i18n } = useTranslation();
   const { showToast } = useToast();
   const detailsHidden = useSourceDetailsHidden();
@@ -215,6 +254,31 @@ export const SourceDetailPanel: React.FC<{
         degraded: (staleData) => staleData,
       })
     : null;
+  const searchTool = webSearchTool(capabilityStatus);
+  const fetchTool = webFetchTool(capabilityStatus);
+  const fetchSettings = fetchTool && fetchVendorForSource(fetchTool, source.id) && onSaveFetch && onRetryFetch
+    ? <ServiceMonthFetchSettings sourceId={source.id} tool={fetchTool} pending={busy || (hostedPending?.has('web_fetch') ?? false)} onSave={onSaveFetch} onRetry={onRetryFetch} onOpenUsage={onOpenUsage} /> : null;
+  const keylessExa = source.id === KEYLESS_EXA_SOURCE_ID;
+  const serviceVendor = serviceVendorForSource(searchTool, source.id);
+  const serviceDetail = keylessExa || Boolean(serviceVendor && (source.protocol === 'search' || serviceView));
+  // Usage, like the Tools rows, waits for the read to list this Source as a search service.
+  const serviceCandidate = searchServicesActive(searchTool)
+    && Boolean(searchTool?.executor_candidates.some((row) => row.kind === 'service' && row.source_id === source.id));
+  let searchSettings: React.ReactNode = null;
+  if (searchTool && serviceVendor && onSaveSearch && onRetryService) {
+    const settingsProps = {
+      source,
+      tool: searchTool,
+      vendor: serviceVendor,
+      pending: busy || (hostedPending?.has('web_search') ?? false),
+      onSave: onSaveSearch,
+      onRetry: onRetryService,
+      onOpenUsage,
+    };
+    searchSettings = serviceCandidate
+      ? <ServiceMonthSearchSettings key={source.id} {...settingsProps} />
+      : <SearchServiceSettings {...settingsProps} month={undefined} />;
+  }
   const capabilities = new Map(models.map((model) => [
     model.id,
     capabilityStatus ? modelCapabilities(capabilityStatus, source.id, model.id) : [],
@@ -225,6 +289,10 @@ export const SourceDetailPanel: React.FC<{
   // A failed read is not "nothing checked": say so where chips would be. Only a
   // hub Source can carry hosted-tool evidence.
   const capabilitiesFailed = source.supply_channel === 'hub' && hostedTools !== undefined && regionFailed(hostedTools);
+  const capabilityFailure = capabilitiesFailed && <p role="status" className="model-hub-source-capabilities-failure flex shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-2 text-destructive-ink">
+    <span>{t('settings.models.capability.readFailed')}</span>
+    {onRetryHostedTools && <button type="button" onClick={onRetryHostedTools} className="model-hub-action-mint shrink-0 font-semibold">{t('settings.models.upstream.retry')}</button>}
+  </p>;
   const editDraft = 'draft' in manageStage ? manageStage.draft : null;
   const editAssessment = editDraft
     ? assessSourceEdit(source, editDraft)
@@ -750,22 +818,62 @@ export const SourceDetailPanel: React.FC<{
   const providerLabel = providerCopyKey ? t(providerCopyKey) : providerIdentity;
   const protocolLabel = t(PROTOCOL_COPY_KEYS[source.protocol]);
   const interfaceLabel = detailsHidden ? protocolLabel : `${providerLabel} · ${protocolLabel}`;
-  const credentialLabel = source.kind === 'api_key'
-    ? t('settings.models.sourceDetail.metadata.apiKey')
-    : t('settings.models.sourceDetail.metadata.account');
+  const credentialLabel = keylessExa
+    ? t('settings.models.searchServices.noSetup')
+    : source.kind === 'api_key'
+      ? t('settings.models.sourceDetail.metadata.apiKey')
+      : t('settings.models.sourceDetail.metadata.account');
   const credentialValue = source.kind === 'api_key'
     ? source.masked_credential
     : source.account_label;
   const lastFetched = source.last_discovered_at
     ? formatRelativeTime(source.last_discovered_at, t)
     : t('settings.models.sourceDetail.metadata.neverFetched');
-  const testable = source.kind === 'api_key' && source.protocol !== 'search' && source.supply_channel === 'hub';
+  const testable = !keylessExa && source.kind === 'api_key' && source.protocol !== 'search' && source.supply_channel === 'hub';
   const usageSummary = adoptedBackends.length > 0
     ? t('settings.models.sourceDetail.usageSummary', { count: source.models.length, backends: adoptedBackends.join(i18n.language.startsWith('zh') ? '、' : ', ') })
     : t('settings.models.gateway.modelCount', { count: source.models.length });
 
   return (
     <div className="model-hub-source-detail">
+      {serviceDetail ? <>
+        <header className="flex shrink-0 items-center gap-3 border-b border-border px-5 py-4">
+          <SearchVendorGlyph vendor={source.vendor} />
+          <div className="flex min-w-0 flex-col gap-1">
+            <h2 ref={headingRef} tabIndex={-1} className="text-lg font-bold text-foreground">{keylessExa ? t('settings.models.searchServices.vendorName.exa-mcp') : source.display_name}</h2>
+            <p className="model-hub-tool-note">{t(source.protocol === 'search' ? fetchSettings ? 'settings.models.webFetch.noModels' : 'settings.models.searchServices.noModels' : 'settings.models.searchServices.modelsAndSearch')}</p>
+            {keylessExa && <p className="model-hub-tool-note">{t('settings.models.searchServices.keylessEndpoint')}</p>}
+          </div>
+        </header>
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          {capabilityFailure}
+          {!keylessExa && state.key && wasBlocked(source.state) && <div className="model-hub-status-gold m-5 flex flex-col gap-2 rounded-lg border p-3" role="status">
+            <p className="font-semibold">{t(state.key, state.values)}</p>
+            <p className="model-hub-tool-note">{t(source.state.detail_key ?? 'models.source.error.unclassified')}</p>
+            {source.vendor === 'tavily' && source.state.detail_key === 'models.source.needs_action.spend_limit_reached' && <p className="model-hub-tool-note">{t('settings.models.searchServices.tavilyLimit')}</p>}
+            {repairDestination === 'reenable_button' && <Button size="xs" className="self-start" disabled={busy || source.trial_pending} onClick={() => void reenable()} aria-busy={reenabling}>{reenabling && <Loader2 className="animate-spin" />}{t(REPAIR_LABEL_KEY.reenable)}</Button>}
+            {repairDestination === 'refetch_button' && <Button size="xs" className="self-start" disabled={busy} onClick={() => void refetch()} aria-busy={refetching}>{refetching && <Loader2 className="animate-spin" />}{t(REPAIR_LABEL_KEY.retest)}</Button>}
+          </div>}
+          {source.trial_pending && <p className="model-hub-tool-note px-5 pt-3">{t('settings.models.searchServices.trialPending')}</p>}
+          <section className="flex flex-col gap-3 border-b border-border px-5 py-4">
+            <h3 className="font-semibold text-foreground">{keylessExa ? t('settings.models.searchServices.noSetup') : t('settings.models.sourceDetail.metadata.apiKey')}</h3>
+            {source.protocol === 'search' ? <div className="flex flex-wrap items-center gap-3">
+              {!keylessExa && credentialValue && <SourcePrivateValue value={credentialValue} className="font-mono" />}
+              {!keylessExa && <Button variant="outline" size="sm" disabled={busy} onClick={() => setReplacingKey(true)}>{t('settings.models.searchServices.replaceKey')}</Button>}
+            </div> : <>
+              <p className="model-hub-tool-note">{t('settings.models.searchServices.sharedKey', { source: source.display_name })}</p>
+              <Button variant="outline" size="sm" className="self-start" onClick={() => { onManageSource?.(); setReplacingKey(true); }}>{t('settings.models.searchServices.manageSource')}</Button>
+            </>}
+          </section>
+          {searchSettings}
+          {fetchSettings}
+          <p className="model-hub-tool-note px-5 py-4">{t(keylessExa ? 'settings.models.searchServices.keylessCustody' : 'settings.models.searchServices.custody')}</p>
+        </div>
+        {source.protocol === 'search' && !keylessExa && <footer className="flex shrink-0 items-center justify-between gap-3 border-t border-border px-5 py-4">
+          <p className="model-hub-tool-note">{t('settings.models.searchServices.removeNote')}</p>
+          <Button variant="outline" size="sm" className="text-destructive-ink" disabled={busy} onClick={beginDelete}>{t('settings.models.sourceDetail.row.remove')}</Button>
+        </footer>}
+      </> : <>
       <section className="model-hub-source-bar flex shrink-0 items-center border-b border-border bg-surface">
         <span className={cn('model-hub-source-tile flex shrink-0 items-center justify-center', ACCENT_TILE[accent])}><Icon className={cn('size-[18px]', ACCENT_ICON[accent])} /></span>
         <div className="model-hub-source-copy flex min-w-0 flex-1 flex-col">
@@ -781,15 +889,20 @@ export const SourceDetailPanel: React.FC<{
         {(source.base_url || credentialValue) && <SourcePrivacyToggle />}
       </section>
       <dl className="model-hub-source-metadata grid shrink-0 grid-cols-2 gap-x-5 gap-y-3 border-b border-border bg-background px-5 py-3 sm:grid-cols-4">
-        <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.endpoint')}</dt><dd className="truncate font-mono">{source.base_url
-          ? <SourcePrivateValue value={source.base_url} />
-          : t('settings.models.sourceDetail.metadata.officialEndpoint')}</dd></div>
+        <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.endpoint')}</dt><dd className="truncate font-mono">{keylessExa
+          ? t('settings.models.searchServices.keylessEndpoint')
+          : source.base_url
+            ? <SourcePrivateValue value={source.base_url} />
+            : t('settings.models.sourceDetail.metadata.officialEndpoint')}</dd></div>
         <div className="min-w-0"><dt>{credentialLabel}</dt><dd className="font-mono">{credentialValue
           ? <SourcePrivateValue value={credentialValue} />
           : '—'}</dd></div>
         <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.type')}</dt><dd className="truncate" title={interfaceLabel}>{interfaceLabel}</dd></div>
         <div className="min-w-0"><dt>{t('settings.models.sourceDetail.metadata.lastFetched')}</dt><dd className="truncate">{lastFetched}</dd></div>
       </dl>
+      {searchSettings}
+      {fetchSettings}
+      </>}
       {(result || refetchFailed || reenableFailed || manageStage.kind === 'delete_failed') && <div className="model-hub-source-notices shrink-0 space-y-2 px-5 pt-3">
         {result && result.removed.length > 0 && <p className="model-hub-status-gold rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.removed', { count: result.removed.length, models: result.removed.join(', ') })}</p>}
         {result && result.added.length === 0 && result.removed.length === 0 && <p className="model-hub-status-mint rounded-lg border px-3 py-2 text-[11.5px]">{t('settings.models.sourceDetail.refetch.unchangedOnly')}</p>}
@@ -797,6 +910,7 @@ export const SourceDetailPanel: React.FC<{
         {reenableFailed && <p className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t('settings.models.repair.failed')}</p>}
         {manageStage.kind === 'delete_failed' && <p data-manage-failure="delete" data-manage-retry-read={String(manageStage.retryRead)} className="rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2 text-[11.5px] text-destructive-ink">{t(manageStage.retryRead ? 'settings.models.sourceDetail.fail.verifyDeleteSource' : 'settings.models.sourceDetail.fail.deleteSource')} <button type="button" disabled={busy} onClick={retryDelete} className="font-semibold underline underline-offset-2">{t('settings.models.sourceDetail.retry')}</button> <button type="button" disabled={busy} onClick={manageStage.retryRead ? dismissUnresolvedManage : cancelManage} className="font-semibold underline underline-offset-2">{t(manageStage.retryRead ? 'settings.models.sourceDetail.dismissUnverified' : 'common.cancel')}</button></p>}
       </div>}
+      {!serviceDetail && <>
       <section className="model-hub-source-toolbar flex shrink-0 flex-col gap-2 border-b border-border px-5 py-2.5 sm:flex-row sm:items-center">
         <span className="flex shrink-0 items-center gap-2"><h3 className="text-[13px] font-bold text-foreground">{t('settings.models.sourceDetail.modelsHeading')}</h3><span className="model-hub-pill model-hub-fill-0a border border-border text-muted">{models.length}</span></span>
         <div className="relative min-w-0 flex-1 sm:ml-auto sm:max-w-[200px]">
@@ -806,17 +920,14 @@ export const SourceDetailPanel: React.FC<{
         <div className="flex shrink-0 items-center gap-2">
           {repairDestination === 'reauth_dialog' && <Button size="xs" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setConfirmingReauth(true)}><LogIn />{t(REPAIR_LABEL_KEY.reauth)}</Button>}
           {repairDestination === 'replace_key_dialog' && <Button size="xs" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => setReplacingKey(true)}>{t(REPAIR_LABEL_KEY.replace_key)}</Button>}
-          {repairDestination === 'reenable_button' && <Button size="xs" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy} onClick={() => void reenable()} aria-busy={reenabling}>{reenabling ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t(REPAIR_LABEL_KEY.reenable)}</Button>}
+          {repairDestination === 'reenable_button' && <Button size="xs" className="model-hub-source-action" data-repair-kind={repair} data-repair-destination={repairDestination} disabled={busy || source.trial_pending} onClick={() => void reenable()} aria-busy={reenabling}>{reenabling ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t(REPAIR_LABEL_KEY.reenable)}</Button>}
           {source.supply_channel === 'hub' && source.protocol !== 'search' && <Button variant="outline" size="xs" className="model-hub-source-action" data-repair-kind={repairDestination === 'refetch_button' ? repair : undefined} data-repair-destination={repairDestination === 'refetch_button' ? repairDestination : undefined} disabled={busy} onClick={() => void refetch()} aria-busy={refetching}>{refetching ? <Loader2 className="animate-spin" /> : <RefreshCw />}{t('settings.models.sourceDetail.action.refetch')}</Button>}
           {testable && <Button variant="outline" size="xs" className="model-hub-source-action" disabled={busy} onClick={() => setTesting(true)}><FlaskConical />{t('settings.models.sourceTest.open')}</Button>}
           {source.kind === 'api_key' && source.protocol !== 'search' && <Button size="xs" className="model-hub-source-action" disabled={busy || manualDraft !== null} onClick={() => setManualDraft({ modelId: '', failed: false, retryRead: false })}><Plus />{t('settings.models.sourceDetail.action.addModel')}</Button>}
           <SourceManageMenu source={source} busy={busy || manageStage.kind !== 'idle'} onEdit={beginEdit} onDelete={beginDelete} />
         </div>
       </section>
-      {capabilitiesFailed && <p role="status" className="model-hub-source-capabilities-failure flex shrink-0 items-center justify-between gap-3 border-b border-border px-5 py-2 text-destructive-ink">
-        <span>{t('settings.models.capability.readFailed')}</span>
-        {onRetryHostedTools && <button type="button" onClick={onRetryHostedTools} className="model-hub-action-mint shrink-0 font-semibold">{t('settings.models.upstream.retry')}</button>}
-      </p>}
+      {capabilityFailure}
       <section className={cn('model-hub-source-table flex min-h-0 flex-1 flex-col overflow-hidden bg-surface', showCapabilities && 'model-hub-source-table--capabilities')}>
         <div className="model-hub-source-table-head hidden border-b border-border font-semibold md:grid">
           <span className="truncate">{t('settings.models.sourceDetail.col.id')}</span>{showCapabilities && <span className="truncate">{t('settings.models.capability.col')}</span>}<span />
@@ -875,6 +986,7 @@ export const SourceDetailPanel: React.FC<{
         )}
         </div>
       </section>
+      </>}
       {testing && <SourceTestDialog key={source.id} source={source} trackMutation={trackMutation} onClose={() => setTesting(false)} />}
       {/* Confirmed before the journey opens, not inside it: `OAuthConnectDialog`
           POSTs the re-auth as it mounts, and on a native source that call is the

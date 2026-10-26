@@ -29,7 +29,7 @@ not verify passkeys today and does not hold the VMK.
 
 The current delete paths are uneven:
 
-- `vibe vault rm` checks metadata first and refuses protected secrets with
+- `vibe vault remove` checks metadata first and refuses protected secrets with
   `protected_delete_forbidden`.
 - The Vaults page has a client-side destructive confirmation dialog, including
   stronger warnings for signing keys.
@@ -62,7 +62,7 @@ Non-goals for the first implementation:
 
 Blocked:
 
-- Local agent via CLI: already blocked by `vibe vault rm`; the service guard
+- Local agent via CLI: already blocked by `vibe vault remove`; the service guard
   should also make future CLI regressions fail closed.
 - Local agent via HTTP: cannot delete a protected secret unless it can complete a
   server-issued WebAuthn challenge for that exact delete operation.

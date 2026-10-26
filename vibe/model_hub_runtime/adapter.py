@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import email.utils
+import inspect
 import json
 import logging
 import math
@@ -13,11 +14,15 @@ import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from typing import Any, Callable, Literal, Mapping, Sequence, TypeVar
+from typing import Any, Awaitable, Callable, Literal, Mapping, Sequence, TypeVar
 
 import aiohttp
-
-from config.v2_config import normalize_model_hub_base_url
+import config.v2_config as model_hub_config
+from config.v2_config import (
+    KEYLESS_EXA_SERVICE_ID,
+    KEYLESS_EXA_SOURCE_ID,
+    normalize_model_hub_base_url,
+)
 from core.agent_core.ai._common import PROVIDER_SILENCE_TIMEOUT_S
 from core.handlers.model_hub.adapter import (
     DiscoveredModel,
@@ -62,12 +67,14 @@ from vibe.model_hub_runtime.client import (
     probe_models,
     upstream_api_url,
 )
+from vibe import __version__ as AVIBE_VERSION
 from vibe.model_hub_runtime.api_key_vendors import (
     anthropic_api_key_header,
     pinned_api_key_protocol,
     search_service,
     validate_api_key_auth_scheme,
 )
+from vibe.model_hub_runtime.keyless_exa_mcp import KeylessExaMcpClient
 from vibe.model_hub_runtime.installer import (
     INSTALL_ALREADY_RUNNING_REASON,
     INSTALL_PLATFORM_UNSUPPORTED_REASON,
@@ -152,7 +159,7 @@ _SEARCH_BODY_MAX_BYTES = 8 * 1024 * 1024
 _SEARCH_TIMEOUT_SECONDS = 30.0
 _SEARCH_CHECK_TIMEOUT_SECONDS = 10.0
 _SEARCH_CHECK_CONNECT_TIMEOUT_SECONDS = 5.0
-_SEARCH_RESPONSE_HEADERS = frozenset({"content-type", "retry-after", "date", "content-length"})
+_SEARCH_RESPONSE_HEADERS = frozenset({"content-type", "retry-after", "x-ratelimit-reset", "date", "content-length"})
 
 
 async def _read_bounded_search_body(content: Any) -> tuple[bytes | None, bool]:
@@ -1512,6 +1519,7 @@ class CLIProxyEngineAdapter:
         self._oauth_flows: dict[str, _OAuthFlow] = {}
         self._active_oauth_providers: set[str] = set()
         self._oauth_lock = threading.RLock()
+        self._keyless_exa_client = KeylessExaMcpClient()
 
     async def install(self) -> EngineStatus:
         await self.recover_installation()
@@ -2055,13 +2063,14 @@ class CLIProxyEngineAdapter:
         self,
         *,
         catalog: Mapping[str, Any],
-        credential_ref: str,
+        credential_ref: str | None,
         method: str,
         endpoint: str,
         payload: Mapping[str, Any] | None = None,
+        extra_headers: Mapping[str, str] | None = None,
         timeout_total: float = _SEARCH_TIMEOUT_SECONDS,
         connect_timeout: float | None = None,
-        on_sent: Callable[[], None] | None = None,
+        on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
         """Call only the immutable catalog endpoint for one search operation."""
         vendor, service = self._search_catalog_parts(catalog)
@@ -2087,39 +2096,51 @@ class CLIProxyEngineAdapter:
         ):
             return SearchResponse(None, {}, None, "invalid_endpoint")
         try:
-            key = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
-            metadata = await asyncio.to_thread(self.state_store.credential_metadata, credential_ref)
+            if credential_ref is None:
+                key = None
+                metadata = {}
+            else:
+                key = await asyncio.to_thread(self.state_store.read_api_key, credential_ref)
+                metadata = await asyncio.to_thread(self.state_store.credential_metadata, credential_ref)
         except Exception:
             return SearchResponse(None, {}, None, "connection")
-        if vendor is None or metadata.get("vendor") != vendor:
+        if vendor is None or (credential_ref is not None and metadata.get("vendor") != vendor):
             return SearchResponse(None, {}, None, "invalid_endpoint")
         auth = str(service.get("auth") or "bearer")
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
-        if auth == "x-api-key":
+        if auth == "x-api-key" and key is not None:
             headers["x-api-key"] = key
-        else:
+        elif auth != "none" and key is not None:
             headers["Authorization"] = f"Bearer {key}"
+        elif auth != "none":
+            return SearchResponse(None, {}, None, "invalid_endpoint")
+        if isinstance(service.get("headers"), Mapping):
+            headers.update({str(name): str(value) for name, value in service["headers"].items()})
+        if extra_headers:
+            headers.update(extra_headers)
         timeout = aiohttp.ClientTimeout(total=timeout_total, connect=connect_timeout)
-        trace = aiohttp.TraceConfig()
         callback_called = False
         response_status: int | None = None
         response_headers: dict[str, str] = {}
         response_received_at: datetime | None = None
 
-        async def request_connection_ready(*_args: Any, **_kwargs: Any) -> None:
-            nonlocal callback_called
-            if callback_called or on_sent is None:
-                return
-            callback_called = True
-            on_sent()
-
-        trace.on_connection_create_end.append(request_connection_ready)
-        trace.on_connection_reuseconn.append(request_connection_ready)
+        class SearchRequest(aiohttp.ClientRequest):
+            async def send(self, conn):
+                nonlocal callback_called
+                # At send(), aiohttp owns the Connection and closes it if
+                # admission fails. Raising from connection-create trace hooks
+                # can instead orphan the not-yet-owned transport.
+                if not callback_called and on_sent is not None:
+                    admission = on_sent()
+                    if inspect.isawaitable(admission):
+                        await admission
+                    callback_called = True
+                return await super().send(conn)
         try:
             async with aiohttp.ClientSession(
                 timeout=timeout,
                 trust_env=False,
-                trace_configs=[trace],
+                request_class=SearchRequest,
             ) as session:
                 async with session.request(
                     method,
@@ -2217,37 +2238,52 @@ class CLIProxyEngineAdapter:
             return SearchCredentialCheck("unknown")
         if response.http_status != 200 or response.body is None:
             return SearchCredentialCheck("unknown")
-        try:
-            body = json.loads(response.body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return SearchCredentialCheck("unknown")
-        limit_rule = check.get("limit")
-        if isinstance(limit_rule, Mapping):
-            limit_outcome = _search_limit_outcome(body, limit_rule)
-            if limit_outcome == "limit":
-                return SearchCredentialCheck("limit")
-            if limit_outcome == "unknown":
+        def decode() -> SearchCredentialCheck:
+            # The free check shares search's 8 MiB body bound, not the event loop.
+            try:
+                body = json.loads(response.body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
                 return SearchCredentialCheck("unknown")
-        passed = check.get("pass")
-        balance = check.get("balance")
-        if isinstance(passed, Mapping) and _search_check_matches(body, passed):
-            return SearchCredentialCheck("pass")
-        if isinstance(balance, Mapping) and _search_check_matches(body, balance):
-            return SearchCredentialCheck("balance")
-        if balance is None and isinstance(passed, Mapping) and passed.get("status") == 200:
-            return SearchCredentialCheck("pass")
-        return SearchCredentialCheck("unknown")
+            limit_rule = check.get("limit")
+            if isinstance(limit_rule, Mapping):
+                limit_outcome = _search_limit_outcome(body, limit_rule)
+                if limit_outcome == "limit":
+                    return SearchCredentialCheck("limit")
+                if limit_outcome == "unknown":
+                    return SearchCredentialCheck("unknown")
+            passed = check.get("pass")
+            balance = check.get("balance")
+            if isinstance(passed, Mapping) and _search_check_matches(body, passed):
+                return SearchCredentialCheck("pass")
+            if isinstance(balance, Mapping) and _search_check_matches(body, balance):
+                return SearchCredentialCheck("balance")
+            if balance is None and isinstance(passed, Mapping) and passed.get("status") == 200:
+                return SearchCredentialCheck("pass")
+            return SearchCredentialCheck("unknown")
+
+        return await asyncio.to_thread(decode)
 
     async def search(
         self,
         source_id: str,
         vendor: str,
         service_id: str,
-        credential_ref: str,
+        credential_ref: str | None,
         request: Mapping[str, Any],
         *,
-        on_sent: Callable[[], None] | None = None,
+        on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
+        if service_id == KEYLESS_EXA_SERVICE_ID:
+            if (
+                not model_hub_config.KEYLESS_EXA_ACTIVE
+                or source_id != KEYLESS_EXA_SOURCE_ID
+                or vendor != "exa-mcp"
+            ):
+                return SearchResponse(None, {}, None, "invalid_endpoint")
+            service = search_service(vendor, "search")
+            if service is None or service.get("service_id") != service_id:
+                return SearchResponse(None, {}, None, "invalid_endpoint")
+            return await self._keyless_exa_client.search(request, on_sent=on_sent)
         service = search_service(vendor, "search" if vendor in {"tavily", "exa"} else "openai_chat")
         if service is None or service.get("service_id") != service_id:
             return SearchResponse(None, {}, None, "invalid_endpoint")
@@ -2263,6 +2299,76 @@ class CLIProxyEngineAdapter:
 
     async def revoke_search_credential(self, credential_ref: str) -> None:
         await asyncio.to_thread(self.state_store.revoke_search_credential, credential_ref)
+
+    async def fetch(
+        self,
+        source_id: str,
+        vendor: str,
+        service_id: str,
+        credential_ref: str | None,
+        request: Mapping[str, Any],
+        *,
+        on_sent: Callable[[], Awaitable[None] | None] | None = None,
+    ) -> SearchResponse:
+        from vibe.model_hub_runtime.fetch_catalog import fetch_service_catalog
+
+        if service_id == KEYLESS_EXA_SERVICE_ID:
+            if (
+                not model_hub_config.KEYLESS_EXA_ACTIVE
+                or source_id != KEYLESS_EXA_SOURCE_ID
+                or vendor != "exa-mcp"
+                or credential_ref is not None
+            ):
+                return SearchResponse(None, {}, None, "invalid_endpoint")
+            service = next(
+                (entry for entry in fetch_service_catalog() if entry.get("service_id") == service_id),
+                None,
+            )
+            if service is None:
+                return SearchResponse(None, {}, None, "invalid_endpoint")
+            return await self._keyless_exa_client.fetch(request, on_sent=on_sent)
+
+        # Keyed services use the same custody and bounded HTTP transport as search,
+        # but their immutable fetch catalog owns a different endpoint and body shape.
+        service = next(
+            (
+                entry for entry in fetch_service_catalog()
+                if entry.get("service_id") == service_id and entry.get("vendor") == vendor
+                and entry.get("kind") == "service"
+                and (entry.get("source_id") is None)
+            ),
+            None,
+        )
+        if service is None or vendor not in {"tavily", "exa", "deepseek"} or credential_ref is None:
+            # The built-in Reader is the only credentialless HTTP fetch service.
+            if vendor != "jina-reader" or credential_ref is not None:
+                return SearchResponse(None, {}, None, "invalid_endpoint")
+            service = next(
+                (
+                    entry for entry in fetch_service_catalog()
+                    if entry.get("service_id") == service_id and entry.get("vendor") == vendor
+                    and entry.get("source_id") == source_id and entry.get("kind") == "service"
+                ),
+                None,
+            )
+            if service is None:
+                return SearchResponse(None, {}, None, "invalid_endpoint")
+        payload = dict(request)
+        request_spec = service.get("request") if isinstance(service.get("request"), Mapping) else {}
+        headers = request_spec.get("headers") if isinstance(request_spec.get("headers"), Mapping) else {}
+        if isinstance(service.get("headers"), Mapping):
+            headers = {**headers, **service["headers"]}
+        if vendor == "jina-reader":
+            headers = {**headers, "User-Agent": f"Avibe/{AVIBE_VERSION}"}
+        return await self._search_http(
+            catalog={"vendor": vendor, **service},
+            credential_ref=credential_ref,
+            method="POST",
+            endpoint=str(service.get("endpoint") or ""),
+            payload=payload,
+            extra_headers=headers or None,
+            on_sent=on_sent,
+        )
 
     async def provision_oauth_credential(
         self,

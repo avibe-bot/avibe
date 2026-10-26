@@ -346,7 +346,6 @@ scenarios:
     test:
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_the_open_project_binds_the_signed_editor
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_every_producer_refuses_an_unreachable_target
-      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_legacy_key_names_the_same_session
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_the_callers_own_session_is_an_effective_target
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_callback_is_admitted_before_the_run_is_reserved
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_forbidden_project_target_is_refused
@@ -365,10 +364,7 @@ scenarios:
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_reserved_replacement_still_follows_the_session_it_makes
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_clearing_the_agent_on_per_run_work_resolves_one
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_the_callers_that_could_still_retarget_per_run_work
-      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_a_fresh_legacy_target_is_a_placement_not_a_blank
-      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_fresh_legacy_work_still_opens_for_the_callers_that_could
-      - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_an_update_onto_a_fresh_legacy_target_is_admitted_too
       - tests/scenarios/permissions/test_effective_target_preflight.py::test_permissions_028_saved_control_keeps_the_definitions_own_authority
-    given: A signed caller names a Session it may not drive, by Session id, by legacy scope key whose thread exists or has never been opened, or by defaulting to its own, or repoints a stored definition at a destination it may or may not use
+    given: A signed caller names a Session it may not drive, by Session id or by defaulting to its own, or repoints a stored definition at a destination it may or may not use
     when: A Run, a callback route, and a Task or Watch definition are produced or retargeted through the real CLI
-    then: Each producer refuses before writing, leaving Run definition Session and Scope counts and the stored row unchanged, a target whose Session does not exist yet is admitted as the placement it is rather than skipped for having no row, an edit that replaces its Session is judged on the destination it chooses rather than the one it abandons, work that becomes per-run admits the Agent each future fire will select with its follow-the-Session marker read from the edit's final policy, and permitted Editors Member Owner and local callers keep the reach they had while saved automation control keeps the definition's own authority
+    then: Each producer refuses before writing, leaving Run definition Session and Scope counts and the stored row unchanged, an edit that replaces its Session is judged on the destination it chooses rather than the one it abandons, work that becomes per-run admits the Agent each future fire will select with its follow-the-Session marker read from the edit's final policy, and permitted Editors Member Owner and local callers keep the reach they had while saved automation control keeps the definition's own authority

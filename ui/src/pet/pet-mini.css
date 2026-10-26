@@ -6,6 +6,11 @@
   color:var(--pet-ink);
   font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
   --settle:cubic-bezier(.32,.72,0,1);
+  /* Content rises toward Vibey as it enters; the top layout flips both. */
+  --pet-rise:8px;
+  /* The history's height bound reserves Vibey and the dock (147px), the bubble
+     header (62px) and the far inset (16px). */
+  --pet-history-reserve:225px;
   --pet-ink:#fff;
   --pet-card:#2a2a2e;
   --pet-main:#34343b;
@@ -14,6 +19,8 @@
   --pet-dismiss-hover:#4a4a50}
 
 .pet-mini-column {
+  /* Between Vibey's bubble and the input below it: room for the bubble's tail. */
+  --pet-input-gap:14px;
   position:absolute;
   left:50%;
   bottom:147px;
@@ -34,7 +41,7 @@
 
 .pet-mini-cards.is-hidden {
   opacity:0;
-  transform:translateY(8px);
+  transform:translateY(var(--pet-rise));
   pointer-events:none}
 
 .pet-mini-collapsed {
@@ -128,7 +135,7 @@
 @keyframes pet-mini-content-in {
   from {
   opacity:0;
-  transform:translateY(8px) scale(.98)}
+  transform:translateY(var(--pet-rise)) scale(.98)}
 to {
   opacity:1;
   transform:none}
@@ -326,7 +333,7 @@ to {
   width:100%;
   padding:0 18px;
   opacity:0;
-  transform:translateY(8px) scale(.97);
+  transform:translateY(var(--pet-rise)) scale(.97);
   transition:opacity 180ms ease,transform 300ms var(--settle)}
 .pet-mini-slot.is-open .pet-mini-slot-body {
   opacity:1;
@@ -791,7 +798,24 @@ to {
    mask, so it stays crisp and collapses away with the detail. */
 .pet-mini-reply-bubble.is-main {
   display:flex;
-  flex-direction:column-reverse}
+  flex-direction:column-reverse;
+  /* Centred on Vibey at every width; at full width the margins are zero. */
+  margin-inline:auto;
+  /* Runs only while useWidthMorph sets an inline width (§4.2). */
+  transition:width 300ms var(--settle)}
+/* A status word alone (thinking, waiting) sizes the bubble to its content,
+   centred on Vibey like the column, so it grows from the centre and its tail
+   never moves. The closed history must not lend it its own text's width. */
+.pet-mini-reply-bubble.is-main.is-compact {
+  width:fit-content;
+  min-width:min(160px,100%);
+  max-width:100%}
+.pet-mini-reply-bubble.is-main.is-compact > .pet-mini-detail {
+  contain:inline-size}
+/* With the input or the marquee below it, the open history leaves room for
+   the bubble's tail before the input. */
+.pet-mini-bubble-over-input {
+  margin-bottom:var(--pet-input-gap)}
 .pet-mini-reply-bubble.is-main .pet-mini-detail-clip {
   position:relative}
 .pet-mini-reply-bubble.is-main .pet-mini-detail-clip:after {
@@ -815,6 +839,7 @@ to {
   display:flex;
   align-items:center;
   justify-content:space-between;
+  gap:12px;
   color:var(--mint-ink);
   font-size:11px;
   line-height:16px;
@@ -847,8 +872,9 @@ to {
   z-index:1;
   border-radius:21px 21px 0 0;
   /* Share the list's 292px box, bounded by the fixed avatar/dock reservation
-     (147px), bubble header (62px), top inset (16px), and measured stack. */
-  max-height:min(292px,max(0px,calc(100dvh - 225px - var(--pet-collapsed-height,0px))));
+     (147px), bubble header (62px), top inset (16px), the measured stack, and
+     the measured input below an open history (with its gap). */
+  max-height:min(292px,max(0px,calc(100dvh - var(--pet-history-reserve) - var(--pet-collapsed-height,0px) - var(--pet-input-space,0px))));
   overflow:auto;
   overscroll-behavior:contain;
   /* Hidden like the card list (§3.2); the edge fades show there is more. */
@@ -904,3 +930,68 @@ to {
   outline:2px solid var(--mint);
   outline-offset:2px}
 .pet-mini-swap:has(.pet-mini-collapsed) { padding-bottom:14px }
+
+/* Top layout (decision 2026-10-23, spec §9.1): with too little room above
+   Vibey, the shell flips the window. Vibey and the dock sit at its top and the
+   column opens below the dock, growing downward; everything else mirrors
+   vertically, so what was nearest Vibey stays nearest Vibey. The column's DOM
+   order is unchanged (focus order too); it is reversed on screen. */
+.pet-mini-stage[data-edge=top] {
+  --pet-rise:-8px;
+  /* Vibey and the dock (163px), the bubble header (62px), the far inset. */
+  --pet-history-reserve:241px}
+.pet-mini-stage[data-edge=top] .pet-mini-avatar-wrap {
+  top:12px;
+  bottom:auto}
+.pet-mini-stage[data-edge=top] .pet-mini-column {
+  top:163px;
+  bottom:auto;
+  flex-direction:column-reverse}
+.pet-mini-stage[data-edge=top] .pet-mini-setup {
+  top:175px;
+  bottom:auto}
+.pet-mini-stage[data-edge=top] .pet-mini-swap:has(.pet-mini-collapsed) {
+  padding-top:14px;
+  padding-bottom:0}
+.pet-mini-stage[data-edge=top] .pet-mini-list {
+  margin-top:0;
+  margin-bottom:auto}
+.pet-mini-stage[data-edge=top] .pet-mini-slot-body {
+  display:flex;
+  flex-direction:column-reverse}
+.pet-mini-stage[data-edge=top] .pet-mini-bubble-over-input {
+  margin-top:var(--pet-input-gap);
+  margin-bottom:0}
+.pet-mini-stage[data-edge=top] .pet-mini-reply-bubble:after {
+  top:-7px;
+  bottom:auto;
+  transform:rotate(225deg)}
+.pet-mini-stage[data-edge=top] .pet-mini-reply-bubble.is-main {
+  flex-direction:column}
+.pet-mini-stage[data-edge=top] .pet-mini-reply-bubble.is-main .pet-mini-detail-clip:after {
+  top:0;
+  bottom:auto}
+.pet-mini-stage[data-edge=top] .pet-mini-bubble-history {
+  border-radius:0 0 21px 21px}
+.pet-mini-stage[data-edge=top] .pet-mini-bubble-history .pet-mini-detail-inner {
+  padding:8px 14px 40px}
+.pet-mini-stage[data-edge=top] .pet-mini-history-open {
+  top:auto;
+  bottom:7px}
+/* The history opens below the toggle row, so the chevrons point the other way. */
+.pet-mini-stage[data-edge=top] .pet-mini-reply-toggle svg {
+  transform:rotate(180deg)}
+.pet-mini-stage[data-edge=top] .pet-mini-reply-toggle[aria-expanded=true] svg {
+  transform:none}
+/* A window only as tall as the strip around Vibey and the dock (163px: the
+   shell's drag, §9.1) has no room for the column, which would show as a
+   sliver at its edge. It comes back with the full window. */
+@media (max-height:163.5px) {
+  .pet-mini-column {
+  visibility:hidden}
+}
+/* Under a shell that owns the layout, nothing is drawn until its first
+   snapshot says which edge (spec §9.1), so a flipped pet never shows a frame
+   in the other layout as it loads. */
+.pet-mini-stage[data-layout-pending] {
+  visibility:hidden}

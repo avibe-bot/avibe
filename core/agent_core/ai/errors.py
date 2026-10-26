@@ -64,6 +64,12 @@ _OVERFLOW_PATTERNS = (
 _OVERFLOW_RE = tuple(re.compile(pattern, re.IGNORECASE) for pattern in _OVERFLOW_PATTERNS)
 _NON_OVERFLOW_RE = (
     re.compile(r"^(?:throttling error|service unavailable):", re.IGNORECASE),
+    # Only an explicit throttling marker suppresses overflow. The first form covers provider message prefixes; the
+    # second covers JSON error type/code fields without turning a generic 400 containing "too many tokens" into one.
+    re.compile(r"(?im)^\s*(?:[\w.-]+\.)?ThrottlingException\b"),
+    re.compile(
+        r'''(?ix)["'](?:__type|type|code|name|error_type|error_code)["']\s*:\s*["'][^"'\r\n]*\bThrottlingException\b'''
+    ),
     re.compile(r"rate limit", re.IGNORECASE),
     re.compile(r"too many requests", re.IGNORECASE),
 )

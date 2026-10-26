@@ -3,6 +3,9 @@
   "$id": "model-hub/api-key-vendors.schema.json",
   "title": "Model Hub API-key vendor catalog",
   "type": "array",
+  "definitions": {
+    "statuses": {"type": "array", "items": {"type": "integer", "minimum": 400, "maximum": 499}, "uniqueItems": true}
+  },
   "items": {
     "type": "object",
     "required": ["id", "label", "official_base_url", "protocol"],
@@ -12,10 +15,11 @@
       "label": {"type": "string", "minLength": 1},
       "official_base_url": {"type": "string", "format": "uri", "pattern": "^https://"},
       "protocol": {"enum": ["anthropic", "openai_responses", "openai_chat", "google", "search"]},
+      "built_in": {"type": "boolean"},
       "models_dev_provider": {"type": ["string", "null"]},
       "search": {
         "type": ["object", "null"],
-        "required": ["service_id", "endpoint", "auth", "request", "result", "limits", "price", "free_check", "service_refused_statuses", "tool_only"],
+        "required": ["service_id", "endpoint", "auth", "request", "result", "limits", "price", "free_check", "service_refused_statuses", "outcomes", "billing", "tool_only"],
         "allOf": [
           {
             "if": {"type": "object", "required": ["tool_only"], "properties": {"tool_only": {"const": false}}},
@@ -30,22 +34,8 @@
         "properties": {
           "service_id": {"type": "string", "minLength": 1},
           "endpoint": {"type": "string", "format": "uri", "pattern": "^https://"},
-          "auth": {"enum": ["bearer", "x-api-key"]},
-          "request": {
-            "type": "object",
-            "properties": {
-              "content_max_chars": {
-                "type": "object",
-                "description": "Vendor text-length request parameter applied only when page content is requested; no larger than the per-source content bound.",
-                "required": ["path", "value"],
-                "additionalProperties": false,
-                "properties": {
-                  "path": {"type": "string", "minLength": 1},
-                  "value": {"type": "integer", "minimum": 1, "maximum": 4000}
-                }
-              }
-            }
-          },
+          "auth": {"enum": ["bearer", "x-api-key", "none"]},
+          "request": {"type": "object"},
           "result": {
             "type": "object",
             "properties": {
@@ -68,7 +58,7 @@
                 "type": "integer",
                 "minimum": 1,
                 "maximum": 100,
-                "description": "Version-independent per-request results ceiling; usage page counts remain bounded across catalog versions."
+                "description": "Version-independent per-request results ceiling."
               }
             }
           },
@@ -81,16 +71,8 @@
               "usd_per_1k": {"type": "number", "minimum": 0},
               "extra": {
                 "type": "array",
-                "items": {
-                  "type": "object",
-                  "required": ["unit", "usd_per_1k"],
-                  "additionalProperties": false,
-                  "properties": {
-                    "unit": {"const": "page"},
-                    "usd_per_1k": {"type": "number", "minimum": 0},
-                    "when": {"const": "content"}
-                  }
-                }
+                "maxItems": 0,
+                "description": "Search services have no additional charges beyond the search price. Exa highlights are included."
               },
               "as_of": {"type": "string", "format": "date"},
               "url": {"type": "string", "format": "uri", "pattern": "^https://"}
@@ -127,6 +109,31 @@
                 "items": {"type": "integer", "minimum": 400, "maximum": 499},
                 "uniqueItems": true
               }
+            }
+          },
+          "outcomes": {
+            "type": "object", "required": ["credential", "balance", "limit"], "additionalProperties": false,
+            "properties": {
+              "credential": {"$ref": "#/definitions/statuses"},
+              "balance": {"$ref": "#/definitions/statuses"},
+              "limit": {"$ref": "#/definitions/statuses"},
+              "tag_overrides": {
+                "type": "array", "items": {
+                  "type": "object", "required": ["status", "tag", "code"], "additionalProperties": false,
+                  "properties": {
+                    "status": {"type": "integer", "minimum": 400, "maximum": 499},
+                    "tag": {"type": "string", "minLength": 1},
+                    "code": {"enum": ["service_limit", "service_refused"]}
+                  }
+                }
+              }
+            }
+          },
+          "billing": {
+            "type": "object", "required": ["nonempty_only", "unbilled_errors"], "additionalProperties": false,
+            "properties": {
+              "nonempty_only": {"type": "boolean"},
+              "unbilled_errors": {"type": "array", "items": {"enum": ["timeout"]}, "uniqueItems": true}
             }
           },
           "service_refused_statuses": {

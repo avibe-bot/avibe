@@ -5,14 +5,17 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import threading
 from typing import Any, Callable, Mapping
 
 import pytest
 
+from core.computer_script_handles import _WINDOW_HANDLE_TOOLS
 from core.computer_server import (
     ComputerServerError,
     ComputerUseServer,
     JsonRpcUpstream,
+    _SessionState,
     _TargetLockManager,
     UpstreamUnavailable,
     _fold_tool_result,
@@ -610,8 +613,8 @@ async def test_non_ready_call_names_status_and_never_spawns_upstream(
                     "name": None,
                 },
             },
-            "get_window_state",
-            {"pid": 41, "window_id": 9, "session": "ses-script"},
+            "click",
+            {"pid": 41, "window_id": 9, "x": 1, "y": 1, "session": "ses-script"},
             [
                 {
                     "pid": 41,
@@ -627,7 +630,26 @@ async def test_non_ready_call_names_status_and_never_spawns_upstream(
                 }
             ],
             "stale_window_handle",
-            ["start_session", "list_apps", "list_windows"],
+            ["start_session", "list_windows"],
+        ),
+        (
+            {
+                "kind": "window",
+                "pid": 41,
+                "window_id": 9,
+                "app": {
+                    "kind": "app",
+                    "pid": 41,
+                    "bundle_id": "com.apple.mail",
+                    "name": None,
+                },
+            },
+            "click",
+            {"pid": 41, "window_id": 9, "x": 1, "y": 1, "session": "ses-script"},
+            [],
+            [],
+            "stale_window_handle",
+            ["start_session", "list_windows"],
         ),
     ],
 )
@@ -759,8 +781,6 @@ async def test_current_script_window_descriptor_is_not_forwarded_to_driver(
     assert result.get("isError") is not True
     assert [params["name"] for _method, params in upstream.calls] == [
         "start_session",
-        "list_apps",
-        "list_windows",
         "get_window_state",
     ]
     assert upstream.calls[-1][1]["arguments"] == {
@@ -768,6 +788,218 @@ async def test_current_script_window_descriptor_is_not_forwarded_to_driver(
         "window_id": 9,
         "session": "ses-script",
     }
+
+
+_MAIL_WINDOW_DESCRIPTOR = {
+    "kind": "window",
+    "pid": 41,
+    "window_id": 9,
+    "app": {
+        "kind": "app",
+        "pid": 41,
+        "bundle_id": "com.apple.mail",
+        "name": None,
+    },
+}
+
+
+class _WindowHandleUpstream(FakeUpstream):
+    """Driver double for one live Mail window that may close or fail to read."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.window_open = True
+        self.observation_error: dict[str, Any] | None = None
+
+    async def request(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        assert method == "tools/call"
+        self.calls.append((method, json.loads(json.dumps(params))))
+        name = params["name"]
+        result: dict[str, Any]
+        if name == "list_apps":
+            result = {
+                "content": [],
+                "structuredContent": {
+                    "apps": [
+                        {"pid": 41, "bundle_id": "com.apple.mail", "name": "Mail"}
+                    ]
+                },
+            }
+        elif name == "list_windows":
+            windows = (
+                [{"pid": 41, "window_id": 9, "app_name": "Mail"}]
+                if self.window_open
+                else []
+            )
+            result = {"content": [], "structuredContent": {"windows": windows}}
+        elif name == "get_window_state" and self.observation_error is not None:
+            result = {
+                "content": [],
+                "structuredContent": self.observation_error,
+                "isError": True,
+            }
+        elif name == "get_window_state":
+            result = {
+                "content": [],
+                "structuredContent": {
+                    "pid": 41,
+                    "window_id": 9,
+                    "elements": [{"element_token": "s1:2", "role": "AXButton"}],
+                },
+            }
+        else:
+            result = {
+                "content": [],
+                "structuredContent": {"effect": "unverifiable"},
+            }
+        return {"jsonrpc": "2.0", "id": 1, "result": result}
+
+
+def _window_handle_server(
+    tmp_path: Path,
+) -> tuple[ComputerUseServer, _WindowHandleUpstream]:
+    state_path, state = _state(tmp_path)
+    upstream = _WindowHandleUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+    return server, upstream
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", sorted(_WINDOW_HANDLE_TOOLS))
+async def test_window_handle_calls_never_scan_applications(
+    tmp_path: Path,
+    tool: str,
+) -> None:
+    """A current window handle costs at most one pid-scoped window lookup."""
+
+    server, upstream = _window_handle_server(tmp_path)
+    observed = await server.call_tool(
+        "get_window_state",
+        {"pid": 41, "window_id": 9, "session": "ses-script"},
+        handle_descriptor=_MAIL_WINDOW_DESCRIPTOR,
+    )
+    assert observed.get("isError") is not True
+    upstream.calls.clear()
+
+    result = await server.call_tool(
+        tool,
+        {"pid": 41, "window_id": 9, "session": "ses-script"},
+        handle_descriptor=_MAIL_WINDOW_DESCRIPTOR,
+    )
+
+    assert result.get("isError") is not True, result
+    names = [params["name"] for _method, params in upstream.calls]
+    assert "list_apps" not in names
+    assert names.count("list_windows") <= 1
+    assert names[-1] == tool
+    discovery = [params for _method, params in upstream.calls if params["name"] == "list_windows"]
+    assert all(params["arguments"]["pid"] == 41 for params in discovery)
+
+
+@pytest.mark.asyncio
+async def test_element_click_hot_path_validates_its_window_once(
+    tmp_path: Path,
+) -> None:
+    """The SDK's resolve-then-act pair performs exactly one discovery call."""
+
+    server, upstream = _window_handle_server(tmp_path)
+
+    observed = await server.call_tool(
+        "get_window_state",
+        {
+            "pid": 41,
+            "window_id": 9,
+            "include_screenshot": False,
+            "session": "ses-script",
+        },
+        handle_descriptor=_MAIL_WINDOW_DESCRIPTOR,
+    )
+    clicked = await server.call_tool(
+        "click",
+        {"pid": 41, "window_id": 9, "element_token": "s1:2", "session": "ses-script"},
+        handle_descriptor=_MAIL_WINDOW_DESCRIPTOR,
+    )
+
+    assert observed.get("isError") is not True
+    assert clicked.get("isError") is not True
+    assert [params["name"] for _method, params in upstream.calls] == [
+        "start_session",
+        "get_window_state",
+        "list_windows",
+        "click",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_closed_window_observation_reports_a_stale_handle(
+    tmp_path: Path,
+) -> None:
+    server, upstream = _window_handle_server(tmp_path)
+    upstream.window_open = False
+    upstream.observation_error = {
+        "code": "window_id_not_found",
+        "detail": "window_id 9 is not a live window",
+    }
+
+    result = await server.call_tool(
+        "get_window_state",
+        {"pid": 41, "window_id": 9, "session": "ses-script"},
+        handle_descriptor=_MAIL_WINDOW_DESCRIPTOR,
+    )
+
+    assert result["isError"] is True
+    assert result["structuredContent"] == {
+        "code": "stale_window_handle",
+        "dispatched": False,
+        "params": {"pid": 41, "window_id": 9},
+    }
+    assert [params["name"] for _method, params in upstream.calls] == [
+        "start_session",
+        "get_window_state",
+        "list_windows",
+    ]
+    # A refused observation never authorizes input on the window.
+    clicked = await server.call_tool(
+        "click",
+        {"pid": 41, "window_id": 9, "x": 1, "y": 1, "session": "ses-script"},
+        handle_descriptor=_MAIL_WINDOW_DESCRIPTOR,
+    )
+    assert clicked["structuredContent"]["code"] == "stale_window_handle"
+    assert clicked["structuredContent"]["dispatched"] is False
+    assert [params["name"] for _method, params in upstream.calls][-1] == "list_windows"
+
+
+@pytest.mark.asyncio
+async def test_failed_observation_of_a_live_window_keeps_the_driver_error(
+    tmp_path: Path,
+) -> None:
+    server, upstream = _window_handle_server(tmp_path)
+    upstream.observation_error = {
+        "code": "ax_timeout",
+        "detail": "the application did not answer",
+    }
+
+    result = await server.call_tool(
+        "get_window_state",
+        {"pid": 41, "window_id": 9, "session": "ses-script"},
+        handle_descriptor=_MAIL_WINDOW_DESCRIPTOR,
+    )
+
+    assert result["isError"] is True
+    assert result["structuredContent"]["code"] == "ax_timeout"
+    assert [params["name"] for _method, params in upstream.calls] == [
+        "start_session",
+        "get_window_state",
+        "list_windows",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1521,6 +1753,124 @@ async def test_end_session_if_active_releases_without_starting_unknown_session(
 
 
 @pytest.mark.asyncio
+async def test_retire_session_releases_session_state_and_lock(tmp_path: Path) -> None:
+    """Terminal archive cleanup drops both registries without starting unknown sessions."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+
+    unknown = await server.retire_session("ses-never-used")
+    assert unknown.get("isError") is not True
+    assert "ses-never-used" not in server._session_locks
+
+    server._session_locks["ses-idle"] = asyncio.Lock()
+    server._sessions["ses-idle"] = _SessionState()
+    idle = await server.retire_session("ses-idle")
+    assert idle.get("isError") is not True
+    assert "ses-idle" not in server._sessions
+    assert "ses-idle" not in server._session_locks
+
+    await server.call_tool("list_apps", {"session": "ses-a"})
+    assert "ses-a" in server._sessions
+    assert "ses-a" in server._session_locks
+
+    retired = await server.retire_session("ses-a")
+
+    assert retired.get("isError") is not True
+    assert "ses-a" not in server._sessions
+    assert "ses-a" not in server._session_locks
+    assert [params["name"] for _method, params in upstream.calls] == [
+        "start_session",
+        "list_apps",
+        "end_session",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_retire_session_reclaims_state_created_by_admitted_call(
+    tmp_path: Path,
+) -> None:
+    """Archive cleanup waits for an admitted call that has not created state yet."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    status_entered = threading.Event()
+    release_status = threading.Event()
+
+    def status_reader() -> ComputerUseStatus:
+        status_entered.set()
+        assert release_status.wait(5)
+        return ComputerUseStatus("ready", None, state)
+
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=status_reader,
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+    call = asyncio.create_task(server.call_tool("list_apps", {"session": "ses-a"}))
+    await _wait_until(status_entered.is_set)
+    assert "ses-a" in server._session_locks
+    assert "ses-a" not in server._sessions
+
+    cleanup = asyncio.create_task(server.retire_session("ses-a"))
+    await asyncio.sleep(0)
+    release_status.set()
+    called = await call
+    retired = await cleanup
+
+    assert called.get("isError") is not True
+    assert retired.get("isError") is not True
+    assert "ses-a" not in server._sessions
+    assert "ses-a" not in server._session_locks
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replace_lock", [False, True])
+async def test_late_retire_cleanup_preserves_newer_session_identity(
+    tmp_path: Path,
+    replace_lock: bool,
+) -> None:
+    """A delayed archive cleanup cannot remove a replacement state or lock."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+    await server.call_tool("list_apps", {"session": "ses-a"})
+    old_lock = server._session_locks["ses-a"]
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_end_session(_session: str) -> dict[str, Any]:
+        entered.set()
+        await release.wait()
+        return {"isError": False, "content": []}
+
+    server.end_session_if_active = delayed_end_session  # type: ignore[method-assign]
+    cleanup = asyncio.create_task(server.retire_session("ses-a"))
+    await entered.wait()
+
+    new_lock = asyncio.Lock() if replace_lock else old_lock
+    new_state = _SessionState()
+    server._session_locks["ses-a"] = new_lock
+    server._sessions["ses-a"] = new_state
+    release.set()
+    retired = await cleanup
+
+    assert retired.get("isError") is not True
+    assert server._session_locks["ses-a"] is new_lock
+    assert server._sessions["ses-a"] is new_state
+
+
+@pytest.mark.asyncio
 async def test_explicit_start_forwards_options_and_normalized_session(
     tmp_path: Path,
 ) -> None:
@@ -2084,6 +2434,75 @@ async def test_observations_are_not_serialized_across_sessions(tmp_path: Path) -
     upstream.block.set()
     assert not (await first).get("isError")
     assert not (await second).get("isError")
+
+
+@pytest.mark.asyncio
+async def test_target_lock_wait_revalidates_generation_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    """A daemon restart while waiting cannot send the waiting action to the old proxy."""
+
+    state_path, initial = _state(tmp_path)
+    current = initial
+    upstreams: list[FakeUpstream] = []
+    target_locks = _ObservedTargetLocks(wait_seconds=5.0)
+
+    async def factory(_state: ComputerUseState) -> FakeUpstream:
+        upstream = FakeUpstream()
+        if not upstreams:
+            upstream.block = asyncio.Event()
+            upstream.blocked_tools = {"clipboard_write"}
+        upstreams.append(upstream)
+        return upstream
+
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, current),
+        upstream_factory=factory,
+        target_lock_manager=target_locks,
+    )
+    first = asyncio.create_task(
+        server.call_tool(
+            "clipboard_write",
+            {"session": "ses-a", "text": "first"},
+        )
+    )
+    await _wait_until(
+        lambda: upstreams and upstreams[0].inflight_by_tool.get("clipboard_write")
+    )
+    second = asyncio.create_task(
+        server.call_tool(
+            "clipboard_write",
+            {"session": "ses-b", "text": "second"},
+        )
+    )
+    await _wait_until(lambda: target_locks.refusals)
+
+    current = ComputerUseState(
+        **{**initial.__dict__, "generation": initial.generation + 1}
+    )
+    old = upstreams[0]
+    assert old.block is not None
+    old.block.set()
+    first_result = await first
+    second_result = await second
+
+    assert first_result.get("isError") is not True
+    assert second_result.get("isError") is not True, second_result
+    assert len(upstreams) == 2
+    assert old.close_calls == 1
+    old_actions = [
+        params["arguments"]["text"]
+        for _method, params in old.calls
+        if params["name"] == "clipboard_write"
+    ]
+    new_actions = [
+        params["arguments"]["text"]
+        for _method, params in upstreams[1].calls
+        if params["name"] == "clipboard_write"
+    ]
+    assert old_actions == ["first"]
+    assert new_actions == ["second"]
 
 
 @pytest.mark.asyncio

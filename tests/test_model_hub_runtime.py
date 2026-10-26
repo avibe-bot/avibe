@@ -920,39 +920,39 @@ def test_packaged_manifest_matches_frozen_runtime_dependency_values(
         "assets": [
             {
                 "platform": "darwin-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_darwin_aarch64.tar.gz",
-                "size_bytes": 40998093,
-                "sha256": "5350a46bee04f8bde5346f70cd8d5d71cc2bc2e73399f508ee197f9280088aba",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-2/CLIProxyAPI_8.0.30_darwin_aarch64.tar.gz",
+                "size_bytes": 41279615,
+                "sha256": "9b43d2a06e3be182116b937fae9762724c4d4d10f570f0f14d85fa9b155143c6",
             },
             {
                 "platform": "darwin-x64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_darwin_amd64.tar.gz",
-                "size_bytes": 43496850,
-                "sha256": "229583a38aeef6f1228aa5ebeaf77f0d9e0cb818163d426c930787fde02fce16",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-2/CLIProxyAPI_8.0.30_darwin_amd64.tar.gz",
+                "size_bytes": 43800161,
+                "sha256": "bbaabfb60b02c126da0a1819e9e6e5f9a9db3903ae066c0769904708b70c7656",
             },
             {
                 "platform": "linux-amd64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_linux_amd64.tar.gz",
-                "size_bytes": 41420943,
-                "sha256": "dd7e0c8e1f0464cb4f933b4132005a0390d1c9f3ffcdeaf10dfd73bac5dcd0ae",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-2/CLIProxyAPI_8.0.30_linux_amd64.tar.gz",
+                "size_bytes": 41717934,
+                "sha256": "1e60cfea3389f1be6922c9c63ee60d59d43a118b016b2be63459e26de3df9fb6",
             },
             {
                 "platform": "linux-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_linux_aarch64.tar.gz",
-                "size_bytes": 38014778,
-                "sha256": "e7d2d3ef548769195e8843069435e49dc82cf4ae9777d9f0af8a4dc40057e843",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-2/CLIProxyAPI_8.0.30_linux_aarch64.tar.gz",
+                "size_bytes": 38275741,
+                "sha256": "0ea9758b520932535779e7c2e2b3eeed35ce1c63d205f05be35556bc77e952f4",
             },
             {
                 "platform": "windows-amd64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_windows_amd64.tar.gz",
-                "size_bytes": 41954382,
-                "sha256": "c7ac88680a02476660abf00ee56e07768cb9a859c12c7558cd77fcf9d4919127",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-2/CLIProxyAPI_8.0.30_windows_amd64.tar.gz",
+                "size_bytes": 42244854,
+                "sha256": "a13477ed1a71589e2c042e5a8d623691c895274cd010e3e7c4818b2a535f84e5",
             },
             {
                 "platform": "windows-arm64",
-                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-1/CLIProxyAPI_8.0.30_windows_aarch64.tar.gz",
-                "size_bytes": 38272453,
-                "sha256": "71eba861e9385cdb44bfc7aae5075a49209e3e4dfbc0c7e06255aff1b5d57c64",
+                "url": "https://github.com/avibe-bot/avibe/releases/download/model-hub-engine-v8.0.30-2/CLIProxyAPI_8.0.30_windows_aarch64.tar.gz",
+                "size_bytes": 38523898,
+                "sha256": "567a2d5ec80735381099f3b6cb51cfabb62d8b437ab9c54e9ad2b206a6e131b4",
             },
         ],
     }
@@ -1367,7 +1367,7 @@ def test_manifest_resolution_drives_admission_persistence_and_schema(
         installer=manager,
         state_store=EngineStateStore(tmp_path / "state"),
     )
-    projected = {"contract_version": 17, **supervisor.status()}
+    projected = {"contract_version": 21, **supervisor.status()}
     schema = json.loads(
         Path("docs/plans/model-hub-contracts/runtime-dependency.schema.json").read_text(
             encoding="utf-8"
@@ -1455,45 +1455,45 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
                 "darwin-arm64",
                 False,
                 "darwin-arm64",
-                40998093,
-                "5350a46bee04f8bde5346f70cd8d5d71cc2bc2e73399f508ee197f9280088aba",
-                "c10089fd11f03ef8b01dd489da8e2ed6ce0dcc01ef33f795416d489dd0bcdd64",
+                41279615,
+                "9b43d2a06e3be182116b937fae9762724c4d4d10f570f0f14d85fa9b155143c6",
+                "e11b3028685aef0d81009ce45f8abecbfcd11eb20267044c1b8e063fdc54b418",
                 "cli-proxy-api",
             ),
             (
                 "darwin-x64",
                 False,
                 "darwin-x64",
-                43496850,
-                "229583a38aeef6f1228aa5ebeaf77f0d9e0cb818163d426c930787fde02fce16",
-                "8c16904ea866cd6ee35eec827d4f691c5230c496147725b5e4a19c0e1115f295",
+                43800161,
+                "bbaabfb60b02c126da0a1819e9e6e5f9a9db3903ae066c0769904708b70c7656",
+                "37103ba11cdeee94423c8d1a59a7cb4d3d36e2b2887ed2a04ca7d163d6ddef03",
                 "cli-proxy-api",
             ),
             (
                 "linux-x64",
                 False,
                 "linux-amd64",
-                41420943,
-                "dd7e0c8e1f0464cb4f933b4132005a0390d1c9f3ffcdeaf10dfd73bac5dcd0ae",
-                "ca55c3d255b5391d823990ea39dceec596c91c6be5ee80856e174e397e46566b",
+                41717934,
+                "1e60cfea3389f1be6922c9c63ee60d59d43a118b016b2be63459e26de3df9fb6",
+                "a966666c9a3b54566a1bb5bf44a967b169113086ca79b10dc0f53e290c9ab4f2",
                 "cli-proxy-api",
             ),
             (
                 "linux-arm64",
                 False,
                 "linux-arm64",
-                38014778,
-                "e7d2d3ef548769195e8843069435e49dc82cf4ae9777d9f0af8a4dc40057e843",
-                "54f85bc24a68cced977a422c01f9726d4b7c916bc24d2c3465258c1fa1ecce0b",
+                38275741,
+                "0ea9758b520932535779e7c2e2b3eeed35ce1c63d205f05be35556bc77e952f4",
+                "a03ff2a1e5233ae7d231202f1d79266a9c1f77a11c7bd4457bc6fbc29fc6ce14",
                 "cli-proxy-api",
             ),
             (
                 "win32-x64",
                 False,
                 "windows-amd64",
-                41954382,
-                "c7ac88680a02476660abf00ee56e07768cb9a859c12c7558cd77fcf9d4919127",
-                "cb34b4d627efa056bb5b44a1301aad855d2006e350a2b7ed460900ebbcc4428c",
+                42244854,
+                "a13477ed1a71589e2c042e5a8d623691c895274cd010e3e7c4818b2a535f84e5",
+                "09d14f44f77040050868b8795bfa15817b0fd54ef21251f0ecb6df41c5bdf48b",
                 "cli-proxy-api.exe",
             ),
             # x64 Python on Windows on Arm still gets the native engine.
@@ -1501,18 +1501,18 @@ def test_installing_projection_matches_live_owner_or_resumable_claim(
                 "win32-x64",
                 True,
                 "windows-arm64",
-                38272453,
-                "71eba861e9385cdb44bfc7aae5075a49209e3e4dfbc0c7e06255aff1b5d57c64",
-                "854351aa7942333c08f52e08139055570dcd7582f732dd8b83ba90a886e5c092",
+                38523898,
+                "567a2d5ec80735381099f3b6cb51cfabb62d8b437ab9c54e9ad2b206a6e131b4",
+                "211741542a28d4beb93b9c8eb299e2d3e90d8369fba85cc1c58e7a5bc858b891",
                 "cli-proxy-api.exe",
             ),
             (
                 "win32-arm64",
                 True,
                 "windows-arm64",
-                38272453,
-                "71eba861e9385cdb44bfc7aae5075a49209e3e4dfbc0c7e06255aff1b5d57c64",
-                "854351aa7942333c08f52e08139055570dcd7582f732dd8b83ba90a886e5c092",
+                38523898,
+                "567a2d5ec80735381099f3b6cb51cfabb62d8b437ab9c54e9ad2b206a6e131b4",
+                "211741542a28d4beb93b9c8eb299e2d3e90d8369fba85cc1c58e7a5bc858b891",
                 "cli-proxy-api.exe",
             ),
     ],
@@ -2328,8 +2328,16 @@ def test_search_free_check_uses_bounded_catalog_transport(monkeypatch):
         },
     }
 
+    matches = runtime_adapter_module._search_check_matches
+
+    def checked_off_loop(*args):
+        calls["mapping_thread"] = threading.current_thread().name
+        return matches(*args)
+
+    monkeypatch.setattr(runtime_adapter_module, "_search_check_matches", checked_off_loop)
     outcome = asyncio.run(adapter.check_search_credential("cred_search", catalog))
 
+    assert calls["mapping_thread"] != caller_thread
     assert outcome.outcome == "pass"
     timeout = calls["session_kwargs"]["timeout"]
     assert timeout.total == 10.0
@@ -2375,23 +2383,25 @@ def test_search_response_retains_wire_facts_after_body_read_failure(
         headers = {"Content-Type": "application/json", "Retry-After": "2"}
         content = ResponseContent()
 
+    async def write(_request, _connection):
+        calls.append("write")
+        return Response()
+
+    monkeypatch.setattr(runtime_adapter_module.aiohttp.ClientRequest, "send", write)
+
     class Request:
-        def __init__(self, traces):
-            self.traces = traces
+        def __init__(self, request_class):
+            self.request_class = request_class
 
         async def __aenter__(self):
-            for trace in self.traces:
-                for callback in trace.on_connection_create_end:
-                    await callback(None, None, None)
-            calls.append("write")
-            return Response()
+            return await self.request_class.send(object.__new__(self.request_class), None)
 
         async def __aexit__(self, *_args):
             return None
 
     class Session:
-        def __init__(self, *, trace_configs, **_kwargs):
-            self.traces = trace_configs
+        def __init__(self, *, request_class, **_kwargs):
+            self.request_class = request_class
 
         async def __aenter__(self):
             return self
@@ -2400,7 +2410,7 @@ def test_search_response_retains_wire_facts_after_body_read_failure(
             return None
 
         def request(self, _method, _endpoint, **_kwargs):
-            return Request(self.traces)
+            return Request(self.request_class)
 
     monkeypatch.setattr(runtime_adapter_module.aiohttp, "ClientSession", Session)
     adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=Store())  # type: ignore[arg-type]
@@ -2424,7 +2434,8 @@ def test_search_response_retains_wire_facts_after_body_read_failure(
     assert calls == ["sent", "write"]
 
 
-def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypatch):
+@pytest.mark.parametrize("admission", ["sync", "async", "refused", "cancelled"])
+def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypatch, admission):
     calls: list[str] = []
 
     class Store:
@@ -2443,25 +2454,25 @@ def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypat
         headers = {}
         content = ResponseContent()
 
+    async def write(_request, _connection):
+        calls.append("write")
+        return Response()
+
+    monkeypatch.setattr(runtime_adapter_module.aiohttp.ClientRequest, "send", write)
+
     class Request:
-        def __init__(self, traces):
-            self.traces = traces
+        def __init__(self, request_class):
+            self.request_class = request_class
 
         async def __aenter__(self):
-            for trace in self.traces:
-                for callback in trace.on_connection_create_end:
-                    await callback(None, None, None)
-                for callback in trace.on_connection_reuseconn:
-                    await callback(None, None, None)
-            calls.append("write")
-            return Response()
+            return await self.request_class.send(object.__new__(self.request_class), None)
 
         async def __aexit__(self, *_args):
             return None
 
     class Session:
-        def __init__(self, *, trace_configs, **_kwargs):
-            self.traces = trace_configs
+        def __init__(self, *, request_class, **_kwargs):
+            self.request_class = request_class
 
         async def __aenter__(self):
             return self
@@ -2470,10 +2481,18 @@ def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypat
             return None
 
         def request(self, _method, _endpoint, **_kwargs):
-            return Request(self.traces)
+            return Request(self.request_class)
 
     monkeypatch.setattr(runtime_adapter_module.aiohttp, "ClientSession", Session)
     adapter = CLIProxyEngineAdapter(supervisor=object(), state_store=Store())  # type: ignore[arg-type]
+
+    async def final_admission():
+        await asyncio.sleep(0)
+        if admission == "refused":
+            raise ValueError("not admitted")
+        if admission == "cancelled":
+            raise asyncio.CancelledError
+        calls.append("sent")
 
     response = asyncio.run(
         adapter.search(
@@ -2482,10 +2501,14 @@ def test_search_on_sent_fires_once_after_connection_ready_before_write(monkeypat
             "tavily/search",
             "cred_search",
             {"query": "hello", "max_results": 1},
-            on_sent=lambda: calls.append("sent"),
+            on_sent=(lambda: calls.append("sent")) if admission == "sync" else final_admission,
         )
     )
 
+    if admission in {"refused", "cancelled"}:
+        assert calls == [] and response.on_sent_fired is False and response.http_status is None
+        assert response.error == ("connection" if admission == "refused" else "cancelled")
+        return
     assert response.http_status == 200
     assert response.on_sent_fired is True
     assert calls == ["sent", "write"]
@@ -2729,45 +2752,28 @@ def test_shipped_api_key_vendor_catalog_matches_its_schema() -> None:
     Draft7Validator(schema).validate(catalog)
 
 
-def test_exa_catalog_bounds_content_and_marks_reported_cost_as_estimate() -> None:
-    service = search_service("exa", "search")
-    assert service["result"]["reported_cost"] == {
-        "path": "costDollars.total", "estimate": True,
-    }
-    assert service["request"]["content_max_chars"] == {
-        "path": "contents.text.maxCharacters", "value": 4000,
-    }
-
-
-@pytest.mark.parametrize(("mapping", "valid"), [
-    ({"path": "contents.text.maxCharacters", "value": 4000}, True),
-    ({"path": "contents.text.maxCharacters", "value": 1}, True),
-    ("contents.text.maxCharacters", False),
-    (None, False),
-    ({}, False),
-    ({"path": "contents.text.maxCharacters"}, False),
-    ({"value": 4000}, False),
-    ({"path": "", "value": 4000}, False),
-    ({"path": 1, "value": 4000}, False),
-    ({"path": "contents.text.maxCharacters", "value": True}, False),
-    ({"path": "contents.text.maxCharacters", "value": "4000"}, False),
-    ({"path": "contents.text.maxCharacters", "value": 0}, False),
-    ({"path": "contents.text.maxCharacters", "value": -1}, False),
-    ({"path": "contents.text.maxCharacters", "value": 1.5}, False),
-    ({"path": "contents.text.maxCharacters", "value": 4001}, False),
-    ({"path": "contents.text.maxCharacters", "value": 4000, "unknown": 1}, False),
+@pytest.mark.parametrize("vendor,protocol,snippet", [
+    ("deepseek", "openai_chat", "summary"), ("tavily", "search", "content"), ("exa", "search", "highlights"),
 ])
-def test_search_content_limit_metadata_matches_schema_and_runtime(mapping, valid) -> None:
-    catalog = json.loads(Path("vibe/data/api_key_vendors.json").read_text(encoding="utf-8"))
-    row = next(row for row in catalog if row["id"] == "exa")
-    row["search"]["request"]["content_max_chars"] = mapping
-    schema = json.loads(Path("vibe/data/api_key_vendors.schema.json").read_text(encoding="utf-8"))
-    assert Draft7Validator(schema).is_valid([row]) is valid
-    if valid:
-        assert _validate_search_catalog(row["search"], protocol="search")["request"]["content_max_chars"] == mapping
-    else:
-        with pytest.raises(ValueError, match="content maximum"):
-            _validate_search_catalog(row["search"], protocol="search")
+def test_search_catalog_maps_only_snippets_without_page_text_or_surcharges(vendor, protocol, snippet) -> None:
+    """The bundled wire mapping is the owner of what S2 may request: no paid page text.
+
+    The old schema-validity test also accepted page-content declarations, so pin
+    the snippet-only shape while keeping Exa's included highlights and reported cost.
+    """
+    service = search_service(vendor, protocol)
+    assert set(service["request"]) == (
+        {"method", "query", "results"} | ({"highlights"} if vendor == "exa" else set())
+        | ({"defaults"} if vendor in {"exa", "tavily"} else set())
+    )
+    assert set(service["result"]) == {"results", "url", "title", "snippet", "page_age"} | (
+        {"reported_cost"} if vendor == "exa" else set()
+    )
+    assert service["result"]["snippet"] == snippet
+    assert service["price"]["extra"] == []
+    if vendor == "exa":
+        assert service["request"]["highlights"] == "contents.highlights"
+        assert service["result"]["reported_cost"] == {"path": "costDollars.total", "estimate": True}
 
 
 @pytest.mark.parametrize(("mapping", "valid"), [
@@ -2814,7 +2820,7 @@ def test_search_query_limits_use_only_documented_vendor_bounds() -> None:
     assert {
         entry.id: entry.search["limits"]["query_max_chars"]
         for entry in api_key_vendor_catalog() if entry.search is not None
-    } == {"deepseek": 128, "tavily": None, "exa": None}
+    } == {"deepseek": 128, "tavily": None, "exa": None, "exa-mcp": None}
 
 
 def test_only_deepseek_search_auto_enrolls_model_sources() -> None:

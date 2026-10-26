@@ -2787,11 +2787,12 @@ class ManagedWatchService:
                 error_text = "timed out"
                 if 124 in set(watch.retry_exit_codes):
                     # A retry authorises no hook: the watch keeps running, and there is
-                    # nothing to tell the user yet.
+                    # nothing to tell the user yet. A configured retry is the waiter
+                    # saying "still waiting", so it records its exit code and no error.
                     if not await self._commit_cycle_result_async(
                         watch,
                         exit_code=124,
-                        error=error_text,
+                        error=None,
                         disable=False,
                     ):
                         return
@@ -2814,12 +2815,13 @@ class ManagedWatchService:
                 )
                 return
 
-            error_text = _squash_error(result.stderr) or f"watch command exited with status {result.exit_code}"
             if result.exit_code in set(watch.retry_exit_codes):
+                # "Still waiting": the exit code is the whole verdict. ``last_error``
+                # stays for real failures, so a healthy waiter never reads as broken.
                 if not await self._commit_cycle_result_async(
                     watch,
                     exit_code=result.exit_code,
-                    error=error_text,
+                    error=None,
                     disable=False,
                 ):
                     return
@@ -2829,6 +2831,7 @@ class ManagedWatchService:
                 )
                 continue
 
+            error_text = _squash_error(result.stderr) or f"watch command exited with status {result.exit_code}"
             await self._commit_cycle_result_async(
                 watch,
                 exit_code=result.exit_code,

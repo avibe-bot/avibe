@@ -124,7 +124,11 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 298  # +8 MCP Hub routes, classified in tests/test_mcp_hub_api.py
+    assert len(endpoints) == 300  # master 292 + 8 MCP Hub routes, classified in tests/test_mcp_hub_api.py
+    for tool in ("web_search", "web_fetch"):
+        retry_route = f"/api/models/hosted-tools/{tool}/services/{{source_id}}/retry"
+        assert ("POST", retry_route) in endpoints
+        assert http_authorization_policy("POST", retry_route).minimum_role == "member"
     assert ("GET", "/api/sessions/main") in endpoints
     assert http_authorization_policy("POST", "/api/vault/requests/{request_id}/approve-delete").minimum_role == "editor"
     # Approvers still read policy and remember duration; protection fields add a service check.

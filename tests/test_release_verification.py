@@ -419,9 +419,13 @@ def test_muc_004_retirement_gate_replays_from_workflow_checkout(tmp_path, tag, f
     gate = "TARGET_VERSION=" + step["run"].split("TARGET_VERSION=", 1)[1]
     automation = tmp_path / "release-automation"
     for name in _step(job, "Checkout release automation")["with"]["sparse-checkout"].splitlines():
-        target = automation / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / name, target)
+        sources = sorted(ROOT.glob(name)) if any(char in name for char in "*?[") else [ROOT / name]
+        assert sources, f"sparse-checkout pattern has no repository matches: {name}"
+        for source in sources:
+            relative = source.relative_to(ROOT)
+            target = automation / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
     binaries = tmp_path / "bin"
     binaries.mkdir()
     (binaries / "python").write_text(f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n")
@@ -440,15 +444,18 @@ def test_muc_004_retirement_gate_replays_from_workflow_checkout(tmp_path, tag, f
     result = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", gate], cwd=tmp_path,
         env={**env, "RELEASE_TAG": tag, "PYTHONPATH": "",
+             "RUNNER_TEMP": str(tmp_path / "runner-temp"),
              "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}"},
         capture_output=True, text=True, timeout=60,
     )
-    assert result.returncode == 0, result.stdout + result.stderr
     collected = "tests/e2e/test_retired_updater_bridge.py::" in result.stdout
     assert collected is forward
     if forward:
+        assert result.returncode != 0
         assert "1 skipped" in result.stdout
+        assert "did not pass in the release run" in result.stdout
     else:
+        assert result.returncode == 0, result.stdout + result.stderr
         assert "No forward Memory retirement upgrade" in result.stdout
 
 

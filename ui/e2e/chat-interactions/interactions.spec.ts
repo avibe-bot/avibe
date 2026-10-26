@@ -11,7 +11,7 @@ for (const lang of ['en', 'zh'] as const) {
         if (url.origin !== 'http://127.0.0.1:5227' || route.request().method() !== 'GET') return route.abort();
         if (url.pathname === `/api/models/turns/${TURN}/provenance`) {
           return route.fulfill({ json: { provenance: {
-            contract_version: 17, turn_id: TURN, agent: 'codex', requested_model_id: 'fixture-model',
+            contract_version: 21, turn_id: TURN, agent: 'codex', requested_model_id: 'fixture-model',
             outcome: 'failed_terminal', failed_attempts: [], blockers: [],
             terminal_error: { source_id: 'fixture-source', configured_model_id: 'fixture-model', reason: 'engine_down' },
           } } });

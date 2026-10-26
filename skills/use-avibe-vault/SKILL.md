@@ -21,7 +21,7 @@ Rules:
 - Static secrets can be used with `run` / `fetch`; keypair secrets can only be used with `vibe vault sign`. Keypairs do not accept field refs.
 - Authorization is per secret: approving a protected secret unlocks **all its fields** for the grant's lifetime. The CLI cannot create, replace, or delete fields; the user does that in the browser.
 - `--env NAME.field` delivers one value to `NAME_FIELD` (only the field is uppercased); `--env LOCAL=NAME.field` chooses the variable. `--tag` and `--skill` deliver every field of each selected secret, using `NAME` for the default and `NAME_FIELD` for extras. Conflicting variable mappings fail before delivery.
-- `list` and `find` return value-free `default_field` and `fields` metadata. If a ref fails with `field_not_found`, use the listed field names rather than guessing.
+- `list` and `find` print the same value-free row: a static secret lists its `fields`, and a multi-field secret also names its `default_field`, the field `NAME` selects. If a ref fails with `field_not_found`, use the listed field names rather than guessing.
 - `export` remains deprecated and has no delivery. Prefer `run`; advanced `inject` writes a restricted-permission file, so use it only for tools that require file-based configuration.
 - With `vibe vault run`, the child process receives static secrets as environment variables, so never run commands that may print env vars, debug config, or secret-bearing errors.
 - When protected `run` / `fetch` needs approval, Avibe automatically asks the user to decrypt and authorize access, and the command waits for that approval (540 seconds by default; `--approval-wait SECONDS` or `--no-approval-wait` to change it). If the command then succeeds, it ran once: do not run it again. If it returns `approval_required`, `approval_wait_timeout`, or `approval_handed_off`, or your call to it is stopped before it gets the approval, the command did not run; Avibe resumes this session once the request is decided, and after an approval you run the same `run` / `fetch` command once.
@@ -73,9 +73,9 @@ Sign a 32-byte digest with a keypair secret. Standard keys may return the signat
 `vibe vault sign WALLET_KEY --digest 0000000000000000000000000000000000000000000000000000000000000001 --scheme ecdsa-secp256k1-recoverable --command "sign deployment transaction"`
 
 Ask the user to delete a Vault secret. Every agent-initiated delete needs one-click user approval, including standard, protected, static, and keypair secrets:
-`vibe vault rm OLD_TOKEN --reason "Rotated credential"`
+`vibe vault remove OLD_TOKEN --reason "Rotated credential"`
 This returns a pending request ID without deleting anything. With the normal callback, Avibe resumes this Session after the user decides; do not rerun `rm`. With `--no-callback`, or when the request has no resolvable Session, check explicitly with `vibe vault await <request_id>`; do not rerun `rm`. If a repeated `rm` reuses a pending request created by another Session, use the returned request ID with `vibe vault await <request_id>` rather than expecting a callback for the current Session.
 
-`vibe vault rm` always requests whole-secret deletion. It rejects `NAME.field`; remove a single field from the Vaults page instead.
+`vibe vault remove` always requests whole-secret deletion. It rejects `NAME.field`; remove a single field from the Vaults page instead.
 
 For more details, run `vibe vault --help`.

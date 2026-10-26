@@ -50,6 +50,7 @@ PROBE_PID_FILES = (
     "runtime/remote-access-cloudflared.pid",
 )
 PROBE_DIAGNOSTIC_TAIL_BYTES = 64 * 1024
+WINDOWS_RENAME_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0, 4.0, 5.0, 5.0, 5.0)
 
 
 def sha256(path: Path) -> str:
@@ -62,6 +63,39 @@ def sha256(path: Path) -> str:
 
 def run(command: list[str], *, cwd: Path = REPO_ROOT, env: dict[str, str] | None = None) -> None:
     subprocess.run(command, cwd=cwd, env=env, check=True)
+
+
+def rename_payload(
+    source: Path,
+    destination: Path,
+) -> None:
+    """Rename a built payload, tolerating transient Windows file locks."""
+
+    total_attempts = len(WINDOWS_RENAME_RETRY_DELAYS) + 1
+    for attempt in range(1, total_attempts + 1):
+        try:
+            source.rename(destination)
+            return
+        except OSError as error:
+            winerror = getattr(error, "winerror", None)
+            if os.name != "nt" or winerror not in {5, 32}:
+                raise
+            if attempt == total_attempts:
+                print(
+                    f"--- payload rename attempt {attempt}/{total_attempts} failed "
+                    f"with WinError {winerror}; retry budget exhausted ---",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                raise
+            delay = WINDOWS_RENAME_RETRY_DELAYS[attempt - 1]
+            print(
+                f"--- payload rename attempt {attempt}/{total_attempts} failed "
+                f"with WinError {winerror}; retrying in {delay:g}s ---",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(delay)
 
 
 def download(source: dict[str, str], cache_dir: Path) -> Path:
@@ -227,6 +261,44 @@ for name in ("claude", "claude.exe"):
         [str(private_python), "-I", "-c", probe],
         cwd=work_dir,
         check=True,
+    )
+
+
+def verify_fetch_dependencies(private_python: Path, work_dir: Path, required_binary_wheels: list[str]) -> None:
+    """Offline release gate on the relocated tree, before hashing/signing.
+
+    Missing native wheels are release errors on our desktop matrix, not silently
+    accepted degraded builds. Runtime import failure still has its safe fallback.
+    """
+    probe = r'''
+import json
+import sys
+from importlib.metadata import distribution
+from pathlib import Path
+import certifi
+import h2.connection
+import pypdf
+from core.web_fetch_worker.transport import native_available
+from core.web_fetch_worker.extract import extract_page
+
+for name in json.loads(sys.argv[1]):
+    dist = distribution(name)
+    wheel = dist.read_text("WHEEL") or ""
+    if "Root-Is-Purelib: false" not in wheel or not any(
+        str(path).endswith((".so", ".pyd", ".dylib", ".dll"))
+        for path in (dist.files or ())
+    ):
+        raise SystemExit(f"Required binary wheel missing: {name}")
+if not Path(certifi.where()).is_file() or "BEGIN CERTIFICATE" not in Path(certifi.where()).read_text():
+    raise SystemExit("curl/httpx CA resources missing")
+if native_available() != (True, None):
+    raise SystemExit("Pinned curl_cffi/chrome150 native profile/codecs unavailable")
+page = extract_page(b"<article><h1>Offline</h1><p>Readable bundled extraction fixture.</p></article>", "text/html", "https://example.com/")
+assert "bundled extraction" in page.content
+'''.strip()
+    subprocess.run(
+        [str(private_python), "-I", "-B", "-c", probe, json.dumps(required_binary_wheels)],
+        cwd=work_dir, check=True,
     )
 
 
@@ -837,6 +909,9 @@ def main() -> int:
     sources = json.loads(SOURCES_PATH.read_text(encoding="utf-8"))
     if sources.get("schema_version") != 2:
         raise SystemExit("Unsupported runtime-sources.json schema")
+    required_binary_wheels = sources["required_binary_wheels"]
+    if set(required_binary_wheels) & set(sources.get("sdist_build_allowlist", [])):
+        raise SystemExit("Required binary wheels cannot be sdist exceptions")
     try:
         target_config = sources["targets"][args.target]
     except KeyError:
@@ -883,12 +958,13 @@ def main() -> int:
         # contains spaces (Application Support / AppData). Probe that boundary
         # before hashing the payload, so no install-time repair is necessary.
         installed_payload = work_dir / "relocated runtime"
-        payload.rename(installed_payload)
+        rename_payload(payload, installed_payload)
         payload = installed_payload
         prune_payload(payload)
         private_python = payload / target_config["python_entrypoint"]
         compile_payload(private_python, python_library(private_python, payload))
-        # Probe the tree as it ships, bytecode included.
+        # Probe the tree as it ships, bytecode included, with no network calls.
+        verify_fetch_dependencies(private_python, work_dir, required_binary_wheels)
         verify_payload(target_config, payload, work_dir, sources["npm_version"])
 
         output_parent = args.output.parent

@@ -25,6 +25,7 @@ import { foldRegionRead, regionFailed, type RegionRead } from './regionRead';
 import type { UsageCounters, UsageReport, UsageWindowKey } from './types';
 import {
   aggregateCounters,
+  aggregateServiceRows,
   costIsFloor,
   costIsUnpriced,
   filterBucketRows,
@@ -35,11 +36,16 @@ import {
   formatBucketHeading,
   formatBucketRange,
   emptyCounters,
+  isModelRow,
+  isServiceRow,
+  metricRows,
   reportHasPartialHistory,
   reportIsPriced,
   reportHasUnknownTokens,
   resolveUsageFilter,
   seriesFor,
+  serviceUsageRows,
+  unpricedServices,
   usageCachedInputShare,
   usageIdentities,
   usageIsEmpty,
@@ -49,6 +55,7 @@ import {
   usageNonCachedInput,
   usageReportShortfall,
   usageTokensAreKnown,
+  type ServiceTotals,
   type UsageFilter,
   type UsageGroup,
   type UsageMetric,
@@ -94,6 +101,8 @@ const useUsageTranslation = () => {
 const usageText = (t: UsageTranslate): UsageText => ({
   unknownModel: t('settings.models.usage.unknownModel'),
   removedSources: t('settings.models.usage.removedSources'),
+  searchServices: t('settings.models.usage.services.title'),
+  webFetch: t('settings.models.tools.tool.web_fetch.name'),
 });
 
 const useCount = () => {
@@ -359,11 +368,12 @@ function UsageChart({
     ? requestedIndex
     : null;
   const bars = report.window_key === '30d' || report.window_key === '60d';
-  const { unknownModel, removedSources } = usageText(t);
+  const { unknownModel, removedSources, searchServices, webFetch } = usageText(t);
   const series = React.useMemo(
-    () => seriesFor(report, filter, group, metric, { unknownModel, removedSources }),
-    [filter, group, metric, removedSources, report, unknownModel],
+    () => seriesFor(report, filter, group, metric, { unknownModel, removedSources, searchServices, webFetch }),
+    [filter, group, metric, removedSources, report, searchServices, unknownModel, webFetch],
   );
+  const unpriced = React.useMemo(() => unpricedServices(report), [report]);
   const labels = React.useMemo(() => new Map(series.map((item) => [
     item.key,
     item.key === 'total'
@@ -404,8 +414,8 @@ function UsageChart({
     : index / Math.max(1, bucketCount - 1)) * plotWidth;
   const y = (value: number) => top + plotHeight * (1 - value / max);
   const bucket = activeIndex === null || activeIndex < 0 ? null : report.buckets[activeIndex];
-  const bucketRows = bucket === null ? [] : filterBucketRows(bucket, filter);
-  const bucketTotals = aggregateCounters(bucketRows);
+  const bucketRows = bucket === null ? [] : metricRows(filterBucketRows(bucket, filter), metric);
+  const bucketTotals = aggregateCounters(bucketRows, unpriced);
   const activeValue = bucket && !bucket.history_complete && bucketRows.length === 0
     ? null
     : usageMetricValue(bucketTotals, metric);
@@ -871,7 +881,7 @@ function UsageChart({
             <div className="model-hub-usage-tooltip-total">
               <strong>{activeValue === null
                 ? t('settings.models.usage.blank')
-                : costIsUnpriced(bucketRows, metric)
+                : costIsUnpriced(bucketRows, metric, unpriced)
                   ? noPriceText(report, t)
                   : atLeast(format(activeValue), costIsFloor(bucketRows, metric))}</strong>
               <span>{metricLabel(metric, t)}</span>
@@ -890,7 +900,7 @@ function UsageChart({
             </div>
             <div className="model-hub-usage-tooltip-foot">
               <span>
-                {bucket.history_complete || bucketRows.length > 0 ? count(bucketTotals.requests) : t('settings.models.usage.blank')}
+                {bucket.history_complete || bucketRows.some(isModelRow) ? count(bucketTotals.requests) : t('settings.models.usage.blank')}
                 {' '}
                 {t('settings.models.usage.requests.unit')}
               </span>
@@ -925,7 +935,7 @@ function tableRows(
   t: UsageTranslate,
 ): TableRow[] {
   const buckets = pinnedKey === null ? report.buckets : report.buckets.filter((bucket) => bucket.key === pinnedKey);
-  const rows = buckets.flatMap((bucket) => filterBucketRows(bucket, filter));
+  const rows = buckets.flatMap((bucket) => filterBucketRows(bucket, filter)).filter(isModelRow);
   const identities = usageIdentities(report, group, usageText(t));
   return identities.of(rows).map((identity) => ({
     key: identity.key,
@@ -1025,20 +1035,23 @@ export const UsageTab: React.FC<{
   const allRows = filteredRows(report, { sourceIds: [], modelKeys: [] });
   // A Source that metered nothing in this window still offers itself.
   const sourceOptions: FilterOption[] = usageIdentities(report, 'source', usageText(t))
-    .of([...allRows, ...report.sources.map((source) => ({ ...emptyCounters(), source_id: source.source_id, model_id: '' }))])
+    .of([...allRows, ...[...report.sources, ...report.services].map((source) => ({ ...emptyCounters(), source_id: source.source_id, model_id: '' }))])
     .map((identity) => ({ key: identity.key, label: identity.label }));
-  const modelOptions: FilterOption[] = usageIdentities(report, 'model', usageText(t)).of(allRows).map((identity) => ({
+  const modelOptions: FilterOption[] = usageIdentities(report, 'model', usageText(t)).of(allRows.filter(isModelRow)).map((identity) => ({
     key: identity.key,
     label: identity.label,
     detail: identity.unlisted ? t('settings.models.usage.removedModel') : undefined,
   }));
   const filter = resolveUsageFilter(report, selection);
   const scopedRows = filteredRows(report, filter);
-  const totals = aggregateCounters(scopedRows);
+  const unpriced = unpricedServices(report);
+  // Every figure counts model calls; only the cost also counts search requests.
+  const totals = aggregateCounters(scopedRows, unpriced);
   const partialHistory = reportHasPartialHistory(report, filter);
   const reportEmpty = usageIsEmpty(report);
   const filteredEmpty = !reportEmpty && scopedRows.length === 0 && !partialHistory;
-  const historyOnlyUnknown = partialHistory && scopedRows.length === 0;
+  const historyOnlyUnknown = partialHistory && !scopedRows.some(isModelRow);
+  const costOnlyUnknown = partialHistory && scopedRows.length === 0;
   const pinnedBucket = pinnedKey === null
     ? null
     : report.buckets.find((bucket) => bucket.key === pinnedKey) ?? null;
@@ -1048,9 +1061,27 @@ export const UsageTab: React.FC<{
   // The removed aggregate closes the list whichever way it is sorted.
   const sortedRows = [...rows].sort((left, right) => (Number(left.removed) - Number(right.removed))
     || (sortValue(right) - sortValue(left)) * (sortAscending ? -1 : 1));
-  const tableTotal = aggregateCounters(
-    (activePinnedKey === null ? report.buckets : report.buckets.filter((bucket) => bucket.key === activePinnedKey))
-      .flatMap((bucket) => filterBucketRows(bucket, filter)),
+  const tableScope = (activePinnedKey === null ? report.buckets : report.buckets.filter((bucket) => bucket.key === activePinnedKey))
+    .flatMap((bucket) => filterBucketRows(bucket, filter));
+  const tableTotal = aggregateCounters(tableScope.filter(isModelRow));
+  const serviceRows = serviceUsageRows(report, filter, activePinnedKey, usageText(t));
+  const serviceTotal = aggregateServiceRows(tableScope.filter(isServiceRow), unpriced);
+  const reportHasServices = allRows.some(isServiceRow);
+  const serviceCost = (totals: ServiceTotals) => (usageHasNoPrice(totals)
+    ? noPriceText(report, t)
+    : formatCost(totals.api_cost_usd ?? 0, totals.api_cost_lower_bound, i18n.language));
+  const serviceReported = (totals: ServiceTotals) => (totals.reported_requests > 0
+    ? formatUsd(totals.reported_usd ?? 0, i18n.language)
+    : t('settings.models.usage.blank'));
+  const serviceBillable = (totals: ServiceTotals) => (
+    <>
+      {count(totals.billable_requests)}
+      {totals.uncertain_requests > 0 && (
+        <span className="model-hub-usage-row-detail">
+          {t('settings.models.usage.services.uncertain', { count: totals.uncertain_requests, requests: count(totals.uncertain_requests) })}
+        </span>
+      )}
+    </>
   );
   const metricText = (counters: UsageCounters, selectedMetric = metric) => {
     const text = tokenText(counters, selectedMetric, selectedMetric === metric ? format : count, t('settings.models.usage.blank') as string);
@@ -1174,15 +1205,25 @@ export const UsageTab: React.FC<{
             {priced && (
               <StatCard
                 label={t('settings.models.usage.stats.cost')}
-                value={historyOnlyUnknown || !usageIsPriced(totals)
+                value={costOnlyUnknown || !usageIsPriced(totals)
                   ? t('settings.models.usage.blank')
                   : usageHasNoPrice(totals)
                     ? noPriceText(report, t)
                     : formatCost(totals.api_cost_usd ?? 0, totals.api_cost_lower_bound, i18n.language)}
                 note={[
                   t('settings.models.usage.cost.notBilled'),
+                  // The vendors' own figures sit beside the list valuation, never in it.
+                  (totals.service_reported_usd ?? 0) > 0
+                    ? t('settings.models.usage.cost.reported', { usd: formatUsd(totals.service_reported_usd ?? 0, i18n.language) })
+                    : null,
                   (totals.excluded_tokens ?? 0) > 0 && !usageHasNoPrice(totals) && !report.pricing?.pending
                     ? t('settings.models.usage.cost.excluded', { count: totals.excluded_tokens ?? 0, tokens: count(totals.excluded_tokens ?? 0) })
+                    : null,
+                  (totals.excluded_service_requests ?? 0) > 0 && !usageHasNoPrice(totals)
+                    ? t('settings.models.usage.cost.excludedServices', {
+                      count: totals.excluded_service_requests ?? 0,
+                      requests: count(totals.excluded_service_requests ?? 0),
+                    })
                     : null,
                   report.pricing?.price_table_date
                     ? t('settings.models.usage.cost.tableDate', { date: report.pricing.price_table_date })
@@ -1334,6 +1375,66 @@ export const UsageTab: React.FC<{
               {t('settings.models.usage.table.accounting')}
             </div>
           </section>
+          {reportHasServices && (
+            <section className="model-hub-usage-card model-hub-usage-details" aria-labelledby="model-hub-usage-services-title">
+              <div className="model-hub-usage-card-header model-hub-usage-details-header">
+                <div>
+                  <h3 id="model-hub-usage-services-title">{t(serviceRows.some((row) => row.tool === 'web_fetch') ? 'settings.models.usage.services.hostedTitle' : 'settings.models.usage.services.title')} <span>{serviceRows.length}</span></h3>
+                  <p>{activePinnedKey === null
+                    ? t('settings.models.usage.table.range')
+                    : t('settings.models.usage.table.bucket', { bucket: formatBucketLabel(pinnedBucket!, i18n.language) })}</p>
+                </div>
+              </div>
+              <div className="model-hub-usage-table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">{t('settings.models.usage.services.identity')}</th>
+                      <th scope="col">{t('settings.models.usage.table.requests')}</th>
+                      <th scope="col">{t('settings.models.usage.services.billable')}</th>
+                      {priced && <th scope="col">{t('settings.models.usage.metric.cost')}</th>}
+                      {priced && <th scope="col">{t('settings.models.usage.services.reported')}</th>}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {serviceRows.map((row) => (
+                      <tr key={row.key} className={cn(row.removed && 'is-removed')}>
+                        <th scope="row">
+                          <span className="model-hub-usage-row-name">{row.label}</span>
+                          <span className="model-hub-usage-row-detail">{row.removed ? t('settings.models.usage.removedSourcesHint') : row.service}{row.tool === 'web_fetch' && ` · ${t('settings.models.tools.tool.web_fetch.name')}`}</span>
+                        </th>
+                        <td>{count(row.totals.requests)}</td>
+                        <td>{serviceBillable(row.totals)}</td>
+                        {priced && <td className={cn('model-hub-usage-table-total', usageHasNoPrice(row.totals) && 'is-unpriced')}>{serviceCost(row.totals)}</td>}
+                        {priced && <td>{serviceReported(row.totals)}</td>}
+                      </tr>
+                    ))}
+                    {serviceRows.length === 0 && <tr><td colSpan={priced ? 5 : 3} className="model-hub-usage-table-empty">{t('settings.models.usage.table.empty')}</td></tr>}
+                  </tbody>
+                  {serviceRows.length > 0 && (
+                    <tfoot>
+                      <tr>
+                        <th scope="row">{t('settings.models.usage.table.total')}</th>
+                        <td>{count(serviceTotal.requests)}</td>
+                        <td>{serviceBillable(serviceTotal)}</td>
+                        {priced && <td>{serviceCost(serviceTotal)}</td>}
+                        {priced && <td>{serviceReported(serviceTotal)}</td>}
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
+              </div>
+              <div className="model-hub-usage-table-foot">
+                <CircleHelp aria-hidden className="size-3.5 shrink-0" />
+                {[
+                  t('settings.models.usage.services.accounting'),
+                  report.pricing?.service_price_date
+                    ? t('settings.models.usage.services.priceDate', { date: report.pricing.service_price_date })
+                    : null,
+                ].filter(Boolean).join(' ')}
+              </div>
+            </section>
+          )}
         </>
       )}
     </div>

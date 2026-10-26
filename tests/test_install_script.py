@@ -83,7 +83,6 @@ def _write_fake_uv(path: Path, uv_log: Path) -> None:
                 return upgrade.ActivationOutcome(outcome.activated_launcher, (failure,))
 
             cli.activate_installer_candidate = _activate_with_peer_failure
-            cli._configured_cli_language = lambda: "zh"
         if os.environ.get("VIBE_TEST_CP1252_DIAGNOSTIC") == "1":
             sys.stdout = io.TextIOWrapper(
                 os.fdopen(os.dup(1), "wb"),
@@ -435,6 +434,40 @@ def test_install_script_keeps_vibe_available_on_current_path(tmp_path):
     assert version_result.returncode == 0, version_result.stdout + version_result.stderr
     assert "avibe-os 9.9.9" in version_result.stdout
     assert uv_log.read_text(encoding="utf-8")
+
+
+def test_install_script_preserves_package_manager_failure_diagnostics(tmp_path):
+    """Quiet progress must not erase why a custom wheel failed to install."""
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    path_dir = tmp_path / "path-bin"
+    path_dir.mkdir()
+    _write_executable(
+        path_dir / "uv",
+        """\
+        #!/usr/bin/env bash
+        if [ "$1" = "--version" ]; then
+            echo "uv 0.13.5"
+            exit 0
+        fi
+        echo "error: Failed to build native-dependency: C compiler not found" >&2
+        exit 1
+        """,
+    )
+    env = {
+        **os.environ,
+        "HOME": str(home_dir),
+        "PATH": os.pathsep.join([str(path_dir), "/usr/bin", "/bin"]),
+        "AVIBE_INSTALL_PACKAGE_SPEC": str(tmp_path / "avibe_os-9.9.9-py3-none-any.whl"),
+    }
+
+    result = _install(env)
+
+    assert result.returncode != 0
+    assert "Failed to install avibe-os from custom package spec" in result.stdout
+    assert "Failed to build native-dependency: C compiler not found" in result.stderr
+    assert not (home_dir / ".local/bin/vibe").exists()
+    assert not list((home_dir / ".avibe/runtime/install-generations").glob("*"))
 
 
 ASTRAL_PYTHON_INSTALL_MIRROR = "https://releases.astral.sh/github/python-build-standalone/releases/download"

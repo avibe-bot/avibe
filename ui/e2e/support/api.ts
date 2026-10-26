@@ -96,6 +96,8 @@ export type Probe = {
 
 export type TurnReceipt = { ok: true; session_id: string; turn_id: string; queued: boolean };
 
+export type ResponseCorrelationId = { header: 'request-id' | 'x-request-id'; value: string };
+
 export type RecordedTurn = {
   turn_id: string;
   ts: string;
@@ -107,8 +109,9 @@ export type RecordedTurn = {
     reason: string;
     http_status?: number | null;
     upstream_error_code?: string | null;
+    response_correlation_ids?: ResponseCorrelationId[];
   };
-  served: null | { source_id: string; configured_model_id: string };
+  served: null | { source_id: string; configured_model_id: string; response_correlation_ids?: ResponseCorrelationId[] };
 };
 
 export type Runtime = {
@@ -355,8 +358,8 @@ export class HubApi {
     const payload = await this.read<{ ok: boolean; contract_version: number; provenance: RecordedTurn | null }>(
       `/api/models/agents/${backend}/provenance?model=${encodeURIComponent(model)}`,
     );
-    if (payload.ok !== true || payload.contract_version !== 11 || !('provenance' in payload)) {
-      throw new Error('Latest recorded turn did not use the v10 provenance envelope');
+    if (payload.ok !== true || payload.contract_version !== 21 || !('provenance' in payload)) {
+      throw new Error('Latest recorded turn did not use the v20 provenance envelope');
     }
     return payload.provenance;
   }

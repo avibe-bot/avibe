@@ -57,6 +57,7 @@ from core.run_settlement import (
 )
 from core.processing_indicator import INTERRUPTED_REACTION_EMOJI
 from core.services.dispatch import SOURCE_HUMAN, SOURCE_SCHEDULED, dispatch_turn_with_outcome
+from core.session_handoff import BACKEND_HANDOFF_TURN_KEY
 from core.services.agent_steering import (
     SteerOutcome,
     SteerReconcileRequest,
@@ -70,7 +71,7 @@ from core.services.agent_steering import (
 from storage import loop_writers, messages_service
 from storage import message_deliveries as delivery_store
 from storage.agent_transcript import last_response, recovered_watch_ids
-from storage.agent_session_rows import reserve_write_lock
+from storage.agent_session_rows import accept_backend_handoff, decode_session_value, reserve_write_lock
 from storage.db import get_cached_sqlite_engine
 from storage.background import (
     OWED_FAILURE_NOTICE_KEY,
@@ -652,6 +653,26 @@ class TurnSubmissionResult:
     delivery_owner_transferred: bool = False
 
 
+@dataclass
+class _PendingDurableTerminal:
+    """One delivered outcome, retained while its non-waiting commit finishes."""
+
+    session_id: str
+    turn_id: str
+    outcome: str
+    settled_by: str | None
+    evidence_kind: str
+    evidence: dict[str, Any] | None
+    resume_successors: bool = True
+    task: asyncio.Task[dict[str, Any]] | None = None
+    result: dict[str, Any] | None = None
+    settle_runs: Callable[[], list[str]] | None = None
+    publish: Callable[[], None] | None = None
+    # Accepted receipts must survive a bounded join that returns before B lands.
+    # Key by the exact attempt, never merely the Delivery that may be reused.
+    accepted_steers: dict[tuple[str, str], dict[str, Any]] = field(default_factory=dict)
+
+
 @dataclass(frozen=True)
 class _RuntimeStartOwner:
     """Proof that one exact Session runtime boundary owns this transaction."""
@@ -709,6 +730,10 @@ class SessionTurnManager:
     # period.
     RESTART_RECOVERY_RETRY_DELAYS: tuple[float, ...] = (5.0, 30.0, 120.0)
     RESTART_RECOVERY_RETRY_PERIOD: float = 600.0
+    # Match one SQLite busy attempt, without making the controller loop wait.
+    # A failed attempt retains its evidence for the runner / recovery's retry.
+    TERMINAL_WRITE_RETRY_SECONDS: float = 5.0
+    TERMINAL_WRITE_RETRY_DELAY: float = 0.05
 
     def __init__(
         self,
@@ -720,6 +745,7 @@ class SessionTurnManager:
         self._build_context = build_context
         self._engine: Engine | None = None
         self.in_flight: dict[str, Turn] = {}
+        self._pending_terminals: dict[str, _PendingDurableTerminal] = {}
         self._draining_backends: set[str] = set()
         self._deferred_restart_sessions: dict[str, set[str]] = {}
         self._queue_recovery_locks: dict[str, asyncio.Lock] = {}
@@ -930,12 +956,14 @@ class SessionTurnManager:
         self,
         run_ids: set[str] | list[str],
         settled_by: Optional[str],
-    ) -> None:
+        *,
+        retire_job: bool = True,
+    ) -> list[str]:
         if settled_by not in SETTLEMENTS_WITHOUT_RESULT or not run_ids:
-            return
+            return []
         normalized = sorted({str(run_id) for run_id in run_ids if str(run_id).strip()})
         if not normalized:
-            return
+            return []
         service = (
             getattr(self.controller, "scheduled_task_service", None)
             if self.controller
@@ -944,9 +972,10 @@ class SessionTurnManager:
         settle = getattr(service, "settle_agent_runs_without_result", None)
         if not callable(settle):
             logger.debug("turn settlement: no harness settlement writer available")
-            return
+            return []
         try:
-            settle(normalized, settled_by=settled_by)
+            options = {} if retire_job else {"retire_job": False}
+            return settle(normalized, settled_by=settled_by, **options) or []
         except Exception:
             logger.warning(
                 "turn settlement: failed to settle runs %s as %s",
@@ -954,12 +983,15 @@ class SessionTurnManager:
                 settled_by,
                 exc_info=True,
             )
+        return []
 
     def _settle_agent_run_ids_from_terminal_turn(
         self,
         run_ids: set[str] | list[str],
         turn: dict[str, Any],
-    ) -> None:
+        *,
+        retire_job: bool = True,
+    ) -> list[str]:
         turn_id = str(turn.get("id") or "").strip()
         durable_ids = self.accepted_agent_run_ids_for_turn(turn_id) if turn_id else []
         normalized = sorted(
@@ -970,7 +1002,7 @@ class SessionTurnManager:
             }
         )
         if not normalized:
-            return
+            return []
         service = (
             getattr(self.controller, "scheduled_task_service", None)
             if self.controller
@@ -978,8 +1010,7 @@ class SessionTurnManager:
         )
         settle = getattr(service, "settle_agent_runs_from_terminal_turn", None)
         if not callable(settle):
-            self._settle_agent_run_ids(normalized, turn.get("settled_by"))
-            return
+            return self._settle_agent_run_ids(normalized, turn.get("settled_by"), retire_job=retire_job)
         try:
             evidence = json.loads(str(turn.get("terminal_evidence_json") or "{}"))
             if not isinstance(evidence, dict):
@@ -987,14 +1018,16 @@ class SessionTurnManager:
         except (TypeError, ValueError, json.JSONDecodeError):
             evidence = {}
         try:
-            settle(
+            options = {} if retire_job else {"retire_job": False}
+            return settle(
                 normalized,
                 turn_id=str(turn["id"]),
                 outcome=str(turn.get("terminal_outcome") or "completed"),
                 settled_by=str(turn.get("settled_by") or "") or None,
                 evidence_kind=str(turn.get("terminal_evidence_kind") or "") or None,
                 evidence=evidence,
-            )
+                **options,
+            ) or []
         except Exception:
             logger.warning(
                 "turn settlement: failed to settle late accepted runs %s from Turn=%s",
@@ -1002,6 +1035,7 @@ class SessionTurnManager:
                 turn.get("id"),
                 exc_info=True,
             )
+        return []
 
     def _settle_turn_owned_agent_runs(self, context: "MessageContext", settled_by: Optional[str]) -> None:
         """Settle the ``agent_runs`` rows this turn owned when no result arrived.
@@ -1437,6 +1471,10 @@ class SessionTurnManager:
         return context
 
     @staticmethod
+    def _binding_native(binding: dict[str, Any]) -> str:
+        return str(decode_session_value(binding.get("native_session_id")) or "").strip()
+
+    @staticmethod
     def _binding_metadata(binding: dict[str, Any]) -> dict[str, Any]:
         raw_metadata = binding.get("metadata_json")
         try:
@@ -1555,6 +1593,15 @@ class SessionTurnManager:
                     return True
             if "metadata" in projection and projection.get("metadata") != SessionTurnManager._binding_metadata(binding):
                 return True
+            # A Delivery admitted before a backend switch still carries the native
+            # the switch replaced; resuming it on the new backend would fail.
+            if (
+                "native_session_id" in projection
+                and "native_session_id" in binding
+                and str(projection.get("native_session_id") or "").strip()
+                != SessionTurnManager._binding_native(binding)
+            ):
+                return True
             return False
 
         session_target = spec.get("agent_session_target")
@@ -1620,6 +1667,8 @@ class SessionTurnManager:
                     "metadata": SessionTurnManager._binding_metadata(binding),
                 }
             )
+            if "native_session_id" in binding:
+                target["native_session_id"] = SessionTurnManager._binding_native(binding)
         spec["agent_session_target"] = target
         # Keep every routing projection on the same durable winner. MessageHandler
         # and Controller prefer these cached fields over agent_session_target, so
@@ -1653,6 +1702,8 @@ class SessionTurnManager:
                     "reasoning_effort": binding.get("reasoning_effort"),
                 }
             )
+            if "native_session_id" in binding:
+                run_target["native_session_id"] = SessionTurnManager._binding_native(binding)
             spec["agent_run_target"] = run_target
         context.platform_specific = spec
 
@@ -1666,6 +1717,7 @@ class SessionTurnManager:
             agent_sessions.c.agent_variant,
             agent_sessions.c.model,
             agent_sessions.c.reasoning_effort,
+            agent_sessions.c.native_session_id,
             agent_sessions.c.metadata_json,
             agent_sessions.c.status,
         )
@@ -2914,6 +2966,7 @@ class SessionTurnManager:
             raise ValueError("Session delivery requires a Session id")
         if request.priority not in {"p0", "p1", "p3"}:
             raise ValueError(f"unsupported delivery priority: {request.priority}")
+        await self._join_session_terminal(request.session_id)
         content_present = (
             request.has_content
             if request.has_content is not None
@@ -3487,6 +3540,25 @@ class SessionTurnManager:
         terminal_target: dict[str, Any] | None = None
         session_id = ""
         try:
+            with self._sqlite_engine().connect() as conn:
+                observed = delivery_store.get_delivery(conn, delivery_id)
+            pending = self._pending_terminals.get(str((observed or {}).get("current_target_turn_id") or ""))
+            if pending is not None and pending.result is None and outcome_value == SteerOutcome.ACCEPTED.value:
+                from core.runtime_work import land_step, rearm_caught_cancellation
+
+                attempt_id = str((observed or {}).get("current_attempt_id") or "")
+                if attempt_id and (expected_attempt_id is None or expected_attempt_id == attempt_id):
+                    # Retain proof before yielding. If this join expires, B writes
+                    # the accepted recovery fence in its eventual transaction;
+                    # recovery need not ask an ended native Turn to remember it.
+                    pending.accepted_steers.setdefault((delivery_id, attempt_id), body)
+                step, cancelled = await land_step(self._ensure_terminal_completion(pending))
+                step.result()
+                if cancelled:
+                    # The receipt used to commit before this caller's next await.
+                    rearm_caught_cancellation()
+                if self._pending_terminals.get(pending.turn_id) is pending:
+                    return DeliveryResult(delivery_id, None, "reconciling_steer", reason="terminal_commit_pending")
             with self._sqlite_engine().begin() as conn:
                 reserve_write_lock(conn)
                 delivery = delivery_store.get_delivery(conn, delivery_id)
@@ -4441,6 +4513,8 @@ class SessionTurnManager:
         if owner is None:
             return False
         turn, deliveries = owner
+        if self._defer_for_pending_terminal(str(turn["session_id"])):
+            return False
         backend = str(turn.get("backend") or "").strip()
         if backend in self._draining_backends:
             self._deferred_restart_sessions.setdefault(backend, set()).add(
@@ -4927,6 +5001,8 @@ class SessionTurnManager:
         expected_head_id: str | None = None,
         expected_head_version: int | None = None,
     ) -> bool:
+        if self._defer_for_pending_terminal(session_id):
+            return False
         turn_id: str | None = None
         with self._sqlite_engine().connect() as conn:
             # Most drains find nothing to claim -- every Turn end asks. Those answer
@@ -4977,6 +5053,112 @@ class SessionTurnManager:
             evidence=evidence,
         )
 
+    def _pending_terminal_for_session(self, session_id: str) -> _PendingDurableTerminal | None:
+        return next(
+            (pending for pending in self._pending_terminals.values() if pending.session_id == session_id),
+            None,
+        )
+
+    def _defer_for_pending_terminal(self, session_id: str) -> bool:
+        pending = self._pending_terminal_for_session(session_id)
+        if pending is None:
+            return False
+        # A failed post-commit store step retains its result and fence. Recovery
+        # must re-drive that owner, not permanently refuse a claimed successor.
+        self._ensure_terminal_completion(pending)
+        return True
+
+    def _ensure_terminal_completion(self, pending: _PendingDurableTerminal) -> asyncio.Task[dict[str, Any]]:
+        if pending.task is None or pending.task.done():
+            pending.task = asyncio.create_task(
+                self._complete_pending_terminal(pending),
+                name=f"durable-terminal:{pending.turn_id}",
+            )
+        return pending.task
+
+    async def _join_session_terminal(self, session_id: str) -> None:
+        pending = self._pending_terminal_for_session(session_id)
+        if pending is None:
+            return
+        # Admission is cancellable; cancellation must not cancel the delivered
+        # outcome it was waiting for. Never steer into the released native Turn.
+        await asyncio.shield(self._ensure_terminal_completion(pending))
+        if self._pending_terminals.get(pending.turn_id) is pending:
+            raise RuntimeError(f"durable terminal completion is unresolved: {pending.turn_id}")
+
+    async def _join_terminal_cleanup(self, turn_id: str | None) -> dict[str, Any]:
+        pending = self._pending_terminals.get(str(turn_id or ""))
+        if pending is None:
+            return {}
+        from core.handlers.model_hub.async_owner import await_owned_task
+
+        return await await_owned_task(self._ensure_terminal_completion(pending))
+
+    def _resume_delivered_terminal(self, session_id: str, turn_id: str, result: dict[str, Any]) -> None:
+        current = self.in_flight.get(session_id)
+        should_resume = bool(result.get("successor_turn_id")) or not result.get("defer_queue_resume")
+        if (
+            result.get("changed")
+            and should_resume
+            and (current is None or current.logical_turn_id != turn_id)
+        ):
+            asyncio.create_task(
+                self._resume_after_native_terminal(session_id, turn_id),
+                name=f"durable-result-resume:{session_id}",
+            )
+
+    async def _complete_pending_terminal(self, pending: _PendingDurableTerminal) -> dict[str, Any]:
+        """Retry only contention, with no boundary or transaction across an await.
+
+        The latch outlives a failed attempt. A runner, shutdown or recovery that
+        subsequently terminalizes this Turn must still use the delivered evidence.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.TERMINAL_WRITE_RETRY_SECONDS
+        try:
+            while self._pending_terminals.get(pending.turn_id) is pending:
+                if pending.result is not None:
+                    if pending.settle_runs is not None:
+                        from core.runtime_work import land_step
+
+                        step, _cancelled = await land_step(self._run_off_loop(pending.settle_runs))
+                        retired_jobs = step.result() or []
+                        pending.settle_runs = None
+                        service = getattr(self.controller, "scheduled_task_service", None)
+                        for task_id in retired_jobs:
+                            service._retire_one_shot_job(task_id)
+                    if pending.publish is not None:
+                        pending.publish()
+                        pending.publish = None
+                    self._pending_terminals.pop(pending.turn_id, None)
+                    result = pending.result
+                else:
+                    result = self._terminalize_durable_turn(
+                        pending.turn_id, pending.outcome,
+                        settled_by=pending.settled_by,
+                        evidence_kind=pending.evidence_kind,
+                        evidence=pending.evidence,
+                        resume_successors=pending.resume_successors,
+                    )
+                    if result.get("contended"):
+                        remaining = deadline - loop.time()
+                        if remaining <= 0:
+                            logger.error("durable terminal writer remains busy for Turn=%s", pending.turn_id)
+                            return {"defer_queue_resume": True}
+                        await asyncio.sleep(min(self.TERMINAL_WRITE_RETRY_DELAY, remaining))
+                        continue
+                    if result.get("completion_pending"):
+                        continue
+                if pending.resume_successors:
+                    self._resume_delivered_terminal(pending.session_id, pending.turn_id, result)
+                return result
+            # Another owner already made the row terminal, or this attempt
+            # could not prove start acceptance. Do not invent a second resume.
+            return pending.result or {"changed": False, "defer_queue_resume": False}
+        except Exception:
+            logger.exception("durable terminal completion deferred for Turn=%s", pending.turn_id)
+            return {"defer_queue_resume": True}
+
     def _terminalize_durable_turn(
         self,
         turn_id: str,
@@ -4999,6 +5181,20 @@ class SessionTurnManager:
                 "delivery_id": None,
                 "defer_queue_resume": False,
             }
+        pending = self._pending_terminals.get(turn_id)
+        if pending is not None:
+            # Competing terminal writers inherit the delivered evidence, but
+            # retain their own stricter shutdown/cancellation resume decision.
+            pending.resume_successors = pending.resume_successors and resume_successors
+            if pending.result is not None:
+                self._ensure_terminal_completion(pending)
+                return {"changed": False, "defer_queue_resume": True, "completion_pending": True}
+            outcome, settled_by = pending.outcome, pending.settled_by
+            evidence_kind, evidence = pending.evidence_kind, pending.evidence
+            expected_start_attempt_id = None
+            replay_unknown_start = abandon_unaccepted_start = False
+            retire_unwritten_delivery_ids = None
+            resume_successors = pending.resume_successors
         result: dict[str, Any]
         materialized_id: str | None = None
         terminal_run_ids: list[str] = []
@@ -5014,7 +5210,12 @@ class SessionTurnManager:
         linked_activation_deferred = False
         with self._sqlite_engine().connect() as conn:
             observed_turn = delivery_store.get_turn(conn, turn_id)
-        if observed_turn is None or observed_turn["state"] == "terminal":
+        if observed_turn is None or (
+            observed_turn["state"] == "terminal" and not (pending is not None and pending.accepted_steers)
+        ):
+            if pending is not None:
+                pending.result = {"changed": False, "defer_queue_resume": False}
+                self._pending_terminals.pop(turn_id, None)
             # Terminal is final, and a missing Turn stays missing: the answer the
             # recheck under the writer would give, without the boundary or the writer.
             # A Turn end reaches here again after its terminal write (#2706).
@@ -5026,8 +5227,33 @@ class SessionTurnManager:
             }
         owner_session_id = str((observed_turn or {}).get("session_id") or "")
         owner_backend = str((observed_turn or {}).get("backend") or "")
+        if pending is None and evidence_kind in {"terminal_result", "agent_initiated_terminal"}:
+            pending = _PendingDurableTerminal(
+                session_id=owner_session_id, turn_id=turn_id, outcome=outcome,
+                settled_by=settled_by, evidence_kind=evidence_kind,
+                evidence=dict(evidence) if evidence is not None else None,
+                resume_successors=resume_successors,
+            )
+            self._pending_terminals[turn_id] = pending
         with self._runtime_start_owner(owner_session_id, owner_backend) as start_owner, self._sqlite_engine().begin() as conn:
-            reserve_write_lock(conn)
+            if pending is not None:
+                if not _try_reserve_write_lock(conn):
+                    self._ensure_terminal_completion(pending)
+                    return {"changed": False, "contended": True, "defer_queue_resume": True}
+            else:
+                reserve_write_lock(conn)
+            if pending is not None:
+                for (delivery_id, attempt_id), receipt in pending.accepted_steers.items():
+                    delivery = delivery_store.get_delivery(conn, delivery_id)
+                    if (
+                        delivery is not None
+                        and delivery.get("current_attempt_id") == attempt_id
+                        and delivery.get("current_target_turn_id") == turn_id
+                    ):
+                        delivery_store.mark_attempt_receipt_batch(
+                            conn, leader_delivery_id=delivery_id,
+                            outcome="accepted", receipt=receipt,
+                        )
             turn = delivery_store.get_turn(conn, turn_id)
             if (
                 turn is None
@@ -5074,6 +5300,8 @@ class SessionTurnManager:
                     and not unknown_start_reconciliation
                     and not abandoned_start
                 ):
+                    if pending is not None:
+                        self._pending_terminals.pop(turn_id, None)
                     return {
                         "changed": False,
                         "successor_turn_id": None,
@@ -5461,45 +5689,61 @@ class SessionTurnManager:
                         .values(agent_status=projected_status)
                     )
                     status_changed = bool(projected.rowcount)
-        if result.get("changed"):
-            run_settled_by = (
-                SETTLED_BY_NO_TERMINAL_RESULT
-                if result.get("unknown_start_exhausted")
-                else settled_by
-            )
-            if (
-                terminal_turn_snapshot is not None
-                and run_settled_by in SETTLEMENTS_WITHOUT_RESULT
-            ):
-                terminal_turn_snapshot = {
-                    **terminal_turn_snapshot,
-                    "settled_by": run_settled_by,
-                }
-                self._settle_agent_run_ids_from_terminal_turn(
-                    terminal_run_ids,
-                    terminal_turn_snapshot,
-                )
-            else:
-                self._settle_agent_run_ids(terminal_run_ids, run_settled_by)
-        if materialized_id:
-            self._publish_materialized_delivery(materialized_id)
-        if result.get("changed"):
-            if requeued_input:
-                self._publish_queue_update(session_id)
-            self._publish_terminal_inbox_update(session_id)
-            waiting = self._restart_recovery_wakes.get(session_id)
-            if waiting is not None:
-                # A cut Turn open for a restart retry has no runtime for a Stop to reach: its
-                # retry runs now, so T2 ends the command of a canceled Turn as live.
-                with suppress(RuntimeError):  # its loop has closed
-                    waiting[0].call_soon_threadsafe(waiting[1].set)
-        if status_changed and projected_status is not None:
-            from core.inbox_events import bus
+        run_settled_by = (
+            SETTLED_BY_NO_TERMINAL_RESULT
+            if result.get("unknown_start_exhausted")
+            else settled_by
+        )
 
-            bus.publish(
-                "session.status",
-                {"session_id": session_id, "agent_status": projected_status},
-            )
+        def settle_runs(*, retire_job: bool = True) -> list[str]:
+            if not result.get("changed"):
+                return []
+            if terminal_turn_snapshot is not None and run_settled_by in SETTLEMENTS_WITHOUT_RESULT:
+                return self._settle_agent_run_ids_from_terminal_turn(
+                    terminal_run_ids,
+                    {**terminal_turn_snapshot, "settled_by": run_settled_by},
+                    retire_job=retire_job,
+                )
+            return self._settle_agent_run_ids(terminal_run_ids, run_settled_by, retire_job=retire_job)
+
+        def publish() -> None:
+            if materialized_id:
+                self._publish_materialized_delivery(materialized_id)
+            if result.get("changed"):
+                if requeued_input:
+                    self._publish_queue_update(owner_session_id)
+                self._publish_terminal_inbox_update(owner_session_id)
+                waiting = self._restart_recovery_wakes.get(owner_session_id)
+                if waiting is not None:
+                    with suppress(RuntimeError):  # its loop has closed
+                        waiting[0].call_soon_threadsafe(waiting[1].set)
+            if status_changed and projected_status is not None:
+                from core.inbox_events import bus
+
+                bus.publish(
+                    "session.status",
+                    {"session_id": owner_session_id, "agent_status": projected_status},
+                )
+
+        if pending is not None:
+            pending.result = result
+            if result.get("changed") and terminal_run_ids and run_settled_by in SETTLEMENTS_WITHOUT_RESULT:
+                # This tail reserves another writer. Keep the completion fence
+                # until it lands, but never hold the activation boundary on its worker.
+                pending.settle_runs = lambda: settle_runs(retire_job=False)
+                pending.publish = publish
+                self._ensure_terminal_completion(pending)
+                return {"changed": False, "defer_queue_resume": True, "completion_pending": True}
+        settle_runs()
+        publish()
+        if pending is not None:
+            if pending.task is not None and pending.task is not asyncio.current_task():
+                # A synchronous competitor may land B, but does not take its
+                # resume ownership. Some such callers return only a bool and
+                # have no resume tail at all. The pending task owns that tail.
+                self._ensure_terminal_completion(pending)
+                return {"changed": False, "defer_queue_resume": True, "completion_pending": True}
+            self._pending_terminals.pop(turn_id, None)
         return result
 
     def reconcile_start_attempt_not_written(
@@ -5569,6 +5813,7 @@ class SessionTurnManager:
         *,
         outcome: str,
         failure_evidence: dict[str, Any] | None = None,
+        resume_successors: bool = True,
     ) -> dict[str, Any]:
         """Settle definitive no-write evidence at the terminal chokepoint.
 
@@ -5576,14 +5821,33 @@ class SessionTurnManager:
         else runs it, so an exit before its rerun dispatched fails it instead. Any other
         accepted Turn ignores the late claim, as before.
         """
+        retire_ids: set[str] | None = None
+        retire_session_id = ""
+        if (failure_evidence or {}).get("retire_input") is True:
+            # Its surface cannot retry it (``mark_prewrite_input_retired``).
+            with self._sqlite_engine().connect() as conn:
+                turn = delivery_store.get_turn(conn, turn_id)
+                retire_session_id = str((turn or {}).get("session_id") or "")
+                retire_ids = {
+                    str(row["id"])
+                    for row in delivery_store.initial_deliveries_for_turn(conn, turn_id)
+                    if row["state"] == "claimed"
+                }
         result = self._terminalize_durable_turn(
             turn_id,
             "not_written",
             settled_by=outcome,
             evidence_kind="definitive_prewrite_failure",
             evidence={"reason": outcome, **(failure_evidence or {})},
+            retire_unwritten_delivery_ids=retire_ids,
+            retire_unwritten_attempt_outcome="not_written",
+            resume_successors=resume_successors,
         )
         if result.get("changed"):
+            if retire_ids and retire_session_id:
+                # A retired input leaves the queue without requeueing anything, so
+                # an open Workbench view learns of it here.
+                self._publish_queue_update(retire_session_id)
             return result
         with self._sqlite_engine().connect() as conn:
             turn = delivery_store.get_turn(conn, turn_id)
@@ -5623,6 +5887,9 @@ class SessionTurnManager:
         no-op; when it failed, the runner commits the same thing it would have.
         """
 
+        # The user was told to send this input again (``mark_prewrite_input_retired``),
+        # so however this runner ends, the input is retired rather than replayed.
+        told_to_resend = (failure_evidence or {}).get("retire_input") is True
         try:
             if terminal_commit is not None:
                 committed_settlement = (
@@ -5646,15 +5913,33 @@ class SessionTurnManager:
                     evidence=terminal_commit["evidence"],
                     resume_successors=resume,
                 )
-                if not resume:
-                    result["defer_queue_resume"] = True
-                return result
+                # A failure reported before the backend was reached (its Agent
+                # disabled, say) cannot land on a start never accepted. Its start is
+                # provably absent, so it settles as such below rather than staying
+                # open, where it showed as running and recovery re-ran its input.
+                if not (
+                    (told_to_resend or (definitive_prewrite_exit and not cancelled))
+                    and result.get("reason") == "start_acceptance_unproven"
+                ):
+                    if not resume:
+                        result["defer_queue_resume"] = True
+                    return result
             if cancelled:
                 interruption = settled_by or SETTLED_BY_NO_TERMINAL_RESULT
                 resume_after_cancel = bool(
                     interruption == SETTLED_BY_STOPPED
                     and not cancel_defers_queue_resume
                 )
+                if told_to_resend:
+                    result = self._settle_durable_prewrite_failure(
+                        turn_id,
+                        outcome=interruption,
+                        failure_evidence=failure_evidence,
+                        resume_successors=resume_after_cancel,
+                    )
+                    if not resume_after_cancel:
+                        result["defer_queue_resume"] = True
+                    return result
                 # Same map as every other Turn-outcome surface. This branch used
                 # to hardcode ``stopped``, so a rolling refresh landed ``failed``
                 # here while ``release_for_backend_refresh`` -- the very caller
@@ -6048,6 +6333,14 @@ class SessionTurnManager:
                     execution=execution,
                 )
                 materialized: list[dict[str, Any]] = []
+                handoff_id = str(
+                    (getattr(context, "platform_specific", None) or {}).get(BACKEND_HANDOFF_TURN_KEY) or ""
+                ).strip()
+                if bound is not None and handoff_id:
+                    # The new backend accepted the turn that carried the switch
+                    # handoff; once the row also holds its native, later turns
+                    # continue that conversation without one.
+                    accept_backend_handoff(conn, session_id, handoff_id)
                 if bound is not None:
                     materialized = delivery_store.materialize_start_acceptance(
                         conn,
@@ -7841,6 +8134,8 @@ class SessionTurnManager:
         observation: RuntimeDeliveryObservation | None = None,
     ) -> str | None:
         """Start only the exact replacement linked from a settled control Turn."""
+        if self._defer_for_pending_terminal(session_id):
+            return None
         start_attempt_id = ""
         with self._sqlite_engine().connect() as conn:
             observed_terminal = delivery_store.get_turn(conn, terminal_turn_id)
@@ -8246,6 +8541,7 @@ class SessionTurnManager:
                 logger.exception("internal async dispatch failed for session=%s", session_id)
             finally:
                 if isinstance(session_id, str):
+                    await self._join_terminal_cleanup(logical_turn_id)
                     durable_terminal_result: dict[str, Any] = {}
                     prewrite_refused = prewrite_refused or (
                         settled_by == SETTLED_BY_REFUSED_CONCURRENT_TURN
@@ -8281,8 +8577,8 @@ class SessionTurnManager:
                     )
                     reconciled = False
 
-                    def reconcile_release() -> dict[str, Any]:
-                        return self._reconcile_durable_runner_release(
+                    async def reconcile_release() -> dict[str, Any]:
+                        result = self._reconcile_durable_runner_release(
                             logical_turn_id,
                             cancelled=cancelled,
                             failed=failed,
@@ -8294,12 +8590,15 @@ class SessionTurnManager:
                             failure_evidence=prewrite_failure_evidence(context),
                             terminal_commit=terminal_commit,
                         )
+                        if result.get("contended") or result.get("completion_pending"):
+                            return await self._join_terminal_cleanup(logical_turn_id)
+                        return result
 
                     if terminal_commit is not None and logical_turn_id and durable_turn_registered:
                         # The emit's own Turn write failed (#2714); this write stands in
                         # for it, so it lands where that one would have: before Hub
                         # finalization, which relies on the row being terminal (#2735).
-                        durable_terminal_result = reconcile_release()
+                        durable_terminal_result = await reconcile_release()
                         # A write that failed again carries no ``changed``; it gets the
                         # attempt after finalization that it would have had on its own.
                         reconciled = "changed" in durable_terminal_result
@@ -8311,14 +8610,14 @@ class SessionTurnManager:
                             await await_owned_task(asyncio.ensure_future(completion))
                         except Exception:
                             logger.warning("Model Hub turn finalization failed", exc_info=True)
-                    # Durable output may already have marked the old row terminal.
-                    # _start_persisted_turn still fences its successor on this live
-                    # runner, so release the projection only after Hub finalization.
+                    # Keep the live runner through both Hub and any fallback
+                    # completion. Otherwise the retry task can also own resume
+                    # when earlier attempts expired before Hub finalized.
+                    if not reconciled and logical_turn_id and durable_turn_registered:
+                        durable_terminal_result = await reconcile_release()
                     released_projection = turn is not None and self.in_flight.get(session_id) is turn
                     if released_projection:
                         self.in_flight.pop(session_id, None)
-                    if not reconciled and logical_turn_id and durable_turn_registered:
-                        durable_terminal_result = reconcile_release()
                     if released_projection:
                         # After the terminal write, so its session.status precedes
                         # turn.end as it does when the emit's own write lands (#2735).
@@ -8360,7 +8659,7 @@ class SessionTurnManager:
                         durable_turn_registered
                         and durable_terminal_result.get("defer_queue_resume")
                     )
-                    should_flush = not defer_durable_resume
+                    should_flush = not (defer_durable_resume or cancel_defers_queue_resume)
                     backend = self._context_backend(context)
                     if should_flush and backend in self._draining_backends:
                         self._deferred_restart_sessions.setdefault(backend, set()).add(session_id)
@@ -8371,6 +8670,7 @@ class SessionTurnManager:
                             await self.flush_queue(session_id)
                     elif (
                         durable_turn_registered
+                        and not cancel_defers_queue_resume
                         and settled_by != SETTLED_BY_RESTARTED
                     ):
                         # Stop may persist the old Turn's terminal snapshot before
@@ -8839,6 +9139,17 @@ class SessionTurnManager:
                     )
                 return owners
 
+        pending_tasks = []
+        for pending in list(self._pending_terminals.values()):
+            pending.resume_successors = False
+            projected = self.in_flight.get(pending.session_id)
+            if projected is not None and projected.logical_turn_id == pending.turn_id:
+                projected.cancel_defers_queue_resume = True
+            pending_tasks.append(self._ensure_terminal_completion(pending))
+        if pending_tasks:
+            # Each write retry is bounded; do not cancel its evidence owner if
+            # shutdown's flush window expires. The runners below still join it.
+            await asyncio.wait(pending_tasks, timeout=self.TERMINAL_WRITE_RETRY_SECONDS)
         owners = live_owners()
         done_tasks: list[asyncio.Task] = []
         for owner in owners.values():
@@ -8915,7 +9226,10 @@ class SessionTurnManager:
         """
         if not backend or not base_session_ids:
             return 0
-
+        delivered_turns = {
+            pending.turn_id for pending in self._pending_terminals.values()
+            if pending.session_id in base_session_ids
+        }
         released_sessions: set[str] = set()
         legacy_projection_sessions: set[str] = set()
         tasks_to_settle: list[asyncio.Task] = []
@@ -8934,7 +9248,12 @@ class SessionTurnManager:
                     backend,
                     base_session_ids,
                 )
-        for session_id, turn in list(self.in_flight.items()):
+        projected_owners = list(self.in_flight.items())
+        for turn_id in delivered_turns:
+            await self._join_terminal_cleanup(turn_id)
+        for session_id, turn in projected_owners:
+            if self.in_flight.get(session_id) is not turn:
+                continue
             if session_id not in base_session_ids:
                 continue
             spec = getattr(turn.context, "platform_specific", None) or {}
@@ -8952,7 +9271,10 @@ class SessionTurnManager:
             # it off the Turn when it pops it. An outcome already decided, by a
             # Stop in flight or a result already delivered, keeps its own cause
             # and needs no refresh notice.
-            refresh_owns_outcome = not self._turn_outcome_decided(turn)
+            refresh_owns_outcome = (
+                turn.logical_turn_id not in delivered_turns
+                and not self._turn_outcome_decided(turn)
+            )
             if refresh_owns_outcome:
                 turn.cancel_settled_by = settled_by
             turn.cancel_defers_queue_resume = True
@@ -9033,7 +9355,12 @@ class SessionTurnManager:
                 released_restored.add(str(owner["session_id"]))
                 # Starting or active, the refresh retired this conversation's
                 # input. The user's own stop needs no explanation.
-                if not owned_by_run and self.controller is not None and settled_by != SETTLED_BY_STOPPED:
+                if (
+                    not owned_by_run
+                    and self.controller is not None
+                    and settled_by != SETTLED_BY_STOPPED
+                    and owner_id not in delivered_turns
+                ):
                     self._notify_backend_refresh(
                         str(owner["session_id"]), origin_message_id, owner_id, backend, settled_by=settled_by
                     )
@@ -9137,6 +9464,7 @@ class SessionTurnManager:
         A Run whose input may have reached the live Turn stops that whole Turn,
         exactly like Session Stop; a Run still outside it is canceled alone.
         """
+        await self._join_session_terminal(session_id)
         normalized_agent_run_id = (
             str(agent_run_id).strip() if agent_run_id is not None else None
         )
@@ -9504,19 +9832,7 @@ class SessionTurnManager:
                 logical_turn_id,
             )
             return
-        current = self.in_flight.get(session_id)
-        should_resume = bool(terminal.get("successor_turn_id")) or not bool(
-            terminal.get("defer_queue_resume")
-        )
-        if (
-            terminal.get("changed")
-            and should_resume
-            and (current is None or current.logical_turn_id != logical_turn_id)
-        ):
-            asyncio.create_task(
-                self._resume_after_native_terminal(session_id, logical_turn_id),
-                name=f"durable-result-resume:{session_id}",
-            )
+        self._resume_delivered_terminal(session_id, logical_turn_id, terminal)
 
     def on_terminal_result(
         self,
@@ -9801,6 +10117,7 @@ class SessionTurnManager:
                 cancelled = True
                 raise
             finally:
+                await self._join_terminal_cleanup(turn_token)
                 sink = self.get_turn_sink(session_key)
                 settled_by = str((sink or {}).get("settled_by") or "")
                 current = self.in_flight.get(session_id)
@@ -9828,8 +10145,6 @@ class SessionTurnManager:
                     cancel_defers_queue_resume
                     or effective_settled_by == SETTLED_BY_RESTARTED
                 )
-                if turn is not None:
-                    self.in_flight.pop(session_id, None)
                 if durable_turn_registered:
                     try:
                         durable_terminal_result = self._terminalize_durable_turn(
@@ -9857,6 +10172,8 @@ class SessionTurnManager:
                             ),
                             resume_successors=not queue_resume_deferred,
                         )
+                        if durable_terminal_result.get("contended") or durable_terminal_result.get("completion_pending"):
+                            durable_terminal_result = await self._join_terminal_cleanup(turn_token)
                         if queue_resume_deferred:
                             durable_terminal_result["defer_queue_resume"] = True
                     except Exception:
@@ -9867,6 +10184,8 @@ class SessionTurnManager:
                         )
                         durable_terminal_result = {"defer_queue_resume": True}
                 if turn is not None:
+                    if self.in_flight.get(session_id) is turn:
+                        self.in_flight.pop(session_id, None)
                     # After the terminal write, so its session.status precedes
                     # turn.end (#2735).
                     bus.publish(
@@ -9887,6 +10206,7 @@ class SessionTurnManager:
                         logger.debug("agent-initiated turn: queue resume failed", exc_info=True)
                 elif (
                     durable_turn_registered
+                    and not cancel_defers_queue_resume
                     and effective_settled_by != SETTLED_BY_RESTARTED
                 ):
                     await self._resume_linked_control_successor(

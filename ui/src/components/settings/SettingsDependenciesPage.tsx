@@ -28,6 +28,7 @@ import {
   dependencyIsStartupRepairing,
   dependencyHasInstallAction,
   dependencyNeedsStartupRepair,
+  dependencyNeedsUpgrade,
 } from './SettingsDependenciesPage.logic';
 import { errorMessage } from '@/lib/errorMessage';
 import { useDependencyChecks } from './useDependencyChecks';
@@ -103,7 +104,7 @@ export const SettingsDependenciesPage: React.FC = () => {
     if (d.status === 'unknown') return t('settings.dependencies.statusUnknown');
     if (d.status === 'not_required') return t('settings.dependencies.statusNotRequired');
     if (!d.installed) return t('settings.dependencies.statusMissing');
-    if (d.status === 'upgrade_required') {
+    if (dependencyNeedsUpgrade(d)) {
       const word = t('settings.dependencies.statusUpgradeRequired');
       return d.version ? `${word} · v${String(d.version).replace(/^v/i, '')}` : word;
     }
@@ -116,13 +117,13 @@ export const SettingsDependenciesPage: React.FC = () => {
     if (d.status === 'not_required') return 'secondary';
     if (d.status === 'error') return 'destructive';
     if (d.status === 'unknown') return 'warning';
-    if (d.status === 'unsupported' || d.status === 'upgrade_required') return 'warning';
+    if (d.status === 'unsupported' || dependencyNeedsUpgrade(d)) return 'warning';
     return d.installed ? 'success' : 'destructive';
   };
 
   const actionText = (d: DependencyItem, installing: boolean): string => {
     if (installing) return t('settings.dependencies.installing');
-    if (d.status === 'upgrade_required') return t('settings.dependencies.update');
+    if (dependencyNeedsUpgrade(d)) return t('settings.dependencies.update');
     if (d.id === 'model-hub-engine' && d.status === 'error') {
       return t('settings.dependencies.repair');
     }

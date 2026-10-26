@@ -19,8 +19,14 @@ from datetime import timedelta
 import aiohttp
 import pytest
 
-from config.v2_config import ModelHubBackendModelConfig, ModelHubHostedToolConfig, ModelHubModelConfig
+from config.v2_config import (
+    KEYLESS_EXA_SOURCE_ID,
+    ModelHubBackendModelConfig,
+    ModelHubHostedToolConfig,
+    ModelHubModelConfig,
+)
 from core.agent_core.messages import HostedCost, message_from_dict
+from core.handlers.model_hub import search_chain as search_chain_module
 from core.handlers.model_hub import service as service_module
 from core.handlers.model_hub.adapter import DiscoveredModel, InvokeCancelledError, RawOutcomeKind, UpstreamRejection
 from core.handlers.model_hub.capability_evidence import EvidenceFeature
@@ -116,6 +122,18 @@ def _executor_models(monkeypatch):
     monkeypatch.setattr(
         hosted_tools_module, "source_executor_models", lambda vendor, protocol: _EXECUTOR_MODELS.get(vendor, ()),
     )
+    # These gateway tests exercise model executors and their fallback/error records. The active keyless Exa
+    # service is covered at the owning search-chain boundary in test_model_hub_search_chain; keep it out of
+    # this model-only fixture without changing the shipped activation predicate.
+    original_service = hosted_tools_module.model_hub_search_service
+
+    def without_keyless(source):
+        if source.id == KEYLESS_EXA_SOURCE_ID:
+            return None
+        return original_service(source)
+
+    monkeypatch.setattr(hosted_tools_module, "model_hub_search_service", without_keyless)
+    monkeypatch.setattr(search_chain_module, "model_hub_search_service", without_keyless)
 
 
 def _bind(service, tool, executor):
@@ -209,8 +227,8 @@ async def test_a_proxied_search_runs_one_native_request_and_answers_its_canonica
     service._admitted_executor = recorded
     status, answer = await _call(service, tool, {"arguments": arguments})
     assert status == 200, answer
-    # Admission reads the config, which grows with use: at the chain step and again under the lock, off the loop.
-    assert len(admitting_threads) == 2 and threading.main_thread() not in admitting_threads
+    # Every admission snapshot, including the active mixed-chain classification, stays off the loop.
+    assert len(admitting_threads) >= 2 and threading.main_thread() not in admitting_threads
     assert service.adapter.invocations == [(executor[0], executor[1], "vibey")]
     sent = service.adapter.requests[0]
     assert sent.protocol == "openai_responses"
@@ -362,10 +380,10 @@ FAILED_WITH_PARTIAL = {**WEB_CALL, "status": "failed"}
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("case", "bound", "handles", "error", "sources", "executed"), [
     # No Source can run it: the record says which providers' Sources could.
-    ("no_candidate", None, [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
-    ("source_removed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
+    ("no_candidate", None, [], "Add a search service in Models › Tools or an API key from a vendor that offers web search", [], False),
+    ("source_removed", (XAI, "grok-4.6"), [], "the search service is unavailable", [], False),
     # A new base URL or credential is a new identity, which the turn's chain was not built for.
-    ("source_identity_changed", (XAI, "grok-4.6"), [], "No Source can run web search right now. Add an API key from one of Anthropic, OpenAI, xAI as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", [], False),
+    ("source_identity_changed", (XAI, "grok-4.6"), [], "the search service is unavailable", [], False),
     # The only candidate failed: its failure, and the Sources tried.
     ("provider_refused", (XAI, "grok-4.6"),
      [InvokeHandle(_outcome(RawOutcomeKind.HTTP_ERROR, status=429, code="rate_limit_error", source_id=XAI))],
@@ -411,8 +429,8 @@ async def test_a_proxied_call_that_cannot_complete_is_a_failed_record(
     # Each reason the gateway words carries the code its reader's surface shows it by (#2589).
     # Which providers to add is the call's own fact: that reason has no code and is shown as written.
     assert answer["record"].get("error_code") == {
-        "no_candidate": None, "source_removed": None,
-        "source_identity_changed": None, "provider_refused": "provider_refused",
+        "no_candidate": None, "source_removed": "service_unavailable",
+        "source_identity_changed": "service_unavailable", "provider_refused": "provider_refused",
         "tool_never_ran": "search_not_run", "call_failed_with_partial_results": "search_failed",
         "stream_failed_after_items": "provider_unavailable",
     }[case]
@@ -1103,7 +1121,7 @@ async def test_a_turn_keeps_its_tools_and_executor_order_until_the_next_turn(tmp
         _bind(service, "web_search", (OPENAI, "gpt-6-astra"))
         _bind(service, "x_search", (XAI, "grok-4.6"))
         again = await router.resolve_hop("menu-alias", process_scope="vibey:freeze", turn_id="turn-freeze")
-        assert again["hosted_tools"].keys() == first["hosted_tools"].keys() == {"web_search", "image_generate"}
+        assert again["hosted_tools"].keys() == first["hosted_tools"].keys() == {"web_search", "image_generate", "web_fetch"}
         status, answer = await search(again, "web_search")
         assert status == 200 and answer["execution"]["executor_source_id"] == XAI
         assert (await search(again, "x_search"))[0] == 409
@@ -1158,7 +1176,8 @@ async def test_a_call_cancelled_before_its_handle_is_still_metered(tmp_path, mon
         raise InvokeCancelledError(observed)
 
     if ended_by == "deadline":
-        monkeypatch.setattr(service_module, "call_timeout", lambda _tool: 0.05)
+        from core.handlers.model_hub import search_chain
+        monkeypatch.setattr(search_chain, "call_timeout", lambda _tool: 0.05)
     service.adapter.invoke = cancelled_after_admission
     gateway = ModelHubTurnGateway(service)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)

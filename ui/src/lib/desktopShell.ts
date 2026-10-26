@@ -7,6 +7,8 @@ declare global {
     readonly __AVIBE_DESKTOP_DRAG__?: true;
     /** The shell supports the desktop pet IPC. Conversation selection is main-only. */
     readonly __AVIBE_DESKTOP_PET__?: true;
+    /** The macOS shell answers the Computer Use guide's actions. */
+    readonly __AVIBE_DESKTOP_COMPUTER_USE__?: true;
   }
 }
 
@@ -43,4 +45,32 @@ export function desktopDragRegion(): '' | undefined {
  */
 export function canShowInDesktopPet(): boolean {
   return isDesktopShell() && window.__AVIBE_DESKTOP_PET__ === true;
+}
+
+type ShellInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+
+const computerUseInvoke = (): ShellInvoke | null => {
+  if (!isDesktopShell() || window.__AVIBE_DESKTOP_COMPUTER_USE__ !== true) return null;
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: ShellInvoke } }).__TAURI_INTERNALS__;
+  return internals?.invoke ? internals.invoke.bind(internals) : null;
+};
+
+/** A System Settings privacy pane the Computer Use guide can open. */
+export type ComputerUsePermissionPane = 'accessibility' | 'screen_recording';
+
+/**
+ * The native side of the Computer Use guide, or `null` when this page cannot
+ * drive it: a browser tab, a remote browser, or an older shell. The shell
+ * re-checks that the caller is its own Workbench.
+ */
+export function computerUseShellActions(): {
+  enable: () => Promise<void>;
+  openPermission: (pane: ComputerUsePermissionPane) => Promise<void>;
+} | null {
+  const invoke = computerUseInvoke();
+  if (!invoke) return null;
+  return {
+    enable: async () => { await invoke('computer_use_enable'); },
+    openPermission: async (pane) => { await invoke('computer_use_open_permission', { pane }); },
+  };
 }

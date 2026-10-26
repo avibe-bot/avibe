@@ -523,10 +523,22 @@ These are important user-facing controls, but they are not text commands:
 
 The `vibe` executable controls the local service and async automation features.
 
-All Agent-facing collection commands use `--page` / `--limit`, default to 20
-compact rows, and cap each page at 100. They never expose an unpaginated `--all`
-mode. Continue with `pagination.next_command`; inspect one record with its
-`show` or `get` command.
+All Agent-facing collection commands use `--page` / `--limit` and default to 20
+compact rows. A page holds at most 100 rows; a larger `--limit` reads 100 and
+`pagination.limit` reports the limit used. They never expose an unpaginated
+`--all` mode. Continue with `pagination.next_command`; inspect one record with
+its `show` or `get` command. List rows omit null, empty, and zero-valued fields;
+`--brief` on `vibe task show`, `vibe watch show`, `vibe runs show`,
+`vibe session get`, `vibe agent show`, and `vibe show status` prints exactly the
+list row.
+
+Every command follows one grammar: `--session-id <id>` is the only way to name a
+Session, and single-Session commands default to the caller Session inside an
+Avibe Agent shell. Agent-facing commands print the JSON envelope
+(`schema_version`, `ok`, `kind`, fields) and accept `--json` as a no-op; operator
+commands print text, and most of them print the envelope with `--json`. CLI text
+is English. There are no command or flag aliases. See
+[CLI Reference](CLI.md#commands) for the full grammar and output rule.
 
 ## 5.1 Top-level CLI commands
 
@@ -536,7 +548,7 @@ mode. Continue with `pagination.next_command`; inspect one record with its
 | `vibe start` | Start the service and Web UI if needed; reuse already-running processes; `--no-open-browser` suppresses the browser launch |
 | `vibe stop` | Stop the service and UI; also terminates OpenCode server |
 | `vibe restart` | Stop then start again |
-| `vibe status` | Print runtime status JSON |
+| `vibe status` | Print runtime status as the JSON envelope |
 | `vibe doctor` | Run diagnostics; `vibe doctor repair` applies explicit safe repairs |
 | `vibe remote` | Guided Avibe Cloud remote Web UI setup |
 | `vibe screenshot` | Capture a local desktop screenshot |
@@ -618,7 +630,7 @@ Recommended usage:
 vibe status
 ```
 
-- prints runtime status JSON
+- prints runtime status as the JSON envelope (`kind: "service_status"`)
 - includes `generation_downgrade` when the running service is older than the last activated install, naming both versions and the launcher that selects the newer one
 
 ### `vibe doctor`
@@ -690,7 +702,7 @@ vibe screenshot --json
 - captures the local desktop as a PNG file
 - saves to `~/.vibe_remote/screenshots/` by default
 - prints the saved file path by default
-- prints a machine-readable payload with `--json`
+- prints the JSON envelope with `--json`
 - stays at the host CLI layer; it does not expose in-chat commands, bot buttons, or agent prompt injection
 
 ### `vibe computer`
@@ -770,13 +782,11 @@ vibe upgrade
 | `vibe task add` | Create a task |
 | `vibe task update` | Update a task |
 | `vibe task list` | List tasks |
-| `vibe task ls` | Hidden alias of `list` |
 | `vibe task show <task_id>` | Show one task |
 | `vibe task pause <task_id>` | Pause a task |
 | `vibe task resume <task_id>` | Resume a task |
 | `vibe task run <task_id>` | Run immediately |
 | `vibe task remove <task_id>` | Delete a task |
-| `vibe task rm <task_id>` | Hidden alias of `remove` |
 
 ### `vibe task add`
 
@@ -853,20 +863,27 @@ exists.
 ### `vibe task list`
 
 ```bash
-vibe task list [--include-finished] [--page N] [--limit N]
+vibe task list [--session-id <id> | --global] [--include-finished] [--q <text>] [--page N] [--limit N]
 ```
 
-Returns compact rows, 20 per page by default and at most 100. Use
-`pagination.next_command` to continue; use `vibe task show <task_id>` for detail.
-List and show expose the Workbench lifecycle projection. Watch rows additionally
-include tri-state `process_alive`; compatibility `state` / `last_status` fields
-do not define lifecycle.
+Lists the caller Session's tasks inside an Avibe Agent shell; pass `--session-id`
+for another Session or `--global` for every Session (required outside an Agent
+shell). Returns compact rows, 20 per page by default and at most 100, enabled
+tasks first and each group newest activity first. `--q` searches task text
+fields. Use `pagination.next_command` to continue; use `vibe task show <task_id>`
+for detail. List and show expose the Workbench lifecycle projection:
+`lifecycle_state` is the lifecycle, and `health` appears only when it is not
+`healthy`. `vibe watch list` follows the same contract.
 
 ### `vibe task show`
 
 ```bash
-vibe task show <task_id>
+vibe task show <task_id> [--brief]
 ```
+
+A removed task still reads here, with `lifecycle_state: "removed"` and
+`removed_at`. Other `vibe task` commands on it fail with `task_removed`;
+`task_not_found` means the id never existed.
 
 ### `vibe task pause`
 
@@ -904,7 +921,7 @@ creation; description, model, reasoning effort, and system prompt can be edited.
 | Subcommand | Purpose |
 | --- | --- |
 | `vibe agent list` | List Agents |
-| `vibe agent show <name>` | Show one Agent |
+| `vibe agent show <name> [--brief]` | Show one Agent |
 | `vibe agent models [<name>]` | List available models + reasoning efforts for an Agent or backend |
 | `vibe agent create` | Create an Agent |
 | `vibe agent update <name>` | Edit mutable Agent fields |
@@ -937,17 +954,19 @@ point back to this command.
 ### `vibe agent run`
 
 ```bash
-vibe agent run (--session-id <session_id> | --create-session | --fork-session <session_id>)? (--message <text> | --message-file <file>) [options]
+vibe agent run (--session-id <session_id> | --fork-session <session_id> | --fork-self)? (--message <text> | --message-file <file>) [options]
 ```
 
 Important options:
 
 - `--agent`
 - `--session-id`
+- `--queue`
 - `--fork-session`
-- `--create-session`
+- `--fork-self`
 - `--same-scope`
 - `--scope-id`
+- `--visible`
 - `--model`
 - `--reasoning-effort`
 - `--close-after`
@@ -955,13 +974,13 @@ Important options:
 - `--message`
 - `--message-file`
 
-If neither `--session-id` nor a creation policy is provided, the run uses a
-private no-delivery session and is best suited for sub-agent style calls.
+Without `--session-id` or a fork, the run creates a new Session for `--agent`.
+It is background by default, which suits sub-agent style calls; `--visible`
+makes it user-facing, and `--same-scope` or `--scope-id` places it.
 
-Runs are asynchronous by default: the command queues the run, returns a payload
-with `run_id` / `session_id`, and uses the callback policy to deliver the final
-result later. Use `--sync` only when the terminal should wait for completion.
-`--async` is still accepted for older scripts but is no longer required.
+Runs are asynchronous by default: the command queues the run, prints one `run`
+object with its `id` and `session_id`, and uses the callback policy to deliver
+the final result later. Use `--sync` only when the terminal should wait for completion.
 
 `--close-after` applies to a new or forked Session. It releases that Agent
 runtime after the Run settles while keeping the Session, transcript, and Run
@@ -969,22 +988,22 @@ record. It cannot target an existing `--session-id`.
 
 With an existing `--session-id`, the default is P1: steer the new Run into an
 active native Turn, start it when idle, or move the same Delivery to P3 after a
-definitive refusal/not-active receipt. `--queue` selects P3 without attempting a
-steer. For an existing Session, `--send-now` explicitly selects the same
-content-bearing P1 behavior; it targets the new message and never promotes older
-queued work. `vibe session send-now` is the content-free P1 operation that
-promotes the exact existing FIFO head without adding a message.
+definitive refusal/not-active receipt; it targets the new message and never
+promotes older queued work. `--queue` selects P3 without attempting a steer.
+`vibe session send-now --session-id <id>` is the content-free P1 operation that
+promotes the exact existing FIFO head without adding a message. Once the
+Controller consumes the request, `vibe runs show <run-id>` shows the persisted
+`metadata.delivery_outcome`.
 
 `--fork-session <session_id>` creates a new Agent Session by forking the source
 Session's native backend context. It is for alternate investigations or
 delegated work that should keep the source context without mutating the source
 Session. Forks keep the same backend as the source; `--agent`, `--model`, and
 `--reasoning-effort` may override the forked Session only when the backend does
-not change. Do not combine `--fork-session` with `--session-id` or
-`--create-session`.
+not change. Do not combine `--fork-session` with `--session-id`.
 
 `--model` and `--reasoning-effort` set the model of any new Session the run
-creates (a blank new Session, `--create-session`, or a fork); the Session keeps
+creates (a blank new Session or a fork); the Session keeps
 it. They are refused with `--session-id` (`model_override_with_existing_session`).
 The pair the new Session will run on (each override over the default it would
 otherwise keep) is checked: a Vibey model or effort its Model Hub menu does not
@@ -1001,8 +1020,8 @@ direct Agent Run calls.
 
 | Subcommand | Purpose |
 | --- | --- |
-| `vibe runs list` | List recent runs |
-| `vibe runs show <run_id>` | Show one run |
+| `vibe runs list` | List the caller Session's recent runs; `--session-id <id>` for another Session, `--global` for every Session |
+| `vibe runs show <run_id> [--brief]` | Show one run |
 | `vibe runs cancel <run_id>` | Request cancellation; once the run's input reached the live Session turn, this stops that turn like Session Stop, including other runs sharing it |
 
 ## 6. Recommended Mental Model
@@ -1038,6 +1057,6 @@ Use the right command family for the job:
 vibe
 vibe status
 vibe doctor
-vibe task list
+vibe task list --global
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'Share the latest build summary.'
 ```

@@ -808,34 +808,32 @@ async def test_failing_checkpoints_stop_after_two_in_a_run_and_the_next_run_trie
     assert [row.kind for row in await store.load("session")].count("compaction") == 1
 
 
-class _UnusableHost(Host):
-    async def render_state(self, request):
-        self.states.append(request)
-        raise RuntimeError("the state store is down")
+#: A checkpoint turn the provider's safeguards refuse, saying why (the adapter's ``error_message``).
+REFUSED = [Done(replace(assistant("", stop_reason="refusal"), error_message="category: reasoning_extraction"))]
 
 
-async def test_once_a_run_stops_compacting_a_request_that_cannot_fit_ends_it_and_nothing_is_built():
-    model, host = Model(reads(6), FAILURES[:2]), _UnusableHost()
-    agent = make_agent(
-        model, context=ContextConfig(host=host), tools=[sized_reader(6_000, 6_000, 6_000, 2_000, 500, 12_000)]
-    )
+@pytest.mark.parametrize(
+    "sizes",
+    [
+        # Requests 5 and 6 cross T and their checkpoints are refused, which uses the bound up; the request a
+        # 12,000-token result leaves cannot fit.
+        pytest.param((6_000, 6_000, 6_000, 2_000, 500, 12_000), id="bound-used-earlier"),
+        # Request 5's checkpoint is refused (one); request 6 cannot fit, and its own checkpoint is refused (two).
+        pytest.param((6_000, 6_000, 6_000, 2_000, 9_000), id="bound-used-by-this-request"),
+    ],
+)
+async def test_a_run_that_takes_no_more_checkpoints_drops_a_request_that_cannot_fit_and_continues(sizes):
+    model = Model(reads(len(sizes)), [REFUSED, REFUSED])
+    agent = make_agent(model, tools=[sized_reader(*sizes)])
     events = await run(agent)
-    # Two failed checkpoints stop compaction for the run; the request a 12,000-token result leaves cannot fit.
     assert len(model.checkpoint_requests) == 2
-    assert not host.states  # no checkpoint row, not even the stop check's dry run, is built
-    assert events[-1].reason == "context_exhausted" and [e for e in events if isinstance(e, ContextExhausted)]
-    assert not [row for row in await agent.store.load("session") if row.kind == "compaction"]
-
-
-async def test_the_second_unproductive_checkpoint_of_a_run_ends_a_request_that_cannot_fit_without_a_drop():
-    model = Model(reads(5), FAILURES[:2])
-    agent = make_agent(model, tools=[sized_reader(6_000, 6_000, 6_000, 2_000, 9_000)])
-    events = await run(agent)
-    # Request 5 crosses T and its checkpoint fails (one); request 6 cannot fit, its checkpoint fails too (two),
-    # so the run stops compacting: the request ends the run, never in a mechanical drop.
-    assert len(model.checkpoint_requests) == 2
-    assert not [row for row in await agent.store.load("session") if row.kind == "compaction"]
-    assert events[-1].reason == "context_exhausted"
+    assert [event.error for event in events if isinstance(event, CompactionFailed)] == [
+        "The checkpoint turn stopped with refusal (category: reasoning_extraction) and no usable checkpoint."
+    ] * 2
+    # The drop calls no model: the earliest part moves out, and the run goes on.
+    drops = [row.payload for row in await agent.store.load("session") if row.kind == "compaction"]
+    assert drops and all((drop["mode"], drop["reason"], drop["summarizer"]) == ("dropped", "overflow", None) for drop in drops)
+    assert events[-1].reason == "completed" and not [e for e in events if isinstance(e, ContextExhausted)]
 
 
 async def test_a_failed_checkpoint_attempt_keeps_every_partial_in_its_audit():
@@ -945,8 +943,12 @@ async def test_two_ineffective_checkpoints_stop_compaction_for_the_run():
     agent = make_agent(model, tools=[sized_reader(6_000, 6_000, 6_000, 6_000, 5_000, 5_000, 5_000)])
     events = await run(agent)
     finished = [event for event in events if isinstance(event, CompactionFinished)]
-    assert len(finished) == 2 and all(event.tokens_after_estimate >= 0.75 * THRESHOLD for event in finished)
+    normal = [event for event in finished if event.mode == "normal"]
+    assert len(normal) == 2 and all(event.tokens_after_estimate >= 0.75 * THRESHOLD for event in normal)
     assert len(model.checkpoint_requests) == 2  # the next crossing is not tried in this run
+    # The request that no longer fits is dropped instead, with no model call, and the run completes.
+    assert [(event.reason, event.mode) for event in finished[2:]] == [("overflow", "dropped")]
+    assert events[-1].reason == "completed"
 
 
 OVERFLOW = ProviderError("overflow", "prompt is too long: 40000 tokens > 32000 maximum", False, status=400)
@@ -1445,11 +1447,12 @@ async def test_a_provider_that_always_overflows_stops_after_two_checkpoint_calls
     agent = make_agent(model, tools=[reader(tokens(1_500))])
     events = await run(agent)
     assert len(model.checkpoint_requests) == 2
-    # The reads, then the refused request: its normal and rolling checkpoints are refused too, which stops the
-    # run's compaction, so the refusal ends the run; nothing is dropped.
-    assert len(model.conversation_requests) == 8 + 1
+    # The reads, then the refused request: its normal and rolling checkpoints are refused too, which uses the run's
+    # bound up, so each later refusal is answered by a drop; the fourth refusal of the request ends the run.
+    assert len(model.conversation_requests) == 8 + 4
     assert events[-1].reason == "context_exhausted"
-    assert not [row for row in await agent.store.load("session") if row.kind == "compaction"]
+    drops = [row.payload for row in await agent.store.load("session") if row.kind == "compaction"]
+    assert [(drop["mode"], drop["reason"]) for drop in drops] == [("dropped", "overflow")] * 3
 
 
 async def test_one_compaction_is_in_flight_per_session():

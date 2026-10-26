@@ -3,6 +3,7 @@ import { PetAvatar, type PetPose } from '../../src/pet/PetAvatar';
 import { PetPage } from '../../src/pet/PetPage';
 import { PetWindow } from '../../src/pet/PetWindow';
 import { petBridge } from '../../src/pet/petBridge';
+import { petPanel } from '../../src/pet/petPanel';
 import { ApiProvider } from '../../src/context/ApiContext';
 import { InstanceAuthorizationProvider } from '../../src/context/InstanceAuthorizationProvider';
 import { WorkbenchInboxProvider } from '../../src/context/WorkbenchInboxProvider';
@@ -30,6 +31,8 @@ const pinnedPose = requestedPose && PINNED_POSES.includes(requestedPose as PetPo
 declare global {
   interface Window {
     petLayoutHitRegions: Parameters<typeof petBridge.setHitRegions>[0];
+    petHitReports: number;
+    petFixtureLayout: (revision: number, edge: 'top' | 'bottom') => void;
     setPetLayoutVisible: (visible: boolean) => void;
     petFixtureSends: { sessionId: string; payload: unknown }[];
     petFixtureOpens: string[];
@@ -44,12 +47,17 @@ declare global {
   }
 }
 window.petLayoutHitRegions = [];
-petBridge.setHitRegions = async (rects) => { window.petLayoutHitRegions = rects; };
+window.petHitReports = 0;
+petBridge.setHitRegions = async (rects) => { window.petLayoutHitRegions = rects; window.petHitReports += 1; };
+// Apply a layout snapshot the way the shell's event does.
+window.petFixtureLayout = (revision, edge) => { petPanel.applySnapshot({ revision, layout: { panel_side: 'left', panel_edge: edge } }); };
 window.petFixtureSends = [];
 window.petFixtureOpens = [];
 window.petFixtureStops = [];
 window.petFixtureMarkReads = [];
 petBridge.open = async (link) => { window.petFixtureOpens.push(link); };
+// `edge=top`: the layout a shell chooses near the top of the display (§9.1).
+if (params.get('edge') === 'top') petPanel.applySnapshot({ revision: 1, layout: { panel_side: 'left', panel_edge: 'top' } });
 const hasMain = params.get('main') !== 'false';
 const layers = Number(params.get('layers') ?? 3);
 const personal = params.get('scenario') === 'personal';

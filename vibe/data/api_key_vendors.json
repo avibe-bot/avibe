@@ -37,15 +37,13 @@
       "request": {
         "method": "POST",
         "query": "query",
-        "results": "count",
-        "content": "need_content"
+        "results": "count"
       },
       "result": {
         "results": "results",
         "url": "url",
         "title": "title",
-        "snippet": "snippet",
-        "content": "content",
+        "snippet": "summary",
         "page_age": "date"
       },
       "limits": {
@@ -58,7 +56,7 @@
         "usd_per_1k": 0.75,
         "extra": [],
         "as_of": "2026-10-19",
-        "url": "https://api-docs.deepseek.com/guides/search-tool"
+        "url": "https://api-docs.deepseek.com/guides/search"
       },
       "free_check": {
         "method": "GET",
@@ -68,6 +66,8 @@
         "invalid_statuses": [401]
       },
       "service_refused_statuses": [400],
+      "outcomes": {"credential": [401], "balance": [402], "limit": []},
+      "billing": {"nonempty_only": true, "unbilled_errors": ["timeout"]},
       "auto_enroll": true,
       "tool_only": false
     }
@@ -141,14 +141,13 @@
         "method": "POST",
         "query": "query",
         "results": "max_results",
-        "content": "include_raw_content"
+        "defaults": {"search_depth": "basic", "include_answer": false}
       },
       "result": {
         "results": "results",
         "url": "url",
         "title": "title",
         "snippet": "content",
-        "content": "raw_content",
         "page_age": "published_date"
       },
       "limits": {
@@ -177,7 +176,9 @@
         "balance": null,
         "invalid_statuses": [401]
       },
-      "service_refused_statuses": [400],
+      "service_refused_statuses": [400, 422],
+      "outcomes": {"credential": [401], "balance": [402], "limit": [432, 433]},
+      "billing": {"nonempty_only": false, "unbilled_errors": []},
       "tool_only": true
     }
   },
@@ -194,16 +195,14 @@
         "method": "POST",
         "query": "query",
         "results": "numResults",
-        "content": "contents.text",
-        "content_max_chars": {"path": "contents.text.maxCharacters", "value": 4000},
-        "highlights": "contents.highlights"
+        "highlights": "contents.highlights",
+        "defaults": {"type": "auto"}
       },
       "result": {
         "results": "results",
         "url": "url",
         "title": "title",
         "snippet": "highlights",
-        "content": "text",
         "page_age": "publishedDate",
         "reported_cost": {"path": "costDollars.total", "estimate": true}
       },
@@ -215,14 +214,69 @@
       "price": {
         "unit": "search",
         "usd_per_1k": 7.0,
-        "extra": [
-          {"unit": "page", "usd_per_1k": 1.0, "when": "content"}
-        ],
+        "extra": [],
         "as_of": "2026-10-19",
         "url": "https://exa.ai/blog/exa-3"
       },
       "free_check": null,
       "service_refused_statuses": [400],
+      "outcomes": {
+        "credential": [401], "balance": [402], "limit": [],
+        "tag_overrides": [
+          {"status": 402, "tag": "API_KEY_BUDGET_EXCEEDED", "code": "service_limit"},
+          {"status": 402, "tag": "TEAM_BUDGET_EXCEEDED", "code": "service_limit"},
+          {"status": 403, "tag": "PROHIBITED_CONTENT", "code": "service_refused"},
+          {"status": 403, "tag": "CONTENT_FILTER_ERROR", "code": "service_refused"}
+        ]
+      },
+      "billing": {"nonempty_only": false, "unbilled_errors": []},
+      "tool_only": true
+    }
+  },
+  {
+    "id": "exa-mcp",
+    "label": "Exa (free)",
+    "official_base_url": "https://mcp.exa.ai/mcp",
+    "protocol": "search",
+    "built_in": true,
+    "search": {
+      "service_id": "exa/mcp",
+      "endpoint": "https://mcp.exa.ai/mcp?tools=web_search_advanced_exa,web_fetch_exa",
+      "auth": "none",
+      "request": {
+        "method": "POST",
+        "query": "query",
+        "results": "numResults",
+        "defaults": {
+          "type": "auto",
+          "enableHighlights": true,
+          "highlightsMaxCharacters": 1000,
+          "textMaxCharacters": 1
+        }
+      },
+      "result": {
+        "results": "results",
+        "url": "url",
+        "title": "title",
+        "snippet": "highlights",
+        "page_age": "publishedDate"
+      },
+      "limits": {
+        "results_min": 1,
+        "results_max": 100,
+        "query_max_chars": null
+      },
+      "price": {
+        "unit": "search",
+        "usd_per_1k": 0,
+        "extra": [],
+        "as_of": "2026-10-22",
+        "url": "https://exa.ai/docs/get-started/exa-mcp#authentication"
+      },
+      "free_check": null,
+      "service_refused_statuses": [403],
+      "outcomes": {"credential": [], "balance": [], "limit": []},
+      "billing": {"nonempty_only": false, "unbilled_errors": []},
       "tool_only": true
     }
   }

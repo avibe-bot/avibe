@@ -218,3 +218,9 @@ scenarios:
     kind: resilience
     layer: scenario
     test: tests/test_tunnel_recovery.py::test_ra_tq_034_connector_exited_before_network_is_restarted_with_backoff
+  - id: RA-TQ-035
+    name: A Connector counts as ready only after the edge registers all four connections
+    status: covered
+    kind: lifecycle
+    layer: contract
+    test: tests/test_tunnel_recovery.py::test_ra_tq_035_connector_readiness_counts_edge_registered_connections

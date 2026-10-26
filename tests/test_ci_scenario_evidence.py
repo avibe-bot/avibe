@@ -13,11 +13,15 @@ from scripts.ci_scenario_evidence import (
     UNIT_SHARD_JOB,
     WORKFLOWS,
     Evidence,
+    ReleaseEvidenceError,
     Reports,
+    check_release_evidence,
     covered_evidence,
+    covered_test_evidence,
     judge,
     pytest_commands,
     read_reports,
+    release_pytest_commands,
 )
 
 CASE = "tests/test_x.py::test_case"
@@ -32,6 +36,71 @@ def _reports(**jobs: dict[str, tuple[str, str]]) -> Reports:
         reports.outcomes[job] = outcomes
         reports.artifacts[job] = reports.artifacts.get(job, 0) or 1
     return reports
+
+
+def _release_fixture(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+    root = tmp_path / "checkout"
+    test = root / "tests" / "test_x.py"
+    test.parent.mkdir(parents=True)
+    test.write_text("def test_case():\n    pass\n", encoding="utf-8")
+    scenarios = root / "tests" / "scenarios" / "capability"
+    scenarios.mkdir(parents=True)
+    scenarios.joinpath("catalog.yaml").write_text(
+        "scenarios:\n  - id: ROW-1\n    status: covered\n    test: tests/test_x.py::test_case\n",
+        encoding="utf-8",
+    )
+    workflow = tmp_path / "workflow.yml"
+    workflow.write_text(
+        "jobs:\n  release:\n    steps:\n      - run: python -m pytest tests/test_x.py --junitxml=report.xml\n",
+        encoding="utf-8",
+    )
+    junit = tmp_path / "junit"
+    junit.mkdir()
+    return root, scenarios.parent, workflow, junit
+
+
+def _write_release_report(junit: Path, body: str) -> None:
+    junit.joinpath("release.xml").write_text(
+        f"<testsuites><testsuite>{body}</testsuite></testsuites>", encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        "",
+        '<skipped message="conditional skip"/>',
+        '<failure message="assertion failed"/>',
+        '<error message="fixture error"/>',
+        '<skipped type="pytest.xfail" message="known gap"/>',
+    ],
+    ids=["pass", "skip", "failure", "error", "xfail"],
+)
+def test_release_evidence_requires_a_passing_junit_case(tmp_path: Path, result: str) -> None:
+    root, scenarios, workflow, junit = _release_fixture(tmp_path)
+    _write_release_report(junit, f'<testcase classname="tests.test_x" name="test_case">{result}</testcase>')
+
+    if result:
+        with pytest.raises(ReleaseEvidenceError, match="did not pass in the release run"):
+            check_release_evidence(junit, workflow, root, scenario_root=scenarios)
+    else:
+        assert check_release_evidence(junit, workflow, root, scenario_root=scenarios) == {
+            CASE: [CASE]
+        }
+
+
+@pytest.mark.parametrize("report_state", ["missing", "empty", "malformed"])
+def test_release_evidence_fails_closed_for_bad_reports(tmp_path: Path, report_state: str) -> None:
+    root, scenarios, workflow, junit = _release_fixture(tmp_path)
+    if report_state == "missing":
+        junit = tmp_path / "missing-junit"
+    elif report_state == "empty":
+        junit.joinpath("release.xml").write_text("<testsuites/>", encoding="utf-8")
+    elif report_state == "malformed":
+        junit.joinpath("release.xml").write_text("<testsuites>", encoding="utf-8")
+
+    with pytest.raises(ReleaseEvidenceError):
+        check_release_evidence(junit, workflow, root, scenario_root=scenarios)
 
 
 @pytest.mark.parametrize(
@@ -114,8 +183,50 @@ def test_a_report_names_each_case_by_its_node_id(tmp_path: Path) -> None:
     assert reports.outcomes["windows-agent"] == {}
 
 
+def test_release_evidence_uses_the_explicit_release_checkout_root(tmp_path: Path) -> None:
+    root, scenarios, workflow, junit = _release_fixture(tmp_path)
+    wrong_root = tmp_path / "primary-checkout"
+    wrong_test = wrong_root / "tests" / "test_x.py"
+    wrong_test.parent.mkdir(parents=True)
+    wrong_test.write_text("def test_other():\n    pass\n", encoding="utf-8")
+    _write_release_report(junit, '<testcase classname="tests.test_x" name="test_case"/>')
+
+    assert check_release_evidence(junit, workflow, root, scenario_root=scenarios) == {CASE: [CASE]}
+    with pytest.raises(ReleaseEvidenceError, match="selects no covered"):
+        check_release_evidence(junit, workflow, wrong_root, scenario_root=scenarios)
+
+
+
+    model_workflow = (WORKFLOWS / "model-hub-e2e.yml").read_text(encoding="utf-8")
+    publish_workflow = (WORKFLOWS / "publish.yml").read_text(encoding="utf-8")
+
+    assert "--release" in model_workflow
+    assert "--workflow .github/workflows/model-hub-e2e.yml" in model_workflow
+    assert "--pytest-root ." in model_workflow
+    assert '--junitxml="$RUNNER_TEMP/model-hub-e2e-junit/model-hub-e2e.xml"' in model_workflow
+    assert "--release" in publish_workflow
+    assert "--workflow .github/workflows/publish.yml" in publish_workflow
+    assert "(cd release-automation && python scripts/ci_scenario_evidence.py --release" in publish_workflow
+    assert "--pytest-root ." in publish_workflow
+    assert "scripts/ci_scenario_evidence.py" in publish_workflow
+    assert "scripts/pytest_collection.py" in publish_workflow
+    assert ".github/workflows/publish.yml" in publish_workflow
+    assert "tests/scenarios/**/catalog.yaml" in publish_workflow
+    assert "cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py" in publish_workflow
+    assert '--junitxml="$RUNNER_TEMP/retired-updater-junit/retired-updater-bridge.xml"' in publish_workflow
+
+    assert release_pytest_commands(WORKFLOWS / "model-hub-e2e.yml") == [
+        ("-m", "e2e_model_hub", "tests/e2e", "-p", "no:cacheprovider")
+    ]
+    publish_commands = release_pytest_commands(WORKFLOWS / "publish.yml")
+    assert publish_commands[1] == ("tests/e2e/test_retired_updater_bridge.py",)
+    assert covered_test_evidence()[
+        "tests/e2e/test_retired_updater_bridge.py::test_released_updater_replaces_companion_without_touching_user_data"
+    ].rows == ["MUC-004"]
+
+
 def test_release_gating_is_read_from_the_release_workflows() -> None:
-    """The Model Hub E2E and the release automation are the only CI that runs some covered rows' evidence."""
+    """The Model Hub E2E and release automation select the expected covered rows."""
 
     commands = [args for name in RELEASE_WORKFLOWS for job in pytest_commands(WORKFLOWS / name).values() for args in job]
     evidence = covered_evidence()

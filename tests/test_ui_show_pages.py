@@ -2394,22 +2394,14 @@ def test_public_show_page_implicit_markdown_preserves_admission_errors(
 
 
 def test_show_cli_guidance_distinguishes_public_and_private_markdown_contracts():
-    translations = {
-        language: json.loads(
-            (Path(ui_server.__file__).parent / "i18n" / f"{language}.json").read_text(
-                encoding="utf-8"
-            )
-        )["show"]["markdown"]["help"]
-        for language in ("en", "zh")
-    }
+    from vibe import cli
 
-    assert "Public Show Page" in translations["en"]
-    assert "automatically" in translations["en"]
-    assert "authorized private" in translations["en"]
-    assert "公共 Show Page" in translations["zh"]
-    assert "自动" in translations["zh"]
-    assert "已授权的私有页面" in translations["zh"]
-    assert all("Accept: text/markdown" in value for value in translations.values())
+    guidance = cli._show_examples_text()
+
+    assert "Public Show Page" in guidance
+    assert "automatically" in guidance
+    assert "authorized private" in guidance
+    assert "Accept: text/markdown" in guidance
 
 
 @pytest.mark.parametrize(

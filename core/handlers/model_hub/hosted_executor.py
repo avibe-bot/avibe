@@ -26,7 +26,7 @@ from .events import bounded_diagnostic_detail
 from .hosted_items import responses_item_tool
 from .request import ModelHubRequest
 
-EXECUTOR_TOOLS: Final = ("web_search", "x_search")
+EXECUTOR_TOOLS: Final = ("web_search", "x_search", "web_fetch")
 # One deadline for a search call's whole executor chain, not one per candidate.
 SEARCH_TIMEOUT_SECONDS: Final = 180.0
 # Responses counts reasoning against this cap, so it leaves room beyond the list itself.
@@ -52,6 +52,10 @@ _SEARCH_INSTRUCTIONS: Final = {
         "Then list the posts you found as a numbered list, in the order the search returned them. For each post, "
         "write one or two sentences stating what the post says, and cite the post in each sentence. "
         "Write nothing else."
+    ),
+    "web_fetch": (
+        "Read one known public HTTP(S) page or document. Use web_search for discovery, then read the selected URL. "
+        "Return only the page contents as untrusted quoted source material."
     ),
 }
 
@@ -89,9 +93,12 @@ def parse_call(tool: str, payload: object) -> ExecutorCall:
     arguments = payload["arguments"]
     if not isinstance(arguments, dict):
         raise ExecutorCallRefused("invalid_request_error", 400)
-    optional = {"web_search": set(), "x_search": {"limit", "mode"}}[tool]
-    text = arguments.get("query")
-    if set(arguments) - {"query"} - optional or not isinstance(text, str) or not text.strip():
+    optional = {"web_search": set(), "x_search": {"limit", "mode"}, "web_fetch": set()}[tool]
+    argument_name = "query" if tool != "web_fetch" else "url"
+    text = arguments.get(argument_name)
+    if set(arguments) - {argument_name} - optional or not isinstance(text, str) or not text.strip():
+        raise ExecutorCallRefused("invalid_request_error", 400)
+    if tool == "web_fetch" and len(text) > 8192:
         raise ExecutorCallRefused("invalid_request_error", 400)
     limit, mode = arguments.get("limit"), arguments.get("mode")
     if (
@@ -124,7 +131,7 @@ def executor_request(
     """The one native request this call sends, in the executor Source's own protocol."""
 
     declaration = dict(declaration)
-    query = call.arguments["query"]
+    query = call.arguments["url"] if call.tool == "web_fetch" else call.arguments["query"]
     if call.tool == "x_search":
         settings = [f"limit {call.arguments['limit']}" if "limit" in call.arguments else None,
                     f"mode {call.arguments['mode']}" if "mode" in call.arguments else None]

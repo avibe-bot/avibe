@@ -1,4 +1,4 @@
-"""Model Hub EngineAdapter interface. FINAL CONTRACT v17 (2026-10-19).
+"""Model Hub EngineAdapter interface. FINAL CONTRACT v21 (2026-10-21).
 
 This file is the canonical adapter boundary and must remain byte-identical to
 ``core/handlers/model_hub/adapter.py``. The adapter owns one-Source operations:
@@ -17,7 +17,8 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, AsyncIterator, Callable, Final, Literal, Mapping, Protocol, Sequence
+import re
+from typing import Any, AsyncIterator, Awaitable, Callable, Final, Literal, Mapping, Protocol, Sequence
 
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
 
@@ -28,6 +29,73 @@ MODEL_PROTOCOLS = ("anthropic", "openai_responses", "openai_chat", "google")
 SOURCE_PROTOCOLS = MODEL_PROTOCOLS + ("search",)
 SEARCH_RESPONSE_MAX_BYTES: Final = 8 * 1024 * 1024
 SEARCH_TRANSPORT_TIMEOUT_SECONDS: Final = 30.0
+# Response correlation is a diagnostic fact, not a header-forwarding surface. These
+# are the only upstream response header names allowed to cross the engine boundary.
+RESPONSE_CORRELATION_HEADER_NAMES: Final = frozenset({"request-id", "x-request-id"})
+# Claude's future subscription-cap classifier consumes this closed set. Keep the
+# names lowercase here; the engine/client boundary matches them case-insensitively.
+CLAUDE_UNIFIED_RATE_LIMIT_HEADER_NAMES: Final = frozenset({
+    "anthropic-ratelimit-unified-status",
+    "anthropic-ratelimit-unified-5h-status",
+    "anthropic-ratelimit-unified-7d-status",
+    "anthropic-ratelimit-unified-7d_oi-status",
+    "anthropic-ratelimit-unified-overage-status",
+    "anthropic-ratelimit-unified-overage-disabled-reason",
+    "anthropic-ratelimit-unified-representative-claim",
+    "anthropic-ratelimit-unified-5h-utilization",
+    "anthropic-ratelimit-unified-7d-utilization",
+    "anthropic-ratelimit-unified-5h-reset",
+    "anthropic-ratelimit-unified-7d-reset",
+    "anthropic-ratelimit-unified-7d_oi-reset",
+    "anthropic-ratelimit-unified-reset",
+    "anthropic-ratelimit-unified-overage-reset",
+})
+RESPONSE_CORRELATION_ID_MAX_LENGTH: Final = 256
+RESPONSE_CORRELATION_ID_MAX_ITEMS: Final = len(RESPONSE_CORRELATION_HEADER_NAMES)
+_CORRELATION_ID_CREDENTIAL_PATTERN = re.compile(
+    r"(?i)(?:bearer|basic)\s+|"
+    r"(?:authorization|api[_ -]?key|access[_ -]?token|token|secret|password|"
+    r"credential|cookie|session|signature)\s*[:=]|"
+    r"(?:sk|rk|pk|sess|token|secret|cred|key)[-_][a-z0-9_-]{8,}|"
+    r"(?:AIza[a-z0-9_-]{20,}|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9_]{20,})|"
+    r"ey[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+$"
+)
+
+
+def sanitize_response_correlation_ids(values: object) -> tuple[tuple[str, str], ...]:
+    """Keep only bounded, credential-free values from the two trusted headers."""
+
+    pairs = values.items() if isinstance(values, Mapping) else values
+    try:
+        iterator = iter(pairs)  # type: ignore[arg-type]
+    except TypeError:
+        return ()
+    retained: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for pair in iterator:
+        if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+            continue
+        raw_name, raw_value = pair
+        if not isinstance(raw_name, str) or not isinstance(raw_value, str):
+            continue
+        name = raw_name.lower()
+        if name not in RESPONSE_CORRELATION_HEADER_NAMES or name in seen:
+            continue
+        if (
+            not raw_value
+            or len(raw_value) > RESPONSE_CORRELATION_ID_MAX_LENGTH
+            or any(not 0x21 <= ord(char) <= 0x7E for char in raw_value)
+            or _CORRELATION_ID_CREDENTIAL_PATTERN.search(raw_value)
+        ):
+            continue
+        seen.add(name)
+        retained.append((name, raw_value))
+        if len(retained) >= RESPONSE_CORRELATION_ID_MAX_ITEMS:
+            break
+    order = {name: index for index, name in enumerate(sorted(RESPONSE_CORRELATION_HEADER_NAMES))}
+    return tuple(sorted(retained, key=lambda item: order[item[0]]))
+
+
 OBSERVATION_OUTCOMES = (
     "observed",
     "ambiguous",
@@ -211,8 +279,15 @@ class RawCallOutcome:
     # from the error envelope in that header's syntax. L2 owns validation and
     # the resulting retry policy.
     retry_after: str | None = None
+    # Validated Retry-After-Ms advice. It stays separate from ``retry_after`` so
+    # a millisecond count can never reach code that interprets numeric advice as
+    # whole seconds.
+    retry_after_ms: int | None = field(default=None, repr=False)
     # Aware UTC receipt time of those headers, before reading the error body.
     response_received_at: datetime | None = None
+    # Exact, bounded Claude unified rate-limit facts for the future #2530
+    # classifier. These never reach an outward response or persisted event.
+    claude_rate_limit_headers: tuple[tuple[str, str], ...] = field(default=(), repr=False)
     # Recognized model output or protocol success, independently of permissive
     # forwarding. An unrecognized HTTP 200 alone cannot prove Source recovery.
     recovery_verified: bool = False
@@ -228,6 +303,10 @@ class RawCallOutcome:
     # The search tools whose own completed item a served response carried, for
     # the positive evidence written at settlement (``vibey-hosted-tools.md`` §3.2).
     hosted_tools: frozenset[str] = frozenset()
+    # The response header name is retained in lowercase so relay ``x-request-id``
+    # and provider ``request-id`` values cannot be conflated. The client and
+    # provenance writer re-validate this tuple before persistence.
+    response_correlation_ids: tuple[tuple[str, str], ...] = ()
 
 
 class ObservationOutcome(str, Enum):
@@ -575,17 +654,36 @@ class EngineAdapter(Protocol):
         source_id: str,
         vendor: str,
         service_id: str,
-        credential_ref: str,
+        credential_ref: str | None,
         request: Mapping[str, Any],
         *,
-        on_sent: Callable[[], None] | None = None,
+        on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
         """Make exactly one catalog-host search request from Model Hub custody.
 
+        ``credential_ref`` is an opaque custody handle for credentialed Sources;
+        it is ``None`` for the built-in keyless MCP Source. In both cases the
+        adapter owns the transport and never exposes secret material.
+
         ``on_sent`` fires once after the connection (including TLS) is ready and
         immediately before aiohttp writes this request. A callback failure stops
-        the request before any request bytes are sent.
+        the request before any request bytes are sent. An async callback is
+        awaited for final controller admission without holding a mutation lock
+        during DNS/TCP/TLS; existing synchronous callbacks remain supported.
         """
+        ...
+
+    async def fetch(
+        self,
+        source_id: str,
+        vendor: str,
+        service_id: str,
+        credential_ref: str | None,
+        request: Mapping[str, Any],
+        *,
+        on_sent: Callable[[], Awaitable[None] | None] | None = None,
+    ) -> SearchResponse:
+        """Make exactly one catalog web-fetch request from Model Hub custody."""
         ...
 
     async def revoke_search_credential(self, credential_ref: str) -> None:

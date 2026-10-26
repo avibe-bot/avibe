@@ -794,6 +794,12 @@ def _machine_coded_error_builders():
         # Round 5d: terminal archive vs retryable lock, on the same route. A client can
         # only tell them apart if BOTH codes survive.
         ("backend_locked", lambda: ui_server._backend_locked_response(locked), "backend_locked", 409),
+        (
+            "backend_busy",
+            lambda: ui_server._backend_busy_response(current_backend="claude", requested_backend="vibey"),
+            "backend_busy",
+            409,
+        ),
         # The runtime-reserved workspace-notifications row: one code, three verbs, so the
         # per-verb sentence is the only thing that varies and BOTH must keep the code.
         (
@@ -1311,6 +1317,66 @@ def test_sessions_patch_archived_outranks_the_backend_lock_preflight(monkeypatch
     assert in_flight.await_count == 1
 
 
+def test_sessions_patch_bound_backend_switch_waits_for_the_old_runtime(monkeypatch, tmp_path):
+    """A bound session switches backend only once its old runtime is settled.
+
+    The switch replaces the native conversation, but a detached backend Activity (or
+    its undelivered output) would keep running on the replaced one; only the
+    controller can tell, so an unreachable controller refuses too. Harness items in
+    the same list follow the session and do not block. A settled session switches.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from core.vibe_agents import VibeAgentStore
+    from storage.db import create_sqlite_engine
+    from storage.models import agent_sessions
+    from storage.projects_service import create_project
+    from storage.workbench_sessions_service import create_session
+    from vibe import internal_client
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    ensure_sqlite_state()
+    engine = create_sqlite_engine()
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    with engine.begin() as conn:
+        project = create_project(conn, str(project_dir), display_name="Project")
+        sid = create_session(conn, scope_id=project["scope_id"], agent_backend="claude", title="Bound")["id"]
+        conn.execute(
+            agent_sessions.update().where(agent_sessions.c.id == sid).values(native_session_id="claude-native")
+        )
+    store = VibeAgentStore()
+    try:
+        store.create(name="reviewer", backend="codex")
+    finally:
+        store.close()
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    def turn_state(**body):
+        return AsyncMock(return_value={"status_code": 200, "body": {"ok": True, "in_flight": False, **body}})
+
+    refusals = (
+        (turn_state(background_activities=[{"item_kind": "backend_activity", "id": "act-1"}]), 409, "backend_busy"),
+        (turn_state(pending_activity_output_count=1), 409, "backend_busy"),
+        (AsyncMock(side_effect=internal_client.InternalServerUnavailable("down")), 503, "controller_unavailable"),
+    )
+    for probe, status, code in refusals:
+        with patch("vibe.internal_client.turn_state", probe):
+            refused = client.patch(f"/api/sessions/{sid}", json={"agent_name": "reviewer"}, headers=headers)
+        assert refused.status_code == status
+        assert refused.get_json()["code"] == code
+
+    settled = turn_state(background_activities=[{"item_kind": "watch", "id": "watch-1"}])
+    with patch("vibe.internal_client.turn_state", settled):
+        switched = client.patch(f"/api/sessions/{sid}", json={"agent_name": "reviewer"}, headers=headers)
+    assert switched.status_code == 200
+    body = switched.get_json()
+    assert (body["id"], body["agent_backend"], body["native_session_id"]) == (sid, "codex", "")
+    assert body["metadata"]["backend_handoff"]["from_native"] == "claude-native"
+
+
 def test_sessions_patch_missing_session_is_still_404(monkeypatch, tmp_path):
     """The archived short-circuit must not swallow the not-found case.
 
@@ -1399,7 +1465,10 @@ def test_sessions_fork_on_archived_source_survives_ui_error_parse(monkeypatch, t
     assert isinstance(body.get("message"), str) and body["message"]
 
 
-def test_doctor_post_runs_fast_diagnostics_by_default(monkeypatch):
+def test_doctor_post_runs_fast_diagnostics_by_default_in_the_ui_language(monkeypatch):
+    from types import SimpleNamespace
+
+    from core.services import settings as settings_service
     from vibe import cli
 
     calls = []
@@ -1407,16 +1476,18 @@ def test_doctor_post_runs_fast_diagnostics_by_default(monkeypatch):
     monkeypatch.setattr(
         cli,
         "_doctor",
-        lambda *, deep=True: calls.append(deep)
+        lambda *, deep=True, language="en": calls.append((deep, language))
         or {"mode": "fast", "groups": [], "summary": {"pass": 0, "warn": 0, "fail": 0}, "ok": True},
     )
+    # The CLI renders Doctor in English; the Web panel keeps the configured UI language.
+    monkeypatch.setattr(settings_service, "load_config_or_default", lambda: SimpleNamespace(language="zh"))
 
     client = app.test_client()
     response = client.post("/api/doctor", json={}, headers=csrf_headers(client))
 
     assert response.status_code == 200
     assert response.get_json()["mode"] == "fast"
-    assert calls == [False]
+    assert calls == [(False, "zh")]
 
 
 def test_doctor_post_can_run_deep_diagnostics(monkeypatch):
@@ -1427,7 +1498,7 @@ def test_doctor_post_can_run_deep_diagnostics(monkeypatch):
     monkeypatch.setattr(
         cli,
         "_doctor",
-        lambda *, deep=True: calls.append(deep)
+        lambda *, deep=True, language="en": calls.append(deep)
         or {"mode": "deep", "groups": [], "summary": {"pass": 0, "warn": 0, "fail": 0}, "ok": True},
     )
 

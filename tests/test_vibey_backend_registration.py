@@ -431,11 +431,11 @@ async def test_an_rc1_vibey_left_empty_starts_at_the_first_upgraded_start(tmp_pa
 
 
 @pytest.mark.parametrize("name_taken", [False, True])
-def test_choosing_the_built_in_backend_in_an_im_picker_routes_to_its_agent(tmp_path, sqlite_db_factory, name_taken):
-    """An IM picker chooses a backend; the routing it saves names that backend's built-in Agent.
+def test_an_im_picker_routes_to_exactly_the_agent_it_lists(tmp_path, sqlite_db_factory, name_taken):
+    """An IM picker lists Agents and saves the one chosen, by id, so a name collision cannot redirect it.
 
-    While a user's Agent holds ``vibey`` the built-in takes the next free name, so saving the id
-    would route the channel to that user's Agent instead of the built-in.
+    While a user's Agent holds ``vibey`` the built-in takes the next free name; both are listed, and
+    each routes the channel to itself.
     """
     from core.handlers.settings_handler import SettingsHandler
 
@@ -468,15 +468,19 @@ def test_choosing_the_built_in_backend_in_an_im_picker_routes_to_its_agent(tmp_p
         handler._get_settings_key = lambda context: context.channel_id
         handler._get_settings_manager = lambda context: settings_manager
 
-        for backend, expected in (("vibey", built_in.name), ("claude", "claude")):
+        controller.get_cwd = lambda _context: str(tmp_path)
+        context = MessageContext(user_id="U1", channel_id="C-test", platform="slack")
+        listed = {agent.name: agent for agent in asyncio.run(handler._gather_routing_modal_data(context)).agents}
+        expected = {built_in.name: "vibey", "claude": "claude", **({"vibey": "claude"} if name_taken else {})}
+        assert set(listed) == set(expected)
+
+        for name, backend in expected.items():
             asyncio.run(handler.handle_routing_update(
-                user_id="U1", channel_id="C-test", backend=backend,
-                opencode_agent=None, opencode_model=None, claude_agent=None, claude_model=None,
+                user_id="U1", channel_id="C-test", agent_id=listed[name].id,
                 notify_user=False, platform="slack",
             ))
-            assert saved["C-test"].agent_name == expected
-            context = MessageContext(user_id="U1", channel_id="C-test", platform="slack")
-            assert controller.resolve_vibe_agent_for_context(context).name == expected
+            assert saved["C-test"].agent_name == name
+            assert controller.resolve_vibe_agent_for_context(context).name == name
             assert controller.resolve_agent_for_context(context) == backend
     finally:
         store.close()

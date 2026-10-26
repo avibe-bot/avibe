@@ -361,7 +361,6 @@ def test_keyless_config_read_failure_preserves_redeemed_recovery(
         assert response.status_code == 400
         assert response.get_json()["error"] == "pairing_recovery_unavailable"
     else:
-        monkeypatch.setattr(cli, "_configured_cli_language", lambda: "en")
         monkeypatch.setattr(
             cli.getpass, "getpass",
             lambda prompt: pytest.fail("keyless recovery must not ask for another key"),
@@ -613,6 +612,14 @@ def test_ambiguous_redeem_failures_retain_prepared_claim(
     )["phase"] == "prepared"
 
 
+def _configure_ui_language(monkeypatch, language: str) -> None:
+    """A configured UI language the CLI's pairing guidance must not follow."""
+
+    config = V2Config.load()
+    config.language = language
+    config.save()
+
+
 @pytest.mark.parametrize("language", ["en", "zh"])
 def test_definitive_failure_retirement_can_be_retried_through_cli(
     pairing_host,
@@ -622,7 +629,7 @@ def test_definitive_failure_retirement_can_be_retried_through_cli(
 ):
     root, calls = pairing_host
     journal = root / "state/pending-pairing.json"
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    _configure_ui_language(monkeypatch, language)
 
     def redeem(url, payload, **kwargs):
         calls.append(payload["pairing_key"])
@@ -649,16 +656,16 @@ def test_definitive_failure_retirement_can_be_retried_through_cli(
         pairing_key="key_bad", backend_url="https://backend.test",
     )) == 1
     first_output = capsys.readouterr().err
-    assert ("was not applied" if language == "en" else "尚未应用") in first_output
+    assert "was not applied" in first_output
     assert "vibe remote pair" in first_output
     assert cli.cmd_remote_pair(args) == 1
     assert journal.exists()
-    assert ("was not applied" if language == "en" else "尚未应用") in capsys.readouterr().err
+    assert "was not applied" in capsys.readouterr().err
 
     monkeypatch.setattr(Path, "unlink", original_unlink)
     assert cli.cmd_remote_pair(args) == 1
     output = capsys.readouterr().err
-    assert ("was cleared" if language == "en" else "已清理") in output
+    assert "was cleared" in output
     assert "vibe remote pair" in output
     assert not journal.exists()
     assert calls == ["key_bad"]
@@ -695,7 +702,6 @@ def test_definitive_failure_marker_write_failure_does_not_promise_recovery(
     journal = root / "state/pending-pairing.json"
     assert json.loads(journal.read_text(encoding="utf-8"))["phase"] == "prepared"
     assert remote_access.pair("", "")["error"] == "pairing_recovery_not_ready"
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "en")
     cli._print_remote_pair_failure(result)
     output = capsys.readouterr().err
     assert "was not applied" in output
@@ -736,7 +742,7 @@ def test_cli_uncertain_failure_instructions_reach_explicit_replacement(
         return redeem(url, payload, **kwargs)
 
     monkeypatch.setattr(remote_access, "_json_request", fail_then_redeem)
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+    _configure_ui_language(monkeypatch, language)
     monkeypatch.setattr(cli.getpass, "getpass", lambda *args: pytest.fail("pending operation must not prompt"))
     args = SimpleNamespace(
         pairing_key="uncertain-key", backend_url="https://backend.test", device_name="fixture", json=False,
@@ -745,7 +751,7 @@ def test_cli_uncertain_failure_instructions_reach_explicit_replacement(
     first = capsys.readouterr().err
     command = "vibe remote pair NEW_PAIRING_KEY --backend-url BACKEND_URL"
     assert command in first
-    assert ("uncertain" if language == "en" else "不确定") in first
+    assert "uncertain" in first
     args.pairing_key = None
     assert cli.cmd_remote_pair(args) == 1
     assert command in capsys.readouterr().err
@@ -1654,24 +1660,14 @@ def test_ordinary_save_during_redeem_does_not_revoke_across_processes(pairing_ho
 
 
 @pytest.mark.parametrize(
-    ("language", "error", "needle"),
+    ("error", "needle"),
     [
-        ("en", "pairing_save_failed_after_redeem", "cloud-side"),
-        ("zh", "pairing_save_failed_after_redeem", "云端"),
-        ("en", "pairing_recovery_unavailable", "could not start"),
-        ("zh", "pairing_recovery_unavailable", "无法启动"),
-        ("en", "pairing_retirement_failed", "retired"),
-        ("zh", "pairing_retirement_failed", "清理"),
+        ("pairing_save_failed_after_redeem", "cloud-side"),
+        ("pairing_recovery_unavailable", "could not start"),
+        ("pairing_retirement_failed", "retired"),
     ],
 )
-def test_pairing_recovery_cli_messages_use_supported_locales(
-    monkeypatch,
-    capsys,
-    language,
-    error,
-    needle,
-):
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
+def test_pairing_recovery_cli_messages_name_the_outcome(capsys, error, needle):
     cli._print_remote_pair_failure({
         "error": error,
         "orphaned_binding": {"instance_id": "inst_A", "device_name": "fixture"},

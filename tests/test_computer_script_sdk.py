@@ -77,18 +77,20 @@ def _fake_controller(
     windows: list[dict] | None = None,
     launch_pid: int | None = 41,
     interaction_errors: dict[str, str] | None = None,
+    observation_screenshot_modes: list[str] | None = None,
 ) -> Iterator[tuple[ThreadingHTTPServer, list[dict]]]:
     requests: list[dict] = []
     observations = 0
     clicks = 0
     app_lookups = 0
     connection_ids: set[int] = set()
+    driver_has_screenshot = False
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def do_POST(self) -> None:  # noqa: N802
-            nonlocal observations, clicks, app_lookups
+            nonlocal observations, clicks, app_lookups, driver_has_screenshot
             length = int(self.headers.get("Content-Length", "0"))
             payload = json.loads(self.rfile.read(length))
             connection_ids.add(id(self.connection))
@@ -301,13 +303,58 @@ def _fake_controller(
                         is False
                     ):
                         elements = None
+                    observation = {
+                        "pid": 41,
+                        "window_id": 9,
+                        **({"elements": elements} if elements is not None else {}),
+                    }
+                    if observation_screenshot_modes is not None:
+                        mode = observation_screenshot_modes[
+                            min(observations - 1, len(observation_screenshot_modes) - 1)
+                        ]
+                    elif payload["arguments"].get("screenshot_out_file"):
+                        mode = "file"
+                    elif payload["arguments"].get("include_screenshot") is False:
+                        mode = "tree"
+                    else:
+                        mode = "image"
+                    if mode == "file":
+                        observation["screenshot_file_path"] = payload["arguments"].get(
+                            "screenshot_out_file", "/tmp/fixture-window.png"
+                        )
+                    elif mode == "invalid":
+                        observation.update(
+                            {
+                                "screenshot_frame_valid": False,
+                                "screenshot_width": 800,
+                                "screenshot_height": 600,
+                            }
+                        )
+                    driver_has_screenshot = mode in {"image", "file"}
+                    body = _result(
+                        observation,
+                        image=mode in {"image", "invalid"},
+                    )
+                elif tool in {
+                    "click",
+                    "double_click",
+                    "right_click",
+                    "drag",
+                    "scroll",
+                    "type_text",
+                    "press_key",
+                    "hotkey",
+                } and any(
+                    field in payload["arguments"]
+                    for field in ("x", "y", "from_x", "from_y", "to_x", "to_y")
+                ) and not driver_has_screenshot:
                     body = _result(
                         {
-                            "pid": 41,
-                            "window_id": 9,
-                            **({"elements": elements} if elements is not None else {}),
+                            "code": "screenshot_context_missing",
+                            "params": {},
+                            "dispatched": False,
                         },
-                        image=True,
+                        is_error=True,
                     )
                 elif tool == "click":
                     clicks += 1
@@ -332,7 +379,7 @@ def _fake_controller(
                                 "route": "accessibility",
                             }
                         )
-                elif tool == "double_click":
+                elif tool in {"double_click", "press_key", "drag"}:
                     body = _result(
                         {
                             "effect": "confirmed",
@@ -400,6 +447,7 @@ def _run_node_script(
     windows: list[dict] | None = None,
     launch_pid: int | None = 41,
     interaction_errors: dict[str, str] | None = None,
+    observation_screenshot_modes: list[str] | None = None,
 ) -> tuple[dict, ThreadingHTTPServer, list[dict]]:
     if NODE is None:
         pytest.skip("Node.js is unavailable")
@@ -430,6 +478,7 @@ def _run_node_script(
         windows=windows,
         launch_pid=launch_pid,
         interaction_errors=interaction_errors,
+        observation_screenshot_modes=observation_screenshot_modes,
     ) as (server, requests):
         request = {
             "script_url": script.resolve().as_uri(),
@@ -884,6 +933,7 @@ import { computer } from "@avibe/computer";
 export default async () => {
   const mail = await computer.app({ bundleId: "com.apple.mail" });
   const window = await mail.window({ labelContains: "New Message" });
+  await window.observe();
   await window.element({ role: "button", label: "Missing" }).click();
   return {};
 };
@@ -1029,7 +1079,6 @@ export default async () => {{
     assert runner_error.structured_error == expected
 
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses-script")
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
 
     def fail_script(**_kwargs):
         raise runner_error
@@ -1926,6 +1975,129 @@ export default async () => {
     assert payload["error"]["step"] == "app.window"
 
 
+def _qq_windows() -> list[dict]:
+    """The live QQ shape: four windows titled "QQ", only one on screen."""
+    return [
+        {
+            "pid": 41,
+            "window_id": window_id,
+            "app_name": "QQ",
+            "title": "QQ",
+            "bounds": {"x": 0, "y": 0, "width": 800, "height": 600},
+            "is_on_screen": window_id == 12,
+            "z_index": z_index,
+        }
+        for window_id, z_index in [(10, None), (11, None), (12, 3), (13, None)]
+    ]
+
+
+def test_sdk_window_on_screen_resolves_off_screen_title_siblings(
+    tmp_path: Path,
+) -> None:
+    payload, _server, _requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const qq = await computer.app({ bundleId: "com.apple.mail" });
+  let ambiguous;
+  try {
+    await qq.window({ title: "QQ" });
+  } catch (error) {
+    ambiguous = { name: error.name, count: error.params.count };
+  }
+  const visible = await qq.window({ title: "QQ", onScreen: true });
+  const waited = await qq.waitFor({ title: "QQ", onScreen: true }, 0);
+  const hidden = await qq.window({ title: "QQ", onScreen: false, index: 0 })
+    .catch((error) => error.code);
+  return { ambiguous, visible: visible.windowId, waited: waited.windowId, hidden };
+};
+""",
+        windows=_qq_windows(),
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {
+            "ambiguous": {"name": "Ambiguous", "count": 4},
+            "visible": 12,
+            "waited": 12,
+            # Three off-screen siblings without a stacking order stay unordered.
+            "hidden": "window_order_unavailable",
+        },
+    }
+
+
+def test_sdk_window_id_selects_one_exact_window(tmp_path: Path) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const qq = await computer.app({ bundleId: "com.apple.mail" });
+  const exact = await qq.window({ windowId: 11 });
+  const missing = await qq.window({ windowId: 99 }).catch((error) => error.name);
+  const mismatch = await qq
+    .window({ windowId: 11, onScreen: true })
+    .catch((error) => error.name);
+  return { exact: [exact.windowId, exact.title], missing, mismatch };
+};
+""",
+        windows=_qq_windows(),
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {
+            "exact": [11, "QQ"],
+            "missing": "NotFound",
+            "mismatch": "NotFound",
+        },
+    }
+    assert {
+        json.dumps(request["payload"]["arguments"], sort_keys=True)
+        for request in requests
+        if request["payload"].get("tool") == "list_windows"
+    } == {json.dumps({"pid": 41})}
+
+
+@pytest.mark.parametrize(
+    ("selector", "field"),
+    [
+        ('{ windowId: "11" }', "windowId"),
+        ("{ windowId: -1 }", "windowId"),
+        ("{ windowId: 1.5 }", "windowId"),
+        ('{ onScreen: "yes" }', "onScreen"),
+        ("{ onScreen: 1 }", "onScreen"),
+    ],
+)
+def test_sdk_rejects_malformed_window_identity_selectors(
+    tmp_path: Path,
+    selector: str,
+    field: str,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        f"""
+import {{ computer }} from "@avibe/computer";
+
+export default async () => {{
+  const qq = await computer.app({{ bundleId: "com.apple.mail" }});
+  await qq.window({selector});
+}};
+""",
+        windows=_qq_windows(),
+    )
+
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "invalid_selector"
+    assert payload["error"]["params"] == {"field": field}
+    assert payload["error"]["step"] == "app.window"
+    assert all(request["payload"].get("tool") != "list_windows" for request in requests)
+
+
 def test_runner_returns_null_and_exits_with_user_timers_still_open(
     tmp_path: Path,
 ) -> None:
@@ -2200,6 +2372,7 @@ import { computer } from "@avibe/computer";
 export default async () => {
   const mail = await computer.app({ bundleId: "com.apple.mail" });
   const window = await mail.window({ labelContains: "New Message" });
+  await window.observe();
   await window.element({ role: "button", label: "Send", index: 0 }).click();
 };
 """,
@@ -2213,7 +2386,7 @@ export default async () => {
     try:
         assert screenshot.read_bytes() == b"png-fixture"
         assert error.details["step"] == "element.click"
-        assert error.details["last_completed_step"] == "app.window"
+        assert error.details["last_completed_step"] == "window.observe"
         assert error.details["ambiguous"] is True
         assert any(
             request["payload"].get("tool") == "click"
@@ -2607,3 +2780,206 @@ def test_python_runner_uses_the_verified_controller_endpoint_for_open_and_close(
             {"connection_token": "token"},
         ),
     ]
+
+
+def _tool_requests(requests: list[dict]) -> list[tuple[str, dict]]:
+    return [
+        (request["payload"]["tool"], request["payload"]["arguments"])
+        for request in requests
+        if request["path"].endswith("/request")
+    ]
+
+
+def test_sdk_element_resolution_reads_the_tree_without_a_screenshot(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ label: "New Message" });
+  await window.element({ role: "button", label: "Send", index: 0 }).doubleClick();
+  await window.expect({ role: "textbox", label: "Subject" }).toExist();
+  await window.observe();
+};
+""",
+    )
+
+    assert payload == {"ok": True, "result": None}
+    observations = [
+        arguments
+        for tool, arguments in _tool_requests(requests)
+        if tool == "get_window_state"
+    ]
+    assert len(observations) == 3
+    # Element resolution (the action and the expectation) skips the capture.
+    assert [arguments.get("include_screenshot") for arguments in observations[:2]] == [
+        False,
+        False,
+    ]
+    # An explicit observation keeps the driver default, which includes it.
+    assert "include_screenshot" not in observations[2]
+
+
+def test_sdk_pixel_window_input_after_element_resolution_recaptures(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ label: "New Message" });
+  await window.element({ role: "button", label: "Send", index: 0 }).doubleClick();
+  await window.press("Return");
+  await window.drag({ from_x: 10, from_y: 20, to_x: 30, to_y: 40 });
+  await window.drag({ from_x: 11, from_y: 21, to_x: 31, to_y: 41 });
+};
+""",
+    )
+
+    assert payload == {"ok": True, "result": None}
+    sequence = [
+        (tool, arguments.get("include_screenshot"))
+        for tool, arguments in _tool_requests(requests)
+        if tool in {"get_window_state", "double_click", "press_key", "drag"}
+    ]
+    assert sequence == [
+        # Resolution leaves a tree-only snapshot ...
+        ("get_window_state", False),
+        ("double_click", None),
+        # ... which keyboard input can use as it is ...
+        ("press_key", None),
+        # ... while pixel input first recaptures once, then reuses it.
+        ("get_window_state", None),
+        ("drag", None),
+        ("drag", None),
+    ]
+
+
+def test_sdk_tree_only_requested_capture_recaptures_before_pixel_input(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ label: "New Message" });
+  await window.observe({ include_screenshot: true });
+  await window.drag({ from_x: 10, from_y: 20, to_x: 30, to_y: 40 });
+};
+""",
+        observation_screenshot_modes=["tree", "image"],
+    )
+
+    assert payload == {"ok": True, "result": None}
+    assert [tool for tool, _arguments in _tool_requests(requests) if tool in {"get_window_state", "drag"}] == [
+        "get_window_state",
+        "get_window_state",
+        "drag",
+    ]
+
+
+def test_sdk_invalid_screenshot_frame_is_not_reused_for_pixel_input(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ label: "New Message" });
+  await window.observe({ include_screenshot: true });
+  await window.drag({ from_x: 10, from_y: 20, to_x: 30, to_y: 40 });
+};
+""",
+        observation_screenshot_modes=["invalid", "image"],
+    )
+
+    assert payload == {"ok": True, "result": None}
+    sequence = [
+        (tool, arguments.get("include_screenshot"))
+        for tool, arguments in _tool_requests(requests)
+        if tool in {"get_window_state", "drag"}
+    ]
+    assert sequence == [
+        ("get_window_state", True),
+        ("get_window_state", None),
+        ("drag", None),
+    ]
+
+
+@pytest.mark.parametrize("observation_mode", ["tree", "invalid"])
+def test_sdk_missing_screenshots_retry_once_per_pixel_action_and_stay_bounded(
+    tmp_path: Path,
+    observation_mode: str,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ label: "New Message" });
+  await window.observe({ include_screenshot: true });
+  const errors = [];
+  for (const x of [10, 11]) {
+    try {
+      await window.drag({ from_x: x, from_y: 20, to_x: 30, to_y: 40 });
+    } catch (error) {
+      errors.push(error.code);
+    }
+  }
+  return { errors };
+};
+""",
+        observation_screenshot_modes=[observation_mode] * 3,
+    )
+
+    assert payload == {
+        "ok": True,
+        "result": {"errors": ["screenshot_context_missing", "screenshot_context_missing"]},
+    }
+    sequence = [tool for tool, _arguments in _tool_requests(requests) if tool in {"get_window_state", "drag"}]
+    assert sequence == [
+        "get_window_state",
+        "get_window_state",
+        "drag",
+        "get_window_state",
+        "drag",
+    ]
+
+
+def test_sdk_file_screenshot_output_is_reused_for_pixel_input(
+    tmp_path: Path,
+) -> None:
+    payload, _server, requests = _run_node_script(
+        tmp_path,
+        """
+import { computer } from "@avibe/computer";
+
+export default async () => {
+  const mail = await computer.app({ bundleId: "com.apple.mail" });
+  const window = await mail.window({ label: "New Message" });
+  await window.observe({ screenshot_out_file: "/tmp/fixture-window.png" });
+  await window.drag({ from_x: 10, from_y: 20, to_x: 30, to_y: 40 });
+  await window.drag({ from_x: 11, from_y: 21, to_x: 31, to_y: 41 });
+};
+""",
+        observation_screenshot_modes=["file"],
+    )
+
+    assert payload == {"ok": True, "result": None}
+    sequence = [tool for tool, _arguments in _tool_requests(requests) if tool in {"get_window_state", "drag"}]
+    assert sequence == ["get_window_state", "drag", "drag"]

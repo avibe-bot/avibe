@@ -528,14 +528,15 @@ running. The tray keeps the shell alive after the window closes.
   `Contents/Helpers/cua-driver` executable.
   - Arguments: `serve --embedded --parent-liveness-stdio
     --no-permissions-gate --socket <S> --host-bundle-id <bundle id>
-    --permission-mode standard`.
+    --permission-mode standard --glide-ms 200`. `--glide-ms` fixes the
+    virtual cursor's glide at 200 ms (see Latency).
   - Environment: start from an empty environment, then set
     `CUA_DRIVER_EMBEDDED=1`, `CUA_DRIVER_EMBEDDED_HOST_PID=<shell pid>`,
     `CUA_DRIVER_MANAGED_POLICY_FILE=<bundled tool policy>`,
-    `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, and `CUA_DRIVER_RS_UPDATE_CHECK=0`.
-    `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS` stays unset, so the driver keeps
-    its 1000 ms post-action watch and the focus-steal lease that comes with
-    it (see Latency).
+    `CUA_DRIVER_RS_TELEMETRY_ENABLED=0`, `CUA_DRIVER_RS_UPDATE_CHECK=0`, and
+    `CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS=500`, which bounds the post-action
+    watch and the focus-steal lease that comes with it at 500 ms (see
+    Latency).
   - Avibe does not depend on that crate. It is unpublished and pulls in the
     whole platform stack, while the protocol needs only these few lines.
   - **Liveness.** The shell keeps the child's stdin pipe open for the daemon's
@@ -626,7 +627,7 @@ running. The tray keeps the shell alive after the window closes.
     - No tool exists whose purpose is activation.
     - Foreground delivery is rejected, and input must address one window
       (below).
-    - The driver keeps its 1000 ms focus-steal lease, which reverts an
+    - The driver keeps a 500 ms focus-steal lease, which reverts an
       activation seen during the post-action watch.
     - As defense in depth, the server rejects the focus-intent shortcuts
       that guide names: `⌘L`, `⌘⇧G`, and the browser tab shortcuts `⌘1`
@@ -1017,14 +1018,31 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
   the proxy takes 1 to 2 ms, so the remaining 1.3 s floor sits inside
   Calculator's AXPress (the slow `-25204` path, trycua/cua#3836). The watch also
   holds the driver's focus-steal lease, which reverts another app's activation
-  while it runs. Upstream warns that shortening it weakens that protection. So
-  v1 keeps the 1000 ms default and gives up the measured 0.7 s per action. Focus
-  protection outweighs latency for unattended use, and latency tuning waits for
-  a measured need. Even at 1000 ms, an app that activates itself later than the
-  watch can stay frontmost. The idle-desktop validation measures this, and the
-  user docs state it. Upstream measured 78 ms at `0`, so the floor depends on
-  how fast the target app answers. Click results report `effect: unverifiable`
-  either way, so agents observe after acting.
+  while it runs. Upstream warns that shortening it weakens that protection.
+  Upstream measured 78 ms at `0`, so the floor depends on how fast the target
+  app answers. Click results report `effect: unverifiable` either way, so
+  agents observe after acting.
+  - **v1 (until 2026-10-21): 1000 ms.** v1 kept the driver default and gave up
+    the measured 0.7 s per action, because focus protection outweighed latency
+    for unattended use and latency tuning waited for a measured need.
+  - **Since 2026-10-21: 500 ms, chosen by the owner.** The need arrived.
+    Profiling on the owner's Mac (rc13, driver at `5272e49`) showed that when
+    an action changes no window, the driver waits out the whole watch. That is
+    about 85 % of a click. Halving the watch saves up to 0.5 s per action. The
+    owner chose 500 ms rather than 300 ms to keep half a second of focus
+    protection after each action.
+  - **Trade-off.** A pop-up or focus steal that appears between 500 ms and
+    1000 ms after the action was caught before and now is not: the lease does
+    not revert it, and the action result does not report it. At either bound,
+    an app that activates itself after the watch can stay frontmost. The
+    idle-desktop validation measures this, and the user docs state it.
+  - **Cursor glide: 200 ms.** The virtual cursor's default glide is
+    speed-based and adds 0.45 to 1.5 s whenever the click position changes.
+    The daemon starts with `--glide-ms 200`, the pinned driver's `serve` flag
+    for a fixed glide duration. It takes 200 ms at any distance, and the cursor
+    still visibly moves to each target. `--cursor-reduced-motion on` is not
+    the knob: at the pinned driver it only stills the idle animation and
+    leaves the glide unchanged.
 - **Element tokens are session-scoped** (`s00000001:5`). Observe and act on one
   persistent MCP connection. A one-shot CLI call cannot reuse a token.
 - **A locked screen blocks all input; window capture still works.** With the

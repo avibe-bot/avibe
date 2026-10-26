@@ -79,17 +79,17 @@ Screenshots:
 
 Scheduled tasks:
 
-- `vibe task add`, `vibe task update`, `vibe task list [--include-finished] [--page N] [--limit N]`, `vibe task show <id>`, `vibe task run <id>`, `vibe task pause <id>`, `vibe task resume <id>`, `vibe task remove <id>`
+- `vibe task add`, `vibe task update`, `vibe task list [--session-id <id> | --global] [--include-finished] [--page N] [--limit N]`, `vibe task show <id>`, `vibe task run <id>`, `vibe task pause <id>`, `vibe task resume <id>`, `vibe task remove <id>`
 - Switching a task between message and command form, or changing `--on-failure`, is rejected — remove and recreate.
 
 Agent runs:
 
 - `vibe agent run` — run one Agent job now. Runs are async by default; pass `--sync` only when the CLI should wait.
-- `vibe runs list`, `vibe runs show <id>`, `vibe runs cancel <id>` — inspect and manage concrete Agent Run records
+- `vibe runs list [--session-id <id> | --global]`, `vibe runs show <id>`, `vibe runs cancel <id>` — inspect and manage concrete Agent Run records
 
 Watches:
 
-- `vibe watch add`, `vibe watch update <id>`, `vibe watch list [--include-finished] [--page N] [--limit N]`, `vibe watch show <id>`, `vibe watch pause <id>`, `vibe watch resume <id>`, `vibe watch remove <id>`
+- `vibe watch add`, `vibe watch update <id>`, `vibe watch list [--session-id <id> | --global] [--include-finished] [--page N] [--limit N]`, `vibe watch show <id>`, `vibe watch pause <id>`, `vibe watch resume <id>`, `vibe watch remove <id>`
 
 For any subcommand, prefer `<command> --help` before composing a new invocation. Harness commands default to this Agent Session inside an Avibe-injected Agent shell. Use `--session-id` only to target a different existing Session, `--same-scope` or `--scope-id` when creating a Session in a visible scope, and `--no-callback` only when an async Agent run will be inspected later through `vibe runs`. Use `--message` / `--message-file` for user messages. `vibe task add` and `vibe watch add` take `--name`; only `vibe task add` takes `--cron` / `--at` / `--timezone`; `vibe agent run` takes `--sync`; and `vibe watch add` takes its own waiter options (`--shell` or a positional command after `--`, `--cwd`, `--timeout`, `--forever`, `--lifetime-timeout`, `--retry-exit-code`, `--retry-delay`). `vibe task add` also accepts `--shell` or a command after `--`, plus `--on-failure {none,agent}` and a per-run `--timeout`; a pure command task takes no session, scope, or agent flags. Do not copy flags between task, watch, and agent-run commands without checking help.
 

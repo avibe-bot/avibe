@@ -1062,7 +1062,7 @@ def test_runtime_start_is_explicit_and_returns_v4_status(tmp_path):
     assert adapter.start_calls == 1
     assert store.config.enabled is True
     assert runtime["enabled"] is True
-    assert runtime["contract_version"] == 17
+    assert runtime["contract_version"] == 21
     assert runtime["status"]["health"] == "ok"
     _assert_valid("runtime-dependency.schema.json", runtime)
 
@@ -1369,7 +1369,7 @@ def test_runtime_start_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 17, "status": {"health": "ok"}}
+        return {"contract_version": 21, "status": {"health": "ok"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1386,7 +1386,7 @@ def test_runtime_stop_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 17, "status": {"health": "not_started"}}
+        return {"contract_version": 21, "status": {"health": "not_started"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1403,7 +1403,7 @@ def test_runtime_install_crosses_the_controller_rpc_boundary(monkeypatch):
 
     async def rpc(operation, payload=None):
         calls.append((operation, payload))
-        return {"contract_version": 17, "status": {"health": "installing"}}
+        return {"contract_version": 21, "status": {"health": "installing"}}
 
     monkeypatch.setattr(model_hub_client, "_rpc", rpc)
 
@@ -1421,7 +1421,7 @@ def test_runtime_dependency_ensure_crosses_the_controller_rpc_boundary(monkeypat
     def rpc(operation, payload=None):
         calls.append((operation, payload))
         return {
-            "contract_version": 17,
+            "contract_version": 21,
             "changed": True,
             "status": {"health": "not_started", "verified": True},
         }
@@ -3253,6 +3253,28 @@ def test_retired_builtins_leave_the_picker_but_stay_routeable(monkeypatch, tmp_p
     ]
 
 
+def test_read_agent_sources_reads_recovery_state_on_the_owning_loop(tmp_path):
+    """Recovery annotations may wake loop-owned waiters, so a loop caller reads them on that loop."""
+    service, store, _adapter = _service(tmp_path)
+    store.config.agents["vibey"].models = [ModelHubBackendModelConfig(id="vibey-model", origin="user")]
+    annotations = service.recovery.annotations
+    threads = []
+
+    def recorded(config):
+        threads.append(threading.get_ident())
+        return annotations(config)
+
+    service.recovery.annotations = recorded
+
+    async def read():
+        return threading.get_ident(), await service.read_agent_sources("vibey")
+
+    loop_thread, payload = asyncio.run(read())
+
+    assert threads == [loop_thread]
+    assert payload == service.get_agent_sources("vibey")
+
+
 def test_compatibility_projections_hide_retired_builtins_unless_requested(tmp_path):
     service, store, _adapter = _service(tmp_path)
     store.config.agents["claude"].models = [
@@ -4873,7 +4895,7 @@ def test_agent_models_route_returns_only_picker_catalog_fields(monkeypatch):
     assert response.status_code == 200
     assert response.get_json() == {
         "ok": True,
-        "contract_version": 17,
+        "contract_version": 21,
         "agent": {
             "backend": "codex",
             "mode": "hub",
@@ -5943,6 +5965,7 @@ def test_models_live_api_calls_only_registered_server_routes():
     }
 
     assert client_routes
+    assert ("POST", "/api/models/hosted-tools/web_search/services/{param}/retry") in client_routes
     assert client_routes <= server_routes
 
 
@@ -6395,7 +6418,7 @@ def test_search_source_replacement_unknown_keeps_old_key_and_revokes_new_ref(tmp
         ("pass", None, False),
         ("balance", "models.source.needs_action.balance_exhausted", False),
         ("limit", "models.source.needs_action.spend_limit_reached", False),
-        ("unknown", "models.source.needs_action.balance_exhausted", True),
+        ("unknown", "models.source.needs_action.spend_limit_reached", True),
         ("invalid", "models.source.needs_action.credential_revoked", True),
     ],
 )
@@ -6408,6 +6431,7 @@ def test_search_source_reenable_free_check_keeps_or_reclassifies_state(
     service, store, adapter = _service(tmp_path)
     adapter.search_check_outcome = outcome
     marker = "vp_" + "a" * 32
+    # Tavily's free usage check distinguishes limits, not a balance blocker.
     source = ModelHubSourceConfig(
         id="src_searchbalance",
         kind="api_key",
@@ -6418,7 +6442,7 @@ def test_search_source_reenable_free_check_keeps_or_reclassifies_state(
         billing="metered",
         state=ModelHubSourceStateConfig(
             status="needs_action",
-            detail_key="models.source.needs_action.balance_exhausted",
+            detail_key="models.source.needs_action.spend_limit_reached",
         ),
         models=[],
         credential_ref="cred_searchbalance",
@@ -6443,19 +6467,28 @@ def test_search_source_reenable_free_check_keeps_or_reclassifies_state(
 
 
 
-def test_search_source_reenable_arms_without_clearing_limit(tmp_path):
+@pytest.mark.parametrize(("vendor", "blocker"), [
+    ("exa", "spend_limit_reached"),  # No free check.
+    ("tavily", "balance_exhausted"),  # Its free check cannot classify this blocker.
+])
+def test_search_source_reenable_arms_without_clearing_blocker(tmp_path, vendor, blocker):
+    from unittest.mock import AsyncMock
+
     service, store, adapter = _service(tmp_path)
+    check = AsyncMock(return_value=SearchCredentialCheck("pass"))
+    adapter.check_search_credential = check
+    detail_key = f"models.source.needs_action.{blocker}"
     source = ModelHubSourceConfig(
         id="src_searchtrial",
         kind="api_key",
-        vendor="exa",
-        display_name="Exa",
+        vendor=vendor,
+        display_name=vendor,
         protocol="search",
         supply_channel="hub",
         billing="metered",
         state=ModelHubSourceStateConfig(
             status="needs_action",
-            detail_key="models.source.needs_action.spend_limit_reached",
+            detail_key=detail_key,
         ),
         models=[],
         credential_ref="cred_searchtrial",
@@ -6464,7 +6497,8 @@ def test_search_source_reenable_arms_without_clearing_limit(tmp_path):
     result = asyncio.run(service.reenable_search_source(source.id, {}))
 
     assert result["trial_armed"] is True
-    assert result["source"]["state"]["detail_key"] == "models.source.needs_action.spend_limit_reached"
+    assert result["source"]["state"]["detail_key"] == detail_key
+    assert result["source"]["state"]["status"] == "needs_action"
     assert result["source"]["trial_pending"] is True
     assert service.search_reenable_trial_armed(source.id)
     assert service.search_reenable_trial_pending(source.id)
@@ -6481,8 +6515,8 @@ def test_search_source_reenable_arms_without_clearing_limit(tmp_path):
     service.settle_search_reenable_trial(source.id)
     assert not service.search_reenable_trial_pending(source.id)
     assert service.list_sources()[0]["trial_pending"] is False
-    assert store.load().sources[0].state.detail_key == "models.source.needs_action.spend_limit_reached"
-    assert adapter.search_check_outcome == "unknown"
+    assert store.load().sources[0].state.detail_key == detail_key
+    check.assert_not_awaited()
 
 
 @pytest.mark.parametrize(("method", "suffix", "payload"), [
@@ -10140,7 +10174,7 @@ def test_runtime_start_route_requires_csrf_before_starting_engine(monkeypatch, t
     assert accepted.status_code == 200
     runtime = accepted.get_json()["runtime"]
     assert adapter.start_calls == 1
-    assert runtime["contract_version"] == 17
+    assert runtime["contract_version"] == 21
     _assert_valid("runtime-dependency.schema.json", runtime)
 
 

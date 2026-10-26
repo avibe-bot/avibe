@@ -165,7 +165,8 @@ const expectSelectedProject = async (page: Page, name: string) => {
 };
 // Opening a folder is the card's own action now, not a chip beside the input.
 const openProjectPill = (page: Page) => homeMain(page).getByRole('button', { name: 'Open project', exact: true });
-const popover = (page: Page) => page.locator('[data-radix-popper-content-wrapper]');
+// On a phone the composer's Agent/model picker opens as a bottom sheet.
+const routeSheet = (page: Page) => page.getByRole('dialog', { name: 'Agent & model' });
 const settingsSurface = (page: Page) => page.locator('[data-settings-overlay="true"]');
 const inboxTab = (page: Page) => page.locator('nav.fixed.bottom-0 a[href="/inbox"]');
 const brandHome = (page: Page) => page.locator('header a[href="/"]');
@@ -203,13 +204,14 @@ const instanceSurvived = (page: Page) =>
 async function pickClaude(page: Page) {
   await expect(agentTrigger(page)).toHaveText(/codex/);
   await agentTrigger(page).click();
-  await popover(page).getByRole('button', { name: 'claude', exact: true }).click();
-  await expect(agentTrigger(page)).toHaveText(/claude/);
-  // The picker keeps its panel open after a pick so the model and effort rows
-  // stay reachable. It is anchored above the input column, so leaving it open
-  // would cover the project row; close it the way a user does.
+  // Agents sit one level below the sheet's model page.
+  await routeSheet(page).getByRole('button', { name: /^Agent/ }).click();
+  await routeSheet(page).getByRole('button', { name: /^claude/ }).click();
+  // The sheet stays open after a pick so the model and effort rows stay
+  // reachable; close it the way a user does, then read the trigger behind it.
   await page.keyboard.press('Escape');
-  await expect(popover(page)).toHaveCount(0);
+  await expect(routeSheet(page)).toHaveCount(0);
+  await expect(agentTrigger(page)).toHaveText(/claude/);
 }
 
 /**

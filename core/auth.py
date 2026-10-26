@@ -40,9 +40,10 @@ BIND_EXEMPT_COMMANDS: frozenset = frozenset({"bind"})
 def _is_admin_protected(action: str) -> bool:
     """Check if an action requires admin permission.
 
-    Handles both exact matches and prefix matches (e.g. ``vibe_update_now:v1.2``).
+    Handles exact matches and a protected action with a ``:`` suffix (e.g. ``vibe_update_now:v1.2``,
+    ``routing_submit:claude``), so a dynamic suffix never sheds the protection of the action it names.
     """
-    if action in ADMIN_PROTECTED_ACTIONS:
+    if action in ADMIN_PROTECTED_ACTIONS or action.partition(":")[0] in ADMIN_PROTECTED_ACTIONS:
         return True
     # Prefix match for actions with dynamic suffixes
     if action.startswith("vibe_update_now"):

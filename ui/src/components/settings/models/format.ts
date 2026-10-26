@@ -131,6 +131,12 @@ export function formatSmallUsd(value: number): string {
  * ("verified 10-13"). Both locales use the same numeric form, so the chip reads
  * the same width in either. An unparseable stamp renders verbatim.
  */
+export const cooldownTime = (until: string, language: string): string => {
+  const date = new Date(until);
+  const clock = new Intl.DateTimeFormat(language, { hour: '2-digit', minute: '2-digit', hour12: false }).format(date);
+  return date.toDateString() === new Date().toDateString() ? clock : `${formatMonthDay(until)} ${clock}`;
+};
+
 export function formatMonthDay(instant: string): string {
   const ms = Date.parse(instant);
   if (Number.isNaN(ms)) return instant;

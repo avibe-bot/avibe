@@ -302,3 +302,50 @@ class MockProcess:
 
     def kill(self):
         self.killed = True
+
+
+def _spawn_recording_manager(binary: Path, monkeypatch) -> AvaultAgentManager:
+    socket_path = Path(tempfile.mkdtemp(prefix="avault-ident-", dir="/tmp")) / "s"
+    manager = AvaultAgentManager(socket_path=socket_path, binary_resolver=lambda: str(binary))
+    monkeypatch.setattr(manager, "_socket_responds", lambda: False)
+
+    def _spawn() -> None:
+        manager.binary_identity_path.unlink(missing_ok=True)
+        manager._spawned_binary = manager._binary_resolver()
+        manager._process = MockProcess()
+
+    monkeypatch.setattr(manager, "_spawn_locked", _spawn)
+    monkeypatch.setattr(manager, "_wait_for_socket_locked", lambda: None)
+    return manager
+
+
+def test_agent_manager_records_the_binary_it_started(tmp_path, monkeypatch):
+    binary = tmp_path / "avault"
+    binary.write_text("v1")
+    manager = _spawn_recording_manager(binary, monkeypatch)
+
+    assert manager.serves_current_binary() is False
+    manager.ensure_running()
+
+    assert stat.S_IMODE(manager.binary_identity_path.stat().st_mode) == 0o600
+    assert manager.serves_current_binary() is True
+
+
+def test_agent_manager_distrusts_an_agent_after_the_binary_is_replaced(tmp_path, monkeypatch):
+    binary = tmp_path / "avault"
+    binary.write_text("v1")
+    manager = _spawn_recording_manager(binary, monkeypatch)
+    manager.ensure_running()
+
+    binary.write_text("v2-replaced")
+
+    assert manager.serves_current_binary() is False
+
+
+def test_agent_manager_distrusts_an_agent_it_did_not_record(tmp_path):
+    binary = tmp_path / "avault"
+    binary.write_text("v1")
+    socket_path = Path(tempfile.mkdtemp(prefix="avault-unrec-", dir="/tmp")) / "s"
+    manager = AvaultAgentManager(socket_path=socket_path, binary_resolver=lambda: str(binary))
+
+    assert manager.serves_current_binary() is False

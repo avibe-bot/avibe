@@ -11,6 +11,7 @@ import subprocess
 import sys
 import zipfile
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -20,6 +21,78 @@ SPEC = importlib.util.spec_from_file_location("desktop_runtime_bundle_builder", 
 assert SPEC is not None and SPEC.loader is not None
 builder = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(builder)
+
+
+def windows_file_error(winerror: int) -> OSError:
+    error = OSError(f"WinError {winerror}")
+    error.winerror = winerror
+    return error
+
+
+def test_payload_rename_retries_windows_file_locks_then_succeeds(monkeypatch, tmp_path, capsys):
+    source = Mock()
+    destination = tmp_path / "relocated runtime"
+    source.rename.side_effect = [windows_file_error(5), windows_file_error(32), None]
+    sleeps = []
+    monkeypatch.setattr(builder.os, "name", "nt")
+    monkeypatch.setattr(builder, "WINDOWS_RENAME_RETRY_DELAYS", (0.25, 0.5))
+    monkeypatch.setattr(builder.time, "sleep", sleeps.append)
+
+    builder.rename_payload(source, destination)
+
+    assert source.rename.call_args_list == [((destination,),)] * 3
+    assert sleeps == [0.25, 0.5]
+    report = capsys.readouterr().err
+    assert "attempt 1/3 failed with WinError 5; retrying in 0.25s" in report
+    assert "attempt 2/3 failed with WinError 32; retrying in 0.5s" in report
+
+
+def test_payload_rename_exhausts_windows_retry_budget(monkeypatch, tmp_path, capsys):
+    source = Mock()
+    destination = tmp_path / "relocated runtime"
+    error = windows_file_error(5)
+    source.rename.side_effect = error
+    sleeps = []
+    monkeypatch.setattr(builder.os, "name", "nt")
+    monkeypatch.setattr(builder, "WINDOWS_RENAME_RETRY_DELAYS", (1.0, 2.0))
+    monkeypatch.setattr(builder.time, "sleep", sleeps.append)
+
+    with pytest.raises(OSError) as raised:
+        builder.rename_payload(source, destination)
+
+    assert raised.value is error
+    assert source.rename.call_count == 3
+    assert sleeps == [1.0, 2.0]
+    assert "attempt 3/3 failed with WinError 5; retry budget exhausted" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("os_name", "error"),
+    [
+        ("posix", windows_file_error(5)),
+        ("nt", windows_file_error(2)),
+    ],
+)
+def test_payload_rename_does_not_retry_other_platforms_or_errors(
+    monkeypatch,
+    tmp_path,
+    os_name,
+    error,
+):
+    source = Mock()
+    destination = tmp_path / "relocated runtime"
+    source.rename.side_effect = error
+    sleep = Mock()
+    monkeypatch.setattr(builder.os, "name", os_name)
+    monkeypatch.setattr(builder, "WINDOWS_RENAME_RETRY_DELAYS", (0.0,))
+    monkeypatch.setattr(builder.time, "sleep", sleep)
+
+    with pytest.raises(OSError) as raised:
+        builder.rename_payload(source, destination)
+
+    assert raised.value is error
+    source.rename.assert_called_once_with(destination)
+    sleep.assert_not_called()
 
 
 def test_private_probe_environment_does_not_inherit_credentials(monkeypatch, tmp_path):
@@ -142,6 +215,8 @@ def test_runtime_sources_schema_two_contains_only_node_and_npm_tools():
     assert sources["schema_version"] == 2
     assert sources["npm_version"] == "10.9.9"
     assert set(sources["sdist_build_allowlist"]) == {"claude-agent-sdk", "http-ece"}
+    assert set(sources["required_binary_wheels"]) == {"curl-cffi", "lxml"}
+    assert not set(sources["required_binary_wheels"]) & set(sources["sdist_build_allowlist"])
     assert "codex_version" not in sources
     assert "codex_license" not in sources
     for target, config in sources["targets"].items():
@@ -149,6 +224,18 @@ def test_runtime_sources_schema_two_contains_only_node_and_npm_tools():
         assert config["npm_source"] == expected_source
         assert config["npm_entrypoint"] == "tools/npm/bin/npm-cli.js"
         assert not any(key.startswith("codex") for key in config)
+
+
+def test_fetch_bundle_offline_native_and_resource_gate(tmp_path):
+    """WF-LOCAL-PACKAGE: the packaged interpreter must load native resources.
+
+    The old bundle gate never imported curl/lxml, so missing wheels could ship
+    unnoticed. This exercises the real offline probe, not a source-text check.
+    """
+    pytest.importorskip("curl_cffi")
+    builder.verify_fetch_dependencies(Path(sys.executable), tmp_path, ["curl-cffi", "lxml"])
+    with pytest.raises(subprocess.CalledProcessError):
+        builder.verify_fetch_dependencies(Path(sys.executable), tmp_path, ["pypdf"])
 
 
 def test_python_runtime_verification_checks_bundled_claude_paths(monkeypatch, tmp_path):

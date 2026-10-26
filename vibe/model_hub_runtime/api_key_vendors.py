@@ -147,6 +147,8 @@ class APIKeyVendorCatalogEntry:
     # The models.dev provider whose entries describe what this vendor's
     # official endpoint accepts; ``None`` when no mapping has been verified.
     models_dev_provider: str | None = None
+    # Built-ins are catalog rows, not addable API-key vendors.
+    built_in: bool = False
     # Bundled wire metadata, never supplied by a caller or a remote catalog.
     search: dict | None = None
 
@@ -155,12 +157,12 @@ def _catalog_path() -> Path:
     return Path(__file__).resolve().parents[1] / "data" / "api_key_vendors.json"
 
 
-def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] | None:
+def _validate_search_catalog(item: object, *, protocol: str, built_in: bool = False) -> dict[str, Any] | None:
     if item is None:
         return None
     if not isinstance(item, dict):
         raise ValueError("api-key vendor search catalog is invalid")
-    required = {"service_id", "endpoint", "auth", "request", "result", "limits", "price", "free_check", "service_refused_statuses", "tool_only"}
+    required = {"service_id", "endpoint", "auth", "request", "result", "limits", "price", "free_check", "service_refused_statuses", "outcomes", "billing", "tool_only"}
     if protocol != "search":
         required.add("auto_enroll")
     if set(item) != required:
@@ -170,19 +172,8 @@ def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] |
         raise ValueError("api-key vendor search catalog endpoint is invalid")
     if not isinstance(item.get("service_id"), str) or not item["service_id"].strip():
         raise ValueError("api-key vendor search catalog service id is invalid")
-    if item.get("auth") not in {"bearer", "x-api-key"} or not isinstance(item.get("request"), dict) or not isinstance(item.get("result"), dict) or not isinstance(item.get("limits"), dict):
+    if item.get("auth") not in {"bearer", "x-api-key", "none"} or (item.get("auth") == "none" and not built_in) or not isinstance(item.get("request"), dict) or not isinstance(item.get("result"), dict) or not isinstance(item.get("limits"), dict):
         raise ValueError("api-key vendor search catalog mapping is invalid")
-    if "content_max_chars" in item["request"]:
-        content_max_chars = item["request"]["content_max_chars"]
-        if (
-            not isinstance(content_max_chars, dict)
-            or set(content_max_chars) != {"path", "value"}
-            or not isinstance(content_max_chars.get("path"), str)
-            or not content_max_chars["path"]
-            or type(content_max_chars.get("value")) is not int
-            or not 1 <= content_max_chars["value"] <= 4000
-        ):
-            raise ValueError("api-key vendor search catalog content maximum is invalid")
     if "reported_cost" in item["result"]:
         reported_cost = item["result"]["reported_cost"]
         if (
@@ -194,7 +185,7 @@ def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] |
         ):
             raise ValueError("api-key vendor search catalog reported cost is invalid")
     results_max = item["limits"].get("results_max")
-    # Usage page counters use this fixed ceiling even after a catalog update.
+    # Keep a fixed per-request results ceiling across catalog updates.
     if isinstance(results_max, bool) or not isinstance(results_max, int) or not 1 <= results_max <= 100:
         raise ValueError("api-key vendor search catalog results maximum is invalid")
     price = item.get("price")
@@ -202,7 +193,7 @@ def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] |
         raise ValueError("api-key vendor search catalog price is invalid")
     if not isinstance(price.get("usd_per_1k"), (int, float)) or isinstance(price.get("usd_per_1k"), bool) or price["usd_per_1k"] < 0:
         raise ValueError("api-key vendor search catalog price is invalid")
-    if not isinstance(price.get("extra"), list) or not isinstance(price.get("as_of"), str) or not isinstance(price.get("url"), str):
+    if price.get("extra") != [] or not isinstance(price.get("as_of"), str) or not isinstance(price.get("url"), str):
         raise ValueError("api-key vendor search catalog price is invalid")
     if not isinstance(item.get("tool_only"), bool) or item["tool_only"] != (protocol == "search"):
         raise ValueError("api-key vendor search catalog protocol is invalid")
@@ -213,6 +204,28 @@ def _validate_search_catalog(item: object, *, protocol: str) -> dict[str, Any] |
         for status in item["service_refused_statuses"]
     ) or len(set(item["service_refused_statuses"])) != len(item["service_refused_statuses"]):
         raise ValueError("api-key vendor search catalog refusal statuses are invalid")
+    outcomes, billing = item.get("outcomes"), item.get("billing")
+    if not isinstance(outcomes, dict) or set(outcomes) - {"credential", "balance", "limit", "tag_overrides"} or any(
+        not isinstance(statuses, list) or any(type(status) is not int or not 400 <= status < 500 for status in statuses)
+        or len(set(statuses)) != len(statuses) for statuses in (outcomes.get(key) for key in ("credential", "balance", "limit"))
+    ):
+        raise ValueError("api-key vendor search outcome statuses are invalid")
+    overrides = outcomes.get("tag_overrides", [])
+    if not isinstance(overrides, list) or any(
+        not isinstance(rule, dict) or set(rule) != {"status", "tag", "code"}
+        or type(rule["status"]) is not int or not 400 <= rule["status"] < 500
+        or not isinstance(rule["tag"], str) or not rule["tag"]
+        or rule["code"] not in {"service_limit", "service_refused"} for rule in overrides
+    ):
+        raise ValueError("api-key vendor search outcome tag overrides are invalid")
+    if (
+        not isinstance(billing, dict) or set(billing) != {"nonempty_only", "unbilled_errors"}
+        or not isinstance(billing["nonempty_only"], bool)
+        or not isinstance(billing["unbilled_errors"], list)
+        or any(error != "timeout" for error in billing["unbilled_errors"])
+        or len(set(billing["unbilled_errors"])) != len(billing["unbilled_errors"])
+    ):
+        raise ValueError("api-key vendor search billing rule is invalid")
     free_check = item.get("free_check")
     if free_check is not None:
         if not isinstance(free_check, dict):
@@ -237,6 +250,7 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
 
     entries: list[APIKeyVendorCatalogEntry] = []
     seen_ids: set[str] = set()
+    seen_service_ids: set[str] = set()
     for item in payload:
         if not isinstance(item, dict):
             raise ValueError("api-key vendor catalog is invalid")
@@ -259,6 +273,12 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
             )
         ):
             raise ValueError("api-key vendor catalog is invalid")
+        built_in = item.get("built_in", False)
+        if not isinstance(built_in, bool) or (built_in and protocol != "search"):
+            raise ValueError("api-key vendor catalog is invalid")
+        search = _validate_search_catalog(item.get("search"), protocol=protocol, built_in=built_in)
+        if search is not None and search["service_id"] in seen_service_ids:
+            raise ValueError("api-key vendor catalog is invalid")
         entries.append(
             APIKeyVendorCatalogEntry(
                 id=vendor_id,
@@ -266,10 +286,13 @@ def api_key_vendor_catalog() -> tuple[APIKeyVendorCatalogEntry, ...]:
                 official_base_url=official_base_url,
                 protocol=protocol,
                 models_dev_provider=models_dev_provider.strip() if models_dev_provider else None,
-                search=_validate_search_catalog(item.get("search"), protocol=protocol),
+                search=search,
+                built_in=built_in,
             )
         )
         seen_ids.add(vendor_id)
+        if search is not None:
+            seen_service_ids.add(search["service_id"])
     return tuple(entries)
 
 

@@ -126,6 +126,10 @@ Hard rules:
   explicitly with
   `python3 scripts/incus_regression.py delete --target worktree --slug <slug> --yes`
   when merged, abandoned, or stale
+- before proposing or performing deletion of any regression environment, check
+  its hold with `status` or `reconcile`; if held, tell the user who holds it and
+  why, and do not offer a one-click delete. Long-running work must hold its
+  environment for as long as it runs.
 - `reconcile` reports every worktree environment held by Incus, including
   environments created outside the runner, and only forgets metadata for
   environments that are no longer present. It never deletes an environment.
@@ -205,7 +209,7 @@ there rather than expanding this index.
 
 ### PR Delivery
 
-- Codex review is triggered automatically by cyhhao after pushes; do not add a trigger while that review is running. When the current head's review fails (Codex reports "Something went wrong") or is never picked up, post `@codex review` yourself and verify pickup; the exact-head review gate is unchanged.
+- Codex review is triggered automatically by cyhhao after pushes; do not add a trigger while that review is running. When the current head's review fails (Codex reports "Something went wrong"), is never picked up, or stalls (its Watch reports `Codex review stalled`), post `@codex review` yourself and verify pickup; the exact-head review gate is unchanged.
 - load and follow the `pr-delivery-loop` skill for every implementation task;
   it owns the detailed procedure, but cannot weaken the baseline below
 - regardless of Skill resolution, use a task branch/worktree, record the change
@@ -238,7 +242,11 @@ there rather than expanding this index.
 
 - default to English for comments, docs, logs, and user-facing copy
 - use non-English text only when required for localization/i18n
-- backend user-facing strings must go through `vibe/i18n/`
+- backend user-facing strings for IM, Web, and notifications must go through `vibe/i18n/`
+- the `vibe` CLI is Agent-facing: its help, errors, hints, and notices are
+  English, written in code, and never read the configured UI language. A message
+  the CLI shares with a localized surface (such as the Doctor report the Web
+  panel shows) keeps its catalog key, and the CLI renders its English entry
 - frontend user-facing strings must go through `ui/src/i18n/en.json` and `ui/src/i18n/zh.json`
 - never hardcode user-visible display text in handlers, platform adapters, or React components
 

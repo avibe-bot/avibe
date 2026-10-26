@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import difflib
+import re
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,11 +20,40 @@ DEFAULT_QUERY_STEP_LIMIT = 250_000
 # Sibling vault tables (requests/links/grants/audit) stay queryable for inspection.
 _DENIED_TABLES = frozenset({"vault_secrets"})
 
+# The PRAGMAs a query may run: each only describes the schema and has no setter.
+# Every other PRAGMA stays denied: some change connection state, such as ``query_only``.
+SCHEMA_PRAGMAS = frozenset(
+    {"table_list", "table_info", "table_xinfo", "index_list", "index_info", "foreign_key_list"}
+)
+
+# Harness concepts whose table name shares nothing a fuzzy match could find.
+_CONCEPT_TABLES = {
+    "task": "run_definitions",
+    "tasks": "run_definitions",
+    "scheduled_tasks": "run_definitions",
+    "watch": "run_definitions",
+    "watches": "run_definitions",
+}
+
+_NO_SUCH_TABLE = re.compile(r"no such table: (?:main\.)?(\S+)")
+_NO_SUCH_COLUMN = re.compile(r"no such column: (\S+)")
+_TABLE_REFERENCE = re.compile(
+    r"\b(?:from|join)\s+(?:main\.)?[\"`\[]?(\w+)[\"`\]]?(?:\s+(?:as\s+)?(\w+))?", re.IGNORECASE
+)
+_SQL_KEYWORDS = frozenset(
+    {
+        "as", "cross", "except", "full", "group", "having", "inner", "intersect", "join", "left",
+        "limit", "natural", "on", "order", "outer", "right", "union", "using", "where", "window",
+    }
+)
+_COLUMNS_HINT = "Read a table's columns with PRAGMA table_info(<table>)."
+
 
 class ReadOnlyQueryError(ValueError):
-    def __init__(self, message: str, *, code: str = "query_failed"):
+    def __init__(self, message: str, *, code: str = "query_failed", hint: str | None = None):
         super().__init__(message)
         self.code = code
+        self.hint = hint
 
 
 @dataclass(frozen=True)
@@ -51,6 +82,7 @@ def run_read_only_query(
     conn = sqlite3.connect(uri, uri=True)
     conn.row_factory = sqlite3.Row
     steps = 0
+    denials: list[tuple[int, str | None]] = []
 
     def progress() -> int:
         nonlocal steps
@@ -64,8 +96,12 @@ def run_read_only_query(
             # agent_events, so roles below Member cannot query that table wholesale.
             if (not allow_skill_statistics and action == sqlite3.SQLITE_READ
                     and arg1 in {"skill_usage_daily", "agent_events"}):
-                return sqlite3.SQLITE_DENY
-            return _authorizer(action, arg1, arg2, db_name, source)
+                verdict = sqlite3.SQLITE_DENY
+            else:
+                verdict = _authorizer(action, arg1, arg2, db_name, source)
+            if verdict == sqlite3.SQLITE_DENY:
+                denials.append((action, arg1))
+            return verdict
 
         conn.set_authorizer(authorize)
         conn.set_progress_handler(progress, 1000)
@@ -87,9 +123,111 @@ def run_read_only_query(
     except sqlite3.DatabaseError as exc:
         message = str(exc)
         code = "query_interrupted" if "interrupted" in message.lower() else "query_failed"
-        raise ReadOnlyQueryError(message, code=code) from exc
+        conn.set_progress_handler(None, 0)
+        hint = _error_hint(conn, statement, message, denials)
+        raise ReadOnlyQueryError(message, code=code, hint=hint) from exc
     finally:
         conn.close()
+
+
+def _error_hint(
+    conn: sqlite3.Connection,
+    statement: str,
+    message: str,
+    denials: list[tuple[int, str | None]],
+) -> str | None:
+    """What to change so the next attempt can succeed, when the error alone does not say."""
+
+    if denials:
+        action, name = denials[0]
+        if action == sqlite3.SQLITE_PRAGMA:
+            return (
+                "Only schema PRAGMAs are allowed: " + ", ".join(sorted(SCHEMA_PRAGMAS)) + ". "
+                + _COLUMNS_HINT
+            )
+        if action == sqlite3.SQLITE_READ:
+            return f"Rows of '{name}' are not readable through vibe data query."
+        return "vibe data query is read-only: run one SELECT or WITH statement, or a schema PRAGMA."
+    table = _NO_SUCH_TABLE.search(message)
+    column = _NO_SUCH_COLUMN.search(message)
+    if not (table or column):
+        return None
+    try:
+        schema = _schema_columns(conn)
+    except sqlite3.DatabaseError:
+        # The hint is advice; the query's own error is the answer and must survive.
+        return None
+    if table:
+        return _unknown_table_hint(schema, table.group(1))
+    return _unknown_column_hint(schema, statement, column.group(1))
+
+
+def _schema_columns(conn: sqlite3.Connection) -> dict[str, list[str]]:
+    """Every queryable table's columns, in declaration order."""
+
+    columns: dict[str, list[str]] = {}
+    rows = conn.execute(
+        "select m.name, p.name from sqlite_master m join pragma_table_info(m.name) p "
+        "where m.type = 'table' and m.name not like 'sqlite_%' order by m.name, p.cid"
+    )
+    for table, column in rows:
+        if table not in _DENIED_TABLES:
+            columns.setdefault(table, []).append(column)
+    return columns
+
+
+def _similar(name: str, candidates: list[str]) -> list[str]:
+    lowered = name.lower()
+    matches = [candidate for candidate in candidates if lowered in candidate.lower()]
+    matches += difflib.get_close_matches(name, candidates, n=3, cutoff=0.75)
+    return list(dict.fromkeys(matches))[:3]
+
+
+def _unknown_table_hint(schema: dict[str, list[str]], name: str) -> str:
+    tables = list(schema)
+    similar = _similar(name, tables)
+    concept = _CONCEPT_TABLES.get(name.lower())
+    if concept in schema and concept not in similar:
+        similar.insert(0, concept)
+    parts = [f"No table named '{name}'."]
+    if similar:
+        parts.append(f"Did you mean {', '.join(similar)}?")
+    parts.append(f"Tables: {', '.join(tables)}.")
+    parts.append(_COLUMNS_HINT)
+    return " ".join(parts)
+
+
+def _unknown_column_hint(schema: dict[str, list[str]], statement: str, reference: str) -> str:
+    qualifier, _, column = reference.rpartition(".")
+    aliases: dict[str, str] = {}
+    referenced: list[str] = []
+    for match in _TABLE_REFERENCE.finditer(statement):
+        table, alias = match.group(1), match.group(2)
+        if table not in schema:
+            continue
+        referenced.append(table)
+        aliases[table] = table
+        if alias and alias.lower() not in _SQL_KEYWORDS:
+            aliases[alias] = table
+    if qualifier in aliases:
+        referenced = [aliases[qualifier]]
+    referenced = list(dict.fromkeys(referenced))
+    owners = [table for table, columns in schema.items() if column in columns]
+    parts = []
+    if referenced:
+        parts.append(f"No column '{column}' on {', '.join(referenced)}.")
+        similar = _similar(column, [name for table in referenced for name in schema[table]])
+        if similar:
+            parts.append(f"Did you mean {', '.join(similar)}?")
+    else:
+        parts.append(f"No column '{column}' on the tables this query reads.")
+    if owners:
+        parts.append(f"'{column}' is a column of {', '.join(owners)}.")
+    for table in referenced:
+        parts.append(f"{table} columns: {', '.join(schema[table])}.")
+    if not referenced:
+        parts.append(_COLUMNS_HINT)
+    return " ".join(parts)
 
 
 def _validate_single_statement(sql: str) -> str:
@@ -137,5 +275,7 @@ def _authorizer(action: int, arg1: str | None, arg2: str | None, db_name: str | 
     if action in denied_actions:
         return sqlite3.SQLITE_DENY
     if action == sqlite3.SQLITE_PRAGMA:
-        return sqlite3.SQLITE_DENY
+        # ``arg1`` is the PRAGMA's name as typed, for both the statement and the
+        # ``pragma_table_info(...)`` table-valued form.
+        return sqlite3.SQLITE_OK if (arg1 or "").lower() in SCHEMA_PRAGMAS else sqlite3.SQLITE_DENY
     return sqlite3.SQLITE_OK

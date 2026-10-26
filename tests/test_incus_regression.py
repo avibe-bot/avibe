@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -874,7 +875,10 @@ def test_build_base_uses_publishable_temp_instance() -> None:
     joined = "\n".join(" ".join(command) for command in commands)
     assert "--ephemeral" not in joined
     assert "incus --project default launch images:ubuntu/24.04/cloud avibe-regression-base-build --storage default --network incusbr0" in joined
-    assert "https://deb.nodesource.com/setup_20.x" in joined
+    assert "https://deb.nodesource.com/setup_22.x" in joined
+    node_install = joined.split("apt-get install -y nodejs\n", 1)[1]
+    assert node_install.splitlines()[0].startswith("node -e ")
+    assert node_install.splitlines()[0].endswith(f" {incus_regression.REGRESSION_NODE_MIN_VERSION}")
     assert "useradd --create-home --shell /bin/bash --groups sudo avibe" in joined
     backend_install = joined.split("sudo -H -u avibe -- bash -s <<'AVIBE_BACKENDS'\n", 1)[1].split("\nAVIBE_BACKENDS", 1)[0]
     assert 'avibe_home="$HOME"' in backend_install
@@ -1002,7 +1006,7 @@ BACKEND
 chmod +x "$HOME/.opencode/bin/opencode"
 INSTALLER
         ;;
-    '-fsSL https://deb.nodesource.com/setup_20.x'|'-fsSL https://askill.sh')
+    '-fsSL https://deb.nodesource.com/setup_22.x'|'-fsSL https://askill.sh')
         printf 'exit 0\n' ;;
     *) exit 98 ;;
 esac
@@ -1155,7 +1159,7 @@ def write_ui_builder_stage(root: Path, *, external: Sequence[str] = ()) -> None:
     """
     copies = "".join(f"COPY {relative} /app/{relative}\n" for relative in external)
     (root / "Dockerfile").write_text(
-        "FROM node:20-slim AS ui-builder\n"
+        "FROM node:22-slim AS ui-builder\n"
         "WORKDIR /app/ui\n"
         "COPY ui/package.json ui/package-lock.json ./\n"
         f"{copies}"
@@ -2563,6 +2567,173 @@ def reconcile_fixture(
     return runtime / "worktrees.json", commands
 
 
+def hold_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, target: str = "worktree"):
+    """Fake Incus config storage; run the real CLI without any host environment."""
+    project, instance = ("avr-master", "avibe-master") if target == "master" else ("avr-wt-eval", "avibe-wt-eval")
+    config = {"user.avibe-regression.seed": "regression"}
+    commands = []
+    _, listing = daemon_listing(project, instance, config=config)
+
+    class RecordingRunner(incus_regression.Runner):
+        def records(self, command, *, what):
+            return [] if self.dry_run else listing(self, command, what=what)
+
+        def run(self, command, **kwargs):
+            if self.dry_run:
+                return super().run(command, **kwargs)
+            commands.append(command)
+            if command[3:5] == ["config", "set"]:
+                for setting in command[6:]:
+                    key, value = setting.split("=", 1)
+                    config[key] = value
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setenv("INCUS_CMD", "incus")
+    monkeypatch.setattr(incus_regression, "Runner", RecordingRunner)
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda root: root)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda *args: None)
+    monkeypatch.setattr(incus_regression, "require_incus", lambda: None)
+    return config, commands
+
+
+@pytest.mark.parametrize("target", ["worktree", "master"])
+@pytest.mark.parametrize("dry_run", [False, True], ids=["apply", "dry-run"])
+def test_hold_then_status_and_release_preserve_unrelated_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], target: str, dry_run: bool
+) -> None:
+    """The CLI persists/shows/releases one instance hold; existing seed tests never cover this marker."""
+    config, commands = hold_fixture(tmp_path, monkeypatch, target)
+    original = dict(config)
+    flags = ["--target", target, "--slug", "eval"] + (["--dry-run"] if dry_run else [])
+    before = datetime.now(timezone.utc)
+    assert incus_regression.main(["hold", *flags, "--owner", "session-one", "--reason", "Evaluation in progress"]) == 0
+    after = datetime.now(timezone.utc)
+    capsys.readouterr()
+    assert incus_regression.main(["status", *flags]) == 0
+    out = capsys.readouterr().out
+    if dry_run:
+        assert config == original
+        assert commands == []
+    else:
+        since = config["user.avibe-regression.hold.since"]
+        assert before <= datetime.fromisoformat(since) <= after
+        assert since.endswith("+00:00")
+        assert config == {
+            **original,
+            "user.avibe-regression.hold.owner": "session-one",
+            "user.avibe-regression.hold.reason": "Evaluation in progress",
+            "user.avibe-regression.hold.since": since,
+        }
+        assert f"HELD: owner=session-one; reason=Evaluation in progress; since={since}" in out
+        assert len([command for command in commands if "set" in command]) == 1
+    assert incus_regression.main(["release", *flags]) == 0
+    assert {key: value for key, value in config.items() if value} == original
+    capsys.readouterr()
+    assert incus_regression.main(["status", *flags]) == 0
+    assert "HELD:" not in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("target", ["worktree", "master"])
+@pytest.mark.parametrize("dry_run", [False, True], ids=["apply", "dry-run"])
+def test_delete_held_environment_refuses_before_mutation_unless_explicitly_overridden(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], target: str, dry_run: bool
+) -> None:
+    """A persistent hold protects running work, including previews that must not offer its deletion."""
+    config, commands = hold_fixture(tmp_path, monkeypatch, target)
+    config.update({
+        "user.avibe-regression.hold.owner": "session-one",
+        "user.avibe-regression.hold.reason": "Evaluation in progress",
+        "user.avibe-regression.hold.since": "2026-10-20T12:00:00+00:00",
+    })
+    original = dict(config)
+    flags = ["delete", "--target", target, "--slug", "eval", "--yes"] + (["--dry-run"] if dry_run else [])
+    assert incus_regression.main(flags) == 1
+    captured = capsys.readouterr()
+    assert "session-one" in captured.err and "Evaluation in progress" in captured.err
+    assert "--ignore-hold" in captured.err
+    assert "+ incus" not in captured.out
+    assert commands == []
+    assert config == original
+    if target == "worktree":
+        assert not incus_regression.mapping_path(tmp_path).exists()
+    flags.append("--ignore-hold")
+    assert incus_regression.main(flags) == 0
+    project, instance = ("avr-master", "avibe-master") if target == "master" else ("avr-wt-eval", "avibe-wt-eval")
+    expected = [
+        ["incus", "--project", project, "delete", instance, "--force"],
+        ["incus", "project", "delete", project],
+    ]
+    if dry_run:
+        out = capsys.readouterr().out
+        assert all("+ " + shlex.join(command) in out for command in expected)
+        assert commands == []
+        assert config == original
+    else:
+        assert commands == expected
+
+
+@pytest.mark.parametrize(("dry_run", "ignore_hold"), [(False, False), (True, False), (True, True)])
+def test_delete_requires_incus_for_live_reads_as_well_as_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], dry_run: bool, ignore_hold: bool
+) -> None:
+    """A dry-run live read must validate its executable; only an overridden preview is fully offline."""
+    monkeypatch.setattr(incus_regression, "current_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(incus_regression, "git_common_root", lambda root: root)
+    monkeypatch.setattr(incus_regression, "load_env_file", lambda *args: None)
+    monkeypatch.setenv("INCUS_CMD", "/missing/incus")
+    monkeypatch.setattr(incus_regression.shutil, "which", lambda executable: None)
+    attempted = []
+
+    def missing_executable(command, **kwargs):
+        attempted.append(command)
+        raise FileNotFoundError(2, "No such file or directory", command[0])
+
+    monkeypatch.setattr(incus_regression.subprocess, "run", missing_executable)
+    flags = ["delete", "--target", "worktree", "--slug", "eval", "--yes"]
+    if dry_run:
+        flags.append("--dry-run")
+    if ignore_hold:
+        flags.append("--ignore-hold")
+    assert incus_regression.main(flags) == (0 if dry_run and ignore_hold else 1)
+    assert attempted == []
+    err = capsys.readouterr().err
+    if not (dry_run and ignore_hold):
+        assert "The Incus CLI executable was not found: /missing/incus" in err
+
+
+def test_reconcile_reports_holds_on_every_observed_instance_without_an_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Untracked and misplaced instances must retain their holds in the inventory report."""
+    mapping_path, commands = reconcile_fixture(
+        tmp_path, monkeypatch, entries={}, projects=("avr-wt-eval",),
+        instances=tuple(
+            {
+                "name": "avibe-wt-eval", "project": project, "status": "Running",
+                "config": {
+                    "user.avibe-regression.hold.owner": owner,
+                    "user.avibe-regression.hold.reason": "Long evaluation",
+                    "user.avibe-regression.hold.since": "2026-10-20T12:00:00+00:00",
+                },
+            }
+            for project, owner in (("avr-wt-eval", "session-one"), ("default", "session-two"))
+        ),
+    )
+    before = mapping_path.read_bytes()
+    assert incus_regression.main(["reconcile", "--yes"]) == 0
+    out = capsys.readouterr().out
+    for project, owner in (("avr-wt-eval", "session-one"), ("default", "session-two")):
+        assert (
+            f"{project}/avibe-wt-eval: HELD: owner={owner}; "
+            "reason=Long evaluation; since=2026-10-20T12:00:00+00:00"
+        ) in out
+    assert "delete --target worktree --slug eval --yes" in out
+    assert "--ignore-hold" not in out
+    assert not any("delete" in command for command in commands)
+    assert mapping_path.read_bytes() == before
+
+
 def test_reconcile_reports_environments_incus_holds_without_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -3261,6 +3432,7 @@ def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch:
             dry_run=False,
             remote=None,
             yes=True,
+            ignore_hold=False,
         )
     )
 
@@ -3270,6 +3442,7 @@ def test_delete_round_trips_generated_worktree_slug(tmp_path: Path, monkeypatch:
         ["incus", "project", "delete", project],
     ]
     assert listings == [
+        (["incus", "project", "list", "--format", "json"], "Incus projects"),
         (["incus", "project", "list", "--format", "json"], "Incus projects"),
         (["incus", "list", "--all-projects", "--format", "json"], "Incus instances"),
     ]
@@ -3311,9 +3484,18 @@ def test_delete_keeps_worktree_metadata_until_absence_is_confirmed(
         ["incus", "list", "--all-projects", "--format", "json"],
     ]
     commands = []
+    preflight = [
+        listing_commands[0],
+        ["incus", "--project", row["project"], "list", "--format", "json"],
+    ]
 
     def run(command, **kwargs):
         assert incus_regression.target_run_in_flight(repo, None, row["project"])
+        if len(commands) < len(preflight):
+            assert command == preflight[len(commands)]
+            objects = [{"name": row["project"]}] if not commands else [{"name": row["instance"], "config": {}}]
+            commands.append(command)
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(objects))
         commands.append(command)
         if command in delete_commands:
             assert kwargs["check"] is False
@@ -3349,7 +3531,7 @@ def test_delete_keeps_worktree_metadata_until_absence_is_confirmed(
         listing_commands[:1] if inventory in {"project-list-fails", "unreadable-project-list"}
         else listing_commands
     )
-    assert commands == delete_commands + expected_listings
+    assert commands == preflight + delete_commands + expected_listings
     assert not incus_regression.target_run_in_flight(repo, None, row["project"])
     payload = json.loads(mapping_path.read_text(encoding="utf-8"))
     assert payload["worktrees"] == ({"another-worktree": other_row} if inventory == "absent" else rows)
@@ -3380,6 +3562,8 @@ def test_delete_against_a_remote_keeps_the_local_metadata(
     mapping_path.write_text(json.dumps({"schema_version": 1, "worktrees": {slug: row}}), encoding="utf-8")
 
     class RecordingRunner:
+        names, records = daemon_listing(row["project"], row["instance"])
+
         def __init__(self, *, dry_run=False):
             self.dry_run = dry_run
 
@@ -3405,6 +3589,7 @@ def test_delete_against_a_remote_keeps_the_local_metadata(
             dry_run=False,
             remote="lab",
             yes=True,
+            ignore_hold=False,
         )
     )
 
@@ -3427,6 +3612,7 @@ def _delete_args(slug: str, **overrides) -> argparse.Namespace:
         "dry_run": False,
         "remote": None,
         "yes": True,
+        "ignore_hold": False,
     }
     fields.update(overrides)
     return argparse.Namespace(**fields)
@@ -5095,9 +5281,10 @@ def test_an_empty_remote_names_the_local_daemon_for_every_command() -> None:
     assert checked, "no subcommand accepts --remote"
 
     for name in checked:
+        required = ["--owner", "session", "--reason", "evaluation"] if name == "hold" else []
         for spelling in ("", "   "):
-            assert parser.parse_args([name, "--remote", spelling]).remote is None, name
-        assert parser.parse_args([name, "--remote", " lab "]).remote == "lab", name
+            assert parser.parse_args([name, *required, "--remote", spelling]).remote is None, name
+        assert parser.parse_args([name, *required, "--remote", " lab "]).remote == "lab", name
 
     # The consequence, at the reader that used to disagree with `remote_ref`.
     empty = parser.parse_args(["up", "--remote", ""])

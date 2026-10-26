@@ -1,8 +1,9 @@
 """C-1 hosted-tool shapes (``vibey-hosted-tools.md`` §4.2 and §12 items 1-6, 22, 28).
 
 The dataclasses in ``core.agent_core.messages`` are the producer; ``message.schema.json``
-is the contract other components read. Every invariant is checked twice: the schema and
-the reader must refuse the same shapes, and what the producer writes must validate.
+is the contract other components read. Known-tool shapes are checked by both the
+schema and the reader, and what the producer writes must validate. Stored unknown
+tools have a reader-only portable fallback; new writes remain strict.
 """
 
 from __future__ import annotations
@@ -272,20 +273,25 @@ VIOLATIONS = {
     "generate-on-web-search": _set(NATIVE, ("content", 0, "action"), {"type": "generate", "prompt": "p"}),
     "generate-on-proxied-search": _set(PROXIED, ("hosted", "action"), {"type": "generate", "prompt": "p"}),
     "search-on-x-search": _set(NATIVE, ("content", 2, "action"), {"type": "search", "queries": ["q"]}),
-    # v2 has no native image tool, and an rc-era block is not read (§4.2, §15).
-    "native-image-block": _set(NATIVE, ("content", 0, "tool"), "image_generation"),
     "unknown-action": _set(NATIVE, ("content", 0, "action"), {"type": "browse", "url": "https://a"}),
     "field-of-another-action": _set(NATIVE, ("content", 0, "action", "url"), "https://a"),
     "empty-queries": _set(NATIVE, ("content", 0, "action", "queries"), []),
     "x-search-limit-zero": _set(NATIVE, ("content", 2, "action", "limit"), 0),
     "x-search-mode": _set(NATIVE, ("content", 2, "action", "mode"), "latest"),
-    "unknown-tool": _set(NATIVE, ("content", 0, "tool"), "code_interpreter"),
     "empty-payload": _set(NATIVE, ("content", 0, "native", "payload"), []),
     "payload-not-objects": _set(NATIVE, ("content", 0, "native", "payload"), ["web_search_call"]),
     "native-replay-flag": _set(NATIVE, ("content", 0, "native", "replay"), True),
     "bad-source-id": _set(NATIVE, ("content", 0, "native", "source_id"), "xai-key"),
     "summary-without-hosted-block": _set(message_to_dict(_produced()[1]), ("hosted_summary",), {"counts": {}, "cited_sources": []}),
     "hosted-block-without-summary": _without(NATIVE, (), "hosted_summary"),
+    "mixed-hosted-block-without-summary": _without(
+        _set(NATIVE, ("content", 0, "tool"), "web_fetch"), (), "hosted_summary"
+    ),
+    "mixed-known-tool-with-invalid-action": _set(
+        _set(NATIVE, ("content", 0, "tool"), "web_fetch"), ("content", 1, "action"), {"type": "fetch"}
+    ),
+    "unknown-summary-field": _set(NATIVE, ("hosted_summary", "future_total"), 3),
+    "unknown-summary-source-field": _set(NATIVE, ("hosted_summary", "cited_sources", 0, "confidence"), 0.9),
     "included-with-usd": _set(NATIVE, ("hosted_summary", "cost"), {"basis": "included", "usd": 0.1}),
     "list-without-usd": _set(NATIVE, ("hosted_summary", "cost"), {"basis": "list"}),
     "negative-usd": _set(NATIVE, ("hosted_summary", "cost", "usd"), -0.01),
@@ -305,7 +311,6 @@ VIOLATIONS = {
         _set(PROXIED, ("hosted", "record"), {"status": "failed", "error": "upstream 500", "sources": []}), ("is_error",), False
     ),
     "completed-result-flagged": _set(PROXIED, ("is_error",), True),
-    "hosted-on-local-tool": _set(PROXIED, ("tool_name",), "bash"),
     "execution-mode": _set(PROXIED, ("hosted", "execution", "mode"), "native"),
     "proxy-billing": _set(PROXIED, ("hosted", "execution", "executor_billing"), "free"),
     "failed-attempt-billing": _set(PROXIED, ("hosted", "execution", "failed_attempts", 0, "billing"), "free"),
@@ -322,6 +327,108 @@ def test_schema_and_reader_refuse_the_same_hosted_violations(payload):
     assert not VALIDATOR.is_valid(payload)
     with pytest.raises(ValueError):
         message_from_dict(payload)
+
+
+def test_a_stored_proxied_result_for_an_unknown_tool_loads_as_a_plain_result(caplog):
+    stored = _set(_set(PROXIED, ("tool_name",), "future_unknown_tool"), ("is_error",), True)
+
+    loaded = message_from_dict(stored)
+
+    assert isinstance(loaded, ToolResultMessage)
+    assert loaded.tool_name == "future_unknown_tool"
+    assert loaded.hosted is None
+    assert loaded.is_error is True
+    assert message_to_dict(loaded) == {key: value for key, value in stored.items() if key != "hosted"}
+    assert [record.levelname for record in caplog.records] == ["WARNING"]
+
+
+@pytest.mark.parametrize("keep_known", [False, True], ids=["all-unknown", "mixed"])
+@pytest.mark.parametrize(
+    ("action", "record", "summary_extension", "expected"),
+    [
+        (
+            {"type": "open_page", "url": "https://example.com/docs"},
+            {"status": "completed", "sources": [{"url": "https://example.com/docs", "title": "Example Docs"}]},
+            {},
+            ("https://example.com/docs", "Example Docs"),
+        ),
+        ({"type": "fetch"}, {"status": "completed", "sources": []}, {}, ("result unavailable in this version",)),
+        (
+            {"type": "fetch", "query": "a failed query"},
+            {"status": "failed", "error": "permission denied", "sources": []},
+            {},
+            ("failed", "permission denied", "a failed query"),
+        ),
+        (
+            {"type": "open_page", "url": "https://example.com/docs"},
+            {"status": "incomplete", "error": "timed out", "sources": [{"url": "https://example.com/partial"}]},
+            {},
+            ("incomplete", "timed out", "https://example.com/docs", "https://example.com/partial"),
+        ),
+        (
+            {"type": "fetch", "queries": ["pending query"]},
+            {"status": "pending", "sources": []},
+            {},
+            ("pending", "no result", "pending query"),
+        ),
+        (
+            {"type": "fetch"},
+            {"status": "failed", "error": "fetch refused", "sources": []},
+            {},
+            ("failed", "fetch refused"),
+        ),
+        (
+            {"type": "fetch"},
+            {"status": "completed", "sources": []},
+            {"future_total": 3},
+            ("result unavailable in this version",),
+        ),
+        (
+            {"type": "fetch"},
+            {"status": "completed", "sources": []},
+            {"cited_sources": [{"url": "https://example.com/future", "confidence": 0.9}]},
+            ("result unavailable in this version",),
+        ),
+    ],
+    ids=["query-and-source", "placeholder", "failed", "incomplete", "pending", "error-only", "future-summary", "future-source"],
+)
+def test_a_native_unknown_hosted_block_loads_as_portable_text(
+    action, record, summary_extension, expected, keep_known, caplog
+):
+    stored = copy.deepcopy(NATIVE)
+    if not keep_known:
+        stored["content"] = stored["content"][:1]
+    stored["content"][0].update(tool="web_fetch", action=action, record=record)
+    stored["hosted_summary"].update(summary_extension)
+    original = copy.deepcopy(stored)
+
+    loaded = message_from_dict(stored)
+
+    assert isinstance(loaded, AssistantMessage)
+    if keep_known:
+        assert loaded.hosted_summary is not None
+        assert loaded.hosted_summary.counts == {}
+        assert loaded.hosted_summary.cited_sources == ()
+        assert loaded.hosted_summary.cost is None
+    else:
+        assert loaded.hosted_summary is None
+    portable = message_to_dict(loaded)
+    assert portable["content"][1:] == stored["content"][1:]
+    assert isinstance(loaded.content[0], TextBlock)
+    assert all(fragment in loaded.content[0].text for fragment in expected)
+    VALIDATOR.validate(portable)
+    assert stored == original
+    assert [record.levelname for record in caplog.records] == ["WARNING"]
+
+
+def test_new_hosted_result_for_an_unknown_tool_stays_strict():
+    with pytest.raises(ValueError, match="future_unknown_tool is not a hosted tool"):
+        ToolResultMessage(
+            tool_call_id="call_unknown",
+            tool_name="future_unknown_tool",
+            content=(TextBlock(text="result"),),
+            hosted=_produced()[4].hosted,
+        )
 
 
 def test_a_count_past_the_bound_is_never_written_and_a_stored_one_is_dropped_on_read():
@@ -361,6 +468,45 @@ def test_a_generate_action_names_a_prompt_only_when_the_endpoint_revised_it(payl
     assert "prompt" not in payload["hosted"]["action"]
     VALIDATOR.validate(payload)
     assert message_from_dict(payload).hosted.action.prompt is None
+
+
+@pytest.mark.parametrize(
+    "payload",
+    json.loads((Path(__file__).parent / "fixtures/released_hosted_messages.json").read_text()),
+    ids=["released-native", "released-model-executor"],
+)
+def test_released_hosted_rows_load_unchanged_without_service_fields(payload):
+    """S2a: optional service fields cannot make a released transcript unreadable."""
+    VALIDATOR.validate(payload)
+    assert message_to_dict(message_from_dict(payload)) == payload
+    # Service result-mapping limits must not narrow the released C-1 source shape.
+    long_source = {"url": "https://a.test/" + "u" * 2048, "title": "t" * 301,
+                   "snippet": "s" * 1001, "page_age": "p" * 65}
+    expanded = copy.deepcopy(payload)
+    record = expanded["content"][0]["record"] if payload["role"] == "assistant" else expanded["hosted"]["record"]
+    record["sources"] = [long_source]
+    VALIDATOR.validate(expanded)
+    assert message_to_dict(message_from_dict(expanded)) == expanded
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "skipped"])
+def test_service_attempts_and_origin_load_and_round_trip(outcome):
+    """S2a: the new writer shape is accepted by both strict persisted readers."""
+    payload = copy.deepcopy(PROXIED)
+    payload["tool_name"] = "web_search"
+    payload["hosted"]["execution"]["executor_origin"] = {
+        "provider": "exa", "api": "search_api", "model": "exa/search",
+    }
+    attempt = {"source_id": SOURCE, "label": "Exa", "kind": "service", "outcome": outcome}
+    if outcome == "skipped":
+        attempt.update(skipped="cooling", retry_at="2026-10-20T12:00:00Z")
+    else:
+        attempt["cost"] = {"basis": "reported", "usd": 0.007, "estimate": True}
+        if outcome == "failed":
+            attempt.update(error_code="service_unreadable", superseded=True)
+    payload["hosted"]["record"]["attempts"] = [attempt]
+    VALIDATOR.validate(payload)
+    assert message_to_dict(message_from_dict(payload)) == payload
 
 
 def test_a_citation_range_must_lie_within_its_text():

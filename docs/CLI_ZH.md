@@ -14,14 +14,92 @@ vibe stop         # 停止所有服务
 
 ## 命令详解
 
+`vibe` CLI 主要由 Agent 调用，因此所有命令遵循同一套语法和同一条输出规则。
+
+### 语法
+
+- **指定 Session。** 只用 `--session-id <id>` 指定 Session。作用于单个 Session 的
+  命令（`vibe session get`、`update`、`send-now`、`queue list`、`queue remove`
+  以及各个 `vibe show` 命令）和 [Session 归属的列表](#session-归属的列表) 一样，
+  默认使用 `AVIBE_SESSION_ID` 对应的调用方 Session。在 Avibe Agent shell 之外
+  没有默认值，命令以 `missing_caller_session` 失败。
+- **指定其他对象。** Agent 名称，run、task、watch、Vault secret 的 id，以及排队
+  消息的 id 都是位置参数：`vibe session queue remove <message-id> --session-id <id>`。
+- **消息文本。** 所有发送或保存消息的命令都使用 `--message` 或 `--message-file`。
+- **可见性。** `--visible` 让 `vibe agent run` 新建或 fork 的 Session 面向用户
+  （新建的委派 Session 默认在后台）。`vibe session update` 使用 `--visible` 或
+  `--hidden`。
+- **只有一种写法。** 没有别名、隐藏的兼容参数或已弃用的命令；已移除的写法会作为
+  未知参数报错。
+
+### 输出
+
+- **面向 Agent 的命令**（`agent`、`runs`、`harness`、`session`、`task`、`watch`、
+  `show`、`vault`、`data query`、`data skill-usage`、`skill list` 和 `status`）
+  在 stdout 输出一个 JSON 对象：
+  `{"schema_version": 1, "ok": true, "kind": "<kind>", ...字段}`。它们接受
+  `--json`，但不改变任何行为。`vibe data query --format text` 则把各行输出为便于
+  阅读的记录。
+- **失败**：这些命令的失败以及所有参数错误，都会在 stderr 输出同样的信封，其中
+  `"ok": false`、`"kind": "error"`，并带有稳定的 `code`、`error` 文本，必要时还有
+  `hint`、`help_command` 和 `details`。退出码非零。
+- **内容型命令**直接输出内容：`vibe skill load` 输出 Skill 正文，`vibe computer`
+  输出精简的观察格式（`--json` 返回驱动的原始负载），`vibe vault run` 原样转出所运行
+  命令的输出，`vibe debug prompt export` 输出它的导出文档。
+- **运维命令**面向终端前的用户，输出文本。`version`、`check-update`、`doctor`、
+  `runtime`、`remote` 子命令、`screenshot` 和 `data retention` 加 `--json` 时输出
+  JSON 信封。服务生命周期命令 `start`、`stop`、`restart`、`upgrade` 以及引导式
+  `vibe remote` 配置只输出进度文本，不接受 `--json`。
+- **语言。** CLI 的帮助、错误、提示和通知始终是英文，与配置的界面语言无关。IM、
+  Web UI 和通知遵循配置的语言；Web 诊断面板用该语言显示与 `vibe doctor` 相同的诊断。
+
 ### 有界列表输出
 
 面向 Agent 的集合命令共用同一套分页契约：`vibe agent list`、`vibe agent models`、
-`vibe runs list`、`vibe session list`、Vault 的 list/find/tags、Show Page 的
-list/marks、`vibe data query`、`vibe task list` 和 `vibe watch list`。默认返回
-20 条，支持 `--page` 和 `--limit`，单页最多 100 条，且不提供无分页的 `--all`
-绕过。使用 `pagination.next_command` 继续翻页；完整记录详情通过对应的 `show`
-或 `get` 命令获取。
+`vibe runs list`、`vibe session list`、`vibe session queue list`、Vault 的
+list/find/tags、Show Page 的 list/marks、`vibe data query`、`vibe task list` 和
+`vibe watch list`。默认返回 20 条，支持 `--page` 和 `--limit`。单页最多 100 条：
+更大的 `--limit` 按 100 读取，`pagination.limit` 报告实际使用的上限。小于 1 的
+`--limit` 或 `--page` 返回 `invalid_pagination` 错误。不提供无分页的 `--all` 绕过。
+使用 `pagination.next_command` 继续翻页；完整记录详情通过对应的 `show` 或 `get`
+命令获取。`vibe skill list` 与 system prompt 中的 Skill 目录分页一致，因此只接受
+`--page`。
+
+列表行只携带决定下一步所需的字段，并省略 null、空值和零值字段，因此缺失的字段即表示
+未设置。Show Page 的列表行只有 `session_id`、`visibility`、`active_url`（用于分享的
+URL）、`path`（要编辑的工作目录）和 `updated_at`。Agent 的列表行是 `name`、
+`backend`、`model`、`reasoning_effort`、`source` 和 `updated_at`；已停用的 Agent
+另带 `enabled: false`。Vault 的列表行在 `vibe vault list` 和 `vibe vault find` 中
+相同，包括 secret 的 `name`、`kind`、`protection`、`fields`（多字段 secret 另带
+`default_field`，即单写 `NAME` 时选中的字段）、`tags`、`description`、`policy`、
+keypair 的 `signing_addresses`，以及 `vibe vault sign` 可用该密钥时的
+`per_use_sign: true`；行中从不包含 secret 值。`vibe task show`、`vibe watch show`、
+`vibe runs show`、`vibe session get`、`vibe agent show` 和 `vibe show status` 输出完整
+记录；加上 `--brief` 则只输出对应 list 命令打印的那一行。已删除的 Task 或 Watch 显示
+`lifecycle_state: "removed"` 和 `removed_at`，不再带它已经没有的实时字段（`enabled`、
+健康状态、下次触发或 waiter 状态）。
+
+### Session 归属的列表
+
+`vibe harness status`、`vibe runs list`、`vibe task list`、`vibe watch list`
+和 `vibe show list` 读取归属于某个 Agent Session 的记录，共用同一套范围语法：
+
+```bash
+vibe watch list                          # 调用方 Session（AVIBE_SESSION_ID）
+vibe watch list --session-id sesk8m4q2p7x   # 其他 Session
+vibe watch list --global                 # 所有 Session
+```
+
+在 Avibe Agent shell 内默认读取调用方 Session。在 Agent shell 之外没有默认值：
+需要传 `--session-id` 或 `--global`，否则命令以 `missing_caller_session` 失败。
+两个参数不能同时使用。每个响应都用 `session_id` 和 `global` 说明实际读取的范围，
+`pagination.next_command` 会重复你传入的范围参数。
+
+Session 的 Run 包括在它里面运行的、由它的 Agent 派发的，以及结果回调给它的 Run，
+因此委派出去的工作对委派方 Session 仍然可见。Watch 归属于它回调的 Session，
+Task 归属于创建它的 Session（创建方未知或已不存在时归属于它运行所在的 Session），
+Show Page 按 Session id 归属；Watch 和 Task 的归属与 Workbench 的“只看本会话”一致。
+`vibe harness status` 会保留控制器故障，以及涉及该 Session 的工作目录冲突。
 
 ## 远程访问 Web UI
 
@@ -93,6 +171,9 @@ vibe status
 **输出示例：**
 ```json
 {
+  "schema_version": 1,
+  "ok": true,
+  "kind": "service_status",
   "state": "running",
   "running": true,
   "pid": 12345
@@ -110,13 +191,16 @@ Avibe 为 Claude、Codex 和 OpenCode 提供统一的托管 Skill Catalog，并�
 
 ```bash
 vibe skill list [--page N]
-vibe skill load -- <name>
+vibe skill load -- <name> [<name> ...]
 ```
 
-`list` 按稳定顺序输出当前可用的名称和描述，每页最多 25 个。第 1 页也会注入
-Agent 的 system prompt；如有更多 Skill，按输出中的命令查看下一页。`load` 只在
-`skill_content` 标签中输出所选 Skill 的正文。标签的 `directory` 属性是绝对路径，
-Agent 可以据此读取 `SKILL.md` 同目录下的 reference 或运行 script。
+`list` 按稳定顺序以 `skills` 返回当前可用的名称和描述，并附带 `pagination` 对象。
+第 1 页也会注入 Agent 的 system prompt；如有更多 Skill，按
+`pagination.next_command` 查看下一页。`load` 按给定顺序，把每个 Skill 的正文
+分别放在各自的 `skill_content` 标签中输出。标签的 `directory` 属性是绝对路径，
+Agent 可以据此读取 `SKILL.md` 同目录下的 reference 或运行 script。遇到未知名称时，
+已加载的 Skill 仍会输出，随后以 `skill_not_found` 错误失败，并列出 `missing` 和
+`loaded` 的名称。
 
 Avibe 会直接发现现有 Skill，无需迁移：
 
@@ -169,6 +253,32 @@ SQLite 数据库的 `agent_events` 与 `skill_usage_daily` 中，没有统计面
 记录器每次写入前都会重新读取此设置，无需重启。关闭统计不影响 Skill 发现或
 加载，也不会删除已有历史。若希望既不再记录，也不保留历史，请先关闭，再清除。
 
+### `vibe data query`
+
+对本地 SQLite 状态数据库执行一条受保护的只读 SQL 语句。结果默认每页 20 行，最多 100 行。
+
+```bash
+vibe data query --sql "select group_concat(name, ', ') as tables from pragma_table_list where schema = 'main'"
+vibe data query --sql "select group_concat(name, ', ') as columns from pragma_table_info('run_definitions')"
+vibe data query --sql "PRAGMA table_info(run_definitions)" --limit 100   # 含类型与主键
+vibe data query --sql "select id, status, created_at from agent_runs order by created_at desc"
+vibe data query --sql-file query.sql --limit 50
+vibe data query --sql "select created_at, author, content_text from messages where session_id = 'sesk8m4q2p7x' order by created_at" --format text
+```
+
+`--format text` 把每一行输出为一条记录，适合阅读对话记录或消息正文这类长文本：先是
+一行 `-[ RECORD n ]`，然后每列一行 `column: value`。值按存储原样输出，换行就是真实
+换行；多行的值从列名的下一行开始，缩进两个空格；SQL `NULL` 输出为 `(null)`。还有更多
+行时，最后一行是 `next_command: ...`，并保留 `--format text`。默认仍是 JSON；两种格式
+下的错误都是 stderr 上的 JSON 错误信封。
+
+连接是只读的：写入、schema 变更、`ATTACH` 和事务都会被拒绝。schema PRAGMA
+`table_list`、`table_info`、`table_xinfo`、`index_list`、`index_info` 和
+`foreign_key_list` 可以作为语句执行，也可以作为 `pragma_*` 表值函数使用；其他
+PRAGMA 一律拒绝。`no such table` 或 `no such column` 错误会带上 `hint`，给出最接近的
+名称以及表清单，或所引用表的列。Task 和 Watch 都是 `run_definitions` 的行
+（`definition_type` 为 `scheduled` 或 `watch`）。
+
 ### `vibe data skill-usage`
 
 仅限实例所有者使用的本地维护命令，返回 JSON 诊断信息，不是 Skill 热度排名。
@@ -201,6 +311,7 @@ vibe data skill-usage --clear --yes --json
 
 ```bash
 vibe doctor
+vibe doctor --json
 ```
 
 显式运行安全的一期修复：
@@ -264,7 +375,7 @@ vibe remote start
 vibe remote stop
 ```
 
-这些子命令都支持 `--json` 输出，便于脚本调用。
+这些子命令加 `--json` 时输出 JSON 信封。
 
 ### `vibe screenshot`
 
@@ -278,43 +389,53 @@ vibe screenshot --json
 
 **行为：**
 - 默认保存到 `~/.vibe_remote/screenshots/`
-- 默认输出保存路径；加 `--json` 时输出机器可读的 JSON
+- 默认输出保存路径；加 `--json` 时输出 JSON 信封
 - 只作为 CLI 层能力存在；不新增 IM 命令、bot 按钮，也不注入 Agent prompt
 
 ### `vibe session`
 
-列出、查看并重命名 Agent 会话。`list` 与 `get` 是只读视图；`update` 只改标题。已归档会话视为软删除，任何情况下都不会被列出。
+列出、查看、更新并操作 Agent 会话。`list` 与 `get` 是只读视图；`update` 修改标题、可见性或 scope。已归档会话视为软删除，任何情况下都不会被列出。
 
 ```bash
 vibe session list                       # 未归档会话，默认每页 20 条，按最近活跃倒序
 vibe session list --type slack          # 按平台过滤（avibe = Web/Workbench）
 vibe session list --page 2 --limit 50   # 第 2 页，每页 50 条（最多 100）
-vibe session get sesk8m4q2p7x           # 单个会话的完整明细
 vibe session get                        # 在 Avibe Agent shell 内查看调用方 Session
-vibe session update sesk8m4q2p7x --title 'Release review'   # 传 "" 可清空标题
+vibe session get --session-id sesk8m4q2p7x                   # 其他会话的完整明细
 vibe session update --title 'Release review'                 # 在 Avibe Agent shell 内
+vibe session update --title 'Release review' --if-untitled   # 保留用户或 Agent 已设置的标题
+vibe session update --session-id sesk8m4q2p7x --title ''     # 清空标题
+vibe session update --session-id sesk8m4q2p7x --hidden       # 只在后台；--visible 恢复显示
+vibe session queue list --session-id sesk8m4q2p7x            # 按 FIFO 顺序列出排队消息
+vibe session queue remove msg_queued123 --session-id sesk8m4q2p7x
+vibe session send-now --session-id sesk8m4q2p7x              # 提升精确的队头
 ```
 
-`--type` 取平台 id：`avibe`（Web/Workbench）、`slack`、`discord`、`telegram`、`lark`、`wechat`。需要更高级的筛选——按 Agent、时间段、消息内容或跨表联查——`list` 与 `get` 的返回都会引导你使用 `vibe data query`。
-当 `get` 或 `update` 运行在 Avibe 已注入 caller context 的 Agent shell 内时，
-可以省略 session id，并默认使用 `AVIBE_SESSION_ID` 对应的调用方 Session。
+除 `list` 外，每个命令都作用于一个 Session：`--session-id`，或在 Avibe Agent shell
+内默认的调用方 Session（见 [语法](#语法)）。加上 `--if-untitled` 时，`update --title`
+只在用户或 Agent 尚未设置标题时写入，自动生成的标题仍视为未命名；检查与写入在同一个事务内，
+不会覆盖同时发生的重命名，`updated: false` 表示保留了原标题。`--type` 取平台 id：`avibe`（Web/Workbench）、`slack`、`discord`、`telegram`、`lark`、`wechat`。需要更高级的筛选——按 Agent、时间段、消息内容或跨表联查——请使用 `vibe data query`。
 
 ### `vibe runs`
 
 列出和查看 Agent run 记录。
 
 ```bash
-vibe runs list --session-id sesk8m4q2p7x --brief
+vibe runs list                         # 在 Avibe Agent shell 内查看调用方 Session 的 run
+vibe runs list --global --definition-id <task-or-watch-id>   # 跨每次运行各自的 Session 查看全部触发
 vibe runs show run_abc123
 vibe runs show run_abc123 --brief      # 只看状态、时间、错误和回调字段
 vibe runs show                         # 在 Avibe Agent shell 内查看调用方 Run
 ```
 
-`vibe runs list` 无过滤参数时仍保持全局列表语义；传入 `--session-id` 等参数
-才会筛选。`vibe runs show` 在 Avibe 已注入 caller context 的 Agent run 内
-可以省略 run id，并默认使用 `AVIBE_RUN_ID`。它输出完整记录：发给 Agent 的文本在
-`message`，回复在 `result_text`；`--brief` 只输出与 `vibe runs list` 相同的精简行，
-用于查看状态。
+`vibe runs list` 遵循 [Session 归属的列表](#session-归属的列表) 的范围语法。
+`vibe runs show` 在 Avibe 已注入 caller context 的 Agent run 内
+可以省略 run id，并默认使用 `AVIBE_RUN_ID`。它把完整记录的每项事实输出一次：状态与
+时间、`error`、回调字段、发给 Agent 的文本 `message`、回复 `result_text`，以及 Run
+在哪里运行、从哪里来（Agent、Session、`source_kind`、`source_session_id`、
+`parent_run_id`）。最终回复之外送达的回复文本（例如回合中途发出的消息）在
+`other_outputs`；投递记账、turn 与进程 id，以及其他字段的副本都不输出。`--brief`
+只输出与 `vibe runs list` 相同的精简行，用于查看状态。
 
 ### `vibe task`
 
@@ -342,8 +463,10 @@ vibe task remove <task-id>
 
 当 `vibe task add` 运行在 Avibe 已注入 caller context 的 Agent shell 内时，
 可以省略 `--session-id`。Avibe 会把任务目标默认到 `AVIBE_SESSION_ID`
-对应的调用方 Session，并在命令输出里报告这次默认。显式 `--session-id`、
-session creation 参数和 delivery 参数仍然优先。
+对应的调用方 Session；输出的 definition 中的 `session_id` 就是解析后的目标。
+显式 `--session-id` 和 session creation 参数仍然优先。要投递到还没有 Session 的
+IM 频道或话题，请用 `--create-session`（或 `--create-session-per-run`）配合
+`--scope-id` 创建。
 
 纯命令任务（`--on-failure none`，即默认值）不会套用上面这条调用方 Session 默认，
 也不接受 session、scope 或 agent 相关参数。执行成功时完全静默；执行失败会记录一条
@@ -369,9 +492,6 @@ Session：
 `vibe task add` 时所在的目录。对 message 任务，`--cwd` 仍然用于放置它创建的
 Session，且在目标 Session 已存在时仍然会被拒绝。
 
-`--session-key` 仍兼容旧脚本，但新任务应使用当前 Avibe prompt
-里展示的 Agent Session ID。
-
 ### `vibe agent run`
 
 直接运行一个 Agent。Run 默认异步，并且不会创建持久化任务定义。只有终端需要等待完成时才使用
@@ -381,32 +501,40 @@ Session，且在目标 Session 已存在时仍然会被拒绝。
 vibe agent run --no-callback --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Apply this correction in the current turn.'
+vibe agent run --session-id sesk8m4q2p7x --queue --message 'Do this after the current turn.'
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
-vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
+vibe agent run --no-callback --scope-id slack::channel::C999 --visible --agent release-reviewer --message 'Post the deployment summary.'
 vibe agent run --close-after --no-callback --agent release-reviewer --message 'Run a disposable batch review.'
 ```
 
-`--send-now` 只能和现有 `--session-id` 一起使用，它显式选择普通的带内容 P1
-语义：新消息会 steering 进活动 native Turn，Session 空闲时立即启动；只有明确
-拒绝后才回退到 P3。它不会提升更早的排队消息。`vibe session send-now` 是无内容
-P1 操作，只提升现有的精确 FIFO 队头，不新增消息。过期队头会被拒绝，而不会改为
-提升下一条；两个命令都不会调用 Stop。
+没有 `--session-id` 也没有 fork 参数时，这次运行会为 `--agent` 新建一个后台
+Session；`--same-scope` 或 `--scope-id` 决定它的位置，`--visible` 让它面向用户。
+
+指定现有 `--session-id` 时，默认是 P1：新消息会 steering 进活动 native Turn，
+Session 空闲时立即启动；只有明确拒绝后才回退到 P3。它不会打断活动 Turn，也不会
+提升更早的排队消息。`--queue` 则把新 Run 放进活动 Turn 之后的 P3 队列。
+`vibe session send-now` 是无内容 P1 操作，只提升现有的精确 FIFO 队头，不新增消息。
+过期队头会被拒绝，而不会改为提升下一条；两个命令都不会调用 Stop。
 
 当一个新 Agent Session 需要从现有 Session 的 native backend 上下文分叉，而不是空白开始时，
 使用 `--fork-session <session-id>`。新 Session 会保持源 Session 的 backend。
 只有 backend 不变时，才可以通过 `--agent`、`--model`、`--reasoning-effort`
 覆盖 fork 后 Session 的 Agent、模型或推理强度；跨 backend fork 会被拒绝。
-不要把 `--fork-session` 和 `--session-id` 或 `--create-session` 混用。
+不要把 `--fork-session` 和 `--session-id` 混用。
 
 `--model` 和 `--reasoning-effort` 可以为这次运行创建的任何新 Session（空白新
-Session、`--create-session` 或 fork）设置模型，该 Session 之后的轮次会沿用它。
+Session 或 fork）设置模型，该 Session 之后的轮次会沿用它。
 它们不能与 `--session-id` 一起使用；已有 Session 的模型在 Web UI 的 Session 模型
 选择器中修改。新 Session 实际运行的组合（覆盖值加上它原本沿用的默认值）会按 Agent
 的模型目录检查：Vibey 的 Model Hub 菜单不提供的模型或推理强度，或菜单无法加载时，
 会被拒绝；claude 和 codex 的未知值只给出警告，因为它们内置的目录可能落后于新版本。
 `vibe agent models <agent>` 会列出可用的值。
+
+命令输出一个 `run` 对象：它的 `id`、`status`、`run_type`、`agent_name`，以及 Avibe
+为它解析出的 `session_id`、`scope_id`、`visibility` 和 `callback_session_id`。
+`--sync` 会用结束后的 run 记录替换它。只有当 run 落在调用方自己的 Session、
+结果已直接回到那里因而不再回调时，才会附带 `callback_notice`。
 
 异步 run 需要明确 callback 策略，除非命令运行在 Avibe 已注入 caller context
 的 Agent 环境内。当最终结果文本需要回到调用方 Session 时，使用
@@ -415,9 +543,6 @@ Session、`--create-session` 或 fork）设置模型，该 Session 之后的轮�
 调用会默认把 callback 指向当前调用方 Session。这个 callback 与普通投递相互独立：
 即使目标 run 已经把结果发到了自己的 IM scope，调用方 Session 仍然会收到结果并触发一次
 跟进 Agent 消息。system、tool call、assistant 中间过程消息不会包含在 callback 里。
-
-`vibe hook send` 仅作为 deprecated 兼容入口保留。新的自动化入口应使用
-`vibe agent run`。
 
 对于新建或 fork 的 Session，如果希望 Run 结束后释放 Agent runtime，同时保留
 Session、transcript 和 Run 记录，可以使用 `--close-after`。它不能和
@@ -454,26 +579,42 @@ vibe watch resume <watch-id>
 vibe watch remove <watch-id>
 ```
 
-`vibe task list` 和 `vibe watch list` 默认每页返回 20 条定义；还有下一页时，
-响应会包含 `pagination.next_command`。默认隐藏成功结束的一次性定义；使用
+`vibe task list` 和 `vibe watch list` 默认读取调用方 Session（见
+[Session 归属的列表](#session-归属的列表)），每页返回 20 条定义；还有下一页时，
+响应会包含 `pagination.next_command`。已启用的定义排在前面，每组内按最近活动时间倒序。
+`--q <text>` 搜索与 Workbench 搜索相同的文本字段（id、名称、Agent、Session、message
+和命令），并会带进 `next_command`。默认隐藏成功结束的一次性定义；使用
 `--include-finished` 分页查看历史。列表输出始终有上限，不提供无分页的 `--all` 模式。
 task 和 watch 命令用 `definition` 表示单条记录、用 `definitions` 表示列表，
 不会再通过命令专属别名重复输出同一份记录。
-list 和 show 与 Workbench 读取同一份 Harness 投影：`lifecycle_state`、
-`lifecycle_detail`、`next_run_at`、`waiting_since` 和 `running_since`；
-watch 还会返回 `process_alive`。对 watch 来说，`process_alive: null`
-表示从未观测到 waiter runtime，`false` 表示曾观测到的 waiter 已退出。
-旧的 `state` 和 task 的 `last_status` 仅作为兼容展示字段保留，不定义 lifecycle。
+
+list 和 show 与 Workbench 读取同一份 Harness 投影：`lifecycle_state` 就是 lifecycle；
+已结束的定义带 `lifecycle_detail` 和 `lifecycle_finished_at`，仍在进行的定义带
+`next_run_at`、`waiting_since` 或 `running_since`。列表行用 `message_preview` 或
+`command_preview` 标识未命名的定义，并携带 `last_error` 和非零的 `last_exit_code`。
+列表行和 `show` 只有当结论不是 `healthy` 时才输出 `health`（watch 还有
+`processing_health`），失败计数只在非零时输出。
+只有已启用 watch 的已观测 waiter 退出时，watch 行才会附带 `process_alive: false`；
+`vibe watch show` 输出观测到的 `process_alive` 和 `runtime`，从未观测到 waiter 时两者都省略。
+task 和 watch 的 add、update、pause、resume 输出与 `show` 相同的 `definition`，
+有警告时再附带 `warnings`。
+
+`vibe task show` 和 `vibe watch show` 也能读取已删除的 definition：返回同一份投影，
+其中 `lifecycle_state: "removed"`，并带有 `removed_at`。列表从不包含已删除的
+definition。对已删除的 definition 执行 `pause`、`resume`、`update`、`run` 或
+`remove` 会以 `task_removed` / `watch_removed` 失败，`details.removed_at` 给出删除
+时间；`task_not_found` / `watch_not_found` 表示该 id 从未存在。
 
 waiter 命令放在 `--` 后面；或者通过 `--shell` 传入一整段 shell 字符串。
 完整参数请看 `vibe watch add --help`，包括 `--timeout`、`--lifetime-timeout`、
 `--forever`、`--retry-exit-code`、`--retry-delay`、`--name` 和 session creation 参数。
-watch 与 `vibe task`、`vibe agent run` 共用 `--session-id`、`--create-session`、
-`--same-scope` 和 `--scope-id` 语义；`--create-session-per-run`
-只属于 `vibe task` 和 `vibe watch` 这类 stored definitions。需要可管理、可暂停、可查看的
+watch 与 `vibe task` 共用 `--session-id`、`--create-session`、
+`--create-session-per-run`、`--same-scope` 和 `--scope-id` 语义；`vibe agent run`
+在没有 `--session-id` 也没有 fork 时总会新建 Session。需要可管理、可暂停、可查看的
 后台等待任务时，优先使用 `vibe watch`，不要随手起 `nohup`。
 `--timeout` 默认是 21600 秒；显式传入 `--timeout 0` 会关闭单次 cycle 的
-超时限制，任何正数值都会原样持久化。
+超时限制，任何正数值都会原样持久化。waiter 以 `--retry-exit-code` 中的退出码退出
+表示“仍在等待”：watch 把它记录为 `last_exit_code`，`last_error` 只留给真正的失败。
 
 ### `vibe version`
 
@@ -481,6 +622,7 @@ watch 与 `vibe task`、`vibe agent run` 共用 `--session-id`、`--create-sessi
 
 ```bash
 vibe version
+vibe version --json
 ```
 
 ### `vibe check-update`
@@ -489,6 +631,7 @@ vibe version
 
 ```bash
 vibe check-update
+vibe check-update --json
 ```
 
 ### `vibe upgrade`
@@ -505,6 +648,14 @@ vibe upgrade
 激活新版本时，所有已经选中 Avibe 安装的稳定 `vibe` 启动器会一起切换到新版本，
 因此任何 `PATH` 查找都不会留在旧版本上。指向其他位置的启动器永远不会被修改。
 参见 [Upgrading](UPGRADING.md#stable-launchers)。
+
+当 Avibe 运行在 uv 管理的 CPython 上时，升级会先用
+`uv python install --upgrade --no-bin` 把这个 Python 小版本更新到最新补丁版本，
+让 CPython 和 OpenSSL 的安全修复随 Avibe 版本一起到达。它不会改变小版本，也不会在
+`PATH` 中添加 `python3.x` 命令。与 `uv python upgrade` 相同，其他跟随该小版本托管
+Python 的 uv 环境也会一起使用新补丁。uv 只知道在它自身版本发布之前的补丁；uv 低于
+0.9.10、离线或下载失败时，升级会继续使用已安装的补丁，并在日志中说明原因。运行
+`uv self update` 即可获得更新的补丁。
 
 ## 服务生命周期
 

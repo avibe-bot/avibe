@@ -4,7 +4,7 @@ import { useDesktopWindowChrome } from '../../context/DesktopWindowChromeContext
 import { Fragment, forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Pencil, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
+import { Activity, ArrowLeft, ArrowRight, ArrowUpRight, Bell, Bot, ChevronDown, ChevronRight, Clock, Eye, GitFork, Image as ImageIcon, Info, Loader2, MapPin, MessageSquare, MessageSquareQuote, Terminal, Undo2, UploadCloud, X } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
@@ -21,7 +21,7 @@ import { readChatViewMode, writeChatViewMode } from '../../lib/chatViewMemory';
 import { normalizeChatMessageFontSize } from '../../lib/chatDisplay';
 import { setConfigField } from '../../lib/configMutations';
 import { annotationStandIn, annotationTitleKey, readAnnotationView } from '../../lib/annotationView';
-import { isAgentActivityBoundaryMessage, isRetriedFailureNotice, isRetryableFailureNotice, isTerminalAgentMessage, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
+import { isAgentActivityBoundaryMessage, isRetriedFailureNotice, isRetryableFailureNotice, isTerminalAgentMessage, offersContinueOnVibey, isTranscriptMessage, shouldRefreshAgentActivityForMessage } from '../../lib/chatMessageTypes';
 import { chatRowKind, drawsEmptyBodyPlaceholder, isAgentAuthored } from '../../lib/chatRowKind';
 import { useIosKeyboardInset } from '../../lib/useIosKeyboardInset';
 import { isProxyMediaUrl } from '../../lib/mediaProxy';
@@ -64,7 +64,7 @@ import {
 } from '../../lib/chatTrigger';
 import { AnnotationMessage } from './AnnotationMessage';
 import { FailureDetails } from './FailureDetails';
-import { FailureRetry } from './FailureRetry';
+import { FailureRetry, type FailureRetryOptions } from './FailureRetry';
 import { FailureNextStep } from './FailureNextStep';
 import { AGENT_BUBBLE, SYSTEM_BUBBLE, USER_BUBBLE } from './chatBubble';
 import { RoleAvatar } from './RoleAvatar';
@@ -86,7 +86,7 @@ import {
 } from './chatShortcuts';
 import { bindFrameChord } from '../apps/windowChords';
 import {
-  MobileChatSessionActionMenu,
+  ChatSessionActionMenu,
   type SessionActionDescriptor,
 } from './sessionActions';
 import { useSessionActions } from './useSessionActions';
@@ -159,7 +159,7 @@ import {
 } from '../../lib/agentActivity';
 import { errorMessage } from '@/lib/errorMessage';
 import { pendingInitialMessageHandoff } from '@/lib/chatInitialMessage';
-import { sessionAgentBackend, sessionAgentDisplayName } from './sessionAgentName';
+import { messageAuthorAgent, sessionAgentBackend, sessionAgentDisplayName } from './sessionAgentName';
 import { useModelHubRecovery } from '../../lib/modelHubRecovery';
 import { getBackendUiMeta } from '@/lib/agentBackends';
 
@@ -2248,16 +2248,21 @@ export const ChatPage: React.FC = () => {
     [sendMessage],
   );
 
-  const handleFailureRetry = useCallback(async (messageId: string): Promise<boolean> => {
+  const handleFailureRetry = useCallback(async (messageId: string, options?: FailureRetryOptions): Promise<boolean> => {
     const sid = sessionId;
     if (!sid || !writable) return false;
     setError(null);
     try {
       // A notice-bound action does not read, clear, or restore the composer.
+      // ``continueOnBackend`` moves the session to that backend's built-in Agent
+      // first, in the same server transaction as the retry.
       const response = await apiFetch(`/api/sessions/${encodeURIComponent(sid)}/messages`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ retry_for: messageId }),
+        body: JSON.stringify({
+          retry_for: messageId,
+          ...(options?.continueOnBackend ? { continue_on_backend: options.continueOnBackend } : {}),
+        }),
       });
       const body = await response.json().catch(() => null);
       if (sid !== sessionIdRef.current) return false;
@@ -2286,6 +2291,8 @@ export const ChatPage: React.FC = () => {
         else appendMessage(body as WorkbenchMessage);
       }
       void refreshQueue();
+      // The header shows the Agent the session moved to.
+      if (options?.continueOnBackend) void refreshSessionRow();
       return ['queued', 'claimed', 'accepted'].includes(body?.delivery_state ?? body?.state ?? '');
     } catch (err) {
       if (sid === sessionIdRef.current) setError(errorMessage(err) ?? t('chat.retryFailed'));
@@ -2293,7 +2300,7 @@ export const ChatPage: React.FC = () => {
     } finally {
       if (sid === sessionIdRef.current) void syncTurnStateRef.current?.();
     }
-  }, [sessionId, writable, api, appendMessage, reloadLatestMessages, refreshQueue, t]);
+  }, [sessionId, writable, api, appendMessage, reloadLatestMessages, refreshQueue, refreshSessionRow, t]);
 
   const stopMessage = useCallback(async () => {
     if (!sessionId || !working) return;
@@ -2923,9 +2930,7 @@ export const ChatPage: React.FC = () => {
           agents={agents}
           defaultAgentName={defaultAgentName}
           onPatch={patch}
-          patchSaving={patchSaving}
           onBack={goBack}
-          working={working}
           showPageMode={showPageActive}
           showPageBusy={showPageBusy}
           onToggleShowPage={toggleShowPage}
@@ -2986,6 +2991,7 @@ export const ChatPage: React.FC = () => {
           session={session}
           agentDisplayName={agentDisplayName}
           agentBackend={agentBackend}
+          agents={agents}
           working={working}
           modelRecovery={runtimeState.model_recovery}
           hasOlder={!!olderCursor}
@@ -3080,6 +3086,18 @@ export const ChatPage: React.FC = () => {
           onSearchAgents={searchAgents}
           onSearchSessions={searchSessions}
           readOnlyReason={readOnlyReason}
+          // Hidden with the rest of the chat surface in Show Page mode, which is
+          // also where the header used to withdraw the picker.
+          actions={writable ? (
+            <ChatRoutePicker
+              session={session}
+              agents={agents}
+              defaultAgentName={defaultAgentName}
+              onPatch={patch}
+              patchSaving={patchSaving}
+              working={working}
+            />
+          ) : null}
         />}
       </div>
       {/* Archive confirm — mounted at the chat surface (not inside the header's
@@ -3490,7 +3508,13 @@ export const QueueStrip: React.FC<{
 }> = ({ queue, onRemove, onRecall, onSendNow, sendingNow = false }) => {
   const { t } = useTranslation();
   if (queue.length === 0) return null;
-  const retryRequired = queue.some((item) => item.requires_explicit_retry === true);
+  const held = queue.filter((item) => item.requires_explicit_retry === true);
+  const retryRequired = held.length > 0;
+  // An input held because its Agent cannot run, whose notice offers Continue on Vibey
+  // (``agent_unavailable``), is continued there rather than by fixing a startup error.
+  // Any other hold keeps the general guidance, so the special copy needs every hold to
+  // share the reason.
+  const agentUnavailable = retryRequired && held.every((item) => item.retry_reason === 'agent_unavailable');
   const headFenced = isQueueDeliveryFenced(queue[0]);
   const reconciling = queue[0].state === 'reconciling_steer';
   const busy = sendingNow || headFenced;
@@ -3529,7 +3553,11 @@ export const QueueStrip: React.FC<{
         {reconciling && (
           <p role="status" className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.sendReconciling')}</p>
         )}
-        {retryRequired && <p className="px-1 pb-1.5 text-[11px] text-muted">{t('chat.queue.retryHint')}</p>}
+        {retryRequired && (
+          <p className="px-1 pb-1.5 text-[11px] text-muted">
+            {t(agentUnavailable ? 'chat.queue.retryHintAgentUnavailable' : 'chat.queue.retryHint')}
+          </p>
+        )}
         <div
           data-queue-batch="true"
           className="flex max-h-32 flex-col overflow-y-auto rounded-lg bg-surface-2"
@@ -3545,6 +3573,8 @@ export const QueueStrip: React.FC<{
 
 interface ComposeProps {
   composerRef: React.Ref<ComposerHandle>;
+  /** The live route picker for the composer's action row; null when read-only. */
+  actions: React.ReactNode;
   readLatestAgentReply: ComposerProps['readLatestAgentReply'];
   onSend: (text: string, attachments?: ComposerAttachment[], references?: MentionReference[]) => void;
   onStop: () => void;
@@ -3560,7 +3590,7 @@ interface ComposeProps {
   readOnlyReason: SessionReadOnlyReason | null;
 }
 
-const Compose: React.FC<ComposeProps> = ({ composerRef, readLatestAgentReply, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason }) => {
+const Compose: React.FC<ComposeProps> = ({ composerRef, actions, readLatestAgentReply, onSend, onStop, busy, sessionId, initialDraft, onDraftChange, onSearchAgents, onSearchSessions, readOnlyReason }) => {
   const { t } = useTranslation();
   const readOnly = readOnlyReason !== null;
   return (
@@ -3583,6 +3613,8 @@ const Compose: React.FC<ComposeProps> = ({ composerRef, readLatestAgentReply, on
         onSearchAgents={onSearchAgents}
         onSearchSessions={onSearchSessions}
         readLatestAgentReply={readLatestAgentReply}
+        layout="stacked"
+        actions={actions}
         // Read-only archived session: reuse the composer's own disabled +
         // placeholder props rather than swapping in a notice bar. ``busy`` is NOT
         // reliably false here — archive commits before the controller turn is
@@ -3612,16 +3644,91 @@ interface TitleFieldHandle {
   startEditing: () => void;
 }
 
+interface ChatRoutePickerProps {
+  session: WorkbenchSession;
+  agents: VibeAgentBrief[];
+  defaultAgentName: string | null;
+  // Applies to the local row first, then persists — never awaited by the picker.
+  onPatch: (changes: Partial<WorkbenchSession>) => void;
+  /** A queued ``onPatch`` write is still in flight. */
+  patchSaving?: boolean;
+  working: boolean;
+}
+
+// The live session's agent/model/effort picker, hosted by the composer's action
+// row: the route is "who answers the next message", so it sits beside Send.
+// Read-only sessions never mount it — their header names the frozen route.
+const ChatRoutePicker: React.FC<ChatRoutePickerProps> = ({ session, agents, defaultAgentName, onPatch, patchSaving, working }) => {
+  const { t } = useTranslation();
+  const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
+  // Mirrors update_session's guard. A session with a NATIVE conversation can
+  // still move to another backend: the server replaces the conversation and
+  // hands the next turn a handoff (docs/plans/2026-10-22-session-backend-switch.md).
+  // It stays on its backend while a turn is RUNNING (the in-flight turn binds
+  // its native on the current route any moment), as a pending fork, and for
+  // good once it has a Vibey conversation: Vibey is where a session can move
+  // to, never from. A bound session also has no "default" choice, which would
+  // clear it to a blank backend. A locked session with a KNOWN backend keeps
+  // the picker open for same-backend agent/model changes; locked with a BLANK
+  // backend (the global-default route mid-turn) has no valid choice at all —
+  // every concrete pick would 409 — so the picker disables until the turn
+  // settles. Idle blank-backend rows with a native (legacy, pre-backfill) stay
+  // enabled: the server allows their one-time "initial pin".
+  const concreteBackend = session.agent_backend?.trim() || null;
+  const nativeBound = Boolean(session.native_session_id);
+  const pendingForkBackend =
+    !session.native_session_id &&
+    session.metadata?.created_via === 'session_fork' &&
+    typeof session.metadata?.fork_source_backend === 'string'
+      ? session.metadata.fork_source_backend.trim() || null
+      : null;
+  const backendLocked =
+    (nativeBound && concreteBackend === 'vibey') || working || Boolean(pendingForkBackend);
+  const pinnedBackend = pendingForkBackend ?? (backendLocked ? concreteBackend : null);
+  const canClearToDefault = !backendLocked && !nativeBound;
+  const pickerDisabled = working && !concreteBackend && !pendingForkBackend;
+  const defaultRoute = defaultAgent
+    ? {
+        agent_name: defaultAgent.name,
+        agent_id: defaultAgent.id,
+        agent_backend: defaultAgent.backend,
+        agent_variant: defaultAgent.backend,
+        model: defaultAgent.model,
+        reasoning_effort: defaultAgent.reasoning_effort,
+      }
+    : undefined;
+  const inheritsDefault = !session.agent_name && !session.agent_backend;
+  return (
+    <AgentRoutePicker
+      presentation="compact"
+      value={session}
+      agents={agents}
+      onChange={onPatch}
+      saving={patchSaving}
+      disabled={pickerDisabled}
+      allowedBackends={pinnedBackend ? [pinnedBackend] : undefined}
+      defaultLabel={
+        canClearToDefault
+          ? defaultAgent
+            ? t('newSession.defaultAgentNamed', { name: defaultAgent.name })
+            : t('newSession.defaultAgent')
+          : undefined
+      }
+      defaultRoute={defaultRoute}
+      isDefaultRoute={inheritsDefault}
+      triggerClassName="max-w-[min(60vw,360px)]"
+      align="end"
+    />
+  );
+};
+
 interface ChatHeaderBarProps {
   session: WorkbenchSession;
   agents: VibeAgentBrief[];
   defaultAgentName: string | null;
   // Applies to the local row first, then persists — never awaited by the header.
   onPatch: (changes: Partial<WorkbenchSession>) => void;
-  /** A queued ``onPatch`` write is still in flight. */
-  patchSaving?: boolean;
   onBack: () => void;
-  working: boolean;
   // The EFFECTIVE mode (ChatPage passes ``showPageActive``): whether the page is
   // actually framed right now, which a read-only session is never.
   showPageMode: boolean;
@@ -3643,19 +3750,18 @@ interface ChatHeaderBarProps {
   canManageShowPage?: boolean;
   canManageInstance?: boolean;
   canPinToDock?: boolean;
-  // Shared session actions, rendered behind the mobile-only ⋯ at the far right.
-  // Empty (or absent) withdraws the trigger — which is what a read-only session
-  // yields, since every one of those writes is refused.
+  // Shared session actions, rendered behind a ⋯ beside the title on desktop and
+  // at the far right of the compact mobile bar. Empty (or absent) withdraws the
+  // trigger — which is what a read-only session yields, since every one of those
+  // writes is refused.
   sessionActions?: SessionActionDescriptor[];
   // Lets the menu's Rename row focus the title field that already lives here.
   titleFieldRef?: React.Ref<TitleFieldHandle>;
 }
 
 // Exported for the read-only regression test (ChatArchivedReadOnly.test.tsx),
-// which renders the header alone rather than mounting the whole page. Note the
-// live (non-readOnly) header pulls in AgentRoutePicker → useApi, so only the
-// read-only rendering is reachable without an ApiProvider.
-export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, patchSaving, onBack, working, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, canPinToDock = false, sessionActions, titleFieldRef }) => {
+// which renders the header alone rather than mounting the whole page.
+export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, defaultAgentName, onPatch, onBack, showPageMode, showPageBusy, onToggleShowPage, onPrepareShowPageLaunch, onShowPageVisibilityChange, onShareOpenChange, annotation, onAnnotateOpenChange, readOnlyReason, writable = readOnlyReason === null, showPageAccess = null, canOpenShowPage = true, canManageShowPage = true, canManageInstance = false, canPinToDock = false, sessionActions, titleFieldRef }) => {
   const { t } = useTranslation();
   const windowChrome = useDesktopWindowChrome();
   const readOnly = !writable;
@@ -3669,46 +3775,15 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
   // ``!readOnly`` twice over: useSessionActions already yields an empty list for a
   // read-only session, and the withdrawal is re-stated here so this header cannot
   // grow a ⋯ full of guaranteed-409 rows if a future caller passes actions anyway.
-  const mobileSessionActions = sessionActions ?? [];
-  const hasMobileSessionActions = writable && mobileSessionActions.length > 0;
+  const headerSessionActions = sessionActions ?? [];
+  const hasSessionActions = writable && headerSessionActions.length > 0;
   const defaultAgent = defaultAgentName ? agents.find((agent) => agent.name === defaultAgentName) : null;
   const sessionAgentLabel = sessionAgentDisplayName(session, agents);
-  // Backend locks once a NATIVE conversation exists — a native can only be
-  // resumed by the backend that created it — or while a turn is RUNNING (the
-  // in-flight turn binds its native on the current route any moment); mirrors
-  // update_session's guard. Until then a session may carry a project-default
-  // backend, but the user can still re-route it to any backend or clear back
-  // to the default. A locked session with a KNOWN backend keeps the picker
-  // open for same-backend agent/model changes; locked with a BLANK backend
-  // (the global-default route mid-turn) has no valid choice at all — every
-  // concrete pick would 409 — so the picker disables until the turn settles.
-  // Idle blank-backend rows with a native (legacy, pre-backfill) stay enabled:
-  // the server allows their one-time "initial pin".
-  const concreteBackend = session.agent_backend?.trim() || null;
-  const pendingForkBackend =
-    !session.native_session_id &&
-    session.metadata?.created_via === 'session_fork' &&
-    typeof session.metadata?.fork_source_backend === 'string'
-      ? session.metadata.fork_source_backend.trim() || null
-      : null;
-  const backendLocked = Boolean(session.native_session_id) || working || Boolean(pendingForkBackend);
-  const pinnedBackend = pendingForkBackend ?? (backendLocked ? concreteBackend : null);
-  const canClearToDefault = !backendLocked;
-  const pickerDisabled = working && !concreteBackend && !pendingForkBackend;
-  const defaultRoute = defaultAgent
-    ? {
-        agent_name: defaultAgent.name,
-        agent_id: defaultAgent.id,
-        agent_backend: defaultAgent.backend,
-        agent_variant: defaultAgent.backend,
-        model: defaultAgent.model,
-        reasoning_effort: defaultAgent.reasoning_effort,
-      }
-    : undefined;
-  const inheritsDefault = !session.agent_name && !session.agent_backend;
   const header = (
     // A single compact row (design.pen IDQ5n): back button + click-to-edit
-    // title on the left, the agent/model/effort picker on the right. The bar
+    // title and the session menu on the left, page controls on the right. The
+    // live agent/model/effort picker sits in the composer's action row (see
+    // ChatRoutePicker); a read-only session names its frozen route here. The bar
     // runs edge-to-edge (the page root cancels the shell padding) with a
     // hairline bottom border separating it from the scrolling transcript.
     // No project-id pill and no override banner — both were noise the user
@@ -3738,9 +3813,20 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
           onCommit={(title) => onPatch({ title })}
           readOnly={readOnly}
         />
+        {/* Desktop: the session menu belongs to the session's name, so it sits
+            right after the title rather than among the page-level controls on
+            the right. Mobile keeps its own trigger at the far right below. */}
+        {hasSessionActions && (
+          <ChatSessionActionMenu
+            actions={headerSessionActions}
+            label={t('workbench.sessionActions')}
+            viewport="wide"
+          />
+        )}
         {/* Hidden while the Show Page is open so the view gets the full width.
             On a read-only session the route is frozen, so show it as static text
-            plus a badge naming WHY instead of an interactive picker. A runtime-owned
+            plus a badge naming WHY; a live session picks its route in the
+            composer instead. A runtime-owned
             row has no backend at all (``agent_backend`` is empty by design), so the
             agent name — which would fall back to the default agent's, naming a route
             this session will never run — is omitted there rather than invented. */}
@@ -3758,26 +3844,6 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
             )}
           </div>
         )}
-        {!showPageMode && !readOnly && (
-          <AgentRoutePicker
-            value={session}
-            agents={agents}
-            onChange={onPatch}
-            saving={patchSaving}
-            disabled={pickerDisabled}
-            allowedBackends={pinnedBackend ? [pinnedBackend] : undefined}
-            defaultLabel={
-              canClearToDefault
-                ? defaultAgent
-                  ? t('newSession.defaultAgentNamed', { name: defaultAgent.name })
-                  : t('newSession.defaultAgent')
-                : undefined
-            }
-            defaultRoute={defaultRoute}
-            isDefaultRoute={inheritsDefault}
-            compactMobile
-          />
-        )}
         {/* Chat hides the brand header, so mount the install nudge here too —
             IM-launched users often land straight in a chat. Renders only on iOS
             Safari + not-installed; null otherwise. */}
@@ -3789,7 +3855,7 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
             back-to-chat button. */}
         {/* In Show Page mode the order is: annotation control, launch/back, Share.
             Share exists only there — never on the plain chat header. */}
-        {(showLaunchControl || showShareControl || hasMobileSessionActions) && (
+        {(showLaunchControl || showShareControl || hasSessionActions) && (
           <div className="ml-auto flex items-center gap-1.5">
             {showPageActions.annotate && writable && (
               <ShowPageAnnotateControl
@@ -3821,13 +3887,11 @@ export const ChatHeaderBar: React.FC<ChatHeaderBarProps> = ({ session, agents, d
                 onOpenChange={onShareOpenChange}
               />
             )}
-            {/* The chat-level session menu is a compact-mobile affordance. Desktop
-                keeps these operations in the sidebar instead of duplicating a
-                second menu in the page header. */}
-            {hasMobileSessionActions && (
-              <MobileChatSessionActionMenu
-                actions={mobileSessionActions}
+            {hasSessionActions && (
+              <ChatSessionActionMenu
+                actions={headerSessionActions}
                 label={t('workbench.sessionActions')}
+                viewport="compact"
               />
             )}
           </div>
@@ -3883,14 +3947,16 @@ const TitleField = forwardRef<TitleFieldHandle, TitleFieldProps>(({ title, onCom
   }
 
   if (!editing) {
+    // A hover surface, not a trailing pencil, says "click to rename": the session
+    // menu sits right after the title, and a hidden pencil would hold a blank gap
+    // between the two.
     return (
       <button
         type="button"
         onClick={() => setEditing(true)}
-        className="group inline-flex min-w-0 items-center gap-2 truncate text-left text-[16px] font-bold text-foreground hover:text-foreground"
+        className="-mx-1.5 inline-flex min-w-0 items-center truncate rounded-md px-1.5 py-0.5 text-left text-[16px] font-bold text-foreground transition-colors hover:bg-foreground/[0.05]"
       >
         <span className="truncate">{title || t('chat.untitled')}</span>
-        <Pencil className="size-3.5 shrink-0 text-muted opacity-0 transition-opacity group-hover:opacity-100" />
       </button>
     );
   }
@@ -3937,12 +4003,16 @@ function transcriptOwnsUpwardInput(target: EventTarget, root: HTMLElement): bool
   return true;
 }
 
+const NO_AGENTS: VibeAgentBrief[] = [];
+
 interface TranscriptProps {
   messages: WorkbenchMessage[];
   session: WorkbenchSession;
   agentDisplayName: string | null;
   /** The backend the replies come from, resolved through an inherited default. */
   agentBackend?: string | null;
+  /** The Agents a reply's recorded author is resolved against (``messageAuthorAgent``). */
+  agents?: VibeAgentBrief[];
   working: boolean;
   modelRecovery?: SessionRuntimeState['model_recovery'];
   hasOlder: boolean;
@@ -3958,7 +4028,7 @@ interface TranscriptProps {
   highlightedId: string | null;
   messageFontSize: number;
   onQuickReply: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
-  onFailureRetry?: (messageId: string) => Promise<boolean>;
+  onFailureRetry?: (messageId: string, options?: FailureRetryOptions) => Promise<boolean>;
   provisionRequestsByMessage: Map<string, VaultRequest[]>;
   onVaultRequestResolved: () => void;
   // Chat-selection toolbar: quote the selection into the composer, or fork +
@@ -4008,6 +4078,7 @@ export const Transcript: React.FC<TranscriptProps> = ({
   session,
   agentDisplayName,
   agentBackend = null,
+  agents = NO_AGENTS,
   working,
   modelRecovery,
   hasOlder,
@@ -4548,14 +4619,16 @@ export const Transcript: React.FC<TranscriptProps> = ({
             // just below the turn's trigger).
             const before = activity?.enabled ? activity.beforeAnchor.get(message.id) : undefined;
             const after = activity?.enabled ? activity.afterAnchor.get(message.id) : undefined;
+            // A reply keeps the Agent that wrote it, which a switch may have replaced.
+            const author = message.author === 'agent' ? messageAuthorAgent(message, agents) : null;
             return (
               <Fragment key={message.id}>
                 {before?.map((group) => renderActivityChip(group))}
                 <MessageRow
                   message={message}
                   session={session}
-                  agentDisplayName={agentDisplayName}
-                  agentBackend={agentBackend}
+                  agentDisplayName={author ? author.displayName : agentDisplayName}
+                  agentBackend={author?.backend ?? agentBackend}
                   messageFontSize={messageFontSize}
                   onQuickReply={onQuickReply}
                   onFailureRetry={onFailureRetry}
@@ -4695,7 +4768,7 @@ type MessageRowProps = {
   agentBackend?: string | null;
   messageFontSize: number;
   onQuickReply?: (messageId: string, choice: string) => boolean | void | Promise<boolean | void>;
-  onFailureRetry?: (messageId: string) => Promise<boolean>;
+  onFailureRetry?: (messageId: string, options?: FailureRetryOptions) => Promise<boolean>;
   retryDisabled?: boolean;
   vaultRequests?: VaultRequest[];
   onVaultRequestResolved?: () => void;
@@ -4939,8 +5012,13 @@ export const MessageRow = memo(function MessageRow({
             </span>
           </div>
           <div className="flex flex-wrap items-center gap-1.5 empty:hidden">
-            <FailureNextStep message={message} />
-            {onFailureRetry && (
+            <FailureNextStep
+              message={message}
+              readOnly={readOnly}
+              disabled={retryDisabled}
+              onRetry={onFailureRetry}
+            />
+            {onFailureRetry && !offersContinueOnVibey(message) && (
               <FailureRetry
                 message={message}
                 readOnly={readOnly}

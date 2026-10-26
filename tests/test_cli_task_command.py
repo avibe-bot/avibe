@@ -3,7 +3,6 @@ from __future__ import annotations
 import io
 import json
 import os
-import shlex
 import sqlite3
 import sys
 from contextlib import redirect_stderr
@@ -40,11 +39,6 @@ def _parse_task_add(argv: list[str]):
     return parser.parse_args(["task", "add", *argv])
 
 
-def _parse_hook_send(argv: list[str]):
-    parser = cli.build_parser()
-    return parser.parse_args(["hook", "send", *argv])
-
-
 def _parse_agent_run(argv: list[str]):
     parser = cli.build_parser()
     return parser.parse_args(["agent", "run", *argv])
@@ -77,7 +71,7 @@ def test_agent_enable_disable_cli_toggles_enabled_state(tmp_path: Path, capsys, 
         disabled_payload = json.loads(capsys.readouterr().out)
         assert disabled_payload["agent"]["enabled"] is False
 
-        assert cli.cmd_agent_list(_parse_agent(["list", "--brief"])) == 0
+        assert cli.cmd_agent_list(_parse_agent(["list"])) == 0
         assert json.loads(capsys.readouterr().out)["agents"] == []
 
         assert cli.cmd_agent_list(_parse_agent(["list", "--include-disabled"])) == 0
@@ -94,7 +88,7 @@ def test_disabled_agent_cannot_run(tmp_path: Path, sqlite_schema_db_factory) -> 
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex", enabled=False)
-    args = _parse_agent_run(["--agent", "worker", "--async", "--no-callback", "--message", "hello"])
+    args = _parse_agent_run(["--agent", "worker", "--no-callback", "--message", "hello"])
 
     with patch("vibe.cli._agent_store", return_value=agent_store):
         result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
@@ -205,13 +199,13 @@ def test_agent_remove_cli_archives_agent(tmp_path: Path, capsys, sqlite_schema_d
         payload = json.loads(capsys.readouterr().out)
         assert payload["removed_agent"] == "worker"
         assert payload["archived_agent"]["name"].startswith("_worker-")
-        assert payload["archived_agent"]["display_name"] == "worker"
+        assert payload["archived_agent"]["archived_at"]
         assert agent_store.get("worker") is None
     finally:
         agent_store.close()
 
 
-def test_agent_remove_cli_localizes_archive_refusal(tmp_path: Path, sqlite_schema_db_factory) -> None:
+def test_agent_remove_cli_archive_refusal_is_english_under_a_zh_ui(tmp_path: Path, sqlite_schema_db_factory) -> None:
     agent_store = cli.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
     try:
         agent_store.create(name="only-agent", backend="codex")
@@ -230,13 +224,13 @@ def test_agent_remove_cli_localizes_archive_refusal(tmp_path: Path, sqlite_schem
 
         assert result == 1
         assert payload["code"] == "agent_no_default_replacement"
-        assert payload["error"] == "没有其他已启用 Agent 时，无法归档默认 Agent `only-agent`。"
-        assert payload["hint"] == "归档当前默认 Agent 前，请保留另一个已启用 Agent。"
+        assert payload["error"] == "The default Agent `only-agent` cannot be archived without another enabled Agent."
+        assert payload["hint"] == "Keep another enabled Agent available when archiving the current default."
     finally:
         agent_store.close()
 
 
-def test_agent_remove_cli_localizes_invalid_reference_metadata() -> None:
+def test_agent_remove_cli_invalid_reference_metadata_is_english_under_a_zh_ui() -> None:
     def refuse_archive(_name):
         raise cli.AgentReferenceRewriteError()
 
@@ -252,11 +246,11 @@ def test_agent_remove_cli_localizes_invalid_reference_metadata() -> None:
 
     assert result == 1
     assert payload["code"] == "agent_reference_metadata_invalid"
-    assert payload["error"] == "任务或监控包含无效元数据，Avibe 无法更新 Agent 引用。"
-    assert payload["hint"] == "请修复或删除元数据异常的任务或监控，然后重试。"
+    assert payload["error"] == "Avibe cannot update Agent references because a task or watch contains invalid metadata."
+    assert payload["hint"] == "Repair or remove the malformed task or watch metadata, then try again."
 
 
-def test_agent_update_and_enable_localize_archived_edit_refusal(tmp_path: Path, sqlite_schema_db_factory) -> None:
+def test_agent_update_and_enable_archived_edit_refusal_is_english_under_a_zh_ui(tmp_path: Path, sqlite_schema_db_factory) -> None:
     agent_store = cli.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
     try:
         agent_store.create(name="archive-fallback", backend="codex")
@@ -279,8 +273,8 @@ def test_agent_update_and_enable_localize_archived_edit_refusal(tmp_path: Path, 
         for result, payload in ((update_result, update_payload), (enable_result, enable_payload)):
             assert result == 1
             assert payload["code"] == "agent_archived_read_only"
-            assert payload["error"] == f"Agent `{archived.archived_name}` 已归档，无法编辑。"
-            assert payload["hint"] == "已归档 Agent 为只读状态，仅供现有持久引用继续使用。"
+            assert payload["error"] == f"Agent `{archived.archived_name}` is archived and cannot be edited."
+            assert payload["hint"] == "Archived Agents are read-only and remain available only to existing durable references."
     finally:
         agent_store.close()
 
@@ -299,47 +293,32 @@ def test_agent_list_is_bounded_and_compact_by_default(tmp_path: Path, capsys, sq
 
     payload = json.loads(capsys.readouterr().out)
     assert len(payload["agents"]) == 20
-    assert "system_prompt" not in payload["agents"][0]
+    # The Agent's key and what it runs on; the unset effort and the default enabled
+    # state are absent.
+    stored = agent_store.get("worker-00")
+    assert payload["agents"][0] == {
+        "name": "worker-00",
+        "backend": "codex",
+        "model": stored.model,
+        "source": "user",
+        "updated_at": stored.updated_at,
+    }
     assert payload["pagination"]["next_command"] == "vibe agent list --page 2 --limit 20"
 
 
-def test_task_add_rejects_unsupported_platform() -> None:
-    args = _parse_task_add(
-        [
-            "--session-key",
-            "foo::channel::C123",
-            "--cron",
-            "0 * * * *",
-            "--message",
-            "hello",
-        ]
+def test_task_add_rejects_disabled_platform_even_with_credentials_present(
+    tmp_path: Path, monkeypatch, sqlite_schema_db_factory
+) -> None:
+    _bare_terminal_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(
+        tmp_path, sqlite_schema_db_factory, session_id="sesDiscord", platform="discord", scope_type="channel", scope_key="C123"
     )
-
-    with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack", "discord"})):
-        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
-
-    assert result == 1
-    assert payload["code"] == "unsupported_platform"
-    assert payload["details"]["requested_platform"] == "foo"
-    assert payload["help_command"] == "vibe task add --help"
-
-
-def test_task_add_rejects_disabled_platform_even_with_credentials_present() -> None:
-    args = _parse_task_add(
-        [
-            "--session-key",
-            "discord::channel::C123",
-            "--cron",
-            "0 * * * *",
-            "--message",
-            "hello",
-        ]
-    )
+    args = _parse_task_add(["--session-id", "sesDiscord", "--cron", "0 * * * *", "--message", "hello"])
 
     config = _configured_v2({"slack"})
     config.discord.bot_token = "configured-but-disabled"
 
-    with patch("vibe.cli._ensure_config", return_value=config):
+    with _cli_state(db_path, agent_store), patch("vibe.cli._ensure_config", return_value=config):
         result, payload = _capture_stderr_json(cli.cmd_task_add, args)
 
     assert result == 1
@@ -358,29 +337,7 @@ def test_supported_task_platforms_always_includes_avibe() -> None:
         assert "avibe" in cli._supported_task_platforms()
 
 
-def test_task_add_rejects_avibe_session_key() -> None:
-    # avibe passes the platform gate but a bare session KEY has no agent session
-    # id, so the reply couldn't attach to a workbench session — must be rejected
-    # (target workbench sessions by --session-id instead).
-    args = _parse_task_add(
-        [
-            "--session-key",
-            "avibe::channel::ses3chKBjP5hy",
-            "--cron",
-            "0 * * * *",
-            "--message",
-            "hello",
-        ]
-    )
-    config = _configured_v2({"slack"})
-    with patch("vibe.cli._ensure_config", return_value=config):
-        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
-
-    assert result == 1
-    assert payload["code"] == "avibe_requires_session_id"
-
-
-def test_task_help_describes_session_id_guidance(capsys) -> None:
+def test_task_help_examples_use_the_caller_session_default(capsys) -> None:
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc:
@@ -388,46 +345,27 @@ def test_task_help_describes_session_id_guidance(capsys) -> None:
 
     assert exc.value.code == 0
     captured = capsys.readouterr()
-    assert "Create, inspect, and control scheduled Agent messages for Avibe." in captured.out
-    assert "vibe task add --session-id sesk8m4q2p7x --cron '0 * * * *' --message" in captured.out
     assert "{add,update,list,show,pause,resume,run,remove}" in captured.out
+    assert "vibe task add --cron '0 * * * *' --message 'Share the hourly summary.'" in captured.out
+    assert "--session-id" not in captured.out
     assert "rm (remove)" not in captured.out
     assert "\n    ls" not in captured.out
 
 
-def test_task_add_help_includes_examples_and_threadless_guidance(capsys) -> None:
+def test_task_add_help_states_task_kinds_and_cron_weekday_names(capsys) -> None:
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc:
         parser.parse_args(["task", "add", "--help"])
 
     assert exc.value.code == 0
-    captured = capsys.readouterr()
-    assert "If this is your first time using this command, read this whole help entry before creating a task." in captured.out
-    assert "`--session-id` chooses which Agent Session Avibe will continue using when the task runs." in captured.out
-    assert "tasks continue this conversation by default" in captured.out
-    assert "--post-to" not in captured.out
-    assert "--same-scope" in captured.out
-    assert "--scope-id" in captured.out
-    assert "--deliver-key" not in captured.out
-    assert "Write cron weekdays as names (mon, tue, ... sun)." in captured.out
-
-
-def test_hook_send_help_describes_runtime_effects(capsys) -> None:
-    parser = cli.build_parser()
-
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["hook", "send", "--help"])
-
-    assert exc.value.code == 0
-    captured = capsys.readouterr()
-    assert "`vibe hook send` is a compatibility entrypoint." in captured.out
-    assert "New automation should use `vibe agent run`." in captured.out
-    assert "`vibe hook send` queues one deprecated asynchronous compatibility turn" in captured.out
-    assert "--post-to" not in captured.out
-    assert "`--message` and `--message-file` provide the one-shot async user message that will be queued immediately." in captured.out
-    assert "--session-id" in captured.out
-    assert "vibe agent run --session-id sesk8m4q2p7x --no-callback --message" in captured.out
+    text = " ".join(capsys.readouterr().out.split())
+    assert "A message task stores --message and sends it to the target Session on each run." in text
+    assert "A command task (--shell, or a command after '--') runs with no Agent turn." in text
+    assert "with --on-failure agent starts one Agent turn" in text
+    assert "Only that form takes Session, scope, or Agent flags." in text
+    assert "Write cron weekdays as names (mon ... sun): numbers are rejected" in text
+    assert "vibe task add --cron '0 9 * * mon-fri' --message" in text
 
 
 def test_task_list_help_mentions_completed_one_shots_hidden_by_default(capsys) -> None:
@@ -445,90 +383,36 @@ def test_task_list_help_mentions_completed_one_shots_hidden_by_default(capsys) -
     assert "--all" not in captured.out
 
 
-def test_task_update_help_includes_partial_update_guidance(capsys) -> None:
+def test_task_update_help_states_partial_update_and_kind_rules(capsys) -> None:
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc:
         parser.parse_args(["task", "update", "--help"])
 
     assert exc.value.code == 0
-    captured = capsys.readouterr()
-    assert "keeping its task ID" in captured.out
-    assert "--reset-delivery" in captured.out
-    assert "Unspecified fields keep their existing values." in captured.out
-    assert "Write cron weekdays as names (mon, tue, ... sun)." in captured.out
+    text = " ".join(capsys.readouterr().out.split())
+    assert "Unspecified fields keep their values." in text
+    assert "A message task cannot become a command task, or the reverse, and --on-failure cannot change" in text
+    assert "Write cron weekdays as names (mon ... sun); numbers are rejected." in text
 
 
-def test_hook_send_help_includes_examples_and_threadless_guidance(capsys) -> None:
-    parser = cli.build_parser()
-
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["hook", "send", "--help"])
-
-    assert exc.value.code == 0
-    captured = capsys.readouterr()
-    assert "`vibe hook send` queues one deprecated asynchronous compatibility turn" in captured.out
-    assert "--post-to" not in captured.out
-    assert "--deliver-key" not in captured.out
-    assert "--session-id" in captured.out
-    assert "vibe agent run --session-id sesk8m4q2p7x --no-callback" in captured.out
-
-
-def test_agent_run_help_includes_fork_session_guidance(capsys) -> None:
+def test_agent_run_help_states_session_callback_and_fork_rules(capsys) -> None:
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc:
         parser.parse_args(["agent", "run", "--help"])
 
     assert exc.value.code == 0
-    captured = capsys.readouterr()
-    assert "--fork-session FORK_SESSION" in captured.out
-    assert "--fork-self" in captured.out
-    assert "--sync" in captured.out
-    assert "--send-now" in captured.out
-    assert "--same-scope" in captured.out
-    assert "--scope-id" in captured.out
-    assert "--visible" in captured.out
-    assert "--deliver-key" not in captured.out
-    assert "Avibe Agent shell examples:" in captured.out
-    assert "Normal terminal examples:" in captured.out
-    assert "--fork-self forks this current Session." in captured.out
-    assert "Forks keep the same backend, scope, and cwd as the source Session." in captured.out
-    assert "vibe agent run --fork-self --message" in captured.out
-    assert "vibe agent run --session-id sesk8m4q2p7x --send-now --message" in captured.out
-    assert "vibe session queue list sesk8m4q2p7x" in captured.out
-    assert "vibe session queue remove sesk8m4q2p7x msg_queued123" in captured.out
-    assert "vibe session send-now sesk8m4q2p7x" in captured.out
-    assert "Agent runs are async by default. From an Avibe Agent shell, they return their final result to this conversation by default." in captured.out
-    assert "vibe agent run --agent release-reviewer --message 'Review the latest deployment result.'" in captured.out
-    assert (
-        "vibe agent run --agent release-reviewer --visible --message 'Review this project in a visible sibling Session.'"
-        in captured.out
-    )
-    assert (
-        "vibe agent run --agent release-reviewer --no-callback --message 'Review the latest deployment result.'"
-        not in captured.out
-    )
-    assert "vibe agent run --agent release-reviewer --same-scope --no-callback --message" not in captured.out
-    assert "From a normal terminal, pass --callback-session-id or --no-callback for async runs." in captured.out
-    assert "Review the latest CI result and print it here." in captured.out
-    assert "Review the latest CI result and report back." in captured.out
-    assert "--callback-session-id sescaller456 --message 'Review the latest CI result and report back.'" in captured.out
-    assert "--no-callback --message 'Review the latest CI result and report back.'" not in captured.out
-    assert "Do not combine fork flags with --session-id or --create-session." in captured.out
-    assert "--create-session-per-run" not in captured.out
-
-
-def test_agent_run_rejects_async_and_sync_together(capsys) -> None:
-    parser = cli.build_parser()
-
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["agent", "run", "--async", "--sync", "--message", "hello"])
-
-    assert exc.value.code == 2
-    payload = json.loads(capsys.readouterr().err)
-    assert payload["code"] == "invalid_arguments"
-    assert "not allowed with argument --async" in payload["error"]
+    text = " ".join(capsys.readouterr().out.split())
+    assert "Runs are async: the final result returns to the caller Session." in text
+    assert "Elsewhere, pass --callback-session-id, --no-callback, or --sync." in text
+    assert "--session-id ID Join this Session's running turn, or start one if idle" in text
+    assert "--queue With --session-id: wait for the running turn" in text
+    assert "Fork this Session's context, backend, scope, and cwd" in text
+    assert "Agent for a new Session (a fork: same backend only)" in text
+    assert "--model, --reasoning-effort, --visible, --same-scope, --scope-id, and --close-after apply only to a new or forked Session." in text
+    for jargon in ("P1", "P3", "native Turn", "steer"):
+        assert jargon not in text
 
 
 def test_agent_run_visible_sugar_sets_foreground_visibility() -> None:
@@ -537,81 +421,24 @@ def test_agent_run_visible_sugar_sets_foreground_visibility() -> None:
     assert args.visibility == "foreground"
 
 
-def test_agent_run_visible_conflicts_with_explicit_visibility(capsys) -> None:
-    parser = cli.build_parser()
-
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(
-            [
-                "agent",
-                "run",
-                "--agent",
-                "worker",
-                "--visible",
-                "--visibility",
-                "background",
-                "--message",
-                "hello",
-            ]
-        )
-
-    assert exc.value.code == 2
-    payload = json.loads(capsys.readouterr().err)
-    assert payload["code"] == "invalid_arguments"
-    assert "--visibility" in payload["error"]
-    assert "--visible" in payload["error"]
-
-
-def test_agent_run_runtime_rejects_async_and_sync_together() -> None:
-    args = SimpleNamespace(
-        agent="worker",
-        session_id=None,
-        fork_session=None,
-        fork_self=False,
-        create_session=False,
-        create_session_per_run=False,
-        same_scope=False,
-        scope_id=None,
-        deliver_key=None,
-        model=None,
-        reasoning_effort=None,
-        cwd=None,
-        post_to=None,
-        callback_session_id=None,
-        no_callback=True,
-        async_run=True,
-        sync_run=True,
-        wait_timeout=None,
-        message="hello",
-        message_file=None,
-        prompt=None,
-        prompt_file=None,
-    )
-
-    result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
-
-    assert result == 1
-    assert payload["code"] == "conflicting_wait_policy"
-
-
 def test_task_add_parse_error_is_structured_json(capsys) -> None:
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["task", "add", "--session-key", "slack::channel::C123"])
+        parser.parse_args(["task", "add", "--session-id", "sesk8m4q2p7x"])
 
     assert exc.value.code == 2
     payload = json.loads(capsys.readouterr().err)
     assert payload["code"] == "invalid_arguments"
     assert payload["help_command"] == "vibe task add --help"
-    assert "--session-key SESSION_KEY" in payload["usage"]
+    assert "--session-id ID" in payload["usage"]
 
 
-def test_task_remove_alias_parse_error_keeps_structured_guidance(capsys) -> None:
+def test_task_remove_parse_error_keeps_structured_guidance(capsys) -> None:
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["task", "rm"])
+        parser.parse_args(["task", "remove"])
 
     assert exc.value.code == 2
     payload = json.loads(capsys.readouterr().err)
@@ -620,111 +447,8 @@ def test_task_remove_alias_parse_error_keeps_structured_guidance(capsys) -> None
     assert "task_id" in payload["error"]
 
 
-def test_task_add_rejects_invalid_session_key_with_hint() -> None:
-    args = _parse_task_add(
-        [
-            "--session-key",
-            "slack::thread::123",
-            "--cron",
-            "0 * * * *",
-            "--message",
-            "hello",
-        ]
-    )
-
-    with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
-        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
-
-    assert result == 1
-    assert payload["code"] == "invalid_session_key"
-    assert payload["example"] == "slack::channel::C123"
-
-
-def test_task_add_rejects_conflicting_delivery_target_flags(capsys) -> None:
-    parser = cli.build_parser()
-
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(
-            [
-                "task",
-                "add",
-                "--session-key",
-                "slack::channel::C123",
-                "--post-to",
-                "channel",
-                "--deliver-key",
-                "slack::channel::C999",
-                "--cron",
-                "0 * * * *",
-                "--message",
-                "hello",
-            ]
-        )
-
-    assert exc.value.code == 2
-    payload = json.loads(capsys.readouterr().err)
-    assert payload["code"] == "invalid_arguments"
-    assert "not allowed with argument --post-to" in payload["error"]
-    assert payload["help_command"] == "vibe task add --help"
-
-
-def test_task_add_rejects_post_to_thread_without_thread_session_key() -> None:
-    args = _parse_task_add(
-        [
-            "--session-key",
-            "slack::channel::C123",
-            "--post-to",
-            "thread",
-            "--cron",
-            "0 * * * *",
-            "--message",
-            "hello",
-        ]
-    )
-
-    with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
-        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
-
-    assert result == 1
-    assert payload["code"] == "invalid_delivery_target"
-
-
-def test_task_add_rejects_cross_platform_deliver_key() -> None:
-    args = _parse_task_add(
-        [
-            "--session-key",
-            "slack::channel::C123",
-            "--deliver-key",
-            "discord::channel::C999",
-            "--cron",
-            "0 * * * *",
-            "--message",
-            "hello",
-        ]
-    )
-
-    with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack", "discord"})):
-        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
-
-    assert result == 1
-    assert payload["code"] == "invalid_delivery_target"
-    assert payload["details"] == {
-        "session_platform": "slack",
-        "delivery_platform": "discord",
-    }
-
-
 def test_task_add_rejects_invalid_cron_with_example() -> None:
-    args = _parse_task_add(
-        [
-            "--session-key",
-            "slack::channel::C123",
-            "--cron",
-            "bad cron",
-            "--message",
-            "hello",
-        ]
-    )
+    args = _parse_task_add(["--cron", "bad cron", "--shell", "true"])
 
     with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
         result, payload = _capture_stderr_json(cli.cmd_task_add, args)
@@ -749,7 +473,7 @@ def test_task_add_rejects_invalid_cron_with_example() -> None:
     ],
 )
 def test_task_add_rejects_numeric_weekday_naming_both_readings(cron: str, readings: str | None) -> None:
-    args = _parse_task_add(["--session-key", "slack::channel::C123", "--cron", cron, "--message", "hello"])
+    args = _parse_task_add(["--cron", cron, "--shell", "true"])
 
     with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
         result, payload = _capture_stderr_json(cli.cmd_task_add, args)
@@ -764,7 +488,7 @@ def test_task_add_rejects_numeric_weekday_naming_both_readings(cron: str, readin
 
 @pytest.mark.parametrize("cron", ["0 9 * * 5-1", "0 9 * * 0-7", "0 9 * * 7"])
 def test_task_add_reports_unparseable_numeric_weekday_as_invalid_cron(cron: str) -> None:
-    args = _parse_task_add(["--session-key", "slack::channel::C123", "--cron", cron, "--message", "hello"])
+    args = _parse_task_add(["--cron", cron, "--shell", "true"])
 
     with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
         result, payload = _capture_stderr_json(cli.cmd_task_add, args)
@@ -773,24 +497,9 @@ def test_task_add_reports_unparseable_numeric_weekday_as_invalid_cron(cron: str)
     assert payload["code"] == "invalid_cron"
 
 
-def test_task_add_numeric_weekday_rejection_follows_cli_language() -> None:
-    args = _parse_task_add(["--session-key", "slack::channel::C123", "--cron", "0 7 * * 6", "--message", "hello"])
-
-    with (
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._configured_cli_language", return_value="zh"),
-    ):
-        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
-
-    assert result == 1
-    assert payload["code"] == "ambiguous_cron_weekday"
-    assert "星期" in payload["error"]
-    assert "Avibe（APScheduler）解析为 sun；标准 crontab(5) 解析为 sat" in payload["hint"]
-
-
 @pytest.mark.parametrize("cron", ["0 7 * * sat", "0 9 * * mon-fri", "0 9 * * mon-sun/2", "0 9 1-7 * *", "*/5 * * * *"])
 def test_task_add_accepts_named_or_unrestricted_weekday(cron: str, capsys) -> None:
-    args = _parse_task_add(["--session-key", "slack::channel::C123", "--cron", cron, "--message", "hello"])
+    args = _parse_task_add(["--cron", cron, "--shell", "true"])
 
     with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
         assert cli.cmd_task_add(args) == 0
@@ -821,18 +530,7 @@ def test_task_update_rejects_numeric_weekday_and_keeps_stored_schedule(tmp_path:
 
 
 def test_task_add_rejects_invalid_timezone() -> None:
-    args = _parse_task_add(
-        [
-            "--session-key",
-            "slack::channel::C123",
-            "--cron",
-            "0 * * * *",
-            "--message",
-            "hello",
-            "--timezone",
-            "Mars/Base",
-        ]
-    )
+    args = _parse_task_add(["--cron", "0 * * * *", "--shell", "true", "--timezone", "Mars/Base"])
 
     with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
         result, payload = _capture_stderr_json(cli.cmd_task_add, args)
@@ -853,6 +551,43 @@ def test_task_show_missing_id_returns_guidance(tmp_path: Path) -> None:
     assert payload["help_command"] == "vibe task list"
 
 
+def test_removed_task_reads_as_removed_and_refuses_mutations(capsys) -> None:
+    store = cli.ScheduledTaskStore()
+    task = store.add_task(
+        name="Hourly summary",
+        session_key="slack::channel::C123",
+        prompt="recurring summary prompt",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="Asia/Shanghai",
+    )
+    assert store.remove_task(task.id) is True
+
+    assert cli.cmd_task_show(task.id) == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["id"] == task.id
+    assert definition["name"] == "Hourly summary"
+    assert definition["lifecycle_state"] == "removed"
+    # It will never fire again, so it carries no live state.
+    assert not {"enabled", "health", "next_run_at", "waiting_since"} & set(definition)
+    removed_at = definition["removed_at"]
+    assert removed_at
+
+    update_args = cli.build_parser().parse_args(["task", "update", task.id, "--name", "Renamed"])
+    mutations = [
+        (cli.cmd_task_set_enabled, (task.id, False)),
+        (cli.cmd_task_set_enabled, (task.id, True)),
+        (cli.cmd_task_update, (update_args,)),
+        (cli.cmd_task_run, (task.id,)),
+        (cli.cmd_task_remove, (task.id,)),
+    ]
+    for command, args in mutations:
+        result, payload = _capture_stderr_json(command, *args)
+        assert result == 1
+        assert payload["code"] == "task_removed"
+        assert payload["details"] == {"task_id": task.id, "removed_at": removed_at}
+
+
 def test_remote_editor_task_add_persists_authorization_context(
     tmp_path: Path,
     monkeypatch,
@@ -864,16 +599,7 @@ def test_remote_editor_task_add_persists_authorization_context(
     _bare_terminal_caller(monkeypatch)
     store_path = tmp_path / "scheduled_tasks.json"
     store = cli.ScheduledTaskStore(store_path)
-    args = _parse_task_add(
-        [
-            "--session-key",
-            "slack::channel::C123",
-            "--cron",
-            "0 * * * *",
-            "--message",
-            "hello",
-        ]
-    )
+    args = _parse_task_add(["--cron", "0 * * * *", "--shell", "true"])
     caller_env = {
         "AVIBE_SESSION_ID": "sesCaller",
         "AVIBE_RUN_ID": "runCaller",
@@ -900,7 +626,7 @@ def test_remote_editor_task_add_persists_authorization_context(
     ):
         result = cli.cmd_task_add(args)
 
-    assert result == 0
+    assert result == 0, capsys.readouterr().err
     payload = json.loads(capsys.readouterr().out)
     # Persisted for the deferred run, hidden from the projection it prints.
     assert "resource_user_context" not in payload["definition"]["metadata"]
@@ -968,8 +694,8 @@ def test_task_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pat
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["session_policy"] == "create_per_run"
-    assert payload["definition"]["deliver_key"] is None
-    assert payload["definition"]["cwd"] is None
+    assert store.get_task(payload["definition"]["id"]).deliver_key is None
+    assert "cwd" not in payload["definition"]
     assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-task"
     assert "session_workdir" not in payload["definition"]["metadata"]
     assert payload["definition"]["agent_name"] == "project-agent"
@@ -1002,11 +728,10 @@ def test_task_add_create_per_run_without_scope_records_standalone_definition(tmp
     assert result == 0
     task = json.loads(capsys.readouterr().out)["definition"]
     assert task["session_policy"] == "create_per_run"
-    assert task["session_id"] is None
-    assert task["deliver_key"] is None
-    assert task["cwd"] is None
-    assert "session_scope_id" not in task["metadata"]
-    assert "session_workdir" not in task["metadata"]
+    assert {"session_id", "cwd"}.isdisjoint(task)
+    assert store.get_task(task["id"]).deliver_key is None
+    assert "session_scope_id" not in task.get("metadata", {})
+    assert "session_workdir" not in task.get("metadata", {})
 
 
 def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
@@ -1073,7 +798,7 @@ def test_task_add_create_session_scope_id_supports_project_scope(tmp_path: Path,
     assert target.visibility == "foreground"
     assert target.suppress_delivery is False
     assert target.workdir == str(tmp_path)
-    assert payload["definition"]["cwd"] is None
+    assert "cwd" not in payload["definition"]
     assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-once-task"
     assert "session_workdir" not in payload["definition"]["metadata"]
 
@@ -1254,11 +979,8 @@ def test_task_add_defaults_target_to_caller_session(tmp_path: Path, capsys, sqli
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["session_id"] == "sesCaller"
     assert payload["definition"]["session_policy"] == "existing"
-    assert payload["session_default_notice"] == {
-        "code": "session_defaulted_to_caller",
-        "message": "Task target Session defaulted to this Agent Session.",
-        "session_id": "sesCaller",
-    }
+    # The defaulted target is the definition's session_id; no notice repeats it.
+    assert set(payload) == {"schema_version", "ok", "kind", "definition"}
 
 
 def test_task_add_rejects_scope_without_session_creation() -> None:
@@ -1361,19 +1083,22 @@ def test_task_list_hides_completed_one_shots_by_default(tmp_path: Path, capsys) 
     ) == "failed"
 
     with patch("vibe.cli._task_store", return_value=store):
-        result = cli.cmd_task_list()
+        result = cli.cmd_task_list(scope=cli.SessionListScope())
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     ids = [item["id"] for item in payload["definitions"]]
     assert done.id not in ids
     assert failed.id in ids
-    assert next(item for item in payload["definitions"] if item["id"] == failed.id)["state"] == "failed"
+    failed_row = next(item for item in payload["definitions"] if item["id"] == failed.id)
+    assert (failed_row["lifecycle_state"], failed_row["last_error"]) == ("finished", "delivery failed")
 
 
-def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys) -> None:
+def test_task_list_row_carries_only_decision_fields(tmp_path: Path, capsys) -> None:
+    """A list row is the compact projection: no nulls, zero counters, healthy verdicts or legacy keys."""
+
     store = cli.ScheduledTaskStore()
-    task = store.add_task(
+    named = store.add_task(
         name="Hourly summary",
         session_key="slack::channel::C123",
         prompt="recurring summary prompt",
@@ -1381,26 +1106,14 @@ def test_task_list_brief_returns_scheduling_focused_view(tmp_path: Path, capsys)
         cron="0 * * * *",
         timezone_name="Asia/Shanghai",
     )
-
-    with patch("vibe.cli._task_store", return_value=store):
-        result = cli.cmd_task_list(brief=True)
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    entry = payload["definitions"][0]
-    assert entry["id"] == task.id
-    assert entry["display_name"] == "Hourly summary"
-    assert "prompt" not in entry
-    assert entry["next_run_at"] is not None
-    assert entry["state"] == "active"
-
-
-def test_paused_recurring_task_keeps_failed_run_in_last_status(
-    tmp_path: Path,
-    capsys,
-) -> None:
-    store = cli.ScheduledTaskStore()
-    task = store.add_task(
+    unnamed = store.add_task(
+        session_key="slack::channel::C123",
+        prompt="Share   the nightly\nsummary.",
+        schedule_type="cron",
+        cron="0 3 * * *",
+        timezone_name="UTC",
+    )
+    paused = store.add_task(
         name="Paused after failure",
         session_key="slack::channel::C123",
         prompt="recurring",
@@ -1408,15 +1121,26 @@ def test_paused_recurring_task_keeps_failed_run_in_last_status(
         cron="0 * * * *",
         timezone_name="UTC",
     )
-    store.mark_task_result(task.id, error="delivery failed")
-    store.set_enabled(task.id, False)
+    store.mark_task_result(paused.id, error="delivery failed")
+    store.set_enabled(paused.id, False)
 
     with patch("vibe.cli._task_store", return_value=store):
-        assert cli.cmd_task_list(brief=True) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope()) == 0
 
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["definitions"][0]["state"] == "paused"
-    assert payload["definitions"][0]["last_status"] == "failed"
+    rows = {row["id"]: row for row in json.loads(capsys.readouterr().out)["definitions"]}
+    assert set(rows[named.id]) == {"id", "name", "kind", "schedule_summary", "lifecycle_state", "next_run_at"}
+    assert (rows[named.id]["name"], rows[named.id]["kind"], rows[named.id]["schedule_summary"]) == (
+        "Hourly summary",
+        "message",
+        "cron:0 * * * *",
+    )
+    assert rows[named.id]["lifecycle_state"] == "waiting"
+    # An unnamed task is labelled by what it does.
+    assert "name" not in rows[unnamed.id]
+    assert rows[unnamed.id]["message_preview"] == "Share the nightly summary."
+    assert rows[paused.id]["lifecycle_state"] == "paused"
+    assert rows[paused.id]["last_error"] == "delivery failed"
+    assert "next_run_at" not in rows[paused.id]
 
 
 def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
@@ -1432,7 +1156,7 @@ def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
         )
 
     with patch("vibe.cli._task_store", return_value=store):
-        result = cli.cmd_task_list(brief=True)
+        result = cli.cmd_task_list(scope=cli.SessionListScope())
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1444,16 +1168,24 @@ def test_task_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
         "returned": 20,
         "has_more": True,
         "next_page": 2,
-        "next_command": "vibe task list --page 2 --limit 20",
+        "next_command": "vibe task list --global --page 2 --limit 20",
     }
-    assert payload["message"].endswith("vibe task list --page 2 --limit 20")
+    assert "message" not in payload
 
 
-def test_task_list_keeps_enabled_tasks_ahead_of_paused_history(
+def test_task_list_orders_enabled_rows_first_then_newest_activity(
     tmp_path: Path,
     capsys,
 ) -> None:
     store = cli.ScheduledTaskStore()
+    older = store.add_task(
+        name="Older active",
+        session_key="slack::channel::C123",
+        prompt="older",
+        schedule_type="cron",
+        cron="0 * * * *",
+        timezone_name="UTC",
+    )
     for index in range(21):
         paused = store.add_task(
             name=f"Paused {index:02d}",
@@ -1464,22 +1196,23 @@ def test_task_list_keeps_enabled_tasks_ahead_of_paused_history(
             timezone_name="UTC",
         )
         store.set_enabled(paused.id, False)
-    active = store.add_task(
-        name="Active",
+    newer = store.add_task(
+        name="Newer active",
         session_key="slack::channel::C123",
-        prompt="active",
+        prompt="newer",
         schedule_type="cron",
         cron="0 * * * *",
         timezone_name="UTC",
     )
 
     with patch("vibe.cli._task_store", return_value=store):
-        assert cli.cmd_task_list(brief=True) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope()) == 0
 
     payload = json.loads(capsys.readouterr().out)
-    assert payload["definitions"][0]["id"] == active.id
-    assert payload["definitions"][0]["state"] == "active"
+    names = [row["name"] for row in payload["definitions"]]
+    assert names[:3] == ["Newer active", "Older active", "Paused 20"]
     assert payload["pagination"]["has_more"] is True
+    assert {row["id"] for row in payload["definitions"][:2]} == {older.id, newer.id}
 
 
 def test_task_list_cli_dispatches_pagination_flags(
@@ -1498,14 +1231,14 @@ def test_task_list_cli_dispatches_pagination_flags(
             timezone_name="UTC",
         )
 
-    monkeypatch.setattr(sys, "argv", ["vibe", "task", "list", "--limit", "2"])
+    monkeypatch.setattr(sys, "argv", ["vibe", "task", "list", "--global", "--limit", "2"])
     with patch("vibe.cli._task_store", return_value=store), pytest.raises(SystemExit) as exc:
         cli.main()
 
     assert exc.value.code == 0
     payload = json.loads(capsys.readouterr().out)
     assert len(payload["definitions"]) == 2
-    assert payload["pagination"]["next_command"] == "vibe task list --page 2 --limit 2"
+    assert payload["pagination"]["next_command"] == "vibe task list --global --page 2 --limit 2"
 
 
 def test_task_list_order_is_stable_across_cron_boundaries(
@@ -1542,7 +1275,7 @@ def test_task_list_order_is_stable_across_cron_boundaries(
     )
 
     with patch("vibe.cli._task_store", return_value=store):
-        assert cli.cmd_task_list(brief=True) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope()) == 0
 
     first_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["definitions"]]
 
@@ -1555,10 +1288,11 @@ def test_task_list_order_is_stable_across_cron_boundaries(
         lambda **kwargs: second_next_runs[str(kwargs["timezone_name"])],
     )
     with patch("vibe.cli._task_store", return_value=store):
-        assert cli.cmd_task_list(brief=True) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope()) == 0
 
     second_ids = [item["id"] for item in json.loads(capsys.readouterr().out)["definitions"]]
-    assert second_ids == first_ids == [later.id, earlier.id]
+    # Newest activity first -- ``earlier`` was written last -- whatever the next fire times say.
+    assert second_ids == first_ids == [earlier.id, later.id]
 
 
 def test_task_show_includes_derived_schedule_fields(tmp_path: Path, capsys) -> None:
@@ -1577,11 +1311,14 @@ def test_task_show_includes_derived_schedule_fields(tmp_path: Path, capsys) -> N
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["definition"]["display_name"] == "Hourly summary"
-    assert payload["definition"]["message_preview"] == "recurring summary prompt"
+    assert payload["definition"]["name"] == "Hourly summary"
+    assert payload["definition"]["message"] == "recurring summary prompt"
     assert payload["definition"]["next_run_at"] is not None
-    assert payload["definition"]["state"] == "active"
-    assert payload["definition"]["last_status"] == "never_run"
+    assert payload["definition"]["lifecycle_state"] == "waiting"
+    # Compatibility spellings and legacy duplicates are not printed.
+    assert {"state", "last_status", "display_name", "prompt", "session_key", "post_to", "deliver_key"}.isdisjoint(
+        payload["definition"]
+    )
 
 
 def test_task_list_include_finished_includes_completed_one_shots(tmp_path: Path, capsys) -> None:
@@ -1596,7 +1333,7 @@ def test_task_list_include_finished_includes_completed_one_shots(tmp_path: Path,
     store.mark_task_result(done.id, error=None)
 
     with patch("vibe.cli._task_store", return_value=store):
-        result = cli.cmd_task_list(include_finished=True)
+        result = cli.cmd_task_list(scope=cli.SessionListScope(), include_finished=True)
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1619,8 +1356,8 @@ def test_task_list_include_finished_keeps_history_paginated(tmp_path: Path, caps
 
     with patch("vibe.cli._task_store", return_value=store):
         result = cli.cmd_task_list(
+            scope=cli.SessionListScope(),
             include_finished=True,
-            brief=True,
             page_request=cli.PageRequest(page=1, limit=2),
         )
 
@@ -1629,7 +1366,7 @@ def test_task_list_include_finished_keeps_history_paginated(tmp_path: Path, caps
     assert len(payload["definitions"]) == 2
     assert payload["pagination"]["has_more"] is True
     assert payload["pagination"]["next_command"] == (
-        "vibe task list --include-finished --page 2 --limit 2"
+        "vibe task list --global --include-finished --page 2 --limit 2"
     )
 
 
@@ -1654,8 +1391,9 @@ def test_task_run_enqueues_request(tmp_path: Path, capsys) -> None:
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is True
-    assert payload["task_id"] == task.id
-    assert (request_root / "pending" / f"{payload['execution_id']}.json").exists()
+    assert set(payload) == {"schema_version", "ok", "kind", "run"}
+    assert payload["run"]["definition_id"] == task.id
+    assert (request_root / "pending" / f"{payload['run']['id']}.json").exists()
 
 
 def test_task_run_enqueues_manual_rerun_for_retired_one_shot(
@@ -1692,7 +1430,7 @@ def test_task_run_enqueues_manual_rerun_for_retired_one_shot(
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    manual = requests.get_run(payload["execution_id"])
+    manual = requests.get_run(payload["run"]["id"])
     assert manual is not None and manual["source_kind"] == "cli"
     assert "task_schedule_consumed" not in manual["metadata"]
     current = cli.ScheduledTaskStore().get_task(task.id)
@@ -1749,7 +1487,7 @@ def test_task_update_modifies_existing_task_without_changing_id(tmp_path: Path, 
     assert payload["definition"]["id"] == task.id
     assert payload["definition"]["name"] == "Morning summary"
     assert payload["definition"]["cron"] == "*/30 * * * *"
-    assert payload["definition"]["prompt"] == "updated"
+    assert payload["definition"]["message"] == "updated"
 
 
 def test_task_update_rejects_agent_together_with_clear_agent(tmp_path: Path, sqlite_schema_db_factory) -> None:
@@ -2379,59 +2117,6 @@ def test_task_update_create_session_preserves_existing_cwd_without_cwd_flag(tmp_
     assert payload["definition"]["session_id"] != "sesOld"
 
 
-def test_task_update_session_key_clears_previous_session_id(tmp_path: Path, capsys) -> None:
-    store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
-    task = store.add_task(
-        session_key="",
-        session_id="sesk8m4q2p7x",
-        prompt="hello",
-        schedule_type="cron",
-        cron="0 * * * *",
-        timezone_name="Asia/Shanghai",
-    )
-    parser = cli.build_parser()
-    args = parser.parse_args(["task", "update", task.id, "--session-key", "slack::channel::C456"])
-
-    with (
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._task_store", return_value=store),
-    ):
-        result = cli.cmd_task_update(args)
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["definition"]["session_id"] is None
-    assert payload["definition"]["session_key"] == "slack::channel::C456"
-
-
-def test_task_update_replaces_post_to_with_deliver_key(tmp_path: Path, capsys) -> None:
-    store_path = tmp_path / "scheduled_tasks.json"
-    store = cli.ScheduledTaskStore(store_path)
-    task = store.add_task(
-        session_key="slack::channel::C123::thread::171717.123",
-        prompt="hello",
-        schedule_type="cron",
-        cron="0 * * * *",
-        timezone_name="Asia/Shanghai",
-        post_to="channel",
-    )
-    parser = cli.build_parser()
-    args = parser.parse_args(["task", "update", task.id, "--deliver-key", "slack::channel::C999"])
-
-    with (
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._task_store", return_value=store),
-    ):
-        result = cli.cmd_task_update(args)
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["definition"]["id"] == task.id
-    assert payload["definition"]["post_to"] is None
-    assert payload["definition"]["deliver_key"] == "slack::channel::C999"
-
-
 def test_task_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: Path, capsys) -> None:
     store_path = tmp_path / "scheduled_tasks.json"
     store = cli.ScheduledTaskStore(store_path)
@@ -2463,19 +2148,24 @@ def test_task_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["definition"]["post_to"] is None
-    assert payload["definition"]["deliver_key"] is None
+    assert payload["definition"].get("post_to") is None
+    assert payload["definition"].get("deliver_key") is None
     assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-reset-task"
 
 
-def test_task_add_returns_reachability_warning_for_unbound_lark_dm(tmp_path: Path, capsys) -> None:
-    parser = cli.build_parser()
-    args = parser.parse_args(
-        ["task", "add", "--session-key", "lark::user::ou_123", "--cron", "0 * * * *", "--message", "hello"]
+def test_task_add_returns_reachability_warning_for_unbound_lark_dm(
+    tmp_path: Path, capsys, monkeypatch, sqlite_schema_db_factory
+) -> None:
+    _bare_terminal_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(
+        tmp_path, sqlite_schema_db_factory, session_id="sesLarkDm", platform="lark", scope_type="user", scope_key="ou_123"
     )
+    parser = cli.build_parser()
+    args = parser.parse_args(["task", "add", "--session-id", "sesLarkDm", "--cron", "0 * * * *", "--message", "hello"])
     fake_store = SimpleNamespace(get_user=lambda *args, **kwargs: None)
 
     with (
+        _cli_state(db_path, agent_store),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"lark"})),
         patch("vibe.cli._task_store", return_value=cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")),
         patch("core.services.settings.get_settings_store", return_value=fake_store),
@@ -2485,180 +2175,6 @@ def test_task_add_returns_reachability_warning_for_unbound_lark_dm(tmp_path: Pat
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["warnings"][0]["code"] == "lark_user_not_bound"
-
-
-def test_hook_send_rejects_invalid_session_key_with_hint() -> None:
-    args = _parse_hook_send(["--session-key", "slack::thread::123", "--message", "hello"])
-
-    with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
-        result, payload = _capture_stderr_json(cli.cmd_hook_send, args)
-
-    assert result == 1
-    assert payload["code"] == "invalid_session_key"
-    assert payload["help_command"] == "vibe hook send --help"
-
-
-def test_hook_send_deprecation_warning_names_callback_policy(tmp_path: Path, capsys) -> None:
-    args = _parse_hook_send(["--session-key", "slack::channel::C123", "--message", "hello"])
-
-    with (
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._task_request_store", return_value=cli.TaskExecutionStore(tmp_path / "task_requests")),
-    ):
-        result = cli.cmd_hook_send(args)
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert "vibe hook send is deprecated" in payload["deprecation_warning"]
-    assert "--no-callback" in payload["deprecation_warning"]
-    assert "--callback-session-id <session-id>" in payload["deprecation_warning"]
-
-
-def test_hook_send_guards_an_explicit_agent_inside_enqueue(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
-    args = _parse_hook_send(
-        [
-            "--session-key",
-            "slack::channel::C123",
-            "--agent",
-            "worker",
-            "--message",
-            "hello",
-        ]
-    )
-    agent_store = cli.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
-    agent = agent_store.create(name="worker", backend="codex")
-    captured: dict[str, object] = {}
-
-    def enqueue_hook_send(**kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(id="run-hook", request_type="agent_run")
-
-    with (
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._agent_store", return_value=agent_store),
-        patch(
-            "vibe.cli._task_request_store",
-            return_value=SimpleNamespace(enqueue_hook_send=enqueue_hook_send),
-        ),
-    ):
-        result = cli.cmd_hook_send(args)
-
-    assert result == 0
-    assert json.loads(capsys.readouterr().out)["run_id"] == "run-hook"
-    assert captured["agent_name"] == agent.name
-    assert captured["expected_enabled_agent_id"] == agent.id
-
-
-def test_hook_send_guards_the_implicit_default_agent_inside_enqueue(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
-    args = _parse_hook_send(
-        [
-            "--session-key",
-            "slack::channel::C123",
-            "--message",
-            "hello",
-        ]
-    )
-    db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
-    default_agent = agent_store.ensure_default_agent(backend="codex")
-    captured: dict[str, object] = {}
-
-    def enqueue_hook_send(**kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(id="run-hook", request_type="agent_run")
-
-    with (
-        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
-        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._agent_store", return_value=agent_store),
-        patch(
-            "vibe.cli._task_request_store",
-            return_value=SimpleNamespace(enqueue_hook_send=enqueue_hook_send),
-        ),
-    ):
-        result = cli.cmd_hook_send(args)
-
-    assert result == 0
-    assert json.loads(capsys.readouterr().out)["run_id"] == "run-hook"
-    assert captured["agent_name"] == default_agent.name
-    assert captured["expected_enabled_agent_id"] == default_agent.id
-
-
-def test_hook_send_rejects_conflicting_delivery_target_flags(capsys) -> None:
-    parser = cli.build_parser()
-
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(
-            [
-                "hook",
-                "send",
-                "--session-key",
-                "slack::channel::C123",
-                "--post-to",
-                "channel",
-                "--deliver-key",
-                "slack::channel::C999",
-                "--message",
-                "hello",
-            ]
-        )
-
-    assert exc.value.code == 2
-    payload = json.loads(capsys.readouterr().err)
-    assert payload["code"] == "invalid_arguments"
-    assert "not allowed with argument --post-to" in payload["error"]
-    assert payload["help_command"] == "vibe hook send --help"
-
-
-def test_hook_send_rejects_cross_platform_deliver_key() -> None:
-    args = _parse_hook_send(
-        [
-            "--session-key",
-            "slack::channel::C123",
-            "--deliver-key",
-            "discord::channel::C999",
-            "--message",
-            "hello",
-        ]
-    )
-
-    with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack", "discord"})):
-        result, payload = _capture_stderr_json(cli.cmd_hook_send, args)
-
-    assert result == 1
-    assert payload["code"] == "invalid_delivery_target"
-    assert payload["details"] == {
-        "session_platform": "slack",
-        "delivery_platform": "discord",
-    }
-
-
-def test_hook_send_enqueues_request(tmp_path: Path, capsys) -> None:
-    args = _parse_hook_send(
-        [
-            "--session-key",
-            "slack::channel::C123::thread::171717.123",
-            "--post-to",
-            "channel",
-            "--message",
-            "hello",
-        ]
-    )
-    request_root = tmp_path / "task_requests"
-
-    with (
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._task_request_store", return_value=cli.TaskExecutionStore(request_root)),
-    ):
-        result = cli.cmd_hook_send(args)
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["ok"] is True
-    assert payload["session_key"] == "slack::channel::C123::thread::171717.123"
-    assert payload["post_to"] == "channel"
-    assert (request_root / "pending" / f"{payload['execution_id']}.json").exists()
 
 
 def test_runs_cancel_running_agent_run_stops_live_turn_and_marks_canceled(
@@ -2948,86 +2464,12 @@ def test_runs_cancel_queued_agent_run_does_not_call_live_controller(
     assert payload["run"]["status"] == "canceled"
 
 
-def test_hook_send_allows_unresolved_legacy_scope_backend(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
-    db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
-    default_agent = agent_store.ensure_default_agent(backend="claude")
-    agent_store.create(name="codex", backend="opencode")
-    agent_store.close()
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-    from storage.importer import ensure_sqlite_state
-    from storage.models import scope_settings
-    from storage.settings_service import upsert_scope
-
-    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
-    with cli.create_sqlite_engine(db_path).begin() as conn:
-        now = "2026-05-22T00:00:00+00:00"
-        scope_id = upsert_scope(conn, "slack", "channel", "C123", now=now)
-        conn.execute(
-            scope_settings.insert().values(
-                scope_id=scope_id,
-                enabled=1,
-                role=None,
-                workdir=None,
-                agent_name=None,
-                agent_backend="codex",
-                agent_variant=None,
-                model=None,
-                reasoning_effort=None,
-                require_mention=None,
-                settings_version=1,
-                settings_json=json.dumps({"routing": {"agent_backend": "codex"}}),
-                created_at=now,
-                updated_at=now,
-            )
-        )
-    args = _parse_hook_send(["--session-key", "slack::channel::C123", "--message", "hello"])
-
-    with (
-        patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent),
-        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._task_request_store", return_value=request_store),
-    ):
-        result = cli.cmd_hook_send(args)
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    queued = json.loads((request_store.pending_dir / f"{payload['run_id']}.json").read_text())
-    assert queued["session_key"] == "slack::channel::C123"
-    assert queued["agent_name"] == default_agent.name
-
-
-def test_hook_send_returns_reachability_warning_for_unbound_lark_dm(tmp_path: Path, capsys) -> None:
-    args = _parse_hook_send(
-        [
-            "--session-key",
-            "lark::user::ou_123",
-            "--message",
-            "hello",
-        ]
-    )
-    request_root = tmp_path / "task_requests"
-    fake_store = SimpleNamespace(get_user=lambda *args, **kwargs: None)
-
-    with (
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"lark"})),
-        patch("vibe.cli._task_request_store", return_value=cli.TaskExecutionStore(request_root)),
-        patch("core.services.settings.get_settings_store", return_value=fake_store),
-    ):
-        result = cli.cmd_hook_send(args)
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["warnings"][0]["code"] == "lark_user_not_bound"
-
-
 def test_agent_run_standalone_async_reserves_background_session(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     agent_store = cli.VibeAgentStore(db_path)
     agent = agent_store.create(name="worker", backend="codex")
     request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-    args = _parse_agent_run(["--agent", "worker", "--async", "--no-callback", "--message", "hello"])
+    args = _parse_agent_run(["--agent", "worker", "--no-callback", "--message", "hello"])
 
     with (
         patch("vibe.cli._agent_store", return_value=agent_store),
@@ -3042,20 +2484,19 @@ def test_agent_run_standalone_async_reserves_background_session(tmp_path: Path, 
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["session_id"].startswith("ses")
-    assert payload["session_policy"] == "none"
-    assert payload["agent"] == agent.name
-    queued = json.loads((request_store.pending_dir / f"{payload['run_id']}.json").read_text())
+    assert payload["run"]["session_id"].startswith("ses")
+    assert payload["run"]["agent_name"] == agent.name
+    queued = json.loads((request_store.pending_dir / f"{payload['run']['id']}.json").read_text())
     assert queued["request_type"] == "agent_run"
-    assert queued["session_id"] == payload["session_id"]
+    assert queued["session_id"] == payload["run"]["session_id"]
     assert queued["agent_name"] == "worker"
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             "select scope_id, visibility, workdir from agent_sessions where id = ?",
-            (payload["session_id"],),
+            (payload["run"]["session_id"],),
         ).fetchone()
-    assert row == (None, "background", str(tmp_path / "show" / payload["session_id"]))
-    assert (tmp_path / "show" / payload["session_id"]).is_dir()
+    assert row == (None, "background", str(tmp_path / "show" / payload["run"]["session_id"]))
+    assert (tmp_path / "show" / payload["run"]["session_id"]).is_dir()
 
 
 def test_agent_run_caller_scope_default_keeps_caller_cwd_and_same_scope_uses_scope_cwd(
@@ -3131,7 +2572,7 @@ def test_agent_run_caller_scope_default_keeps_caller_cwd_and_same_scope_uses_sco
 
     implicit = run([])
     explicit = run(["--same-scope"])
-    visible = run(["--visibility", "foreground"])
+    visible = run(["--visible"])
 
     with engine.connect() as conn:
         rows = {
@@ -3144,98 +2585,24 @@ def test_agent_run_caller_scope_default_keeps_caller_cwd_and_same_scope_uses_sco
                     agent_sessions.c.workdir,
                 ).where(
                     agent_sessions.c.id.in_(
-                        [implicit["session_id"], explicit["session_id"], visible["session_id"]]
+                        [implicit["run"]["session_id"], explicit["run"]["session_id"], visible["run"]["session_id"]]
                     )
                 )
             )
         }
 
-    assert rows[implicit["session_id"]].scope_id == scope_id
-    assert rows[implicit["session_id"]].visibility == "background"
-    assert rows[implicit["session_id"]].workdir == str(invocation_cwd)
-    assert rows[explicit["session_id"]].scope_id == scope_id
-    assert rows[explicit["session_id"]].visibility == "background"
-    assert rows[explicit["session_id"]].workdir == str(scope_cwd)
-    assert rows[visible["session_id"]].scope_id == scope_id
-    assert rows[visible["session_id"]].visibility == "foreground"
-    assert rows[visible["session_id"]].workdir == str(invocation_cwd)
+    assert rows[implicit["run"]["session_id"]].scope_id == scope_id
+    assert rows[implicit["run"]["session_id"]].visibility == "background"
+    assert rows[implicit["run"]["session_id"]].workdir == str(invocation_cwd)
+    assert rows[explicit["run"]["session_id"]].scope_id == scope_id
+    assert rows[explicit["run"]["session_id"]].visibility == "background"
+    assert rows[explicit["run"]["session_id"]].workdir == str(scope_cwd)
+    assert rows[visible["run"]["session_id"]].scope_id == scope_id
+    assert rows[visible["run"]["session_id"]].visibility == "foreground"
+    assert rows[visible["run"]["session_id"]].workdir == str(invocation_cwd)
 
 
-def test_agent_run_create_session_uses_scope_anchor_for_channel_deliver_key(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
-    db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
-    agent_store.create(name="worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-    args = _parse_agent_run(
-        [
-            "--agent",
-            "worker",
-            "--async",
-            "--no-callback",
-            "--create-session",
-            "--deliver-key",
-            "slack::channel::C123",
-            "--message",
-            "hello",
-        ]
-    )
-
-    with (
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_request_store", return_value=request_store),
-        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
-    ):
-        result = cli.cmd_agent_run(args)
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    target = cli.resolve_session_id_target(payload["session_id"], db_path=db_path)
-    assert target.session_key.to_key() == "slack::channel::C123"
-    assert target.session_key.thread_id is None
-    assert target.session_anchor.startswith("slack_C123:run_")
-
-
-def test_agent_run_create_session_preserves_legacy_thread_deliver_key(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
-    db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
-    agent_store.create(name="worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-    args = _parse_agent_run(
-        [
-            "--agent",
-            "worker",
-            "--async",
-            "--no-callback",
-            "--create-session",
-            "--deliver-key",
-            "slack::channel::C123::thread::171717.123",
-            "--message",
-            "hello",
-        ]
-    )
-
-    with (
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_request_store", return_value=request_store),
-        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
-    ):
-        result = cli.cmd_agent_run(args)
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["deliver_key"] == "slack::channel::C123::thread::171717.123"
-    target = cli.resolve_session_id_target(payload["session_id"], db_path=db_path)
-    assert target.session_key.to_key() == "slack::channel::C123::thread::171717.123"
-    assert target.session_key.thread_id == "171717.123"
-    assert target.session_anchor.startswith("slack_171717.123:run_")
-    queued = request_store.get_run(payload["run_id"])
-    assert queued is not None
-    assert queued["deliver_key"] == "slack::channel::C123::thread::171717.123"
-
-
-def test_agent_run_create_session_scope_id_uses_unique_project_anchors(tmp_path: Path, capsys) -> None:
+def test_agent_run_scope_id_uses_unique_project_anchors(tmp_path: Path, capsys) -> None:
     from sqlalchemy import select
     from storage.db import create_sqlite_engine
     from storage.importer import ensure_sqlite_state
@@ -3283,9 +2650,7 @@ def test_agent_run_create_session_scope_id_uses_unique_project_anchors(tmp_path:
                 [
                     "--agent",
                     "worker",
-                    "--async",
                     "--no-callback",
-                    "--create-session",
                     "--scope-id",
                     scope_id,
                     "--message",
@@ -3309,7 +2674,7 @@ def test_agent_run_create_session_scope_id_uses_unique_project_anchors(tmp_path:
                 ).mappings()
             )
 
-    assert {payload["session_id"] for payload in payloads} == {row["id"] for row in rows}
+    assert {payload["run"]["session_id"] for payload in payloads} == {row["id"] for row in rows}
     anchors = {row["session_anchor"] for row in rows}
     assert len(anchors) == 2
     assert all(anchor.startswith("avibe_proj_unique:run_") for anchor in anchors)
@@ -3320,7 +2685,7 @@ def test_agent_run_standalone_does_not_create_platform_pseudo_scope(tmp_path: Pa
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="codex")
     request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-    args = _parse_agent_run(["--agent", "worker", "--async", "--no-callback", "--message", "hello"])
+    args = _parse_agent_run(["--agent", "worker", "--no-callback", "--message", "hello"])
 
     with (
         patch("vibe.cli._agent_store", return_value=agent_store),
@@ -3338,32 +2703,10 @@ def test_agent_run_standalone_does_not_create_platform_pseudo_scope(tmp_path: Pa
     with sqlite3.connect(db_path) as conn:
         row = conn.execute(
             "select scope_id, visibility from agent_sessions where id = ?",
-            (payload["session_id"],),
+            (payload["run"]["session_id"],),
         ).fetchone()
 
     assert row == (None, "background")
-
-
-def test_agent_run_rejects_deprecated_prompt_argument(tmp_path: Path, sqlite_schema_db_factory) -> None:
-    db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
-    agent_store.create(name="worker", backend="codex")
-    args = _parse_agent_run(["--agent", "worker", "--async", "--prompt", "hello"])
-
-    with patch("vibe.cli._agent_store", return_value=agent_store):
-        result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
-
-    assert result == 1
-    assert payload["code"] == "deprecated_prompt_argument"
-
-
-def test_agent_run_rejects_per_run_for_direct_invocation() -> None:
-    args = _parse_agent_run(["--agent", "worker", "--create-session-per-run", "--message", "hello"])
-
-    result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
-
-    assert result == 1
-    assert payload["code"] == "invalid_session_policy"
 
 
 def test_agent_run_rejects_cross_backend_agent_for_existing_session(tmp_path: Path, sqlite_schema_db_factory) -> None:
@@ -3419,7 +2762,6 @@ def test_agent_run_existing_session_allows_matching_agent_hint(tmp_path: Path, c
         [
             "--agent",
             "codex-worker",
-            "--async",
             "--no-callback",
             "--session-id",
             session_id,
@@ -3438,8 +2780,8 @@ def test_agent_run_existing_session_allows_matching_agent_hint(tmp_path: Path, c
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["session_id"] == session_id
-    assert payload["agent"] == "codex-worker"
+    assert payload["run"]["session_id"] == session_id
+    assert payload["run"]["agent_name"] == "codex-worker"
 
 
 def test_agent_run_rejects_different_same_backend_agent_for_existing_session(tmp_path: Path, sqlite_schema_db_factory) -> None:
@@ -3471,103 +2813,6 @@ def test_agent_run_rejects_different_same_backend_agent_for_existing_session(tmp
     assert payload["code"] == "agent_session_agent_mismatch"
 
 
-def test_agent_run_rejects_post_to_thread_for_threadless_session_before_enqueue(tmp_path: Path, sqlite_schema_db_factory) -> None:
-    db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    # The raw schema template carries no import marker, so the first CLI call to
-    # ``_ensure_cli_sqlite_state`` would run the JSON importer over this database
-    # and drop the rows seeded below. Establish the state first, as the rest of
-    # this module does, then seed what the command is meant to find.
-    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
-    agent_store = cli.VibeAgentStore(db_path)
-    agent_store.create(name="worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-    from storage.sessions_service import SQLiteSessionsService
-
-    service = SQLiteSessionsService(db_path)
-    try:
-        session_id = service.reserve_agent_session(
-            scope_key="slack::C123",
-            agent_backend="codex",
-            session_anchor="slack_C123",
-            agent_name="worker",
-        )
-    finally:
-        service.close()
-    args = _parse_agent_run(["--async", "--session-id", session_id, "--post-to", "thread", "--message", "hello"])
-
-    with (
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_request_store", return_value=request_store),
-        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
-    ):
-        result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
-
-    assert result == 1
-    assert payload["code"] == "invalid_delivery_target"
-    assert request_store.list_pending() == []
-
-
-def test_agent_run_rejects_cross_platform_deliver_key_before_enqueue(tmp_path: Path, sqlite_schema_db_factory) -> None:
-    db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    # The raw schema template carries no import marker, so the first CLI call to
-    # ``_ensure_cli_sqlite_state`` would run the JSON importer over this database
-    # and drop the rows seeded below. Establish the state first, as the rest of
-    # this module does, then seed what the command is meant to find.
-    ensure_sqlite_state(db_path=db_path, primary_platform="slack")
-    agent_store = cli.VibeAgentStore(db_path)
-    agent_store.create(name="worker", backend="codex")
-    request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
-    from storage.sessions_service import SQLiteSessionsService
-
-    service = SQLiteSessionsService(db_path)
-    try:
-        session_id = service.reserve_agent_session(
-            scope_key="slack::C123",
-            agent_backend="codex",
-            session_anchor="slack_C123",
-            agent_name="worker",
-        )
-    finally:
-        service.close()
-    args = _parse_agent_run(
-        [
-            "--async",
-            "--session-id",
-            session_id,
-            "--deliver-key",
-            "discord::channel::C999",
-            "--message",
-            "hello",
-        ]
-    )
-
-    with (
-        patch("vibe.cli._agent_store", return_value=agent_store),
-        patch("vibe.cli._task_request_store", return_value=request_store),
-        patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path),
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack", "discord"})),
-    ):
-        result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
-
-    assert result == 1
-    assert payload["code"] == "invalid_delivery_target"
-    assert payload["details"] == {
-        "session_platform": "slack",
-        "delivery_platform": "discord",
-    }
-    assert request_store.list_pending() == []
-
-
-def test_agent_run_rejects_delivery_options_without_session_policy() -> None:
-    args = _parse_agent_run(["--agent", "worker", "--async", "--post-to", "channel", "--message", "hello"])
-
-    result, payload = _capture_stderr_json(cli.cmd_agent_run, args)
-
-    assert result == 1
-    assert payload["code"] == "delivery_target_without_session_policy"
-
-
 def test_agent_run_existing_session_uses_session_agent_when_agent_omitted(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     # The raw schema template carries no import marker, so the first CLI call to
@@ -3590,7 +2835,7 @@ def test_agent_run_existing_session_uses_session_agent_when_agent_omitted(tmp_pa
         )
     finally:
         service.close()
-    args = _parse_agent_run(["--async", "--no-callback", "--session-id", session_id, "--message", "hello"])
+    args = _parse_agent_run(["--no-callback", "--session-id", session_id, "--message", "hello"])
 
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
@@ -3602,8 +2847,8 @@ def test_agent_run_existing_session_uses_session_agent_when_agent_omitted(tmp_pa
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["agent"] == "worker"
-    queued = json.loads((request_store.pending_dir / f"{payload['run_id']}.json").read_text())
+    assert payload["run"]["agent_name"] == "worker"
+    queued = json.loads((request_store.pending_dir / f"{payload['run']['id']}.json").read_text())
     assert queued["agent_name"] == "worker"
 
 
@@ -3617,20 +2862,7 @@ def test_agent_run_rejects_default_async_wait_timeout_combo() -> None:
     assert "--sync" in payload["hint"]
 
 
-def test_agent_create_accepts_effort_alias(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
-    db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
-    agent_store = cli.VibeAgentStore(db_path)
-    args = _parse_agent(["create", "worker", "--backend", "codex", "--effort", "high"])
-
-    with patch("vibe.cli._agent_store", return_value=agent_store):
-        result = cli.cmd_agent_create(args)
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["agent"]["reasoning_effort"] == "high"
-
-
-def test_agent_create_localizes_reserved_name_error(tmp_path: Path, sqlite_schema_db_factory) -> None:
+def test_agent_create_reserved_name_error_is_english_under_a_zh_ui(tmp_path: Path, sqlite_schema_db_factory) -> None:
     agent_store = cli.VibeAgentStore(sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite"))
     args = _parse_agent(["create", "_hidden", "--backend", "codex"])
 
@@ -3642,8 +2874,8 @@ def test_agent_create_localizes_reserved_name_error(tmp_path: Path, sqlite_schem
 
     assert result == 1
     assert payload["code"] == "agent_name_reserved"
-    assert payload["error"] == "Agent 名称不能以下划线 `_` 开头；该命名空间由 Avibe 保留。"
-    assert payload["hint"] == "请选择不以下划线 `_` 开头的 Agent 名称。"
+    assert payload["error"] == "Agent names starting with `_` are reserved for Avibe."
+    assert payload["hint"] == "Choose an Agent name that does not start with `_`."
 
 
 def test_agent_default_cli_sets_default_agent(tmp_path: Path, capsys, sqlite_schema_db_factory) -> None:
@@ -4149,7 +3381,7 @@ def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pat
     args = _parse_task_add(
         [
             "--create-session-per-run",
-            "--deliver-key",
+            "--scope-id",
             "slack::channel::C123",
             "--cron",
             "0 * * * *",
@@ -4181,37 +3413,6 @@ def test_task_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pat
     assert captured["expected_enabled_agent_id"] == default_agent.id
 
 
-def test_task_add_rejects_deprecated_prompt_argument() -> None:
-    args = _parse_task_add(
-        [
-            "--session-key",
-            "slack::channel::C123",
-            "--cron",
-            "0 * * * *",
-            "--prompt",
-            "hello",
-        ]
-    )
-
-    with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
-        result, payload = _capture_stderr_json(cli.cmd_task_add, args)
-
-    assert result == 1
-    assert payload["code"] == "deprecated_prompt_argument"
-    assert "--message" in payload["hint"]
-
-
-def test_hook_send_rejects_deprecated_prompt_argument() -> None:
-    args = _parse_hook_send(["--session-key", "slack::channel::C123", "--prompt", "hello"])
-
-    with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
-        result, payload = _capture_stderr_json(cli.cmd_hook_send, args)
-
-    assert result == 1
-    assert payload["code"] == "deprecated_prompt_argument"
-    assert "--message" in payload["hint"]
-
-
 def test_task_remove_alias_parses_to_remove_command() -> None:
     parser = cli.build_parser()
     args = parser.parse_args(["task", "remove", "task-123"])
@@ -4219,15 +3420,6 @@ def test_task_remove_alias_parses_to_remove_command() -> None:
     assert args.command == "task"
     assert args.task_command == "remove"
     assert args.task_id == "task-123"
-
-
-def test_task_hidden_aliases_still_parse() -> None:
-    parser = cli.build_parser()
-    list_args = parser.parse_args(["task", "ls"])
-    remove_args = parser.parse_args(["task", "rm", "task-123"])
-
-    assert list_args.task_command == "ls"
-    assert remove_args.task_command == "rm"
 
 
 def _reclaim_bound_definitions_now(session_id: str, *, mode: str, reason: str) -> dict[str, int]:
@@ -4459,23 +3651,9 @@ def _reserved_session_cli_db(tmp_path: Path, sqlite_schema_db_factory):
     return db_path, agent_store, ordinary
 
 
-@pytest.mark.parametrize(
-    ("language", "expected_hint"),
-    [
-        (
-            "en",
-            "This session only receives Avibe's workspace failure notifications — it does not accept messages.",
-        ),
-        (
-            "zh",
-            "该会话只接收 Avibe 的工作区失败通知，不接受发送消息。",
-        ),
-    ],
-)
-def test_reserved_session_cli_hint_uses_the_configured_backend_locale(
-    language: str,
-    expected_hint: str,
-) -> None:
+@pytest.mark.parametrize("language", ["en", "zh"])
+def test_reserved_session_cli_hint_is_english_whatever_the_ui_language(language: str) -> None:
+    expected_hint = "This session only receives Avibe's workspace failure notifications — it does not accept messages."
     exc = cli.UnresolvableSessionTarget(
         "reserved",
         session_id="ses-workspace-notices",
@@ -4628,7 +3806,6 @@ def test_agent_run_refuses_the_reserved_session_with_no_side_effects(
     request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
     args = _parse_agent_run(
         [
-            "--async",
             "--no-callback",
             "--session-id",
             "ses-workspace-notices",
@@ -4683,7 +3860,7 @@ def test_agent_run_refuses_the_reserved_session_with_no_side_effects(
 
     # --- positive control: the ordinary session still runs ------------------
     ok_args = _parse_agent_run(
-        ["--async", "--no-callback", "--session-id", ordinary, "--message", "hello"]
+        ["--no-callback", "--session-id", ordinary, "--message", "hello"]
     )
     with (
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
@@ -4753,7 +3930,15 @@ def _command_task_store(tmp_path: Path):
     return cli.ScheduledTaskStore(tmp_path / "scheduled_tasks.json")
 
 
-def _caller_session_state(tmp_path: Path, sqlite_schema_db_factory, *, session_id: str = "sesCaller"):
+def _caller_session_state(
+    tmp_path: Path,
+    sqlite_schema_db_factory,
+    *,
+    session_id: str = "sesCaller",
+    platform: str = "avibe",
+    scope_type: str = "project",
+    scope_key: str = "proj-command-task",
+):
     """A migrated CLI state DB holding one active Session owned by an enabled Agent."""
 
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
@@ -4766,7 +3951,7 @@ def _caller_session_state(tmp_path: Path, sqlite_schema_db_factory, *, session_i
     ensure_sqlite_state(db_path=db_path, primary_platform="avibe")
     with cli.create_sqlite_engine(db_path).begin() as conn:
         now = "2026-06-28T00:00:00+00:00"
-        scope_id = upsert_scope(conn, "avibe", "project", "proj-command-task", now=now)
+        scope_id = upsert_scope(conn, platform, scope_type, scope_key, now=now)
         conn.execute(
             agent_sessions.insert().values(
                 id=session_id,
@@ -4784,6 +3969,18 @@ def _caller_session_state(tmp_path: Path, sqlite_schema_db_factory, *, session_i
             )
         )
     return db_path, agent_store
+
+
+def _cli_state(db_path: Path, agent_store):
+    """Point the CLI at a test-owned state DB and Agent store."""
+
+    from contextlib import ExitStack
+
+    stack = ExitStack()
+    stack.enter_context(patch("vibe.cli.paths.get_state_dir", return_value=db_path.parent))
+    stack.enter_context(patch("vibe.cli.paths.get_sqlite_state_path", return_value=db_path))
+    stack.enter_context(patch("vibe.cli._agent_store", return_value=agent_store))
+    return stack
 
 
 # --- parse forms -----------------------------------------------------------
@@ -4912,13 +4109,10 @@ def test_task_add_requires_a_message_or_a_command(monkeypatch) -> None:
     "flag_argv,flag_name",
     [
         (["--session-id", "sesTarget"], "--session-id"),
-        (["--session-key", "slack::channel::C123"], "--session-key"),
         (["--create-session"], "--create-session"),
         (["--create-session-per-run"], "--create-session-per-run"),
         (["--scope-id", "avibe::project::proj-x"], "--scope-id"),
         (["--agent", "codex"], "--agent"),
-        (["--post-to", "channel"], "--post-to"),
-        (["--deliver-key", "slack::channel::C123"], "--deliver-key"),
     ],
 )
 def test_task_add_rejects_session_flags_for_pure_command_task(
@@ -4964,10 +4158,9 @@ def test_task_add_pure_command_task_ignores_caller_session_default(
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     definition = payload["definition"]
-    assert definition["session_id"] is None
-    assert definition["session_policy"] is None
-    assert definition["session_key"] == ""
-    assert definition["agent_name"] is None
+    assert definition.get("session_id") is None
+    assert definition.get("session_policy") is None
+    assert definition.get("agent_name") is None
     assert "session_default_notice" not in payload
     # The caller is still RECORDED, just not bound: creation origin survives.
     assert definition["metadata"]["created_by"]["caller"]["session_id"] == "sesCaller"
@@ -5006,10 +4199,10 @@ def test_task_add_escalating_command_task_binds_caller_session(
     assert definition["session_id"] == "sesCaller"
     assert definition["session_policy"] == "existing"
     assert definition["shell_command"] == "./scripts/sync.sh"
-    assert definition["prompt"] == "The nightly sync failed. Diagnose it."
+    assert definition["message"] == "The nightly sync failed. Diagnose it."
     assert definition["metadata"]["on_failure"] == "agent"
     assert definition["kind"] == "command"
-    assert payload["session_default_notice"]["code"] == "session_defaulted_to_caller"
+    assert "session_default_notice" not in payload
 
 
 def test_task_add_escalating_command_task_accepts_an_explicit_cwd(
@@ -5226,9 +4419,9 @@ def test_task_add_pure_shell_command_persists_command_fields(
     payload = json.loads(capsys.readouterr().out)
     definition = payload["definition"]
     assert definition["shell_command"] == "./scripts/sync.sh"
-    assert definition["command"] is None
+    assert definition.get("command") is None
     assert definition["timeout_seconds"] == 0
-    assert definition["prompt"] == ""
+    assert "message" not in definition
     assert definition["cwd"] == str(tmp_path)
     assert definition["metadata"]["on_failure"] == "none"
     assert "session_workdir" not in definition["metadata"]
@@ -5255,24 +4448,22 @@ def test_task_add_command_argv_persists_the_argv_list(
     assert result == 0
     definition = json.loads(capsys.readouterr().out)["definition"]
     assert definition["command"] == ["python3", "sync.py", "--target", "prod"]
-    assert definition["shell_command"] is None
-    assert definition["timeout_seconds"] is None
-    assert definition["command_preview"] == "python3 sync.py --target prod"
-    assert definition["display_name"] == "python3 sync.py --target prod"
+    assert definition.get("shell_command") is None
+    assert definition.get("timeout_seconds") is None
 
 
 def test_task_add_message_task_stores_no_command_fields(
-    tmp_path: Path, capsys, monkeypatch
+    tmp_path: Path, capsys, monkeypatch, sqlite_schema_db_factory
 ) -> None:
     """Regression guard: the message lane must be untouched by the command flags."""
 
     _bare_terminal_caller(monkeypatch)
+    db_path, agent_store = _caller_session_state(tmp_path, sqlite_schema_db_factory)
     store = _command_task_store(tmp_path)
-    args = _parse_task_add(
-        ["--session-key", "slack::channel::C123", "--cron", "0 * * * *", "--message", "morning briefing"]
-    )
+    args = _parse_task_add(["--session-id", "sesCaller", "--cron", "0 * * * *", "--message", "morning briefing"])
 
     with (
+        _cli_state(db_path, agent_store),
         patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
         patch("vibe.cli._task_store", return_value=store),
     ):
@@ -5280,13 +4471,13 @@ def test_task_add_message_task_stores_no_command_fields(
 
     assert result == 0
     definition = json.loads(capsys.readouterr().out)["definition"]
-    assert definition["prompt"] == "morning briefing"
-    assert definition["shell_command"] is None
-    assert definition["command"] is None
-    assert definition["timeout_seconds"] is None
+    assert definition["message"] == "morning briefing"
+    assert definition.get("shell_command") is None
+    assert definition.get("command") is None
+    assert definition.get("timeout_seconds") is None
     assert definition["kind"] == "message"
     assert definition["on_failure"] == "none"
-    assert "on_failure" not in definition["metadata"]
+    assert "on_failure" not in definition.get("metadata", {})
 
 
 # --- update ---------------------------------------------------------------
@@ -5323,8 +4514,8 @@ def test_task_update_replaces_pure_command_task_shell(tmp_path: Path, capsys, mo
     # ``update_command_fields`` is all-or-nothing, so an unnamed column must survive.
     assert definition["timeout_seconds"] == 60
     assert definition["cwd"] == str(tmp_path)
-    assert definition["session_policy"] is None
-    assert definition["session_id"] is None
+    assert definition.get("session_policy") is None
+    assert definition.get("session_id") is None
 
 
 def test_task_update_timeout_only_preserves_stored_command(
@@ -5346,7 +4537,7 @@ def test_task_update_timeout_only_preserves_stored_command(
     assert result == 0
     definition = json.loads(capsys.readouterr().out)["definition"]
     assert definition["command"] == ["python3", "sync.py"]
-    assert definition["shell_command"] is None
+    assert definition.get("shell_command") is None
     assert definition["timeout_seconds"] == 900
 
 
@@ -5395,7 +4586,7 @@ def test_task_update_rewords_escalation_guidance_on_an_agent_command_task(
 
     assert result == 0
     definition = json.loads(capsys.readouterr().out)["definition"]
-    assert definition["prompt"] == "Check the upstream API first."
+    assert definition["message"] == "Check the upstream API first."
     assert definition["shell_command"] == "./scripts/old.sh"
     assert definition["timeout_seconds"] == 60
     assert definition["on_failure"] == "agent"
@@ -5462,14 +4653,16 @@ def test_task_payload_renders_command_kind_and_preview(tmp_path: Path) -> None:
     task = _stored_command_task(store, name=None, shell_command="./scripts/sync.sh --verbose")
     task.last_exit_code = 2
 
-    payload = cli._task_payload(task)
-    brief = cli._task_payload(task, brief=True)
+    projected = cli._task_fallback_projection(task)
+    payload = cli._task_projection_payload(projected)
+    brief = cli._task_projection_payload(projected, brief=True)
 
     assert payload["kind"] == "command"
     assert payload["on_failure"] == "none"
-    assert payload["command_preview"] == "./scripts/sync.sh --verbose"
-    assert payload["display_name"] == "./scripts/sync.sh --verbose"
+    assert payload["shell_command"] == "./scripts/sync.sh --verbose"
     assert brief["kind"] == "command"
+    # An unnamed command task is labelled by its command.
+    assert brief["command_preview"] == "./scripts/sync.sh --verbose"
     assert brief["last_exit_code"] == 2
 
 
@@ -5483,33 +4676,12 @@ def test_task_payload_renders_message_kind_for_message_tasks(tmp_path: Path) -> 
         timezone_name="UTC",
     )
 
-    payload = cli._task_payload(task)
+    brief = cli._task_projection_payload(cli._task_fallback_projection(task), brief=True)
 
-    assert payload["kind"] == "message"
-    assert payload["command_preview"] == ""
-    assert payload["display_name"] == "morning briefing"
-    assert cli._task_payload(task, brief=True)["last_exit_code"] is None
+    assert brief["kind"] == "message"
+    assert brief["message_preview"] == "morning briefing"
+    assert {"command_preview", "last_exit_code"}.isdisjoint(brief)
 
-
-# --- documented examples --------------------------------------------------
-
-
-def test_documented_task_command_examples_stay_parseable() -> None:
-    """Injected help text is a live caller: every example must survive the parser."""
-
-    parser = cli.build_parser()
-    text = cli._task_add_examples_text() + "\n" + cli._task_update_examples_text()
-    examples = [
-        line.strip()
-        for line in text.splitlines()
-        if line.strip().startswith(("vibe task add ", "vibe task update "))
-    ]
-    command_examples = [line for line in examples if "--shell" in line or "--timeout" in line]
-    assert len(examples) >= 4
-    assert len(command_examples) >= 3
-
-    for example in examples:
-        parser.parse_args(shlex.split(example)[1:])
 
 def test_task_resume_rejects_orphaned_owner_without_execution_target(
     monkeypatch, tmp_path: Path
@@ -5541,7 +4713,7 @@ def test_task_resume_rejects_orphaned_owner_without_execution_target(
 
     with (
         patch("vibe.cli._task_store", return_value=store),
-        patch("vibe.cli._configured_cli_language", return_value="zh"),
+        patch("vibe.cli.V2Config.load", return_value=SimpleNamespace(language="zh")),
     ):
         result, payload = _capture_stderr_json(
             cli.cmd_task_set_enabled,
@@ -5551,10 +4723,10 @@ def test_task_resume_rejects_orphaned_owner_without_execution_target(
 
     assert result == 1
     assert payload["code"] == "task_owner_session_unavailable"
-    assert payload["error"] == "这个 Task 的管理 Session 已不可用。"
+    assert payload["error"] == "This Task's managing Session is no longer available."
     assert payload["hint"] == (
-        "请从可用的 Agent Session 创建替代 Task，再用 "
-        f"`vibe task remove {task.id}` 删除这条失去管理者的定义。"
+        "Create a replacement Task from an available Agent Session, then remove this orphaned definition with "
+        f"`vibe task remove {task.id}`."
     )
     assert payload["details"] == {
         "task_id": task.id,
@@ -5590,7 +4762,7 @@ def _run_on_new_session(tmp_path: Path, capsys, db_path: Path, agent_store, requ
             side_effect=lambda session_id: tmp_path / "show" / session_id,
         ),
     ):
-        result = cli.cmd_agent_run(_parse_agent_run(["--async", "--no-callback", *argv]))
+        result = cli.cmd_agent_run(_parse_agent_run(["--no-callback", *argv]))
     captured = capsys.readouterr()
     return result, json.loads(captured.out if result == 0 else captured.err)
 
@@ -5617,9 +4789,9 @@ def test_agent_run_starts_a_new_session_on_a_chosen_model_that_its_later_turns_k
     )
 
     assert result == 0, payload
-    session_id = payload["session_id"]
+    session_id = payload["run"]["session_id"]
     assert bool(payload.get("warnings")) is warned
-    queued = json.loads((request_store.pending_dir / f"{payload['run_id']}.json").read_text())
+    queued = json.loads((request_store.pending_dir / f"{payload['run']['id']}.json").read_text())
     assert (queued["model"], queued["reasoning_effort"]) == (model, effort)
     with sqlite3.connect(db_path) as conn:
         row = conn.execute("select model, reasoning_effort from agent_sessions where id = ?", (session_id,)).fetchone()
@@ -5636,55 +4808,50 @@ def test_agent_run_starts_a_new_session_on_a_chosen_model_that_its_later_turns_k
 
 
 @pytest.mark.parametrize(
-    ("defaults", "extra", "catalog", "language", "message"),
+    ("defaults", "extra", "catalog", "message"),
     [
-        ({}, ["--model", "claude-opus-9"], None, "en", "model 'claude-opus-9' is not in the vibey model catalog"),
+        ({}, ["--model", "claude-opus-9"], None, "model 'claude-opus-9' is not in the vibey model catalog"),
         (
             {},
             ["--model", "claude-opus-5-5", "--reasoning-effort", "medium"],
             None,
-            "en",
             "reasoning_effort 'medium' is not valid for model 'claude-opus-5-5'",
         ),
         # A model the menu lists with no efforts takes none.
-        ({}, ["--model", "gpt-6-astra", "--reasoning-effort", "high"], None, "en",
+        ({}, ["--model", "gpt-6-astra", "--reasoning-effort", "high"], None,
          "reasoning_effort 'high' is not valid for model 'gpt-6-astra'"),
         # The pair the Session would run on: an effort override over the Agent's default model...
-        ({"model": "claude-opus-5-5"}, ["--reasoning-effort", "medium"], None, "en",
+        ({"model": "claude-opus-5-5"}, ["--reasoning-effort", "medium"], None,
          "reasoning_effort 'medium' is not valid for model 'claude-opus-5-5'"),
         # ...and a model override over the Agent's default effort.
-        ({"model": "claude-opus-5-5", "reasoning_effort": "xhigh"}, ["--model", "gpt-6-astra"], None, "en",
+        ({"model": "claude-opus-5-5", "reasoning_effort": "xhigh"}, ["--model", "gpt-6-astra"], None,
          "reasoning_effort 'xhigh' is not valid for model 'gpt-6-astra'"),
         # A menu that cannot be loaded vouches for nothing.
-        ({}, ["--model", "claude-opus-5-5"], {"ok": False, "error": "config_unavailable"}, "en",
+        ({}, ["--model", "claude-opus-5-5"], {"ok": False, "error": "config_unavailable"},
          "the vibey model catalog could not be loaded, so the model and reasoning effort cannot be checked"),
-        ({}, ["--model", "claude-opus-9"], None, "zh", "模型 'claude-opus-9' 不在 vibey 的模型目录中"),
     ],
     ids=["unknown-model", "effort-the-model-does-not-take", "effort-on-a-model-that-takes-none",
-         "effort-over-the-agents-model", "model-over-the-agents-effort", "menu-unavailable", "zh"],
+         "effort-over-the-agents-model", "model-over-the-agents-effort", "menu-unavailable"],
 )
 def test_agent_run_refuses_a_vibey_model_its_menu_does_not_offer_and_keeps_no_session(
-    tmp_path: Path, capsys, sqlite_schema_db_factory, defaults, extra, catalog, language, message
+    tmp_path: Path, capsys, sqlite_schema_db_factory, defaults, extra, catalog, message
 ) -> None:
     """The effective pair a new Vibey Session would run on (each override over the Agent's default) is checked against
-    the Model Hub menu, which is authoritative: a pair it does not offer, or a menu that cannot load, is refused in the
-    caller's language with the catalog hint; the reserved Session is released and no run is queued."""
+    the Model Hub menu, which is authoritative: a pair it does not offer, or a menu that cannot load, is refused with the
+    catalog hint; the reserved Session is released and no run is queued."""
     db_path = sqlite_schema_db_factory(tmp_path / "state" / "vibe.sqlite")
     agent_store = cli.VibeAgentStore(db_path)
     agent_store.create(name="worker", backend="vibey", **defaults)
     request_store = cli.TaskExecutionStore(tmp_path / "task_requests")
 
-    with (
-        patch("vibe.cli._configured_cli_language", return_value=language),
-        patch.dict(_CATALOGS, {"vibey": catalog} if catalog is not None else {}),
-    ):
+    with patch.dict(_CATALOGS, {"vibey": catalog} if catalog is not None else {}):
         result, payload = _run_on_new_session(
             tmp_path, capsys, db_path, agent_store, request_store, ["--agent", "worker", *extra, "--message", "hi"]
         )
 
     assert result == 1
     assert (payload["code"], payload["error"]) == ("session_model_unavailable", message)
-    assert payload["hint"] == cli.i18n_t("harness.cli.agentRunModel.catalogHint", language, agent="worker")
+    assert payload["hint"] == "Run `vibe agent models worker` to list valid models and reasoning efforts."
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("select count(*) from agent_sessions").fetchone() == (0,)
     assert not list(request_store.pending_dir.glob("*.json"))
@@ -5710,13 +4877,13 @@ def test_agent_run_refuses_a_fork_onto_a_vibey_model_its_menu_does_not_offer(
         with sqlite3.connect(db_path) as conn:
             conn.execute(
                 "update agent_sessions set native_session_id = ? where id = ?",
-                (f"vibey:{payload['session_id']}", payload["session_id"]),
+                (f"vibey:{payload['run']['session_id']}", payload["run"]["session_id"]),
             )
 
     with patch("core.scheduled_tasks.paths.get_sqlite_state_path", return_value=db_path):
         result, payload = _run_on_new_session(
             tmp_path, capsys, db_path, agent_store, request_store,
-            ["--fork-session", payload["session_id"], "--model", "claude-opus-9", "--message", "branch"],
+            ["--fork-session", payload["run"]["session_id"], "--model", "claude-opus-9", "--message", "branch"],
         )
 
     assert result == 1

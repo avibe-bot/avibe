@@ -68,6 +68,18 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
 
 7. **Hosted tools** (v2, [`../vibey-hosted-tools.md`](../vibey-hosted-tools.md) §3.4, §3.5, §6, §7).
    - `HopResolution.hosted_tools` has one entry per hosted tool the turn declares:
+     - **`web_fetch`** (WF-1/2/3, v21) has exactly
+       `{native: "unsupported", replay: "unsupported"}`: always function-only,
+       never Claude-native. WF-3 enables its server entry, Vibey registration and
+       producer with `WEB_FETCH_ACTIVE = True`; an explicit false hides them and
+       rejects execution. The first resolution
+       freezes its canonical `{url}`-only function beside the other turn tools.
+       Vibey posts `{"arguments": {"url": ...}}` under the live turn to
+       `/hosted-tools/web_fetch`; the gateway owns normalization and the budget.
+       The validated record produces C-1's complete capped ordinary quotation
+       through the same deterministic frame used by readers. Replay preserves
+       the stored call/result without a fetch or settlement. The owner chose to
+       ship readers and activation together (`../web-fetch.md` §8).
      - **a search tool** (`web_search`, `x_search`) gives the primary hop's facts:
        - `native` is `assumed` when the tool runs on the hop (`hosted_tools.runs_on`: a hub Source with an eligible
          credential, never a Claude subscription, and an untranslated path, that serves the model, for which the
@@ -152,8 +164,17 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
        longer admits work, it is 409 `turn_not_live`; a tool outside the turn's frozen tool set, or for
        `image_generate` a model outside the turn's frozen models, is 409 `tool_not_enabled`. Nothing runs. Stopping
        the turn cancels an admitted call, which is still metered.
-     - **A search call runs on a chain** built from the turn's frozen executor order: each candidate is a Source
-       whose vendor offers the tool natively, called with the first of its vendor's `executor_models` the Source
+     - **A search call runs on a chain** built from the turn's frozen candidate list. For `web_search`, a candidate
+       is a search-service Source (including a qualifying official DeepSeek API-key Source) or a model executor;
+       one Source holds one role. Automatic order puts services before model executors. A saved order preserves
+       deliberate placements; unnamed or role-changed services, identified by `executor_order_kinds`, are placed
+       before its first model executor without a config write, unnamed models follow, and disabled entries go last
+       (`web-search-services.md` §4.1). The turn freezes `prefer_native`, candidates and their result counts.
+       `prefer_native: false` states native/replay unsupported on every hop, so native history replays synthetically.
+       A candidate is skipped by its first applicable reason: unavailable, disabled, blocked, cooling, query too long.
+       Skips write no state and cost nothing. A service sends its catalog request through the adapter custody
+       boundary, never the model engine. A model executor is a Source whose vendor offers the tool natively,
+       called with the first of its vendor's `executor_models` the Source
        lists (a Source listing none is no candidate), and admitted on the final snapshot when the gateway reaches it
        (`runs_on`, its identity, no current negative `call` evidence). The gateway sends one short native request
        (the overlay's declaration; on Responses `tool_choice: "required"`; Anthropic is asked in the message alone;
@@ -161,7 +182,7 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
        or server error included), a narrow-rule refusal, a refusal of the executor model (`model_not_found`), or a
        failure mid-stream. Only the narrow rule writes negative `call` evidence; a model refusal is not a refusal of
        the tool. A completed response that never ran the tool ends the chain. One deadline covers the whole chain
-       (180 s).
+       (180 s), with at most 30 s per service attempt; model executors retain the remaining chain budget.
      - **An `image_generate` call** runs directly on the image endpoint of the (Source, model) the turn's frozen
        models name (`vibey-hosted-tools.md` §7.4), admitted on the final snapshot; there is no chain and no
        fallback. Its arguments are `{model, prompt, size?, images?, n?}`, `images` being at most 4 base64 strings,
@@ -176,9 +197,18 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
      - Every outcome of a well-formed call is a 200 with `{"record", "execution"?}` in the
        `ToolResultMessage.hosted` encoding. `execution` names the attempt whose response the record came from (the
        last one tried when all failed), with its billing and cost; earlier billable attempts are listed in
-       `execution.failed_attempts: [{source_id, billing, cost?}]`. With no candidate, or every candidate failed, the
-       record is `failed` and names what to add.
-     - Success is an allow-list: a call is `completed` only when the response says it completed (Responses
+       `execution.failed_attempts: [{source_id, billing, cost?}]`, including an earlier possibly billed service
+       attempt whose charge is unknown (no cost). A service chain's `record.attempts[]` carries every reached
+       candidate, tried or skipped, even with no execution. Model-only chains retain the released shape.
+       With no candidate, the failed record names both remedies: add a search service or a search-capable API key.
+       Otherwise its terminal reason prioritizes query-too-long (`search_query_too_long`, largest reachable limit
+       in `error`), query-specific refusal, blocked Sources (`search_sources_blocked` with per-Source remedies;
+       disabled decides only if every candidate is disabled), last tried failure, then cooling/unavailable.
+     - A service response is `completed` exactly for HTTP 200 with a results array that is empty or retains at
+       least one row after mapping bounds: HTTP(S) URLs at most 2,048 characters, title 300, excerpt 1,000,
+       page age 64, at most the frozen result count. Missing/unreadable arrays or non-empty arrays with no usable
+       rows are `service_unreadable` and fail over. JSON decoding and mapping run off the controller loop.
+     - Model success is an allow-list: a call is `completed` only when the response says it completed (Responses
        `status: completed`; Anthropic `end_turn` or `stop_sequence`) and nothing failed; a response that stopped
        early is `incomplete`; any reported failure, or any other or missing ending, is `failed`. An unreadable
        response is `failed`. The record's `error` is in the user's language, and every reason the gateway words
@@ -192,9 +222,21 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
        citations are read.
      - A malformed call is 400 `invalid_request_error` (including a body over the tool's request bound), an
        unauthenticated one 401, an unknown tool 404, as `{"type": "error", "error": {"type", "code"}}`.
-     - Each attempt is metered on its own Source and never changes Source health. `cost` is the pricing module's
-       value of that attempt: `included` on a monthly Source, the provider's own figure as `reported`, else `list`;
-       absent when it cannot be valued, never zero.
+     - Each sent attempt is metered on its own Source; skips and pre-send failures are not. Model executor
+       attempts never change Source health. Service credential, balance and catalog-named limit failures do,
+       fenced by the Source attempt-start settlement generation. Transient, query-specific, redirect and unreadable
+       service failures never write health; transient/unavailable/unreadable failures use a separately fenced
+       (Source, service) cooldown. A service writes no negative hosted-tool evidence. Completed service requests
+       write positive `mode: service` evidence. A re-enable trial admits one request immediately before sending.
+     - A model attempt's cost uses the pricing module as before. A service attempt uses its catalog list price or
+       a finite non-negative reported price no larger than 100 times that price, with the catalog's estimate flag.
+       Known-unbilled outcomes carry explicit list $0: pre-send failure, non-200, empty DeepSeek results, or a
+       catalog-declared unbilled outcome. Received status survives body failure or stop: a non-200 is $0, an Exa/
+       Tavily 200 is billed, and a DeepSeek 200 with an unreadable result count is uncertain. Otherwise sent/no-status
+       failures are uncertain unless the catalog declares them unbilled. Unknown costs remain absent and make
+       known chain totals lower bounds. Stopped calls write no record but meter their observed billing facts.
+       Stop itself creates no cooldown or failure: no-status and 200 stops settle only billing/authentication/trial
+       facts, while an observed failure status still settles its health/cooldown row.
 
 ## 3. Not required
 

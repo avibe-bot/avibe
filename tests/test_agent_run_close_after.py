@@ -1205,8 +1205,9 @@ def test_an_activity_started_while_the_runs_terminal_record_waits_still_defers_t
 def test_an_activity_that_settles_while_the_runs_terminal_record_waits_stays_first(tmp_path, monkeypatch) -> None:
     """#2706: the other order. An owned Activity that the loop saw open ends -- durably -- and settles the Run while
     the record waits for SQLite's writer. The Activity's settlement committed first, so it stays first: the Run keeps
-    the Activity's status and the record adds only its output, exactly as when the Activity had ended before the result
-    on the loop."""
+    the Activity's outcome and the record adds only its output, exactly as when the Activity had ended before the result
+    on the loop. Only an Activity the service ended settles a Run whose Turn is still running, so this one is a runtime
+    replacement."""
 
     from core.scheduled_tasks import ScheduledTaskService, ScheduledTaskStore, TaskExecutionStore
     from storage.background import SQLiteBackgroundTaskStore
@@ -1262,14 +1263,17 @@ def test_an_activity_that_settles_while_the_runs_terminal_record_waits_stays_fir
             # The Activity ends on the loop and its Run owner settles it, before the record commits.
             blocked[0] = False
             activity_store.upsert_activity(activity_row, phase="awaiting_output")
-            activity = SimpleNamespace(id="activity-1", status="stopped", run_id=queued.id, metadata={})
+            activity = SimpleNamespace(
+                id="activity-1", status="killed", run_id=queued.id, metadata={"interrupt_reason": "backend_refresh"}
+            )
             assert scheduled.settle_activity_runs(activity) == [queued.id]
             release.set()
             await record
 
     asyncio.run(exercise())
     settled = request_store.get_run(queued.id)
-    assert normalize_run_status(settled["status"]) == "canceled", "the later record replaced the Activity's settlement"
+    assert settled["metadata"].get("interrupt_reason") == "backend_refresh", "the later record replaced the Activity's settlement"
+    assert settled["error"] != "the turn failed", "the later record replaced the Activity's settlement"
 
 
 def test_the_runs_terminal_record_reads_only_its_sessions_activities(tmp_path, monkeypatch) -> None:

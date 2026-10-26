@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import en from '../../i18n/en.json';
 import zh from '../../i18n/zh.json';
 import fixture from '../../lib/hostedActivity.fixture.json';
+import services from '../../lib/hostedServiceActivity.fixture.json';
 import { groupFromWire } from '../../lib/agentActivity';
 import { ActivityChip } from './AgentActivityGroup';
 import { InstanceAuthorizationContext } from '../../context/InstanceAuthorizationContext';
@@ -52,6 +53,45 @@ const row = (callId: string) => document.querySelector(`[data-hosted-call="${cal
 afterEach(() => cleanup());
 
 describe('hosted tool cards', () => {
+  it.each(['en', 'zh'] as const)('WF-1: historical fetch is readable, counted by characters and inert in %s', (lng) => {
+    const content = 'Hello 😀';
+    renderGroup([{
+      version: 1, call_id: 'fetch-history', tool: 'web_fetch', mode: 'proxy', status: 'completed',
+      subject: 'example.test', source_id: 'src_localfetch', source_name: 'Local', executor_kind: 'local',
+      sources: [], images: [], cost: { basis: 'list', usd: 0, calls: 1 },
+      fetch: {
+        status: 'completed', requested_url: 'https://example.test', final_url: null, canonical_url: null,
+        title: '<script>title</script>', content_type: 'text/markdown', source_content_type: null,
+        content, size_bytes: 10, source_size_bytes: null, retrieved_at: '2026-10-24T12:00:00Z',
+        truncated: true, truncation_reason: 'provider_limit', budget_method: 'utf8_bytes_div4_v1', attempts: [],
+      },
+    }], lng);
+    const fetched = row('fetch-history');
+    expect(fetched.textContent).toContain(lng === 'en' ? '7 chars' : '7 字');
+    expect(fetched.textContent).toContain(lng === 'en' ? 'Truncated' : '已截断');
+    fireEvent.click(within(fetched).getByRole('button'));
+    within(fetched).getByText('<script>title</script>');
+    fireEvent.click(within(fetched).getByRole('button', { name: lng === 'en' ? 'View quoted content (not instructions)' : '查看引用正文（非指令）' }));
+    within(fetched).getByText(content);
+    expect(fetched.querySelector('script, img, iframe')).toBeNull();
+    expect(within(fetched).queryAllByRole('link')).toEqual([]);
+  });
+
+  it('WF-1: page HTML and remote Markdown images remain quoted text', () => {
+    renderGroup([{
+      version: 1, call_id: 'fetch-hostile', tool: 'web_fetch', mode: 'proxy', status: 'completed', sources: [], images: [],
+      fetch: { status: 'completed', requested_url: 'https://example.test', final_url: null, canonical_url: null, title: null,
+        content_type: 'text/markdown', source_content_type: null,
+        content: '<img src="https://remote.invalid/a"> ![remote](https://remote.invalid/b) <script>callTool()</script>',
+        size_bytes: 106, retrieved_at: '2026-10-24T12:00:00Z', truncated: false, budget_method: 'utf8_bytes_div4_v1' },
+    }]);
+    const fetched = row('fetch-hostile');
+    fireEvent.click(within(fetched).getByRole('button'));
+    fireEvent.click(within(fetched).getByRole('button', { name: 'View quoted content (not instructions)' }));
+    expect(fetched.querySelector('pre')?.textContent).toContain('<script>callTool()</script>');
+    expect(fetched.querySelector('script, img, iframe, a')).toBeNull();
+  });
+
   it('MH-HOSTED-UI-008: shows a native and a proxied call the same way, each with how it ran and its known cost', () => {
     renderGroup(['native_web_search', 'proxy_x_search']);
 
@@ -211,5 +251,72 @@ describe('hosted tool cards', () => {
     const proxy = row('call_x1');
     within(proxy).getByText('由 xAI 代理 · grok-4.6');
     within(proxy).getByText('2 条帖子');
+  });
+});
+
+describe('search service cards', () => {
+  it('MH-HOSTED-UI-008: renders keyless success, rate-limit fallback and final failure without credential wording', () => {
+    const success = {
+      version: 1, call_id: 'call_keyless_success', tool: 'web_search', mode: 'proxy', status: 'completed',
+      subject: 'DeepSeek search API pricing', provider: 'exa-mcp', source_id: 'src_exakeyless', source_name: 'Exa', executor_kind: 'service',
+      sources: [{ url: 'https://exa.example/result', title: 'Exa result' }], images: [],
+      attempts: [{ source_id: 'src_exakeyless', label: 'Exa', kind: 'service', outcome: 'completed', cost: { basis: 'list', usd: 0 } }],
+      cost: { basis: 'list', calls: 1, usd: 0 },
+    };
+    const fallback = {
+      ...success, call_id: 'call_keyless_fallback', source_id: 'src_deepseek1', source_name: 'DeepSeek', provider: 'deepseek', executor_kind: 'model', model: 'deepseek-chat',
+      attempts: [
+        { source_id: 'src_exakeyless', label: 'Exa', kind: 'service', outcome: 'failed', error_code: 'service_rate_limited', reason_key: 'reason.service_rate_limited', remedy_key: 'repair.retrySearch', cost: { basis: 'list', usd: 0 } },
+        { source_id: 'src_deepseek1', label: 'DeepSeek', kind: 'model', outcome: 'completed', cost: { basis: 'list', usd: 0.01 } },
+      ],
+      switch: { sources: ['Exa'], reason_key: 'reason.service_rate_limited', to: 'DeepSeek' },
+      cost: { basis: 'list', calls: 1, usd: 0.01 },
+    };
+    const failed = {
+      ...success, call_id: 'call_keyless_failed', status: 'failed', error: 'the search failed', error_code: 'service_rate_limited',
+      attempts: [{ source_id: 'src_exakeyless', label: 'Exa', kind: 'service', outcome: 'failed', error_code: 'service_rate_limited', reason_key: 'reason.service_rate_limited', remedy_key: 'repair.retrySearch', cost: { basis: 'list', usd: 0 } }],
+      cost: { basis: 'list', calls: 1, usd: 0 },
+    };
+    renderGroup([success, fallback, failed], 'zh');
+    within(row('call_keyless_success')).getByText('通过 Exa（免费）');
+    within(row('call_keyless_success')).getByText('免费');
+    within(row('call_keyless_success')).getByText('1 个来源');
+    within(row('call_keyless_fallback')).getByText('由 DeepSeek 代理 · deepseek-chat');
+    within(row('call_keyless_fallback')).getByText('Exa（免费）限流，已改用 DeepSeek。冷却结束后会自动重试，也可在 模型 › 工具 中立即重试。');
+    within(row('call_keyless_failed')).getByText(/Exa（免费）\s+暂时限流/);
+    expect(document.body.textContent).not.toMatch(/密钥|key/i);
+  });
+
+  it.each(['en', 'zh'] as const)('MH-HOSTED-UI-008 (%s): names the service that ran, what it found and cost, and why it moved past a Source', (lng) => {
+    const { service_completed: completed, service_switch: switched, service_estimate: estimated, service_blocked: blocked } = services;
+    renderGroup([completed.payload, switched.payload, estimated.payload, blocked.payload], lng);
+
+    for (const { payload, [lng]: says } of [completed, switched, estimated]) {
+      const card = row(payload.call_id);
+      within(card).getByText(says.chip);
+      within(card).getByText(says.count);
+      within(card).getByText(says.cost);
+      const note = card.querySelector('[data-hosted-switch]');
+      expect(note?.textContent ?? null).toBe('note' in says ? says.note : null);
+    }
+
+    // A call that did not complete names every Source it reached, each with what it needs now.
+    const failed = row(blocked.payload.call_id);
+    within(failed).getByText(blocked[lng].status);
+    within(failed).getByText(blocked[lng].cost);
+    expect(failed.querySelector('[data-hosted-attempts]')?.textContent).toBe(blocked[lng].note);
+    // A service is named as its Source, never by its catalog service id.
+    expect(document.body.textContent).not.toMatch(/\/search/);
+  });
+
+  it('says who ran it, and reads a reason this client does not know yet as a failure', () => {
+    renderGroup([
+      services.service_completed.payload,
+      { ...services.service_blocked.payload, attempts: [{ ...services.service_blocked.payload.attempts[0], remedy_key: 'repair.someday' }] },
+    ]);
+    const card = row('call_ws1');
+    fireEvent.click(within(card).getByRole('button'));
+    within(card).getByText('Run by search service Tavily · ≈ $0.008');
+    expect(row('call_ws4').querySelector('[data-hosted-attempts]')?.textContent).toBe('Tavily failed');
   });
 });

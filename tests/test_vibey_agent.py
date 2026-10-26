@@ -37,12 +37,13 @@ from sqlalchemy import select, update
 from config.v2_config import ModelHubConfig
 from core.agent_core.agent.events import NAMED_ERROR_KINDS, ToolFinished
 from core.agent_core.agent.recovery import UNRECORDED_EFFECT
-from core.agent_core.ai.provider import Done
+from core.agent_core.ai.provider import Done, MalformedToolCall
 from core.agent_core.harness.projection import project
 from core.agent_core.messages import (
     AssistantMessage,
     Citation,
     HostedAction,
+    HostedAttempt,
     HostedCost,
     HostedImage,
     HostedNative,
@@ -58,6 +59,7 @@ from core.agent_core.messages import (
     ThinkingBlock,
     ToolCallBlock,
     ToolResultMessage,
+    Usage,
     UserMessage,
     text,
     message_from_dict,
@@ -1308,6 +1310,125 @@ async def test_a_transient_failure_continues_from_the_same_transcript_without_a_
     assert harness.controller.terminals[-1]["is_error"] is False
 
 
+async def test_malformed_tool_arguments_recover_without_executing_the_bad_call(
+    engine, session, tmp_path, published, continuation_policy
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+
+    continuation_policy(initial_delay_s=0)
+    valid = ToolCallBlock(id="call_valid", name="echo", arguments={"value": "ok"})
+    malformed = ToolCallBlock(id="call_bad", name="echo", arguments={})
+    partial = AssistantMessage(
+        (text("before"), valid, malformed), ORIGIN, "error", usage=Usage(input_tokens=17, output_tokens=23)
+    )
+    failure = ProviderError(
+        "invalid_request",
+        "malformed tool arguments: expected a JSON object",
+        False,
+        partial=partial,
+        continuable=True,
+        malformed_tool_calls=(MalformedToolCall(id=malformed.id, name=malformed.name),),
+    )
+    tool = FakeTool("echo")
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "telegram",
+        [[failure], [Done(assistant("recovered"))]],
+        tools=[tool],
+    )
+
+    await harness.agent.handle_message(harness.request("run the safe call"))
+
+    assert len(tool.calls) == 1
+    assert tool.calls[0][0] == {"value": "ok"}
+    assert len(harness.provider.requests) == 2
+    resumed = harness.provider.requests[1].messages
+    assert any(
+        isinstance(message, ToolResultMessage)
+        and message.tool_call_id == malformed.id
+        and message.is_error
+        for message in resumed
+    )
+    rows = await harness.context_rows()
+    responses = [row for row in rows if row.kind == "response"]
+    assert responses[0].message.stop_reason == "error"
+    assert responses[0].message.tool_calls == (valid, malformed)
+    results = [row.message for row in rows if row.kind == "tool_result"]
+    assert len(results) == 2
+    assert any(result.tool_call_id == malformed.id and result.is_error for result in results)
+    assert any(
+        "malformed JSON arguments" in block.text
+        for result in results
+        for block in result.content
+        if isinstance(block, TextBlock)
+    )
+    assert harness.controller.im_client.sent == ["before", "recovered"]
+    with engine.connect() as conn:
+        assert conn.execute(
+            select(agent_events.c.id).where(
+                agent_events.c.session_id == SESSION, agent_events.c.event_type == "model_attempt"
+            )
+        ).first() is None
+    assert harness.controller.terminals[-1]["is_error"] is False
+
+
+async def test_malformed_tool_recovery_honors_a_terminating_valid_sibling(
+    engine, session, tmp_path, published, continuation_policy
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+
+    continuation_policy(initial_delay_s=0)
+    valid = ToolCallBlock(id="call_valid", name="echo", arguments={"value": "stop"})
+    malformed = ToolCallBlock(id="call_bad", name="echo", arguments={})
+    failure = ProviderError(
+        "invalid_request",
+        "malformed tool arguments: expected a JSON object",
+        False,
+        partial=AssistantMessage((valid, malformed), ORIGIN, "error"),
+        continuable=True,
+        malformed_tool_calls=(MalformedToolCall(id=malformed.id, name=malformed.name),),
+    )
+    tool = FakeTool("echo", result=ToolResult((text("terminated"),), terminate=True))
+    harness = _Harness(engine, tmp_path, "telegram", [[failure]], tools=[tool])
+
+    await harness.agent.handle_message(harness.request("stop after the safe call"))
+
+    assert len(harness.provider.requests) == 1
+    assert len(tool.calls) == 1
+    assert harness.controller.terminals[-1]["is_error"] is False
+
+
+async def test_malformed_hosted_tool_does_not_emit_tool_activity(
+    engine, session, tmp_path, published, continuation_policy
+) -> None:
+    from core.agent_core.ai.provider import ProviderError
+
+    continuation_policy(initial_delay_s=0)
+    malformed = ToolCallBlock(id="call_hosted", name="web_search", arguments={})
+    failure = ProviderError(
+        "invalid_request",
+        "malformed tool arguments: expected a JSON object",
+        False,
+        partial=AssistantMessage((malformed,), ORIGIN, "error"),
+        continuable=True,
+        malformed_tool_calls=(MalformedToolCall(id=malformed.id, name=malformed.name),),
+    )
+    tool = FakeTool("web_search")
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "telegram",
+        [[failure], [Done(assistant("recovered"))]],
+        tools=[tool],
+    )
+
+    await harness.agent.handle_message(harness.request("search safely"))
+
+    assert tool.calls == []
+    assert not any(item.startswith("🔧 web_search") for item in harness.controller.im_client.sent)
+
+
 async def test_a_continuation_reuses_a_committed_tool_result_without_rerunning_the_tool(
     engine, session, tmp_path, published
 ) -> None:
@@ -1945,6 +2066,24 @@ async def test_a_refused_model_route_fails_before_the_input_is_written(
 
 
 # --- settlement and run shape -----------------------------------------------------------
+
+
+async def test_a_failed_compaction_is_logged_with_why_and_never_shown(engine, session, tmp_path, published, caplog) -> None:
+    """C-9 keeps compaction silent to the user; the service log keeps why a checkpoint failed, the category a
+    provider's refusal named included, so a run that later runs out of room can be traced to it."""
+    from core.agent_core.agent.events import CompactionFailed
+    from modules.agents.vibey.agent import _Run
+
+    harness = _Harness(engine, tmp_path, "telegram", [])
+    run = _Run(request=harness.request("hello"), session_id=SESSION, turn_id="turn", instance="test")
+    error = "The checkpoint turn stopped with refusal (category: reasoning_extraction) and no usable checkpoint."
+
+    with caplog.at_level(logging.WARNING, logger="modules.agents.vibey.agent"):
+        await harness.agent._on_event(run, CompactionFailed("turn", 1, "threshold", error))
+
+    [line] = [record.getMessage() for record in caplog.records if record.getMessage().startswith("Vibey compaction")]
+    assert line == f"Vibey compaction failed: session={SESSION} turn=turn reason=threshold error={error}"
+    assert harness.controller.im_client.sent == []
 
 
 async def test_the_footer_reports_the_runs_final_outcome(engine, session, tmp_path, published, caplog) -> None:
@@ -2808,13 +2947,13 @@ async def test_a_restart_rerun_waits_for_its_surviving_command_as_the_live_call_
         if case in {"cancelled", "cancelled_at_shutdown"}:
             await _until(lambda: harness.agent._run_for(SESSION, cut_turn) is not None, "the rerun never ran")
             await asyncio.sleep(0.3)
-            harness.controller.shutdown_requested = case == "cancelled_at_shutdown"
+            harness.controller.shutdown_requested = case.endswith("at_shutdown")
             # The Turn task is cancelled directly, without ``handle_stop``.
             resumed.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(resumed, timeout=20)
             results = [entry for entry in await harness.context_rows() if entry.kind == "tool_result"]
-            if case == "cancelled":
+            if not harness.controller.shutdown_requested:
                 assert "Stopped by the user" in results[0].message.content[0].text
                 assert suite.jobs.status(job_id).state != "running"
             else:
@@ -3340,6 +3479,327 @@ async def test_a_native_search_is_kept_as_one_hosted_call_and_replayed_next_turn
 
 
 
+@pytest.mark.parametrize("platform", ["avibe", "telegram"])
+@pytest.mark.parametrize("outcome", ["completed", "error", "stop"])
+async def test_anthropic_deferred_search_shows_only_its_completion_live_and_on_reload(
+    engine, session, tmp_path, published, outcome, platform, monkeypatch
+):
+    """The real parser, loop, immutable store, dispatcher and activity projection agree at every boundary."""
+    import httpx
+    from modules.agents.vibey.models import registry_providers
+    from storage import agent_activity_service
+    from tests.agent_core.ai.test_anthropic_deferred import USE, RESULT, _sse
+    monkeypatch.setattr("core.message_mirror._activity_streaming_enabled", lambda: True)
+
+    started, release, client_shown = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    async def client_tool(arguments, ctx):
+        started.set()
+        if outcome == "stop":
+            await ctx.cancel.wait()
+        else:
+            await release.wait()
+        return ToolResult((text("client result"),))
+
+    sent = []
+    served = {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": "src_served00001"}
+    def gateway(request):
+        sent.append(json.loads(request.content))
+        if len(sent) == 1:
+            body = _sse([USE, {"type": "tool_use", "id": "toolu_client", "name": "echo", "input": {}}])
+        elif outcome == "error":
+            return httpx.Response(400, json={"type": "error", "error": {"type": "invalid_request_error", "message": "test error"}})
+        else:
+            body = _sse([RESULT, {"type": "text", "text": "found"}], stop="end_turn", searches=1)
+        return httpx.Response(200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": json.dumps(served)}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(engine, tmp_path, platform, [], tools=[FakeTool("echo", execute=client_tool)],
+                           providers=registry_providers(media_loader=None, client=client))
+        real_emit = harness.agent._emit_tool_line
+        async def emit_client(*args, **kwargs):
+            await real_emit(*args, **kwargs)
+            client_shown.set()
+        harness.agent._emit_tool_line = emit_client
+        harness.controller.hub_source_id = "src_served00001"
+        harness.controller.im_client.supports_message_editing = lambda context=None: False
+        harness.controller.hub_hosted_tools = {"web_search": {
+            "native": "assumed", "declaration": {"type": "web_search_20250305", "name": "web_search"},
+            "include": [], "replay": "unsupported"
+        }}
+        request = harness.request("search")
+        running = asyncio.create_task(harness.agent.handle_message(request))
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await asyncio.wait_for(client_shown.wait(), timeout=5)
+        before = await harness.context_rows()
+        original = next(row for row in before if row.kind == "response")
+        with engine.connect() as conn:
+            groups = agent_activity_service.list_turn_groups(conn, session_id=SESSION)["groups"]
+            detail = agent_activity_service.get_turn_group(conn, session_id=SESSION, group_id=groups[-1]["id"])
+        assert not any(row.get("hosted") for row in detail["rows"])
+        assert not any("avibe release" in line for line in harness.controller.im_client.sent)
+        if outcome == "stop":
+            assert await harness.agent.handle_stop(AgentRequest(**{**request.__dict__, "message": "stop"}))
+        else:
+            release.set()
+        await asyncio.wait_for(running, timeout=10)
+        if outcome == "stop":
+            with engine.begin() as conn:
+                message_deliveries.terminalize_turn(
+                    conn, _turn(request.context), outcome="canceled", settled_by="test_stop", evidence_kind="test"
+                )
+
+    rows = await harness.context_rows()
+    assert next(row for row in rows if row.row_id == original.row_id) == original
+    with engine.connect() as conn:
+        groups = agent_activity_service.list_turn_groups(conn, session_id=SESSION)["groups"]
+        details = [agent_activity_service.get_turn_group(conn, session_id=SESSION, group_id=group["id"]) for group in groups]
+    cards = [row["hosted"] for detail in details for row in detail["rows"] if row.get("hosted")]
+    assert len(cards) == (1 if outcome == "completed" else 0)
+    if outcome == "completed":
+        [card] = cards
+        assert card["response_id"] != original.row_id and card["status"] == "completed"
+        # The client-tool activity comes first; the completed search stays at response 2.
+        activity_rows = [row for detail in details for row in detail["rows"]]
+        assert next(index for index, row in enumerate(activity_rows) if row.get("hosted")) > 0
+    lines = [line for line in harness.controller.im_client.sent if "avibe release" in line]
+    assert len(lines) == (1 if outcome == "completed" else 0)
+    if platform == "avibe":
+        live = [payload["content"]["hosted"] for name, payload in published
+                if name == "message.new" and (payload.get("content") or {}).get("hosted")]
+        assert live == cards
+    if outcome == "completed":
+        assert all("Cut off" not in line for line in lines) and len(card["sources"]) == 1
+        assert sent[1]["tools"] == sent[0]["tools"]
+        assert sent[1]["messages"][-1]["role"] == "user"
+        assert {b["type"] for b in sent[1]["messages"][-1]["content"]} == {"tool_result"}
+        responses = [row.message for row in rows if row.kind == "response"]
+        assert not responses[0].hosted_summary.counts
+        assert responses[1].hosted_summary.counts == {"web_search_requests": 1}
+    else:
+        assert not lines
+
+
+
+@pytest.mark.parametrize("platform", ["avibe", "telegram"])
+@pytest.mark.parametrize("background", [False, True], ids=["foreground", "background"])
+@pytest.mark.parametrize("deferred", [False, True], ids=["ordinary", "deferred"])
+async def test_native_search_card_survives_the_delivery_policy(
+    engine, session, tmp_path, published, monkeypatch, platform, background, deferred
+):
+    """MH-HOSTED-UI-016: background probes retain the same rich card as ordinary searches.
+
+    Real Anthropic wire -> Agent loop -> dispatcher -> mirror, with only HTTP and
+    the client tool faked. Background suppresses delivery, never the card's data
+    or its response anchor when the Session is subsequently opened on Web.
+    """
+    import httpx
+
+    from modules.agents.vibey.models import registry_providers
+    from storage import agent_activity_service
+    from tests.agent_core.ai.test_anthropic_deferred import USE, RESULT, _sse
+    from tests.test_model_hub_l3 import _source
+
+    monkeypatch.setattr("core.message_mirror._activity_streaming_enabled", lambda: True)
+    sources = [{"url": f"https://example.test/{index}", "title": f"Result {index}"} for index in range(9)]
+    completion = {**RESULT, "content": [
+        {**source, "type": "web_search_result", "encrypted_content": "opaque"} for source in sources
+    ]}
+    client_call = {"type": "tool_use", "id": "toolu_client", "name": "bash", "input": {"command": "echo probe"}}
+    sent = []
+    served = {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": "src_served00001"}
+
+    def gateway(wire):
+        sent.append(json.loads(wire.content))
+        if deferred and len(sent) == 1:
+            body = _sse([USE, client_call])
+        else:
+            body = _sse([*([USE] if not deferred else []), completion, {"type": "text", "text": "Result 0"}],
+                        stop="end_turn", searches=1)
+        return httpx.Response(200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": json.dumps(served)},
+                              text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(engine, tmp_path, platform, [], tools=[FakeTool("bash")],
+                           providers=registry_providers(media_loader=None, client=client))
+        harness.controller.hub_source_id = served["source"]
+        harness.controller.hub_sources = [_source(served["source"], "Search source")]
+        harness.controller.hub_hosted_tools = {"web_search": {
+            "native": "assumed", "declaration": {"type": "web_search_20250305", "name": "web_search"},
+            "include": [], "replay": "unsupported",
+        }}
+        harness.controller.im_client.supports_message_editing = lambda context=None: False
+        request = harness.request("search")
+        request.context.platform_specific["suppress_delivery"] = background
+        await harness.agent.handle_message(request)
+
+    rows = await harness.context_rows()
+    responses = [row for row in rows if row.kind == "response"]
+    assert len(responses) == len(sent) == (2 if deferred else 1)
+    final = responses[-1]
+    if deferred:
+        [pending] = [block for block in responses[0].message.content if isinstance(block, HostedToolBlock)]
+        assert pending.record.status == "pending" and pending.native.payload == (USE,)
+        [finished] = [block for block in final.message.content if isinstance(block, HostedToolBlock)]
+        assert finished.native.payload == (completion,)
+        assert not responses[0].message.hosted_summary.counts
+    assert final.message.hosted_summary.counts == {"web_search_requests": 1}
+
+    with engine.connect() as conn:
+        traces = conn.execute(select(agent_events).where(
+            agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call"
+        ).order_by(agent_events.c.created_at, agent_events.c.id)).mappings().all()
+        groups = agent_activity_service.list_turn_groups(conn, session_id=SESSION)["groups"]
+        details = [agent_activity_service.get_turn_group(conn, session_id=SESSION, group_id=group["id"]) for group in groups]
+    assert len(traces) == (2 if deferred else 1)  # no pending search card
+    event = traces[-1]
+    expected = {
+        "version": 1, "call_id": USE["id"], "tool": "web_search", "mode": "native", "status": "completed",
+        "subject": USE["input"]["query"], "action": "search", "provider": served["provider"],
+        "source_id": served["source"], "source_name": "Search source", "model": served["model"],
+        "sources": sources, "images": [], "response_id": final.row_id,
+    }
+    assert json.loads(event["content_json"])["hosted"] == expected
+    assert json.loads(event["metadata_json"])["precedes_message_id"] == final.row_id
+    [owner] = [detail for detail in details if any(row["id"] == event["id"] for row in detail["rows"])]
+    assert (owner["anchor_message_id"], owner["anchor_position"]) == (final.row_id, "before")
+    assert owner["rows"][-1]["hosted"] == expected
+
+    live = [payload for name, payload in published if name == "message.new"]
+    search_events = [item for item in live if (item.get("content") or {}).get("hosted")]
+    if platform == "avibe" and not background:
+        assert [item["content"]["hosted"] for item in search_events] == [expected]
+        assert search_events[0]["metadata"]["precedes_message_id"] == final.row_id
+    else:
+        assert not search_events
+    lines = [line for line in harness.controller.im_client.sent if "avibe release" in line]
+    if background:
+        assert not live and not harness.controller.im_client.sent
+    else:
+        assert lines == [event["content_text"]]  # the same ordinary hosted line, including on IM
+
+
+@pytest.mark.parametrize("client_finished", [False, True])
+@pytest.mark.parametrize("case", ["continue", "stopped", "preflight_failed", "partial_failure"])
+async def test_restart_defers_accepted_steer_until_native_search_continuation(
+    engine, session, tmp_path, published, client_finished, case, continuation_policy
+):
+    """T3 must not insert a recovered steer into the tool-result-only continuation.
+
+    The old path consumes it before Agent.resume; an in-process steer test cannot
+    see this. Seed the real parser's committed cut, discard the adapter, then run
+    startup recovery twice and the durable Turn's actual transcript resume.
+    """
+    import httpx
+    from dataclasses import replace
+    from core.agent_core.ai._common import PIN_MODEL_HEADER, PIN_SOURCE_HEADER
+    from modules.agents.vibey.models import registry_providers
+    from tests.agent_core.ai.test_anthropic_deferred import _paused, _sse, RESULT
+    from tests.agent_core.fakes import ORIGIN
+
+    continuation_policy(initial_delay_s=0)
+    sent = []
+    def gateway(wire):
+        sent.append(wire)
+        complete_at = 2 if case == "partial_failure" else 1
+        results = [{**RESULT, "tool_use_id": f"srvtoolu_{index}"} for index in (0, 1)]
+        blocks = [*results, {"type": "text", "text": "found"}] if len(sent) <= complete_at else [
+            {"type": "text", "text": "steer answered"}
+        ]
+        body = _sse(blocks, stop="end_turn", searches=2 if len(sent) == complete_at else 0)
+        if case == "partial_failure" and len(sent) == 1:
+            body = _sse(results[:1], stop=None, searches=1).removesuffix('data: {"type": "message_stop"}\n\n')
+        served = {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": "src_served00001"}
+        return httpx.Response(200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": json.dumps(served)},
+                              text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(engine, tmp_path, "avibe", [], providers=registry_providers(media_loader=None, client=client))
+        harness.controller.hub_source_id = "src_served00001"
+        harness.controller.hub_hosted_tools = {"web_search": {
+            "native": "assumed", "declaration": {"type": "web_search_20250305", "name": "web_search"},
+            "include": [], "replay": "unsupported",
+        }}
+        request = harness.request("search")
+        turn_id = _turn(request.context)
+        harness.controller._native_start(request.context)
+        harness.agent.store.bind_agent(SESSION, None, turn_id=turn_id)
+        await harness.agent.store.consume_input(
+            SESSION, request.context.platform_specific["delivery_id"], UserMessage((text("search"),))
+        )
+        paused_request, paused = await _paused("SSC")
+        paused = replace(paused, origin=ORIGIN, source_identity="sha256:test-source-identity")
+        original = await harness.agent.store.append_response(SESSION, paused, final=False)
+        steer_id, attempt = harness.open_steer("and the docs", turn_id, harness.controller.started[-1])
+        harness.accept_steer(steer_id, attempt, turn_id)
+        if client_finished:
+            await harness.agent.store.append_tool_result(SESSION, paused_request.messages[-1], details={})
+        if case == "stopped":
+            with engine.begin() as conn:
+                message_deliveries.terminalize_turn(
+                    conn, turn_id, outcome="canceled", settled_by="test_stop", evidence_kind="test"
+                )
+        else:
+            with engine.begin() as conn:
+                turn = message_deliveries.get_turn(conn, turn_id)
+                assert message_deliveries.rotate_restart_generation(
+                    conn, turn_id, expected_version=int(turn["version"]), streak=1, response_seq=original.context_seq
+                )
+        harness.new_agent()
+        await harness.agent.recover_runtime_state()
+        await harness.agent.recover_runtime_state()
+        rows = await harness.context_rows()
+        if case == "stopped":
+            assert rows[-1].row_id == steer_id and not sent
+            return
+        assert all(row.row_id != steer_id for row in rows)
+        context = _context("avibe", SESSION, turn_id=turn_id, delivery_id=request.context.platform_specific["delivery_id"])
+        context.platform_specific.update({"vibey_resume": True, "vibey_source_turn_id": turn_id})
+        scheduled = []
+        if case == "preflight_failed":
+            async def unavailable(*_args):
+                raise RuntimeError("Source unavailable")
+            harness.agent._preflight = unavailable
+            harness.controller.vibey_recovery = SimpleNamespace(ensure=lambda: scheduled.append(True))
+        await harness.agent.handle_message(AgentRequest(**{**request.__dict__, "context": context, "message": "", "user_message": ""}))
+        if case == "preflight_failed":
+            assert scheduled
+            _owner_settled(engine, request)
+            await harness.agent.recover_runtime_state()
+            assert (await harness.context_rows())[-1].row_id == steer_id and not sent
+            return
+
+    assert len(sent) == (3 if case == "partial_failure" else 2)
+    continuation, answered = json.loads(sent[0].content), json.loads(sent[-1].content)
+    if case == "partial_failure":
+        retried = json.loads(sent[1].content)
+        assert retried["messages"] == continuation["messages"]
+        assert retried["tools"] == continuation["tools"]
+        assert sent[1].headers[PIN_SOURCE_HEADER] == "src_served00001"
+        assert sent[1].headers[PIN_MODEL_HEADER] == "test-model"
+    assert sent[0].headers[PIN_SOURCE_HEADER] == "src_served00001"
+    assert sent[0].headers[PIN_MODEL_HEADER] == "test-model"
+    assert continuation["messages"][-1]["role"] == "user"
+    assert {block["type"] for block in continuation["messages"][-1]["content"]} == {"tool_result"}
+    assert "and the docs" not in json.dumps(continuation)
+    assert "and the docs" in json.dumps(answered)
+    rows = await harness.context_rows()
+    completion = next(row for row in rows if row.kind == "response" and row.row_id != original.row_id
+                      and row.message.stop_reason != "error")
+    hosted = [block for block in completion.message.content if isinstance(block, HostedToolBlock)]
+    assert [(block.id, block.record.status) for block in hosted] == [
+        ("srvtoolu_0", "completed"), ("srvtoolu_1", "completed"),
+    ]
+    if case == "partial_failure":
+        [partial] = [row for row in rows if row.kind == "response" and row.message.stop_reason == "error"]
+        assert partial.message.hosted_summary.counts == {"web_search_requests": 1}
+        assert completion.message.hosted_summary.counts == {"web_search_requests": 2}
+        assert sum((row.message.hosted_summary.counts.get("web_search_requests", 0)
+                    if row.message.hosted_summary else 0) for row in rows if row.kind == "response") == 3
+    [steer] = [row for row in rows if row.row_id == steer_id]
+    assert completion.context_seq < steer.context_seq
+    assert next(row for row in rows if row.row_id == original.row_id) == original
+
+
 def _anthropic_reply(*blocks: str, stop_reason: str) -> str:
     """An Anthropic stream of whole content blocks, each given as its ``content_block_start`` JSON."""
     events = ['data: {"type":"message_start","message":{"usage":{}}}\n\n']
@@ -3453,6 +3913,131 @@ async def test_a_proxied_hosted_call_runs_on_the_turns_executor_chain_and_keeps_
     assert result.hosted.record.error_code == code
     sent = models[1]["messages"][-1]["content"][0]
     assert sent["type"] == "tool_result" and seen in json.dumps(sent)
+
+
+@pytest.mark.parametrize("platform", ["avibe", "telegram"])
+@pytest.mark.parametrize("executor", ["local", "exa", "jina", "policy"])
+async def test_web_fetch_survives_the_real_agent_commit_delivery_and_next_turn_replay(
+    engine, session, tmp_path, published, monkeypatch, platform, executor
+):
+    """WF-3: a gateway 200 must commit and display, not become an interrupted call.
+
+    The earlier tool-only acceptance never reached SQLite media registration.
+    Exercise the real parser, Agent loop, tool runtime, transcript, dispatcher,
+    mirror and activity reader; only HTTP is stubbed. A fresh adapter then replays
+    the stored fetch with the tool disabled, without another fetch or media write.
+    """
+    import httpx
+
+    from core.agent_core.messages import ServiceExecutorOrigin, WebFetchRecord
+    from core.agent_core.web_fetch import frame_fetch_record
+    from modules.agents.vibey.models import registry_providers
+    from storage import agent_activity_service
+    from storage.models import media_objects
+
+    monkeypatch.setattr("core.message_mirror._activity_streaming_enabled", lambda: True)
+    blocked = executor == "policy"
+    url = "http://10.0.0.5/" if blocked else "https://example.test/page"
+    content = "" if blocked else "Hello 世界"
+    sid, label, kind, vendor, service_id = {
+        "local": ("src_localfetch", "Local", "local", "local", "local/fetch"),
+        "exa": ("src_exakeyless", "Exa (free)", "service", "exa-mcp", "exa/mcp"),
+        "jina": ("src_jinakeyless", "Jina Reader (free)", "service", "jina-reader", "jina/reader"),
+        "policy": (None, None, None, None, None),
+    }[executor]
+    cost = HostedCost(basis="list", usd=0)
+    record = WebFetchRecord(
+        status="failed" if blocked else "completed", requested_url=url,
+        content=content, size_bytes=len(content.encode("utf-8")), retrieved_at="2026-10-25T17:27:45Z",
+        error="blocked by local policy" if blocked else None,
+        error_code="fetch_url_blocked" if blocked else None,
+        attempts=() if blocked else (HostedAttempt(sid, label, kind, "completed", cost=cost),),
+    )
+    hosted = HostedResult(record=record, execution=None if blocked else ProxyExecution(
+        executor_origin=ServiceExecutorOrigin(vendor, "local_fetch" if kind == "local" else "fetch_api", service_id),
+        executor_source_id=sid, executor_billing="metered", cost=cost,
+    ))
+    frame = frame_fetch_record(record)
+    expected = ToolResultMessage("toolu_fetch", "web_fetch", (text(frame),), is_error=blocked, hosted=hosted)
+    envelope = message_to_dict(expected)["hosted"]
+    served = {"provider": "test-provider", "api": "anthropic", "model": "test-model", "source": "src_served00001"}
+    replies = [
+        _anthropic_reply(json.dumps({"type": "tool_use", "id": "toolu_fetch", "name": "web_fetch", "input": {"url": url}}), stop_reason="tool_use"),
+        _anthropic_reply('{"type":"text","text":"fetch handled"}', stop_reason="end_turn"),
+        _anthropic_reply('{"type":"text","text":"stored read recalled"}', stop_reason="end_turn"),
+    ]
+    models, executed = [], []
+
+    def gateway(request):
+        if request.url.path == "/vibey/v1/hosted-tools/web_fetch":
+            executed.append(request)
+            assert json.loads(request.content) == {"arguments": {"url": url}}
+            return httpx.Response(200, json=envelope)
+        assert request.url.path == "/vibey/v1/messages"
+        models.append(json.loads(request.content))
+        return httpx.Response(200, headers={
+            "content-type": "text/event-stream", "x-avibe-served-hop": json.dumps(served),
+        }, text=replies.pop(0))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        harness = _Harness(engine, tmp_path, platform, [],
+                           providers=registry_providers(media_loader=None, client=client), gateway_client=client)
+        harness.controller.hub_source_id = served["source"]
+        harness.controller.hub_hosted_tools = {"web_fetch": {"native": "unsupported", "replay": "unsupported"}}
+        harness.controller.im_client.supports_message_editing = lambda context=None: False
+        first = harness.request("read this page")
+        await harness.agent.handle_message(first)
+        assert harness.controller.terminals[-1]["is_error"] is False
+        assert harness.controller.terminal_texts[-1] == "fetch handled"
+        [committed] = [row for row in await harness.context_rows() if row.kind == "tool_result"]
+        assert committed.message == expected
+        assert executed[0].headers["x-avibe-turn-id"] == _turn(first.context)
+        assert executed[0].headers["authorization"] == "Bearer hub-token"
+
+        # Reconstruct from durable rows, with no web_fetch declaration on the new turn.
+        harness.new_agent()
+        harness.controller.hub_hosted_tools = {}
+        await harness.agent.handle_message(harness.request("recall the stored read"))
+        assert harness.controller.terminals[-1]["is_error"] is False
+        assert harness.controller.terminal_texts[-1] == "stored read recalled"
+        [replayed] = [row for row in await harness.context_rows() if row.kind == "tool_result"]
+        assert replayed == committed
+
+    assert len(executed) == 1 and len(models) == 3 and replies == []
+    assert models[0]["tools"][0]["name"] == "web_fetch"
+    assert all(tool.get("name") != "web_fetch" for tool in models[2].get("tools", []))
+    for request in models[1:]:
+        [answer] = [block for message in request["messages"] for block in message["content"]
+                    if block.get("type") == "tool_result" and block.get("tool_use_id") == "toolu_fetch"]
+        assert answer["content"] == [{"type": "text", "text": frame}]
+        assert answer.get("is_error", False) is blocked
+        assert "tool call interrupted" not in json.dumps(request)
+
+    # The dispatcher/mirror create exactly one hosted trace, read unchanged by
+    # the activity API. Page records never register images or produce uploads.
+    with engine.connect() as conn:
+        traces = conn.execute(select(agent_events).where(
+            agent_events.c.session_id == SESSION, agent_events.c.event_type == "tool_call"
+        )).mappings().all()
+        groups = agent_activity_service.list_turn_groups(conn, session_id=SESSION)["groups"]
+        details = [agent_activity_service.get_turn_group(conn, session_id=SESSION, group_id=group["id"]) for group in groups]
+        assert conn.execute(select(media_objects.c.token).where(media_objects.c.session_id == SESSION)).first() is None
+    [trace] = [row for row in traces if json.loads(row["content_json"]).get("hosted")]
+    card = json.loads(trace["content_json"])["hosted"]
+    assert card["tool"] == "web_fetch" and card["status"] == record.status
+    assert card["sources"] == card["images"] == []
+    assert card["fetch"] == envelope["record"]
+    if blocked:
+        assert card["policy_sources"] == [] and card["error_code"] == "fetch_url_blocked"
+    else:
+        assert card["source_id"] == sid and card["cost"]["usd"] == 0
+    assert [row["hosted"] for detail in details for row in detail["rows"] if row.get("hosted")] == [card]
+    live = [payload["content"]["hosted"] for name, payload in published
+            if name == "message.new" and (payload.get("content") or {}).get("hosted")]
+    assert live == ([card] if platform == "avibe" else [])
+    assert harness.controller.im_client.sent.count(trace["content_text"]) == 1
+    assert not harness.controller.im_client.uploads
+    assert len(harness.rows("result")) == 2 and not harness.rows("error")
 
 
 _JPEG = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8
@@ -3877,7 +4462,9 @@ def _without(entry: dict, key: str) -> dict:
     "hosted_tools",
     [
         None,
-        {"web_fetch": _PROXY_SEARCH},
+        {"future_unknown_tool": _PROXY_SEARCH},
+        {"web_fetch": _NATIVE_SEARCH},
+        {"web_fetch": {**_PROXY_SEARCH, "refused": True}},
         {"web_search": _without(_NATIVE_SEARCH, "declaration")},
         {"web_search": {**_PROXY_SEARCH, "include": []}},
         {"web_search": {**_NATIVE_SEARCH, "note": "extra"}},
@@ -3894,7 +4481,7 @@ def _without(entry: dict, key: str) -> dict:
         {"image_generate": {**_IMAGES, "models": [{**_IMAGES["models"][0], "source_id": "openai-main"}]}},
     ],
     ids=[
-        "absent", "unknown-tool", "assumed-without-declaration", "unsupported-with-include", "extra-field",
+        "absent", "unknown-tool", "native-fetch", "refused-fetch", "assumed-without-declaration", "unsupported-with-include", "extra-field",
         "no-replay", "unknown-fact", "unhashable-fact", "include-not-a-list", "v1-executor", "refused-not-true",
         "refused-on-a-native-tool", "no-image-models",
         "default-not-first", "unknown-image-param", "image-source-not-a-source-id",
@@ -4896,6 +5483,54 @@ async def test_an_answer_split_into_adjacent_text_blocks_reads_as_written(
     assert [citation["url"] for citation in citations] == ([RELEASE] if cited else [])
 
 
+@pytest.mark.parametrize("platform", ["avibe", "telegram"])
+async def test_unannotated_citation_markers_degrade_before_delivery_and_reload(
+    engine, session, tmp_path, published, platform
+) -> None:
+    """A raw provider marker is safe fallback text, not Web syntax, without annotations."""
+    marker = "\ue200cite\ue202turn0view0\ue201"
+    answer = (
+        f"Claim {marker} repeats {marker}.\n\n"
+        f"Inline `{marker}` remains literal.\n\n"
+        f"```\n{marker}\n```"
+    )
+    expected = (
+        "Claim (source unavailable) repeats (source unavailable).\n\n"
+        f"Inline `{marker}` remains literal.\n\n"
+        f"```\n{marker}\n```"
+    )
+    harness = _Harness(engine, tmp_path, platform, [[Done(assistant(answer))]])
+
+    await harness.agent.handle_message(harness.request("show the answer"))
+
+    [result] = harness.rows("result")
+    assert result["content_text"] == expected
+    assert "citations" not in json.loads(result["content_json"])
+    if platform == "telegram":
+        assert expected in harness.controller.im_client.sent
+        return
+
+    live = [
+        payload
+        for name, payload in published
+        if name == "message.new" and payload.get("id") == result["id"]
+    ]
+    assert len(live) == 1
+    assert live[0]["content"]["text"] == expected
+    assert "citations" not in live[0]["content"]
+
+    from storage import messages_service
+
+    with engine.connect() as conn:
+        [reloaded] = [
+            row
+            for row in messages_service.list_session_messages(conn, session_id=SESSION)["messages"]
+            if row["id"] == result["id"]
+        ]
+    assert reloaded["text"] == expected
+    assert "citations" not in (reloaded["content"] or {})
+
+
 async def test_a_native_hosted_call_reaches_the_workbench_as_a_card_and_cited_answer(
     engine, session, tmp_path, published
 ) -> None:
@@ -4991,6 +5626,63 @@ async def test_a_proxied_hosted_result_shows_once_its_result_is_committed(engine
     await harness.agent._on_event(run, ToolFinished("turn", 1, call.id, entry.row_id, False))
 
     assert harness.controller.im_client.sent[-1:] == ["🔎 X search “from:OpenAI” · via xAI proxy (grok-4.6) · 1 post · $0.11"]
+
+
+async def test_a_search_chain_shows_its_sources_as_model_hub_holds_them_now(
+    engine, session, tmp_path, published
+) -> None:
+    """MH-HOSTED-UI-010 (web-search-services.md §4.3): each Source a search chain reached is shown as Model Hub holds
+    it now, read with its health and its search switch: renamed since, it shows its new name; still blocked or
+    turned off, its repair; a failure whose key was replaced since, no repair at all."""
+    from modules.agents.vibey.agent import _Run
+    from tests.test_model_hub_hosted_tools_config import SOURCE
+
+    tavily, deepseek, exa = "src_tavily01", "src_deepseek1", "src_exa00001"
+    revoked = "models.source.needs_action.credential_revoked"
+
+    def source(source_id: str, vendor: str, name: str, protocol: str = "search", **state: Any) -> dict:
+        health = {"status": "standby", "retry_at": None, "detail_key": None, **state}
+        return {**SOURCE, "id": source_id, "vendor": vendor, "display_name": name, "protocol": protocol,
+                "models": [], "credential_ref": f"cred_{source_id}", "state": health}
+
+    hub = ModelHubConfig.from_payload({
+        "sources": [
+            source(tavily, "tavily", "My Tavily", status="needs_action", detail_key=revoked),
+            source(deepseek, "deepseek", "DeepSeek", protocol="openai_chat"),
+            source(exa, "exa", "Exa"),
+        ],
+        "hosted_tools": {"web_search": {"services": {exa: {"enabled": False}}}},
+    })
+    harness = _Harness(engine, tmp_path, "telegram", [[Done(assistant("ok"))]])
+    # A tool result answers a Turn, so the Session has consumed an input first.
+    await harness.agent.handle_message(harness.request("hello"))
+    harness.controller.model_hub_runtime.snapshot = lambda: hub
+    call = ToolCallBlock(id="call_ws1", name="web_search", arguments={"query": "DeepSeek search API pricing"})
+    record = HostedRecord(
+        status="failed",
+        error="every search source is blocked or turned off",
+        error_code="search_sources_blocked",
+        attempts=(
+            HostedAttempt(tavily, "Tavily", "service", "skipped", skipped="blocked", needs_action=revoked),
+            HostedAttempt(deepseek, "DeepSeek", "service", "failed", error_code="service_key_invalid",
+                          cost=HostedCost(basis="list", usd=0.0)),
+            HostedAttempt(exa, "Exa", "service", "skipped", skipped="disabled"),
+        ),
+    )
+    result = ToolResultMessage(
+        "call_ws1", "web_search", (text("no results"),), is_error=True, hosted=HostedResult(record)
+    )
+    entry = await harness.agent.store.append_tool_result(SESSION, result, details={})
+    run = _Run(request=harness.request("search it"), session_id=SESSION, turn_id="turn", instance="test")
+    run.tool_calls[call.id] = call
+
+    await harness.agent._on_event(run, ToolFinished("turn", 1, call.id, entry.row_id, True))
+
+    assert harness.controller.im_client.sent[-1:] == [
+        "🔎 Web search “DeepSeek search API pricing” · failed: all search sources are blocked or disabled"
+        " · My Tavily needs a replacement key; DeepSeek failed on this request; a later action has since updated"
+        " its state; Exa needs web search enabled in Models › Tools · $0"
+    ]
 
 
 def test_an_image_is_attached_unless_the_reply_already_links_it(tmp_path) -> None:

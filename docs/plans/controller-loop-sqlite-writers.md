@@ -1,6 +1,8 @@
 # SQLite writers on the controller loop: terminal, record and recovery paths (#2706)
 
-Status: design note, proposed. No code yet.
+Status: paths A, C and B step 1 shipped. B step 2 is implemented by the
+[terminal-completion synchronization design](terminal-completion-synchronization.md):
+keep its atomic transaction on the loop, but never wait for SQLite's writer there.
 
 ## Background
 
@@ -182,5 +184,5 @@ Each move needs the check this note applies to A. Does a loop section rely on th
 
 - [x] C: bound the recovery reads (start from live Runs and pending legacy notices, with a pinned plan; read-only transactions; mismatch-only status projection).
 - [x] A: record the Turn's Run terminal through the runtime-work door with `land_step`, keeping the cancellation point it had on the loop; make the blocking-Activity check on the loop and re-read the durable Activity rows inside the write's transaction; build the store off the loop. The IM network tail is #2714.
-- [ ] B, step 1: skip the writer for redundant terminalization, the post-terminal read and an empty drain.
-- [ ] B, step 2: a design note for B's remaining write that keeps terminalization and successor selection atomic with respect to admission (orderings 1–5).
+- [x] B, step 1: skip the writer for redundant terminalization, the post-terminal read and an empty drain (#2718).
+- [x] B, step 2: [non-waiting terminal completion](terminal-completion-synchronization.md), with exact-Turn cleanup/admission fences and the original atomic successor selection (orderings 1–5).

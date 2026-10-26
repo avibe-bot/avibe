@@ -4,6 +4,7 @@ import {
   dependencyIsStartupManaged,
   dependencyIsStartupRepairing,
   dependencyNeedsStartupRepair,
+  dependencyNeedsUpgrade,
   dependenciesNeedAutomaticRefresh,
 } from './SettingsDependenciesPage.logic';
 
@@ -108,5 +109,21 @@ describe('startup dependency refresh', () => {
         deps: [showRuntime],
       }, true),
     ).toBe(false);
+  });
+});
+
+describe('dependencyNeedsUpgrade', () => {
+  it('flags an installed avault below its managed pin without changing its readiness', () => {
+    const avault = { id: 'avault', status: 'ready' as const, installed: true, has_update: true };
+    expect(dependencyNeedsUpgrade(avault)).toBe(true);
+    expect(dependencyNeedsStartupRepair(avault)).toBe(true);
+    expect(dependencyIsStartupRepairing(avault, new Set(['avault']))).toBe(true);
+    expect(dependencyNeedsUpgrade({ ...avault, has_update: false })).toBe(false);
+    expect(dependencyNeedsUpgrade({ ...avault, installed: false, status: 'missing' as const })).toBe(false);
+  });
+
+  it('keeps pin staleness of other dependencies informational', () => {
+    expect(dependencyNeedsUpgrade({ id: 'askill', status: 'ready', installed: true, has_update: true })).toBe(false);
+    expect(dependencyNeedsUpgrade({ id: 'askill', status: 'upgrade_required', installed: true })).toBe(true);
   });
 });

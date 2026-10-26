@@ -199,6 +199,7 @@
     "edit": "Edit",
     "configure": "Configure",
     "cancel": "Cancel",
+    "done": "Done",
     "confirm": "Confirm",
     "clear": "Clear",
     "retry": "Retry",
@@ -326,7 +327,6 @@
     "placeholder": "Describe what you want the agent to do…",
     "loadError": "Couldn't load projects — close and reopen to retry.",
     "createFailed": "Couldn't start the session. Please try again.",
-    "agent": "Agent",
     "defaultAgent": "Default agent",
     "defaultAgentNamed": "Default · {{name}}"
   },
@@ -437,6 +437,7 @@
       "platformConnections": "Platform Connections",
       "remoteAccess": "Remote Access",
       "shortcuts": "Shortcuts",
+      "computerUse": "Computer Use",
       "service": "Service",
       "dependencies": "Dependencies",
       "diagnostics": "Diagnostics & Logs",
@@ -516,6 +517,42 @@
         "tab": "Tab"
       },
       "reset": "Restore defaults"
+    },
+    "computerUse": {
+      "title": "Computer Use",
+      "subtitle": "Let Avibe agents see and operate this Mac. Follow the steps in order; each one is marked done as soon as macOS reports it.",
+      "recheck": "Recheck",
+      "checking": "Checking…",
+      "loading": "Checking Computer Use status…",
+      "stepsTitle": "Setup steps",
+      "unsupportedTitle": "Available in the Avibe desktop app",
+      "unsupportedDetail": "Computer Use is set up from Avibe Desktop on a Mac. Open the desktop app to continue.",
+      "remoteNotice": "Complete these steps in the Avibe desktop app on the Mac. This page shows their progress.",
+      "actionFailed": "The desktop app did not respond. Try again, or use the Avibe menu bar menu.",
+      "relaunchNotice": "If macOS asks you to Quit & Reopen, choose it. Avibe will reopen and continue this page automatically.",
+      "actions": {
+        "enable": "Turn on",
+        "openSettings": "Open Settings"
+      },
+      "stepState": {
+        "complete": "done",
+        "current": "current step",
+        "pending": "not done yet"
+      },
+      "steps": {
+        "enable": {
+          "title": "Turn on Computer Use",
+          "detail": "Same as the Computer Use switch in the Avibe menu bar menu."
+        },
+        "accessibility": {
+          "title": "Allow Accessibility",
+          "detail": "In System Settings → Privacy & Security → Accessibility, turn on Avibe. If Avibe is not listed, click + and add it."
+        },
+        "screenRecording": {
+          "title": "Allow Screen & System Audio Recording",
+          "detail": "In System Settings → Privacy & Security → Screen & System Audio Recording, authorize the running Avibe Desktop app: click +, or drag Avibe into the list, then turn it on."
+        }
+      }
     },
     "diagnosticsTab": "Diagnostics",
     "logsTab": "Logs",
@@ -1729,6 +1766,17 @@
           "outputTokens": "Output tokens",
           "totalTokens": "Total tokens"
         },
+        "services": {
+          "title": "Search services",
+          "hostedTitle": "Search and page reading",
+          "identity": "Source / service",
+          "billable": "Billable",
+          "uncertain_one": "+{{requests}} with unknown billing",
+          "uncertain_other": "+{{requests}} with unknown billing",
+          "reported": "Vendor-reported",
+          "accounting": "Search requests are not model calls: they stay out of the token and request figures above, and only their value at API price joins the total.",
+          "priceDate": "Search prices from {{date}}."
+        },
         "failure": "The usage report could not be read.",
         "retry": "Retry",
         "cost": {
@@ -1737,6 +1785,9 @@
           "fetching": "Fetching prices…",
           "excluded_one": "{{tokens}} token has no price and is left out",
           "excluded_other": "{{tokens}} tokens have no price and are left out",
+          "reported": "Vendors reported {{usd}}",
+          "excludedServices_one": "{{requests}} search request has no price and is left out",
+          "excludedServices_other": "{{requests}} search requests have no price and are left out",
           "tableDate": "Price table from {{date}}",
           "tableDateUnknown": "Price table date unknown",
           "tableFetching": "Fetching the price table…"
@@ -2320,7 +2371,7 @@
         "reauth": "Sign in",
         "replaceKey": "Replace key",
         "retest": "Retry",
-        "reenable": "Check again",
+        "reenable": "Re-enable",
         "reauthTitle": "Sign in to “{{name}}” again?",
         "reauthBody": {
           "immediate": "The old sign-in stops working as soon as you start, and every source using it goes unavailable. Finishing restores only this one — the others need their own sign-in.",
@@ -2351,6 +2402,7 @@
           "generate": "Generate"
         },
         "tool": {
+          "web_fetch": {"name": "Web fetch", "inline": "web fetch", "description": "Read one page for the model; content past the cap is explicitly truncated."},
           "web_search": {
             "name": "Web search",
             "inline": "web search",
@@ -2455,7 +2507,8 @@
             "call": "call",
             "search": "search",
             "post": "post",
-            "profile": "profile"
+            "profile": "profile",
+            "fetch": "fetch"
           },
           "listNote": "At API price",
           "listNoteExtras": "At API price · {{extras}}",
@@ -2469,6 +2522,111 @@
         "clearFailed": "Couldn't clear the {{toolInline}} refusal. Please retry.",
         "clearUnconfirmed": "Couldn't confirm whether the {{toolInline}} refusal was cleared. It's being re-read from the server; check it before trying again."
       },
+      "webFetch": {
+        "dialogTitle": "Add search / fetch service", "dialogDescription": "Search and fetch share service keys, but their switches and execution orders are independent. Built-in free executors need no setup.", "noModels": "Provides search and web fetch, not models.",
+        "endpoints": {"tavily": "https://api.tavily.com/extract", "exa": "https://api.exa.ai/contents", "deepseek": "https://api.deepseek.com/v1/tools/fetch", "exa-mcp": "https://mcp.exa.ai/mcp", "jina-reader": "https://r.jina.ai/"},
+        "order": "Fetch order", "caption": "When the model calls web_fetch, try in this order; move on after failure. Default: local → configured services → Exa (free) → Jina Reader (free); reorder as needed.",
+        "use": "Use for web fetch", "unused": "Not used for web fetch", "kind": "Fetch service", "local": "Local", "add": "Add fetch service",
+        "searchBadge": "Search", "fetchBadge": "Fetch", "viewOrder": "View fetch order", "price": "${{usd}} / 1k pages",
+        "egress": "Local reads leave this Avibe runtime directly: the site sees its egress IP and browser-like requests. Services receive the submitted URL when they read it.",
+        "custody": "Configured service keys stay with the gateway; Local, Exa (free) and Jina Reader (free) need no key.",
+        "vendorName": {"local": "Local", "exa-mcp": "Exa (free)", "jina-reader": "Jina Reader (free)"},
+        "row": {"local": "Chrome 150 fingerprint · HTML / PDF / text · no JS", "tavily": "Uses the Tavily key · basic Extract", "exa": "Uses the Exa key · Contents", "deepseek": "Uses the official DeepSeek key · Fetch", "exa-mcp": "Shares IP limits with web search", "jina-reader": "20 per minute · Jina renders JS · default last fallback"},
+        "localDetail": "Defaults to the Chrome 150 browser profile and HTTP/2. If native transport cannot load, plain HTTP/2 is used and the call records the reason. No JavaScript execution, user cookies or login credentials. Supports HTML, PDF, plain text, Markdown and JSON.",
+        "limits": "180 seconds per chain, 30 seconds per attempt; local text up to 16 MiB, PDF 32 MiB. The complete model-facing result is capped at 12,000 estimated tokens (48,000 UTF-8 bytes); any cut is explicit.",
+        "exaDetail": "Search and fetch share Exa's IP limits and cooldown; their switches are independent. No key required.",
+        "jinaDetail": "20 requests per minute without a key (2026-10-24). Jina processes JavaScript server-side; availability also depends on shared egress limits. Last by default, not fixed after reordering.",
+        "terms": "Jina / Elastic terms", "endpoint": "Endpoint", "tavilyPrice": "1 credit per 5 URLs (amortized)", "localPrice": "Read directly from your machine", "builtInPrice": "Built in · no key or setup"
+      },
+      "searchServices": {
+        "subtitle": "Tools Vibey can use in a conversation. Searches send the query to the vendor or search service that runs them; a failure may retry with the next one in the search order. Image prompts go to the image model's vendor. Metered providers and search services bill under their own rules.",
+        "preferNative": "Prefer the model's own search",
+        "nativeOn": "When Claude, GPT or Grok can search natively, use it directly. The model vendor supplies the results and citations.",
+        "nativeOff": "Every model uses the search order below, including models that can search natively.",
+        "order": "Search order",
+        "orderNative": "Used when the model cannot search natively. A failure tries the next entry.",
+        "orderAll": "Used for every model. A failure tries the next entry.",
+        "orderAuto": "Automatic: search services first, then model executors.",
+        "orderAutoKeyless": "Automatic: your added search services → enabled official DeepSeek → Exa (free) → model executors; use the arrows to reorder.",
+        "orderCustom": "Customized order.",
+        "kind": "Search service",
+        "modelKind": "Model executor",
+        "unused": "Not used for search",
+        "skipped": "{{reason}} · skipped",
+        "keyInvalid": "Key invalid",
+        "cooldown": "Paused until {{time}} (the service asked to retry later)",
+        "retry": "Retry now",
+        "add": "Add search service",
+        "addVendor": "Add {{vendor}}",
+        "empty": "Add a search service to search before model executors. List prices: {{prices}}. Plans and actual bills may differ.",
+        "price": "${{usd}} / 1k searches",
+        "free": "Free",
+        "freeTier": "Free; IP rate-limited",
+        "keylessReady": "Free · no API key",
+        "keylessResults_one": "{{count}} result · IP rate-limited",
+        "keylessResults_other": "{{count}} results · IP rate-limited",
+        "keylessCooldown": "Rate-limited · retry later",
+        "keylessCooldownUntil": "Paused until {{time}}",
+        "keylessEmpty": "Exa (free) is built in, needs no key, and searches before model executors. Added search services precede it. List prices: {{prices}}. Plans and actual bills may differ.",
+        "vendorPrice": "{{vendor}} ${{usd}} / 1k searches",
+        "priceDate": "API list price · {{date}}",
+        "builtInPrice": "Built in · no key or setup",
+        "priceNote": "Prices are the catalog's dated API list prices. Free allowances, plans and actual bills may differ.",
+        "custody": "Search service keys stay with the gateway, like other provider keys. They are never passed to the model or Agent.",
+        "keylessQueryDestination": "Queries go directly from this Avibe runtime to Exa (mcp.exa.ai); Exa can see the connection's IP.",
+        "keylessEndpoint": "mcp.exa.ai",
+        "keylessCustody": "Added-service keys stay in the gateway; Exa (free) needs no key, and no key is given to the model or Agent.",
+        "queryDestination": "Queries are sent to the service that runs the search.",
+        "queryVendor": "Search queries are sent to {{vendor}}.",
+        "placement": "A new search service joins before the model executors, including in a saved order. Change the order in Tools → Web search.",
+        "noModels": "Search service · does not provide models",
+        "modelsAndSearch": "One provider for models and web search",
+        "createModelSource": "Creates an ordinary {{vendor}} provider on its official endpoint. The same key provides models and web search.",
+        "dialogDescription": "Tavily and Exa provide search, not models. DeepSeek uses an ordinary model provider, sharing its key and health with search.",
+        "added": "Added",
+        "inOrder": "Already in search order",
+        "addedUnused": "Added · not used for search",
+        "builtIn": "Built in · free",
+        "viewOrder": "View search order",
+        "noSetup": "No key or setup required",
+        "openDetail": "Manage {{vendor}}",
+        "maxResults_one": "Up to {{count}} result",
+        "maxResults_other": "Up to {{count}} results",
+        "deepseekFacts": "Queries processed in China · 128-character query limit",
+        "freeCheck": "Saving runs only the free credential check. If the check is inconclusive, the key is saved and the first real search confirms it. No paid test search.",
+        "noFreeCheck": "No free check is available. The key is saved without a test call; the first real search confirms it.",
+        "settings": "Search settings",
+        "use": "Use for web search",
+        "results": "Results per search",
+        "resultCount_one": "{{count}} result per search",
+        "resultCount_other": "{{count}} results per search",
+        "sharedKeyResults_one": "Uses {{source}}'s key · {{count}} result per search",
+        "sharedKeyResults_other": "Uses {{source}}'s key · {{count}} results per search",
+        "settingsNote": "The model supplies only the query. The result count is set here and applies from the next turn.",
+        "trialPending": "Re-enable is waiting for the next real search. No test search is sent.",
+        "tavilyLimit": "In Tavily, upgrade your plan or raise this key's usage limit (432), or raise the pay-as-you-go limit (433), then re-enable.",
+        "replaceKey": "Replace key",
+        "sharedKey": "Uses the key of provider “{{source}}”. Manage that key under Providers & routing.",
+        "manageSource": "Manage provider key",
+        "removeNote": "Removing this service stops using it for search. Other providers are unaffected.",
+        "addProvider": "Add provider",
+        "menu": "Search services (Tavily, Exa…)",
+        "month": "This month",
+        "monthRequests_one": "{{requests}} request",
+        "monthRequests_other": "{{requests}} requests",
+        "monthEstimate": "API list-price estimate {{usd}}",
+        "monthReported": "vendor-reported {{usd}}",
+        "openUsage": "View usage",
+        "vendorName": {
+          "exa-mcp": "Exa (free)"
+        },
+        "vendor": {
+          "deepseek": "Search through the official DeepSeek provider. Only searches with results are billed; empty results, failures and timeouts are not.",
+          "tavily": "Basic web search with query-relevant snippets, designed for AI agents.",
+          "exa": "Semantic web search with query-relevant highlights included in the search price.",
+          "exa-mcp": "Keyless Exa search. Free and IP rate-limited; no key or setup is required."
+        }
+      },
       "capability": {
         "readFailed": "Couldn't read this Source's tool capabilities.",
         "col": "Capabilities",
@@ -2481,6 +2639,7 @@
           "native": "A real request ran {{toolInline}} natively on this model. Display only; it doesn't change routing.",
           "executor": "This model ran {{toolInline}} for other models as the executor. Display only; it doesn't change routing.",
           "direct": "This model generated images on its image endpoint. Display only; it doesn't change routing.",
+          "service": "This search service ran {{toolInline}} in a real request. Display only; it doesn't change routing.",
           "refused": "This Source refused {{toolInline}} in a real request on this model. Until you clear it, Vibey does it another way.",
           "replay": "This model runs {{toolInline}} on this Source but refused earlier results sent back to it, so they go back as plain text."
         },
@@ -2732,6 +2891,10 @@
     "not_public": "Make the Show Page public first to change its link.",
     "session_agent_unavailable": "The source session's Agent is no longer available. Choose an enabled Agent to fork this session.",
     "session_archived": "This session is archived, so its Show Page can't be changed.",
+    "backend_locked": "This session can't change to that backend now. A running turn has to finish first, and a Vibey session stays on Vibey.",
+    "backend_busy": "This session still has background work running on its current backend. Switch after it finishes.",
+    "controller_unavailable": "Avibe's service isn't reachable right now. Try again in a moment.",
+    "continue_agent_unavailable": "Vibey isn't available right now, so this session can't switch to it.",
     "reserved_session": "Avibe owns this session — it only receives workspace notifications.",
     "invalid_icon_type": "The icon must be an SVG, PNG, ICO, JPEG, or WebP image.",
     "icon_too_large": "That icon is too large. Use an image up to 2 MiB.",
@@ -2807,6 +2970,7 @@
   },
   "modelHub": {
     "errors": {
+      "authentication_failed": "The API key was rejected. Check it and try again.",
       "credential_replacement_unverified": "The new key could not be verified yet. Your old key is unchanged; please try again later.",
       "source_model_tiers_managed": "This model's tiers are set automatically, so the change was not saved"
     }
@@ -3150,7 +3314,8 @@
         "shellNotRunningDetail": "Open or reopen the Avibe desktop app to make Computer Use available.",
         "daemonUnreachableDetail": "The desktop driver is not reachable. Turn Computer Use off and on; reopen Avibe if it repeats.",
         "controllerUnavailableDetail": "The Avibe Controller is not reachable. Wait for the service to recover before using the Computer Use CLI.",
-        "socketPathTooLongDetail": "macOS could not create the managed driver socket. Update or reinstall the Avibe desktop app."
+        "socketPathTooLongDetail": "macOS could not create the managed driver socket. Update or reinstall the Avibe desktop app.",
+        "finishInSettings": "Finish in Settings"
       },
       "continueOnPhone": "Continue on your phone",
       "connectChatApps": "Connect chat apps in <settings>Settings</settings>"
@@ -3178,6 +3343,8 @@
     "sessionForkUnavailable": "This session has no native agent session to fork yet.",
     "sessionHideToBackground": "Hide to background",
     "sessionHiddenToast": "Hidden to background · Find it in Agents → Runs",
+    "sessionShowInForeground": "Show in foreground",
+    "sessionShownToast": "Shown in foreground",
     "sessionArchive": "Archive session",
     "archiveSession": {
       "title": "Archive this session permanently?",
@@ -3968,7 +4135,8 @@
     "restarting": "Restarting...",
     "autoUpdate": "Auto Update",
     "autoUpdateHint": "Auto-install when idle",
-    "desktopManagedUpdate": "Updates are delivered with the Avibe desktop app",
+    "desktopManagedUpdate": "Updates come from the Avibe desktop app on the computer running Avibe. Check for updates there.",
+    "desktopManagedUpdateAvailable": "Version {{to}} is available. Update it with the Avibe desktop app on the computer running Avibe.",
     "runtimeVersionSkew": "This app is v{{app}}, but it is connected to an Avibe Runtime at v{{runtime}}"
   },
   "doctor": {
@@ -4308,6 +4476,7 @@
       "modelPlaceholder": "Pick or type a model",
       "modelEmpty": "No matches — you can type a custom value.",
       "effort": "Reasoning effort",
+      "effortUnavailable": "{{effort}} is no longer available for this model. Your setting was not changed.",
       "systemPrompt": "System prompt",
       "systemPromptCount": "~{{count}} tokens",
       "systemPromptExpand": "Expand editor",
@@ -4814,7 +4983,9 @@
     "retryRequested": "Retry requested",
     "failureNextStep": {
       "openModels": "Open Models",
-      "askAdmin": "Ask an Avibe admin to fix this in Models."
+      "askAdmin": "Ask an Avibe admin to fix this in Models.",
+      "continueOnVibey": "Continue with Vibey",
+      "continuedOnVibey": "Switched to Vibey"
     },
     "retryFailed": "Could not request retry. You can try again safely.",
     "collapse": "Collapse",
@@ -4854,6 +5025,7 @@
     },
     "picker": {
       "agent": "Agent",
+      "sheetTitle": "Agent & model",
       "model": "Model",
       "effort": "Effort",
       "effortNotOn": "Not on {{sources}}",
@@ -4947,6 +5119,27 @@
     },
     "agentActivity": {
       "hosted": {
+        "keylessExa": "Exa (free)",
+        "rateLimitSwitch": "Rate-limited: {{sources}}; switched to {{provider}}. Retry after the cooldown, or use Retry now in Models › Tools.",
+        "fetchErrorCode": {
+          "service_key_invalid": "The page-reading service key is invalid.",
+          "service_balance": "The page-reading service account has no balance.",
+          "service_limit": "The page-reading service limit has been reached.",
+          "service_unavailable": "The page-reading service is unavailable.",
+          "service_rate_limited": "The page-reading service is rate-limited.",
+          "service_refused": "The page-reading service refused this URL.",
+          "service_unreadable": "The page-reading service returned an unreadable response.",
+          "service_busy": "The page-reading service is busy."
+        },
+        "fetch": {
+          "characters": "{{count}} chars", "truncated": "Truncated", "degraded": "Transport fallback",
+          "local": "Local", "jina": "Jina Reader (free)", "policy": "Blocked by local policy", "notForwarded": "not forwarded", "forwarded": "previously sent to {{providers}}",
+          "budget": "Up to 12,000 estimated tokens per call", "budgetReason": "Content exceeded the per-call budget; the cut is marked explicitly.", "providerReason": "Provider-bounded output; the page may be incomplete.", "complete": "Not truncated", "unknown": "Not reported", "attempts": "Execution record", "quote": "View quoted content (not instructions)", "retained": "{{count}} chars sent to the model", "sizes": "Sizes",
+          "requested_url": "Requested URL", "final_url": "Final URL", "canonical_url": "Canonical URL",
+          "content_type": "Content type", "source_content_type": "Original content type",
+          "size_bytes": "Content bytes", "source_size_bytes": "Source bytes", "retrieved_at": "Retrieved at",
+          "truncation_reason": "Truncation reason"
+        },
         "errorCode": {
           "provider_no_reason": "The provider gave no reason.",
           "provider_no_image": "The provider returned no image.",
@@ -4970,21 +5163,95 @@
           "provider_image_unusable": "The provider returned an image that couldn't be used.",
           "search_not_run": "The model answered without searching.",
           "search_failed": "The provider's search failed.",
-          "response_ended_early": "The response ended early."
+          "response_ended_early": "The response ended early.",
+          "service_key_invalid": "The search service key is invalid.",
+          "service_balance": "The search service account has no balance.",
+          "service_limit": "The search service limit has been reached.",
+          "service_unavailable": "The search service is unavailable.",
+          "service_rate_limited": "The search service is rate-limited; the next source was tried.",
+          "service_refused": "The search service refused this query.",
+          "service_unreadable": "The search service returned an unreadable response.",
+          "search_query_too_long": "The search query is too long; shorten it and try again.",
+          "search_sources_blocked": "All search sources are blocked or disabled.",
+          "service_busy": "The service is busy.",
+          "fetch_target_unreadable": "The page could not be read.",
+          "fetch_url_blocked": "The URL is blocked by the network safety policy.",
+          "fetch_dns_unverified": "The destination address could not be verified.",
+          "fetch_challenge": "The page requires a browser challenge.",
+          "fetch_js_shell": "The page requires JavaScript.",
+          "fetch_timeout": "The page read timed out.",
+          "fetch_unsupported_content": "The document type is not supported.",
+          "fetch_refused": "The page request was refused.",
+          "fetch_unavailable": "The page is unavailable.",
+          "fetch_sources_blocked": "All page-reading sources are blocked or disabled."
         },
         "mode": {
           "native": "Native · {{provider}}",
           "proxy": "Via {{provider}} proxy",
+          "service": "Through {{provider}}",
           "direct": "Direct · {{provider}}",
           "directModel": "{{model}} · {{source}}",
           "proxyModel": "Via {{provider}} proxy · {{model}}"
         },
+        "repair": {
+          "retryFetch": "retry later or use Retry now in Models › Tools › Web fetch",
+          "retrySearch": "was rate-limited; retry later or use Retry now in Models › Tools",
+          "disabled": "needs web search enabled in Models › Tools",
+          "fetch_disabled": "needs page reading enabled",
+          "key": "needs a replacement key",
+          "reauthorize": "needs a new sign-in",
+          "balance": "needs an account top-up",
+          "balanceReenable": "needs an account top-up, then re-enabling in Models › Tools",
+          "limit": "needs a higher spending or usage limit",
+          "limitReenable": "needs a higher spending or usage limit, then re-enabling in Models › Tools",
+          "tavilyLimit": "needs a plan upgrade or a higher key usage limit (432), or a higher pay-as-you-go limit (433) in Tavily, then re-enabling in Models › Tools",
+          "plan": "needs a plan that includes this product",
+          "account": "needs the account restored by the provider",
+          "error": "needs attention in Models › Providers"
+        },
+        "reason": {
+          "failed": "failed",
+          "superseded": "failed on this request; a later action has since updated its state",
+          "service_key_invalid": "has an invalid key",
+          "service_balance": "is out of balance",
+          "service_limit": "reached its usage limit",
+          "service_unavailable": "was unavailable",
+          "service_rate_limited": "was rate-limited",
+          "service_refused": "refused this query",
+          "service_unreadable": "returned an unreadable response",
+          "service_busy": "was busy",
+          "fetch_target_unreadable": "could not read the page",
+          "fetch_url_blocked": "blocked the URL for network safety",
+          "fetch_dns_unverified": "could not verify the destination address",
+          "fetch_challenge": "encountered a browser challenge",
+          "fetch_js_shell": "requires JavaScript",
+          "fetch_timeout": "timed out",
+          "fetch_unsupported_content": "does not support this document type",
+          "fetch_refused": "refused the request",
+          "fetch_unavailable": "was unavailable"
+        },
+        "skip": {
+          "blocked": "was blocked",
+          "disabled": "was not enabled for search",
+          "fetch_disabled": "was not enabled for page reading",
+          "cooling": "was waiting to retry",
+          "query_too_long": "can't take a query this long",
+          "unsupported_type": "does not support this document type",
+          "service_busy": "was busy",
+          "unavailable": "was unavailable"
+        },
+        "listSeparator": ", ",
+        "itemSeparator": "; ",
+        "switch": "{{failed}}; switched to {{provider}}",
         "status": {
           "failed": "Failed",
           "incomplete": "Incomplete",
+          "completed": "Completed",
+          "skipped": "Skipped",
           "pending": "Cut off"
         },
         "cost": {
+          "free": "Free",
           "included": "Included in subscription",
           "list": "≈ ${{usd}}",
           "reported": "${{usd}}",
@@ -5003,6 +5270,7 @@
         "ranNative": "Ran natively on {{where}}",
         "ranProxy": "Run by proxy executor {{where}}",
         "ranDirect": "Ran directly on {{where}}",
+        "ranService": "Run by search service {{where}}",
         "fallback": {
           "ranOn": "{{from}} doesn't support {{toolInline}}, so {{provider}} ({{source}}) ran it",
           "ran": "{{from}} doesn't support {{toolInline}}, so {{provider}} ran it",
@@ -5051,6 +5319,7 @@
       "title": "Queued · {{count}}",
       "retryRequired": "Retry needed · {{count}}",
       "retryHint": "Automatic startup retries stopped after failure. Your input is retained. Resolve the error, then use Send now or Retry on the failure notice.",
+      "retryHintAgentUnavailable": "The Agent can't run, so your input is kept. Use Continue on Vibey on the failure notice, or Send now once the Agent is back.",
       "sendNow": "Send now",
       "sendingNow": "Sending…",
       "confirmingNow": "Send status not confirmed",

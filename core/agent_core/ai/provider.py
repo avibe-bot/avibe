@@ -120,6 +120,9 @@ class ModelEndpoint:
     hosted_tools: Mapping[str, HostedToolRoute] = field(default_factory=dict)
     #: The models ``image_generate`` may call; None when the tool is off or no model is available.
     image_models: Optional[ImageModels] = None
+    #: The upstream protocol whose response origin and tokenizer anchor C-9 for a converted hop; ``None`` when the
+    #: wire protocol is also the served protocol.
+    origin_api: Optional[ProtocolName] = None
 
 
 @dataclass(frozen=True)
@@ -208,6 +211,18 @@ class Done:
 
 
 @dataclass(frozen=True)
+class MalformedToolCall:
+    """A provider tool call whose final JSON arguments were not a JSON object.
+
+    This carries only canonical call identity. The malformed provider bytes never
+    cross the adapter boundary or enter the transcript.
+    """
+
+    id: str
+    name: str
+
+
+@dataclass(frozen=True)
 class ProviderError:
     kind: ErrorKind
     message: str
@@ -224,6 +239,10 @@ class ProviderError:
     #: Permission to continue from the committed transcript, not replay this request. False by default:
     #: only a classified transient failure grants it, even when streaming makes ``retryable`` false.
     continuable: bool = False
+    #: Malformed final arguments are still strict protocol errors, but this
+    #: narrow metadata grants Vibey one transcript-only recovery. The partial
+    #: contains safe empty arguments for these calls; the loop must not execute them.
+    malformed_tool_calls: tuple[MalformedToolCall, ...] = ()
 
 
 @dataclass(frozen=True)

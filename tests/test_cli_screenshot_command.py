@@ -47,7 +47,9 @@ def test_cmd_screenshot_prints_json(capsys, monkeypatch) -> None:
     assert cli.cmd_screenshot(args) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload == {
+        "schema_version": 1,
         "ok": True,
+        "kind": "screenshot",
         "path": "/tmp/vibe-screen.png",
         "backend": "fake",
     }

@@ -259,7 +259,7 @@ def test_failure_report_preserves_only_wrapper_codes(tmp_path, monkeypatch, caps
                 raise ValueError(private)
             body = {"run": {"status": "succeeded", "result_text": "fixture"}}
         elif "agent" in argv and "run" in argv:
-            body = {"run_id": "fixture-run", "session_id": "fixture-session"}
+            body = {"run": {"id": "fixture-run", "session_id": "fixture-session"}}
         elif "harness" in argv:
             body = {"controller": {"available": False}}
         else:

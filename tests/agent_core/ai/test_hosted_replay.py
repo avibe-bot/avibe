@@ -680,6 +680,7 @@ _READ_CALL = ToolCallBlock(id="toolu_1", name="read", arguments={"path": "a"})
 # Sonnet 5.5, Fable and Mythos "reject `thinking: {type: "disabled"}`".
 _ADAPTIVE_MODEL = "claude-opus-5-5"
 _MANUAL_MODEL = "claude-sonnet-4-5"
+_NON_CLAUDE_MODEL = "grok-4.7"
 
 
 @pytest.mark.parametrize(
@@ -698,16 +699,19 @@ _MANUAL_MODEL = "claude-sonnet-4-5"
         (_MANUAL_MODEL, (_READ_CALL,), "result-then-user", "disabled"),
         # ...while a new turn after an answer keeps it on.
         (_MANUAL_MODEL, (TextBlock("done"),), "user", "enabled"),
+        # An Anthropic-compatible non-Claude model does not receive the Claude-specific fallback...
+        (_NON_CLAUDE_MODEL, (_READ_CALL,), "result", None),
+        # ...but its normal non-tool-loop reasoning request remains unchanged.
+        (_NON_CLAUDE_MODEL, (TextBlock("done"),), "user", "enabled"),
     ],
     ids=["adaptive-thinking-as-text", "adaptive-call-first", "manual-signed-thinking-first", "manual-thinking-as-text",
-         "manual-call-first", "manual-user-message-after-results", "manual-new-turn"],
+         "manual-call-first", "manual-user-message-after-results", "manual-new-turn", "non-claude-tool-loop",
+         "non-claude-new-turn"],
 )
-async def test_a_tool_loop_whose_assistant_message_cannot_start_with_thinking_continues_with_thinking_off(
+async def test_anthropic_thinking_fallback_is_scoped_to_manual_claude_tool_loops(
     model, continued, after, thinking
 ):
-    """Under manual thinking a request whose continued assistant message cannot start with thinking (its thinking went
-    as text) is sent with thinking off, as Anthropic's refusal advises; adaptive thinking has no such rule and is never
-    turned off, since several adaptive models refuse ``disabled``; a new turn after an answer keeps thinking on."""
+    """Manual Claude uses the #2736 fallback; adaptive Claude stays on; other models omit it rather than guessing."""
 
     endpoint = replace(_endpoint("anthropic", replay=False, native=False), hosted_tools={}, model_id=model)
     result = ToolResultMessage("toolu_1", "read", (TextBlock("contents"),))
@@ -722,7 +726,10 @@ async def test_a_tool_loop_whose_assistant_message_cannot_start_with_thinking_co
 
     wire = await build_wire_request(request, gateway=True)
 
-    assert wire.body["thinking"]["type"] == thinking
+    if thinking is None:
+        assert "thinking" not in wire.body
+    else:
+        assert wire.body["thinking"]["type"] == thinking
 
 
 def _thought_and_read() -> str:

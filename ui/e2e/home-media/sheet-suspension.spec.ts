@@ -284,6 +284,8 @@ for (const width of [390, 1366]) test(`sheet ${width} keeps Unicode draft and se
   await draft(page).fill('项目乙：请检查发布 ✓');
   await page.getByRole('button', { name: '第二个项目', exact: true }).click();
   await page.getByRole('button', { name: /codex/ }).first().click();
+  // The composer's picker keeps Agents one level below its model page.
+  await page.getByRole('button', { name: /^Agent/ }).click();
   await page.getByRole('button', { name: /^claude/ }).click();
   await settings(page);
   await expect(page.getByTestId('sheet-logical-open')).toHaveText('true');
@@ -442,7 +444,9 @@ for (const outcome of ['success', 'failure', 'cancel'] as const) test(`project c
   await page.evaluate((outcome) => { window.homeMedia.holdProject = true; window.homeMedia.projectFailure = outcome === 'failure'; }, outcome);
   await page.getByRole('button', { name: en.workbench.newProjectDialog.create, exact: true }).click();
   await expect.poll(async () => (await writes(page, '/api/projects')).length).toBe(1);
-  if (outcome === 'cancel') await page.getByRole('button', { name: en.workbench.newProjectDialog.cancel, exact: true }).first().click();
+  // The footer Cancel is disabled while the create is in flight; the dialog's
+  // close control (labelled Cancel too) is the one a user can still reach.
+  if (outcome === 'cancel') await page.getByRole('button', { name: en.workbench.newProjectDialog.cancel, exact: true, disabled: false }).click();
   await settings(page);
   await page.evaluate(() => window.homeMedia.releaseProject());
   await expect.poll(() => page.evaluate(() => window.homeMedia.projectCompletions)).toBe(1);

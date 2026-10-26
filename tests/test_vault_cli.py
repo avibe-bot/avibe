@@ -92,6 +92,11 @@ def _create_standard_secret(name: str, *, sealed: Sealed | None = None, **kwargs
         return vault_service.create_secret(conn, name=name, sealed=sealed or _sealed(), **kwargs)
 
 
+def _secret_meta(name: str) -> dict:
+    with cli._open_vault_engine().connect() as conn:
+        return vault_service.get_secret_meta(conn, name)
+
+
 def _grant_from_request(conn, request: dict, *, session_id: str | None = None) -> dict:
     option = request["card"]["grant_options"][0]
     return vault_service.create_grant(
@@ -438,22 +443,19 @@ def test_provision_field_hint_predicate_is_shared_across_callback_and_sync(metad
         assert f"--env {metadata['name']} --" in sync and ".value" not in sync
 
 
-def test_find_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
+@pytest.mark.parametrize("command", ["list", "find"])
+def test_list_and_find_print_the_same_value_free_row(capfd, command):
     _create_standard_secret("STANDARD_KEY")
+    _create_standard_secret(
+        "LOGIN",
+        default_field="password",
+        fields=[{"name": "username", "sealed": _sealed("user")}],
+        tags=["github"],
+        description="GitHub login",
+        policy={"allowed_hosts": ["github.com"], "auth": {"type": "bearer"}},
+    )
     with cli._open_vault_engine().begin() as conn:
-        vault_service.create_secret(
-            conn,
-            name="ETH_KEY",
-            kind="keypair",
-            signer_kind="local",
-            sealed=_sealed("key"),
-        )
-        vault_service.create_secret(
-            conn,
-            name="PROTECTED_STATIC_KEY",
-            protection="protected",
-            sealed=_sealed("protected-static"),
-        )
+        vault_service.create_secret(conn, name="ETH_KEY", kind="keypair", signer_kind="local", sealed=_sealed("key"))
         vault_service.create_secret(
             conn,
             name="PROTECTED_ETH_KEY",
@@ -464,38 +466,39 @@ def test_find_reports_value_free_capabilities(tmp_path, capfd, monkeypatch):
             public_meta=PROTECTED_SIGNING_PUBLIC_META,
         )
         vault_service.create_secret(
-            conn,
-            name="REMOTE_ETH_KEY",
-            kind="keypair",
-            signer_kind="remote",
-            sealed=_sealed("remote-key"),
+            conn, name="REMOTE_ETH_KEY", kind="keypair", signer_kind="remote", sealed=_sealed("remote-key")
         )
 
-    assert cli.cmd_vault_find(_ns()) == 0
+    assert getattr(cli, f"cmd_vault_{command}")(_ns()) == 0
     payload = json.loads(capfd.readouterr().out)
 
-    assert payload["kind"] == "vault_find"
     secrets = {item["name"]: item for item in payload["secrets"]}
+    # Unset and false fields are absent; usage counters, timestamps, and signer
+    # internals are not row fields.
     assert secrets["STANDARD_KEY"] == {
         "name": "STANDARD_KEY",
         "kind": "static",
         "protection": "standard",
-        "default_field": "value",
         "fields": ["value"],
-        "tags": [],
-        "description": None,
-        "policy": {},
-        "access_grantable": True,
-        "per_use_sign": False,
     }
-    assert secrets["ETH_KEY"]["per_use_sign"] is True
-    assert secrets["PROTECTED_STATIC_KEY"]["access_grantable"] is True
+    assert secrets["LOGIN"] == {
+        "name": "LOGIN",
+        "kind": "static",
+        "protection": "standard",
+        "fields": ["password", "username"],
+        "default_field": "password",
+        "tags": ["github"],
+        "description": "GitHub login",
+        "policy": {"allowed_hosts": ["github.com"], "auth": {"type": "bearer"}},
+    }
+    # A keypair takes no field refs; it says whether ``vibe vault sign`` can use it.
+    assert secrets["ETH_KEY"] == {"name": "ETH_KEY", "kind": "keypair", "protection": "standard", "per_use_sign": True}
+    assert secrets["REMOTE_ETH_KEY"] == {"name": "REMOTE_ETH_KEY", "kind": "keypair", "protection": "standard"}
     assert secrets["PROTECTED_ETH_KEY"]["per_use_sign"] is True
-    assert secrets["REMOTE_ETH_KEY"]["per_use_sign"] is False
-    assert "sk-" not in json.dumps(payload)
+    assert "ct-" not in json.dumps(payload)
 
 
-def test_list_paginates_and_points_agents_to_find(capfd):
+def test_list_paginates_through_next_command_alone(capfd):
     for index in range(25):
         _create_standard_secret(f"KEY_{index:02d}")
 
@@ -507,8 +510,8 @@ def test_list_paginates_and_points_agents_to_find(capfd):
     assert payload["secrets"][0]["name"] == "KEY_00"
     assert payload["pagination"]["has_more"] is True
     assert payload["pagination"]["next_command"] == "vibe vault list --page 2 --limit 20"
-    assert "vibe vault find --q <keyword>" in payload["message"]
-    assert "Use pagination.next_command" in payload["next_steps"][0]
+    # next_command is the continuation; no fixed prose or next_steps repeat it.
+    assert set(payload) == {"schema_version", "ok", "kind", "secrets", "pagination"}
 
 
 def test_find_filters_by_query_and_multiple_tags(capfd):
@@ -571,13 +574,8 @@ def test_tags_lists_normal_and_skill_tags(capfd):
     payload = json.loads(capfd.readouterr().out)
 
     tags = {item["tag"]: item for item in payload["tags"]}
-    assert tags["openai"] == {"tag": "openai", "type": "tag", "secret_count": 2}
-    assert tags["skill:model-work"] == {
-        "tag": "skill:model-work",
-        "type": "skill",
-        "secret_count": 2,
-        "skill": "model-work",
-    }
+    assert tags["openai"] == {"tag": "openai", "secret_count": 2}
+    assert tags["skill:model-work"] == {"tag": "skill:model-work", "secret_count": 2}
 
 
 def test_tags_filters_skill_tags_by_query(capfd):
@@ -593,7 +591,7 @@ def test_rm_requests_deletion_for_protected_secret_and_leaves_it(capfd):
     with cli._open_vault_engine().begin() as conn:
         vault_service.create_secret(conn, name="PROTECTED_RM", protection="protected", sealed=_sealed("protected-rm"))
 
-    code = cli.cmd_vault_rm(_ns(name="PROTECTED_RM"))
+    code = cli.cmd_vault_remove(_ns(name="PROTECTED_RM"))
     captured = capfd.readouterr()
 
     assert code == 0
@@ -610,7 +608,7 @@ def test_rm_requests_deletion_for_protected_secret_and_leaves_it(capfd):
 def test_rm_requests_deletion_for_standard_secret_and_leaves_it(capfd):
     _create_standard_secret("STANDARD_RM")
 
-    code = cli.cmd_vault_rm(_ns(name="STANDARD_RM"))
+    code = cli.cmd_vault_remove(_ns(name="STANDARD_RM"))
     captured = capfd.readouterr()
 
     assert code == 0
@@ -625,7 +623,7 @@ def test_rm_requests_deletion_for_standard_secret_and_leaves_it(capfd):
 def test_rm_no_callback_points_to_await(capfd):
     _create_standard_secret("NO_CALLBACK_RM")
 
-    code = cli.cmd_vault_rm(_ns(name="NO_CALLBACK_RM", no_callback=True))
+    code = cli.cmd_vault_remove(_ns(name="NO_CALLBACK_RM", no_callback=True))
     payload = json.loads(capfd.readouterr().out)
 
     assert code == 0
@@ -638,9 +636,9 @@ def test_rm_reuses_pending_request_without_repeating_notification(capfd, monkeyp
     published: list[dict] = []
     monkeypatch.setattr(cli, "_publish_cli_vaults_updated", lambda **kwargs: published.append(kwargs))
 
-    assert cli.cmd_vault_rm(_ns(name="REUSED_RM")) == 0
+    assert cli.cmd_vault_remove(_ns(name="REUSED_RM")) == 0
     first = json.loads(capfd.readouterr().out)
-    assert cli.cmd_vault_rm(_ns(name="REUSED_RM")) == 0
+    assert cli.cmd_vault_remove(_ns(name="REUSED_RM")) == 0
     second = json.loads(capfd.readouterr().out)
 
     assert first["request_id"] == second["request_id"]
@@ -679,9 +677,9 @@ def test_rm_reused_callback_enabled_request_keeps_auto_resume_guidance(capfd, mo
         )
     monkeypatch.setattr(cli, "_publish_cli_vaults_updated", lambda **kwargs: None)
 
-    assert cli.cmd_vault_rm(_ns(name="CALLBACK_REUSE_RM", session_id="ses_rm_callback")) == 0
+    assert cli.cmd_vault_remove(_ns(name="CALLBACK_REUSE_RM", session_id="ses_rm_callback")) == 0
     first = json.loads(capfd.readouterr().out)
-    assert cli.cmd_vault_rm(_ns(name="CALLBACK_REUSE_RM", session_id="ses_rm_callback", no_callback=True)) == 0
+    assert cli.cmd_vault_remove(_ns(name="CALLBACK_REUSE_RM", session_id="ses_rm_callback", no_callback=True)) == 0
     second = json.loads(capfd.readouterr().out)
 
     assert first["request_id"] == second["request_id"]
@@ -732,13 +730,13 @@ def test_rm_passes_remote_authority_for_acl_and_request_snapshot(capfd, monkeypa
     monkeypatch.setattr(cli, "caller_resource_user_context", lambda _context: editor)
     monkeypatch.setattr(cli, "_publish_cli_vaults_updated", lambda **kwargs: None)
 
-    assert cli.cmd_vault_rm(_ns(name="PRIVATE_REMOTE_RM", session_id="ses_remote_rm")) == 1
+    assert cli.cmd_vault_remove(_ns(name="PRIVATE_REMOTE_RM", session_id="ses_remote_rm")) == 1
     assert "vault_access_forbidden" in capfd.readouterr().err
     with cli._open_vault_engine().connect() as conn:
         assert conn.execute(select(vault_requests.c.id).where(vault_requests.c.secret_name == "PRIVATE_REMOTE_RM")).first() is None
 
     monkeypatch.setattr(cli, "caller_resource_user_context", lambda _context: owner)
-    assert cli.cmd_vault_rm(_ns(name="ALLOWED_REMOTE_RM", session_id="ses_remote_rm")) == 0
+    assert cli.cmd_vault_remove(_ns(name="ALLOWED_REMOTE_RM", session_id="ses_remote_rm")) == 0
     capfd.readouterr()
     with cli._open_vault_engine().connect() as conn:
         row = conn.execute(select(vault_requests).where(vault_requests.c.secret_name == "ALLOWED_REMOTE_RM")).mappings().one()
@@ -746,22 +744,22 @@ def test_rm_passes_remote_authority_for_acl_and_request_snapshot(capfd, monkeypa
 
 
 def test_rm_rejects_single_field_delete(capfd):
-    code = cli.cmd_vault_rm(_ns(name="LOGIN.password"))
+    code = cli.cmd_vault_remove(_ns(name="LOGIN.password"))
     payload = json.loads(capfd.readouterr().err)
 
     assert code == 1
     assert payload["code"] == "vault_field_delete_forbidden"
-    assert payload["error"] == "vibe vault rm deletes whole secrets; remove single fields in the Vaults page."
+    assert payload["error"] == "vibe vault remove deletes whole secrets; remove single fields in the Vaults page."
 
 
 def test_rm_missing_secret_still_reports_not_found(capfd):
-    code = cli.cmd_vault_rm(_ns(name="MISSING_RM"))
+    code = cli.cmd_vault_remove(_ns(name="MISSING_RM"))
     captured = capfd.readouterr()
 
     assert code == 1
     payload = json.loads(captured.err)
     assert payload["code"] == "secret_not_found"
-    assert payload["help_command"] == "vibe vault rm --help"
+    assert payload["help_command"] == "vibe vault remove --help"
 
 
 def test_access_request_cli_uses_caller_session(tmp_path, capfd, monkeypatch):
@@ -1072,8 +1070,7 @@ def test_run_calls_avault_with_env_mapping_and_records_delivery(tmp_path, capfd,
         [{"name": "SRC_KEY", "env": "LOCAL_NAME", "envelope": _sealed("run"), "tier": "standard"}],
         ["python3", "-c", "pass"],
     )
-    cli.cmd_vault_list(_ns())
-    secret = json.loads(capfd.readouterr().out)["secrets"][0]
+    secret = _secret_meta("SRC_KEY")
     assert secret["use_count"] == 1
     assert secret["last_used_at"] is not None
 
@@ -2672,9 +2669,7 @@ def test_run_records_protected_delivery_when_child_exits_70(capfd, monkeypatch):
     monkeypatch.setattr(api, "avault_deliver_run", Mock())
 
     assert cli.cmd_vault_run(_ns(env=["PROTECTED_KEY"], command_argv=["python3", "-c", "pass"])) == 70
-    cli.cmd_vault_list(_ns())
-    secret = json.loads(capfd.readouterr().out)["secrets"][0]
-    assert secret["use_count"] == 1
+    assert _secret_meta("PROTECTED_KEY")["use_count"] == 1
 
 
 def test_run_records_delivery_when_legacy_avault_returns_70(tmp_path, capfd, monkeypatch):
@@ -2686,9 +2681,7 @@ def test_run_records_delivery_when_legacy_avault_returns_70(tmp_path, capfd, mon
     monkeypatch.setattr(api, "avault_deliver_run", Mock(return_value=70))
 
     assert cli.cmd_vault_run(_ns(env=["NODELIVER_KEY"], command_argv=["python3", "-c", "pass"])) == 70
-    cli.cmd_vault_list(_ns())
-    secret = json.loads(capfd.readouterr().out)["secrets"][0]
-    assert secret["use_count"] == 1
+    assert _secret_meta("NODELIVER_KEY")["use_count"] == 1
 
 
 def test_run_releases_standard_always_ask_grant_on_explicit_pre_handoff_failure(tmp_path, capfd, monkeypatch):
@@ -2700,9 +2693,7 @@ def test_run_releases_standard_always_ask_grant_on_explicit_pre_handoff_failure(
     monkeypatch.setattr(api, "avault_deliver_run", Mock(return_value={"exit_code": 70, "delivered": False}))
 
     assert cli.cmd_vault_run(_ns(env=["ASK_KEY"], command_argv=["python3", "-c", "pass"], session_id="ses_cli")) == 70
-    cli.cmd_vault_list(_ns())
-    secret = json.loads(capfd.readouterr().out)["secrets"][0]
-    assert secret["use_count"] == 0
+    assert _secret_meta("ASK_KEY")["use_count"] == 0
     with cli._open_vault_engine().connect() as conn:
         status = conn.execute(vault_grants.select().where(vault_grants.c.id == grant["id"])).mappings().one()["status"]
     assert status == "active"
@@ -2722,8 +2713,7 @@ def test_run_bad_command_does_not_call_avault_or_deliver(tmp_path, capfd, monkey
     assert code == 1
     assert json.loads(captured.err)["code"] == "command_not_found"
     deliver.assert_not_called()
-    cli.cmd_vault_list(_ns())
-    assert json.loads(capfd.readouterr().out)["secrets"][0]["use_count"] == 0
+    assert _secret_meta("NODELIVER_KEY")["use_count"] == 0
 
 
 def test_run_missing_secret_is_clean_error(capfd):

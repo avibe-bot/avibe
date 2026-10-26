@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import signal
 import socket
 import subprocess
@@ -204,6 +205,7 @@ class AvaultAgentManager:
         self.start_timeout = start_timeout
         self._lock = threading.RLock()
         self._process: subprocess.Popen | None = None
+        self._spawned_binary: str | None = None
 
     def client(self, *, timeout: float | None = DEFAULT_AGENT_SOCKET_TIMEOUT) -> AvaultAgentClient:
         return AvaultAgentClient(self.socket_path, timeout=timeout, ensure_agent=self.ensure_running)
@@ -222,15 +224,49 @@ class AvaultAgentManager:
                 self._process = None
             self._spawn_locked()
             self._wait_for_socket_locked()
+            self._record_binary_identity_locked()
 
     def reset(self) -> None:
         with self._lock:
             self._terminate_process_locked()
 
+    @property
+    def binary_identity_path(self) -> Path:
+        return self.socket_path.with_name(f"{self.socket_path.name}.binary.json")
+
+    def serves_current_binary(self) -> bool:
+        """Whether the resident agent was started here from the binary resolved now.
+
+        A resident agent outlives the service and keeps running the executable it
+        was started from, so a binary replaced on disk (or an agent this code did
+        not start) says nothing about the code behind the socket.
+        """
+        try:
+            recorded = json.loads(self.binary_identity_path.read_text(encoding="utf-8"))
+            current = _binary_identity(self._binary_resolver())
+        except (OSError, ValueError, AvaultAgentError):
+            return False
+        return isinstance(recorded, dict) and current is not None and recorded == current
+
+    def _record_binary_identity_locked(self) -> None:
+        identity = _binary_identity(self._spawned_binary) if self._spawned_binary else None
+        if identity is None:
+            return
+        tmp = self.binary_identity_path.with_name(f"{self.binary_identity_path.name}.tmp")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump(identity, handle)
+            os.replace(tmp, self.binary_identity_path)
+        except OSError:
+            logger.warning("failed to record the resident avault agent binary", exc_info=True)
+
     def _spawn_locked(self) -> None:
         binary = self._binary_resolver()
         _ensure_agent_socket_parent(self.socket_path.parent)
         _remove_stale_agent_socket(self.socket_path)
+        self.binary_identity_path.unlink(missing_ok=True)
+        self._spawned_binary = binary
         try:
             self._process = subprocess.Popen(
                 [
@@ -314,6 +350,15 @@ def _remove_stale_agent_socket(path: Path) -> None:
         path.unlink(missing_ok=True)
     except OSError:
         return
+
+
+def _binary_identity(binary: str) -> dict[str, Any] | None:
+    try:
+        resolved = Path(binary).resolve()
+        st = resolved.stat()
+    except OSError:
+        return None
+    return {"binary": str(resolved), "size": st.st_size, "mtime_ns": st.st_mtime_ns}
 
 
 def _missing_binary_resolver() -> str:

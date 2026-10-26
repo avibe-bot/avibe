@@ -51,9 +51,6 @@ from tests.scenarios.permissions.test_cli_invocation_authority import (
 EDITOR_EMAIL = "editor@example.com"
 IM_SCOPE_KEY = "slack::channel::C123"
 IM_ANCHOR = "slack_C123"
-#: A well-formed legacy key with no Scope and no Session behind it yet. Each case
-#: suffixes it so one case's placement never becomes the next one's existing row.
-FRESH_SCOPE_KEY = "slack::channel::C_NEW"
 
 
 @pytest.fixture(params=["personal", "organization"])
@@ -307,7 +304,7 @@ def test_permissions_028_the_open_project_binds_the_signed_editor():
 
 @pytest.mark.parametrize(
     "command",
-    ["agent_run", "hook_send", "task_add", "watch_add"],
+    ["agent_run", "task_add", "watch_add"],
 )
 def test_permissions_028_every_producer_refuses_an_unreachable_target(targets, run_cli, command):
     """PERMISSIONS-028: no producer writes work into a Session its caller cannot drive."""
@@ -317,8 +314,7 @@ def test_permissions_028_every_producer_refuses_an_unreachable_target(targets, r
     before = state.counts()
 
     argv = {
-        "agent_run": ["agent", "run", "--session-id", standalone, "--message", "hi", "--async", "--no-callback"],
-        "hook_send": ["hook", "send", "--session-id", standalone, "--message", "hi"],
+        "agent_run": ["agent", "run", "--session-id", standalone, "--message", "hi", "--no-callback"],
         "task_add": _message_task_argv("--session-id", standalone),
         "watch_add": _watch_argv("--session-id", standalone),
     }[command]
@@ -331,31 +327,6 @@ def test_permissions_028_every_producer_refuses_an_unreachable_target(targets, r
     assert code == 1
     assert payload["code"] == "session_not_found"
     assert state.counts() == before
-
-
-def test_permissions_028_a_legacy_key_names_the_same_session(targets, run_cli):
-    """PERMISSIONS-028: the deprecated scope key resolves to the row it would speak in."""
-
-    state = targets
-    before = state.counts()
-
-    code, payload = run_cli(
-        ["hook", "send", "--session-key", IM_SCOPE_KEY, "--message", "hi"],
-        kind=state.kind,
-    )
-    assert code == 1
-    assert payload["code"] == "session_not_found"
-    assert payload["details"]["session_id"] == state.sessions["legacy"]
-    assert state.counts() == before
-
-    # A key naming a thread that does not exist yet is a creation, not a
-    # refusal: it is admitted as a placement instead (see below), so a local
-    # caller opening new IM work is unaffected by the gate.
-    fresh = run_cli(
-        ["hook", "send", "--session-key", "slack::channel::C999", "--message", "hi"],
-        role=None,
-    )
-    assert fresh[0] == 0
 
 
 def test_permissions_028_the_callers_own_session_is_an_effective_target(targets, run_cli):
@@ -391,7 +362,6 @@ def test_permissions_028_a_callback_is_admitted_before_the_run_is_reserved(targe
             state.agent.name,
             "--message",
             "hi",
-            "--async",
             "--callback-session-id",
             state.sessions["standalone"],
         ],
@@ -432,7 +402,7 @@ def test_permissions_028_an_unusable_agent_refuses_the_turn(targets, run_cli):
     before = state.counts()
 
     code, payload = run_cli(
-        ["agent", "run", "--session-id", state.sessions["open"], "--message", "hi", "--async", "--no-callback"],
+        ["agent", "run", "--session-id", state.sessions["open"], "--message", "hi", "--no-callback"],
         kind=state.kind,
     )
 
@@ -451,7 +421,7 @@ def test_permissions_028_a_permitted_editor_still_queues_the_turn(targets, run_c
     before = state.counts()
 
     code, payload = run_cli(
-        ["agent", "run", "--session-id", state.sessions["open"], "--message", "hi", "--async", "--no-callback"],
+        ["agent", "run", "--session-id", state.sessions["open"], "--message", "hi", "--no-callback"],
         kind=state.kind,
     )
     assert code == 0, payload
@@ -472,7 +442,7 @@ def test_permissions_028_runtime_management_and_local_callers_are_unchanged(targ
     before = state.counts()
 
     code, payload = run_cli(
-        ["agent", "run", "--session-id", state.sessions["standalone"], "--message", "hi", "--async", "--no-callback"],
+        ["agent", "run", "--session-id", state.sessions["standalone"], "--message", "hi", "--no-callback"],
         role=role,
         kind=state.kind,
     )
@@ -909,95 +879,6 @@ def test_permissions_028_the_callers_that_could_still_retarget_per_run_work(
     after = state.task_rows()[task_id]
     assert after["agent_name"] == state.agent.name
     assert BINDING_FOLLOWS_SESSION_METADATA_KEY not in after["metadata"]
-
-
-@pytest.mark.parametrize("command", ["hook_send", "task_add", "watch_add"])
-def test_permissions_028_a_fresh_legacy_target_is_a_placement_not_a_blank(
-    targets, run_cli, command
-):
-    """PERMISSIONS-028: a key whose thread nobody has opened yet is still a target.
-
-    There is no Session to admit the caller TO, but the work being written says
-    where one will be created on the first dispatch -- the reservation writer's
-    question, asked one step earlier. Read as "no target, no question", the same
-    Editor who is refused the IM thread that exists was handed the one that does
-    not, and every future fire with it.
-    """
-
-    state = targets
-    key = f"{FRESH_SCOPE_KEY}_{command}"
-    before = state.counts()
-
-    argv = {
-        "hook_send": ["hook", "send", "--session-key", key, "--message", "hi"],
-        "task_add": _message_task_argv("--session-key", key),
-        "watch_add": _watch_argv("--session-key", key),
-    }[command]
-    code, payload = run_cli(argv, kind=state.kind)
-
-    # An IM scope is not a Project, so no Personal Project bypass reaches this --
-    # the same answer the identical key gets once its Session exists.
-    assert code == 1
-    assert payload["code"] == "project_access_denied"
-    # Scopes included: resolving the key to ask the question must not leave the
-    # row the question was about.
-    assert state.counts() == before
-
-
-@pytest.mark.parametrize("role", ["member", "owner", None])
-def test_permissions_028_fresh_legacy_work_still_opens_for_the_callers_that_could(
-    targets, run_cli, role
-):
-    """PERMISSIONS-028: Member, Owner and a local caller keep opening new IM work."""
-
-    state = targets
-    before = state.counts()
-
-    code, payload = run_cli(
-        ["hook", "send", "--session-key", f"{FRESH_SCOPE_KEY}_{role}", "--message", "hi"],
-        role=role,
-        kind=state.kind,
-    )
-    assert code == 0, payload
-    assert state.counts()["runs"] == before["runs"] + 1
-
-
-@pytest.mark.parametrize("kind_of_work", ["task", "watch"])
-def test_permissions_028_an_update_onto_a_fresh_legacy_target_is_admitted_too(
-    targets, run_cli, kind_of_work
-):
-    """PERMISSIONS-028: an edit may not repoint saved work at a Scope it cannot reach.
-
-    The definition keeps speaking in the target this edit names, so the target is
-    reauthorized -- and a Session that does not exist yet is reauthorized as the
-    placement it is, not skipped for having no row.
-    """
-
-    state = targets
-    seeded = (
-        _message_task_argv("--session-id", state.sessions["standalone"], name="repoint")
-        if kind_of_work == "task"
-        else _watch_argv("--session-id", state.sessions["standalone"], name="repoint")
-    )
-    assert run_cli(seeded, role=None)[0] == 0
-    rows = state.task_rows() if kind_of_work == "task" else state.watch_rows()
-    definition_id = next(iter(rows))
-    before = state.counts()
-
-    code, payload = run_cli(
-        [
-            kind_of_work,
-            "update",
-            definition_id,
-            "--session-key",
-            f"{FRESH_SCOPE_KEY}_update_{kind_of_work}",
-        ],
-        kind=state.kind,
-    )
-    assert code == 1
-    assert payload["code"] == "project_access_denied"
-    assert (state.task_rows() if kind_of_work == "task" else state.watch_rows()) == rows
-    assert state.counts() == before
 
 
 def test_permissions_028_saved_control_keeps_the_definitions_own_authority(targets, run_cli):

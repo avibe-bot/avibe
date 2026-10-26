@@ -2,6 +2,8 @@ from types import SimpleNamespace
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -232,7 +234,8 @@ def test_require_bind_null_allows_any_member_regardless_of_platform_default():
     assert result.allowed is True
 
 
-def test_admin_guard_denies_non_admin_for_auth_setup_callback():
+@pytest.mark.parametrize("action", ["auth_setup:codex", "routing_submit:claude"])
+def test_admin_guard_denies_non_admin_for_a_protected_action_with_a_suffix(action):
     store = _Store()
     store.settings.channels["C1"] = SimpleNamespace(enabled=True)
     store._bound_users.add("U5")
@@ -242,7 +245,7 @@ def test_admin_guard_denies_non_admin_for_auth_setup_callback():
         user_id="U5",
         channel_id="C1",
         is_dm=False,
-        action="auth_setup:codex",
+        action=action,
         store=store,
     )
 

@@ -3,11 +3,13 @@ import { LoaderCircle, Plus } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/components/ui/button';
+import { ResponsiveMenu } from '@/components/ui/responsive-menu';
+import { searchServicesActive } from './searchServices';
 import { ModelHubInfoHint } from './ModelHubInfoHint';
 import { foldRegionRead, type RegionRead } from './regionRead';
 import { SourceRow } from './SourceRow';
 import { SourcePrivacyToggle } from './SourcePrivacy';
-import type { AgentBackend, Source } from './types';
+import type { AgentBackend, HostedWebSearchToolStatus, Source } from './types';
 
 export const SourcesCard: React.FC<{
   read: RegionRead<Source[]>;
@@ -21,8 +23,13 @@ export const SourcesCard: React.FC<{
   subscriptionPickerOpen?: boolean;
   subscriptionTriggerRef?: React.Ref<HTMLButtonElement>;
   activeBackends?: ReadonlySet<AgentBackend>;
-}> = ({ read, onRetry, retryDisabled = false, retryRef, readFailureCopy, onOpenSource, onAddApiKey, onAddSubscription, subscriptionPickerOpen, subscriptionTriggerRef, activeBackends }) => {
+  searchTool?: HostedWebSearchToolStatus;
+  onAddSearchService?: (opener: HTMLButtonElement) => void;
+}> = ({ read, onRetry, retryDisabled = false, retryRef, readFailureCopy, onOpenSource, onAddApiKey, onAddSubscription, subscriptionPickerOpen, subscriptionTriggerRef, activeBackends, searchTool, onAddSearchService }) => {
   const { t } = useTranslation();
+  const [addOpen, setAddOpen] = React.useState(false);
+  const addTrigger = React.useRef<HTMLButtonElement>(null);
+  const services = searchServicesActive(searchTool);
   const sources = foldRegionRead<Source[], Source[] | undefined>(read, {
     loading: () => undefined,
     ready: (data) => data,
@@ -60,7 +67,7 @@ export const SourcesCard: React.FC<{
             : <>
                 {read.kind === 'degraded' && read.cause === 'read_failed' && <div className="mb-2 flex items-center justify-between gap-3 rounded-lg border border-destructive/25 bg-destructive/[0.08] px-3 py-2"><p className="text-[11px] text-destructive-ink">{readFailureCopy ?? t('settings.models.upstream.unread')}</p><Button ref={retryRef} variant="outline" size="xs" disabled={retryDisabled} onClick={onRetry}>{t('settings.models.upstream.retry')}</Button></div>}
                 {groups.length > 0
-                  ? groups.map((group) => <div key={group.id} className="space-y-2.5"><h3 className="model-hub-upstream-group-label flex h-[18px] items-center uppercase">{t(`settings.models.upstream.group.${group.id}`)}</h3>{group.sources.map((source) => <SourceRow key={source.id} source={source} onOpen={onOpenSource} activeBackends={activeBackends} />)}</div>)
+                  ? groups.map((group) => <div key={group.id} className="space-y-2.5"><h3 className="model-hub-upstream-group-label flex h-[18px] items-center uppercase">{t(`settings.models.upstream.group.${group.id}`)}</h3>{group.sources.map((source) => <SourceRow key={source.id} source={source} onOpen={onOpenSource} activeBackends={activeBackends} searchTool={searchTool} />)}</div>)
                   : <p className="px-3 py-10 text-center text-[12px] text-muted">{t('settings.models.upstream.empty')}</p>}
               </>}
       </div>
@@ -81,7 +88,10 @@ export const SourcesCard: React.FC<{
           <Plus className="size-3" />
           {t('settings.models.upstream.addSubscription')}
         </Button>
-        <Button
+        {services ? <ResponsiveMenu open={addOpen} onOpenChange={setAddOpen} sheetTitle={t('settings.models.searchServices.addProvider')} trigger={<Button ref={addTrigger} variant="outline" size="xs" className="model-hub-footer-action model-hub-footer-action--outlined model-hub-fill-0a"><Plus className="size-3" />{t('settings.models.searchServices.addProvider')}</Button>}>
+          <button type="button" role="menuitem" className="w-full rounded-md px-3 py-2 text-left text-sm hover:bg-surface-2" onClick={() => { setAddOpen(false); if (addTrigger.current) onAddApiKey(addTrigger.current); }}>{t('settings.models.upstream.addApiKey')}</button>
+          <button type="button" role="menuitem" className="w-full rounded-md px-3 py-2 text-left text-sm hover:bg-surface-2" onClick={() => { setAddOpen(false); if (addTrigger.current) onAddSearchService?.(addTrigger.current); }}>{t('settings.models.searchServices.menu')}</button>
+        </ResponsiveMenu> : <Button
           variant="outline"
           size="xs"
           className="model-hub-footer-action model-hub-footer-action--outlined model-hub-fill-0a"
@@ -89,7 +99,7 @@ export const SourcesCard: React.FC<{
         >
           <Plus className="size-3" />
           {t('settings.models.upstream.addApiKey')}
-        </Button>
+        </Button>}
       </div>
     </section>
   );

@@ -34,6 +34,7 @@ from core.agent_core.messages import (
     HostedToolBlock,
     ImageBlock,
     Message,
+    Origin,
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
@@ -112,7 +113,8 @@ TOOL_TRUNCATED = (
 MAX_ROLLS = 2
 MAX_OVERFLOWS = 4
 #: Unproductive checkpoint attempts (failed, or normal with a result still at least ``INEFFECTIVE_RATIO * T``) a run
-#: makes before it stops compacting for the rest of the run; held in memory, never persisted (section 10).
+#: makes before it takes no more checkpoints for the rest of the run; the drop, which calls no model, still makes room.
+#: Held in memory, never persisted (section 10).
 UNPRODUCTIVE_CHECKPOINTS = 2
 INEFFECTIVE_RATIO = 0.75
 
@@ -523,6 +525,14 @@ def checkpoint_max_tokens(capabilities: ModelCapabilities, configured: int) -> i
     return min(CHECKPOINT_MAX_TOKENS, output_tokens(capabilities, configured))
 
 
+def _anchor_origin(endpoint: ModelEndpoint) -> Origin:
+    """The served origin that anchors C-9 usage for this request, including converted routes."""
+    target = endpoint_origin(endpoint)
+    if endpoint.origin_api is None:
+        return target
+    return Origin(provider=target.provider, api=endpoint.origin_api, model=target.model)
+
+
 def _estimate(request: ModelRequest, transcript: Sequence[Message], anchor: Optional[Anchor]) -> int:
     """The anchored usage while it holds, grown by the ``tokens()`` of what changed since; else ``tokens()`` of the
     request (section 2).
@@ -535,7 +545,7 @@ def _estimate(request: ModelRequest, transcript: Sequence[Message], anchor: Opti
     removed is a local estimate taken from a provider count.
     """
     whole = sent_tokens(request)
-    if anchor is None or anchor.response.origin != endpoint_origin(request.endpoint):
+    if anchor is None or anchor.response.origin != _anchor_origin(request.endpoint):
         return whole
     sent = len(anchor.transcript)
     if len(transcript) <= sent or transcript[sent] != anchor.response:

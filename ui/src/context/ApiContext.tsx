@@ -739,7 +739,7 @@ export type ApiContextType = {
     backend: string,
   ) => Promise<PickerAgentCatalog | null>;
   getLogs: (lines?: number, source?: string) => Promise<{ logs: LogEntry[]; total: number; source: string; sources: LogSource[] }>;
-  getVersion: () => Promise<VersionInfo>;
+  getVersion: (options?: { cache?: boolean }) => Promise<VersionInfo>;
   doUpgrade: () => Promise<UpgradeResult>;
   browseDirectory: (path: string, showHidden?: boolean) => Promise<{ ok: boolean; path?: string; parent?: string | null; dirs?: { name: string; path: string }[]; error?: string }>;
   browseFavorites: () => Promise<{ ok: boolean; system?: string; favorites?: { key: string; path: string }[]; error?: string }>;
@@ -3759,7 +3759,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         })
         .catch(() => null),
     getLogs: (lines = 500, source) => postJson('/api/logs', source ? { lines, source } : { lines }),
-    getVersion: () => getCachedJson('/api/version', 10_000),
+    getVersion: (options) => getCachedJson('/api/version', 10_000, options),
     doUpgrade: () => postJson('/api/upgrade', {}),
     browseDirectory: (path, showHidden) => postJson('/api/browse', { path, show_hidden: showHidden || false }),
     browseFavorites: () => getJson('/api/browse/favorites'),

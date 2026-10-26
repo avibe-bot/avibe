@@ -13,7 +13,7 @@ import type { VaultRequest, VibeAgentBrief, WorkbenchMessage, WorkbenchSession }
 import { ToastProvider } from '../../context/ToastProvider';
 import { isVoiceControlDisabled } from '../../lib/voiceRecording';
 import { ChatHeaderBar, MessageRow, ThinkingBubble } from './ChatPage';
-import { sessionAgentBackend, sessionAgentDisplayName } from './sessionAgentName';
+import { messageAuthorAgent, sessionAgentBackend, sessionAgentDisplayName } from './sessionAgentName';
 import { BACKEND_BRAND_MARKS } from '../visual/backendBrandMarks';
 import { Composer } from './Composer';
 import { QuickReplies } from './QuickReplies';
@@ -271,6 +271,25 @@ describe('chat avatars', () => {
     expect(sessionAgentBackend(session({ agent_backend: 'claude' }), [claude, vibey], 'vibey')).toBe('claude');
   });
 
+  it('keeps a reply under the Agent that wrote it after the session switches', () => {
+    const reviewer = { ...archivedPm, id: 'agt-reviewer', name: 'reviewer', display_name: 'Reviewer', backend: 'claude' };
+    const reply = (author_name: string | null, metadata: Record<string, unknown> = {}) => ({ author_name, metadata });
+    const byReviewer = reply('reviewer', { author_agent_id: reviewer.id, author_backend: 'claude' });
+    // A reply that records no Agent (written before replies did) reads as the session's.
+    expect(messageAuthorAgent(reply('codex'), [vibey])).toBeNull();
+    // Named from the catalog by the recorded id, drawn with the recorded backend.
+    expect(messageAuthorAgent(byReviewer, [vibey, reviewer])).toEqual({ displayName: 'Reviewer', backend: 'claude' });
+    // No catalog (a read-only viewer, whatever the session routes to now), or a new
+    // Agent that took the old name: the recorded name and backend still stand.
+    const taker = { ...reviewer, id: 'agt-new', display_name: 'Someone else', backend: 'opencode' };
+    for (const agents of [[], [vibey, taker]]) {
+      expect(messageAuthorAgent(byReviewer, agents)).toEqual({ displayName: 'reviewer', backend: 'claude' });
+    }
+    // The session's own Agent resolves to the same name the session shows.
+    expect(messageAuthorAgent(reply('vibey', { author_agent_id: vibey.id, author_backend: 'vibey' }), [vibey]))
+      .toEqual({ displayName: 'vibey', backend: 'vibey' });
+  });
+
   it('draws Vibey in the thinking and transcript bubbles of a session that inherits it', () => {
     const inherits = session({ agent_id: null, agent_name: null, agent_backend: null });
     const thinking = render(<ThinkingBubble session={inherits} agentDisplayName={null} agentBackend="vibey" />);
@@ -368,9 +387,8 @@ describe('read-only header withdraws the Show Page controls', () => {
   });
 
   it('renders an archived header with the title and badge but no Show Page button', () => {
-    // Only the read-only header is reachable here: the live one renders
-    // AgentRoutePicker, which calls useApi() and throws without an ApiProvider.
-    // The pure matrix above covers the live side.
+    // Only the read-only header is reachable here; the pure matrix above covers
+    // the live side.
     const markup = render(
       <ChatHeaderBar
         session={session({ status: 'archived' })}
@@ -378,7 +396,6 @@ describe('read-only header withdraws the Show Page controls', () => {
         defaultAgentName={null}
         onPatch={async () => undefined}
         onBack={() => undefined}
-        working={false}
         showPageMode={false}
         showPageBusy={false}
         onToggleShowPage={() => undefined}
@@ -421,7 +438,6 @@ describe('read-only header withdraws the Show Page controls', () => {
         defaultAgentName={null}
         onPatch={async () => undefined}
         onBack={() => undefined}
-        working={false}
         showPageMode={false}
         showPageBusy={false}
         onToggleShowPage={() => undefined}
@@ -561,7 +577,6 @@ describe('archived conflicts converge whatever the verb', () => {
         defaultAgentName={null}
         onPatch={async () => undefined}
         onBack={() => undefined}
-        working={false}
         showPageMode={false}
         showPageBusy={false}
         onToggleShowPage={() => undefined}
@@ -673,7 +688,6 @@ describe('a runtime-owned system session is read-only for its own reason', () =>
         defaultAgentName="claude"
         onPatch={async () => undefined}
         onBack={() => undefined}
-        working={false}
         showPageMode={false}
         showPageBusy={false}
         onToggleShowPage={() => undefined}

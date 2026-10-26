@@ -8,16 +8,16 @@ import { beginRegionRead, foldRegionRead, loadingRegion, readRegion, readyRegion
 import type { HostedToolClear, HostedToolName, HostedToolPut, HostedToolsStatus } from './types';
 
 /**
- * The hosted-tools read, shared by the Tools tab and the Source chips.
+ * The hosted-tools read, shared by Tools, Sources activation, and Source detail.
  *
- * Read lazily, while either surface is open, like the other report tabs, and
- * again whenever `revision` changes: `revision` is the open Source's identity
+ * Read while one of those surfaces is open, and again whenever `revision`
+ * changes: `revision` is the open Source's identity
  * (as `retry.source_identity` defines it: endpoint, credential, verification),
  * a change of which drops its evidence on the server, so the old status is
  * dropped here too before the new read.
  *
- * Every write (a PUT or a clear) answers the whole status, so writes run one
- * at a time: each starts after the previous one settled, and each answer is
+ * Every write answers the whole status (or reads it after the retry POST), so
+ * writes run one at a time: each starts after the previous one settled, and each answer is
  * then the newest state the server committed. A read never overlaps a write:
  * one asked for while writes are queued waits for them to drain, and one
  * already out when a write is queued is dropped, because it cannot tell
@@ -33,7 +33,7 @@ import type { HostedToolClear, HostedToolName, HostedToolPut, HostedToolsStatus 
  * that is itself out of date (being re-read, or kept after its read failed)
  * holds every tool it shows the same way, for the same reason.
  */
-export function useHostedTools(active: boolean, revision: string | null = null) {
+export function useHostedTools(active: boolean, revision: string | null = null, surface: string | null = null) {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const alive = React.useRef(true);
@@ -90,7 +90,7 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
     const forget = shownRevision.current !== revision;
     shownRevision.current = revision;
     void refresh({ forget });
-  }, [active, revision, refresh]);
+  }, [active, revision, surface, refresh]);
 
   const write = React.useCallback(async (
     tool: HostedToolName,
@@ -156,5 +156,21 @@ export function useHostedTools(active: boolean, revision: string | null = null) 
     degraded: (stale) => new Set([...pending, ...stale.tools.map((tool) => tool.name)]),
   }), [read, pending]);
 
-  return { read, pending: held, refresh, save, clear };
+  const retryService = React.useCallback(
+    (sourceId: string) => write('web_search', async () => {
+      await modelsApi.retrySearchService(sourceId);
+      return modelsApi.getHostedTools();
+    }, 'save'),
+    [write],
+  );
+
+  const retryFetch = React.useCallback(
+    (sourceId: string) => write('web_fetch', async () => {
+      await modelsApi.retryFetchService(sourceId);
+      return modelsApi.getHostedTools();
+    }, 'save'),
+    [write],
+  );
+
+  return { read, pending: held, refresh, save, clear, retryService, retryFetch };
 }

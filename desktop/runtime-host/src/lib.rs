@@ -85,3 +85,4 @@ pub fn bundled_runtime_host(
 }
 
 pub mod update;
+pub mod update_status;

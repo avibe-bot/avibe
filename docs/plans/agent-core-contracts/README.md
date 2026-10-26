@@ -20,9 +20,27 @@ on it fork; after that, a change needs orchestrator approval and lands here firs
 
 Conventions:
 
+- WF-1 (2026-10-25, coordinated unreleased Model Hub v21) extends C-1 with
+  `WebFetchRecord`, discriminated only by outer `tool_name: web_fetch`. Its one
+  ordinary text block equals the canonical untrusted frame (≤48,000 UTF-8
+  surrogatepass bytes); nullable metadata, fixed budget method, diagnostics and
+  strict consistency are specified in `../web-fetch.md` §4. Search/native records
+  are unchanged. Executor origins accept `fetch_api` and `local_fetch`, not
+  assistant-model origins. Attempts accept `local`.
+- C-6 recognizes function-only fetch facts (`native` and `replay` both
+  `unsupported`). WF-3 enables declaration and execution through the shared
+  `WEB_FETCH_ACTIVE` switch; records, activity and usage remain readable even
+  when the switch is false. The coordinated reader/activation release decision is
+  in `../web-fetch.md` §8. #2920's released rc4 reader preserves the
+  full ordinary quotation when discarding unknown hosted metadata. Config and
+  usage downgrade writes are intentionally lossy as disclosed in the owning plan.
+
 - JSON Schema draft-07, like `../model-hub-contracts/`. Python implementations use dataclasses; the schemas describe
   the serialized form, which is what crosses a lane boundary or reaches disk.
 - Persisted shapes carry `"version": 1`. Readers accept every released version (persisted-shape rule).
+  - C-1 clarification (approved 2026-10-22): Anthropic deferred hosted calls use existing v1 use-only and result-only
+    fragments across immutable responses. Pairing/replay semantics are in `cross-provider.md`; released-reader
+    round-trips cover v3.2.2 and gh-v3.2.3rc2. No wire-shape version change.
 - Field names are `snake_case`, except the tool parameters in C-7, which keep Pi's names (`oldText`, `newText`,
   `replaceAll`).
 - Every statement about existing code names its file and was checked against `master`; fields that already exist

@@ -3,7 +3,7 @@
 // under the current display name while a stale catalog entry cannot claim it.
 // Pure so the precedence is asserted without mounting the page
 // (see ChatArchivedReadOnly.test.tsx).
-import type { VibeAgentBrief, WorkbenchSession } from '../../context/ApiContext';
+import type { VibeAgentBrief, WorkbenchMessage, WorkbenchSession } from '../../context/ApiContext';
 
 export function sessionAgentDisplayName(
   session: Pick<WorkbenchSession, 'agent_id' | 'agent_name'>,
@@ -33,4 +33,27 @@ export function sessionAgentBackend(
       ?? agents.find((candidate) => candidate.name === agentName)
     : defaultAgentName ? agents.find((candidate) => candidate.name === defaultAgentName) : undefined;
   return agent?.backend ?? null;
+}
+
+// Which Agent wrote one reply. A reply records that Agent's id and backend
+// (``author_agent_id``, ``author_backend`` in its metadata), so a session switched to
+// another Agent (say from Codex to Vibey) keeps its earlier replies under the Agent
+// that wrote them. The recorded identity is authoritative: the name comes from the
+// catalog by that id, else the name recorded with the reply, so neither a reused name
+// nor a missing catalog or route (a read-only viewer) can misattribute it. ``null``
+// for a reply that records neither (written before replies recorded it), which reads
+// as the session's Agent, as before.
+export function messageAuthorAgent(
+  message: Pick<WorkbenchMessage, 'author_name' | 'metadata'>,
+  agents: VibeAgentBrief[],
+): { displayName: string; backend: string | null } | null {
+  const metadata = (message.metadata ?? {}) as Record<string, unknown>;
+  const text = (value: unknown) => (typeof value === 'string' ? value.trim() : '');
+  const agentId = text(metadata.author_agent_id);
+  const backend = text(metadata.author_backend);
+  if (!agentId && !backend) return null;
+  const agent = agentId ? agents.find((candidate) => candidate.id === agentId) : undefined;
+  const displayName = agent?.display_name?.trim() || text(message.author_name) || agent?.name || backend;
+  if (!displayName) return null;
+  return { displayName, backend: backend || agent?.backend || null };
 }

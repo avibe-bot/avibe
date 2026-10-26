@@ -178,15 +178,6 @@ def test_packaged_skill_examples_parse_and_match_the_pinned_driver_schema() -> N
         parser.parse_args(["computer", "observe", "apps", "--session-id", "manual"])
 
 
-def test_computer_help_uses_the_configured_backend_locale(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
-    help_text = cli.build_parser().format_help()
-    assert "通过当前 Avibe Agent Turn 使用本机桌面" in help_text
-    assert "Use the local desktop through the active Avibe Agent Turn" not in help_text
-
-
 def test_argument_contract_rejects_manual_session_and_maps_screenshot_output(tmp_path: Path) -> None:
     with pytest.raises(ValueError) as exc_info:
         build_driver_arguments(None, ["session=manual"])
@@ -314,13 +305,12 @@ def test_cmd_computer_run_passes_string_arguments_and_prints_json(
     }
 
 
-def test_cmd_computer_run_localizes_missing_private_node(
+def test_cmd_computer_run_reports_missing_private_node(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from vibe.computer_script_runner import ComputerScriptRunnerError
 
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
 
     def unavailable(**_kwargs):
         raise ComputerScriptRunnerError(
@@ -335,19 +325,18 @@ def test_cmd_computer_run_localizes_missing_private_node(
     args = cli.build_parser().parse_args(["computer", "run", "./inspect.mjs"])
     with pytest.raises(
         cli.TaskCliError,
-        match="Avibe 桌面应用随附的 Node runtime",
+        match="Node runtime shipped with the Avibe desktop app",
     ) as exc_info:
         cli.cmd_computer(args)
     assert exc_info.value.code == "computer_script_unavailable"
 
 
-def test_cmd_computer_run_localizes_sdk_error_details(
+def test_cmd_computer_run_reports_sdk_error_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from vibe.computer_script_runner import ComputerScriptRunnerError
 
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
 
     def invalid_selector(**_kwargs):
         raise ComputerScriptRunnerError(
@@ -372,9 +361,7 @@ def test_cmd_computer_run_localizes_sdk_error_details(
     with pytest.raises(cli.TaskCliError) as exc_info:
         cli.cmd_computer(args)
 
-    assert str(exc_info.value) == (
-        "Computer Use 脚本在 computer.app 失败：脚本使用了无效选择器。"
-    )
+    assert str(exc_info.value).startswith("Computer Use script failed at computer.app")
     assert "Application selector" not in str(exc_info.value)
 
 
@@ -413,28 +400,15 @@ def test_computer_cli_error_translations_exist_in_all_supported_languages() -> N
             )
 
 
-@pytest.mark.parametrize(
-    ("language", "expected"),
-    [
-        (
-            "en",
-            "No screenshot is available for this result. The window may be hidden or "
-            "minimized, or capture may be unavailable.",
-        ),
-        (
-            "zh",
-            "此结果没有可用的截图。窗口可能已隐藏或最小化，也可能是截图不可用。",
-        ),
-    ],
-)
-def test_cmd_computer_localizes_missing_screenshot_error(
+def test_cmd_computer_reports_missing_screenshot_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    language: str,
-    expected: str,
 ) -> None:
+    expected = (
+        "No screenshot is available for this result. The window may be hidden or "
+        "minimized, or capture may be unavailable."
+    )
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
 
     with patch(
         "vibe.internal_client.computer_use_sync",
@@ -508,7 +482,6 @@ def test_cmd_computer_reports_driver_error_before_writing_screenshot(
     expected_arguments: dict,
 ) -> None:
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
     output_path = tmp_path / f"{expected_tool}.png"
 
     def fake_computer_use_sync(**kwargs):
@@ -552,7 +525,7 @@ def test_cmd_computer_reports_driver_error_before_writing_screenshot(
         assert cli.cmd_computer(args) == 1
 
     output = capsys.readouterr().out
-    assert "请求的 Computer Use 目标正忙" in output
+    assert "The requested Computer Use target is busy" in output
     assert "desktop is held" not in output
     assert not output_path.exists()
 
@@ -653,12 +626,11 @@ def test_json_unavailable_error_keeps_code_and_params(
     assert payload == body
 
 
-def test_cmd_computer_localizes_controller_error_in_zh(
+def test_cmd_computer_reports_controller_error_in_english(
     monkeypatch: pytest.MonkeyPatch,
     capsys,
 ) -> None:
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
 
     def fake_computer_use_sync(**kwargs):
         del kwargs
@@ -676,8 +648,7 @@ def test_cmd_computer_localizes_controller_error_in_zh(
         assert cli.cmd_computer(args) == 1
 
     output = capsys.readouterr().out
-    assert "当前 Avibe Session 已归档或正在归档" in output
-    assert "Computer Use is unavailable because" not in output
+    assert "Computer Use is unavailable because this Avibe Session is archived or being archived." in output
 
 
 def test_cmd_computer_requires_an_injected_caller_session(

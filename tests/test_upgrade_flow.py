@@ -172,6 +172,118 @@ def test_build_upgrade_plan_keeps_windows_on_arm_on_x64_python(monkeypatch, tmp_
 
     pinned = ["--python", "cpython-3.12-windows-x86_64-none"]
     assert (plan.command[4:6] == pinned) is on_arm, plan.command
+    # The patch upgrade targets the interpreter the staged install will use.
+    upgraded = (plan.python_upgrade_command or [])[-1:]
+    assert upgraded == (["cpython-3.12-windows-x86_64-none"] if on_arm else [])
+
+
+@pytest.mark.parametrize(
+    ("home", "expected"),
+    [
+        # Created before uv's minor-version links, as on a long-lived install.
+        ("{uv}/cpython-3.12.12-macos-aarch64-none/bin", "cpython-3.12-macos-aarch64-none"),
+        ("{uv}/cpython-3.12-linux-x86_64-gnu/bin", "cpython-3.12-linux-x86_64-gnu"),
+        ("{uv}/cpython-3.14.0rc2-linux-aarch64-musl/bin", "cpython-3.14-linux-aarch64-musl"),
+        # Windows records the install directory itself, not its bin.
+        ("{uv}/cpython-3.13.5-windows-x86_64-none", "cpython-3.13-windows-x86_64-none"),
+        # Interpreters uv does not own, even one named like uv's, or builds a
+        # plain minor request would replace.
+        ("/usr/bin", None),
+        ("/opt/homebrew/opt/python@3.12/Frameworks/Python.framework/Versions/3.12/bin", None),
+        ("{other}/cpython-3.12-linux-x86_64-gnu/bin", None),
+        ("{uv}/cpython-3.13.5+freethreaded-linux-x86_64-gnu/bin", None),
+        # uv cannot say where its Pythons are.
+        ("{uv}/cpython-3.12.12-macos-aarch64-none/bin", "uv-fails"),
+    ],
+)
+def test_uv_upgrade_moves_only_a_uv_managed_interpreter_to_its_newest_patch(
+    monkeypatch, tmp_path, home, expected,
+):
+    launcher = tmp_path / "bin" / "vibe"
+    target = tmp_path / "old" / "vibe"
+    target.parent.mkdir(parents=True)
+    target.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher.parent.mkdir(parents=True)
+    launcher.symlink_to(target)
+    uv_python_dir = tmp_path / "uv" / "python"
+    uv = tmp_path / "uv-bin" / "uv"
+    uv.parent.mkdir()
+    uv.write_text(
+        "#!/bin/sh\nexit 2\n" if expected == "uv-fails"
+        else f'#!/bin/sh\n[ "$1 $2" = "python dir" ] && echo {shlex.quote(str(uv_python_dir))}\n',
+        encoding="utf-8",
+    )
+    uv.chmod(0o755)
+    tool_python = tmp_path / "uv" / "tools" / "avibe-os" / "bin" / "python"
+    tool_python.parent.mkdir(parents=True)
+    (tool_python.parent.parent / "pyvenv.cfg").write_text(
+        f"home = {home.format(uv=uv_python_dir, other=tmp_path / 'opt')}\nversion_info = 3.12.12\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("vibe.upgrade.config_paths.get_vibe_remote_dir", lambda: tmp_path / "home")
+    monkeypatch.setattr("vibe.upgrade.windows_native_arm64", lambda: False)
+
+    plan = build_upgrade_plan(
+        python_executable=str(tool_python),
+        uv_path=str(uv),
+        vibe_path=str(launcher),
+        base_env={"PATH": "/usr/bin"},
+    )
+
+    assert plan.method == "uv"
+    assert plan.python_upgrade_command == (
+        None
+        if expected in (None, "uv-fails")
+        else [str(uv), "python", "install", "--upgrade", "--no-bin", "--no-registry", expected]
+    )
+    # uv keeps choosing the staged interpreter, so a release that drops this
+    # minor version can still move the install to a supported one.
+    assert "--python" not in plan.command
+
+
+@pytest.mark.parametrize("outcome", ["upgraded", "old-uv", "offline", "timeout", "uv-missing"])
+def test_python_patch_upgrade_runs_first_and_never_blocks_the_staged_install(caplog, outcome):
+    python_upgrade = [
+        "/usr/local/bin/uv", "python", "install", "--upgrade", "--no-bin", "--no-registry",
+        "cpython-3.12-macos-aarch64-none",
+    ]
+    plan = UpgradePlan(
+        command=["/usr/local/bin/uv", "tool", "install", "avibe-os", "--upgrade"],
+        env={"PATH": "/usr/bin", "UV_TOOL_DIR": "/staged/uv/tools"},
+        method="uv",
+        python_upgrade_command=python_upgrade,
+    )
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        if command != python_upgrade:
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if outcome == "timeout":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        if outcome == "uv-missing":
+            raise FileNotFoundError(command[0])
+        returncode, stderr = {
+            "upgraded": (0, "Installed Python 3.12.15"),
+            "old-uv": (2, "error: unexpected argument '--upgrade' found"),
+            "offline": (1, "error: Failed to install cpython-3.12.15-macos-aarch64-none"),
+        }[outcome]
+        return subprocess.CompletedProcess(command, returncode, "", stderr)
+
+    with caplog.at_level("INFO", logger="vibe.upgrade"):
+        result = execute_upgrade_plan(
+            plan, run=run, capture_output=True, text=True,
+            timeout=vibe_upgrade.UPGRADE_INSTALL_TIMEOUT_SECONDS,
+        )
+
+    assert result.returncode == 0
+    # The staged install runs after the patch upgrade so it can select it.
+    assert [command for command, _ in calls] == [python_upgrade, plan.command]
+    patch_kwargs, install_kwargs = calls[0][1], calls[1][1]
+    assert patch_kwargs["env"] == plan.env
+    assert patch_kwargs["timeout"] == vibe_upgrade.PYTHON_PATCH_UPGRADE_TIMEOUT_SECONDS
+    assert install_kwargs["timeout"] == vibe_upgrade.UPGRADE_INSTALL_TIMEOUT_SECONDS
+    assert ("Keeping the installed Python patch" in caplog.text) is (outcome != "upgraded")
 
 
 def test_build_upgrade_plan_refuses_uv_install_without_activation_point(monkeypatch):
@@ -1051,11 +1163,8 @@ def test_do_upgrade_keeps_active_launcher_when_staged_install_fails(monkeypatch,
     assert launcher.resolve() == old.resolve()
 
 
-@pytest.mark.parametrize(
-    ("language", "expected"),
-    [("en", "Upgrade activated the new version"), ("zh", "升级已激活新版本")],
-)
-def test_cmd_upgrade_reports_peer_activation_failures(monkeypatch, tmp_path, capsys, language, expected):
+def test_cmd_upgrade_reports_peer_activation_failures(monkeypatch, tmp_path, capsys):
+    expected = "Upgrade activated the new version"
     launcher = tmp_path / "activated home 空格" / "vibe"
     peer = tmp_path / "peer home 空格" / "稳定-vibe"
     outcome = vibe_upgrade.ActivationOutcome(
@@ -1076,7 +1185,6 @@ def test_cmd_upgrade_reports_peer_activation_failures(monkeypatch, tmp_path, cap
     monkeypatch.setattr(cli, "cache_running_vibe_path", lambda: str(launcher))
     monkeypatch.setattr(cli, "build_upgrade_plan", lambda **_kwargs: plan)
     monkeypatch.setattr(cli, "_runtime_process_was_running", lambda: False)
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     monkeypatch.setattr(cli, "activate_upgrade_candidate", lambda _activation: outcome)
     monkeypatch.setattr(
         cli,
@@ -1679,13 +1787,13 @@ def test_cmd_check_update_reports_desktop_managed_runtime(monkeypatch, capsys):
     assert "Updates are delivered with the Avibe desktop app." in capsys.readouterr().out
 
 
-def test_desktop_managed_runtime_messages_follow_configured_language(monkeypatch, capsys):
+def test_desktop_managed_runtime_messages_are_english_in_the_cli_and_localized_on_the_web(monkeypatch, capsys):
     monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
     monkeypatch.setattr(cli.V2Config, "load", lambda: SimpleNamespace(language="zh"))
     monkeypatch.setattr(api.V2Config, "load", lambda: SimpleNamespace(language="zh"))
 
     assert cli.cmd_check_update() == 0
-    assert "更新由 Avibe 桌面应用统一提供。" in capsys.readouterr().out
+    assert "Updates are delivered with the Avibe desktop app." in capsys.readouterr().out
     assert api.do_upgrade()["message"] == "此 Runtime 由 Avibe 桌面应用管理。"
 
 

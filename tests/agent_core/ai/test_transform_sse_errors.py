@@ -115,7 +115,6 @@ def test_cross_provider_transform_drops_opaque_payload_and_answers_orphaned_call
     assistant = result.messages[1]
     assert isinstance(assistant, AssistantMessage)
     assert assistant.content == (
-        TextBlock(text="private"),
         ToolCallBlock(
             id=result.tool_call_id_map["call|foreign"],
             name="read",
@@ -162,7 +161,62 @@ def test_opaque_payloads_go_back_only_to_the_source_identity_that_served_them(se
     if bound:
         assert sent.content == (reasoning, redacted, call)
     else:
-        assert sent.content == (TextBlock("plan"), ToolCallBlock("call_1", "read", {"path": "x"}))
+        assert sent.content == (ToolCallBlock("call_1", "read", {"path": "x"}),)
+
+
+_THINKER = Origin("openai", "openai_responses", "gpt-test")
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        Origin("anthropic", "anthropic", "claude-test"),
+        Origin("openai", "openai_chat", "gpt-test"),
+        Origin("openai", "openai_responses", "gpt-other"),
+        _THINKER,
+    ],
+    ids=["to-anthropic", "to-chat", "to-another-model", "same-origin"],
+)
+def test_thinking_goes_back_only_to_the_origin_that_thought_it(target: Origin) -> None:
+    """cross-provider.md: thinking is a model's private reasoning, not something the assistant said. Another origin
+    gets none of it, signed, unsigned or redacted, and never as assistant text (Anthropic refuses such requests as
+    reasoning extraction); everything the assistant said or did still goes. A response whose only content was that
+    thinking is left out, not sent as an empty assistant message, while one that was empty as served (a refusal) still
+    goes. Its own origin gets it back as before."""
+
+    signed = ThinkingBlock("signed plan", '{"id": "rs_1", "encrypted_content": "enc"}')
+    redacted = ThinkingBlock("", "redacted-opaque", redacted=True)
+    call = ToolCallBlock("call_1", "read", {"path": "x"})
+    result = ToolResultMessage("call_1", "read", (TextBlock("contents"),))
+    history = (
+        UserMessage((TextBlock("go"),)),
+        AssistantMessage((signed, ThinkingBlock("unsigned plan"), redacted, TextBlock("reading"), call), _THINKER, "tool_use"),
+        result,
+        AssistantMessage((ThinkingBlock("only thought", "sig-only"), ThinkingBlock("more thought")), _THINKER, "stop"),
+        UserMessage((TextBlock("and then?"),)),
+        AssistantMessage((), _THINKER, "refusal"),
+        UserMessage((TextBlock("please"),)),
+    )
+
+    sent = transform_messages(history, target).messages
+
+    if target == _THINKER:
+        assert sent == (
+            history[0],
+            AssistantMessage(
+                (signed, TextBlock("unsigned plan"), redacted, TextBlock("reading"), call), _THINKER, "tool_use"
+            ),
+            result,
+            AssistantMessage((ThinkingBlock("only thought", "sig-only"), TextBlock("more thought")), _THINKER, "stop"),
+            *history[4:],
+        )
+        return
+    assert sent == (
+        history[0],
+        AssistantMessage((TextBlock("reading"), call), _THINKER, "tool_use"),
+        result,
+        *history[4:],
+    )
 
 
 def test_cross_provider_transform_drops_results_for_failed_tool_turns() -> None:
@@ -301,6 +355,24 @@ def test_error_classification_preserves_retry_after_and_stream_boundary() -> Non
 
 def test_overflow_classifies_cerebras_bodyless_status() -> None:
     assert classify_error(status=400, body="400 status code (no body)").kind == "overflow"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'ThrottlingException: too many tokens',
+        '{"error":{"type":"ThrottlingException","message":"too many tokens"}}',
+        '{"error":{"message":"ThrottlingException: too many tokens"}}',
+    ],
+)
+def test_http_400_throttling_is_excluded_from_overflow_without_becoming_rate_limit(body: str) -> None:
+    error = classify_error(status=400, body=body)
+    assert error.kind == "invalid_request"
+    assert error.kind != "overflow"
+
+
+def test_generic_http_400_too_many_tokens_remains_overflow() -> None:
+    assert classify_error(status=400, body="too many tokens").kind == "overflow"
 
 
 @pytest.mark.parametrize("status", [401, 403])

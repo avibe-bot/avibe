@@ -103,10 +103,12 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     }
   };
 
-  const checkVersion = async () => {
+  // An explicit refresh skips the shared read cache, so a check the desktop app
+  // just finished shows at once.
+  const checkVersion = async (fresh = false) => {
     setChecking(true);
     try {
-      const info = await api.getVersion();
+      const info = await api.getVersion(fresh ? { cache: false } : undefined);
       setVersionInfo(info);
     } catch (e) {
       console.error('Failed to check version:', e);
@@ -138,8 +140,12 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     }
   };
 
-  const hasUpdate = !inDesktopShell && versionInfo?.managed_by !== 'desktop' && versionInfo?.has_update === true;
+  // A desktop-managed Runtime relays the desktop app's own conclusion, so the
+  // dot may light, but only that app installs: it never gets an Upgrade button.
+  const hasUpdate = !inDesktopShell && versionInfo?.has_update === true;
   const isDesktopManaged = versionInfo?.managed_by === 'desktop';
+  // The desktop app reports SemVer; show it in the Runtime's PEP 440 form.
+  const latestVersion = versionInfo?.latest ? normalizeVersion(versionInfo.latest) : null;
   const shellVersion = inDesktopShell ? window.__AVIBE_DESKTOP_VERSION__ : undefined;
   const runtimeVersion = versionInfo?.current;
   // A shell can serve a Runtime it did not start, such as one it adopted.
@@ -220,7 +226,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                   variant="ghost"
                   size="icon"
                   className="h-7 w-7 text-muted hover:text-foreground"
-                  onClick={checkVersion}
+                  onClick={() => checkVersion(true)}
                   disabled={checking || restarting}
                   aria-label={refreshLabel}
                   title={refreshLabel}
@@ -260,15 +266,21 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
               </div>
 
               {/* Latest Version */}
-              {!isSourceBuild && versionInfo?.latest && (
+              {!isSourceBuild && latestVersion && (
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-muted">{t('dashboard.latestVersion')}</span>
-                  <span className="font-mono font-medium text-foreground">{versionInfo.latest}</span>
+                  <span className="font-mono font-medium text-foreground">{latestVersion}</span>
                 </div>
               )}
 
               {/* Update Status */}
-              {!isSourceBuild && (isDesktopManaged ? (
+              {!isSourceBuild && (isDesktopManaged && hasUpdate ? (
+                <div className="flex items-center gap-2 rounded-md border border-gold/30 bg-gold/10 px-3 py-2 text-sm text-gold-ink">
+                  <AlertCircle size={16} className="shrink-0" />
+                  <span>{t('dashboard.desktopManagedUpdateAvailable', { to: latestVersion })}</span>
+                </div>
+              ) : isDesktopManaged && !latestVersion ? (
+                // The desktop app has not published a conclusion this Runtime can relay.
                 <div className="flex items-center gap-2 rounded-md border border-cyan/30 bg-cyan/10 px-3 py-2 text-sm text-cyan-ink">
                   <Check size={16} className="shrink-0" />
                   <span>{t('dashboard.desktopManagedUpdate')}</span>
@@ -279,7 +291,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                   <span>
                     {t('dashboard.updateHint', {
                       from: currentVersion,
-                      to: versionInfo?.latest,
+                      to: latestVersion,
                     })}
                   </span>
                 </div>
@@ -325,8 +337,8 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                 </div>
               )}
 
-              {/* Auto Update Toggle */}
-              {!isSourceBuild && !isDesktopManaged && autoUpdate !== null && (
+              {/* Auto Update Toggle: only once the Runtime has said who manages it */}
+              {versionInfo && !isSourceBuild && !isDesktopManaged && autoUpdate !== null && (
                 <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
                   <div className="min-w-0">
                     <div className="text-sm text-foreground">{t('dashboard.autoUpdate')}</div>

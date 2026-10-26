@@ -90,9 +90,10 @@ export const supersedesHubAnswer = (result: BackendModels, knownHub: boolean): b
  *
  * A Hub effort menu follows capability evidence that any turn can change
  * (#2606). The route picker and the Agents page read it again as their menu
- * opens or the effort field is approached, and while that read is in flight the
- * controls that can write an effort (an effort, or a model that keeps or clears
- * one) are held. The New Agent dialog writes on Create, so Create reads this
+ * opens or the effort field is approached. The route picker holds controls
+ * while that read is in flight; the Agents page holds model changes and queues
+ * the latest effort choice, validating it against the answer before saving.
+ * The New Agent dialog writes on Create, so Create reads this
  * answer again and creates only an effort it still offers, and nothing when Hub
  * cannot answer. A write made outside those (a model changed before any read
  * started, or after a read that came back unread) uses the last answer; a stale
@@ -129,6 +130,22 @@ export async function fetchBackendModels(
   if (hub) return hub;
   const native = await nativeBackendModels(api, backend);
   return agent === null ? { ...native, hubUnread: true } : native;
+}
+
+/**
+ * Just the display labels of a backend's models, for a closed picker that names
+ * the current model. Reads only what is already on disk: Model Hub's persisted
+ * catalog, or Claude/Codex's cached catalog snapshot. OpenCode's live list is
+ * never read here — it may start OpenCode, and it carries no labels anyway.
+ */
+export async function fetchBackendModelLabels(
+  api: ApiContextType,
+  backend: string,
+): Promise<Record<string, string>> {
+  const hub = hubCatalogModels(await api.readModelHubAgentCatalogForModelPicker(backend), backend);
+  if (hub) return hub.modelLabels ?? {};
+  if (backend !== 'claude' && backend !== 'codex') return {};
+  return (await nativeBackendModels(api, backend)).modelLabels ?? {};
 }
 
 async function nativeBackendModels(api: ApiContextType, backend: string): Promise<BackendModels> {

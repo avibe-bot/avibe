@@ -332,8 +332,10 @@ def test_real_notifications_deliver_and_persist_resolved_citations(
     agent.controller = controller
     agent.config = controller.config
     agent._calculate_duration_ms = lambda started_at: 0
-    # The real result emit, so the sidecar crosses the real agent boundary.
+    # The real result emit, so the sidecar crosses the real agent boundary, with the real
+    # event it emits: a stub that lacks one fails before the boundary it is here to cross.
     agent.emit_result_message = types.MethodType(BaseAgent.emit_result_message, agent)
+    agent._result_event = BaseAgent._result_event
 
     handler = CodexEventHandler(agent)
     context = MessageContext(

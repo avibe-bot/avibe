@@ -44,15 +44,16 @@ POSITIVE_REFRESH_SECONDS = 3600
 FeatureKind = Literal["effort", "hosted_tool"]
 EvidenceStatus = Literal["verified", "unsupported"]
 RoutingStatus = Literal["unsupported", "unknown"]
-ExecutionMode = Literal["native", "executor", "direct"]
+ExecutionMode = Literal["native", "executor", "service", "direct"]
 
 HOSTED_TOOL_ASPECTS: Mapping[str, tuple[str, ...]] = {
     "web_search": ("call", "replay"),
     "x_search": ("call", "replay"),
     # An image call is an ordinary tool call and result, so only its call is evidence.
     "image_generate": ("call",),
+    "web_fetch": ("call",),
 }
-EXECUTION_MODES: frozenset[str] = frozenset({"native", "executor", "direct"})
+EXECUTION_MODES: frozenset[str] = frozenset({"native", "executor", "service", "direct"})
 _NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _DIGEST_RE = re.compile(r"sha256:[0-9a-f]{64}")
 

@@ -16,7 +16,7 @@ from typing import Any, Sequence
 import yaml
 
 from config import paths
-from core.prompt_registry import RenderedPromptBlock, join_prompt_blocks, render_prompt, render_prompt_block
+from core.prompt_registry import RenderedPromptBlock, join_prompt_blocks, render_prompt_block
 
 try:
     import tomllib
@@ -1044,21 +1044,6 @@ def catalog_page(skills: Sequence[ManagedSkill], page: int) -> tuple[Sequence[Ma
     if page > len(pages):
         return (), None
     return pages[page - 1], page + 1 if page < len(pages) else None
-
-
-def render_skill_list(
-    skills: Sequence[ManagedSkill],
-    *,
-    page: int = 1,
-    more_notice: str | None = None,
-) -> str:
-    entries, next_page = catalog_page(skills, page)
-    lines = _skill_list_rows(entries)
-    if next_page is not None:
-        lines.append(
-            more_notice or render_prompt("skills-more-notice", next_page=next_page)
-        )
-    return "\n".join(lines)
 
 
 def _skill_list_rows(entries: Sequence[ManagedSkill]) -> list[str]:

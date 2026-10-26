@@ -443,6 +443,108 @@ def test_a_usage_cap_cools_its_source_as_quota_until_the_upstream_reset(tmp_path
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("backend", ["claude", "codex"])
+@pytest.mark.parametrize("windows,advice,expected", [
+    ({"5h": 18000}, {}, 18000),
+    ({"7d": 604800}, {}, 604800),
+    ({"5h": 18000, "7d": 604800}, {"Retry-After": "60"}, 604800),
+    ({"5h": 18000}, {"Retry-After": "24000", "Retry-After-Ms": "25000000"}, 25000),
+    ({"5h": 18000}, {"Retry-After": "25000", "Retry-After-Ms": "24000000"}, 25000),
+    ({"5h": 20}, {}, 300),  # A short upstream reset cannot shorten the quota ladder.
+])
+def test_claude_cap_headers_drive_persisted_recovery_without_early_probes(
+    tmp_path, monkeypatch, caplog, stream, backend, windows, advice, expected,
+):
+    """MH-RETRY-ADVICE-004: shared Claude caps survive settlement/restart without short-ladder probes or raw headers."""
+    async def run():
+        source = _source("src_claudecap", "Claude", vendor="anthropic", protocol="anthropic")
+        service, clock, models = configured_service(tmp_path, sources=[source])
+        receipt = clock.now()
+        deadline = receipt + timedelta(seconds=expected)
+
+        class ReceiptClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return clock.now()
+
+        monkeypatch.setattr(engine_client_module, "datetime", ReceiptClock)
+        raw_headers = {
+            "aNtHrOpIc-Ratelimit-Unified-Status": "rejected",
+            "Authorization": "private-upstream-credential",
+            "Set-Cookie": "private-upstream-cookie",
+            "Organization-Id": "private-upstream-org",
+            "Anthropic-Ratelimit-Unified-Unknown": "private-unknown-value",
+            **advice,
+        }
+        for window, delay in windows.items():
+            raw_headers[f"Anthropic-Ratelimit-Unified-{window}-Status"] = "rejected"
+            raw_headers[f"Anthropic-Ratelimit-Unified-{window}-Reset"] = str(int(receipt.timestamp()) + delay)
+        calls = []
+
+        async def respond(request):
+            calls.append(await request.json())
+            if clock.now() < deadline:
+                return web.json_response({"error": {"type": "rate_limit_error", "message": "Rate limited"}},
+                                         status=429, headers=raw_headers)
+            metadata, output, terminal, buffered = WIRE[BACKENDS[backend][1]]
+            return web.Response(body=metadata + output + terminal if stream else buffered,
+                                content_type="text/event-stream" if stream else "application/json")
+
+        async with loopback_engine(tmp_path, service, respond):
+            service.store = FreshStore(service.store.load())
+            async with gateway_client(service, backend, models[backend]) as (gateway, client, url, headers):
+                async with client.post(url, headers=headers, json={"model": "shared-model", "stream": stream}) as response:
+                    body = await response.json()
+                    assert body["error"]["cause"] == "quota_exhausted"
+                    assert body["error"]["code"] == RECOVERY_EXHAUSTED_CODE
+                    assert not any(name.lower() in response.headers for name in raw_headers)
+                gateway.correlation.settle("turn_lifecycle", settled_by=SETTLED_BY_TERMINAL_RESULT)
+                record = service.provenance.get("turn_lifecycle")
+                assert record["failed_attempts"] == [{
+                    "source_id": source.id, "configured_model_id": "shared-model", "channel": "hub",
+                    "reason": "quota_exhausted", "http_status": 429, "upstream_detail": "Rate limited",
+                }]
+            stored = service.store.load().sources[0].state
+            assert (stored.status, stored.detail_key, stored.retry_at) == (
+                "cooldown", "models.source.cooldown.quota_exhausted", deadline.isoformat(),
+            )
+            assert len(calls) == 1 and clock.delays == []
+            assert service.events.list()[0]["reason"] == "quota_exhausted"
+            surfaces = json.dumps([
+                body, record, service.list_events(), service.list_sources(), service.store.persisted, caplog.text,
+            ])
+            assert "anthropic-ratelimit" not in surfaces.lower()
+            for secret in ("private-upstream-credential", "private-upstream-cookie", "private-upstream-org", "private-unknown-value"):
+                assert secret not in surfaces
+
+            # A new policy restores eligibility from fresh persisted config,
+            # never from this request's header projection or live retry streak.
+            service.recovery = clock.policy()
+            clock.advance(expected - 121)
+            with pytest.raises(ModelHubError):
+                await service.resolve_with_recovery(backend=backend, model_id=models[backend], request={})
+            assert len(calls) == 1 and clock.delays == []
+            chain = service.agent_chain(backend, models[backend])
+            assert chain["supply_state"] == "waiting"
+            assert chain["chain"][0]["retry_at"] == deadline.isoformat()
+            assert chain["chain"][0]["runnable"] is False
+            _assert_valid("agent-chain.schema.json", chain)
+            # A concurrent later-completing short failure cannot pull it forward.
+            await fail(service, service.store.load().sources[0], "rate_limited")
+            assert service.store.load().sources[0].state.retry_at == deadline.isoformat()
+            assert service.store.load().sources[0].state.detail_key == "models.source.cooldown.quota_exhausted"
+            clock.advance(121)
+            assert service.store.load().sources[0].state.status == "cooldown"
+            async with gateway_client(service, backend, models[backend]) as (_gateway, client, url, headers):
+                async with client.post(url, headers=headers, json={"model": "shared-model", "stream": stream}) as response:
+                    assert response.status == 200
+                    await response.read()
+            assert len(calls) == 2
+            assert service.store.load().sources[0].state.status == "standby"
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("engine_refuses", [True, False], ids=["engine", "upstream"])
 def test_a_401_the_engine_itself_gave_spares_the_source(tmp_path, engine_refuses):
     """MH-RUNTIME-015: the engine's own 401 is told from an upstream's by a witness no upstream answers (#2755).

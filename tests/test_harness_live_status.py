@@ -210,6 +210,42 @@ def test_hfr_481_unified_view_marks_workdir_conflict_and_watch_failure() -> None
     )
 
 
+@pytest.mark.parametrize(
+    ("session_id", "runtime_sessions", "conflicts"),
+    (
+        ("ses-a", ["ses-a"], [["ses-a", "ses-b"]]),
+        ("ses-c", ["ses-c"], []),
+    ),
+)
+def test_session_view_keeps_its_runtime_and_the_conflicts_it_is_part_of(
+    session_id, runtime_sessions, conflicts
+) -> None:
+    """A conflict is between Sessions: it is found across the runtime, then shown to its members."""
+
+    snapshot = build_harness_status(
+        runs=[],
+        watches=[],
+        tasks=[],
+        runtime_snapshot={
+            "available": True,
+            "ownership_available": True,
+            "owned_run_ids": [],
+            "agents": [
+                {"backend": "codex", "state": "active", "session_id": "ses-a", "workdir": "/repo/project"},
+                {"backend": "claude", "state": "active", "session_id": "ses-b", "workdir": "/repo/project"},
+                {"backend": "codex", "state": "active", "session_id": "ses-c", "workdir": "/repo/other"},
+            ],
+        },
+        session_id=session_id,
+    )
+
+    assert [row["session_id"] for row in snapshot["runtime_agents"]] == runtime_sessions
+    assert [
+        row["session_ids"] for row in snapshot["anomalies"] if row["code"] == "active_workdir_conflict"
+    ] == conflicts
+    assert snapshot["counts"]["runtime_agents"] == 1
+
+
 def test_same_backend_shared_process_is_not_a_workdir_conflict() -> None:
     snapshot = build_harness_status(
         runs=[],
@@ -301,9 +337,9 @@ def test_activity_age_accepts_utc_z_timestamps() -> None:
 
 def test_harness_status_cli_returns_one_unified_payload(monkeypatch, capsys) -> None:
     sqlite_store = SimpleNamespace(
-        list_active_runs=lambda *, limit: [],
+        list_active_runs=lambda *, limit, session_id: [],
         active_run_ids=lambda run_ids: set(run_ids),
-        list_enabled_definitions=lambda definition_type, *, limit: [],
+        list_enabled_definitions=lambda definition_type, *, limit, session_id: [],
     )
     monkeypatch.setattr(
         cli,
@@ -325,7 +361,7 @@ def test_harness_status_cli_returns_one_unified_payload(monkeypatch, capsys) -> 
         }
 
     monkeypatch.setattr(internal_client, "list_running_agents", _controller_snapshot)
-    args = cli.build_parser().parse_args(["harness", "status"])
+    args = cli.build_parser().parse_args(["harness", "status", "--global"])
 
     assert cli.cmd_harness_status(args) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -343,9 +379,9 @@ def test_harness_status_cli_revalidates_runs_after_ownership_snapshot(
 ) -> None:
     run = {"id": "run-finished", "status": "running"}
     sqlite_store = SimpleNamespace(
-        list_active_runs=lambda *, limit: [run],
+        list_active_runs=lambda *, limit, session_id: [run],
         active_run_ids=lambda run_ids: set(),
-        list_enabled_definitions=lambda definition_type, *, limit: [],
+        list_enabled_definitions=lambda definition_type, *, limit, session_id: [],
     )
     monkeypatch.setattr(
         cli,
@@ -367,7 +403,7 @@ def test_harness_status_cli_revalidates_runs_after_ownership_snapshot(
 
     monkeypatch.setattr(internal_client, "list_running_agents", _controller_snapshot)
 
-    assert cli.cmd_harness_status(SimpleNamespace()) == 0
+    assert cli.cmd_harness_status(SimpleNamespace(global_scope=True)) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["runs"] == []
     assert payload["anomalies"] == []
@@ -378,9 +414,9 @@ def test_harness_status_cli_preserves_pre_snapshot_run_truncation(
 ) -> None:
     runs = [{"id": f"run-{index}", "status": "running"} for index in range(101)]
     sqlite_store = SimpleNamespace(
-        list_active_runs=lambda *, limit: runs,
+        list_active_runs=lambda *, limit, session_id: runs,
         active_run_ids=lambda run_ids: {"run-0"},
-        list_enabled_definitions=lambda definition_type, *, limit: [],
+        list_enabled_definitions=lambda definition_type, *, limit, session_id: [],
     )
     monkeypatch.setattr(
         cli,
@@ -401,7 +437,7 @@ def test_harness_status_cli_preserves_pre_snapshot_run_truncation(
 
     monkeypatch.setattr(internal_client, "list_running_agents", _controller_snapshot)
 
-    assert cli.cmd_harness_status(SimpleNamespace()) == 0
+    assert cli.cmd_harness_status(SimpleNamespace(global_scope=True)) == 0
     payload = json.loads(capsys.readouterr().out)
     assert [row["id"] for row in payload["runs"]] == ["run-0"]
     assert payload["truncated"]["runs"] is True
@@ -453,7 +489,7 @@ def test_harness_status_prioritizes_running_run_before_bounded_probe(
 
         monkeypatch.setattr(internal_client, "list_running_agents", _controller_snapshot)
 
-        assert cli.cmd_harness_status(SimpleNamespace()) == 0
+        assert cli.cmd_harness_status(SimpleNamespace(global_scope=True)) == 0
         payload = json.loads(capsys.readouterr().out)
 
         assert probed_run_ids[:3] == [
@@ -467,18 +503,6 @@ def test_harness_status_prioritizes_running_run_before_bounded_probe(
         assert payload["anomalies"][0]["run_id"] == "run-owner-missing"
     finally:
         store.close()
-
-
-def test_harness_cli_help_uses_configured_language(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: "zh")
-
-    with pytest.raises(SystemExit) as exc_info:
-        cli.build_parser().parse_args(["harness", "--help"])
-
-    assert exc_info.value.code == 0
-    output = capsys.readouterr().out
-    assert "检查活跃 Run、已启用 Watch、即将触发的 Task 和实时异常" in output
-    assert "显示有界的实时状态与异常快照" in output
 
 
 def test_enabled_tasks_are_bounded_after_next_fire_ordering(tmp_path) -> None:

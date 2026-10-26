@@ -719,9 +719,18 @@ def test_init_sentry_disables_spotlight_env_bypass(monkeypatch, tmp_path):
         sentry_sdk.get_global_scope().set_client(None)
 
 
+def _decode_sentry_wire_body(body, headers):
+    if headers["Content-Encoding"] == "br":
+        import brotli
+        return brotli.decompress(body)
+    import gzip
+
+    assert headers["Content-Encoding"] == "gzip"
+    return gzip.decompress(body)
+
+
 def test_performance_transactions_are_scrubbed_like_events(monkeypatch, tmp_path):
     """Transactions skip ``before_send``; their spans must not carry what events may not."""
-    import gzip
 
     import sentry_sdk
     from sentry_sdk.envelope import Envelope
@@ -761,7 +770,7 @@ def test_performance_transactions_are_scrubbed_like_events(monkeypatch, tmp_path
         sentry_sdk.get_global_scope().set_client(None)
 
     (body, headers), = sent
-    raw = gzip.decompress(body) if headers.get("Content-Encoding") == "gzip" else body
+    raw = _decode_sentry_wire_body(body, headers)
     envelope = Envelope.deserialize(raw)
     payload = next(item.get_bytes().decode("utf-8") for item in envelope.items if item.type == "transaction")
     assert "s3cret" not in payload
@@ -769,7 +778,6 @@ def test_performance_transactions_are_scrubbed_like_events(monkeypatch, tmp_path
 
 
 def test_real_sdk_event_shapes_preserve_protocol_ownership(monkeypatch, tmp_path):
-    import gzip
     import json
 
     import sentry_sdk
@@ -822,7 +830,7 @@ def test_real_sdk_event_shapes_preserve_protocol_ownership(monkeypatch, tmp_path
         sentry_sdk.get_global_scope().set_client(None)
 
     (body, headers), = sent
-    raw = gzip.decompress(body) if headers.get("Content-Encoding") == "gzip" else body
+    raw = _decode_sentry_wire_body(body, headers)
     envelope = Envelope.deserialize(raw)
     payload = json.loads(next(item.get_bytes() for item in envelope.items if item.type == "event"))
     assert payload["logentry"]["message"] == "failure"
@@ -833,7 +841,6 @@ def test_real_sdk_event_shapes_preserve_protocol_ownership(monkeypatch, tmp_path
 
 def test_worker_scrub_retains_rotated_secret_after_enqueue(monkeypatch, tmp_path):
     """A value queued before rotation remains covered by the process-lifetime union."""
-    import gzip
     import threading
 
     import sentry_sdk
@@ -888,7 +895,7 @@ def test_worker_scrub_retains_rotated_secret_after_enqueue(monkeypatch, tmp_path
 
     try:
         (body, headers), = sent
-        raw = gzip.decompress(body) if headers.get("Content-Encoding") == "gzip" else body
+        raw = _decode_sentry_wire_body(body, headers)
         assert "old-worker-s3cret" not in raw.decode("utf-8")
     finally:
         sentry_sdk.get_client().close(timeout=0)

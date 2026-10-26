@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Bundled web_fetch service descriptors (WF-1)",
+  "type": "array",
+  "items": {
+    "type": "object", "additionalProperties": false,
+    "required": ["vendor", "label", "kind", "service_id", "available", "auto_enroll", "endpoint", "auth", "request", "result", "content_types", "price", "limits", "outcomes"],
+    "properties": {
+      "vendor": {"type": "string", "pattern": "^[a-z][a-z0-9-]*$"},
+      "label": {"type": "string", "minLength": 1, "maxLength": 64},
+      "source_id": {"type": "string", "pattern": "^src_[a-z0-9]{8,}$"},
+      "kind": {"enum": ["local", "service"]},
+      "service_id": {"type": "string", "minLength": 1},
+      "available": {"type": "boolean"}, "auto_enroll": {"type": "boolean"},
+      "endpoint": {"type": ["string", "null"], "pattern": "^https://"},
+      "auth": {"enum": ["none", "bearer", "x-api-key"]},
+      "request": {"type": "object"}, "result": {"type": "object"}, "outcomes": {"type": "object"},
+      "billing": {
+        "type": "object", "additionalProperties": false,
+        "required": ["nonempty_only", "unbilled_errors"],
+        "properties": {
+          "nonempty_only": {"type": "boolean"},
+          "unbilled_errors": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+        }
+      },
+      "content_types": {"type": "array", "uniqueItems": true, "items": {"enum": ["html", "pdf", "text", "markdown", "json"]}},
+      "price": {
+        "type": "object", "additionalProperties": false,
+        "required": ["unit", "usd_per_1k", "extra", "as_of", "url"],
+        "properties": {
+          "unit": {"enum": ["fetch", "search"]}, "usd_per_1k": {"type": "number", "minimum": 0},
+          "extra": {"const": []}, "as_of": {"type": "string", "format": "date"}, "url": {"type": "string", "pattern": "^https://"}
+        }
+      },
+      "limits": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 1}}
+    },
+    "allOf": [
+      {"if": {"properties": {"kind": {"const": "local"}}}, "then": {"required": ["source_id"], "properties": {"endpoint": {"type": "null"}, "auth": {"const": "none"}}}, "else": {"properties": {"endpoint": {"type": "string"}}}},
+      {"if": {"required": ["source_id"]}, "then": {"properties": {"auth": {"const": "none"}, "price": {"properties": {"usd_per_1k": {"const": 0}}}}}}
+    ]
+  }
+}

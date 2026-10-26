@@ -47,6 +47,7 @@ capability:
     - tests/test_model_hub_migration_bearer.py
     - tests/test_model_hub_transport_leases.py
     - tests/test_model_hub_hosted_executor.py
+    - tests/test_model_hub_search_chain.py
     - tests/test_model_hub_hosted_evidence.py
     - tests/test_model_hub_hosted_images.py
     - tests/test_model_hub_usage.py
@@ -196,6 +197,10 @@ scenarios:
       - tests/test_model_hub_hosted_tools_config.py::test_disk_load_with_a_broken_hosted_tools_section_keeps_model_hub
       - tests/test_model_hub_hosted_tools_config.py::test_released_configs_load_with_every_tool_on_and_stay_without_the_section
       - tests/test_model_hub_hosted_tools_config.py::test_hosted_tool_settings_round_trip_in_canonical_order
+      - tests/test_model_hub_search_settings.py::test_released_order_keeps_missing_kinds_absent_and_ignores_unnamed_entries
+      - tests/test_model_hub_search_settings.py::test_damaged_role_map_keeps_opt_out_across_load_write_and_reenable
+      - tests/test_model_hub_search_settings.py::test_role_metadata_drops_removed_sources_on_load_and_real_deletion
+      - tests/test_model_hub_search_settings.py::test_rc12_loader_preserves_tool_switch_and_orders_but_drops_service_overrides
   - id: MH-HOSTED-003
     name: A refusal is routing state with no time limit that applies only under its Source identity and wire stamp; a success is display history that never replaces it; a clear is persisted before it takes effect
     status: covered
@@ -230,6 +235,9 @@ scenarios:
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_relay_is_any_endpoint_but_the_vendors_own_by_the_engines_endpoint_identity
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_tools_read_states_saved_and_effective_values_and_what_real_use_showed
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_put_changes_only_the_fields_it_names
+      - tests/test_model_hub_search_settings.py::test_put_merges_absent_sources_fields_and_null_resets
+      - tests/test_model_hub_search_settings.py::test_http_tools_put_and_read_preserve_patch_and_active_contract
+      - tests/test_model_hub_search_settings.py::test_service_order_read_skips_removed_sources_without_rewriting_saved_order
       - tests/test_model_hub_hosted_tools_resolution.py::test_a_put_refuses_what_the_contract_forbids
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_latest_success_is_the_newest_in_time_not_in_text
       - tests/test_model_hub_hosted_tools_resolution.py::test_the_latest_success_is_the_newest_one_whose_source_is_still_the_same
@@ -315,6 +323,14 @@ scenarios:
       - tests/test_hosted_activity.py::test_the_im_line_says_a_reason_avibe_worded_in_the_readers_language
       - tests/test_hosted_activity.py::test_every_known_hosted_error_code_has_copy_on_every_surface
       - ui/src/components/workbench/HostedToolRow.test.tsx::MH-HOSTED-UI-015
+  - id: MH-HOSTED-UI-016
+    name: Foreground and background Sessions preserve the same rich hosted card payload and response ordering, while background delivery remains suppressed
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_vibey_agent.py::test_native_search_card_survives_the_delivery_policy
+    related_tests:
+      - tests/test_agent_activity_service.py::test_a_native_hosted_card_sorts_before_the_response_that_carried_it
   - id: MH-EFFORT-MENU-001
     name: The model picker leaves out an effort every hop refuses and keeps, with its refusing Sources, one the other hops serve
     status: covered
@@ -336,7 +352,7 @@ scenarios:
       - ui/src/components/workbench/AgentRoutePicker.test.tsx::MH-EFFORT-MENU-003
       - ui/src/components/workbench/AgentsPage.test.tsx::MH-EFFORT-MENU-003
   - id: MH-EFFORT-MENU-004
-    name: While an effort-menu read is in flight, the route picker and the Agents page hold the controls that can write an effort, and the New Agent dialog reads again at Create, creating only an effort the answer still offers and nothing when Model Hub cannot answer
+    name: While an effort-menu read is in flight, the route picker holds controls and the Agents page holds model changes while retaining the latest effort choice for validation before saving; the New Agent dialog reads again at Create, creating only an effort the answer still offers and nothing when Model Hub cannot answer
     status: covered
     kind: observation
     layer: unit
@@ -423,13 +439,13 @@ scenarios:
       - tests/agent_core/ai/test_hosted_replay.py::test_an_opaque_payload_refusal_ends_the_send_as_a_refusal_of_its_source_identity
       - tests/agent_core/ai/test_hosted_replay.py::test_an_opaque_payload_another_account_refuses_is_sent_portably_from_then_on_in_the_session
       - tests/agent_core/ai/test_hosted_replay.py::test_a_refusal_of_what_the_session_already_demoted_stands_as_the_error
-      - tests/agent_core/ai/test_hosted_replay.py::test_a_tool_loop_whose_assistant_message_cannot_start_with_thinking_continues_with_thinking_off
+      - tests/agent_core/ai/test_hosted_replay.py::test_anthropic_thinking_fallback_is_scoped_to_manual_claude_tool_loops
       - tests/agent_core/ai/test_hosted_replay.py::test_a_session_whose_signatures_were_refused_still_finishes_tool_loops_with_thinking_on
       - tests/agent_core/ai/test_hosted_replay.py::test_a_decrypt_refusal_drops_every_opaque_payload_of_that_identity_for_the_rest_of_the_turn
       - tests/agent_core/ai/test_hosted_replay.py::test_a_hosted_call_goes_back_verbatim_and_pinned_only_to_its_own_source_with_replay_evidence
       - tests/agent_core/ai/test_hosted_replay.py::test_a_continuation_goes_back_verbatim_only_to_the_hop_that_served_it
   - id: MH-HOSTED-VIBEY-006
-    name: An Anthropic pause_turn continues as one response pinned to its Source and model, with the final request's usage and summed hosted counters, pending calls finalized by id, at most five continuations, ending interrupted when its Source cannot continue it, and verified only when every response was from one origin
+    name: Anthropic server-tool continuations carry pending calls by id; pause_turn stays one pinned response with bounded continuations, while a mixed client/server group appends a same-id completion after client results, replays once, and displays one completed card without rewriting context or charging twice
     status: covered
     kind: contract
     layer: contract
@@ -439,6 +455,19 @@ scenarios:
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_paused_response_its_source_cannot_continue_ends_interrupted_and_keeps_what_it_has
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_continued_response_is_verified_only_when_every_response_in_it_was_from_one_origin
       - tests/agent_core/ai/test_hosted_pause_turn.py::test_a_counter_past_the_bound_in_any_pause_stays_absent_and_the_response_completes
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_mixed_pause_preserves_exact_assistant_and_result_only_user_group
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_orphan_result_finishes_prior_call_without_repeating_use_and_keeps_usage_here
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_later_replay_pairs_once_but_preserves_native_response_boundaries
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_a_result_from_another_source_cannot_complete_the_previous_sources_call
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_deferred_completion_never_invents_a_charge_from_a_result_block
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_a_steer_waits_until_the_deferred_result_and_never_enters_the_tool_result_user_message
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_deferred_result_then_pause_turn_keeps_the_native_exchange_without_replay_evidence
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_partial_deferred_failure_retries_the_open_exchange_and_pairs_only_the_valid_result
+      - tests/agent_core/ai/test_anthropic_deferred.py::test_failed_deferred_attempt_does_not_cross_a_closed_or_different_exchange
+      - tests/test_vibey_agent.py::test_anthropic_deferred_search_shows_only_its_completion_live_and_on_reload
+      - tests/test_vibey_agent.py::test_restart_defers_accepted_steer_until_native_search_continuation
+      - tests/test_hosted_activity.py::test_deferred_search_has_no_card_or_share_of_an_earlier_search_cost
+      - tests/test_agent_activity_service.py::test_reload_omits_only_old_deferred_search_cards
   - id: MH-HOSTED-VIBEY-007
     name: An image_generate call goes to the gateway's image endpoint with its arguments alone, after the turn's frozen models accept every argument and its reference images are read as read reads them; the images it returns are saved through the media sink and its record names those files; no base64 enters history, and a call that saved no file is a failed record with its code
     status: covered
@@ -481,12 +510,12 @@ scenarios:
       - 'ui/src/components/settings/models/ToolsTab.test.tsx::MH-HOSTED-UI-003: prices each executor where a price is known, and never shows unknown as zero'
       - 'ui/src/components/settings/models/format.test.ts::MH-HOSTED-UI-003: keeps the first significant digits of a per-call price, and never shows a nonzero price as zero'
   - id: MH-HOSTED-UI-005
-    name: The hosted-tools report stays unread until the Tools tab opens, re-reads on every open, and again after a committed Source change
+    name: The hosted-tools report reads activation on Sources without blocking first paint, refreshes on each surface change, and again after a committed Source change
     status: covered
     kind: observation
     layer: unit
     test:
-      - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-005: leaves the hosted-tools report unread until its tab opens, then re-reads on every open'
+      - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-005: reads activation on Sources without gating first paint, then refreshes when its surface changes'
       - 'ui/src/components/settings/models/SettingsModelsPage.render.test.tsx::MH-HOSTED-UI-005: reads the hosted-tools report again after a committed Source change, since a Source change can drop its evidence'
   - id: MH-HOSTED-UI-006
     name: A Source model shows one chip per feature with a record, a refusal over a success, and an unused model draws nothing
@@ -495,7 +524,8 @@ scenarios:
     layer: unit
     test:
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: draws one chip per feature with a record, a refusal over a success, and nothing for an unused model'
-      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: says when the capability read failed instead of drawing a Source with no evidence'
+      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: lets a failed capability read retry in serviceDetail=false instead of leaving held controls stranded'
+      - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: lets a failed capability read retry in serviceDetail=true instead of leaving held controls stranded'
       - 'ui/src/components/settings/models/SourceDetailPanel.test.tsx::MH-HOSTED-UI-006: adds no capability column when no model has evidence'
       - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-006: gives each pair one record, a refusal over a success and a call refusal over a replay one'
       - 'ui/src/components/settings/models/hostedTools.test.ts::MH-HOSTED-UI-006: gives a Source model one capability per feature, a call refusal hiding the success and the replay'
@@ -813,6 +843,14 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_retry_lifecycle.py::test_a_plan_or_billing_429_settles_its_source_by_the_code_that_names_it
+  - id: MH-RETRY-ADVICE-004
+    name: Shared Claude cap resets persist as quota cooldowns without early probes or raw header disclosure
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_claude_cap_headers_drive_persisted_recovery_without_early_probes
+    related_tests:
+      - tests/test_model_hub_claude_caps.py
   - id: MH-RETRY-EVIDENCE-001
     name: Unknown buffered success passes through without proving recovery
     status: covered
@@ -2576,6 +2614,23 @@ scenarios:
     related_tests:
       - tests/test_model_hub_service_acceptance_helpers.py::test_an_ignored_override_that_installs_the_packaged_engine_fails_the_run
       - tests/test_model_hub_service_acceptance_helpers.py::test_a_selected_manifest_without_a_usable_version_fails_the_run
+  - id: MH-SEARCH-SERVICES-001
+    name: The active search-service read and producer share a one-role service and model chain, freeze turn settings, bound excerpts, fence health and cooldown independently, admit one recovery trial, and meter every sent request by observed billing facts
+    status: covered
+    kind: contract
+    layer: contract
+    test: tests/test_model_hub_search_chain.py::test_vendor_request_mapping_meter_and_evidence
+    related_tests:
+      - tests/test_model_hub_search_chain.py::test_order_placement_is_read_only_and_survives_reload
+      - tests/test_model_hub_search_chain.py::test_skip_precedence_terminal_reason_and_attempts_without_execution
+      - tests/test_model_hub_search_chain.py::test_billing_is_a_function_of_sent_status_and_original_results
+      - tests/test_model_hub_search_chain.py::test_connect_holds_no_mutation_lock_and_only_the_first_ready_trial_sends
+      - tests/test_model_hub_search_chain.py::test_stop_during_timeout_teardown_never_runs_the_next_paid_candidate
+      - tests/test_model_hub_search_chain.py::test_model_executor_retains_the_chain_budget_not_the_service_attempt_limit
+      - tests/test_model_hub_search_chain.py::test_health_and_cooldown_fences_each_protect_only_their_own_state
+      - tests/test_model_hub_search_chain.py::test_prefer_native_off_flows_through_the_hop_to_function_declaration_and_synthetic_history
+      - tests/test_model_hub_search_chain.py::test_retry_http_client_rpc_clears_only_the_service_fence_with_plain_success
+      - tests/test_model_hub_search_chain.py::test_search_read_and_chain_activate_together
   - id: MH-HOSTED-GATEWAY-004
     name: A proxied search runs one native request on the turn's first admitted executor, without an effort, and answers its canonical record and execution with the pricing module's cost and the same positive evidence a native call writes
     status: covered

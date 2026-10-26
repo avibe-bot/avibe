@@ -83,7 +83,10 @@ window kind; see "G8 lifecycle" below.
   transparent areas around it do not swallow clicks. Expanded, the window
   grows to fit the panel, anchored at the pet. The panel flips to the side with
   room near screen edges. The shell performs the resize.
-- The user moves it by dragging the pet (`start-dragging`).
+- The user moves it by dragging the pet (`start-dragging`). The mini drags
+  through the shell instead, so Vibey can reach the top of the display and
+  the column can flip below it; see
+  [the mini spec §9.1](2026-10-12-desktop-mini-main-agent.md#91-window).
 - **Position is the pet anchor, not the window frame.** The window's origin
   moves whenever the panel opens to the left or above the pet. A raw window
   position saved while expanded would restore the collapsed pet displaced by

@@ -1,7 +1,9 @@
 """Message routing and Agent communication handlers"""
 
+import asyncio
 import logging
 import inspect
+from dataclasses import replace
 from typing import Any, List, Optional, Tuple
 
 from core.audio_asr import (
@@ -10,15 +12,24 @@ from core.audio_asr import (
     format_audio_transcript_echo,
 )
 from core.agent_input import AgentInputMetadata, harness_label
-from core.backend_failure import emit_backend_failure
+from core.backend_failure import (
+    CONTINUE_ON_VIBEY_NEXT_STEP,
+    emit_backend_failure,
+    harness_run_identity,
+    output_with_next_step,
+)
 from core.delivery_target import routed_delivery_context
 from core.message_output import HARNESS_PROMPT_ECHO_SPEC_KEY
+from core.session_handoff import BACKEND_HANDOFF_TURN_KEY
 from core.message_context import (
     resolve_context_platform,
     resolve_context_thread_id,
 )
+from core.delivery_evidence import DeliveryEvidence
 from core.native_dispatch_phase import (
     DISPATCH_PHASE_PREWRITE,
+    mark_prewrite_input_retired,
+    mark_prewrite_recovery_required,
     set_dispatch_phase,
 )
 from modules.agents.base import AgentRequest
@@ -816,6 +827,7 @@ class MessageHandler(BaseHandler):
             )
             if processing_indicator is not None:
                 self.controller.processing_indicator.apply_to_request(request, processing_indicator)
+            await self._attach_backend_handoff(context, agent_name, request)
             try:
                 await self.controller.agent_service.handle_message(agent_name, request)
                 agent_dispatched = True
@@ -910,8 +922,27 @@ class MessageHandler(BaseHandler):
         A Model Hub supply refusal is already the user's copy and names its own cause.
         """
 
+        from core.vibe_agents import AgentUnavailableError
         from modules.agents.model_hub import ModelSupplyRefusal
 
+        if isinstance(error, AgentUnavailableError) and error.reason in {"disabled", "missing"}:
+            agent = error.agent_name
+            if error.reason == "missing":
+                # A deleted Agent resolved by id names only that id; the session's
+                # projection still carries the name the user knows.
+                from core.agent_session_context import resolve_context_agent_session_target
+
+                target = resolve_context_agent_session_target(context) or {}
+                agent = str(target.get("agent_name") or "").strip() or agent
+            label = display_name_for_backend(agent) if is_agent_backend(agent) else agent
+            await self._emit_agent_cannot_run(
+                context,
+                request,
+                self._t(f"error.agentUnavailable.{error.reason}", agent=label),
+                failing_backend=None,
+                cause=error,
+            )
+            return
         if isinstance(error, ModelSupplyRefusal):
             error_text = f"❌ {error}"
         else:
@@ -929,6 +960,89 @@ class MessageHandler(BaseHandler):
             request=request,
             cause=error,
         )
+
+    async def _emit_agent_cannot_run(
+        self,
+        context: MessageContext,
+        request: AgentRequest | None,
+        reason: str,
+        *,
+        failing_backend: Optional[str],
+        cause: BaseException | None = None,
+        escape_reason: bool = True,
+    ) -> None:
+        """Notify that the session's Agent cannot run, and offer to continue on Vibey.
+
+        The Workbench draws the offer as a button from ``failure_next_step``: it moves
+        the session to the built-in Vibey Agent and runs the failed input there. A
+        chat app cannot change the session's Agent, so its notice says where to.
+        Nothing is offered when Vibey is what cannot run, or is not available.
+        Retrying on its own would fail the same way, so an input that never reached
+        the backend waits for its owner in the Workbench: continue on Vibey, or Retry
+        once it is back. A chat app has no Retry, so once its notice (which says to
+        send the message again) is delivered, its input is retired instead of holding
+        every later message behind it. A Harness run's input is its Run's to settle,
+        and resending a generated prompt by hand would run it outside its Run, so a
+        chat app is told only that the Agent cannot run.
+        """
+        target = routed_delivery_context(context)
+        workbench = resolve_context_platform(target) == "avibe"
+        # A background session's notice stays in its local history: it is read in the
+        # Workbench, where the input waits like a Workbench one.
+        background = bool((context.platform_specific or {}).get("suppress_delivery"))
+        chat_input = not workbench and not background and not harness_run_identity(context, request)
+        if not workbench and escape_reason:
+            reason = self._get_formatter(target).escape_special_chars(reason)
+        # Catalog and Model Hub reads: off the controller loop.
+        offer = failing_backend != "vibey" and await asyncio.to_thread(self._builtin_vibey_available)
+        if workbench or background:
+            # The held input's hint names the notice's button only when there is one;
+            # otherwise the notice offers Retry, which the general hint already names.
+            mark_prewrite_recovery_required(context, "agent_unavailable" if offer else "agent_unavailable_no_alternative")
+        output = output_with_next_step(request, CONTINUE_ON_VIBEY_NEXT_STEP) if offer and workbench else None
+        text = f"❌ {reason}"
+        if offer and workbench:
+            text = f"{text}\n{self._t('error.continueOnVibey.workbench')}"
+        elif chat_input:
+            # Its input is retired below, so it will not run once the Agent is back.
+            next_step = "error.continueOnVibey.im" if offer else "error.agentUnavailable.resendLater"
+            text = f"{text}\n{self._t(next_step)}"
+        delivery = DeliveryEvidence() if chat_input else None
+        try:
+            await emit_backend_failure(
+                self.controller,
+                context,
+                str(failing_backend or getattr(request, "vibe_agent_backend", None) or "agent"),
+                text,
+                display_text=text,
+                request=request,
+                output=output,
+                delivery=delivery,
+                cause=cause,
+            )
+        finally:
+            # A chat app's input is retired only once the user was told to send it
+            # again, even if settling the turn then raised; an undelivered notice
+            # leaves it to the ordinary startup retries.
+            if delivery is not None and delivery.delivered:
+                mark_prewrite_input_retired(context, "agent_unavailable")
+
+    def _builtin_vibey_available(self) -> bool:
+        """Whether a continuation on Vibey could run now: its built-in Agent exists and
+        the Model Hub supplies it a model (the same answer a Vibey turn starts from).
+        Blocking. A problem with Vibey's own selected model is not predicted here: the
+        continuation then ends with Vibey's own notice, which says what to fix."""
+        from modules.agents.model_hub import hub_supply_refusal
+
+        store = getattr(self.controller, "vibe_agent_store", None)
+        getter = getattr(store, "get_builtin_default_agent_for_backend", None)
+        if not callable(getter):
+            return False
+        try:
+            return getter("vibey") is not None and hub_supply_refusal(self.controller, "vibey", self._get_lang()) is None
+        except Exception:
+            logger.debug("Could not resolve whether Vibey can run", exc_info=True)
+            return False
 
     async def _admit_human_delivery(
         self,
@@ -1379,6 +1493,66 @@ class MessageHandler(BaseHandler):
         spec[HARNESS_PROMPT_ECHO_SPEC_KEY] = message
         context.platform_specific = spec
 
+    async def _attach_backend_handoff(
+        self, context: MessageContext, backend: str, request: AgentRequest
+    ) -> None:
+        """Prepare a turn of a Session that switched backend and has not continued yet.
+
+        The switch cleared the row's native and left ``backend_handoff``
+        (``docs/plans/2026-10-22-session-backend-switch.md``). The row is read by
+        primary key, whichever projection selected it (a Workbench target or an
+        IM/CLI run target), because a projection can predate the switch. A turn that
+        continues the Session's own conversation on the switched-to backend then:
+
+        - drops any runtime that backend still caches for the Session from an earlier
+          phase, while the row has no native yet, and stops every projection from
+          offering a native the row no longer holds;
+        - carries the handoff in its input, and is tagged so its native-start receipt
+          can spend the marker.
+
+        A turn into a namespaced conversation (a subagent) or on another backend (a
+        one-off Agent run) neither carries nor spends it. Any failure fails the turn
+        before dispatch, so the next turn retries; the first accepted turn on the new
+        native is always one that carried the handoff.
+        """
+        from core.agent_session_context import resolve_context_agent_session_target
+        from core.session_handoff import load_pending_handoff, pending_handoff_for_row
+
+        spec = context.platform_specific or {}
+        if spec.get("vibey_resume") is True:
+            return
+        # The same marks the backends namespace a conversation by: a Claude/Codex
+        # subagent base (set above) or a routing-default subagent.
+        if spec.get("backend_base_session_id") or spec.get("routing_subagent"):
+            return
+        target = resolve_context_agent_session_target(context) or {}
+        session_id = str(target.get("id") or spec.get("agent_session_id") or "").strip()
+        if not session_id:
+            return
+        read_row = getattr(self.sessions, "get_agent_session_by_id", None)
+        if not callable(read_row):
+            return
+        row = await asyncio.to_thread(read_row, session_id)
+        handoff = pending_handoff_for_row(row, backend)
+        if handoff is None:
+            return
+        pending = await asyncio.to_thread(load_pending_handoff, row, handoff, backend)
+        spec = dict(context.platform_specific or {})
+        for key in ("agent_session_target", "agent_run_target"):
+            projection = spec.get(key)
+            if isinstance(projection, dict) and projection.get("native_session_id") != pending.native_session_id:
+                spec[key] = {**projection, "native_session_id": pending.native_session_id}
+        context.platform_specific = spec
+        if not pending.native_session_id:
+            agent = getattr(getattr(self.controller, "agent_service", None), "agents", {}).get(backend)
+            release = getattr(agent, "release_native_runtime", None)
+            if callable(release):
+                await release(request)
+        request.input_metadata = replace(request.input_metadata or AgentInputMetadata(), handoff=pending.text)
+        spec = dict(context.platform_specific or {})
+        spec[BACKEND_HANDOFF_TURN_KEY] = pending.handoff_id
+        context.platform_specific = spec
+
     async def prepare_input_metadata(
         self, context: MessageContext, *, human: bool
     ) -> AgentInputMetadata:
@@ -1677,15 +1851,11 @@ class MessageHandler(BaseHandler):
         display_backend = display_name_for_backend(backend) if backend else str(target)
         hint_key = f"error.agentNotConfiguredHint.{backend}" if backend else "error.agentNotConfiguredHint.generic"
         hint = self._t(hint_key)
-        msg = f"❌ {self._t('error.agentNotConfigured', agent=target, backend=display_backend, hint=hint)}"
+        reason = self._t('error.agentNotConfigured', agent=target, backend=display_backend, hint=hint)
+        msg = f"❌ {reason}"
         if request is not None:
-            await emit_backend_failure(
-                self.controller,
-                context,
-                backend or str(target),
-                msg,
-                display_text=msg,
-                request=request,
+            await self._emit_agent_cannot_run(
+                context, request, reason, failing_backend=backend or str(target), escape_reason=False
             )
             return
         await self._get_im_client(context).send_message(context, msg)

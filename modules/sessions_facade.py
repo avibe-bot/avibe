@@ -122,6 +122,13 @@ class SessionsFacade:
             expected_route=expected_route,
         )
 
+    def get_agent_session_by_id(self, agent_session_id: str) -> Optional[dict]:
+        """The persisted ``agent_sessions`` row, read by primary key."""
+        getter = getattr(self.sessions_store, "get_agent_session_by_id", None)
+        if not callable(getter):
+            return None
+        return getter(agent_session_id)
+
     def get_agent_session_runtime_marker(
         self,
         agent_session_id: str,

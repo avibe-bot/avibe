@@ -41,6 +41,7 @@ from core.computer_use import (
 from core.computer_script_handles import (
     ComputerScriptHandleError,
     bind_handle_to_request,
+    handle_validated_by_driver,
     parse_handle_descriptor,
     validate_handle_is_current,
 )
@@ -1202,6 +1203,7 @@ class ComputerUseServer:
                 upstream: Upstream | None = None
                 session_state: _SessionState | None = None
                 pre_forward = True
+                driver_validates_handle = False
                 try:
                     status = await asyncio.to_thread(self._status_reader)
                     if status.status != "ready" or status.state is None:
@@ -1249,20 +1251,31 @@ class ComputerUseServer:
                                 raise _DriverSessionEnded(discovery_tool)
                             return discovered
 
-                        try:
-                            validation_error = await validate_handle_is_current(
-                                parsed_handle,
-                                name,
-                                discover,
-                            )
-                        except ComputerScriptHandleError as exc:
-                            return _error_result(
-                                exc.code,
-                                dispatched=False,
-                                result_params=exc.params,
-                            )
-                        if validation_error is not None:
-                            return _not_dispatched_error_result(validation_error)
+                        async def check_handle() -> dict[str, Any] | None:
+                            try:
+                                validation_error = await validate_handle_is_current(
+                                    parsed_handle,
+                                    name,
+                                    discover,
+                                )
+                            except ComputerScriptHandleError as exc:
+                                return _error_result(
+                                    exc.code,
+                                    dispatched=False,
+                                    result_params=exc.params,
+                                )
+                            if validation_error is not None:
+                                return _not_dispatched_error_result(validation_error)
+                            return None
+
+                        driver_validates_handle = handle_validated_by_driver(
+                            parsed_handle,
+                            name,
+                        )
+                        if not driver_validates_handle:
+                            refusal = await check_handle()
+                            if refusal is not None:
+                                return refusal
                     self._require_observation(name, arguments, session_state)
                     forwarded = dict(arguments)
                     forwarded["session"] = session
@@ -1275,6 +1288,10 @@ class ComputerUseServer:
                         element_token_windows=session_state.element_token_windows,
                     )
                     async with target_lock:
+                        await asyncio.to_thread(
+                            self._revalidate_daemon_key,
+                            state.daemon_key,
+                        )
                         pre_forward = False
                         result = await self._upstream_call(
                             upstream,
@@ -1289,6 +1306,18 @@ class ComputerUseServer:
                             # outcome ambiguous.
                             return _not_dispatched_error_result(result)
 
+                    if driver_validates_handle and result.get("isError") is True:
+                        # A failed read-only observation changed nothing. When
+                        # the handle no longer names a live window, report it
+                        # exactly as the pre-forward check would; any other
+                        # failure stays as the driver returned it.
+                        refusal = await check_handle()
+                        if (
+                            refusal is not None
+                            and refusal["structuredContent"]["code"]
+                            == "stale_window_handle"
+                        ):
+                            return refusal
                     if name in _OBSERVE_TOOLS and not result.get("isError"):
                         self._record_observation(arguments, result, session_state)
                     if name == "start_session":
@@ -1389,11 +1418,31 @@ class ComputerUseServer:
                 "Every computer-use call requires the current Avibe session id.",
             )
 
+        expected_lock = self._session_locks.get(normalized)
+        expected_state = self._sessions.get(normalized)
         result = await self.end_session_if_active(normalized)
-        lock = self._session_locks.get(normalized)
-        if lock is not None:
-            async with lock:
+        if expected_lock is None:
+            return result
+
+        async with expected_lock:
+            # Archive closes Computer Use admission before this boundary, but
+            # compare exact identities so a late cleanup cannot remove a newer
+            # session generation or its lock.
+            if self._session_locks.get(normalized) is not expected_lock:
+                return result
+            current_state = self._sessions.get(normalized)
+            if (
+                expected_state is not None
+                and current_state is not None
+                and current_state is not expected_state
+            ):
+                return result
+            if current_state is not None:
+                # When no state existed at the archive boundary, this is the
+                # state created by a call that was admitted before the fence.
                 self._sessions.pop(normalized, None)
+            # ``end_session`` may already have removed the expected state.
+            self._session_locks.pop(normalized, None)
         return result
 
     async def handle(self, message: Mapping[str, Any]) -> dict[str, Any] | None:

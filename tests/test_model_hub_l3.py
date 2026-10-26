@@ -5580,7 +5580,7 @@ def test_backend_failure_keeps_the_gateway_terminal_error_no_later_request_super
 def test_released_backend_rejection_records_read_unchanged(tmp_path: Path) -> None:
     """Records the earlier bridge wrote stay as written: no reason or phase is re-derived on read."""
     released = {
-        "contract_version": 17,
+        "contract_version": 21,
         "turn_id": "turn_released_rejection",
         "ts": NOW.isoformat(),
         "agent": "vibey",
@@ -7056,7 +7056,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     _assert_valid(
         "observation-result.schema.json",
         {
-            "contract_version": 17,
+            "contract_version": 21,
             "outcome": "adapter_error",
             "reachable": True,
             "authenticated": "unknown",
@@ -9590,7 +9590,7 @@ def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
 
     probe = asyncio.run(service.probe_agent("codex", "shared-model"))
     assert probe == {
-        "contract_version": 17,
+        "contract_version": 21,
         "backend": "codex",
         "channel": "native_cli",
         "reachable": True,

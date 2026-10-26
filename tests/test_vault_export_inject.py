@@ -39,6 +39,11 @@ def _sealed(suffix: str = "1") -> Sealed:
     return Sealed(ciphertext=f"ct-{suffix}", nonce=f"n-{suffix}", wrap_meta=f"wm-{suffix}")
 
 
+def _use_count(name: str) -> int:
+    with cli._open_vault_engine().connect() as conn:
+        return vault_service.get_secret_meta(conn, name)["use_count"]
+
+
 def _create_standard_secret(
     name: str,
     *,
@@ -118,10 +123,8 @@ def test_inject_calls_avault_and_records_delivery(tmp_path, capfd, monkeypatch, 
             {"name": "B_KEY", "key": "B_KEY", "envelope": _sealed("b"), "tier": "standard"},
         ],
     )
-    cli.cmd_vault_list(_ns())
-    secrets = {s["name"]: s for s in json.loads(capfd.readouterr().out)["secrets"]}
-    assert secrets["A_KEY"]["use_count"] == 1
-    assert secrets["B_KEY"]["use_count"] == 1
+    assert _use_count("A_KEY") == 1
+    assert _use_count("B_KEY") == 1
 
 
 def test_inject_canonicalizes_default_alias_and_maps_extra_field_key(tmp_path, capfd, monkeypatch):
@@ -532,8 +535,7 @@ def test_inject_dedupes_repeated_keys(tmp_path, capfd, monkeypatch):
         "dotenv",
         [{"name": "A_KEY", "key": "A_KEY", "envelope": _sealed("a"), "tier": "standard"}],
     )
-    cli.cmd_vault_list(_ns())
-    assert json.loads(capfd.readouterr().out)["secrets"][0]["use_count"] == 1
+    assert _use_count("A_KEY") == 1
 
 
 def test_inject_payload_does_not_leak_value(tmp_path, capfd, monkeypatch):
@@ -561,8 +563,7 @@ def test_inject_does_not_record_delivery_when_avault_fails(tmp_path, capfd, monk
     captured = capfd.readouterr()
     assert code == 1
     assert json.loads(captured.err)["code"] == "avault_failed"
-    cli.cmd_vault_list(_ns())
-    assert json.loads(capfd.readouterr().out)["secrets"][0]["use_count"] == 0
+    assert _use_count("A_KEY") == 0
 
 
 def test_inject_succeeds_even_if_audit_fails(tmp_path, capfd, monkeypatch):

@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "executor_order": ["src_exakeyless", "src_tavily01"],
+  "executor_order_kinds": {"src_exakeyless": "service", "src_tavily01": "service"},
+  "service_order": ["src_exakeyless", "src_tavily01"],
+  "services": {
+    "src_exakeyless": {"results": 9, "enabled": false},
+    "src_tavily01": {"results": 7, "enabled": false}
+  }
+}

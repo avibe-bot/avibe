@@ -1982,9 +1982,9 @@ class Controller:
             **({"citations": citations} if citations else {}),
             **({"hosted": hosted} if hosted else {}),
         )
-        # The dispatcher's terminal commit already ran this write beside the Turn's
-        # signal (#2714), which makes this call a no-op. It still covers a dispatcher
-        # that did not reach that commit.
+        # The dispatcher's terminal commit already handed off this write beside
+        # the Turn's signal (#2714 / #2706), which makes this call a no-op even if
+        # its completion is pending. Still cover a dispatcher that skipped it.
         manager = getattr(self, "session_turns", None)
         complete = getattr(manager, "on_terminal_delivery_complete", None)
         if callable(complete):

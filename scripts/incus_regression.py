@@ -65,6 +65,11 @@ OPENCODE_INSTALL_SH = (
     "curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors https://opencode.ai/install "
     '| HOME="$opencode_home" bash -s -- --no-modify-path --version "$opencode_version"'
 )
+# The regression base installs Node from NodeSource's rolling 22.x channel,
+# which can lag an upstream security release; refuse to publish a base whose
+# Node is older than the patched floor.
+REGRESSION_NODE_MAJOR = 22
+REGRESSION_NODE_MIN_VERSION = "22.23.4"
 VENV_DIR = "/opt/avibe/venv"
 METADATA_DIR = "/var/lib/avibe-regression"
 METADATA_PATH = f"{METADATA_DIR}/metadata.json"
@@ -101,6 +106,7 @@ SEED_MODES = (SEED_REGRESSION, SEED_NONE)
 # has rebuilt the home, it matches neither mode.
 SEED_SWITCHING = "switching"
 SEED_CONFIG_KEY = "user.avibe-regression.seed"
+HOLD_CONFIG_KEYS = tuple(f"user.avibe-regression.hold.{field}" for field in ("owner", "reason", "since"))
 SHOW_RUNTIME_BUILD_TIMEOUT_SECONDS = 300
 SLUG_RE = re.compile(r"^[a-z][a-z0-9-]{1,38}[a-z0-9]$")
 DAEMON_UNREACHABLE_HINT = (
@@ -280,6 +286,19 @@ def instance_record(runner: Runner, remote: str | None, project: str, instance: 
     return None
 
 
+def describe_instance_hold(record: dict | None) -> str | None:
+    """Read the hold from the instance, never from this checkout's metadata."""
+    config = (record or {}).get("config") or {}
+    if not isinstance(config, dict):
+        raise RegressionError("Could not read the instance config to check its regression hold.")
+    values = [str(config.get(key) or "").strip() for key in HOLD_CONFIG_KEYS]
+    if not any(values):
+        return None
+    # A partial marker still protects the environment until explicitly released.
+    owner, reason, since = (value or "unknown" for value in values)
+    return f"HELD: owner={owner}; reason={reason}; since={since}"
+
+
 def instance_exists(runner: Runner, remote: str | None, project: str, instance: str) -> bool:
     return instance_record(runner, remote, project, instance) is not None
 
@@ -421,6 +440,9 @@ def target_update_lock(repo_root: Path, remote: str | None, project: str, *, dry
     port exactly while its environment exists or is being built -- because none
     of them creates, destroys or forgets either half; a `down` that interrupts a
     build makes that `up` fail, and its reservation gives the row back.
+
+    `hold` and `release` also take this lock so their marker changes cannot race
+    a `delete` between its hold check and removal of the instance.
 
     `blocking=False` is for a caller whose answer to "somebody else holds this"
     is to stop rather than to wait. The acquire is then both the proof that
@@ -1045,6 +1067,7 @@ class ObservedInstance:
 
     project: str
     state: str
+    hold: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1169,6 +1192,7 @@ def worktree_instances(runner: Runner, *, remote: str | None) -> dict[str, tuple
                 ObservedInstance(
                     project=str(item.get("project") or "default"),
                     state=str(item.get("status") or "Unknown"),
+                    hold=describe_instance_hold(item),
                 )
             )
     return {name: tuple(observed) for name, observed in instances.items()}
@@ -2744,8 +2768,9 @@ def build_base_image(args: argparse.Namespace) -> int:
                 {cloud_init_wait_command()}
                 apt-get update
                 apt-get install -y bash ca-certificates curl git build-essential python3 python3-pip python3-venv rsync sudo tmux
-                curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+                curl -fsSL https://deb.nodesource.com/setup_{REGRESSION_NODE_MAJOR}.x | bash -
                 apt-get install -y nodejs
+                node -e 'const want = process.argv[1].split(".").map(Number); const have = process.versions.node.split(".").map(Number); const ok = have[0] === want[0] && (have[1] > want[1] || (have[1] === want[1] && have[2] >= want[2])); if (!ok) {{ console.error(`NodeSource installed Node ${{process.versions.node}}, need ${{process.argv[1]}} or a newer ${{want[0]}}.x`); process.exit(1); }}' {REGRESSION_NODE_MIN_VERSION}
                 # Backends must be service-owned at creation so their updaters
                 # stay writable without a recursive ownership repair at deployment.
                 id -u avibe >/dev/null 2>&1 || useradd --create-home --shell /bin/bash --groups sudo avibe
@@ -2970,6 +2995,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     if not args.dry_run:
         require_incus()
     runner = Runner(dry_run=args.dry_run)
+    hold = describe_instance_hold(instance_record(runner, args.remote, target.project, target.instance))
+    if hold:
+        print(f"{target.project}/{target.instance}: {hold}")
     failed = 0
     for command in (
         incus("list", *optional_remote_ref(args.remote), project=target.project),
@@ -3014,12 +3042,39 @@ def cmd_down(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hold(args: argparse.Namespace) -> int:
+    """Set or release an instance-local hold without changing its running work."""
+    releasing = args.command == "release"
+    values = ("", "", "") if releasing else (args.owner.strip(), args.reason.strip(), datetime.now(timezone.utc).isoformat())
+    if not releasing and not all(values):
+        raise RegressionError("A hold requires a non-empty --owner and --reason.")
+    repo_root = current_repo_root()
+    load_env_file(repo_root, args.env_file)
+    target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False)
+    if not args.dry_run:
+        require_incus()
+    with target_update_lock(repo_root, args.remote, target.project, dry_run=args.dry_run, blocking=False):
+        runner = Runner(dry_run=args.dry_run)
+        if not args.dry_run and instance_record(runner, args.remote, target.project, target.instance) is None:
+            raise RegressionError(f"Regression instance {target.project}/{target.instance} does not exist.")
+        # One config update for all three fields; empty values clear the marker.
+        runner.run(incus(
+            "config", "set", remote_ref(args.remote, target.instance),
+            *(f"{key}={value}" for key, value in zip(HOLD_CONFIG_KEYS, values)),
+            project=target.project,
+        ))
+        action = "Release hold" if releasing else f"Hold for {values[0]}: {values[1]} (since {values[2]})"
+        print(f"{'Would apply' if args.dry_run else 'Applied'} to {target.project}/{target.instance}: {action}")
+    return 0
+
+
 def cmd_delete(args: argparse.Namespace) -> int:
     repo_root = current_repo_root()
     load_env_file(repo_root, args.env_file)
     if args.target == MASTER_TARGET and not args.yes:
         raise RegressionError("Deleting the master regression environment requires --yes.")
-    if not args.dry_run:
+    needs_incus = not args.dry_run or not getattr(args, "ignore_hold", False)
+    if needs_incus:
         require_incus()
     # Removing the objects and forgetting the row are one change to what this
     # slug names, so both happen under the environment's update lock -- the same
@@ -3035,6 +3090,17 @@ def cmd_delete(args: argparse.Namespace) -> int:
     with target_update_lock(repo_root, args.remote, lock_project, dry_run=args.dry_run, blocking=False):
         target = resolve_target(args, repo_root, dry_run=args.dry_run, allocate_port=False, slug=slug)
         runner = Runner(dry_run=args.dry_run)
+        if not getattr(args, "ignore_hold", False):
+            # A dry run still needs a real, read-only daemon listing to prove
+            # that a hold is absent; the mutation runner intentionally reports
+            # no records in dry-run mode.
+            hold_runner = Runner(dry_run=False) if args.dry_run else runner
+            hold = describe_instance_hold(instance_record(hold_runner, args.remote, target.project, target.instance))
+            if hold:
+                raise RegressionError(
+                    f"Refusing to delete {target.slug}: {hold}. "
+                    "Use --ignore-hold to explicitly override this hold."
+                )
         results = (
             runner.run(incus("delete", remote_ref(args.remote, target.instance), "--force", project=target.project), check=False),
             runner.run(incus("project", "delete", remote_ref(args.remote, target.project)), check=False),
@@ -3122,6 +3188,9 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
             print(f"{len(live)} worktree regression environment(s) exist in {authority}:")
             for env in live:
                 print(f"  {env.slug}  [{env.footprint}]  {describe_worktree_entry(env.entry)}")
+                for item in env.instances:
+                    if item.hold:
+                        print(f"    {item.project}/{env.instance}: {item.hold}")
             print()
             # Deletion stays explicit and per-environment. `delete` derives the
             # project and instance from the slug by naming convention, so it
@@ -3136,7 +3205,7 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
             # Saying both is the only honest report.
             deletable = [env for env in live if env.deletable_by_slug]
             if deletable:
-                print("Delete any of them with:")
+                print("Explicit deletion commands (held environments are refused):")
                 for env in deletable:
                     print(
                         "  python3 scripts/incus_regression.py delete --target worktree "
@@ -3299,12 +3368,18 @@ def build_parser() -> argparse.ArgumentParser:
         ("shell", cmd_shell),
         ("down", cmd_down),
         ("delete", cmd_delete),
+        ("hold", cmd_hold),
+        ("release", cmd_hold),
     ):
         sub = subparsers.add_parser(name)
         add_common(sub)
         add_target_args(sub)
         if name == "delete":
             sub.add_argument("--yes", action="store_true")
+            sub.add_argument("--ignore-hold", action="store_true", help="Explicitly override an environment's hold.")
+        if name == "hold":
+            sub.add_argument("--owner", required=True, help="Session id or name holding this environment.")
+            sub.add_argument("--reason", required=True, help="Why this environment must be kept.")
         sub.set_defaults(func=func)
 
     reconcile = subparsers.add_parser(

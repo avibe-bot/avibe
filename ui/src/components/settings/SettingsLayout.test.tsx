@@ -205,6 +205,31 @@ describe('SettingsLayout', () => {
     }
   });
 
+  it('lists Computer Use under System only inside the desktop shell, whatever the viewport', () => {
+    // A wide browser tab is a desktop viewport but not the desktop host.
+    media.matches = true;
+    const view = renderLayout('/settings/shortcuts');
+    expect(screen.queryByRole('link', { name: 'settings.sections.computerUse' })).toBeNull();
+    view.unmount();
+
+    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
+    try {
+      for (const canManage of [true, false]) {
+        authorization.capabilities.can_manage_instance = canManage;
+        const shellView = renderLayout('/settings/shortcuts');
+        const link = screen.getByRole('link', { name: 'settings.sections.computerUse' });
+        expect(link.getAttribute('href')).toBe('/settings/computer-use');
+        const systemRows = screen.getAllByRole('link').map((row) => row.getAttribute('href'));
+        expect(systemRows.indexOf('/settings/computer-use')).toBe(
+          systemRows.indexOf('/settings/shortcuts') + 1,
+        );
+        shellView.unmount();
+      }
+    } finally {
+      Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+    }
+  });
+
   it('keeps the settings rail fixed while the route pane owns vertical scrolling', () => {
     renderLayout('/settings/replies');
 

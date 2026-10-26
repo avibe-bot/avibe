@@ -346,6 +346,56 @@ def test_a_native_hosted_card_sorts_before_the_response_that_carried_it(isolated
     assert [row["id"] for row in detail["rows"]] == ["evt_00063f0000000200cccccccc"]
 
 
+@pytest.mark.parametrize("stop_reason", ["tool_use", "error", "aborted"])
+async def test_reload_omits_only_old_deferred_search_cards(isolated_state, stop_reason):
+    """Released pending traces are hidden only for deferred calls, not cut-off streams.
+
+    The completion with the same provider id stays at its own response. Previously
+    every pending trace displayed as interrupted; ordinary card tests miss its cause.
+    """
+    from dataclasses import replace
+    from core.agent_core.messages import message_to_dict
+    from tests.agent_core.ai.test_anthropic_deferred import _paused
+
+    _, paused = await _paused()
+    engine = create_sqlite_engine()
+    sid = "ses_old_deferred"
+    with engine.begin() as conn:
+        scope = _seed_session(conn, session_id=sid)
+        _msg(conn, scope, sid, mid="m_user", mtype="user", author="user", created_at="2026-06-01T10:00:00Z", text="q", source="user")
+        _msg(conn, scope, sid, mid="m_paused", mtype="assistant", author="agent", created_at="2026-06-01T10:00:02Z",
+             content={"model": {"message": message_to_dict(replace(paused, stop_reason=stop_reason))}})
+        _msg(conn, scope, sid, mid="m_completed", mtype="result", author="agent", created_at="2026-06-01T10:00:04Z", text="done")
+        _evt(conn, scope, sid, eid="e_client", created_at="2026-06-01T10:00:03Z", text="client")
+        for eid, status, response_id, when in (
+            ("e_pending", "pending", "m_paused", "2026-06-01T10:00:02Z"),
+            ("e_completed", "completed", "m_completed", "2026-06-01T10:00:04Z"),
+        ):
+            conn.execute(agent_events.insert().values(
+                id=eid, scope_id=scope, session_id=sid, platform="avibe", event_type="tool_call", visibility="trace",
+                content_text=status, content_json=json.dumps({"kind": "toolcall", "hosted": {
+                    "version": 1, "call_id": "srvtoolu_0", "tool": "web_search", "mode": "native",
+                    "status": status, "response_id": response_id,
+                }}), metadata_json=json.dumps({"precedes_message_id": response_id}), source="agent",
+                created_at=when, updated_at=when,
+            ))
+    with engine.connect() as conn:
+        # The compatibility read seeks only the retained traces' owning message ids.
+        plan = conn.exec_driver_sql(
+            "EXPLAIN QUERY PLAN SELECT id, session_id, content_json FROM messages WHERE id IN (?)",
+            ("m_paused",),
+        ).all()
+        assert any("SEARCH messages USING INDEX" in row[3] and "id=?" in row[3] for row in plan)
+        assert not any("SCAN messages" in row[3] or "TEMP B-TREE" in row[3] for row in plan)
+        groups = agent_activity_service.list_turn_groups(conn, session_id=sid)["groups"]
+        rows = [row for group in groups for row in agent_activity_service.get_turn_group(
+            conn, session_id=sid, group_id=group["id"]
+        )["rows"]]
+    assert [row["id"] for row in rows] == (
+        ["e_client", "e_completed"] if stop_reason == "tool_use" else ["e_pending", "e_client", "e_completed"]
+    )
+
+
 def test_a_native_hosted_card_stays_with_its_response_at_the_scan_window_edge(isolated_state, monkeypatch):
     """The card sorts just ahead of its response, but belongs to the window that response is in.
 

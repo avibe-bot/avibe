@@ -23,6 +23,12 @@ is not ours to cap — so every aggregate here is an exact sum, and
 `USAGE_COUNTER_CEILING` constrains only what crosses into the file and back out
 of it. A row carrying a counter past it is dropped at whichever door it reaches,
 loudly, rather than rewritten into a number nobody spent.
+
+A search-service request reaches no model, so it gets its own row in the same file
+and the same daily and hourly lifecycle: one per Source and catalog `service_id`,
+counting sent requests rather than model calls (`web-search-services.md` §4.3). It
+is told apart by the `service_id` a model row never carries, and a row naming both
+a model and a service is unreadable. Model counters never include it.
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import queue
 import threading
 from concurrent.futures import Executor
@@ -41,7 +48,7 @@ from time import monotonic
 from typing import Callable, Final, Mapping, Optional, Sequence
 
 from .identifiers import persisted_ledger_key, usage_ledger_key
-from .pricing import Cost, ModelPrice, PriceTable, context_tier_size, row_cost
+from .pricing import Cost, ModelPrice, PriceTable, ServiceCost, context_tier_size, row_cost, service_row_cost
 from .state_file import write_state_document
 from .stream_wire import ProtocolUsageReport
 
@@ -163,6 +170,131 @@ def _repair_cache_writes(counters: dict) -> None:
     counters["cache_write_1h_input_tokens"] = min(
         counters["cache_write_1h_input_tokens"], counters["cache_write_input_tokens"]
     )
+
+
+# A service row's counts (`web-search-services.md` §4.3): requests sent, those the
+# catalog's billing rule charges, those whose billing is unknown, and those the
+# vendor priced itself. Every billable request is valued at the request's list
+# price, so no separate list-priced quantity exists. `reported_usd`, the vendor's
+# own figures, rides beside them as an amount rather than a count.
+_SERVICE_COUNTER_KEYS: Final = (
+    "requests",
+    "billable_requests",
+    "uncertain_requests",
+    "reported_requests",
+)
+# What one request's reported cost can be at most: a fixed bound above every catalog
+# version's own per-request ceiling, so a stored figure past it is corruption.
+_SERVICE_REPORTED_USD_CEILING: Final = 1.0
+
+
+def _is_service(value: Mapping) -> bool:
+    """Whether a normalized row, hour slice or counter set counts search requests.
+
+    Every service counter set carries `billable_requests` and no model one does, so
+    the counters themselves say which arithmetic applies wherever they travel.
+    """
+
+    return "billable_requests" in value
+
+
+def _counter_keys(value: Mapping) -> tuple[str, ...]:
+    return _SERVICE_COUNTER_KEYS if _is_service(value) else _COUNTER_KEYS
+
+
+def _amount(value: object) -> Optional[float]:
+    """Read one persisted dollar amount, or None when it is not finite and non-negative."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        amount = float(value)
+    except OverflowError:
+        return None
+    if not math.isfinite(amount) or amount < 0:
+        return None
+    return amount
+
+
+def _service_relations_hold(counters: Mapping) -> bool:
+    """The relations a service counter set keeps on every door (§4.3).
+
+    The reported amount is bounded by its count rather than compared for equality
+    anywhere: it is a float sum, so two orders of the same additions may differ in
+    their last place, while each addend's bound survives any order.
+    """
+
+    return (
+        counters["billable_requests"] + counters["uncertain_requests"] <= counters["requests"]
+        and counters["reported_requests"] <= counters["billable_requests"]
+        and counters["reported_usd"] <= counters["reported_requests"] * _SERVICE_REPORTED_USD_CEILING
+    )
+
+
+def _normalize_service_totals(value: object) -> Optional[dict]:
+    """Read strict service counters for a retained slice or pruned history, or None.
+
+    Like a model slice, nested evidence is refused rather than repaired: the daily
+    row is the authoritative aggregate.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    totals: dict = {}
+    for key in _SERVICE_COUNTER_KEYS:
+        counter = value.get(key)
+        if not isinstance(counter, int) or isinstance(counter, bool) or counter < 0:
+            return None
+        if counter > USAGE_COUNTER_CEILING:
+            return None
+        totals[key] = counter
+    amount = _amount(value.get("reported_usd"))
+    if amount is None:
+        return None
+    totals["reported_usd"] = amount
+    return totals if _service_relations_hold(totals) else None
+
+
+def _repair_service_counters(row: Mapping) -> Optional[tuple[dict, bool]]:
+    """Read one daily service row's counts, repaired to their relations (§4.3).
+
+    None when a count is past the ceiling, which makes the row unreadable exactly as
+    it does a model row. A field the row lacks reads as zero. A row that breaks a
+    relation keeps `requests`, has its counts reduced to their bounds and drops the
+    reported quantities that a reduced count no longer covers, or that break their
+    own bound (orphaned dollars included); the second value says so, and the caller
+    marks the row a lower bound.
+    """
+
+    counters: dict = {}
+    broken = False
+    for key in _SERVICE_COUNTER_KEYS:
+        raw = row.get(key, 0)
+        counter = _counter(raw)
+        if counter is None:
+            return None
+        broken = broken or type(raw) is not int or raw < 0
+        counters[key] = counter
+    amount = _amount(row.get("reported_usd", 0.0))
+    billable_reduced = counters["billable_requests"] > counters["requests"]
+    if billable_reduced:
+        counters["billable_requests"] = counters["requests"]
+        broken = True
+    unbilled = counters["requests"] - counters["billable_requests"]
+    if counters["uncertain_requests"] > unbilled:
+        counters["uncertain_requests"] = unbilled
+        broken = True
+    if (
+        billable_reduced
+        or amount is None
+        or counters["reported_requests"] > counters["billable_requests"]
+        or amount > counters["reported_requests"] * _SERVICE_REPORTED_USD_CEILING
+    ):
+        counters["reported_requests"] = 0
+        amount = 0.0
+        broken = True
+    counters["reported_usd"] = amount
+    return counters, broken
 
 
 def _utc_now() -> datetime:
@@ -383,17 +515,18 @@ def _has_unresolved_hourly_mass(row: dict) -> bool:
     expired = row.get("hourly_expired_totals")
     if not isinstance(hours, list):
         return True
+    service = _is_service(row)
     if expired is None:
-        expired = _empty_totals()
+        expired = _empty_totals(service=service)
     elif not isinstance(expired, dict):
         return True
-    known = _empty_totals()
+    known = _empty_totals(service=service)
     for item in hours:
         if not isinstance(item, dict):
             return True
         _accumulate(known, item)
     _accumulate(known, expired)
-    return any(known[key] != row[key] for key in _COUNTER_KEYS)
+    return any(known[key] != row[key] for key in _counter_keys(row))
 
 
 def _hourly_owner_day_window(
@@ -567,7 +700,7 @@ def _merge_hour_slices(target: dict, incoming: dict) -> None:
     target["hourly_history_complete"] = target_complete and incoming_complete
 
 
-def _normalize_hour_slice(item: object) -> Optional[dict]:
+def _normalize_hour_slice(item: object, *, service: bool = False) -> Optional[dict]:
     """Normalize one nested hourly slice, or drop it as corrupt."""
 
     if not isinstance(item, dict):
@@ -579,7 +712,7 @@ def _normalize_hour_slice(item: object) -> Optional[dict]:
     if parts is None:
         return None
     key, _start = parts
-    counters = _normalize_hourly_totals(item)
+    counters = _normalize_hourly_totals(item, service=service)
     if counters is None:
         return None
     return {
@@ -589,9 +722,11 @@ def _normalize_hour_slice(item: object) -> Optional[dict]:
     }
 
 
-def _normalize_hourly_totals(value: object) -> Optional[dict]:
+def _normalize_hourly_totals(value: object, *, service: bool = False) -> Optional[dict]:
     """Read strict counters for either a retained slice or pruned history."""
 
+    if service:
+        return _normalize_service_totals(value)
     if not isinstance(value, dict):
         return None
     if all(key not in value for key in _CACHE_WRITE_KEYS):
@@ -627,6 +762,8 @@ def _normalize_row(row: object) -> Optional[dict]:
 
     if not isinstance(row, dict):
         return None
+    if "service_id" in row:
+        return _normalize_service_row(row)
     day = _text(row.get("day"))
     source_id = persisted_ledger_key(row.get("source_id"))
     model_id = persisted_ledger_key(row.get("model_id"))
@@ -668,18 +805,64 @@ def _normalize_row(row: object) -> Optional[dict]:
     for subset, superset in _COUNTER_SUBSETS:
         normalized[subset] = min(normalized[subset], normalized[superset])
     _repair_cache_writes(normalized)
-    counters = {key: normalized[key] for key in _COUNTER_KEYS}
     normalized["last_metered_at"] = _timestamp(row.get("last_metered_at"))
+    return _normalize_hours(normalized, row)
+
+
+def _normalize_service_row(row: dict) -> Optional[dict]:
+    """Project one persisted search-service row, repaired to its relations, or drop it.
+
+    A row naming both a model and a service is neither; the same day, Source and
+    key rules as a model row apply otherwise.
+    """
+
+    if "model_id" in row:
+        return None
+    day = _text(row.get("day"))
+    source_id = persisted_ledger_key(row.get("source_id"))
+    service_id = persisted_ledger_key(row.get("service_id"))
+    if day is None or source_id is None or service_id is None or row.get("tool", "web_search") not in ("web_search", "web_fetch"):
+        return None
+    calendar_day = _calendar_day(day)
+    if calendar_day is None:
+        return None
+    repaired = _repair_service_counters(row)
+    if repaired is None:
+        return None
+    counters, broken = repaired
+    normalized = {
+        "day": calendar_day.isoformat(),
+        "source_id": source_id,
+        "service_id": service_id,
+        **({"tool": "web_fetch"} if row.get("tool") == "web_fetch" else {}),
+        **counters,
+        # A broken relation leaves a smaller true statement, so what it values is
+        # a floor; so is a request whose billing is unknown.
+        "lower_bound": row.get("lower_bound") is True or broken or counters["uncertain_requests"] > 0,
+    }
+    if row.get("history_degraded") is True:
+        normalized["history_degraded"] = True
+    normalized["last_metered_at"] = _timestamp(row.get("last_metered_at"))
+    # Repaired counts no longer match the slices that were written beside them,
+    # so where in the day the remainder fell is unknown.
+    return _normalize_hours(normalized, row, invalid=broken)
+
+
+def _normalize_hours(normalized: dict, row: dict, *, invalid: bool = False) -> dict:
+    """Attach a normalized row's optional hourly history, checked against its daily counts."""
+
+    service = _is_service(normalized)
+    counters = {key: normalized[key] for key in _counter_keys(normalized)}
     raw_hours = row.get("hours")
     if isinstance(raw_hours, list):
         # An empty list with the producer's complete flag can be ordinary
         # retention expiry: the daily owner outlives its 24-hour slices.
         by_key: dict[str, dict] = {}
-        invalid_hour = False
+        invalid_hour = invalid
         duplicate_hour = False
         over_capacity = False
         for item in raw_hours:
-            normalized_hour = _normalize_hour_slice(item)
+            normalized_hour = _normalize_hour_slice(item, service=service)
             if normalized_hour is None:
                 invalid_hour = True
                 continue
@@ -703,10 +886,10 @@ def _normalize_row(row: object) -> Optional[dict]:
             hours = []
         else:
             hours = list(by_key.values())
-        nested_totals = _empty_totals()
+        nested_totals = _empty_totals(service=service)
         for item in hours:
             _accumulate(nested_totals, item)
-        if any(nested_totals[key] > counters[key] for key in _COUNTER_KEYS):
+        if any(nested_totals[key] > counters[key] for key in counters):
             # The daily row is the authoritative released aggregate. A nested
             # corruption that exceeds it cannot be repaired by clamping one
             # arbitrary hour, so discard all hourly slices and report the
@@ -718,7 +901,7 @@ def _normalize_row(row: object) -> Optional[dict]:
             row.get("hourly_history_complete") is True and not invalid_hour
         )
         normalized["hourly_expired_totals"] = _normalize_hourly_totals(
-            row.get("hourly_expired_totals")
+            row.get("hourly_expired_totals"), service=service
         )
         expiry = _hour_key_parts(row.get("hourly_expired_before"))
         normalized["hourly_expired_before"] = expiry[0] if expiry else None
@@ -756,6 +939,54 @@ class SourceIdentity:
     source_id: str
     label: Optional[str] = None
     model_ids: Sequence[str] = ()
+
+
+@dataclass(frozen=True)
+class ServiceCatalogEntry:
+    """One search service as the current catalog lists it, for labelling and valuing its rows.
+
+    Caller-owned for the same reason a Source's label is: the catalog belongs to the
+    release, not to the file, so a row a later catalog no longer lists stays
+    readable, with no label and no price, instead of being priced from a stored copy.
+    """
+
+    service_id: str
+    label: str
+    usd_per_1k: float
+    # The date the catalog's price was verified (`price.as_of`).
+    price_date: str
+
+
+def _keyed_catalog(catalog: Optional[Sequence[ServiceCatalogEntry]]) -> dict[str, ServiceCatalogEntry]:
+    """Key the catalog the way the service rows it values were keyed."""
+
+    keyed: dict[str, ServiceCatalogEntry] = {}
+    for entry in catalog or ():
+        key = usage_ledger_key(entry.service_id)
+        if key is not None:
+            keyed[key] = entry
+    return keyed
+
+
+def _service_price(row: Mapping, keyed_catalog: Mapping[str, ServiceCatalogEntry]) -> Optional[float]:
+    entry = keyed_catalog.get(row["service_id"])
+    return entry.usd_per_1k if entry is not None else None
+
+
+def _service_fields(target: dict, cost: Optional[ServiceCost], *, degraded: bool) -> dict:
+    """A service aggregate's counts, plus its cost fields exactly when the report is priced.
+
+    The ledger keeps the reported amount regardless; publishing it is the cost
+    presence rule's, so an unpriced report carries counts only.
+    """
+
+    published = {key: value for key, value in target.items() if key != "reported_usd"}
+    if cost is None:
+        return published
+    fields = cost.fields()
+    # A degraded read lost rows of unknown size, so no figure from it is exact.
+    fields["api_cost_lower_bound"] = fields["api_cost_lower_bound"] or degraded
+    return {**published, **fields}
 
 
 @dataclass(frozen=True)
@@ -807,17 +1038,40 @@ def _bucket_rows(
     prices: Optional[PriceTable],
     keyed_model_labels: Mapping[tuple[str, str], str],
     *,
+    keyed_catalog: Optional[Mapping[str, ServiceCatalogEntry]] = None,
     degraded: bool = False,
 ) -> list[dict]:
     """Publish one bucket's rows: one per Source and model, summed across context tiers.
 
     Each row is valued at its own tier before the sum, because a tier's rates
-    apply only to the calls recorded in it.
+    apply only to the calls recorded in it. Search-service rows follow, one per
+    Source and service, in their own `kind: "service"` shape: a service is never
+    dressed as a model.
     """
 
     published: dict[tuple[str, str], dict] = {}
     costs: dict[tuple[str, str], Cost] = {}
+    services: dict[tuple[str, str, str], dict] = {}
+    service_costs: dict[tuple[str, str, str], ServiceCost] = {}
     for row in rows:
+        if _is_service(row):
+            key = (row["source_id"], row["service_id"], row.get("tool", "web_search"))
+            target = services.setdefault(
+                key,
+                {
+                    "kind": "service",
+                    "source_id": row["source_id"],
+                    "service_id": row["service_id"],
+                    **({"tool": row["tool"]} if "tool" in row else {}),
+                    **_empty_totals(service=True),
+                },
+            )
+            _accumulate(target, row)
+            if prices is not None:
+                service_costs.setdefault(key, ServiceCost()).add(
+                    service_row_cost(row, _service_price(row, keyed_catalog or {}))
+                )
+            continue
         key = (row["source_id"], row["model_id"])
         target = published.setdefault(
             key, {"source_id": row["source_id"], "model_id": row["model_id"], **_empty_totals()}
@@ -825,15 +1079,19 @@ def _bucket_rows(
         _accumulate(target, row)
         if prices is not None:
             costs.setdefault(key, Cost()).add(row_cost(row, _row_price(row, prices, keyed_model_labels)))
+    service_rows = [
+        _service_fields(services[key], service_costs.get(key), degraded=degraded)
+        for key in sorted(services)
+    ]
     if prices is None:
-        return [published[key] for key in sorted(published)]
+        return [published[key] for key in sorted(published)] + service_rows
     priced = []
     for key in sorted(published):
         cost = costs[key]
         # A degraded read lost rows of unknown size, so no figure from it is exact.
         cost.api_cost_lower_bound = cost.api_cost_lower_bound or degraded
         priced.append({**published[key], **cost.fields()})
-    return priced
+    return priced + service_rows
 
 
 def _recency(
@@ -900,13 +1158,22 @@ def _cache_write_increment(usage: Optional[ProtocolUsageReport]) -> dict[str, in
     }
 
 
-def _row_key(row: dict) -> tuple[str, str, str, int]:
-    """A row is one day of one model on one Source, in one context tier."""
+def _row_key(row: dict) -> tuple[str, str, str, int, bool, str]:
+    """A row is one day of one model on one Source, in one context tier.
 
-    return (row["day"], row["source_id"], row["model_id"], row.get("context_tier", 0))
+    Or of one hosted service/tool on one Source. The boolean keeps model and
+    service identities apart; the final tool keeps shared Exa search/fetch
+    attribution separate without changing its service/cooldown identity.
+    """
+
+    if _is_service(row):
+        return (row["day"], row["source_id"], row["service_id"], 0, True, row.get("tool", "web_search"))
+    return (row["day"], row["source_id"], row["model_id"], row.get("context_tier", 0), False, "")
 
 
-def _empty_totals() -> dict:
+def _empty_totals(*, service: bool = False) -> dict:
+    if service:
+        return {**{key: 0 for key in _SERVICE_COUNTER_KEYS}, "reported_usd": 0.0}
     return {key: 0 for key in _COUNTER_KEYS}
 
 
@@ -930,8 +1197,14 @@ def _accumulate(target: dict, row: dict) -> None:
     reduced to keep a row writable.
     """
 
-    for key in _COUNTER_KEYS:
+    for key in _counter_keys(target):
         target[key] += row[key]
+    if _is_service(target):
+        # A float sum, so it is bounded by its count rather than compared exactly;
+        # see `_service_relations_hold`.
+        target["reported_usd"] += row["reported_usd"]
+        if "lower_bound" in target:
+            target["lower_bound"] = target["lower_bound"] or row.get("lower_bound") is True
 
 
 def _newer_timestamp(current: Optional[str], candidate: Optional[str]) -> Optional[str]:
@@ -1028,13 +1301,15 @@ def _retain_hour_slices(row: dict, measured: datetime) -> dict:
     if not incomplete and (row_day_overlaps or retained or expired_known):
         # Compare durable UTC slices even when a host timezone change makes the
         # persisted local owner day fall outside the current display grid.
-        nested_totals = _empty_totals()
+        nested_totals = _empty_totals(service=_is_service(row))
         for item in retained.values():
             _accumulate(nested_totals, item)
         if expired_known:
             _accumulate(nested_totals, expired)
+        # Counts reconcile exactly; a reported amount is a float sum whose order
+        # differs between the day and its hours, so it is bounded, never compared.
         if not expired_known or any(
-            nested_totals[key] != row[key] for key in _COUNTER_KEYS
+            nested_totals[key] != row[key] for key in _counter_keys(row)
         ):
             logger.warning(
                 "Model Hub usage ledger row %s cannot reconcile its complete "
@@ -1073,6 +1348,78 @@ def _has_recent_hourly_evidence(row: dict, start: datetime, end: datetime) -> bo
             # retention validator rejects future-stamped counters afterward.
             return True
     return False
+
+
+def _model_increment(
+    call: "UsageCall", source_key: str, *, owner_day: str, metered_at: datetime
+) -> Optional[dict]:
+    """One metered model call as an unnormalized row, or None when its model has no key."""
+
+    model_key = usage_ledger_key(call.model_id)
+    if model_key is None:
+        return None
+    usage = call.usage
+    return {
+        "day": owner_day,
+        "source_id": source_key,
+        "model_id": model_key,
+        "context_tier": call.context_tier,
+        "requests": call.requests,
+        "token_reports": call.requests if usage is not None else 0,
+        "input_tokens": usage.input_tokens if usage else 0,
+        "cached_input_tokens": usage.cached_input_tokens if usage else 0,
+        "output_tokens": usage.output_tokens if usage else 0,
+        **_cache_write_increment(usage),
+        "last_metered_at": metered_at.isoformat(),
+        "hours": [
+            {
+                "key": _hour_key(metered_at),
+                "requests": call.requests,
+                "token_reports": call.requests if usage is not None else 0,
+                "input_tokens": usage.input_tokens if usage else 0,
+                "cached_input_tokens": usage.cached_input_tokens if usage else 0,
+                "output_tokens": usage.output_tokens if usage else 0,
+                **_cache_write_increment(usage),
+                "last_metered_at": metered_at.isoformat(),
+            }
+        ],
+        "hourly_expired_totals": _empty_totals(),
+        "hourly_history_complete": True,
+    }
+
+
+def _service_increment(
+    call: "ServiceUsageCall", source_key: str, *, owner_day: str, metered_at: datetime
+) -> Optional[dict]:
+    """Sent search requests as an unnormalized row, or None when the service has no key.
+
+    It meets the same repair a persisted row does, so a call whose counts break a
+    relation is recorded as the floor that repair leaves, never as written.
+    """
+
+    service_key = usage_ledger_key(call.service_id)
+    if service_key is None:
+        return None
+    counts = {
+        "requests": call.requests,
+        "billable_requests": call.billable_requests,
+        "uncertain_requests": call.uncertain_requests,
+        "reported_requests": call.reported_requests,
+        "reported_usd": call.reported_usd,
+    }
+    return {
+        "day": owner_day,
+        "source_id": source_key,
+        "service_id": service_key,
+        **({"tool": call.tool} if call.tool == "web_fetch" else {}),
+        **counts,
+        "last_metered_at": metered_at.isoformat(),
+        "hours": [
+            {"key": _hour_key(metered_at), **counts, "last_metered_at": metered_at.isoformat()}
+        ],
+        "hourly_expired_totals": _empty_totals(service=True),
+        "hourly_history_complete": True,
+    }
 
 
 class BoundedUsageLedger:
@@ -1166,7 +1513,7 @@ class BoundedUsageLedger:
             row.get("history_degraded") is True for row in rows.values()
         )
         for row in rows.values():
-            if all(row[key] <= USAGE_COUNTER_CEILING for key in _COUNTER_KEYS):
+            if all(row[key] <= USAGE_COUNTER_CEILING for key in _counter_keys(row)):
                 held.append(row)
                 continue
             degraded = True
@@ -1200,7 +1547,7 @@ class BoundedUsageLedger:
 
         holdable: list[dict] = []
         for row in rows:
-            if all(row[key] <= USAGE_COUNTER_CEILING for key in _COUNTER_KEYS):
+            if all(row[key] <= USAGE_COUNTER_CEILING for key in _counter_keys(row)):
                 holdable.append(_retain_hour_slices(row, measured))
                 continue
             logger.warning(
@@ -1249,7 +1596,7 @@ class BoundedUsageLedger:
 
         self.record_many((UsageCall(source_id=source_id, model_id=model_id, usage=usage, at=at),))
 
-    def record_many(self, calls: Sequence["UsageCall"]) -> None:
+    def record_many(self, calls: Sequence["UsageCall | ServiceUsageCall"]) -> None:
         """Fold a batch of metered calls into their days' rows in one transaction.
 
         The batch is the reason a backlog cannot grow: one read, one retention
@@ -1290,43 +1637,17 @@ class BoundedUsageLedger:
                     if _aware(call.at) > persisted_at
                     else call.owner_day
                 )
-                usage = call.usage
                 # A live call carries identities, not keys, and this is the one place
                 # they become one: derive here and every row downstream — new,
                 # accumulated, or read back next restart — is already a key, so no
                 # later surface can re-derive one that was folded and orphan its row.
                 source_key = usage_ledger_key(call.source_id)
-                model_key = usage_ledger_key(call.model_id)
                 increment = None
-                if source_key is not None and model_key is not None:
+                if source_key is not None:
                     increment = _normalize_row(
-                        {
-                            "day": owner_day,
-                            "source_id": source_key,
-                            "model_id": model_key,
-                            "context_tier": call.context_tier,
-                            "requests": call.requests,
-                            "token_reports": call.requests if usage is not None else 0,
-                            "input_tokens": usage.input_tokens if usage else 0,
-                            "cached_input_tokens": usage.cached_input_tokens if usage else 0,
-                            "output_tokens": usage.output_tokens if usage else 0,
-                            **_cache_write_increment(usage),
-                            "last_metered_at": metered_at.isoformat(),
-                            "hours": [
-                                {
-                                    "key": _hour_key(metered_at),
-                                    "requests": call.requests,
-                                    "token_reports": call.requests if usage is not None else 0,
-                                    "input_tokens": usage.input_tokens if usage else 0,
-                                    "cached_input_tokens": usage.cached_input_tokens if usage else 0,
-                                    "output_tokens": usage.output_tokens if usage else 0,
-                                    **_cache_write_increment(usage),
-                                    "last_metered_at": metered_at.isoformat(),
-                                }
-                            ],
-                            "hourly_expired_totals": _empty_totals(),
-                            "hourly_history_complete": True,
-                        }
+                        _service_increment(call, source_key, owner_day=owner_day, metered_at=metered_at)
+                        if isinstance(call, ServiceUsageCall)
+                        else _model_increment(call, source_key, owner_day=owner_day, metered_at=metered_at)
                     )
                 if increment is None:
                     # Reachable only for a value no config can hold — not text, or
@@ -1460,7 +1781,8 @@ class BoundedUsageLedger:
         costs: dict[str, dict[str, Cost]] = {}
         for row in rows:
             source_id = keyed_sources.get(row["source_id"])
-            if source_id is None:
+            if source_id is None or _is_service(row):
+                # A search request is not a model call a plan's quota covers.
                 continue
             cost = row_cost(row, _row_price(row, prices, keyed_model_labels))
             costs.setdefault(source_id, {}).setdefault(row["day"], Cost()).add(cost)
@@ -1533,6 +1855,7 @@ class BoundedUsageLedger:
         now: datetime,
         identities: Optional[Sequence[SourceIdentity]] = None,
         prices: Optional[PriceTable] = None,
+        service_catalog: Optional[Sequence[ServiceCatalogEntry]] = None,
     ) -> dict:
         """Aggregate the window into the read shape the settings page consumes.
 
@@ -1554,6 +1877,9 @@ class BoundedUsageLedger:
         A model's label is its own identity, which only matters for a folded row.
         There the key is a head plus a digest, so a tab drawing `model_id` would
         show a string nobody typed; the label carries the identity back.
+
+        `service_catalog` is the current release's search services, which label and
+        value service rows the way the price table values model tokens.
         """
 
         bounded_days = max(1, min(int(days), self.retention_days))
@@ -1566,6 +1892,7 @@ class BoundedUsageLedger:
             to_day=today.isoformat(),
             identities=identities,
             prices=prices,
+            service_catalog=service_catalog,
             degraded=degraded,
         )
 
@@ -1578,6 +1905,7 @@ class BoundedUsageLedger:
         to_day: str,
         identities: Optional[Sequence[SourceIdentity]],
         prices: Optional[PriceTable] = None,
+        service_catalog: Optional[Sequence[ServiceCatalogEntry]] = None,
         degraded: bool = False,
     ) -> dict:
         """Aggregate one exact set of daily or hourly rows.
@@ -1585,27 +1913,76 @@ class BoundedUsageLedger:
         With a price table, every aggregate also carries its API-price valuation,
         summed from the same rows so a total always equals the sum of its parts.
         A `degraded` read lost rows of unknown size, so every valuation is a floor.
+
+        Search-service rows never enter a model count or `sources[]`: they are
+        `services[]`, and only their valuation joins the totals and days, beside
+        the vendors' own reported figures (`web-search-services.md` §4.3).
         """
 
         keyed_source_labels, keyed_model_labels = _keyed_identities(identities)
+        keyed_catalog = _keyed_catalog(service_catalog)
         costs: dict[int, Cost] = {}
+        service_costs: dict[int, ServiceCost] = {}
 
         def priced(target: dict, cost: Optional[Cost]) -> None:
             if cost is not None:
                 costs.setdefault(id(target), Cost()).add(cost)
 
-        def with_cost(target: dict, *, omit: str = "") -> dict:
+        def service_priced(target: dict, cost: Optional[ServiceCost]) -> None:
+            if cost is not None:
+                service_costs.setdefault(id(target), ServiceCost()).add(cost)
+
+        def with_cost(target: dict, *, omit: str = "", with_services: bool = False) -> dict:
             published = {key: value for key, value in target.items() if key != omit}
             if prices is None:
                 return published
             cost = costs.get(id(target), Cost())
             cost.api_cost_lower_bound = cost.api_cost_lower_bound or degraded
-            return {**published, **cost.fields()}
+            fields = cost.fields()
+            if with_services:
+                # The services' list valuation joins the one API-price figure;
+                # their reported costs stay beside it, never added to it.
+                service = service_costs.get(id(target), ServiceCost())
+                fields["api_cost_usd"] = round(cost.api_cost_usd + service.api_cost_usd, 6)
+                fields["api_cost_lower_bound"] = fields["api_cost_lower_bound"] or service.lower_bound
+                fields["excluded_service_requests"] = service.excluded_requests
+                fields["service_reported_usd"] = round(service.reported_usd, 6)
+            return {**published, **fields}
 
         totals = _empty_totals()
         sources: dict[str, dict] = {}
+        services: dict[tuple[str, str, str], dict] = {}
         by_day: dict[str, dict] = {}
         for row in rows:
+            if _is_service(row):
+                entry = keyed_catalog.get(row["service_id"])
+                service_cost = (
+                    None
+                    if prices is None
+                    else service_row_cost(row, entry.usd_per_1k if entry is not None else None)
+                )
+                service_priced(totals, service_cost)
+                day = by_day.setdefault(row["day"], {"day": row["day"], **_empty_totals()})
+                service_priced(day, service_cost)
+                service = services.setdefault(
+                    (row["source_id"], row["service_id"], row.get("tool", "web_search")),
+                    {
+                        "source_id": row["source_id"],
+                        "service_id": row["service_id"],
+                        **({"tool": row["tool"]} if "tool" in row else {}),
+                        "label": keyed_source_labels.get(row["source_id"]),
+                        "service_label": entry.label if entry is not None else None,
+                        **_empty_totals(service=True),
+                        "last_metered_at": None,
+                    },
+                )
+                _accumulate(service, row)
+                service_priced(service, service_cost)
+                service["last_metered_at"] = _newer_timestamp(
+                    service["last_metered_at"],
+                    row["last_metered_at"],
+                )
+                continue
             _accumulate(totals, row)
             cost = (
                 None
@@ -1647,11 +2024,22 @@ class BoundedUsageLedger:
             _accumulate(day, row)
             priced(day, cost)
 
+        published_services = []
+        for key in sorted(services, key=lambda key: (-services[key]["requests"], key)):
+            service = services[key]
+            fields = _service_fields(
+                service,
+                service_costs.get(id(service), ServiceCost()) if prices is not None else None,
+                degraded=degraded,
+            )
+            if prices is not None:
+                fields["priced"] = service["service_id"] in keyed_catalog
+            published_services.append(fields)
         summary = {
             "window_days": window_days,
             "from_day": from_day,
             "to_day": to_day,
-            "totals": with_cost(totals),
+            "totals": with_cost(totals, with_services=True),
             "sources": [
                 {
                     **with_cost(source, omit="models"),
@@ -1668,10 +2056,20 @@ class BoundedUsageLedger:
                     key=lambda source: (-source["requests"], source["source_id"]),
                 )
             ],
-            "days": [with_cost(by_day[day]) for day in sorted(by_day)],
+            "services": published_services,
+            "days": [with_cost(by_day[day], with_services=True) for day in sorted(by_day)],
         }
         if prices is not None:
             summary["pricing"] = prices.fields()
+            price_dates = [
+                keyed_catalog[service["service_id"]].price_date
+                for service in published_services
+                if service["service_id"] in keyed_catalog
+            ]
+            if price_dates:
+                # The catalog prices that valued `services[]`, by when the oldest of
+                # them was verified; with no service valued there is nothing to date.
+                summary["pricing"]["service_price_date"] = min(price_dates)
         return summary
 
     def report(
@@ -1681,13 +2079,16 @@ class BoundedUsageLedger:
         now: datetime,
         identities: Optional[Sequence[SourceIdentity]] = None,
         prices: Optional[PriceTable] = None,
+        service_catalog: Optional[Sequence[ServiceCatalogEntry]] = None,
     ) -> dict:
         """Build one modern dense report without reallocating daily history."""
 
         if window not in USAGE_WINDOW_KEYS:
             raise ValueError(f"unsupported usage window: {window!r}")
         if window == "24h":
-            return self._hourly_report(now=now, identities=identities, prices=prices)
+            return self._hourly_report(
+                now=now, identities=identities, prices=prices, service_catalog=service_catalog
+            )
         days = int(window[:-1])
         bounded_days = max(1, min(days, self.retention_days))
         report_local = _local(now)
@@ -1701,9 +2102,11 @@ class BoundedUsageLedger:
             to_day=today.isoformat(),
             identities=identities,
             prices=prices,
+            service_catalog=service_catalog,
             degraded=read_degraded,
         )
         _source_labels, keyed_model_labels = _keyed_identities(identities)
+        keyed_catalog = _keyed_catalog(service_catalog)
         by_day = {
             row["day"]: []
             for row in rows
@@ -1731,6 +2134,7 @@ class BoundedUsageLedger:
                         by_day.get(bucket_day.isoformat(), []),
                         prices,
                         keyed_model_labels,
+                        keyed_catalog=keyed_catalog,
                         degraded=read_degraded,
                     ),
                 }
@@ -1750,10 +2154,12 @@ class BoundedUsageLedger:
         now: datetime,
         identities: Optional[Sequence[SourceIdentity]],
         prices: Optional[PriceTable] = None,
+        service_catalog: Optional[Sequence[ServiceCatalogEntry]] = None,
     ) -> dict:
         """Project only measured nested slices onto 24 actual consecutive hours."""
 
         _source_labels, keyed_model_labels = _keyed_identities(identities)
+        keyed_catalog = _keyed_catalog(service_catalog)
 
         report_instant = _aware(now)
         starts = _hour_starts(now)
@@ -1818,16 +2224,20 @@ class BoundedUsageLedger:
                 projected = measured_by_bucket[index].get(key)
                 if projected is None:
                     start_local = start.astimezone()
+                    service = _is_service(row)
                     projected = {
                         "day": start_local.date().isoformat(),
                         "source_id": row["source_id"],
-                        "model_id": row["model_id"],
+                        **({"service_id": row["service_id"], **({"tool": row["tool"]} if "tool" in row else {})}
+                           if service else {"model_id": row["model_id"]}),
                         **({"context_tier": row["context_tier"]} if "context_tier" in row else {}),
-                        **{counter: 0 for counter in _COUNTER_KEYS},
+                        **_empty_totals(service=service),
                         "last_metered_at": None,
                     }
                     measured_by_bucket[index][key] = projected
                 _accumulate(projected, item)
+                if _is_service(row) and row.get("lower_bound") and row.get("uncertain_requests", 0) == 0:
+                    projected["lower_bound"] = True
                 projected["last_metered_at"] = _newer_timestamp(
                     projected["last_metered_at"],
                     item.get("last_metered_at"),
@@ -1843,6 +2253,7 @@ class BoundedUsageLedger:
                 list(measured_by_bucket[index].values()),
                 prices,
                 keyed_model_labels,
+                keyed_catalog=keyed_catalog,
                 # An incomplete hour holds usage it cannot place, so its cost is a floor.
                 degraded=index in incomplete,
             )
@@ -1868,6 +2279,7 @@ class BoundedUsageLedger:
             to_day=days[-1],
             identities=identities,
             prices=prices,
+            service_catalog=service_catalog,
             degraded=bool(incomplete),
         )
         return {
@@ -2041,11 +2453,111 @@ class UsageCall:
         )
 
 
+@dataclass(frozen=True)
+class ServiceUsageCall:
+    """Sent search-service requests, in the shape the ledger folds them in.
+
+    The service counterpart of `UsageCall`: a request reaches no model, so it is
+    counted by what the catalog's billing rule makes of it (`web-search-services.md`
+    §4.3) rather than by tokens. `requests` is how many sent requests this value
+    speaks for; the other counts are the subsets the relations bound. A request
+    that failed before it was sent is never one of them.
+    """
+
+    source_id: str
+    service_id: str
+    at: datetime
+    requests: int = 1
+    billable_requests: int = 0
+    uncertain_requests: int = 0
+    reported_requests: int = 0
+    reported_usd: float = 0.0
+    owner_day: str = ""
+    tool: str = "web_search"
+
+    def __post_init__(self) -> None:
+        if self.tool not in ("web_search", "web_fetch"):
+            raise ValueError("unsupported hosted service tool")
+        if not self.owner_day:
+            object.__setattr__(self, "owner_day", local_usage_day(self.at).isoformat())
+
+    @property
+    def fold_key(self) -> tuple[str, str, str, str, str, str]:
+        """What makes two calls one daily row and one hourly slice; never a model's key."""
+
+        return ("service", self.owner_day, _hour_key(self.at), self.source_id, self.service_id, self.tool)
+
+    def folded_with(self, other: "ServiceUsageCall") -> "ServiceUsageCall":
+        """Fold a call that shares this one's row: every count adds, the later stamp wins."""
+
+        return replace(
+            self,
+            at=max(_aware(self.at), _aware(other.at)),
+            requests=self.requests + other.requests,
+            billable_requests=self.billable_requests + other.billable_requests,
+            uncertain_requests=self.uncertain_requests + other.uncertain_requests,
+            reported_requests=self.reported_requests + other.reported_requests,
+            reported_usd=self.reported_usd + other.reported_usd,
+        )
+
+
+def _flag_count(flag: object) -> Optional[int]:
+    """One request's count for a billing flag; None for an answer that is not a flag.
+
+    Anything but a bool, an int included, is refused rather than coerced: `int()`
+    would read 2 as two requests and fail on text. A refused count keeps the call
+    out of the fold, and the ledger repairs it into a floor that keeps the request.
+    """
+
+    if flag is True:
+        return 1
+    if flag is False:
+        return 0
+    return None
+
+
+def _service_call_is_foldable(call: ServiceUsageCall) -> bool:
+    """Only fold service calls whose own counters already satisfy the relations.
+
+    Invalid calls must reach ``_normalize_row`` separately: folding an invalid
+    reported amount with a valid call could make the combined row look valid and
+    erase the required lower-bound witness.
+    """
+
+    counters = {
+        "requests": call.requests,
+        "billable_requests": call.billable_requests,
+        "uncertain_requests": call.uncertain_requests,
+        "reported_requests": call.reported_requests,
+    }
+    if any(
+        type(value) is not int or value < 0 or value > USAGE_COUNTER_CEILING
+        for value in counters.values()
+    ):
+        return False
+    amount = _amount(call.reported_usd)
+    return (
+        amount is not None
+        and counters["billable_requests"] + counters["uncertain_requests"] <= counters["requests"]
+        and counters["reported_requests"] <= counters["billable_requests"]
+        and amount <= counters["reported_requests"] * _SERVICE_REPORTED_USD_CEILING
+    )
+
+
+def _queue_key(call: UsageCall | ServiceUsageCall) -> tuple:
+    """Keep invalid service calls separate until the ledger repairs each one."""
+
+    key = call.fold_key
+    if isinstance(call, ServiceUsageCall) and not _service_call_is_foldable(call):
+        return (*key, id(call))
+    return key
+
+
 @dataclass
 class _QueuedRow:
     """One queued row and the future every call folded into it is waiting on."""
 
-    call: UsageCall
+    call: UsageCall | ServiceUsageCall
     done: "asyncio.Future[None]"
 
 
@@ -2084,7 +2596,7 @@ class UsageWriter:
     ):
         self.ledger = ledger
         self._durability_wait = durability_wait
-        self._pending: dict[tuple[str, str, str, str, int, bool], _QueuedRow] = {}
+        self._pending: dict[tuple, _QueuedRow] = {}
         # Where context tiers come from: the valuation's table factory, and the
         # table last read from it with the monotonic instant it was read.
         self._price_table = price_table
@@ -2137,17 +2649,56 @@ class UsageWriter:
         without tiers (no models.dev copy yet), records the base tier.
         """
 
-        call = UsageCall(
-            source_id=source_id,
-            model_id=model_id,
-            usage=usage,
-            at=at,
-            context_tier=self._context_tier(model_id, usage),
+        return self._queue(
+            UsageCall(
+                source_id=source_id,
+                model_id=model_id,
+                usage=usage,
+                at=at,
+                context_tier=self._context_tier(model_id, usage),
+            )
         )
+
+    def record_service(
+        self,
+        *,
+        source_id: str,
+        service_id: str,
+        billable: bool,
+        uncertain: bool = False,
+        reported_usd: Optional[float] = None,
+        at: datetime,
+        tool: str = "web_search",
+    ) -> "asyncio.Future[None]":
+        """Own one sent search-service request and queue it, as `record` does a model call.
+
+        Synchronous for the same reason, so a stopped turn still meters a request
+        it sent (`web-search-services.md` §4.3). `billable` is the catalog's billing
+        rule's answer; `uncertain` is a request whose billing is unknown, which is
+        never also billable. `reported_usd` is the vendor's own figure for a billable
+        request, already bounded by the caller; the ledger's relations are the
+        backstop, and a figure that breaks them is recorded as a floor, not as sent.
+        """
+
+        return self._queue(
+            ServiceUsageCall(
+                source_id=source_id,
+                service_id=service_id,
+                at=at,
+                billable_requests=_flag_count(billable),
+                uncertain_requests=_flag_count(uncertain),
+                reported_requests=int(reported_usd is not None),
+                reported_usd=reported_usd if reported_usd is not None else 0.0,
+                tool=tool,
+            )
+        )
+
+    def _queue(self, call: UsageCall | ServiceUsageCall) -> "asyncio.Future[None]":
         done = asyncio.get_running_loop().create_future
-        if (queued := self._pending.get(call.fold_key)) is None:
+        key = _queue_key(call)
+        if (queued := self._pending.get(key)) is None:
             queued = _QueuedRow(call=call, done=done())
-            self._pending[call.fold_key] = queued
+            self._pending[key] = queued
         else:
             queued.call = queued.call.folded_with(call)
         if self._flush is None or self._flush.done():

@@ -373,23 +373,33 @@ impl WorkArea {
         PET_SIZE * self.unit
     }
 
-    fn pet_at(&self, anchor: (f64, f64)) -> LogicalRect {
+    /// Where `frame` puts the window for a pet at `anchor` on this display.
+    pub fn window_rect(&self, anchor: (f64, f64), frame: PetFrame) -> LogicalRect {
+        let (x, y) = frame.origin(anchor, self.unit);
         LogicalRect {
-            x: restored_window_origin(anchor, self.unit).0,
-            y: restored_window_origin(anchor, self.unit).1,
+            x,
+            y,
             width: WINDOW_WIDTH * self.unit,
-            height: WINDOW_HEIGHT * self.unit,
+            height: frame.height * self.unit,
         }
     }
 }
 
-// Shared with pet-mini.css: image top-left (172.5, 449), dock at y=552.
+// Shared with pet-mini.css. Bottom layout: image top-left (172.5, 449), dock at
+// y=552. Top layout: image top-left (172.5, 12), dock at y=115.
 pub const PET_SIZE: f64 = 115.0;
 pub const WINDOW_WIDTH: f64 = 460.0;
 pub const WINDOW_HEIGHT: f64 = 600.0;
 const PET_BOTTOM: f64 = 36.0;
+/// The image's inset from the window's top in the top layout; it keeps the
+/// listening glow (8px above the image) inside the window.
+const PET_TOP: f64 = 12.0;
 // pet-mini.css: the dock starts 103px below the image top and is 40px high.
 const PET_AND_DOCK_HEIGHT: f64 = 143.0;
+/// The strip a dragged window shrinks to: Vibey and its dock, `PET_TOP` above
+/// the image and `PET_BOTTOM` below it, at full width. Both layouts draw Vibey
+/// at the same place in it, and it is all a drag must keep on the display.
+pub const DRAG_HEIGHT: f64 = PET_TOP + PET_SIZE + PET_BOTTOM;
 /// Distance from the work area's corner for a pet with no saved place.
 const DEFAULT_MARGIN: f64 = 24.0;
 
@@ -407,9 +417,9 @@ pub enum PanelEdge {
     Bottom,
 }
 
-/// Where the panel sits relative to the pet, shared by the native frame and
-/// the page. `edge: bottom` aligns the panel's bottom with the pet's, so the
-/// panel grows upward.
+/// Which side of Vibey the column opens on, shared by the native frame and the
+/// page. `edge: bottom` puts Vibey at the bottom of the window, so the column
+/// grows upward; `edge: top` puts Vibey at the top and the column grows down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct PetLayout {
     pub panel_side: PanelSide,
@@ -425,23 +435,68 @@ impl Default for PetLayout {
     }
 }
 
-pub fn window_size(_expanded: bool) -> (f64, f64) {
-    (WINDOW_WIDTH, WINDOW_HEIGHT)
+impl PetLayout {
+    fn edge(panel_edge: PanelEdge) -> Self {
+        Self {
+            panel_edge,
+            ..Self::default()
+        }
+    }
 }
 
-/// The image stays at the same position in every interaction state.
-pub fn pet_offset(_expanded: bool, _layout: PetLayout) -> (f64, f64) {
-    ((WINDOW_WIDTH - PET_SIZE) / 2.0, WINDOW_HEIGHT - PET_BOTTOM - PET_SIZE)
+/// The native window around the pet: its layout and its height in the pet
+/// display's points. The width is always `WINDOW_WIDTH`, and nothing in the
+/// page's interaction states changes either.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PetFrame {
+    pub layout: PetLayout,
+    pub height: f64,
 }
 
-pub fn window_origin(anchor: (f64, f64), expanded: bool, layout: PetLayout) -> (f64, f64) {
-    let (dx, dy) = pet_offset(expanded, layout);
-    (anchor.0 - dx, anchor.1 - dy)
+impl Default for PetFrame {
+    fn default() -> Self {
+        Self {
+            layout: PetLayout::default(),
+            height: WINDOW_HEIGHT,
+        }
+    }
 }
 
-pub fn anchor_from_window(origin: (f64, f64), expanded: bool, layout: PetLayout) -> (f64, f64) {
-    let (dx, dy) = pet_offset(expanded, layout);
-    (origin.0 + dx, origin.1 + dy)
+impl PetFrame {
+    /// The dragged strip (see `DRAG_HEIGHT`). It keeps `layout`, which places
+    /// the image at the same point in it either way.
+    pub fn dragging(layout: PetLayout) -> Self {
+        Self {
+            layout,
+            height: DRAG_HEIGHT,
+        }
+    }
+
+    pub fn size(&self) -> (f64, f64) {
+        (WINDOW_WIDTH, self.height)
+    }
+
+    /// The image's top-left inside the window, in window points.
+    pub fn pet_offset(&self) -> (f64, f64) {
+        let x = (WINDOW_WIDTH - PET_SIZE) / 2.0;
+        match self.layout.panel_edge {
+            PanelEdge::Bottom => (x, self.height - PET_BOTTOM - PET_SIZE),
+            PanelEdge::Top => (x, PET_TOP),
+        }
+    }
+
+    /// The window origin that puts the image on `anchor`, on a display whose
+    /// points are `unit` long in the anchor's space.
+    pub fn origin(&self, anchor: (f64, f64), unit: f64) -> (f64, f64) {
+        let (dx, dy) = self.pet_offset();
+        (anchor.0 - dx * unit, anchor.1 - dy * unit)
+    }
+
+    /// The anchor (the image's top-left) of a window at `origin`.
+    pub fn anchor(&self, origin: (f64, f64), unit: f64) -> (f64, f64) {
+        let (dx, dy) = self.pet_offset();
+        (origin.0 + dx * unit, origin.1 + dy * unit)
+    }
 }
 
 /// Moves a point between two views of one physical desktop, each that desktop
@@ -453,13 +508,40 @@ pub fn rescale(point: (f64, f64), from_scale: f64, to_scale: f64) -> (f64, f64) 
     (point.0 * factor, point.1 * factor)
 }
 
-/// The mini has one bottom-anchored column; it never flips or moves on expand.
-pub fn choose_layout(_anchor: (f64, f64), _work_area: LogicalRect) -> PetLayout {
-    PetLayout::default()
+/// The window for a pet at `anchor` on `area` (decision 2026-10-23). The
+/// column opens upward, as it always has, while the full window fits above
+/// Vibey, or while there is at least as much room above as below; otherwise
+/// it flips and opens downward. Either way the window extends from Vibey
+/// toward the column only as far as the work area goes, up to its full height,
+/// so no part of it is ever off the display: macOS never lets a window rise
+/// above the menu bar, so a frame that did would move Vibey instead.
+pub fn settle_frame(anchor: (f64, f64), area: &WorkArea) -> PetFrame {
+    let unit = area.unit;
+    let above = (anchor.1 - area.area.y) / unit;
+    let below = (area.area.bottom() - anchor.1) / unit - PET_AND_DOCK_HEIGHT;
+    let full_above = WINDOW_HEIGHT - PET_BOTTOM - PET_SIZE;
+    if above >= full_above || above >= below {
+        return upward_frame(anchor, area);
+    }
+    PetFrame {
+        layout: PetLayout::edge(PanelEdge::Top),
+        height: (PET_TOP + PET_AND_DOCK_HEIGHT + below).clamp(DRAG_HEIGHT, WINDOW_HEIGHT),
+    }
+}
+
+/// The window with the column opening upward whatever the room, as tall as
+/// the room above Vibey allows: for a page that predates the top layout (a
+/// shell can adopt an older running Runtime). Vibey still stays put.
+pub fn upward_frame(anchor: (f64, f64), area: &WorkArea) -> PetFrame {
+    let above = (anchor.1 - area.area.y) / area.unit;
+    PetFrame {
+        layout: PetLayout::default(),
+        height: (above + PET_SIZE + PET_BOTTOM).clamp(DRAG_HEIGHT, WINDOW_HEIGHT),
+    }
 }
 
 pub fn default_anchor(work_area: &WorkArea) -> PetAnchor {
-    let (dx, dy) = pet_offset(false, PetLayout::default());
+    let (dx, dy) = PetFrame::default().pet_offset();
     PetAnchor {
         x: work_area.area.right() - (WINDOW_WIDTH + DEFAULT_MARGIN) * work_area.unit + dx * work_area.unit,
         y: work_area.area.bottom() - (WINDOW_HEIGHT + DEFAULT_MARGIN) * work_area.unit + dy * work_area.unit,
@@ -482,33 +564,28 @@ pub fn area_for(areas: &[WorkArea], anchor: (f64, f64)) -> Option<&WorkArea> {
         .or_else(|| areas.first())
 }
 
-/// Where a collapsed pet window starts so the pet sits on `anchor`, on a
-/// display whose points are `unit` long in the anchor's space.
-pub fn restored_window_origin(anchor: (f64, f64), unit: f64) -> (f64, f64) {
-    let (dx, dy) = pet_offset(false, PetLayout::default());
-    (anchor.0 - dx * unit, anchor.1 - dy * unit)
-}
-
 /// Keeps a restored pet whole on a connected display. A pet already inside a
 /// work area stays exactly where it was. Otherwise it moves into the area it
 /// overlaps most; with no overlap, into its own display if that is still
-/// connected, else the first area (the primary display). Use the fixed window
-/// on a display that fits it, otherwise preserve access to the image and dock.
+/// connected, else the first area (the primary display).
+///
+/// What must be inside is what a drag must keep on the display: Vibey and the
+/// dock with the strip's margins above and below them (`DRAG_HEIGHT`), which
+/// leaves room for the window's edge on the column's side in either layout
+/// (`settle_frame`). It spans the window's width on a display that fits the
+/// whole window, else Vibey's.
 pub fn clamp_anchor(anchor: &PetAnchor, work_areas: &[WorkArea]) -> PetAnchor {
     let at = (anchor.x, anchor.y);
-    let image = |area: &WorkArea| LogicalRect {
-        x: anchor.x,
-        y: anchor.y,
-        width: PET_SIZE * area.unit,
-        height: PET_SIZE * area.unit,
-    };
     let footprint = |area: &WorkArea| {
-        if area.area.width >= WINDOW_WIDTH * area.unit && area.area.height >= WINDOW_HEIGHT * area.unit {
-            area.pet_at(at)
+        let unit = area.unit;
+        let strip = area.window_rect(at, PetFrame::dragging(PetLayout::default()));
+        if area.area.width >= WINDOW_WIDTH * unit && area.area.height >= WINDOW_HEIGHT * unit {
+            strip
         } else {
             LogicalRect {
-                height: PET_AND_DOCK_HEIGHT * area.unit,
-                ..image(area)
+                x: anchor.x,
+                width: PET_SIZE * unit,
+                ..strip
             }
         }
     };
@@ -518,6 +595,12 @@ pub fn clamp_anchor(anchor: &PetAnchor, work_areas: &[WorkArea]) -> PetAnchor {
             ..anchor.clone()
         };
     }
+    let image = |area: &WorkArea| LogicalRect {
+        x: anchor.x,
+        y: anchor.y,
+        width: PET_SIZE * area.unit,
+        height: PET_SIZE * area.unit,
+    };
     let overlapping = work_areas
         .iter()
         .map(|area| (area.area.overlap(&image(area)), area))
@@ -541,6 +624,337 @@ pub fn clamp_anchor(anchor: &PetAnchor, work_areas: &[WorkArea]) -> PetAnchor {
             .clamp(left, (left + target.area.width - bounds.width).max(left)),
         y: anchor.y.clamp(top, (top + target.area.height - bounds.height).max(top)),
         monitor: target.name.clone(),
+    }
+}
+
+/// The window for a pet at `anchor`, on the display it is on (else the
+/// first): `settle_frame` there, or the full window with no display at all.
+pub fn frame_at(anchor: (f64, f64), areas: &[WorkArea]) -> PetFrame {
+    area_for(areas, anchor).map_or_else(PetFrame::default, |area| settle_frame(anchor, area))
+}
+
+/// Where a dropped pet comes to rest, and the window for it there. A drag can
+/// leave the pet partly off every display (Windows lets a window go), so it
+/// comes back whole like a restored one, recording the display it is on.
+///
+/// `monitor` is the display the pet was on before (or the saved one): where
+/// the drop overlaps no work area, it comes back there rather than onto the
+/// primary display.
+pub fn place_dropped(dropped: (f64, f64), areas: &[WorkArea], monitor: Option<String>) -> (PetAnchor, PetFrame) {
+    let anchor = clamp_anchor(
+        &PetAnchor {
+            x: dropped.0,
+            y: dropped.1,
+            monitor,
+        },
+        areas,
+    );
+    let frame = frame_at((anchor.x, anchor.y), areas);
+    (anchor, frame)
+}
+
+/// Where a pet moved by something other than the shell's own drag comes to
+/// rest, and its window: the platform after a display change, or an older
+/// page dragging the window natively. Like a drop (`place_dropped`), except
+/// that a page without the top layout always gets the upward window.
+pub fn place_moved(
+    moved: (f64, f64),
+    areas: &[WorkArea],
+    monitor: Option<String>,
+    page_layouts: bool,
+) -> (PetAnchor, PetFrame) {
+    let (anchor, frame) = place_dropped(moved, areas, monitor);
+    if page_layouts {
+        return (anchor, frame);
+    }
+    let at = (anchor.x, anchor.y);
+    let frame = area_for(areas, at).map_or_else(PetFrame::default, |area| upward_frame(at, area));
+    (anchor, frame)
+}
+
+/// The layout the page should draw, and its revision. The shell is its only
+/// source (spec §9.1): the page reads it from `pet_ready` and from the layout
+/// event, keeps only a newer revision, and acknowledges each one it draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct LayoutSnapshot {
+    pub revision: u64,
+    pub layout: PetLayout,
+}
+
+/// What the shell does with the native window after a `FrameState` step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FrameStep {
+    /// The window stays as it is.
+    Keep,
+    /// Put the window at `anchor` (window points) as `frame`, now.
+    Apply { frame: PetFrame, anchor: (f64, f64) },
+    /// Tell the page to draw `snapshot`; its frame waits for the page's
+    /// acknowledgement of that revision, or for `expire(publication)`. Every
+    /// publication has a new id, so a later one voids an earlier one's timer.
+    Publish { snapshot: LayoutSnapshot, publication: u64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Held {
+    frame: PetFrame,
+    anchor: (f64, f64),
+    revision: u64,
+    /// The latest publication of this frame; only its timer may expire it.
+    publication: u64,
+}
+
+/// What the document in the pet window can draw.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PageKind {
+    /// A document is loading and has not said yet (`pet_ready`).
+    Loading,
+    /// It draws the shell's layout snapshots and acknowledges them.
+    Layouts,
+    /// It predates the top layout: it only draws the upward column and never
+    /// acknowledges anything.
+    Legacy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Drag {
+    before: PetFrame,
+    anchor: (f64, f64),
+}
+
+/// The pet window's frame, owned by the shell, and the layout its page must
+/// draw. Every source of change is an event here: a new window, a document
+/// loading or ready, a drag starting, ending or failing, a move, an
+/// acknowledgement, a timeout. The shell only carries out the returned step.
+///
+/// - A change of layout is never shown in the full window before the page
+///   has drawn it: the frame is held until that revision is acknowledged.
+///   While the page's kind is unknown (loading) nothing held is released; an
+///   older page gets the upward window instead, at once.
+/// - Every drag ends idle or holding: a drag that does not end with a
+///   placement goes back to the frame and anchor it started from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameState {
+    current: PetFrame,
+    drag: Option<Drag>,
+    held: Option<Held>,
+    snapshot: LayoutSnapshot,
+    page: PageKind,
+    publications: u64,
+}
+
+impl FrameState {
+    pub fn new(frame: PetFrame) -> Self {
+        Self {
+            current: frame,
+            drag: None,
+            held: None,
+            snapshot: LayoutSnapshot {
+                revision: 1,
+                layout: frame.layout,
+            },
+            page: PageKind::Loading,
+            publications: 0,
+        }
+    }
+
+    /// A new window, whose document is loading. Revisions and publications
+    /// keep growing, so an answer or a timer meant for the old window can
+    /// never match the new one.
+    pub fn rebuild(&mut self, frame: PetFrame) {
+        let (revision, publications) = (self.snapshot.revision + 1, self.publications);
+        *self = Self::new(frame);
+        self.snapshot.revision = revision;
+        self.publications = publications;
+    }
+
+    pub fn current(&self) -> PetFrame {
+        self.current
+    }
+
+    pub fn snapshot(&self) -> LayoutSnapshot {
+        self.snapshot
+    }
+
+    pub fn page(&self) -> PageKind {
+        self.page
+    }
+
+    /// Whether frames are chosen as for a page that draws layouts: also while
+    /// the page is loading, because nothing is released until it says.
+    pub fn draws_layouts(&self) -> bool {
+        self.page != PageKind::Legacy
+    }
+
+    /// The shell's own drag, or a frame waiting for its page: both place the
+    /// window themselves, so nothing else may.
+    pub fn busy(&self) -> bool {
+        self.drag.is_some() || self.held.is_some()
+    }
+
+    /// The window's document is loading (a reload, or a navigation).
+    pub fn page_loading(&mut self) {
+        self.page = PageKind::Loading;
+    }
+
+    /// The document said what it draws (`pet_ready`); the window now shows
+    /// the pet at `anchor`, and `upward` is the upward window for a pet at a
+    /// given anchor. A frame held for a page that draws layouts is published
+    /// again (its expiry starts over). An older page gets the upward window,
+    /// now, in place of a held frame or of a current one in the top layout.
+    pub fn page_ready(
+        &mut self,
+        kind: PageKind,
+        anchor: (f64, f64),
+        upward: impl Fn((f64, f64)) -> PetFrame,
+    ) -> FrameStep {
+        self.page = kind;
+        if kind == PageKind::Layouts {
+            return self.publish();
+        }
+        // Mid-drag, the frame a failed drag would go back to becomes upward too.
+        if let Some(drag) = self.drag.as_mut() {
+            if drag.before.layout != PetLayout::default() {
+                drag.before = upward(drag.anchor);
+            }
+            return FrameStep::Keep;
+        }
+        if let Some(held) = self.held.take() {
+            return self.apply(upward(held.anchor), held.anchor);
+        }
+        if self.current.layout == PetLayout::default() {
+            return FrameStep::Keep;
+        }
+        self.apply(upward(anchor), anchor)
+    }
+
+    /// Starts the shell's drag from a pet at `anchor`: returns the strip to
+    /// apply, or `None` while another drag runs or a frame waits for its page.
+    pub fn begin_drag(&mut self, anchor: (f64, f64)) -> Option<PetFrame> {
+        // Only a page known to draw layouts drags through the shell: until it
+        // has said so, a drop could only be held with nobody to release it.
+        if self.busy() || self.page != PageKind::Layouts {
+            return None;
+        }
+        self.drag = Some(Drag {
+            before: self.current,
+            anchor,
+        });
+        self.current = PetFrame::dragging(self.current.layout);
+        Some(self.current)
+    }
+
+    /// The drag ended with the pet at `anchor`, framed `next` (chosen as
+    /// `draws_layouts` says). It is held until the page draws its revision,
+    /// unless the page is an older one, which gets it at once.
+    pub fn end_drag(&mut self, next: PetFrame, anchor: (f64, f64)) -> FrameStep {
+        if self.drag.take().is_none() {
+            return FrameStep::Keep;
+        }
+        if self.page == PageKind::Legacy {
+            self.apply(next, anchor)
+        } else {
+            self.hold(next, anchor)
+        }
+    }
+
+    /// The drag did not end with a placement (the native drag did not start,
+    /// or the window could not be read when it ended): back to the frame and
+    /// anchor it started from. Without a drag it changes nothing.
+    pub fn abort_drag(&mut self) -> FrameStep {
+        let Some(drag) = self.drag.take() else {
+            return FrameStep::Keep;
+        };
+        // The frame it goes back to may no longer be the layout the page draws
+        // (an older page became ready meanwhile, then a newer one): like any
+        // other change of layout, the page draws it first.
+        if self.draws_layouts() && drag.before.layout != self.snapshot.layout {
+            return self.hold(drag.before, drag.anchor);
+        }
+        self.apply(drag.before, drag.anchor)
+    }
+
+    /// Something other than the shell's drag moved the window; `next` is the
+    /// window for where it now is (chosen as `draws_layouts` says). Ignored
+    /// while the shell places it itself.
+    pub fn follow(&mut self, next: PetFrame, anchor: (f64, f64), moved: bool) -> FrameStep {
+        if self.busy() {
+            return FrameStep::Keep;
+        }
+        if self.draws_layouts() && next.layout != self.current.layout {
+            return self.hold(next, anchor);
+        }
+        if !moved && next == self.current {
+            return FrameStep::Keep;
+        }
+        self.apply(next, anchor)
+    }
+
+    /// The page drew `revision`. Only the waiting frame's own revision, from a
+    /// page that draws layouts, releases it; anything else changes nothing.
+    pub fn ack(&mut self, revision: u64) -> FrameStep {
+        self.release(revision)
+    }
+
+    /// The timer of `publication` ran out without an acknowledgement: its
+    /// frame applies anyway, if that is still the latest publication of the
+    /// frame waiting and the page has said it draws layouts.
+    pub fn expire(&mut self, publication: u64) -> FrameStep {
+        match self.held {
+            Some(held) if held.publication == publication => self.release(held.revision),
+            _ => FrameStep::Keep,
+        }
+    }
+
+    fn release(&mut self, revision: u64) -> FrameStep {
+        match self.held {
+            Some(held) if held.revision == revision && self.page == PageKind::Layouts => {
+                self.held = None;
+                self.current = held.frame;
+                FrameStep::Apply {
+                    frame: held.frame,
+                    anchor: held.anchor,
+                }
+            }
+            _ => FrameStep::Keep,
+        }
+    }
+
+    fn hold(&mut self, frame: PetFrame, anchor: (f64, f64)) -> FrameStep {
+        self.snapshot = LayoutSnapshot {
+            revision: self.snapshot.revision + 1,
+            layout: frame.layout,
+        };
+        self.held = Some(Held {
+            frame,
+            anchor,
+            revision: self.snapshot.revision,
+            publication: 0,
+        });
+        self.publish()
+    }
+
+    /// Publishes the waiting frame's snapshot under a new publication id.
+    fn publish(&mut self) -> FrameStep {
+        let Some(held) = self.held.as_mut() else {
+            return FrameStep::Keep;
+        };
+        self.publications += 1;
+        held.publication = self.publications;
+        FrameStep::Publish {
+            snapshot: self.snapshot,
+            publication: self.publications,
+        }
+    }
+
+    fn apply(&mut self, frame: PetFrame, anchor: (f64, f64)) -> FrameStep {
+        if frame.layout != self.snapshot.layout {
+            self.snapshot = LayoutSnapshot {
+                revision: self.snapshot.revision + 1,
+                layout: frame.layout,
+            };
+        }
+        self.current = frame;
+        FrameStep::Apply { frame, anchor }
     }
 }
 
@@ -923,53 +1337,742 @@ mod tests {
     }
 
     #[test]
-    fn the_anchor_is_the_pet_image_whichever_way_the_panel_opened() {
+    fn the_anchor_is_the_pet_image_in_every_frame() {
         let anchor = (1000.0, 700.0);
-        for expanded in [false, true] {
+        for unit in [1.0, 1.25, 2.0] {
             for panel_side in [PanelSide::Left, PanelSide::Right] {
                 for panel_edge in [PanelEdge::Top, PanelEdge::Bottom] {
                     let layout = PetLayout { panel_side, panel_edge };
-                    let origin = window_origin(anchor, expanded, layout);
-                    assert_eq!(anchor_from_window(origin, expanded, layout), anchor);
-                    let (width, height) = window_size(expanded);
-                    let (dx, dy) = pet_offset(expanded, layout);
-                    assert!(dx >= 0.0 && dx + PET_SIZE <= width && dy >= 0.0 && dy + PET_SIZE <= height);
+                    for frame in [
+                        PetFrame {
+                            layout,
+                            height: WINDOW_HEIGHT,
+                        },
+                        PetFrame { layout, height: 420.0 },
+                        PetFrame::dragging(layout),
+                    ] {
+                        let origin = frame.origin(anchor, unit);
+                        assert_eq!(frame.anchor(origin, unit), anchor);
+                        let (width, height) = frame.size();
+                        let (dx, dy) = frame.pet_offset();
+                        assert!(dx >= 0.0 && dy >= 0.0 && dx + PET_SIZE <= width);
+                        assert!(dy + PET_AND_DOCK_HEIGHT <= height, "the dock is inside the window");
+                    }
                 }
             }
         }
-        // Expansion changes no geometry in the fixed mini window.
+        // The dragged strip draws Vibey at the same place in either layout,
+        // so a flip on drop needs no move while the window is the strip.
         assert_eq!(
-            window_origin(anchor, false, PetLayout::default()),
-            window_origin(anchor, true, PetLayout::default())
+            PetFrame::dragging(PetLayout::edge(PanelEdge::Top)).pet_offset(),
+            PetFrame::dragging(PetLayout::edge(PanelEdge::Bottom)).pet_offset()
+        );
+        assert_eq!(DRAG_HEIGHT, 163.0);
+        // The default (bottom) frame keeps today's image box.
+        assert_eq!(PetFrame::default().pet_offset(), (172.5, 449.0));
+        assert_eq!(PetFrame::default().size(), (WINDOW_WIDTH, WINDOW_HEIGHT));
+    }
+
+    #[test]
+    fn the_column_opens_toward_its_room_and_the_window_never_leaves_the_display() {
+        // A 13-inch MacBook's work area below the menu bar, a 125% 1366x768
+        // laptop above a taskbar, and a tall external display.
+        for area in [
+            area("laptop", 0.0, 33.0, 1470.0, 923.0),
+            area("small", 0.0, 0.0, 1093.0, 574.0),
+            area("tall", 1470.0, -400.0, 1440.0, 1415.0),
+            WorkArea {
+                unit: 2.0,
+                ..area("dense", 0.0, 0.0, 2880.0, 1800.0)
+            },
+        ] {
+            let unit = area.unit;
+            let top = area.area.y + PET_TOP * unit;
+            let bottom = area.area.bottom() - (PET_SIZE + PET_BOTTOM) * unit;
+            let mut y = top;
+            while y <= bottom {
+                let anchor = (area.area.x + 400.0 * unit, y);
+                let frame = settle_frame(anchor, &area);
+                let window = area.window_rect(anchor, frame);
+                assert!(area.area.contains(&window), "{:?} at {y}: {window:?}", area.name);
+                assert_eq!(
+                    frame.anchor(frame.origin(anchor, unit), unit),
+                    anchor,
+                    "Vibey stays put"
+                );
+                assert!((DRAG_HEIGHT..=WINDOW_HEIGHT).contains(&frame.height));
+                let above = (y - area.area.y) / unit;
+                let below = (area.area.bottom() - y) / unit - PET_AND_DOCK_HEIGHT;
+                let flipped = frame.layout.panel_edge == PanelEdge::Top;
+                assert_eq!(flipped, above < 449.0 && below > above, "{:?} at {y}", area.name);
+                // The column gets the full window whenever its side has room.
+                let room = if flipped {
+                    PET_TOP + PET_AND_DOCK_HEIGHT + below
+                } else {
+                    above + 151.0
+                };
+                assert_eq!(frame.height, room.min(WINDOW_HEIGHT));
+                y += 7.0 * unit;
+            }
+        }
+
+        let laptop = area("laptop", 0.0, 33.0, 1470.0, 923.0);
+        // Dragged to the very top: the column drops below Vibey, full height.
+        let at_top = settle_frame((600.0, 45.0), &laptop);
+        assert_eq!(
+            at_top,
+            PetFrame {
+                layout: PetLayout::edge(PanelEdge::Top),
+                height: WINDOW_HEIGHT
+            }
+        );
+        assert_eq!(laptop.window_rect((600.0, 45.0), at_top).y, 33.0);
+        // Room for the full column above: today's layout and window.
+        assert_eq!(settle_frame((600.0, 600.0), &laptop), PetFrame::default());
+        // Between the two, the larger side wins and the window stops at the
+        // menu bar instead of moving Vibey down.
+        let middle = settle_frame((600.0, 433.0), &laptop);
+        assert_eq!(
+            middle,
+            PetFrame {
+                layout: PetLayout::default(),
+                height: 551.0
+            }
+        );
+        assert_eq!(laptop.window_rect((600.0, 433.0), middle).y, 33.0);
+        assert_eq!(settle_frame((600.0, 333.0), &laptop).layout.panel_edge, PanelEdge::Top);
+
+        let anchor = default_anchor(&laptop);
+        let origin = PetFrame::default().origin((anchor.x, anchor.y), 1.0);
+        assert_eq!(
+            origin,
+            (
+                laptop.area.right() - WINDOW_WIDTH - DEFAULT_MARGIN,
+                laptop.area.bottom() - WINDOW_HEIGHT - DEFAULT_MARGIN
+            )
+        );
+        assert_eq!(settle_frame((anchor.x, anchor.y), &laptop), PetFrame::default());
+    }
+
+    #[test]
+    fn a_page_without_the_top_layout_gets_an_upward_window_that_keeps_vibey_put() {
+        let laptop = area("laptop", 0.0, 33.0, 1470.0, 923.0);
+        for y in [45.0, 200.0, 433.0, 700.0] {
+            let frame = upward_frame((600.0, y), &laptop);
+            assert_eq!(frame.layout, PetLayout::default());
+            let window = laptop.window_rect((600.0, y), frame);
+            assert!(laptop.area.contains(&window), "{y}: {window:?}");
+            assert_eq!(frame.anchor(frame.origin((600.0, y), 1.0), 1.0), (600.0, y));
+        }
+        // Near the top the window is only the strip; with room it is whole.
+        assert_eq!(upward_frame((600.0, 45.0), &laptop).height, DRAG_HEIGHT);
+        assert_eq!(upward_frame((600.0, 700.0), &laptop), PetFrame::default());
+        // Where the column opens upward anyway, both choices agree.
+        assert_eq!(
+            settle_frame((600.0, 433.0), &laptop),
+            upward_frame((600.0, 433.0), &laptop)
         );
     }
 
     #[test]
-    fn the_fixed_window_stays_whole_and_layout_never_flips() {
-        let screen = LogicalRect {
-            x: 0.0,
-            y: 25.0,
-            width: 1440.0,
-            height: 875.0,
-        };
-        for anchor in [(1300.0, 780.0), (20.0, 40.0), (700.0, 450.0)] {
-            let layout = choose_layout(anchor, screen);
-            assert_eq!(layout, PetLayout::default());
-        }
-        let area = WorkArea {
-            name: Some("primary".into()),
-            area: screen,
-            unit: 1.0,
-        };
-        let anchor = default_anchor(&area);
-        let origin = window_origin((anchor.x, anchor.y), false, PetLayout::default());
+    fn a_pet_moved_outside_a_shell_drag_gets_the_window_for_where_it_now_is() {
+        let laptop = area("laptop", 0.0, 33.0, 1470.0, 923.0);
+        let short = area("short", 0.0, 0.0, 1093.0, 574.0);
+        // An older page dragged its strip-high window down: the upward
+        // window grows back to its full height.
+        let (anchor, frame) = place_moved((600.0, 700.0), std::slice::from_ref(&laptop), None, false);
+        assert_eq!((anchor.x, anchor.y), (600.0, 700.0));
+        assert_eq!(frame, PetFrame::default());
+        // Near the top an older page still opens upward; a current one flips.
         assert_eq!(
-            origin,
+            place_moved((600.0, 45.0), std::slice::from_ref(&laptop), None, false)
+                .1
+                .layout,
+            PetLayout::default()
+        );
+        assert_eq!(
+            place_moved((600.0, 45.0), std::slice::from_ref(&laptop), None, true)
+                .1
+                .layout
+                .panel_edge,
+            PanelEdge::Top
+        );
+        // The display it was on is gone: it lands whole on the remaining one,
+        // in a window that fits its height (a display narrower than the full
+        // window keeps Vibey, not the transparent sides, inside).
+        let (anchor, frame) = place_moved((3000.0, 900.0), std::slice::from_ref(&short), None, true);
+        let window = short.window_rect((anchor.x, anchor.y), frame);
+        assert!(window.y >= short.area.y && window.bottom() <= short.area.bottom());
+        assert!(anchor.x + PET_SIZE <= short.area.right());
+        assert_eq!(anchor.monitor.as_deref(), Some("short"));
+    }
+
+    /// A page in the model: the document now showing, what it draws, and
+    /// what it drew.
+    #[derive(Clone, Copy)]
+    struct Page {
+        document: u32,
+        kind: PageKind,
+        drawn: Option<LayoutSnapshot>,
+    }
+
+    enum Message {
+        /// Shell to page: a snapshot (layout event), for the document it was
+        /// sent to. The page draws and acknowledges only a newer revision.
+        Snapshot(u32, LayoutSnapshot),
+        /// Shell to page: the `pet_ready` reply's snapshot, which the page
+        /// always acknowledges (it may have drawn that revision from an event
+        /// that arrived while the shell still took it for loading).
+        ReadySnapshot(u32, LayoutSnapshot),
+        /// The document finishes loading and calls `pet_ready`; the first
+        /// `attempts` calls fail (and are retried) without reaching the shell.
+        Ready(u32, PageKind, u32),
+        /// Page to shell: `pet_settle(revision)` for the layout it drew.
+        Ack(u64, PetLayout),
+    }
+
+    const UPWARD: PetFrame = PetFrame {
+        layout: PetLayout {
+            panel_side: PanelSide::Left,
+            panel_edge: PanelEdge::Bottom,
+        },
+        height: 380.0,
+    };
+
+    #[test]
+    fn the_frame_state_keeps_its_invariants_whatever_the_interleaving() {
+        let frames = [
+            PetFrame::default(),
+            PetFrame {
+                layout: PetLayout::edge(PanelEdge::Top),
+                height: WINDOW_HEIGHT,
+            },
+            PetFrame {
+                layout: PetLayout::default(),
+                height: 420.0,
+            },
+            PetFrame {
+                layout: PetLayout::edge(PanelEdge::Top),
+                height: 300.0,
+            },
+        ];
+        let upward = |_: (f64, f64)| UPWARD;
+        // A small deterministic generator: many seeds, no shared randomness.
+        for seed in 1..2000u64 {
+            let mut next = seed;
+            let mut roll = |n: u64| {
+                next = next.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                (next >> 33) % n
+            };
+            let mut state = FrameState::new(frames[0]);
+            let mut page = Page {
+                document: 0,
+                kind: PageKind::Layouts,
+                drawn: None,
+            };
+            let mut queue: Vec<Message> = vec![Message::Ready(0, PageKind::Layouts, 0)];
+            let mut published = vec![0];
+            let mut latest = 0;
+            // A frame for wherever the pet is, chosen as the shell would.
+            let place = |state: &FrameState, pick: u64| {
+                if state.draws_layouts() {
+                    frames[pick as usize]
+                } else {
+                    UPWARD
+                }
+            };
+            for _ in 0..80 {
+                let revision = state.snapshot().revision;
+                let step = match roll(10) {
+                    0 => {
+                        let kind = state.page();
+                        if let Some(strip) = state.begin_drag((1.0, 1.0)) {
+                            assert_eq!(strip.height, DRAG_HEIGHT);
+                            assert_eq!(
+                                kind,
+                                PageKind::Layouts,
+                                "seed {seed}: a shell drag while the page's kind was not known"
+                            );
+                        }
+                        FrameStep::Keep
+                    }
+                    1 => {
+                        let frame = place(&state, roll(4));
+                        let step = if roll(3) == 0 {
+                            state.abort_drag()
+                        } else {
+                            state.end_drag(frame, (2.0, 2.0))
+                        };
+                        // However a drag ends, the machine is idle or holding.
+                        assert!(state.drag.is_none(), "seed {seed}: a drag ended still dragging");
+                        step
+                    }
+                    2 => {
+                        let frame = place(&state, roll(4));
+                        state.follow(frame, (3.0, 3.0), roll(2) == 0)
+                    }
+                    3 => {
+                        // The document reloads: a newer page, or sometimes an older one.
+                        let kind = if roll(4) == 0 {
+                            PageKind::Legacy
+                        } else {
+                            PageKind::Layouts
+                        };
+                        page = Page {
+                            document: page.document + 1,
+                            kind,
+                            drawn: None,
+                        };
+                        state.page_loading();
+                        queue.push(Message::Ready(page.document, kind, roll(3) as u32));
+                        FrameStep::Keep
+                    }
+                    4 => {
+                        // Any timer, current or voided, may fire.
+                        let timer = published[roll(published.len() as u64) as usize];
+                        let step = state.expire(timer);
+                        released(&state, step, seed);
+                        if matches!(step, FrameStep::Apply { .. }) {
+                            assert_eq!(timer, latest, "seed {seed}: a voided timer released a frame");
+                        }
+                        step
+                    }
+                    _ => {
+                        if queue.is_empty() {
+                            FrameStep::Keep
+                        } else {
+                            let index = roll(queue.len() as u64) as usize;
+                            deliver(&mut state, &mut page, &mut queue, index, &upward, seed)
+                        }
+                    }
+                };
+                if let FrameStep::Publish { snapshot, publication } = step {
+                    queue.push(Message::Snapshot(page.document, snapshot));
+                    assert!(publication > latest, "seed {seed}: publication ids only grow");
+                    published.push(publication);
+                    latest = publication;
+                }
+                assert!(
+                    state.snapshot().revision >= revision,
+                    "seed {seed}: revisions only grow"
+                );
+                if !state.busy() {
+                    assert_eq!(
+                        state.snapshot().layout,
+                        state.current().layout,
+                        "seed {seed}: idle in another layout"
+                    );
+                }
+            }
+            // Quiescence: the drag ends one way or the other, everything is
+            // delivered, and the page draws the layout of the window shown.
+            let step = if roll(2) == 0 {
+                state.abort_drag()
+            } else {
+                let frame = place(&state, roll(4));
+                state.end_drag(frame, (4.0, 4.0))
+            };
+            assert!(state.drag.is_none(), "seed {seed}: a drag ended still dragging");
+            if let FrameStep::Publish { snapshot, .. } = step {
+                queue.push(Message::Snapshot(page.document, snapshot));
+            }
+            while !queue.is_empty() {
+                deliver(&mut state, &mut page, &mut queue, 0, &upward, seed);
+            }
+            assert!(
+                !state.busy(),
+                "seed {seed}: a frame is still held after its page answered"
+            );
+            match page.kind {
+                PageKind::Layouts => {
+                    let drawn = page.drawn.expect("the current document read a snapshot");
+                    assert_eq!(drawn, state.snapshot(), "seed {seed}");
+                    assert_eq!(drawn.layout, state.current().layout, "seed {seed}");
+                }
+                PageKind::Legacy => assert_eq!(state.current().layout, PetLayout::default(), "seed {seed}"),
+                PageKind::Loading => unreachable!(),
+            }
+        }
+    }
+
+    /// Delivers `queue[index]`, as the shell or the page would handle it.
+    fn deliver(
+        state: &mut FrameState,
+        page: &mut Page,
+        queue: &mut Vec<Message>,
+        index: usize,
+        upward: &impl Fn((f64, f64)) -> PetFrame,
+        seed: u64,
+    ) -> FrameStep {
+        match queue.remove(index) {
+            Message::Snapshot(document, snapshot) => {
+                let newer = page.drawn.is_none_or(|drawn| snapshot.revision > drawn.revision);
+                if document == page.document && page.kind == PageKind::Layouts && newer {
+                    page.drawn = Some(snapshot);
+                    queue.push(Message::Ack(snapshot.revision, snapshot.layout));
+                }
+                FrameStep::Keep
+            }
+            Message::ReadySnapshot(document, snapshot) => {
+                if document == page.document && page.kind == PageKind::Layouts {
+                    let drawn = match page.drawn {
+                        Some(drawn) if drawn.revision > snapshot.revision => drawn,
+                        _ => snapshot,
+                    };
+                    page.drawn = Some(drawn);
+                    queue.push(Message::Ack(drawn.revision, drawn.layout));
+                }
+                FrameStep::Keep
+            }
+            Message::Ready(document, kind, attempts) => {
+                if document != page.document {
+                    return FrameStep::Keep;
+                }
+                if attempts > 0 {
+                    // The call failed on its way: the page retries it later.
+                    queue.push(Message::Ready(document, kind, attempts - 1));
+                    return FrameStep::Keep;
+                }
+                let step = state.page_ready(kind, (9.0, 9.0), upward);
+                if kind == PageKind::Layouts {
+                    // `pet_ready`'s reply carries the snapshot.
+                    queue.push(Message::ReadySnapshot(document, state.snapshot()));
+                }
+                step
+            }
+            Message::Ack(acked, drawn) => {
+                let before = *state;
+                let step = state.ack(acked);
+                if let FrameStep::Apply { frame, .. } = step {
+                    assert_eq!(
+                        frame.layout, drawn,
+                        "seed {seed}: a held frame came back in another layout"
+                    );
+                    released(state, step, seed);
+                } else {
+                    assert_eq!(*state, before, "seed {seed}: a stale acknowledgement changed something");
+                }
+                step
+            }
+        }
+    }
+
+    /// A held frame released (by an acknowledgement or an expiry): never in
+    /// the top layout unless the page has said it draws layouts.
+    fn released(state: &FrameState, step: FrameStep, seed: u64) {
+        if let FrameStep::Apply { frame, .. } = step {
+            if frame.layout.panel_edge == PanelEdge::Top {
+                assert_eq!(
+                    state.page(),
+                    PageKind::Layouts,
+                    "seed {seed}: a flipped frame was released while the page could not draw it"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_change_waits_for_its_page_only_when_the_layout_changes() {
+        let top = PetFrame {
+            layout: PetLayout::edge(PanelEdge::Top),
+            height: WINDOW_HEIGHT,
+        };
+        let upward = |_: (f64, f64)| UPWARD;
+        let mut state = FrameState::new(PetFrame::default());
+        assert_eq!(state.page_ready(PageKind::Layouts, (0.0, 0.0), upward), FrameStep::Keep);
+        // A shorter window in the same layout applies at once.
+        let shorter = PetFrame {
+            height: 420.0,
+            ..PetFrame::default()
+        };
+        assert_eq!(
+            state.follow(shorter, (1.0, 2.0), true),
+            FrameStep::Apply {
+                frame: shorter,
+                anchor: (1.0, 2.0)
+            }
+        );
+        assert_eq!(state.snapshot().revision, 1);
+        // Another layout is held and published.
+        let FrameStep::Publish { snapshot, .. } = state.follow(top, (1.0, 2.0), true) else {
+            panic!()
+        };
+        assert_eq!(
+            snapshot,
+            LayoutSnapshot {
+                revision: 2,
+                layout: top.layout
+            }
+        );
+        assert!(state.busy());
+        assert_eq!(
+            state.follow(PetFrame::default(), (0.0, 0.0), true),
+            FrameStep::Keep,
+            "held: nothing else places it"
+        );
+        assert_eq!(
+            state.begin_drag((0.0, 0.0)),
+            None,
+            "no drag while a frame waits for its page"
+        );
+        assert_eq!(state.ack(1), FrameStep::Keep);
+        assert_eq!(
+            state.ack(2),
+            FrameStep::Apply {
+                frame: top,
+                anchor: (1.0, 2.0)
+            }
+        );
+        assert_eq!(
+            state.ack(2),
+            FrameStep::Keep,
+            "a duplicate acknowledgement changes nothing"
+        );
+        // Every drop is held for a page that draws layouts, even in the same
+        // layout, so its full window returns only after the page has drawn.
+        let strip = state.begin_drag((1.0, 2.0)).unwrap();
+        assert_eq!(strip.height, DRAG_HEIGHT);
+        assert_eq!(state.begin_drag((1.0, 2.0)), None);
+        let FrameStep::Publish { snapshot, publication } = state.end_drag(top, (3.0, 4.0)) else {
+            panic!()
+        };
+        assert_eq!(snapshot.revision, 3);
+        assert_eq!(
+            state.expire(publication),
+            FrameStep::Apply {
+                frame: top,
+                anchor: (3.0, 4.0)
+            }
+        );
+        // A drag that does not end with a placement goes back where it began.
+        state.begin_drag((3.0, 4.0));
+        assert_eq!(
+            state.abort_drag(),
+            FrameStep::Apply {
+                frame: top,
+                anchor: (3.0, 4.0)
+            }
+        );
+        assert!(!state.busy());
+        assert_eq!(state.abort_drag(), FrameStep::Keep);
+        // A new window keeps revisions growing, and its page is loading.
+        state.rebuild(top);
+        assert_eq!(
+            state.snapshot(),
+            LayoutSnapshot {
+                revision: 4,
+                layout: top.layout
+            }
+        );
+        assert_eq!(state.page(), PageKind::Loading);
+    }
+
+    #[test]
+    fn nothing_held_is_released_before_the_page_says_what_it_draws() {
+        let top = PetFrame {
+            layout: PetLayout::edge(PanelEdge::Top),
+            height: WINDOW_HEIGHT,
+        };
+        let upward = |anchor: (f64, f64)| PetFrame {
+            height: anchor.1,
+            ..PetFrame::default()
+        };
+        // No shell drag before the page has said it draws layouts.
+        let mut state = FrameState::new(PetFrame::default());
+        assert_eq!(state.begin_drag((0.0, 0.0)), None, "loading: no shell drag");
+        state.page_ready(PageKind::Layouts, (0.0, 0.0), upward);
+        // A drag that started under it, dropped while a replacement document
+        // loads: held, through its timer and the old document's answer.
+        state.begin_drag((0.0, 0.0)).unwrap();
+        state.page_loading();
+        let FrameStep::Publish { snapshot, publication } = state.end_drag(top, (5.0, 200.0)) else {
+            panic!()
+        };
+        assert_eq!(state.expire(publication), FrameStep::Keep);
+        assert_eq!(
+            state.ack(snapshot.revision),
+            FrameStep::Keep,
+            "the old document's answer does not count"
+        );
+        // A page that draws layouts: published again under a new id, which
+        // voids the first timer; its own answer releases the frame.
+        let mut layouts = state;
+        let FrameStep::Publish {
+            snapshot: again,
+            publication: renewed,
+        } = layouts.page_ready(PageKind::Layouts, (0.0, 0.0), upward)
+        else {
+            panic!()
+        };
+        assert_eq!(again, snapshot);
+        assert!(renewed > publication);
+        assert_eq!(
+            layouts.expire(publication),
+            FrameStep::Keep,
+            "the voided timer fires after the re-publication"
+        );
+        assert_eq!(
+            layouts.ack(snapshot.revision),
+            FrameStep::Apply {
+                frame: top,
+                anchor: (5.0, 200.0)
+            }
+        );
+        // The renewed timer, had it fired first, would have released it.
+        let mut timed = state;
+        let FrameStep::Publish {
+            publication: renewed, ..
+        } = timed.page_ready(PageKind::Layouts, (0.0, 0.0), upward)
+        else {
+            panic!()
+        };
+        assert!(matches!(timed.expire(renewed), FrameStep::Apply { .. }));
+        // An older page: the upward window for the same spot, at once.
+        let mut legacy = state;
+        assert_eq!(
+            legacy.page_ready(PageKind::Legacy, (0.0, 0.0), upward),
+            FrameStep::Apply {
+                frame: PetFrame {
+                    height: 200.0,
+                    ..PetFrame::default()
+                },
+                anchor: (5.0, 200.0)
+            }
+        );
+        assert!(!legacy.busy());
+        assert_eq!(legacy.snapshot().layout, PetLayout::default());
+        // A window already in the top layout, when an older page becomes
+        // ready, becomes the upward window at the spot the window shows.
+        let mut flipped = FrameState::new(top);
+        assert_eq!(
+            flipped.page_ready(PageKind::Legacy, (8.0, 150.0), upward),
+            FrameStep::Apply {
+                frame: PetFrame {
+                    height: 150.0,
+                    ..PetFrame::default()
+                },
+                anchor: (8.0, 150.0)
+            }
+        );
+        // An older page never drags through the shell, and its moves apply at once.
+        assert_eq!(legacy.begin_drag((5.0, 200.0)), None);
+        assert!(matches!(
+            legacy.follow(UPWARD, (7.0, 7.0), true),
+            FrameStep::Apply { .. }
+        ));
+    }
+
+    #[test]
+    fn a_pet_dropped_off_every_display_returns_to_the_one_it_came_from() {
+        // Windows lets a drag end with Vibey above a secondary display, on no
+        // work area at all.
+        let areas = [
+            area("primary", 0.0, 0.0, 1920.0, 1040.0),
+            area("secondary", 1920.0, 0.0, 1920.0, 1040.0),
+        ];
+        let above = (2600.0, -600.0);
+        let (anchor, frame) = place_dropped(above, &areas, Some("secondary".into()));
+        assert_eq!(anchor.monitor.as_deref(), Some("secondary"));
+        assert!(areas[1]
+            .area
+            .contains(&areas[1].window_rect((anchor.x, anchor.y), frame)));
+        assert_eq!(anchor.x, 2600.0, "only pulled down onto it");
+        // Without its display it would land on the primary one.
+        assert_eq!(place_dropped(above, &areas, None).0.monitor.as_deref(), Some("primary"));
+        // A display that is gone gives way to the primary one.
+        assert_eq!(
+            place_dropped(above, &areas[..1], Some("secondary".into()))
+                .0
+                .monitor
+                .as_deref(),
+            Some("primary")
+        );
+        // A drop that overlaps a display keeps that one, whatever it came from.
+        assert_eq!(
+            place_dropped((500.0, 300.0), &areas, Some("secondary".into()))
+                .0
+                .monitor
+                .as_deref(),
+            Some("primary")
+        );
+        assert_eq!(
+            place_moved(above, &areas, Some("secondary".into()), true)
+                .0
+                .monitor
+                .as_deref(),
+            Some("secondary")
+        );
+    }
+
+    #[test]
+    fn a_dropped_pet_stays_where_it_lands_unless_it_left_every_display() {
+        let areas = [
+            area("laptop", 0.0, 33.0, 1470.0, 923.0),
+            area("external", 1470.0, -400.0, 1440.0, 1415.0),
+        ];
+        // Dropped at the top of the laptop: it stays, and its column flips.
+        let (anchor, frame) = place_dropped((600.0, 45.0), &areas, None);
+        assert_eq!(
+            (anchor.x, anchor.y, anchor.monitor.as_deref()),
+            (600.0, 45.0, Some("laptop"))
+        );
+        assert_eq!(frame.layout.panel_edge, PanelEdge::Top);
+        // Halfway up the external display: today's layout, the full window.
+        let (anchor, frame) = place_dropped((2000.0, 300.0), &areas, None);
+        assert_eq!(
+            (anchor.x, anchor.y, anchor.monitor.as_deref()),
+            (2000.0, 300.0, Some("external"))
+        );
+        assert_eq!(frame, PetFrame::default());
+        // Partly off the laptop's top-left corner: it comes back whole, just
+        // inside, with its column below it.
+        let (anchor, frame) = place_dropped((-80.0, 10.0), &areas, None);
+        assert_eq!((anchor.x, anchor.y), (172.5, 33.0 + 12.0));
+        assert_eq!(frame.layout.panel_edge, PanelEdge::Top);
+        assert!(areas[0]
+            .area
+            .contains(&areas[0].window_rect((anchor.x, anchor.y), frame)));
+        // Without any display information nothing moves.
+        assert_eq!(
+            place_dropped((5.0, 6.0), &[], None),
             (
-                screen.right() - WINDOW_WIDTH - DEFAULT_MARGIN,
-                screen.bottom() - WINDOW_HEIGHT - DEFAULT_MARGIN
+                PetAnchor {
+                    x: 5.0,
+                    y: 6.0,
+                    monitor: None
+                },
+                PetFrame::default()
             )
         );
+    }
+
+    #[test]
+    fn a_display_change_settles_the_same_spot_in_the_new_display_points() {
+        // The saved pet sits near the top of a 100% display, which is then
+        // replaced by a 200% one of the same point size: the same anchor
+        // flips and fills the same points, now twice as many pixels.
+        let anchor = (500.0, 60.0);
+        let plain = area("display", 0.0, 0.0, 1440.0, 900.0);
+        let dense = WorkArea {
+            unit: 2.0,
+            ..plain.clone()
+        };
+        let before = settle_frame(anchor, &plain);
+        assert_eq!(before.layout.panel_edge, PanelEdge::Top);
+        // On the dense display the strip needs twice the room above Vibey.
+        let clamped = clamp_anchor(
+            &PetAnchor {
+                x: anchor.0,
+                y: anchor.1 - 50.0,
+                monitor: Some("display".into()),
+            },
+            std::slice::from_ref(&dense),
+        );
+        assert_eq!(clamped.y, PET_TOP * 2.0);
+        let after = settle_frame((clamped.x, clamped.y), &dense);
+        assert_eq!(after.layout.panel_edge, PanelEdge::Top);
+        assert!(dense.area.contains(&dense.window_rect((clamped.x, clamped.y), after)));
+        assert_eq!(after.height, WINDOW_HEIGHT.min(PET_TOP + (900.0 - clamped.y) / 2.0));
     }
 
     #[test]
@@ -997,7 +2100,11 @@ mod tests {
             monitor: None,
         };
         let pulled = clamp_anchor(&straddling, &areas);
-        assert_eq!((pulled.x, pulled.y), (172.5, 474.0));
+        assert_eq!(
+            (pulled.x, pulled.y),
+            (172.5, 400.0),
+            "only pulled sideways: near the top it flips"
+        );
 
         // With no overlap, its own display wins over the primary one.
         let lost = PetAnchor {
@@ -1045,7 +2152,7 @@ mod tests {
                 width: PET_SIZE,
                 height: PET_AND_DOCK_HEIGHT,
             }));
-            assert_eq!(restored.y, 407.0, "the dock, not only the image, must fit");
+            assert_eq!(restored.y, 399.0, "the dock and the strip's margin below it must fit");
         }
     }
 
@@ -1063,7 +2170,7 @@ mod tests {
         assert_eq!(clamp_anchor(&on_laptop, &areas), on_laptop);
         let low_laptop = clamp_anchor(&PetAnchor { y: 500.0, ..on_laptop }, &areas);
         assert_eq!(low_laptop.monitor.as_deref(), Some("short"));
-        assert_eq!((low_laptop.x, low_laptop.y), (100.0, 407.0));
+        assert_eq!((low_laptop.x, low_laptop.y), (100.0, 399.0));
         assert!(areas[0].area.contains(&LogicalRect {
             x: low_laptop.x,
             y: low_laptop.y,
@@ -1079,7 +2186,10 @@ mod tests {
             &areas,
         );
         assert_eq!(external.monitor.as_deref(), Some("full"));
-        assert!(areas[1].area.contains(&areas[1].pet_at((external.x, external.y))));
+        let at = (external.x, external.y);
+        assert!(areas[1]
+            .area
+            .contains(&areas[1].window_rect(at, settle_frame(at, &areas[1]))));
     }
 
     #[test]
@@ -1135,21 +2245,21 @@ mod tests {
             },
             &areas,
         );
+        // Near the display's top it stays exactly where it was dragged.
         let physical = rescale((restored.x, restored.y), primary, 1.0);
-        assert!((physical.0 - 3000.0).abs() < 1e-9 && (physical.1 - 673.5).abs() < 1e-9);
+        assert!((physical.0 - 3000.0).abs() < 1e-9 && (physical.1 - 200.0).abs() < 1e-9);
         assert_eq!(restored.monitor.as_deref(), Some("side"));
         assert_eq!(
             area_for(&areas, saved).and_then(|area| area.name.as_deref()),
             Some("side")
         );
-        // The window starts the pet's 8-point padding, at the side display's
-        // scale, above and left of it.
-        let window_at = rescale(
-            restored_window_origin((restored.x, restored.y), window / primary),
-            primary,
-            1.0,
-        );
-        assert!((window_at.0 - (3000.0 - 258.75)).abs() < 1e-9 && window_at.1.abs() < 1e-9);
+        // The window starts the image's offset, at the side display's scale,
+        // above and left of it: its column opens below Vibey there.
+        let at = (restored.x, restored.y);
+        let frame = settle_frame(at, &areas[1]);
+        assert_eq!(frame.layout.panel_edge, PanelEdge::Top);
+        let window_at = rescale(frame.origin(at, window / primary), primary, 1.0);
+        assert!((window_at.0 - (3000.0 - 258.75)).abs() < 1e-9 && (window_at.1 - (200.0 - 18.0)).abs() < 1e-9);
     }
 
     #[test]
@@ -1162,24 +2272,23 @@ mod tests {
         };
         let areas = [area("primary", 0.0, 0.0, 1920.0, 1080.0), side.clone()];
         let edge = (
-            side.area.right() - (WINDOW_WIDTH - pet_offset(false, PetLayout::default()).0) * side.unit,
-            side.area.bottom() - (WINDOW_HEIGHT - pet_offset(false, PetLayout::default()).1) * side.unit,
+            side.area.right() - (WINDOW_WIDTH - PetFrame::default().pet_offset().0) * side.unit,
+            side.area.bottom() - (WINDOW_HEIGHT - PetFrame::default().pet_offset().1) * side.unit,
         );
-        // Overlapping the right edge: pulled in by the fixed window extent.
+        // Overlapping the right edge: pulled in by the window's width, and
+        // left at its height, where its column opens below it.
         let past_edge = PetAnchor {
             x: side.area.right() - 100.0,
             y: 300.0,
             monitor: Some("side".to_owned()),
         };
         let pulled = clamp_anchor(&past_edge, &areas);
+        assert_eq!((pulled.x, pulled.y), (edge.0, 300.0));
         assert_eq!(
-            (pulled.x, pulled.y),
-            (
-                edge.0,
-                side.area.y + pet_offset(false, PetLayout::default()).1 * side.unit
-            )
+            settle_frame((pulled.x, pulled.y), &side).layout.panel_edge,
+            PanelEdge::Top
         );
-        // Inside by the image size but not by the full window is not whole.
+        // Inside by the image size but not by the window's width is not whole.
         let almost = PetAnchor {
             x: side.area.right() - 100.0,
             y: side.area.bottom() - 100.0,
@@ -1196,7 +2305,7 @@ mod tests {
         assert_eq!((home.x, home.y), edge);
         // A pet with no place keeps the margin in the display's own points.
         let corner = default_anchor(&side);
-        let (dx, dy) = pet_offset(false, PetLayout::default());
+        let (dx, dy) = PetFrame::default().pet_offset();
         assert_eq!(
             (corner.x, corner.y),
             (

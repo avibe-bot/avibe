@@ -18,6 +18,7 @@ import type { HostedToolName, RefusedEffort } from './types';
 
 const TOOL_ICON: Record<HostedToolName, React.ComponentType<{ className?: string }>> = {
   web_search: Globe,
+  web_fetch: Globe,
   x_search: AtSign,
   image_generate: ImageIcon,
 };

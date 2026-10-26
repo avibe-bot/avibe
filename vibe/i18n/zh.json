@@ -11,7 +11,10 @@
     "modelSourceRequired": "{backend} 还没有模型来源。请在「模型」页添加 API Key 或订阅。",
     "modelsNextStepImUrl": "管理这个 Avibe 的人可以在「模型」页处理：{url}",
     "modelsNextStepIm": "管理这个 Avibe 的人可以在 Avibe 工作台的「模型」页处理。",
-    "opencodeModelProviderRequired": "请在 Avibe 中选择带供应商的 OpenCode 模型，或配置它的 Model Hub 路由。"
+    "opencodeModelProviderRequired": "请在 Avibe 中选择带供应商的 OpenCode 模型，或配置它的 Model Hub 路由。",
+    "sessionBackendBusy": "这个会话在当前后端上还有后台任务在运行，等它结束后再切换。",
+    "sessionControllerUnavailable": "暂时连不上 Avibe 服务，请稍后再试。",
+    "sessionContinueAgentUnavailable": "{backend} 现在用不了，这个会话暂时没法切换过去。"
   },
   "status": {
     "backendUnresponsive": "后端无响应",
@@ -49,7 +52,6 @@
       "back": "返回首页"
     },
     "markdown": {
-      "help": "公共 Show Page 链接会自动向 Agent 和命令行客户端返回 Agent 可读的 Markdown。读取已授权的私有页面时，请在请求 URL 时设置 Accept: text/markdown。",
       "errors": {
         "authenticationRequired": "需要先完成身份验证才能读取此 Show Page。",
         "forbidden": "你无权读取此 Show Page。",
@@ -90,31 +92,6 @@
   },
   "harness": {
     "agentInitiatedContinuation": "Agent 主动发起的续接",
-    "cli": {
-      "agentRunModel": {
-        "existingSession": "--model 和 --reasoning-effort 只在这次运行创建新 Session 时可用",
-        "existingSessionHint": "已有 Session 保持自己的模型；请在 Web UI 的 Session 模型选择器中修改。如果现在就要换模型运行，请新建一个 Session（--agent <名称> --model ...），或分叉当前 Session（--fork-session <id> --model ...）。",
-        "modelNotInCatalog": "模型 '{model}' 不在 {backend} 的模型目录中",
-        "modelMaybeNewer": "模型 '{model}' 不在 {backend} 的模型目录中；可能是拼写错误，也可能比目录更新",
-        "effortInvalidForModel": "推理强度 '{effort}' 不适用于模型 '{model}'",
-        "effortInvalidForBackend": "推理强度 '{effort}' 不适用于 backend '{backend}'",
-        "catalogUnavailable": "无法加载 {backend} 的模型目录，因此无法检查模型和推理强度",
-        "catalogHint": "运行 `vibe agent models {agent}` 查看可用的模型和推理强度。",
-        "helpModel": "这次运行所创建的新 Session（空白新 Session、--create-session 或分叉）使用的模型；该 Session 之后的轮次会沿用它。不能与 --session-id 一起使用。参见 `vibe agent models <agent>`。",
-        "helpEffort": "这次运行所创建的新 Session 使用的推理强度；该 Session 会沿用它。不能与 --session-id 一起使用。"
-      },
-      "help": {
-        "command": "检查统一的 Harness 实时状态和异常",
-        "description": "检查活跃 Run、已启用 Watch、即将触发的 Task 和实时异常。",
-        "status": "显示有界的实时状态与异常快照"
-      },
-      "error": {
-        "sqliteRequired": "Harness 状态需要 SQLite Task 存储。",
-        "controllerStatus": "控制器返回状态码 {status}。",
-        "controllerTimeout": "控制器请求超时。",
-        "controllerUnavailable": "无法连接控制器。"
-      }
-    },
     "promptEcho": {
       "scheduled": "⏰ 定时任务",
       "watch": "👀 监听",
@@ -196,17 +173,12 @@
       },
       "fallbackResult": {
         "canceled": "本次 run 在产出结果前被取消，因此没有结果。",
-        "failed": "本次 run 在产出结果前失败，因此没有结果。"
+        "failed": "本次 run 在产出结果前失败，因此没有结果。",
+        "canceledWithResult": "本次 run 在产出下面的结果后被取消。",
+        "failedWithResult": "本次 run 在产出下面的结果后失败。"
       },
       "bindingUnresolvedRetry": "绑定的 Agent 会话 {session} 无法接收请求({attempt}/{threshold})。连续 {threshold} 次出现目标会话不可用后，该定义将自动暂停。请用以下命令重新绑定:vibe task update {id} --session-id <id>。",
-      "bindingUnresolvedPaused": "已暂停:绑定的 Agent 会话 {session} 无法接收请求，该定义继续运行只会反复失败。请用以下命令重新绑定:vibe task update {id} --session-id <id>;然后恢复:vibe task resume {id}。",
-      "cli": {
-        "help": {
-          "cancel": "\u8bf7\u6c42\u5c3d\u529b\u53d6\u6d88\u4e00\u4e2a run\uff1b\u82e5\u8be5 run \u5df2\u8fdb\u5165\u6b63\u5728\u8fd0\u884c\u7684 Session turn\uff0c\u4f1a\u50cf Session Stop \u4e00\u6837\u505c\u6b62\u6574\u4e2a turn",
-          "showBrief": "只显示状态、时间、错误和回调字段，与 vibe runs list 相同"
-        },
-        "canceledBeforeLiveTurn": "\u8be5 run \u5728\u5176\u8f93\u5165\u8fdb\u5165\u6b63\u5728\u8fd0\u884c\u7684 Session turn \u4e4b\u524d\u5df2\u88ab\u53d6\u6d88\u3002"
-      }
+      "bindingUnresolvedPaused": "已暂停:绑定的 Agent 会话 {session} 无法接收请求，该定义继续运行只会反复失败。请用以下命令重新绑定:vibe task update {id} --session-id <id>;然后恢复:vibe task resume {id}。"
     },
     "notice": {
       "failed": "[Avibe Harness] 后台任务「{name}」执行失败。",
@@ -363,15 +335,6 @@
       "message": "等待运行中命令的 Watch 一旦暂停或结束，就无法恢复。",
       "hint": "暂停或结束时它的命令已经停止。如需继续，请重新运行该命令；也可以用 `vibe watch remove {id}` 删除这个 Watch。"
     },
-    "jobWatchUpdateRefused": {
-      "message": "这个 Watch 等待的是一个已在运行的命令，只能修改它的名称、消息和生命周期上限。",
-      "hint": "它的 Session、Agent、投递目标和命令在命令交接时已经确定。可用 `vibe watch update {id}` 修改名称、消息或生命周期上限。"
-    },
-    "cronNumericWeekday": {
-      "message": "cron 的星期字段使用了数字：{field}",
-      "readings": "Avibe（APScheduler）解析为 {avibe}；标准 crontab(5) 解析为 {crontab}。",
-      "hint": "请改用星期英文名（mon、tue、wed、thu、fri、sat、sun），它们在两种规则下含义一致。"
-    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "源会话的 Agent 已无法用于创建新的复刻会话。",
@@ -464,6 +427,15 @@
       "generic": "请在 Agent 设置里选择一个已启用的 Agent，或启用该 Agent 使用的 backend。"
     },
     "processMessageFailed": "出错：{error}",
+    "agentUnavailable": {
+      "disabled": "{agent} 已停用，这个会话没法再用它继续。",
+      "missing": "{agent} 已被删除，这个会话没法再用它继续。",
+      "resendLater": "这条消息不会自动重发，Agent 恢复后请重新发送。"
+    },
+    "continueOnVibey": {
+      "workbench": "可以一键切换到 Vibey，无缝接着做。",
+      "im": "可以在 Avibe 工作台把这个会话切换到 Vibey，再重新发送这条消息。"
+    },
     "streamTurnInProgress": "⚠️ 这个会话已经有一条回复在生成中，请等它完成后再试。",
     "sessionReset": "检测到会话错误。会话已重置，请重试。",
     "sessionConnectionLost": "与 Claude 的连接已断开，请重试。",
@@ -562,18 +534,15 @@
     "restartRequired": "升级完成，请重启 Avibe。",
     "restartRequiredShort": "升级完成 - 需要重启",
     "restartRequiredSlack": "✅ *升级完成*\n\n请重启 Avibe 以应用更新。",
-    "postUpdateVersionMismatch": "❌ Avibe 更新没有生效。尝试更新到 `{target}`，但服务仍在运行 `{current}`。已暂停这个版本的自动重试，请检查安装路径和重启日志。",
-    "updated": "✅ Avibe 已更新到 `{version}`",
-    "updatedSlack": "✅ *Avibe 更新成功*\n\n当前运行版本 `{version}`",
+    "postUpdateVersionMismatch": "❌ Avibe 更新没有生效。尝试更新到 {target}，但服务仍在运行 {current}。已暂停这个版本的自动重试，请检查安装路径和重启日志。",
+    "updated": "✅ Avibe 已更新到 {version}",
+    "updatedSlack": "✅ *Avibe 更新成功*\n\n当前运行版本 {version}",
     "availablePlain": "Avibe 有可用更新：{current} → {latest} ({releaseUrl})",
-    "availableSlack": "🚀 *Avibe 有可用更新*\n\n新版本可用：`{current}` → {latestLink}",
-    "availableDiscord": "🚀 **Avibe 有可用更新**\n\n从 `{current}` 更新到 {latestLink}",
-    "availableMarkdown": "🚀 Avibe 有可用更新\n\n从 `{current}` 更新到 {latestLink}",
+    "availableSlack": "🚀 *Avibe 有可用更新*\n\n新版本可用：{current} → {latestLink}",
+    "availableDiscord": "🚀 **Avibe 有可用更新**\n\n从 {current} 更新到 {latestLink}",
+    "availableMarkdown": "🚀 Avibe 有可用更新\n\n从 {current} 更新到 {latestLink}",
     "availableText": "🚀 Avibe 有可用更新\n\n从 {current} 更新到 {latestLink}",
-    "actionUpdateNow": "立即更新",
-    "downgradeRefused": "拒绝从 Avibe {version}（{generation}）执行 {command}：最近激活的安装是 {activatedVersion}（{activatedGeneration}）。请改为运行 `{rerunCommand}`；如确需运行旧版本，请加 --allow-downgrade。",
-    "downgradeAllowed": "警告：由于指定了 --allow-downgrade，正在运行 Avibe {version}（{generation}），它比最近激活的安装 {activatedVersion}（{activatedGeneration}）旧。",
-    "downgradeWarning": "警告：这个 vibe 运行的是 Avibe {version}（{generation}），比最近激活的安装 {activatedVersion}（{activatedGeneration}）旧。请使用 `{launcher}`，或运行 `{repairCommand}` 让所有启动器都指向它。"
+    "actionUpdateNow": "立即更新"
   },
   "discord": {
     "settingsSubtitle": "调整消息可见性、@提及策略与语言。",
@@ -582,10 +551,8 @@
       "messageTypes": "消息类型",
       "mentionPolicy": "提及策略",
       "language": "语言",
-      "backend": "后端",
-      "opencodeAgent": "OpenCode Agent",
-      "claudeAgent": "Claude Agent",
-      "codexAgent": "Codex Agent",
+      "agent": "Agent",
+      "backendAgent": "{backend} Agent",
       "model": "模型",
       "reasoningEffort": "推理强度"
     }
@@ -665,24 +632,16 @@
     },
     "routing": {
       "title": "Agent 设置",
-      "currentBackend": "当前后端：",
-      "backend": "后端",
-      "selectBackend": "选择后端",
-      "opencodeSettings": "OpenCode 设置",
-      "opencodeAgent": "OpenCode Agent",
-      "selectOpencodeAgent": "选择 OpenCode Agent",
+      "currentAgent": "当前 Agent：",
+      "agent": "Agent",
+      "selectAgent": "选择 Agent",
+      "backendAgent": "{backend} Agent",
+      "selectBackendAgent": "选择 {backend} Agent",
       "model": "模型",
       "selectModel": "选择模型",
       "reasoningEffort": "推理强度（思考模式）",
       "selectReasoningEffort": "选择推理强度",
-      "claudeSettings": "Claude 设置",
-      "claudeAgent": "Claude Agent",
-      "selectClaudeAgent": "选择 Claude Agent",
-      "codexSettings": "Codex 设置",
-      "codexAgent": "Codex Agent",
-      "selectCodexAgent": "选择 Codex Agent",
-      "codexReasoningEffort": "推理强度",
-      "tip": "选择“(默认)”以使用后端的配置默认值。"
+      "tip": "选择“(默认)”以使用该 Agent 自身的模型和推理强度。"
     }
   },
   "command": {
@@ -708,8 +667,8 @@
     "new": {
       "started": "已开启新的会话。你下一条消息会从全新对话开始。",
       "pausedReason": "绑定的 Agent 会话已被 /new 清除",
-      "pausedTasks": "⏸️ 已暂停 {count} 个绑定到被清理会话的定时任务。用 `vibe task list` → `vibe task update <id> --session-id <new>` 重新指向，再 `vibe task resume <id>`。",
-      "pausedWatches": "⏸️ 已暂停 {count} 个绑定到被清理会话的 watch。用 `vibe watch list` → `vibe watch update <id> --session-id <new>` 重新指向，再 `vibe watch resume <id>`。"
+      "pausedTasks": "⏸️ 已暂停 {count} 个绑定到被清理会话的定时任务。用 `vibe task list --global` → `vibe task update <id> --session-id <new>` 重新指向，再 `vibe task resume <id>`。",
+      "pausedWatches": "⏸️ 已暂停 {count} 个绑定到被清理会话的 watch。用 `vibe watch list --global` → `vibe watch update <id> --session-id <new>` 重新指向，再 `vibe watch resume <id>`。"
     },
     "clear": {
       "noSessions": "没有要清除的活动会话。\n会话状态已重置。",
@@ -811,9 +770,9 @@
   "routing": {
     "slackOnly": "🤖 Agent 切换目前仅在 Slack 可用。请使用 Slack Agent 设置进行配置。",
     "introTitle": "Agent 与模型设置",
-    "introDesc": "配置该频道使用的后端。",
+    "introDesc": "选择该频道使用的 Agent。",
+    "noAgents": "该频道没有可用的 Agent。",
     "label": {
-      "backend": "后端",
       "agent": "Agent",
       "model": "模型",
       "reasoningEffort": "推理强度"
@@ -849,60 +808,9 @@
   "permission": {
     "adminOnly": "🔒 仅管理员可以修改 Bot 设置。如需权限请联系管理员。"
   },
-  "skill": {
-    "cli": {
-      "help": {
-        "command": "通过 Avibe 列出和加载 Skills",
-        "list": "列出可用的 Skills",
-        "load": "加载一个 Skill",
-        "page": "Catalog 页码（默认：1）",
-        "name": "Skill 名称"
-      },
-      "more": "还有更多 Skills。运行 `vibe skill list --page {page}` 查看下一页。",
-      "error": {
-        "invalidPage": "错误：页码必须是正整数",
-        "notFound": "未找到 Skill：{name}"
-      }
-    }
-  },
   "computer": {
     "cli": {
-      "help": {
-        "command": "通过当前 Avibe Agent Turn 使用本机桌面",
-        "description": "通过 Avibe 服务执行 allowlist 中的 Computer Use 操作。调用方 Session 来自 Agent 环境，服务端会检查它是否有当前活动 Turn。",
-        "argsJson": "Driver 参数 JSON 对象，或使用 @路径读取 JSON 文件。",
-        "arg": "覆盖一个 driver 参数；有效 JSON 值会按 JSON 解析。",
-        "output": "调用方选择的截图路径，用于“observe window”。",
-        "json": "输出结构化服务响应。",
-        "run": "运行 JavaScript Computer Use 脚本",
-        "runDescription": "使用随 Avibe 发货的 @avibe/computer 模块运行 ESM 文件，并绑定到当前这个 Avibe Agent Turn。",
-        "scriptFile": "可读的 .mjs 脚本路径。",
-        "scriptArg": "以 name=value 或 name=@file 传入脚本参数；值保持为字符串。",
-        "js": "在本 Session 的常驻 Computer Use 内核中执行 JavaScript",
-        "jsDescription": "在一个 Node 内核中执行代码，同一 Avibe Session 的多次调用之间保留顶层变量。已预载 computer 和 avibe，支持顶层 await。每次调用都绑定到当前 Agent Turn。",
-        "jsCode": "JavaScript 源码，或用 @FILE 从 UTF-8 文件读取。",
-        "jsTimeout": "单次调用超时（毫秒，默认 30000，最大 300000）。",
-        "jsReset": "丢弃本 Session 的 JavaScript 内核及其全部变量；已打开的应用不受影响",
-        "observe": "观察应用、窗口或一个精确窗口",
-        "observeApps": "列出可见应用",
-        "observeWindows": "列出窗口",
-        "observeWindow": "观察一个精确窗口，并可选择保存截图",
-        "zoom": "以易读比例检查一个精确窗口",
-        "click": "点击已观察的元素或精确窗口坐标",
-        "type": "向已观察的目标输入文本",
-        "key": "按下一个按键",
-        "hotkey": "按下组合键",
-        "scroll": "滚动已观察的目标",
-        "drag": "拖动已观察的目标",
-        "setValue": "设置已观察控件的值",
-        "launch": "启动应用或 URL",
-        "forceQuit": "强制终止应用；未保存的数据会丢失。",
-        "clipboard": "读取或写入系统剪贴板",
-        "clipboardRead": "读取系统剪贴板",
-        "clipboardWrite": "写入系统剪贴板"
-      },
       "error": {
-        "invalidArguments": "Computer Use 参数无效：{detail}",
         "cannotReadArgsJson": "无法读取 --args-json 文件：{error}",
         "argsJsonObject": "--args-json 必须包含 JSON 对象",
         "argNameValue": "--arg 的值必须使用 name=value 格式",
@@ -1052,43 +960,14 @@
       }
     }
   },
-  "debug": {
-    "cli": {
-      "help": {
-        "command": "查看 Avibe 内部状态",
-        "prompt": "查看维护中的 Prompt 源",
-        "promptExport": "导出完整 Prompt 源区块，可附带生产渲染结果",
-        "promptContext": "包含 backend、可选 agent_instructions 和生产构建参数 options 的 JSON 文件",
-        "promptFormat": "导出格式"
-      },
-      "error": {
-        "promptExport": "Prompt 导出失败：{error}",
-        "invalidContext": "上下文必须是 JSON 对象，且只能包含 backend、agent_instructions 和 options。",
-        "invalidBackend": "backend 必须为 claude、codex 或 opencode。",
-        "invalidField": "字段类型无效或缺少必填字段：{field}",
-        "unknownField": "未知字段：{field}",
-        "unreadableContext": "无法读取上下文文件，请检查路径和权限。",
-        "invalidJson": "上下文文件必须包含有效的 UTF-8 JSON。",
-        "renderFailed": "无法渲染提示词来源，请检查源文件和渲染输入。"
-      }
-    }
-  },
   "language": {
     "systemDefault": "(系统默认)",
     "en": "English",
     "zh": "中文"
   },
   "desktopRuntime": {
-    "checkUpdate": "更新由 Avibe 桌面应用统一提供。",
-    "upgrade": "此 Runtime 由 Avibe 桌面应用管理。请更新桌面应用来更新 Avibe。",
     "apiUpgrade": "此 Runtime 由 Avibe 桌面应用管理。",
-    "backendUpgrade": "此 Codex 后端属于旧版 Avibe 桌面 Runtime，无法原地更新。请重新打开当前桌面应用，将其安装为私有后端。",
-    "handoverNotRequested": "此处正在运行另一个桌面托管的 Avibe Runtime；本次启动不会替换它。",
-    "handoverRefused": "已拒绝停止被取代的桌面托管 Avibe Runtime：{reason}",
-    "handoverFailed": "未能停止被取代的桌面托管 Avibe Runtime：{part}",
-    "claimRefused": "此处正在运行另一个不属于本桌面应用的 Avibe Runtime；未停止任何进程（{part}：{reason}）。",
-    "stopRefused": "未停止任何进程：此命令来自桌面托管的 Avibe Runtime，而正在运行的 {part} 不属于该 Runtime（{reason}）。请从启动它的 Avibe 停止它。",
-    "restartRefused": "未重启任何进程：此命令来自桌面托管的 Avibe Runtime，而正在运行的 {part} 不属于该 Runtime（{reason}）。请从启动它的 Avibe 重启它。"
+    "backendUpgrade": "此 Codex 后端属于旧版 Avibe 桌面 Runtime，无法原地更新。请重新打开当前桌面应用，将其安装为私有后端。"
   },
   "cliHealth": {
     "installReadbackFailed": "安装程序已结束，但所选 CLI 仍然缺失或无法运行，尚未验证安装成功。请修复后重试。",
@@ -1190,6 +1069,8 @@
         "web_search": {"one": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "several": "当前没有能运行网页搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "refused": "{sources} 拒绝了网页搜索，当前没有能运行它的供应商。在 模型 › 工具 中清除拒绝记录后会再试。"},
         "x_search": {"one": "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "several": "当前没有能运行 X 搜索的供应商。请在 模型 › 供应商与路由 中把 {vendors} 其中一家的 API Key 添加为供应商；存在 Vaults 里的密钥不会用于这里。", "refused": "{sources} 拒绝了 X 搜索，当前没有能运行它的供应商。在 模型 › 工具 中清除拒绝记录后会再试。"}
       },
+      "noSearchSource": "目前没有供应商可以执行网页搜索。请在 模型 › 工具 中添加搜索服务，或在 模型 › 供应商 中添加提供网页搜索的厂商 API Key。",
+      "queryLimit": "搜索词超过 {limit} 个字符，请缩短后重试。",
       "listSeparator": "、",
       "providerRefused": "执行方的供应商拒绝了此次调用（{detail}）。",
       "providerUnavailable": "执行方的供应商暂时不可用（{detail}），请稍后重试。",
@@ -1280,26 +1161,6 @@
       "oauth_time_mismatch_body": "Avibe Cloud 已完成登录,但这台机器因为本地时间不同步而拒绝了安全令牌。请校准系统时间后重试。",
       "invalid_oauth_nonce_title": "无法验证此次登录",
       "invalid_oauth_nonce_body": "本次登录未能通过验证,为保护你的账户已中止。请重新登录以继续。"
-    },
-    "cli": {
-      "pairHelpEpilog": "使用说明：\n  已有配对密钥时，可直接使用此命令。\n  如需引导式设置，请运行 `vibe remote`。\n  不提供密钥时，命令会继续本机可恢复的配对；没有待处理操作时会提示输入密钥。\n  要替换结果不确定的待处理配对，请明确提供新密钥和原本使用的后端地址。\n  配对会保存远程访问配置，然后自动启动托管隧道。\n  配对密钥只能使用一次；若配对失败，请在 Avibe Cloud 控制台获取新密钥。\n\n示例：\n  vibe remote\n  vibe remote pair vrp_abc123\n  vibe remote pair --device-name \"Mac Studio\"\n  vibe remote pair --backend-url https://avibe.bot",
-      "localWriteUnavailableTitle": "远程访问设置已在联系 Avibe Cloud 前停止。",
-      "localWriteUnavailableBody": "本地配置无法可靠保存配对信息，因此没有消耗配对密钥。",
-      "saveFailedAfterRedeemTitle": "云端已完成配对，但本地保存失败。",
-      "orphanedBinding": "孤立绑定：实例 {instance_id}（设备 {device_name}）。",
-      "recoveryRetained": "已兑换的凭据仍保存在本机，不需要新的配对密钥。",
-      "retryAfterLocalFix": "修复本地配置问题后运行：",
-      "recoveryInvalid": "已保存的配对恢复记录无效，无法重放。",
-      "recoveryUnavailable": "本地配对恢复无法启动，没有消耗新的配对密钥。",
-      "recoveryNotReady": "配对尚无可靠保存的响应，可能仍在运行，也可能已消耗密钥。无密钥重试无法恢复此结果。",
-      "recoveryRevoked": "已保存的配对恢复记录已被本地解绑操作作废。",
-      "recoveryIndeterminate": "配对结果不确定，或已被本地后续操作取代，无法保证存在可恢复的响应；不要重复使用已提交的密钥。",
-      "replacePendingPairing": "先检查云端控制台，并确认没有仍在进行的配对。若要明确替换待处理操作，请将以下命令中的占位符替换为新密钥和原本要使用的后端地址（默认后端为 https://avibe.bot）：",
-      "retirementFailed": "配对已应用，但恢复记录未能清理。请不要更换密钥并重试。",
-      "failedClaimCleanup": "本次配对失败，尚未应用。修复本地存储后，不提供密钥重试，以清理失败操作的记录。",
-      "failedClaimUnrecorded": "本次配对失败，尚未应用，且无法记录清理状态。修复本地存储后，请向 'vibe remote pair' 显式提供新的配对密钥；无密钥重试无法恢复此结果。",
-      "failedClaimRetired": "失败的配对记录已清理。获取新的配对密钥后，运行以下命令安全输入：",
-      "retryPairCommand": "使用以下命令重试本地配对恢复："
     }
   },
   "turn": {
@@ -1314,39 +1175,7 @@
   "runtime": {
     "prepare": {
       "prepared": "Show Runtime 已准备完成。",
-      "skipped": "Show Runtime 准备已跳过：{reason}",
-      "failed": "Show Runtime 准备失败：{reason}",
-      "unsupportedSource": "Show Runtime 准备失败：{reason}。请移除 VIBE_SHOW_RUNTIME_SOURCE 以使用随 Avibe 发布的运行时，或将 VIBE_SHOW_RUNTIME_BIN 指向你自行构建的运行时。",
-      "modelHubEngineSkipped": "Model Hub 引擎：已跳过（{reason}）。",
-      "modelHubEngineInstalled": "Model Hub 引擎已安装。",
-      "modelHubEngineReady": "Model Hub 引擎已就绪。",
-      "modelHubEngineNotReady": "Model Hub 引擎尚未就绪：{reason}",
-      "ripgrepInstalled": "ripgrep 已安装。",
-      "ripgrepReady": "ripgrep 已就绪。",
-      "ripgrepNotReady": "ripgrep 尚未就绪：{reason}",
-      "cloudflaredInstalled": "cloudflared 已安装。",
-      "cloudflaredReady": "cloudflared 已就绪。",
-      "cloudflaredNotReady": "cloudflared 尚未就绪：{reason}"
-    },
-    "clean": {
-      "commandHelp": "清理过期的 Show、Git、Model Hub、tmux、ripgrep 和 cloudflared 运行时安装与归档；任一清理失败时以非零状态退出。",
-      "dryRunHelp": "仅报告可清理的归档与缓存条目，不删除任何内容。",
-      "wouldRemoveItems": "将清理 {count} 项 Show Runtime 缓存。",
-      "wouldRemoveArchives": "将清理 {count} 个已下载的 Show Runtime 归档（{size}）。",
-      "consumerWouldRemoveItems": "将清理 {count} 项 {consumer} 缓存。",
-      "consumerWouldRemoveArchives": "将清理 {count} 个已下载的 {consumer} 归档（{size}）。",
-      "removedItems": "已清理 {count} 项 Show Runtime 缓存。",
-      "removedArchives": "已清理 {count} 个已下载的 Show Runtime 归档（{size}）。",
-      "consumerRemovedItems": "已清理 {count} 项 {consumer} 缓存。",
-      "consumerRemovedArchives": "已清理 {count} 个已下载的 {consumer} 归档（{size}）。",
-      "consumerPreviewFailed": "{consumer} 缓存预览失败（{reason}）；可能仍有过期条目。",
-      "consumerFailed": "{consumer} 清理失败（{reason}）；过期条目仍保留。",
-      "consumerArchivesPartial": "{consumer} 归档清理仅部分完成（{reason}）；有 {failed} 个归档无法清理。",
-      "consumerArchivesSkipped": "{consumer} 归档清理已跳过（{reason}）；可能仍有过期归档。",
-      "partiallyRemoved": " 有 {failed} 个归档无法删除；请检查权限与 Avibe 日志。",
-      "skipped": "归档清理已跳过（{reason}）；可能仍有过期归档。请在正在运行的安装或清理结束后重试。",
-      "removalFailed": "有 {failed} 个归档无法删除；过期归档仍保留。请检查运行目录权限与 Avibe 日志。",
-      "skippedInspection": "归档清理无法检查缓存（{reason}）；可能仍有过期归档。请检查运行目录权限与 Avibe 日志。"
+      "failed": "Show Runtime 准备失败：{reason}"
     },
     "doctor": {
       "archiveCacheReclaimable": "Show Runtime 归档缓存中有 {count} 个可回收归档（{size}）；当前与回滚归档会被保留。",
@@ -1366,15 +1195,6 @@
       "repairPostVerificationFailed": "Show Runtime 准备已完成，但无法验证是否可启动：{detail}",
       "repairPrepareFailed": "Show Runtime 准备失败：{detail}",
       "repairLegacyArchiveUnavailable": "打包的 Show Runtime 清单不可用，旧版上游归档地址也没有发布资产。请升级或重新安装官方 Avibe 软件包，或移除过期的 runtime 来源覆盖配置。"
-    },
-    "stop": {
-      "opencodeStopped": "OpenCode 服务已停止",
-      "serviceFailed": "错误：Avibe 服务未能停止；已保留 pidfile 并中止。",
-      "uiFailed": "错误：Avibe UI 未能停止；已保留 pidfile 并中止。",
-      "installerFailed": "错误：桌面后端安装进程未能停止。",
-      "opencodeFailed": "错误：此 Runtime 启动的 OpenCode 服务未能停止。",
-      "unknownFailed": "错误：此 Runtime 启动的一个进程无法识别，已保留运行。",
-      "remoteAccessFailed": "错误：远程访问隧道无法停止。"
     }
   },
   "doctor": {
@@ -1756,44 +1576,6 @@
       "dryTmux": "将安装或刷新清单固定的 tmux runtime。"
     }
   },
-  "data": {
-    "helpCommand": "查看 Avibe 数据,或执行显式的 trace 保留维护",
-    "helpDescription": "通过受保护的只读 SQL 查看本地 Avibe SQLite 状态,或执行显式维护:`query` 为只读;`retention --run` 会删除旧的内部 trace 事件并可能压实数据库。",
-    "skillUsage": {
-      "ownerRequired": "需要实例管理者或所有者权限。",
-      "confirmationRequired": "清除 Skill 统计需要使用 --yes 确认。",
-      "clearRequired": "--yes 必须与 --clear 一起使用。",
-      "helpCommand": "查看或清除本地 Skill 统计（实例管理者或所有者）",
-      "helpClear": "清除 Skill 事件及每日统计。",
-      "helpYes": "确认清除 Skill 统计。"
-    },
-    "retention": {
-      "invalidDays": "--days 必须在 {minimum} 到 {maximum} 之间;拒绝运行而不是静默收窄窗口。",
-      "helpCommand": "查看或执行内部 agent trace 事件的有界保留",
-      "helpDescription": "agent_events trace 保留策略的状态与手动控制:超过保留窗口的 tool_call trace 会被删除;聊天消息、非 trace 事件与较新的 trace 永远不会被触碰。",
-      "helpRun": "立即执行一次保留清理(绕过每日节流,仍遵守租约)。",
-      "helpDays": "以天为单位的保留窗口覆盖值(默认:配置值,当前为 {current})。",
-      "helpCompact": "在安全时同时物理压实数据库(VACUUM);蕴含 --run。默认关闭:VACUUM 会持有数据库唯一写锁并可能阻塞运行中服务的写入;请在维护窗口或服务停止时执行。",
-      "configRecovered": "Avibe 配置无法读取（处于恢复默认状态）；保留策略未知。如需删除，请使用显式 --days 窗口重新运行。",
-      "compactionReasonCheckpointBusy": "数据库正被并发读写占用",
-      "compactionReasonFreeSpace": "磁盘空闲空间不足以安全重写数据库",
-      "compactionReasonOther": "当前不满足安全压实条件",
-      "error": "trace 保留命令执行失败:{error}",
-      "plan": "有 {count} 条早于 {days} 天的 trace 记录待清理（载荷文本约 {size}）。",
-      "lastRun": "上次保留清理：{at}，删除 {rows} 条。",
-      "neverRun": "尚未执行过保留清理。",
-      "disabled": "trace 保留策略已在运行配置中关闭；每日任务不会删除任何内容。",
-      "compaction": "数据库内部当前可回收空间：{size}。",
-      "ran": "本次保留清理删除了 {rows} 条 trace 记录。",
-      "compacted": "数据库已压实；向磁盘归还 {size}。",
-      "compactionDeferred": "压实已推迟（{reason}）；行已删除，磁盘空间将在下次安全通过时归还。",
-      "compactionSkipped": "压实已跳过：可回收空间过小。",
-      "leaseLost": "本次运行将租约丢失给了另一个保留清理；删除中途停止且未记录完成。请在另一运行结束后重试。",
-      "notDue": "保留清理在最近一天内已运行过，无需重复。",
-      "busy": "另一个保留清理正在运行，请稍后重试。",
-      "cancelled": "保留清理已在批次边界停止；未记录完成状态。"
-    }
-  },
   "vibeyAgent": {
     "error": {
       "refusal": "模型拒绝回答这个请求。",
@@ -1832,6 +1614,8 @@
     "mainSessionProtected": "桌宠主会话由 Avibe 管理，不能归档或编辑。"
   },
   "hostedTools": {
+    "keylessExa": "Exa（免费）",
+    "rateLimitSwitch": "{sources}限流，已改用 {provider}。冷却结束后会自动重试，也可在 模型 › 工具 中立即重试。",
     "errorCode": {
       "provider_no_reason": "供应商未说明原因",
       "provider_no_image": "供应商没有返回图片",
@@ -1855,15 +1639,48 @@
       "provider_image_unusable": "供应商返回的图片无法使用",
       "search_not_run": "模型没有搜索就直接作答了",
       "search_failed": "供应商的搜索失败了",
-      "response_ended_early": "回复提前结束了"
+      "response_ended_early": "回复提前结束了",
+      "service_key_invalid": "搜索服务密钥无效",
+      "service_balance": "搜索服务账户余额不足",
+      "service_limit": "搜索服务已达到用量上限",
+      "service_unavailable": "搜索服务暂时不可用",
+      "service_rate_limited": "搜索服务受到限流，已尝试下一个来源",
+      "service_refused": "搜索服务拒绝了这次搜索",
+      "service_unreadable": "搜索服务返回了无法读取的结果",
+      "search_query_too_long": "搜索词太长，请缩短后重试",
+      "search_sources_blocked": "所有搜索来源都被阻止或停用了",
+      "service_busy": "服务正忙",
+      "fetch_target_unreadable": "无法读取该网页",
+      "fetch_url_blocked": "网络安全策略阻止了该网址",
+      "fetch_dns_unverified": "无法验证目标地址",
+      "fetch_challenge": "网页需要完成浏览器验证",
+      "fetch_js_shell": "网页需要 JavaScript",
+      "fetch_timeout": "网页读取超时",
+      "fetch_unsupported_content": "不支持此文档类型",
+      "fetch_refused": "网页请求被拒绝",
+      "fetch_unavailable": "网页不可用",
+      "fetch_sources_blocked": "所有网页读取来源都被阻止或停用了"
     },
     "tool": {
       "web_search": "网页搜索",
+      "web_fetch": "读取网页",
       "x_search": "X 搜索",
       "image_generate": "图片生成"
     },
+    "fetchErrorCode": {
+      "service_key_invalid": "网页读取服务的密钥无效",
+      "service_balance": "网页读取服务的账户余额不足",
+      "service_limit": "网页读取服务已达用量上限",
+      "service_unavailable": "网页读取服务不可用",
+      "service_rate_limited": "网页读取服务受到限流",
+      "service_refused": "网页读取服务拒绝了此网址",
+      "service_unreadable": "网页读取服务返回了无法读取的结果",
+      "service_busy": "网页读取服务正忙"
+    },
+    "fetch": {"characters": "{count} 字", "truncated": "已截断", "local": "本机", "jina": "Jina Reader（免费）", "policy": "本机策略拒绝", "notForwarded": "未转发第三方", "forwarded": "此前已发给 {providers}"},
     "quoted": "“{subject}”",
     "mode": {
+      "service": "通过 {provider}",
       "native": "原生（{provider}）",
       "proxy": "由 {provider} 代理",
       "proxyModel": "由 {provider} 代理（{model}）",
@@ -1879,12 +1696,63 @@
       "images": "{count} 张"
     },
     "cost": {
+      "free": "免费",
       "included": "订阅内含",
       "list": "≈ ${usd}",
       "reported": "${usd}",
       "calls": "{cost}（{calls} 次调用）",
       "atLeast": "至少 {cost}"
     },
+    "repair": {
+      "retryFetch": "可稍后重试或在 模型 › 工具 › 网页读取 中立即重试",
+      "retrySearch": "暂时限流，可稍后重试或在 模型 › 工具 中立即重试",
+      "disabled": "需要在 模型 › 工具 中启用网页搜索",
+      "fetch_disabled": "需要启用网页读取",
+      "key": "需要更换密钥",
+      "reauthorize": "需要重新授权登录",
+      "balance": "需要充值",
+      "balanceReenable": "需要充值，然后在 模型 › 工具 中重新启用",
+      "limit": "需要提高消费或用量上限",
+      "limitReenable": "需要提高消费或用量上限，然后在 模型 › 工具 中重新启用",
+      "tavilyLimit": "需要在 Tavily 后台升级套餐或提高该密钥的用量上限（432），或提高按量上限（433），然后在 模型 › 工具 中重新启用",
+      "plan": "需要升级为包含此产品的套餐",
+      "account": "需要联系供应商恢复账户",
+      "error": "需要在 模型 › 供应商 中处理"
+    },
+    "reason": {
+      "failed": "失败",
+      "superseded": "这次请求失败，状态已由之后的操作更新",
+      "service_key_invalid": "密钥无效",
+      "service_balance": "余额不足",
+      "service_limit": "已达用量上限",
+      "service_unavailable": "暂时不可用",
+      "service_rate_limited": "限流",
+      "service_refused": "拒绝了这次搜索",
+      "service_unreadable": "返回了无法读取的结果",
+      "service_busy": "服务正忙",
+      "fetch_target_unreadable": "无法读取该网页",
+      "fetch_url_blocked": "因网络安全策略阻止了该网址",
+      "fetch_dns_unverified": "无法验证目标地址",
+      "fetch_challenge": "遇到了浏览器验证",
+      "fetch_js_shell": "需要 JavaScript",
+      "fetch_timeout": "读取超时",
+      "fetch_unsupported_content": "不支持此文档类型",
+      "fetch_refused": "拒绝了请求",
+      "fetch_unavailable": "不可用"
+    },
+    "skip": {
+      "blocked": "当时被阻止",
+      "disabled": "当时未用于搜索",
+      "fetch_disabled": "当时未用于网页读取",
+      "cooling": "当时正在等待重试",
+      "query_too_long": "不支持这么长的搜索词",
+      "unsupported_type": "不支持此文档类型",
+      "service_busy": "服务正忙",
+      "unavailable": "当时不可用"
+    },
+    "listSeparator": "、",
+    "itemSeparator": "；",
+    "switch": "{failed}，已改用 {provider}",
     "status": {
       "failed": "失败：{error}",
       "incomplete": "未完成：{error}",

@@ -10,7 +10,9 @@ Status: **design v2**, 2026-10-15, owner-approved direction (passive, default-on
 - What is already built (rc4) and what v2 removes or changes is listed in §11; the implementation split is §12.
 - Extension: [`web-search-services.md`](web-search-services.md) adds search APIs (Tavily, Exa, DeepSeek, …) as
   `web_search` executors, the "prefer the model's own search" switch, and moves the web search order into the card
-  body. Where the two documents differ for `web_search`, that one holds.
+  body. [`web-fetch.md`](web-fetch.md) adds phase-2 page reading as a separate canonical hosted tool; it reuses
+  this document's turn freeze, replay, and unknown-tool reader rules. Where the documents differ for `web_search`,
+  the search plan holds.
 
 ## 0. Owner decisions this design implements
 
@@ -426,18 +428,27 @@ never dropped.
   from receiving it), so an `image_generation_call` is ignored like any undeclared item, and a line over 8 MiB fails
   the stream like any oversized line. The #2589 codes `image_not_streamed` and `provider_no_image` lose their
   producers and stay in `HOSTED_ERROR_CODES` for records already written.
-- **rc-era transcripts are not migrated.** An rc session may hold an assistant row with a native `image_generation`
-  `HostedToolBlock`. No reader branch keeps that removed shape alive (owner directive; AGENTS.md forbids reintroducing
-  a removed optional-feature artifact through a compatibility shim), so such a session no longer loads its context
-  (§15).
+- **Stored history survives hosted-tool registry changes.** An unrecognized native `HostedToolBlock` loads as
+  portable text with its query or URL and sources when renderable, otherwise a one-line unavailable placeholder.
+  The projection keeps a readable non-completed status and error, including an explicit no-result marker for pending
+  calls, so a failed or interrupted call is never presented as a successful result.
+  This includes an rc-era `image_generation` block without restoring its removed native shape or replay path.
+  A proxied result for an unrecognized tool keeps its `content` and `is_error`, with `hosted` dropped. New writes
+  and known-tool rows remain strict; no migration or stored-row rewrite is performed, and each degraded row logs
+  one warning without content.
+  If any native block is degraded, response-wide counts, cited sources and cost are discarded: they cannot be
+  partitioned between the unknown call and the remaining calls. Calls are decoded before that aggregate, and its
+  discarded contents are not validated against this build's summary/source schema. A known block still requires a
+  summary; an existing summary becomes empty when known blocks remain and is omitted when none remain (§15).
+  The message envelope and retained known blocks remain strictly validated.
 - **Per adapter notes.** xAI's X-search `reasoning` items (`tco_…`) stay ThinkingBlocks. The `custom_tool_call`
   becomes the HostedToolBlock, never a local tool call. Anthropic's `encrypted_content` is kept only in
   `native.payload`. Hosted payloads count against the 32 MiB `StreamAssembler` budget; search events measured at
   most 96 KB, so every stream uses the 8 MiB line cap.
 
-### 4.3 `pause_turn`
+### 4.3 Anthropic server-tool continuation
 
-Unchanged from v1 as implemented (orchestrator decision, 2026-10-14):
+**`pause_turn`.** Unchanged from v1 as implemented (orchestrator decision, 2026-10-14):
 - The Anthropic adapter continues a paused response internally, at most 5 continuations, each pinned to the Source
   that served the paused response. It never re-renders a continuation in portable form.
 - A continuation that Source answers `pin_unavailable`, a pause of a send that carried no pin, or a 6th pause ends
@@ -446,12 +457,52 @@ Unchanged from v1 as implemented (orchestrator decision, 2026-10-14):
   `cited_sources` by URL. Pending calls carry over by tool-call id, so each call stays one block.
 - The merged message is verified only when every response in it was verified and reported the same origin.
 
+**Mixed parallel groups** (C-1 clarification approved 2026-10-22). A response with `stop_reason: tool_use`, client
+`tool_use` blocks, and a `server_tool_use` lacking its result has **not run** that server tool. After the client
+results, the next response starts with a `web_search_tool_result` whose `tool_use_id` names that earlier use; it
+never repeats the use. The adapter carries the pending use by id, as for `pause_turn`, but this continuation crosses
+C-5's commit boundary, so its completion is append-only:
+
+- Response 1 keeps its ordinary pending `HostedToolBlock`, with the use alone in `native.payload`.
+- Response 2 holds an ordinary completed (or failed) `HostedToolBlock` with the **same id, tool and action**, and
+  the result alone in `native.payload`. These are two immutable fragments of **one logical call**. No committed
+  `content_json.model`, `context_seq` or trace row is rewritten. The v1 shape round-trips through the actual
+  v3.2.2 and gh-v3.2.3rc2 readers; no schema version or new persisted message kind is needed.
+- Pairing requires the preceding mixed response, its client results, and the same origin, Source and Source
+  identity. A result from a re-resolved hop cannot complete an old Source's call.
+- Usage and hosted counters remain on the response reporting them, unchanged. Parsing a completion never adds a
+  charge inferred from a block. A missing reported counter remains missing; it is not manufactured as zero or one.
+- Web and IM follow one rule: a deferred use produces no card; response 2's result fragment renders as an ordinary
+  hosted card at its own position, after the client-tool activity, live and on reload. A call that never completes
+  produces no card. Old pending trace cards of this exact deferred shape are also hidden at read time; other pending
+  calls (for example a stream cut with `stop_reason: error`) retain interrupted rendering. No cross-response card
+  merge, provisional state, held-card map, audit receipt or special delivery guarantee exists.
+
+Provider source, fetched **2026-10-22**: [Server tools — Mixing server tools and client tools in one turn](https://platform.claude.com/docs/en/agents-and-tools/tool-use/server-tools.md).
+
 ### 4.4 In-flight turn replay
 
 Within one turn, a client `tool_result` after server tools in the same assistant message makes the next request
 pinned to the Source the previous response came from, and the assistant content goes back verbatim. (The adapter's
 own `pause_turn` continuations follow §4.3 and never take the fallback below.) This is the provider's own continuation contract, so it needs no `replay` evidence, but it does need the
 tool still declared natively on that hop (§3.5).
+
+For a mixed pending group (§4.3), the assistant content is sent in its original order, followed by **one user
+message containing only all client `tool_result` blocks**, with the same tool declarations. No user text follows
+those results: it would close the still-open server-tool turn and the provider rejects it. Queued steers therefore
+wait until the deferred result has arrived, including after a restart: T3 derives the open barrier from the
+persisted transcript and owning Turn, leaves accepted inputs unconsumed, and restores them to `Agent.resume`'s
+queue before it opens admission. A stopped/settled Turn has no continuation barrier and admits them normally.
+A subsequent internal `pause_turn` preserves the entire linked exchange
+natively without requiring historical replay evidence.
+
+A failed partial and every client-tool result owned by that failed response are omitted together from the effective request history used by in-flight discovery, completion pairing and wire compilation. Their durable rows remain audit facts, and reused client call ids become eligible again only after the next valid assistant response resets that failed-attempt scope. For the same
+Anthropic origin/account's deferred exchange, the partial neither closes the in-flight request nor completes a pair for
+replay eligibility. An already-authorized transcript retry therefore sends the preceding valid mixed response
+and its client results unchanged; a later successful response pairs across the failed attempts. The failed
+partials and their reported usage stay immutable in storage. This does not grant retry permission or make a
+failed stream resumable like `pause_turn`; Stop/`aborted`, a new user input, or another origin/account still closes
+the exchange.
 
 **Fallback form.** It applies when the pinned Source refuses in-flight verbatim replay, when the fresh hop no
 longer declares the tool natively, or on `pin_unavailable`. Each server block pair is replaced **in place** by one
@@ -470,6 +521,12 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
 | `TextBlock.citations` | not sent | not sent |
 | Proxied search or image call (`ToolCallBlock` + `ToolResultMessage.hosted`) | ordinary tool call and result | same |
 
+- **Cross-response Anthropic completions** (§4.3) are joined before replay eligibility is decided. The earlier use
+  counts as finished when its later fragment completed it. Native replay retains the exact response order:
+  assistant use → client-result-only user → assistant server result. Both halves go native or neither does.
+  Portable replay emits **one** same-named synthetic call in the first response's parallel group and its result
+  alongside that group's client results; it suppresses the completion fragment in response 2, retaining its other
+  content and its usage. An unmatched pending call still renders interrupted.
 - **Google targets** take the Chat pair; the engine translates it to Gemini `functionCall` / `functionResponse`
   parts. A failed record becomes `response: {error: <text>}`.
 - **Synthetic rendering rules**, by action, unchanged from v1: a `search` becomes one call with `{query:
@@ -780,6 +837,12 @@ when metered, sources, failure reason); citations through the existing citation 
 `🔎 Web search "query" · native (xAI) · 6 sources · $0.01`. The image card shows the prompt, the image, the model
 used and the cost; IM attaches the file.
 
+Delivery suppression does not degrade these records: a background Session's tool trace retains the same
+`content.hosted` payload as a foreground Session. Native cards retain `response_id` and the mirror's
+`precedes_message_id`, so opening the Session places the rich card above its owning response, including a
+mixed-search completion at response 2 (§4.3). Suppression still prevents outward IM delivery and live Web
+publication; no pending card, replay, backfill, or delivery receipt is added.
+
 Who ran a call is its vendor's catalog label. A Source whose vendor the catalog does not name, as a compatible
 endpoint's `custom` does not, is named by its Source name in the vendor's place on both surfaces, and is not repeated
 beside it (amended 2026-10-20, #2873).
@@ -826,8 +889,8 @@ under the freeze protocol (`model-hub-contracts/README.md`).
 
 ### 10.1 C-1 (`agent-core-contracts/message.schema.json`, `cross-provider.md`, `conversion-tables.md`)
 
-- A `HostedToolBlock` has `tool` `web_search` | `x_search`, written and read; an rc-era `image_generation` block is not
-  accepted (§4.2, §15).
+- A new `HostedToolBlock` has `tool` `web_search` | `x_search`, and known-tool rows are read strictly. Stored
+  unrecognized tools, including rc-era `image_generation`, load as portable text rather than native blocks (§4.2, §15).
 - `ToolResultMessage.hosted` keeps `{record, execution?, action?}`. `record.images[]` and `action: generate` occur
   only for `image_generate`; `generate` gains the `model` used, with `prompt` required for a `completed` record.
 - `ProxyExecution` becomes the result's `execution` with `mode: "proxy" | "direct"` (direct for an image endpoint)
@@ -970,6 +1033,32 @@ and no real credentials.
    unless enabled.
 7. **rc-era state is not migrated** (owner directive): probe evidence carries `basis: probe`, which v2's loader does not
    accept, so those records are pruned; an rc-era `hosted_tools` section keeps each tool's `enabled`, and its unknown
-   keys and fields are ignored (§3.3); an rc session holding a native `image_generation` block no longer loads its
-   context (§4.2), and its turn ends with the existing localized context-load error ("this session's history can't
-   be loaded; start a new session"), never a raw traceback: ordinary error handling, not a compatibility path.
+   keys and fields are ignored (§3.3). An rc session holding a removed native `image_generation` block is not restored
+   as a native image tool: the current reader degrades any unrecognized native hosted block to portable text, as it does
+   for a future hosted tool this build does not know.
+8. **History is readable across hosted-tool registry changes.** A stored hosted result for a tool added by a newer build
+   loads as an ordinary tool result, and a native call loads as portable text with its query or URL and sources when
+   available, otherwise a one-line unavailable placeholder. A degraded native block also clears unpartitionable
+   response-wide facts (§4.2). The row is not rewritten, new writes stay strict, and known tools retain strict
+   validation—including a result-only fragment for a known deferred completion; only an unrecognized tool name
+   degrades portably. This is the intentional downgrade path before a new hosted tool ships.
+9. **A deferred call without a completion stays unresolved in model history.** Stop, an error before its result,
+   `pin_unavailable`, or re-resolution to a different Source do not synthesize a success or retry the search elsewhere.
+   The existing §4.4 fallback remains unchanged. Already dropped result blocks in old transcripts cannot be recovered.
+10. **Deferred calls have no card on any surface.** Response 1's use-only pending block with `stop_reason: tool_use`
+    is a protocol fact, not a search that ran. Web and IM omit it, including the old interrupted cards emitted for this
+    exact shape by earlier builds. A later completion uses the ordinary hosted-card path at response 2's position;
+    a call that never completes has no card. Other pending blocks retain interrupted rendering. No Web merge,
+    provisional searching state, held-card state, restart flush, audit receipt or special delivery guarantee exists;
+    the ordinary commit-to-trace/send crash gap remains unchanged.
+11. **Unreported hosted usage is unknown.** Counters/cost are read from wire usage only, never inferred from the
+    number of parsed calls or completion fragments. The 2026-10-22 live probe's installed parser dropped the result
+    block and its hosted summary, so that transcript cannot establish which response reported the search counter.
+    Neither the mixed-group contract nor [web search usage and pricing](https://platform.claude.com/docs/en/agents-and-tools/tool-use/web-search-tool.md)
+    (both fetched 2026-10-22) specifies attribution across this split; the latter defines the
+    `usage.server_tool_use.web_search_requests` counter. Both present and absent counters are covered by
+    raw-stream-shaped fixtures; the fix never adds a second charge.
+12. **An existing authorized retry can repeat upstream work.** A failed partial is not a valid native response
+    prefix, so a retry resends the last valid continuation rather than inventing a new provider resume protocol.
+    Each attempt's reported usage stays on its own response: a partial reporting one search followed by a retry
+    reporting two records all three, without synthesizing or deduplicating real charges. No new retry layer is added.

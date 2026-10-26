@@ -11,7 +11,10 @@
     "modelSourceRequired": "{backend} has no model source yet. Add an API key or a subscription in Models.",
     "modelsNextStepImUrl": "Someone who manages this Avibe can fix it in Models: {url}",
     "modelsNextStepIm": "Someone who manages this Avibe can fix it in Models, in the Avibe Workbench.",
-    "opencodeModelProviderRequired": "Select an OpenCode model with a provider in Avibe, or configure its Model Hub route."
+    "opencodeModelProviderRequired": "Select an OpenCode model with a provider in Avibe, or configure its Model Hub route.",
+    "sessionBackendBusy": "This session still has background work running on its current backend. Switch after it finishes.",
+    "sessionControllerUnavailable": "Avibe's service isn't reachable right now. Try again in a moment.",
+    "sessionContinueAgentUnavailable": "{backend} isn't available right now, so this session can't switch to it."
   },
   "status": {
     "backendUnresponsive": "backend not responding",
@@ -49,7 +52,6 @@
       "back": "Back to home"
     },
     "markdown": {
-      "help": "Public Show Page links automatically return agent-readable Markdown to Agents and command-line clients. For an authorized private read, request the URL with Accept: text/markdown.",
       "errors": {
         "authenticationRequired": "Authentication is required to read this Show Page.",
         "forbidden": "You do not have permission to read this Show Page.",
@@ -90,31 +92,6 @@
   },
   "harness": {
     "agentInitiatedContinuation": "Agent-initiated continuation",
-    "cli": {
-      "agentRunModel": {
-        "existingSession": "--model and --reasoning-effort only apply when the run creates a new Session",
-        "existingSessionHint": "An existing Session keeps its model; change it in the Web UI's Session model picker. To run on another model now, start a new Session (--agent <name> --model ...) or fork this one (--fork-session <id> --model ...).",
-        "modelNotInCatalog": "model '{model}' is not in the {backend} model catalog",
-        "modelMaybeNewer": "model '{model}' is not in the {backend} model catalog; it may be a typo or newer than the catalog",
-        "effortInvalidForModel": "reasoning_effort '{effort}' is not valid for model '{model}'",
-        "effortInvalidForBackend": "reasoning_effort '{effort}' is not valid for backend '{backend}'",
-        "catalogUnavailable": "the {backend} model catalog could not be loaded, so the model and reasoning effort cannot be checked",
-        "catalogHint": "Run `vibe agent models {agent}` to list valid models and reasoning efforts.",
-        "helpModel": "Model for the new Session this run creates (a blank new Session, --create-session, or a fork); kept on that Session for its later turns. Not valid with --session-id. See `vibe agent models <agent>`.",
-        "helpEffort": "Reasoning effort for the new Session this run creates; kept on that Session. Not valid with --session-id."
-      },
-      "help": {
-        "command": "Inspect unified Harness live state and anomalies",
-        "description": "Inspect active Runs, armed Watches, upcoming Tasks, and live anomalies.",
-        "status": "Show the bounded live/anomaly snapshot"
-      },
-      "error": {
-        "sqliteRequired": "Harness status requires the SQLite task store.",
-        "controllerStatus": "The controller returned status {status}.",
-        "controllerTimeout": "The controller request timed out.",
-        "controllerUnavailable": "The controller is unreachable."
-      }
-    },
     "promptEcho": {
       "scheduled": "⏰ Scheduled task",
       "watch": "👀 Watch",
@@ -196,17 +173,12 @@
       },
       "fallbackResult": {
         "canceled": "The run was canceled before producing a result.",
-        "failed": "The run failed before producing a result."
+        "failed": "The run failed before producing a result.",
+        "canceledWithResult": "The run was canceled after producing the result below.",
+        "failedWithResult": "The run failed after producing the result below."
       },
       "bindingUnresolvedRetry": "Pinned agent session {session} cannot accept a turn ({attempt}/{threshold}). This definition will be paused after {threshold} consecutive unresolvable-target failures. Re-point it with: vibe task update {id} --session-id <id>.",
-      "bindingUnresolvedPaused": "paused: pinned agent session {session} cannot accept a turn. This definition would fail on every run. Re-point it with: vibe task update {id} --session-id <id>; then resume it with: vibe task resume {id}.",
-      "cli": {
-        "help": {
-          "cancel": "Request best-effort cancellation for one run; a run already in the live Session turn stops that whole turn, like Session Stop",
-          "showBrief": "Show only status, timing, error, and callback fields, as in vibe runs list"
-        },
-        "canceledBeforeLiveTurn": "Run was canceled before its input reached the live Session turn."
-      }
+      "bindingUnresolvedPaused": "paused: pinned agent session {session} cannot accept a turn. This definition would fail on every run. Re-point it with: vibe task update {id} --session-id <id>; then resume it with: vibe task resume {id}."
     },
     "notice": {
       "failed": "[Avibe Harness] Scheduled work \"{name}\" failed.",
@@ -363,15 +335,6 @@
       "message": "A Watch on a running command cannot be resumed once it is paused or finished.",
       "hint": "Pausing or finishing ended its command. Run the command again to watch a new run, or remove this Watch with `vibe watch remove {id}`."
     },
-    "jobWatchUpdateRefused": {
-      "message": "This Watch waits on a command that is already running, so only its name, message, and lifetime can be changed.",
-      "hint": "Its Session, Agent, delivery, and command were fixed when the command was handed over. Change the name, message, or lifetime with `vibe watch update {id}`."
-    },
-    "cronNumericWeekday": {
-      "message": "Cron weekday field uses numbers: {field}",
-      "readings": "Avibe (APScheduler) reads it as {avibe}; crontab(5) reads it as {crontab}.",
-      "hint": "Write weekday names (mon, tue, wed, thu, fri, sat, sun); they mean the same day everywhere."
-    },
     "sessionFork": {
       "agentUnavailable": {
         "message": "The source session's Agent is no longer available for a new fork.",
@@ -464,6 +427,15 @@
       "generic": "Choose an enabled Agent in Agent settings, or enable the backend this Agent uses."
     },
     "processMessageFailed": "Error: {error}",
+    "agentUnavailable": {
+      "disabled": "{agent} is turned off, so this session can't continue on it.",
+      "missing": "{agent} was deleted, so this session can't continue on it.",
+      "resendLater": "This message won't run later; send it again once the Agent is back."
+    },
+    "continueOnVibey": {
+      "workbench": "Switch to Vibey to pick up right where you left off.",
+      "im": "Switch this session to Vibey in the Avibe Workbench, then send this message again."
+    },
     "streamTurnInProgress": "⚠️ A reply is already streaming for this session — wait for it to finish, then try again.",
     "sessionReset": "Session error detected. Session has been reset. Please try your message again.",
     "sessionConnectionLost": "Connection to Claude was lost. Please try your message again.",
@@ -562,18 +534,15 @@
     "restartRequired": "Upgrade complete. Please restart Avibe.",
     "restartRequiredShort": "Upgrade completed - restart required",
     "restartRequiredSlack": "✅ *Upgrade complete*\n\nPlease restart Avibe to apply the update.",
-    "postUpdateVersionMismatch": "❌ Avibe update did not take effect. Tried to update to `{target}`, but the service is still running `{current}`. Automatic retries for this version have been paused; please check the install path and restart logs.",
-    "updated": "✅ Avibe has been updated to `{version}`",
-    "updatedSlack": "✅ *Avibe Updated Successfully*\n\nNow running version `{version}`",
+    "postUpdateVersionMismatch": "❌ Avibe update did not take effect. Tried to update to {target}, but the service is still running {current}. Automatic retries for this version have been paused; please check the install path and restart logs.",
+    "updated": "✅ Avibe has been updated to {version}",
+    "updatedSlack": "✅ *Avibe Updated Successfully*\n\nNow running version {version}",
     "availablePlain": "Avibe update available: {current} → {latest} ({releaseUrl})",
-    "availableSlack": "🚀 *Avibe Update Available*\n\nA new version is available: `{current}` → {latestLink}",
-    "availableDiscord": "🚀 **Avibe Update Available**\n\nUpdate from `{current}` → {latestLink}",
-    "availableMarkdown": "🚀 Avibe Update Available\n\nUpdate from `{current}` → {latestLink}",
+    "availableSlack": "🚀 *Avibe Update Available*\n\nA new version is available: {current} → {latestLink}",
+    "availableDiscord": "🚀 **Avibe Update Available**\n\nUpdate from {current} → {latestLink}",
+    "availableMarkdown": "🚀 Avibe Update Available\n\nUpdate from {current} → {latestLink}",
     "availableText": "🚀 Avibe Update Available\n\nUpdate from {current} → {latestLink}",
-    "actionUpdateNow": "Update Now",
-    "downgradeRefused": "Refusing to {command} from Avibe {version} ({generation}): the last activated install is {activatedVersion} ({activatedGeneration}). Run `{rerunCommand}` instead, or pass --allow-downgrade to run the older build on purpose.",
-    "downgradeAllowed": "Warning: running Avibe {version} ({generation}), older than the last activated install {activatedVersion} ({activatedGeneration}), because --allow-downgrade was given.",
-    "downgradeWarning": "Warning: this vibe runs Avibe {version} ({generation}), older than the last activated install {activatedVersion} ({activatedGeneration}). Use `{launcher}`, or run `{repairCommand}` to move every launcher to it."
+    "actionUpdateNow": "Update Now"
   },
   "discord": {
     "settingsSubtitle": "Adjust message visibility, mention behavior, and language.",
@@ -582,10 +551,8 @@
       "messageTypes": "Message types",
       "mentionPolicy": "Mention policy",
       "language": "Language",
-      "backend": "Backend",
-      "opencodeAgent": "OpenCode agent",
-      "claudeAgent": "Claude agent",
-      "codexAgent": "Codex agent",
+      "agent": "Agent",
+      "backendAgent": "{backend} agent",
       "model": "Model",
       "reasoningEffort": "Reasoning effort"
     }
@@ -665,24 +632,16 @@
     },
     "routing": {
       "title": "Agent Settings",
-      "currentBackend": "Current Backend:",
-      "backend": "Backend",
-      "selectBackend": "Select backend",
-      "opencodeSettings": "OpenCode Settings",
-      "opencodeAgent": "OpenCode Agent",
-      "selectOpencodeAgent": "Select OpenCode agent",
+      "currentAgent": "Current Agent:",
+      "agent": "Agent",
+      "selectAgent": "Select agent",
+      "backendAgent": "{backend} Agent",
+      "selectBackendAgent": "Select {backend} agent",
       "model": "Model",
       "selectModel": "Select model",
       "reasoningEffort": "Reasoning Effort (Thinking Mode)",
       "selectReasoningEffort": "Select reasoning effort",
-      "claudeSettings": "Claude Settings",
-      "claudeAgent": "Claude Agent",
-      "selectClaudeAgent": "Select Claude agent",
-      "codexSettings": "Codex Settings",
-      "codexAgent": "Codex Agent",
-      "selectCodexAgent": "Select Codex agent",
-      "codexReasoningEffort": "Reasoning Effort",
-      "tip": "Select (Default) to use the backend's configured defaults."
+      "tip": "Select (Default) to use the Agent's own model and reasoning effort."
     }
   },
   "command": {
@@ -708,8 +667,8 @@
     "new": {
       "started": "Started a fresh session. Your next message will begin a new conversation.",
       "pausedReason": "the bound agent session was cleared by /new",
-      "pausedTasks": "⏸️ Paused {count} scheduled task(s) pinned to the cleared session. Re-point with `vibe task list` → `vibe task update <id> --session-id <new>`, then `vibe task resume <id>`.",
-      "pausedWatches": "⏸️ Paused {count} watch(es) pinned to the cleared session. Re-point with `vibe watch list` → `vibe watch update <id> --session-id <new>`, then `vibe watch resume <id>`."
+      "pausedTasks": "⏸️ Paused {count} scheduled task(s) pinned to the cleared session. Re-point with `vibe task list --global` → `vibe task update <id> --session-id <new>`, then `vibe task resume <id>`.",
+      "pausedWatches": "⏸️ Paused {count} watch(es) pinned to the cleared session. Re-point with `vibe watch list --global` → `vibe watch update <id> --session-id <new>`, then `vibe watch resume <id>`."
     },
     "clear": {
       "noSessions": "No active sessions to clear.\nSession state has been reset.",
@@ -811,9 +770,9 @@
   "routing": {
     "slackOnly": "🤖 Agent switching is currently only available in Slack. Use Slack Agent Settings to configure routing.",
     "introTitle": "Agent & Model Settings",
-    "introDesc": "Configure which backend to use for this channel.",
+    "introDesc": "Choose which Agent this channel uses.",
+    "noAgents": "No Agent is available for this channel.",
     "label": {
-      "backend": "Backend",
       "agent": "Agent",
       "model": "Model",
       "reasoningEffort": "Reasoning Effort"
@@ -849,60 +808,9 @@
   "permission": {
     "adminOnly": "🔒 Only admins can change bot settings. Contact an admin if you need access."
   },
-  "skill": {
-    "cli": {
-      "help": {
-        "command": "List and load Skills through Avibe",
-        "list": "List available Skills",
-        "load": "Load one Skill",
-        "page": "Catalog page (default: 1)",
-        "name": "Skill name"
-      },
-      "more": "More skills are available. Run `vibe skill list --page {page}` to view more.",
-      "error": {
-        "invalidPage": "error: page must be a positive integer",
-        "notFound": "Skill not found: {name}"
-      }
-    }
-  },
   "computer": {
     "cli": {
-      "help": {
-        "command": "Use the local desktop through the active Avibe Agent Turn",
-        "description": "Run an allowlisted Computer Use operation through the Avibe service. The caller Session is taken from the Agent environment and the service checks that it has an active Turn.",
-        "argsJson": "JSON object of driver arguments, or @path to a JSON file.",
-        "arg": "Override one driver argument; JSON values are parsed when valid.",
-        "output": "Caller-selected screenshot path for 'observe window'.",
-        "json": "Print the structured service response.",
-        "run": "Run a JavaScript Computer Use script",
-        "runDescription": "Run an ESM file with the shipped @avibe/computer module, bound to this exact Avibe Agent Turn.",
-        "scriptFile": "Path to a readable .mjs script.",
-        "scriptArg": "Pass one script argument as name=value or name=@file. Values remain strings.",
-        "js": "Evaluate JavaScript in this Session's persistent Computer Use kernel",
-        "jsDescription": "Evaluate code in a Node kernel that keeps top-level bindings between calls in this Avibe Session. computer and avibe are preloaded; top-level await is supported. Each call is bound to the current Agent Turn.",
-        "jsCode": "JavaScript source, or @FILE to read it from a UTF-8 file.",
-        "jsTimeout": "Per-call timeout in milliseconds (default 30000, max 300000).",
-        "jsReset": "Discard this Session's JavaScript kernel and all of its bindings; open apps are untouched",
-        "observe": "Observe apps, windows, or one exact window",
-        "observeApps": "List visible applications",
-        "observeWindows": "List windows",
-        "observeWindow": "Observe one exact window and optionally save a screenshot",
-        "zoom": "Inspect one exact window at a readable scale",
-        "click": "Click an observed element or exact window coordinate",
-        "type": "Type text into an observed target",
-        "key": "Press one key",
-        "hotkey": "Press a key combination",
-        "scroll": "Scroll an observed target",
-        "drag": "Drag an observed target",
-        "setValue": "Set an observed control value",
-        "launch": "Launch an application or URL",
-        "forceQuit": "Force-terminate an application; unsaved state is lost.",
-        "clipboard": "Read or write the system clipboard",
-        "clipboardRead": "Read the system clipboard",
-        "clipboardWrite": "Write the system clipboard"
-      },
       "error": {
-        "invalidArguments": "Invalid Computer Use arguments: {detail}",
         "cannotReadArgsJson": "Cannot read the --args-json file: {error}",
         "argsJsonObject": "--args-json must contain a JSON object",
         "argNameValue": "--arg values must use name=value",
@@ -1052,43 +960,14 @@
       }
     }
   },
-  "debug": {
-    "cli": {
-      "help": {
-        "command": "Inspect internal Avibe state",
-        "prompt": "Inspect authored prompt sources",
-        "promptExport": "Export all prompt sources, optionally with the production rendering",
-        "promptContext": "JSON file with backend, optional agent_instructions and production builder options",
-        "promptFormat": "Export format"
-      },
-      "error": {
-        "promptExport": "Prompt export failed: {error}",
-        "invalidContext": "The context must be a JSON object containing only backend, agent_instructions and options.",
-        "invalidBackend": "backend must be claude, codex or opencode.",
-        "invalidField": "Invalid field type or missing required field: {field}",
-        "unknownField": "Unknown field: {field}",
-        "unreadableContext": "Cannot read the context file. Check its path and permissions.",
-        "invalidJson": "The context file must contain valid UTF-8 JSON.",
-        "renderFailed": "Cannot render the prompt sources. Check the sources and rendering inputs."
-      }
-    }
-  },
   "language": {
     "systemDefault": "(System Default)",
     "en": "English",
     "zh": "中文"
   },
   "desktopRuntime": {
-    "checkUpdate": "Updates are delivered with the Avibe desktop app.",
-    "upgrade": "This Runtime is managed by the Avibe desktop app. Update the app to update Avibe.",
     "apiUpgrade": "This Runtime is managed by the Avibe desktop app.",
-    "backendUpgrade": "This Codex backend belongs to an older Avibe desktop Runtime and cannot be updated in place. Reopen the current desktop app to install it privately.",
-    "handoverNotRequested": "Another desktop-managed Avibe Runtime is running here; this start does not replace it.",
-    "handoverRefused": "Refused to stop the superseded desktop-managed Avibe Runtime: {reason}",
-    "handoverFailed": "Failed to stop the superseded desktop-managed Avibe Runtime: {part}",
-    "claimRefused": "Another Avibe Runtime is running here and does not belong to this desktop app; nothing was stopped ({part}: {reason}).",
-    "stopRefused": "Nothing was stopped: this command runs from a desktop-managed Avibe Runtime, and the running {part} is not that Runtime's ({reason}). Stop it from the Avibe that started it.",
-    "restartRefused": "Nothing was restarted: this command runs from a desktop-managed Avibe Runtime, and the running {part} is not that Runtime's ({reason}). Restart it from the Avibe that started it."
+    "backendUpgrade": "This Codex backend belongs to an older Avibe desktop Runtime and cannot be updated in place. Reopen the current desktop app to install it privately."
   },
   "cliHealth": {
     "installReadbackFailed": "The installer finished, but the selected CLI is missing or cannot run. Installation was not verified; repair it and try again.",
@@ -1190,6 +1069,8 @@
         "web_search": {"one": "No Source can run web search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "several": "No Source can run web search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "refused": "{sources} refused web search, so no Source can run it right now. Clear the refusal in Models › Tools to try again."},
         "x_search": {"one": "No Source can run X search right now. Add an API key from {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "several": "No Source can run X search right now. Add an API key from one of {vendors} as a Source in Models › Sources & gateway; a key stored in Vaults is not used for this.", "refused": "{sources} refused X search, so no Source can run it right now. Clear the refusal in Models › Tools to try again."}
       },
+      "noSearchSource": "No Source can run web search. Add a search service in Models › Tools or an API key from a vendor that offers web search in Models › Providers.",
+      "queryLimit": "The query exceeds {limit} characters. Shorten it and try again.",
       "listSeparator": ", ",
       "providerRefused": "The executor's provider refused the call ({detail}).",
       "providerUnavailable": "The executor's provider is unavailable right now ({detail}). Try again later.",
@@ -1280,26 +1161,6 @@
       "oauth_time_mismatch_body": "Avibe Cloud finished the sign-in, but this machine rejected the security token because the local clock appears out of sync. Correct the system time, then try again.",
       "invalid_oauth_nonce_title": "We couldn't verify this sign-in",
       "invalid_oauth_nonce_body": "This sign-in attempt couldn't be verified, so we stopped to keep your account secure. Start over to continue."
-    },
-    "cli": {
-      "pairHelpEpilog": "Guidance:\n  This is the direct pairing command for users who already have a pairing key.\n  For the guided setup flow, run `vibe remote`.\n  Without a key, the CLI resumes a recoverable local pairing, or prompts if none is pending.\n  To replace an uncertain pending attempt, explicitly supply a fresh key and the same backend URL.\n  Pairing saves the remote-access config and then starts the managed tunnel automatically.\n  The pairing key is one-time use; create a fresh key from the Avibe Cloud console if it fails.\n\nExamples:\n  vibe remote\n  vibe remote pair vrp_abc123\n  vibe remote pair --device-name \"Mac Studio\"\n  vibe remote pair --backend-url https://avibe.bot",
-      "localWriteUnavailableTitle": "Remote access setup stopped before contacting Avibe Cloud.",
-      "localWriteUnavailableBody": "The local config cannot durably accept a pairing, so no pairing key was consumed.",
-      "saveFailedAfterRedeemTitle": "The pairing was redeemed cloud-side but could not be saved locally.",
-      "orphanedBinding": "Orphaned binding: instance {instance_id} (device {device_name}).",
-      "recoveryRetained": "The redeemed credentials are kept on this host, so no new pairing key is needed.",
-      "retryAfterLocalFix": "Fix the local config problem, then run:",
-      "recoveryInvalid": "The saved pairing recovery record is invalid and cannot be replayed.",
-      "recoveryUnavailable": "Local pairing recovery could not start. No new pairing key was consumed.",
-      "recoveryNotReady": "A pairing operation has no durably recorded response. It may still be running or may have consumed the key. A keyless retry cannot recover it.",
-      "recoveryRevoked": "The saved pairing recovery was invalidated by a local unpair operation.",
-      "recoveryIndeterminate": "The pairing outcome is uncertain or was superseded locally. No recoverable response is guaranteed; do not reuse the submitted key.",
-      "replacePendingPairing": "Check the cloud console and ensure no pairing is still running. To explicitly replace the pending attempt, substitute a fresh key and the intended backend URL in this command (the default backend is https://avibe.bot):",
-      "retirementFailed": "Pairing was applied, but its recovery record could not be retired. Retry without a new key.",
-      "failedClaimCleanup": "This pairing attempt failed and was not applied. Fix local storage, then retry without a key to clear its failed-operation record.",
-      "failedClaimUnrecorded": "This pairing attempt failed and was not applied. Its cleanup could not be recorded. After fixing local storage, supply a fresh pairing key explicitly to 'vibe remote pair'; a keyless retry cannot recover this result.",
-      "failedClaimRetired": "The failed pairing record was cleared. Get a fresh pairing key, then run the following command to enter it securely:",
-      "retryPairCommand": "Retry local pairing recovery with:"
     }
   },
   "turn": {
@@ -1314,39 +1175,7 @@
   "runtime": {
     "prepare": {
       "prepared": "Show Runtime prepared.",
-      "skipped": "Show Runtime preparation skipped: {reason}",
-      "failed": "Show Runtime preparation failed: {reason}",
-      "unsupportedSource": "Show Runtime preparation failed: {reason}. Remove VIBE_SHOW_RUNTIME_SOURCE and use the packaged runtime, or set VIBE_SHOW_RUNTIME_BIN to a runtime you built.",
-      "modelHubEngineSkipped": "Model Hub engine: skipped ({reason}).",
-      "modelHubEngineInstalled": "Model Hub engine installed.",
-      "modelHubEngineReady": "Model Hub engine ready.",
-      "modelHubEngineNotReady": "Model Hub engine not ready: {reason}",
-      "ripgrepInstalled": "ripgrep installed.",
-      "ripgrepReady": "ripgrep ready.",
-      "ripgrepNotReady": "ripgrep not ready: {reason}",
-      "cloudflaredInstalled": "cloudflared installed.",
-      "cloudflaredReady": "cloudflared ready.",
-      "cloudflaredNotReady": "cloudflared not ready: {reason}"
-    },
-    "clean": {
-      "commandHelp": "Remove stale Show, Git, Model Hub, tmux, ripgrep, and cloudflared runtime installs and archives; exit nonzero if any cleanup fails.",
-      "dryRunHelp": "Report stale archives and cache entries without removing anything.",
-      "wouldRemoveItems": "Would remove {count} Show Runtime cache item(s).",
-      "wouldRemoveArchives": "Would remove {count} downloaded Show Runtime archive(s) ({size}).",
-      "consumerWouldRemoveItems": "Would remove {count} {consumer} cache item(s).",
-      "consumerWouldRemoveArchives": "Would remove {count} downloaded {consumer} archive(s) ({size}).",
-      "removedItems": "Removed {count} Show Runtime cache item(s).",
-      "removedArchives": "Removed {count} downloaded Show Runtime archive(s) ({size}).",
-      "consumerRemovedItems": "Removed {count} {consumer} cache item(s).",
-      "consumerRemovedArchives": "Removed {count} downloaded {consumer} archive(s) ({size}).",
-      "consumerPreviewFailed": "{consumer} cache preview failed ({reason}); stale entries may remain.",
-      "consumerFailed": "{consumer} cleanup failed ({reason}); stale entries remain.",
-      "consumerArchivesPartial": "{consumer} archive cleanup was partial ({reason}); {failed} archive(s) could not be removed.",
-      "consumerArchivesSkipped": "{consumer} archive cleanup skipped ({reason}); stale archives may remain.",
-      "partiallyRemoved": " {failed} archive(s) could not be removed; check permissions and the Avibe log.",
-      "skipped": "Archive cleanup skipped ({reason}); stale archives may remain. Try again after the running install or cleanup finishes.",
-      "removalFailed": "{failed} archive(s) could not be removed; stale archives remain. Check runtime directory permissions and the Avibe log.",
-      "skippedInspection": "Archive cleanup could not inspect the cache ({reason}); stale archives may remain. Check runtime directory permissions and the Avibe log."
+      "failed": "Show Runtime preparation failed: {reason}"
     },
     "doctor": {
       "archiveCacheReclaimable": "Show Runtime archive cache holds {count} reclaimable archive(s) ({size}); the current and rollback archives are kept.",
@@ -1366,15 +1195,6 @@
       "repairExplicitCommandFailed": "The Show Runtime command from VIBE_SHOW_RUNTIME_BIN could not start: {reason}. Fix or remove the override, then rerun Doctor.",
       "repairPrepareFailed": "Show Runtime preparation failed: {detail}",
       "repairLegacyArchiveUnavailable": "The packaged Show Runtime manifest is unavailable and the legacy upstream archive URL has no release asset. Upgrade or reinstall the official Avibe package, or remove stale runtime source overrides."
-    },
-    "stop": {
-      "opencodeStopped": "OpenCode server stopped",
-      "serviceFailed": "ERROR: Avibe service did not stop; preserving pidfile and aborting.",
-      "uiFailed": "ERROR: Avibe UI did not stop; preserving pidfile and aborting.",
-      "installerFailed": "ERROR: Desktop backend installer processes did not stop.",
-      "opencodeFailed": "ERROR: The OpenCode server this Runtime started did not stop.",
-      "unknownFailed": "ERROR: A process this Runtime started could not be identified and was left running.",
-      "remoteAccessFailed": "ERROR: The remote access tunnel could not be stopped."
     }
   },
   "doctor": {
@@ -1756,44 +1576,6 @@
       "dryTmux": "Would install or refresh the manifest-pinned tmux runtime."
     }
   },
-  "data": {
-    "helpCommand": "Inspect Avibe data, and run explicit trace-retention maintenance",
-    "helpDescription": "Inspect local Avibe SQLite state with guarded read-only SQL, or run explicit maintenance: `query` is read-only, while `retention --run` deletes old internal trace events and may compact the database.",
-    "skillUsage": {
-      "ownerRequired": "Instance Member or Owner access is required.",
-      "confirmationRequired": "Clearing Skill statistics requires --yes.",
-      "clearRequired": "--yes requires --clear.",
-      "helpCommand": "Inspect or clear local Skill statistics (Instance Member or Owner)",
-      "helpClear": "Clear Skill events and daily statistics.",
-      "helpYes": "Confirm clearing Skill statistics."
-    },
-    "retention": {
-      "invalidDays": "--days must be between {minimum} and {maximum}; refusing to run instead of silently clamping the window.",
-      "helpCommand": "Show or run bounded retention for internal agent trace events",
-      "helpDescription": "Status and manual control for the agent_events trace retention policy: tool_call trace rows older than the retention window are deleted; messages, non-trace events, and newer traces are never touched.",
-      "helpRun": "Run one retention pass now (bypasses the daily cadence gate, still respects the lease).",
-      "helpDays": "Retention window override in days (default: the configured value, currently {current}).",
-      "helpCompact": "Also physically compact the database (VACUUM) when safe; implies --run. Off by default: VACUUM holds the database's sole writer lock and can stall the running service's writes; run it during a maintenance window or with the service stopped.",
-      "configRecovered": "The Avibe config could not be read (recovery defaults active); the retention policy is unknown. Re-run with an explicit --days window to delete anything.",
-      "compactionReasonCheckpointBusy": "the database is busy with concurrent readers/writers",
-      "compactionReasonFreeSpace": "there is not enough free disk space to rewrite the database safely",
-      "compactionReasonOther": "compaction was not safe to run",
-      "error": "Trace retention command failed: {error}",
-      "plan": "{count} trace row(s) older than {days} day(s) are eligible ({size} of payload text).",
-      "lastRun": "Last retention run: {at}, deleted {rows} row(s).",
-      "neverRun": "No retention run has completed yet.",
-      "disabled": "Trace retention is disabled in runtime config; the daily task will not delete anything.",
-      "compaction": "Reclaimable inside the database right now: {size}.",
-      "ran": "Retention pass deleted {rows} trace row(s).",
-      "compacted": "Database compacted; {size} returned to disk.",
-      "compactionDeferred": "Compaction deferred ({reason}); rows are deleted, disk space returns on a later safe pass.",
-      "compactionSkipped": "Compaction skipped: too little would be reclaimed.",
-      "leaseLost": "This pass lost its lease to another retention run; deletion stopped partway and no completion was recorded. Retry once the other run finishes.",
-      "notDue": "Retention already ran within the last day; nothing to do.",
-      "busy": "Another retention run is active; try again later.",
-      "cancelled": "Retention stopped at a batch boundary; no completion was recorded."
-    }
-  },
   "vibeyAgent": {
     "error": {
       "refusal": "The model declined to answer this request.",
@@ -1832,6 +1614,8 @@
     "mainSessionProtected": "The desktop mini's main session is managed by Avibe and cannot be archived or edited."
   },
   "hostedTools": {
+    "keylessExa": "Exa (free)",
+    "rateLimitSwitch": "Rate-limited: {sources}; switched to {provider}. Retry after the cooldown, or use Retry now in Models › Tools.",
     "errorCode": {
       "provider_no_reason": "the provider gave no reason",
       "provider_no_image": "the provider returned no image",
@@ -1855,15 +1639,48 @@
       "provider_image_unusable": "the provider returned an image that couldn't be used",
       "search_not_run": "the model answered without searching",
       "search_failed": "the provider's search failed",
-      "response_ended_early": "the response ended early"
+      "response_ended_early": "the response ended early",
+      "service_key_invalid": "the search service key is invalid",
+      "service_balance": "the search service account has no balance",
+      "service_limit": "the search service limit has been reached",
+      "service_unavailable": "the search service is unavailable",
+      "service_rate_limited": "the search service is rate-limited; the next source was tried",
+      "service_refused": "the search service refused this query",
+      "service_unreadable": "the search service returned an unreadable response",
+      "search_query_too_long": "the search query is too long; shorten it and try again",
+      "search_sources_blocked": "all search sources are blocked or disabled",
+      "service_busy": "the service is busy",
+      "fetch_target_unreadable": "the page could not be read",
+      "fetch_url_blocked": "the URL is blocked by the network safety policy",
+      "fetch_dns_unverified": "the destination address could not be verified",
+      "fetch_challenge": "the page requires a browser challenge",
+      "fetch_js_shell": "the page requires JavaScript",
+      "fetch_timeout": "the page read timed out",
+      "fetch_unsupported_content": "the document type is not supported",
+      "fetch_refused": "the page request was refused",
+      "fetch_unavailable": "the page is unavailable",
+      "fetch_sources_blocked": "all page-reading sources are blocked or disabled"
     },
     "tool": {
       "web_search": "Web search",
+      "web_fetch": "Read",
       "x_search": "X search",
       "image_generate": "Image generation"
     },
+    "fetchErrorCode": {
+      "service_key_invalid": "the page-reading service key is invalid",
+      "service_balance": "the page-reading service account has no balance",
+      "service_limit": "the page-reading service limit has been reached",
+      "service_unavailable": "the page-reading service is unavailable",
+      "service_rate_limited": "the page-reading service is rate-limited",
+      "service_refused": "the page-reading service refused this URL",
+      "service_unreadable": "the page-reading service returned an unreadable response",
+      "service_busy": "the page-reading service is busy"
+    },
+    "fetch": {"characters": "{count} chars", "truncated": "Truncated", "local": "Local", "jina": "Jina Reader (free)", "policy": "Blocked by local policy", "notForwarded": "not forwarded", "forwarded": "previously sent to {providers}"},
     "quoted": "“{subject}”",
     "mode": {
+      "service": "via {provider}",
       "native": "native ({provider})",
       "proxy": "via {provider} proxy",
       "proxyModel": "via {provider} proxy ({model})",
@@ -1879,12 +1696,63 @@
       "images": "{count} images"
     },
     "cost": {
+      "free": "Free",
       "included": "included in subscription",
       "list": "≈ ${usd}",
       "reported": "${usd}",
       "calls": "{cost} for {calls} calls",
       "atLeast": "at least {cost}"
     },
+    "repair": {
+      "retryFetch": "retry later or use Retry now in Models › Tools › Web fetch",
+      "retrySearch": "was rate-limited; retry later or use Retry now in Models › Tools",
+      "disabled": "needs web search enabled in Models › Tools",
+      "fetch_disabled": "needs page reading enabled",
+      "key": "needs a replacement key",
+      "reauthorize": "needs a new sign-in",
+      "balance": "needs an account top-up",
+      "balanceReenable": "needs an account top-up, then re-enabling in Models › Tools",
+      "limit": "needs a higher spending or usage limit",
+      "limitReenable": "needs a higher spending or usage limit, then re-enabling in Models › Tools",
+      "tavilyLimit": "needs a plan upgrade or a higher key usage limit (432), or a higher pay-as-you-go limit (433) in Tavily, then re-enabling in Models › Tools",
+      "plan": "needs a plan that includes this product",
+      "account": "needs the account restored by the provider",
+      "error": "needs attention in Models › Providers"
+    },
+    "reason": {
+      "failed": "failed",
+      "superseded": "failed on this request; a later action has since updated its state",
+      "service_key_invalid": "has an invalid key",
+      "service_balance": "is out of balance",
+      "service_limit": "reached its usage limit",
+      "service_unavailable": "was unavailable",
+      "service_rate_limited": "was rate-limited",
+      "service_refused": "refused this query",
+      "service_unreadable": "returned an unreadable response",
+      "service_busy": "was busy",
+      "fetch_target_unreadable": "could not read the page",
+      "fetch_url_blocked": "blocked the URL for network safety",
+      "fetch_dns_unverified": "could not verify the destination address",
+      "fetch_challenge": "encountered a browser challenge",
+      "fetch_js_shell": "requires JavaScript",
+      "fetch_timeout": "timed out",
+      "fetch_unsupported_content": "does not support this document type",
+      "fetch_refused": "refused the request",
+      "fetch_unavailable": "was unavailable"
+    },
+    "skip": {
+      "blocked": "was blocked",
+      "disabled": "was not enabled for search",
+      "fetch_disabled": "was not enabled for page reading",
+      "cooling": "was waiting to retry",
+      "query_too_long": "can't take a query this long",
+      "unavailable": "was unavailable",
+      "unsupported_type": "does not support this document type",
+      "service_busy": "was busy"
+    },
+    "listSeparator": ", ",
+    "itemSeparator": "; ",
+    "switch": "{failed}; switched to {provider}",
     "status": {
       "failed": "failed: {error}",
       "incomplete": "incomplete: {error}",

@@ -48,6 +48,7 @@ from core.agent_core.agent.events import (
     NAMED_ERROR_KINDS,
     AgentError,
     AgentEvent,
+    CompactionFailed,
     CompactionFinished,
     MessageCommitted,
     RunEnded,
@@ -60,7 +61,8 @@ from core.agent_core.agent.models import ModelSelection
 from core.agent_core.agent.recovery import settle_open_calls
 from core.agent_core.harness.context import ContextConfig
 from core.agent_core.harness.projection import open_tool_calls
-from core.agent_core.harness.store import ContextEntry
+from core.agent_core.hosted_continuations import pending_hosted
+from core.agent_core.ai.transform import in_flight_position
 from core.agent_core.tools.base import CallInstance
 from core.agent_core.tools.jobs import call_instance
 from core.agent_core.messages import (
@@ -88,7 +90,7 @@ from core.services.agent_steering import (
 )
 from core.backend_failure import emit_backend_failure
 from core.agent_output import Narration, Reply, ToolActivity, TurnEnd, TurnOutcome, emit_output
-from core.citations import CitationBundle, register_text_citations
+from core.citations import CitationBundle, register_citations, register_text_citations
 from core.hosted_activity import HostedActivity, hosted_line, native_activities, proxy_activity
 from core.message_output import MessageOutput, terminal_output_for
 from core.native_dispatch_phase import mark_backend_dispatch_attempted
@@ -324,7 +326,14 @@ class VibeyAgent(BaseAgent):
                 )
                 await self._fail(request, type(error).__name__, f"turn failed: {error}", cause=error)
             finally:
-                await self._admit_returned_inputs(turn)
+                await self._admit_returned_inputs(turn, defer_continuation=self._service_stopping(turn))
+                if (
+                    (context.platform_specific or {}).get("vibey_resume")
+                    and turn.reason not in _COMPLETED
+                    and not self._service_stopping(turn)
+                ):
+                    # Preflight/Stop can end a rerun before its Agent took the durable inputs.
+                    self._schedule_recovery()
                 self.store.bind_agent(session_id, None)
                 if turn.router is not None:
                     await turn.router.aclose()
@@ -414,6 +423,7 @@ class VibeyAgent(BaseAgent):
                     agent_input,
                     turn_id=turn.turn_id,
                     turn_inputs=resume_turn_inputs,
+                    pending_inputs=await self._recovered_inputs(session_id),
                 )
                 if transcript_resume
                 else turn.agent.run(agent_input, turn_id=turn.turn_id)
@@ -426,10 +436,10 @@ class VibeyAgent(BaseAgent):
                 if turn.continuation_started_at is None:
                     turn.continuation_started_at = time.monotonic()
                 # Finish T2 before asking the same Agent to build its next request.
-                # Accepted P1 inputs are admitted into the transcript, but never
-                # become an implicit user-visible continuation message.
+                # Accepted P1 inputs enter context unless the native continuation still
+                # requires a tool-result-only user message; those restore to its queue.
                 await self._settle_left_open(runtime)
-                resume_turn_inputs = await self._admit_returned_inputs(turn)
+                resume_turn_inputs = await self._admit_returned_inputs(turn, defer_continuation=True)
                 if await self._wait_auto_continue(turn):
                     turn.continuations += 1
                     turn.reason = None
@@ -437,6 +447,8 @@ class VibeyAgent(BaseAgent):
                     turn.final_row = None
                     transcript_resume = True
                     continue
+                # Stop/backoff exhaustion ended the continuation we deferred T3 for.
+                await self._resume(runtime)
             agent_input = await self._continuing_input(turn)
         if self._cut_by_service_stop(turn):
             # Stopping the service (its Model Hub gateway first) ended this run, not
@@ -902,6 +914,15 @@ class VibeyAgent(BaseAgent):
         elif isinstance(event, CompactionFinished):
             # Silent (C-9 section 10); the session's occupancy snapshot drops with the context.
             self._note_total(run, event.tokens_after_estimate)
+        elif isinstance(event, CompactionFailed):
+            # Silent to the user too (C-9 section 10); the log keeps why, a refusal's category included.
+            logger.warning(
+                "Vibey compaction failed: session=%s turn=%s reason=%s error=%s",
+                run.session_id,
+                run.turn_id,
+                event.reason,
+                _loggable(event.error),
+            )
 
     async def _settle(self, run: _Run) -> None:
         """Settle the Turn from the run's outcome (loop-control.md section 6).
@@ -1019,7 +1040,7 @@ class VibeyAgent(BaseAgent):
         run.reason = None
         return pending[-1]
 
-    async def _admit_returned_inputs(self, run: _Run) -> tuple[int, ...]:
+    async def _admit_returned_inputs(self, run: _Run, *, defer_continuation: bool = False) -> tuple[int, ...]:
         """Inputs a stopped or failed run accepted but did not consume enter the context (T3).
 
         They belong to the Turn that accepted them and share its outcome, as a message
@@ -1030,7 +1051,11 @@ class VibeyAgent(BaseAgent):
         if run.agent is None:
             return ()
         try:
-            for item in await run.agent.take_pending_inputs():
+            pending = await run.agent.take_pending_inputs()
+            if pending and defer_continuation and await self._deferred_continuation_open(run.session_id):
+                # Durable accepted rows restore the queue at resume, including after shutdown.
+                return ()
+            for item in pending:
                 entry = await self.store.consume_input(run.session_id, item.message_id, item.message)
                 consumed.append(entry.context_seq)
         except Exception:
@@ -1059,9 +1084,35 @@ class VibeyAgent(BaseAgent):
             return
         if not runtime.cwd:
             runtime.cwd = await asyncio.to_thread(self._session_workdir, session_id)
+        if (defer_continued or stop is not None) and await self._deferred_continuation_open(session_id):
+            # T3 cannot close an Anthropic server-tool turn. Startup leaves the accepted
+            # rows untouched; Agent.resume restores them to its queue before admission opens.
+            return
+        for item in await self._recovered_inputs(session_id):
+            await self.store.consume_input(session_id, item.message_id, item.message)
+
+    async def _deferred_continuation_open(self, session_id: str) -> bool:
+        turn = await asyncio.to_thread(self._active_turn, session_id)
+        if turn is None:
+            return False
+        entries = [row for row in await self.store.load_turn(session_id, str(turn["id"])) if row.message is not None]
+        position = in_flight_position([row.message for row in entries])
+        return (
+            position is not None
+            and bool(pending_hosted(entries[position].message))
+            and await asyncio.to_thread(self._work_state, str(turn["id"])) == "open"
+        )
+
+    def _active_turn(self, session_id: str) -> Optional[dict[str, Any]]:
+        with self._engine.connect() as conn:
+            return delivery_store.active_turn(conn, session_id)
+
+    async def _recovered_inputs(self, session_id: str) -> tuple[AgentInput, ...]:
+        inputs = []
         for message_id, text_value, files, delivery in await asyncio.to_thread(self._unconsumed_inputs, session_id):
             message = await self._render_input(session_id, text_value, files, await self._input_metadata(delivery))
-            await self.store.consume_input(session_id, message_id, message)
+            inputs.append(AgentInput(message_id, message))
+        return tuple(inputs)
 
     async def _input_metadata(self, delivery: dict[str, Any]) -> Optional[AgentInputMetadata]:
         """A recovered input's sender facts, from the owner the live steer path uses (T3).
@@ -1564,15 +1615,22 @@ class VibeyAgent(BaseAgent):
     def _display_with_citations(
         self, message: AssistantMessage, *, final: bool, replied: bool = False, images: Sequence[HostedImage] = ()
     ) -> tuple[str, Optional[CitationBundle]]:
-        """The display text and, when the provider cited sources, the bundle that links them.
+        """The display text and citation bundle for provider citations or raw citation markers.
 
         The same text ``_display_source`` gives, with each cited span carrying a
         token that delivery writes out as a Markdown link (IM) and a badge (Web),
-        through ``core.citations`` like every other backend's citations.
+        through ``core.citations`` like every other backend. A marker without
+        trustworthy structured source evidence is registered with an empty source
+        map and becomes the localized source-unavailable fallback instead.
         """
         blocks = [(separator, block.text, block.citations or ()) for separator, block in text_parts(message)]
         if not any(citations for _, _, citations in blocks):
-            return self._display_source(message, final=final, replied=replied, images=images), None
+            body = self._display_source(message, final=final, replied=replied, images=images)
+            return register_citations(
+                body,
+                {},
+                unresolved_label=i18n_t("message.citationUnresolved", self._language()),
+            )
         body, bundle = register_text_citations(
             blocks,
             unresolved_label=i18n_t("message.citationUnresolved", self._language()),
@@ -1633,24 +1691,44 @@ class VibeyAgent(BaseAgent):
         except Exception:
             logger.exception("Vibey could not deliver %d generated image(s)", len(run.hosted_images))
 
-    async def _source_names(self) -> Mapping[str, str]:
-        """Each Model Hub Source's display name by id, as Model Hub holds them now.
+    async def _source_display(self, tool: str = "web_search") -> tuple[Mapping[str, str], Optional[Mapping[str, Mapping[str, Any]]]]:
+        """Each Model Hub Source's display name and current state by id, as Model Hub holds them now.
 
-        Read through the Model Hub runtime, the one owner of its current config, off
-        the event loop: ``self.config`` is the controller's app config, which carries
-        no Model Hub state, and a Source renamed or added since start must show as it
-        is now.
+        Read through the Model Hub runtime, the one owner of its current config, off the event loop: ``self.config``
+        is the controller's app config, which carries no Model Hub state, and a Source renamed, repaired, turned off
+        for search or removed since must show as it is now (``core.hosted_activity.SourceState``). Without a read
+        the states are None, so a card offers no repair it could not check.
         """
         runtime = getattr(self.controller, "model_hub_runtime", None)
         if runtime is None:
-            return {}
+            return {}, None
+
+        def read() -> tuple[dict[str, str], dict[str, dict[str, Any]]]:
+            from config.v2_config import hosted_tool_setting, model_hub_builtin_sources
+            from core.handlers.model_hub.hosted_tools import search_service_settings
+            from core.handlers.model_hub.fetch_readers import fetch_service_settings
+
+            hub = runtime.snapshot()
+            setting = hosted_tool_setting(hub, tool)
+            display_sources = [*hub.sources, *model_hub_builtin_sources()]
+            names = {source.id: source.display_name for source in display_sources if source.display_name}
+            states: dict[str, dict[str, Any]] = {}
+            for source in display_sources:
+                state: dict[str, Any] = {"protocol": source.protocol, "vendor": source.vendor}
+                if source.state.status in ("needs_action", "error"):
+                    state["needs_action"] = source.state.detail_key
+                service = fetch_service_settings(setting, source) if tool == "web_fetch" else search_service_settings(setting, source)
+                if service is not None:
+                    state["enabled"] = service["enabled"]
+                states[source.id] = state
+            return names, states
+
         try:
-            hub = await asyncio.to_thread(runtime.snapshot)
+            return await asyncio.to_thread(read)
         except Exception:
-            # A name is display only: the card and the line still show the Source by id.
-            logger.warning("Vibey could not read Model Hub's Sources for display names", exc_info=True)
-            return {}
-        return {source.id: source.display_name for source in hub.sources if source.display_name}
+            # Display only: the card and the line still show each Source by its id or the label it was recorded with.
+            logger.warning("Vibey could not read Model Hub's Sources for display", exc_info=True)
+            return {}, None
 
     async def _emit_hosted(self, run: _Run, activity: HostedActivity) -> None:
         """One hosted call: its line for IM and its card for the Web (``core.hosted_activity``)."""
@@ -1674,7 +1752,7 @@ class VibeyAgent(BaseAgent):
         message = run.responses.get(row_id)
         if message is None:
             return
-        names = await self._source_names()
+        names, _states = await self._source_display()
         for activity in native_activities(message, source_names=names.get, response_id=row_id):
             await self._emit_hosted(run, activity)
 
@@ -1695,8 +1773,17 @@ class VibeyAgent(BaseAgent):
             await self._emit_tool_line(run, call.name, dict(call.arguments))
             return
         duration = int((time.monotonic() - started) * 1000) if started is not None else None
-        names = await self._source_names()
-        await self._emit_hosted(run, proxy_activity(call, result.hosted, source_names=names.get, duration_ms=duration))
+        names, states = await self._source_display(call.name)
+        await self._emit_hosted(
+            run,
+            proxy_activity(
+                call,
+                result.hosted,
+                source_names=names.get,
+                source_state=states.get if states is not None else None,
+                duration_ms=duration,
+            ),
+        )
 
     def _committed_tool_result(self, event_id: str) -> Optional[ToolResultMessage]:
         """The tool result a ``ToolFinished`` names: one row, by primary key."""

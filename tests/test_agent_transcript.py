@@ -200,6 +200,7 @@ COMPACTION = {  # the current C-9 ``Compaction`` shape (transcript-rows.schema.j
 }
 
 
+
 async def test_every_kind_round_trips_in_one_order_attributed_to_the_turn(engine) -> None:
     with engine.begin() as conn:
         home = _scope(conn, "C-home")
@@ -256,6 +257,73 @@ async def test_every_kind_round_trips_in_one_order_attributed_to_the_turn(engine
         ("context_edit", "context"),
         ("context_compaction", "context"),
     ]
+
+
+async def test_a_stored_unknown_native_hosted_row_loads_through_the_transcript_owner(engine):
+    with engine.begin() as conn:
+        home = _scope(conn, "C-hosted-history")
+        _session(conn, "ses_hosted_history", home)
+        consumed = _row(conn, "ses_hosted_history", home, "go")
+    store = SQLiteTranscriptStore(engine)
+    await store.consume_input("ses_hosted_history", consumed, _user("go"))
+    response = await store.append_response("ses_hosted_history", _assistant("stored"), final=True)
+    tool_result = await store.append_tool_result(
+        "ses_hosted_history", _tool_result("call_unknown", "stored tool result"), details={}
+    )
+
+    unknown = {
+        "role": "assistant",
+        "content": [
+            {
+                "type": "hosted_tool",
+                "id": "fetch_1",
+                "tool": "future_unknown_tool",
+                "action": {"type": "open_page", "url": "https://example.com/docs"},
+                "record": {
+                    "status": "completed",
+                    "sources": [{"url": "https://example.com/docs", "title": "Example Docs"}],
+                },
+                "native": {"source_id": "src_x1a2b3c4d5", "payload": []},
+            }
+        ],
+        "origin": {"provider": "anthropic", "api": "anthropic", "model": "claude-opus-5-5"},
+        "stop_reason": "stop",
+        "hosted_summary": {"counts": {}, "cited_sources": []},
+    }
+    unknown_tool_result = {
+        "role": "tool_result",
+        "tool_call_id": "call_unknown",
+        "tool_name": "future_unknown_tool",
+        "content": [{"type": "text", "text": "stored tool result"}],
+        "is_error": True,
+        "hosted": {"record": {"status": "completed", "sources": []}},
+    }
+    with engine.begin() as conn:
+        row = conn.execute(select(messages.c.content_json).where(messages.c.id == response.row_id)).scalar_one()
+        payload = json.loads(row)
+        payload["model"]["message"] = unknown
+        conn.execute(messages.update().where(messages.c.id == response.row_id).values(content_json=json.dumps(payload)))
+        event_payload = conn.execute(
+            select(agent_events.c.content_json).where(agent_events.c.id == tool_result.row_id)
+        ).scalar_one()
+        event = json.loads(event_payload)
+        event["message"] = unknown_tool_result
+        conn.execute(
+            agent_events.update().where(agent_events.c.id == tool_result.row_id).values(content_json=json.dumps(event))
+        )
+
+    loaded = list(await store.load("ses_hosted_history"))
+
+    assert len(loaded) == 3
+    restored = loaded[1].message
+    assert isinstance(restored, AssistantMessage)
+    assert restored.hosted_summary is None
+    assert isinstance(restored.content[0], TextBlock)
+    assert "https://example.com/docs" in restored.content[0].text
+    assert "Example Docs" in restored.content[0].text
+    result = loaded[2].message
+    assert isinstance(result, ToolResultMessage)
+    assert result.hosted is None and result.is_error is True
 
 
 async def test_rows_outside_the_context_never_load(engine) -> None:
@@ -391,6 +459,36 @@ async def test_fork_chain_reads_the_ancestry_up_to_each_fork_point(engine) -> No
     assert released.context_seq == 1
     assert list(await store.load("ses_early")) == [root[0], early]
     assert early.context_seq == 2
+
+
+async def test_turn_context_load_ignores_long_fork_history(engine) -> None:
+    with engine.begin() as conn:
+        home = _scope(conn, "C-long-root")
+        _session(conn, "ses_long_root", home)
+        root_input = _accepted_turn(conn, "ses_long_root", home, "root", "turn_long_root")
+    store = SQLiteTranscriptStore(engine)
+    await store.consume_input("ses_long_root", root_input, _user("root"))
+    for index in range(60):
+        await store.append_response("ses_long_root", _assistant(f"root-{index}"), final=False, turn_id="turn_long_root")
+    root_rows = list(await store.load("ses_long_root"))
+    with engine.begin() as conn:
+        _session(
+            conn,
+            "ses_long_child",
+            home,
+            {"fork_source_session_id": "ses_long_root", "fork_source_context_seq": root_rows[-1].context_seq},
+        )
+        child_input = _accepted_turn(conn, "ses_long_child", home, "child", "turn_long_child")
+    await store.consume_input("ses_long_child", child_input, _user("child"))
+    child_response = await store.append_response(
+        "ses_long_child", _assistant("child done"), final=False, turn_id="turn_long_child"
+    )
+
+    full = list(await store.load("ses_long_child"))
+    turn = list(await store.load_turn("ses_long_child", "turn_long_child"))
+    assert len(full) == len(root_rows) + 2
+    assert [entry.row_id for entry in turn] == [child_input, child_response.row_id]
+    assert all(entry.session_id == "ses_long_child" for entry in turn)
 
 
 async def test_a_cancelled_write_raises_only_after_its_commit_settled(engine) -> None:
@@ -595,6 +693,7 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
             cut_turn = message_deliveries.get_turn(conn, "turn_cut")
             assert restart_resume_plan(conn, cut_turn) == "rerun"
             assert committed_final(conn, "ses_cut", "turn_cut") is None
+        assert [entry.kind for entry in await store.load_turn("ses_cut", "turn_cut")] == ["input", "response"]
         # The rerun's end, on the loop: the final's delivery.
         assert delivered_committed_row(rerun, final.row_id, outward=True) is None
         with engine.begin() as conn:
@@ -618,6 +717,10 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
         r"|session_id=\? AND context_seq>\?)\)"
     )
     for (sql, _params), plan in zip(statements, plans):
+        if sql.lstrip().upper() in {"BEGIN", "COMMIT"}:
+            continue
+        if "INDEXED BY ix_messages_turn_id" in sql or "INDEXED BY ix_agent_events_turn_sequence_id" in sql or "INDEXED BY ix_message_deliveries_turn" in sql:
+            continue
         searches = [step for step in plan if step.startswith(("SEARCH", "SCAN"))]
         if not searches and sql.lstrip().upper().startswith("UPDATE"):
             continue  # a CAS write keyed by the row id, whose plan names no table read
@@ -629,6 +732,18 @@ async def test_the_restart_reads_of_a_turns_context_tail_stay_bounded(engine) ->
         "current_target_turn_id" in sql and "steering" in str(params) and bounded.fullmatch(plan[0])
         for (sql, params), plan in zip(statements, plans)
     )
+    turn_queries = [
+        (sql, plan)
+        for (sql, _params), plan in zip(statements, plans)
+        if "INDEXED BY ix_messages_turn_id" in sql
+        or "INDEXED BY ix_agent_events_turn_sequence_id" in sql
+        or "INDEXED BY ix_message_deliveries_turn" in sql
+    ]
+    assert len(turn_queries) == 3
+    assert any("ix_messages_turn_id" in step for _, plan in turn_queries for step in plan)
+    assert any("ix_agent_events_turn_sequence_id" in step for _, plan in turn_queries for step in plan)
+    assert any("ix_message_deliveries_turn" in step for _, plan in turn_queries for step in plan)
+    assert all(not step.startswith("SCAN") for _, plan in turn_queries for step in plan)
 
 
 async def test_a_call_instance_is_settled_once_whoever_writes(engine) -> None:

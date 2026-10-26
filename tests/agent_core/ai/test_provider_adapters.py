@@ -21,6 +21,7 @@ from core.agent_core.ai.openai_responses import OpenAIResponsesAdapter, build_re
 from core.agent_core.ai.provider import (
     BlockEnd,
     Done,
+    MalformedToolCall,
     MediaLoader,
     ModelEndpoint,
     ModelRequest,
@@ -1010,6 +1011,39 @@ async def test_anthropic_ignores_unknown_delta_variants_like_pi() -> None:
 
     assert isinstance(events[-1], Done)
     assert events[-1].message.content == (TextBlock(""),)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop", "details", "error_message"),
+    [
+        (
+            "refusal",
+            {"type": "refusal", "category": "reasoning_extraction", "explanation": "Claude can't help with this."},
+            "category: reasoning_extraction; explanation: Claude can't help with this.",
+        ),
+        ("refusal", {"category": "cyber", "explanation": None}, "category: cyber"),
+        # A diagnostic never fails the response: a shape it cannot read is left out.
+        ("refusal", [], None),
+        ("refusal", {"category": 7}, None),
+        ("end_turn", {"category": "cyber"}, None),
+    ],
+)
+async def test_anthropic_refusal_keeps_its_stop_details_as_the_error_message(
+    stop: str, details: Any, error_message: str | None
+) -> None:
+    delta = json.dumps({"type": "message_delta", "delta": {"stop_reason": stop, "stop_details": details}})
+    body = f'data: {delta}\n\ndata: {{"type":"message_stop"}}\n\n'
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(AnthropicAdapter(client), _request("anthropic"))
+
+    assert isinstance(events[-1], Done)
+    assert events[-1].message.stop_reason == ("refusal" if stop == "refusal" else "stop")
+    assert events[-1].message.error_message == error_message
 
 
 @pytest.mark.asyncio
@@ -2348,7 +2382,7 @@ async def test_chat_late_tool_id_matches_tool_call_start_id() -> None:
 async def test_chat_malformed_tool_arguments_keep_text_and_usage_in_partial() -> None:
     body = (
         'data: {"choices":[{"delta":{"content":"before "}}]}\n\n'
-        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read","arguments":"not-json"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}\n\n'
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_good","function":{"name":"read","arguments":"{\\"path\\":\\"x\\"}"}},{"index":1,"id":"call_bad","function":{"name":"read","arguments":"not-json"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}\n\n'
         "data: [DONE]\n\n"
     )
 
@@ -2363,7 +2397,14 @@ async def test_chat_malformed_tool_arguments_keep_text_and_usage_in_partial() ->
     assert error.kind == "invalid_request"
     assert error.partial is not None
     assert error.partial.usage == Usage(input_tokens=3, output_tokens=2)
-    assert error.partial.content == (TextBlock("before "),)
+    assert error.partial.content == (
+        TextBlock("before "),
+        ToolCallBlock(id="call_good", name="read", arguments={"path": "x"}, native_id="call_good"),
+        ToolCallBlock(id="call_bad", name="read", arguments={}, native_id="call_bad"),
+    )
+    assert error.partial.error_message == "malformed tool arguments: expected a JSON object"
+    assert error.continuable is True
+    assert error.malformed_tool_calls == (MalformedToolCall(id="call_bad", name="read"),)
 
 
 @pytest.mark.asyncio
@@ -2401,6 +2442,24 @@ async def test_chat_finish_reason_end_maps_to_stop() -> None:
 
     assert isinstance(events[-1], Done)
     assert events[-1].message.stop_reason == "stop"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("finish_reason", "expected"),
+    [("model_context_window_exceeded", "length"), ("stop", "stop"), ("content_filter", "safety")],
+)
+async def test_chat_context_window_finish_reason_maps_only_the_named_reason(finish_reason: str, expected: str) -> None:
+    body = f'data: {{"choices":[{{"delta":{{"content":"ok"}},"finish_reason":"{finish_reason}"}}]}}\n\ndata: [DONE]\n\n'
+
+    def handler(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        events = await _events(OpenAIChatAdapter(client), _request("openai_chat"))
+
+    assert isinstance(events[-1], Done)
+    assert events[-1].message.stop_reason == expected
 
 
 @pytest.mark.asyncio

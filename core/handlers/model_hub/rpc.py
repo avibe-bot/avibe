@@ -223,6 +223,10 @@ async def dispatch_model_hub_rpc(
         return await service.set_hosted_tool(payload.get("tool"), payload.get("setting"))
     if operation == "clear_hosted_refusals":
         return await service.clear_hosted_refusals(payload.get("tool"), payload.get("target"))
+    if operation == "clear_service_cooldown":
+        return await service.clear_service_cooldown(
+            payload.get("source_id"), payload.get("service_id"), tool=payload.get("tool", "web_search"),
+        )
     if operation == "clear_source_evidence":
         return await service.clear_source_evidence(payload.get("source_id"), payload.get("target"))
     if operation == "get_agent_chain":

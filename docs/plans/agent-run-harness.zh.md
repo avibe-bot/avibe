@@ -103,7 +103,9 @@ vibe agent run \
 
 ### 废弃 `vibe hook send`
 
-兼容窗口：
+兼容窗口已结束：`vibe hook send` 已移除，已存储的 `hook_send` run 记录仍可读取。
+
+兼容窗口（历史）：
 
 ```bash
 vibe hook send ... -> vibe agent run ...
@@ -596,6 +598,7 @@ JSON 输出应作为 agents 和 scripts 的稳定契约。
 - 顶层必须有 `schema_version`、`ok`、`kind`。
 - `kind` 表达返回对象类型，例如 `agent_run`、`run_definition`、`agent_runs`。
 - 人类可读输出可以更短，但 `--json` 输出必须稳定。
+- 记录省略 null、空值和零值字段；一个 Run 就是一个 `run` 对象，顶层不再重复它的字段。
 
 同步 Agent Run 成功：
 
@@ -619,7 +622,6 @@ JSON 输出应作为 agents 和 scripts 的稳定契约。
 {
   "schema_version": 1,
   "ok": true,
-  "accepted": true,
   "kind": "agent_run",
   "run": {
     "id": "run123",
@@ -645,8 +647,7 @@ Task/Watch definition 创建成功：
     "session_id": "sesnew12345",
     "scope_id": "slack::channel::C123",
     "next_run_at": "2026-06-01T09:00:00+08:00"
-  },
-  "warnings": []
+  }
 }
 ```
 
@@ -657,10 +658,6 @@ Task/Watch definition 创建成功：
   "schema_version": 1,
   "ok": true,
   "kind": "agent_run",
-  "definition": {
-    "id": "def123",
-    "definition_type": "scheduled"
-  },
   "run": {
     "id": "run123",
     "status": "queued",
@@ -685,12 +682,8 @@ Task/Watch definition 创建成功：
     "source_kind": "cli",
     "agent_name": "release-reviewer",
     "session_id": "sesnew12345",
-    "definition_id": null,
     "created_at": "2026-05-21T17:00:00Z",
-    "started_at": "2026-05-21T17:00:03Z",
-    "completed_at": null,
-    "result_text": null,
-    "error": null
+    "started_at": "2026-05-21T17:00:03Z"
   }
 }
 ```
@@ -709,7 +702,6 @@ Task/Watch definition 创建成功：
       "status": "running",
       "agent_name": "release-reviewer",
       "session_id": "sesnew12345",
-      "definition_id": null,
       "created_at": "2026-05-21T17:00:00Z"
     }
   ]

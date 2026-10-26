@@ -477,6 +477,57 @@ def row_cost(row: Mapping[str, Any], price: Optional[ModelPrice]) -> Cost:
     )
 
 
+@dataclass
+class ServiceCost:
+    """Priced search-service usage of one aggregate (`web-search-services.md` §4.3).
+
+    Two figures that are never added together: the list valuation of the billable
+    requests at the current catalog price, and the vendors' own reported figures.
+    """
+
+    api_cost_usd: float = 0.0
+    reported_usd: float = 0.0
+    # Billable requests whose service the current catalog no longer prices.
+    excluded_requests: int = 0
+    api_cost_lower_bound: bool = False
+
+    def add(self, other: "ServiceCost") -> None:
+        self.api_cost_usd += other.api_cost_usd
+        self.reported_usd += other.reported_usd
+        self.excluded_requests += other.excluded_requests
+        self.api_cost_lower_bound = self.api_cost_lower_bound or other.api_cost_lower_bound
+
+    @property
+    def lower_bound(self) -> bool:
+        # Like an unpriced model's tokens, an unpriced billable request makes the figure a floor.
+        return self.api_cost_lower_bound or self.excluded_requests > 0
+
+    def fields(self) -> dict[str, Any]:
+        return {
+            "reported_usd": round(self.reported_usd, 6),
+            "api_cost_usd": round(self.api_cost_usd, 6),
+            "api_cost_lower_bound": self.lower_bound,
+        }
+
+
+def service_row_cost(row: Mapping[str, Any], usd_per_1k: Optional[float]) -> ServiceCost:
+    """Value one service ledger row at its service's list price; None when the catalog no longer prices it.
+
+    Every billable request is one request at the list price. A request whose
+    billing is unknown adds nothing and makes the figure a floor, as a stored
+    `lower_bound` does; the reported figures ride beside it unchanged.
+    """
+
+    billable = int(row.get("billable_requests") or 0)
+    floor = row.get("lower_bound") is True or int(row.get("uncertain_requests") or 0) > 0
+    reported = float(row.get("reported_usd") or 0.0)
+    if usd_per_1k is None:
+        # The catalog cannot value this service anymore. Even a non-billable
+        # historical request is unpriced; retain that fact as a lower bound.
+        return ServiceCost(reported_usd=reported, excluded_requests=billable, api_cost_lower_bound=True)
+    return ServiceCost(api_cost_usd=billable * usd_per_1k / 1000, reported_usd=reported, api_cost_lower_bound=floor)
+
+
 def billing_period(today: date, renewal_day: Optional[int]) -> tuple[str, date, Optional[date]]:
     """(basis, first day, next renewal) of the period ending today."""
 

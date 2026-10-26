@@ -36,7 +36,7 @@ and a restart that recovers the batch renders the same line. The sources are:
 | Task on-failure Agent turn | `[Harness: Task <task id> "<name>" on-failure]` |
 | Webhook | `[Harness: webhook <definition id> "<name>"]` |
 | `vibe agent run` from an Agent shell | `[Harness: agent run <run id> from #<caller session>]` |
-| `vibe agent run` outside an Agent shell, or `vibe hook send` | `[Harness: agent run <run id> from the CLI]` |
+| `vibe agent run` outside an Agent shell | `[Harness: agent run <run id> from the CLI]` |
 | Callback of a finished run | `[Harness: callback of run <run id> from #<run's session>]` |
 | Vault request outcome | `[Harness: Vault request <request id>]` |
 | `hook_send` run queued by a release before `vibe hook send` became an Agent run | `[Harness: hook send <run id>]` |

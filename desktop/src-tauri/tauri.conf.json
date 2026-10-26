@@ -33,7 +33,8 @@
         "bootstrap",
         "window-drag",
         "pet",
-        "main-pet-bind"
+        "main-pet-bind",
+        "main-computer-use"
       ],
       "csp": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost"
     }

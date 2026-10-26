@@ -19,15 +19,37 @@ from aiohttp import web
 from core.handlers.model_hub.turn_gateway import ModelHubTurnGateway
 from tests.test_model_hub_declared_tools import COMPLETED, INPUT, _wire
 from tests.test_model_hub_l3 import _canonicalize_fixed_test_routes, _service, _source
-from vibe.model_hub_runtime.client import ENGINE_RESPONSE_HEADER_ALLOW_LIST, _allowed_engine_header
+from vibe.model_hub_runtime.client import (
+    CLAUDE_UNIFIED_RATE_LIMIT_HEADER_NAMES,
+    ENGINE_RESPONSE_HEADER_ALLOW_LIST,
+    _allowed_claude_rate_limit_headers,
+    _allowed_engine_header,
+)
+from core.handlers.model_hub.adapter import sanitize_response_correlation_ids
 
 # What an upstream may send and the engine forwards: none of it belongs to Avibe's callers.
 INJECTED = {
     "Set-Cookie": "upstream-session=secret; Path=/; HttpOnly",
-    "Request-Id": "req_upstream_1",
+    "Anthropic-Request-Id": "anthropic-request-1",
     "Anthropic-Organization-Id": "org-upstream",
     "Retry-After-Ms": "1500",
+    "Anthropic-Ratelimit-Unified-Status": "rejected",
+    "Anthropic-Ratelimit-Unified-5h-Status": "rejected",
+    "Anthropic-Ratelimit-Unified-7d-Status": "allowed",
+    "Anthropic-Ratelimit-Unified-7d_oi-Status": "allowed",
+    "Anthropic-Ratelimit-Unified-Overage-Status": "rejected",
+    "Anthropic-Ratelimit-Unified-Overage-Disabled-Reason": "plan_limit",
+    "Anthropic-Ratelimit-Unified-Representative-Claim": "5h",
+    "Anthropic-Ratelimit-Unified-5h-Utilization": "1.0",
+    "Anthropic-Ratelimit-Unified-7d-Utilization": "0.25",
     "Anthropic-Ratelimit-Unified-5h-Reset": "1797000000",
+    "Anthropic-Ratelimit-Unified-7d-Reset": "1798000000",
+    "Anthropic-Ratelimit-Unified-7d_oi-Reset": "1798000000",
+    "Anthropic-Ratelimit-Unified-Reset": "1798000000",
+    "Anthropic-Ratelimit-Unified-Overage-Reset": "1798000000",
+    "Anthropic-Ratelimit-Unified-Unknown": "must-not-cross",
+    "X-Request-Id": "relay-request-1",
+    "Request-Id": "provider-request-1",
     "X-Upstream-Injected": "1",
 }
 JSON_BODY = {
@@ -66,11 +88,60 @@ async def _engine(status: int, stream: bool):
         await runner.cleanup()
 
 
-def test_only_the_retry_advice_avibe_uses_is_read_from_an_engine_response():
-    assert ENGINE_RESPONSE_HEADER_ALLOW_LIST == {"retry-after"}
+def test_only_allowlisted_headers_are_read_from_an_engine_response():
+    assert ENGINE_RESPONSE_HEADER_ALLOW_LIST == {
+        "retry-after", "retry-after-ms", "request-id", "x-request-id",
+        *CLAUDE_UNIFIED_RATE_LIMIT_HEADER_NAMES,
+    }
     headers = {**INJECTED, "Retry-After": "120"}
     assert _allowed_engine_header(headers, "Retry-After") == "120"
-    assert {name: _allowed_engine_header(headers, name) for name in INJECTED} == dict.fromkeys(INJECTED)
+    assert _allowed_engine_header({"rEtRy-AfTeR-Ms": "1500"}, "Retry-After-Ms") == "1500"
+    assert _allowed_engine_header(headers, "Request-Id") == "provider-request-1"
+    assert _allowed_engine_header(headers, "X-Request-Id") == "relay-request-1"
+    assert _allowed_engine_header(headers, "Anthropic-Ratelimit-Unified-5H-Status") == "rejected"
+    assert _allowed_engine_header(headers, "Anthropic-Ratelimit-Unified-Unknown") is None
+    assert sanitize_response_correlation_ids(headers) == (
+        ("request-id", "provider-request-1"),
+        ("x-request-id", "relay-request-1"),
+    )
+    assert _allowed_engine_header(headers, "Set-Cookie") is None
+
+
+def test_claude_unified_headers_are_exactly_projected_and_validated():
+    headers = {
+        "aNtHrOpIc-RaTeLiMiT-UnIfIeD-5h-StAtUs": "REJECTED",
+        "Anthropic-Ratelimit-Unified-5h-Reset": "1797000000",
+        "Anthropic-Ratelimit-Unified-Representative-Claim": "5h",
+        "Anthropic-Ratelimit-Unified-Unknown": "private",
+        "Anthropic-Ratelimit-Unified-7d-Reset": "not-a-date",
+        "Anthropic-Ratelimit-Unified-7d-Status": "rejected\nforged",
+        "Anthropic-Ratelimit-Unified-Overage-Status": "allowed",
+    }
+    assert _allowed_claude_rate_limit_headers(headers) == (
+        ("anthropic-ratelimit-unified-5h-reset", "1797000000"),
+        ("anthropic-ratelimit-unified-5h-status", "rejected"),
+        ("anthropic-ratelimit-unified-overage-status", "allowed"),
+        ("anthropic-ratelimit-unified-representative-claim", "5h"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"X-Request-Id": "relay-1\nforged"}, ()),
+        ({"X-Request-Id": "r" * 257}, ()),
+        ({"X-Request-Id": "Bearer secret-token-value"}, ()),
+        ({"X-Request-Id": "AIzaSyA1234567890abcdefghijklmnopqrstuv"}, ()),
+        ({"X-Request-Id": "ghp_1234567890abcdefghijklmnopqrstuv"}, ()),
+        ({"X-Request-Id": "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.signature"}, ()),
+        ({"X-Request-Id": "sk-live_abcdefghijklmnop"}, ()),
+        ({"X-Request-Id": "token=secret-value"}, ()),
+        ({"Set-Cookie": "session=secret", "Organization-Id": "org-1"}, ()),
+        ({"Request-Id": "provider-1", "Set-Cookie": "session=secret"}, (("request-id", "provider-1"),)),
+    ],
+)
+def test_response_correlation_ids_are_bounded_and_credential_free(headers, expected):
+    assert sanitize_response_correlation_ids(headers) == expected
 
 
 @pytest.mark.asyncio

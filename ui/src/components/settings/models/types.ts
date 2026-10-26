@@ -10,8 +10,8 @@
 // and the PR records the server implementation and feature-flag activation
 // edge. The client never synthesizes a fallback payload shape.
 
-export const CONTRACT_VERSION = 17 as const;
-export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17] as const;
+export const CONTRACT_VERSION = 21 as const;
+export const PERSISTED_TURN_CONTRACT_VERSIONS = [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21] as const;
 export const AGENT_CHAIN_CONTRACT_VERSION = CONTRACT_VERSION;
 export const PROBE_RESULT_CONTRACT_VERSION = CONTRACT_VERSION;
 
@@ -642,6 +642,13 @@ export type AgentChain = {
   supply_state: 'ok' | 'waiting' | 'interrupted';
 };
 
+export type ResponseCorrelationHeader = 'request-id' | 'x-request-id';
+export type ResponseCorrelationId = {
+  /** Canonical response header name; values are bounded and sanitized server-side. */
+  header: ResponseCorrelationHeader;
+  value: string;
+};
+
 export type RecordedAttempt = {
   source_id: string;
   configured_model_id: string;
@@ -649,7 +656,9 @@ export type RecordedAttempt = {
   stripped_reasoning_efforts?: string[];
   declared_reasoning_efforts?: string[];
   origin?: { provider: string; api: ModelProtocol; model: string };
+  response_correlation_ids?: ResponseCorrelationId[];
 };
+export type CanceledAttempt = Omit<RecordedAttempt, 'response_correlation_ids'>;
 export type TurnProvenance = {
   contract_version: (typeof PERSISTED_TURN_CONTRACT_VERSIONS)[number];
   turn_id: string;
@@ -659,7 +668,7 @@ export type TurnProvenance = {
   outcome: 'served' | 'exhausted' | 'failed_terminal' | 'no_candidate' | 'canceled';
   failed_attempts: Array<RecordedAttempt & { reason: ResolutionReason; http_status?: number | null; upstream_detail?: string }>;
   served: RecordedAttempt | null;
-  canceled_attempt: RecordedAttempt | null;
+  canceled_attempt: CanceledAttempt | null;
   terminal_error: {
     source_id: string | null;
     configured_model_id: string | null;
@@ -674,6 +683,7 @@ export type TurnProvenance = {
     http_status?: number | null;
     upstream_error_code?: string | null;
     upstream_detail?: string;
+    response_correlation_ids?: ResponseCorrelationId[];
     error_kind?: never;
     backend_error_detail?: never;
   } | {
@@ -884,6 +894,65 @@ export type UsagePricing = {
   /** No price table yet and a first fetch is running; re-read soon, and say
    *  prices are being fetched rather than that there are none. */
   pending?: true;
+  /** When the oldest catalog price that valued `services` was verified; absent
+   *  when no service was valued. */
+  service_price_date?: string;
+};
+
+/** What a model total adds for search services (`web-search-services.md` §4.3):
+ *  `totals` and `days` keep counting model calls, and only their `api_cost_usd`
+ *  includes the services' list valuation. Present exactly when the report is priced. */
+export type ServiceCostTotals = {
+  /** The vendors' own reported search costs, beside `api_cost_usd` and never added to it. */
+  service_reported_usd: number;
+  /** Billable search requests the current catalog no longer prices, left out of `api_cost_usd`. */
+  excluded_service_requests: number;
+};
+
+export type UsageTotals = UsageCounters & Partial<ServiceCostTotals>;
+
+/** Sent search-service requests. A request reaches no model, so no model
+ *  counter ever includes one. */
+export type ServiceCounters = {
+  requests: number;
+  /** The subset the catalog's billing rule charges, each valued at its list price. */
+  billable_requests: number;
+  /** The subset whose billing is unknown: never billable, and a floor on the cost. */
+  uncertain_requests: number;
+  /** The subset of `billable_requests` the vendor priced itself. */
+  reported_requests: number;
+} & Partial<ServicePricedUsage>;
+
+/** Present exactly when the report is priced. */
+export type ServicePricedUsage = {
+  /** `billable_requests` at the current catalog's list price. */
+  api_cost_usd: number;
+  /** The vendors' figures for `reported_requests`, never added to `api_cost_usd`. */
+  reported_usd: number;
+  /** The valuation is only a floor: billing unknown, a repaired row, or a price
+   *  the catalog no longer has. */
+  api_cost_lower_bound: boolean;
+};
+
+/** One Source's search service over the window. A tool-only Source appears
+ *  only here, never in `sources`. */
+export type ServiceUsage = ServiceCounters & {
+  source_id: string;
+  /** The catalog's service ID, such as `tavily/search`. */
+  service_id: string;
+  /** Missing historical attribution means web_search; Exa keeps one shared service id. */
+  tool?: 'web_search' | 'web_fetch';
+  /** Joined from current Source config; null exactly when config no longer
+   *  holds the Source, which then folds into the removed-Sources identity. */
+  label: string | null;
+  /** The current catalog's name for the service; null once the catalog no
+   *  longer lists it, and views show `service_id`. */
+  service_label: string | null;
+  last_metered_at: string | null;
+  /** False when the current catalog no longer prices the service, so its
+   *  billable requests are left out of `api_cost_usd`. Present exactly when
+   *  the report is priced. */
+  priced?: boolean;
 };
 
 export type UsageByModel = UsageCounters & {
@@ -912,7 +981,7 @@ export type UsageBySource = UsageCounters & {
   models: UsageByModel[];
 };
 
-export type UsageByDay = UsageCounters & { day: string };
+export type UsageByDay = UsageTotals & { day: string };
 
 export type UsageSummary = {
   /** The window the server actually served, after clamping to retention. Views
@@ -922,9 +991,11 @@ export type UsageSummary = {
   from_day: string;
   /** Last local day of the window, which is the host's today. */
   to_day: string;
-  totals: UsageCounters;
+  totals: UsageTotals;
   /** One entry per Source with at least one metered turn, busiest first. */
   sources: UsageBySource[];
+  /** One entry per Source and search service with a sent request, busiest first. */
+  services: ServiceUsage[];
   /** One entry per local day carrying a metered turn, oldest first — a trend
    *  series, so a day with no turn is ABSENT rather than reported as zero. */
   days: UsageByDay[];
@@ -934,17 +1005,30 @@ export type UsageSummary = {
 
 export type UsageWindowKey = '24h' | '7d' | '30d' | '60d';
 
+/** A model row, the released shape, which never carries `kind`. */
 export type UsageBucketRow = UsageCounters & {
+  kind?: never;
   source_id: string;
   model_id: string;
 };
+
+/** A search-service row: its own counters, never dressed as a model. */
+export type UsageServiceBucketRow = ServiceCounters & {
+  kind: 'service';
+  source_id: string;
+  service_id: string;
+  /** Missing historical attribution means web_search; Exa keeps one shared service id. */
+  tool?: 'web_search' | 'web_fetch';
+};
+
+export type UsageBucketEntry = UsageBucketRow | UsageServiceBucketRow;
 
 export type UsageBucket = {
   key: string;
   start_at: string;
   end_at: string;
   history_complete: boolean;
-  rows: UsageBucketRow[];
+  rows: UsageBucketEntry[];
 };
 
 /** The modern temporal report consumed by the Model Hub analytics surface. */
@@ -1034,12 +1118,12 @@ export type QuotaSummary = {
 
 // ── hosted-tools-status.schema.json ─────────────────────────────────────
 /** The catalog's tools, in catalog order (`vibey-hosted-tools.md` §2). */
-export const HOSTED_TOOL_NAMES = ['web_search', 'x_search', 'image_generate'] as const;
+export const HOSTED_TOOL_NAMES = ['web_search', 'x_search', 'image_generate', 'web_fetch'] as const;
 export type HostedToolName = (typeof HOSTED_TOOL_NAMES)[number];
-export type HostedSearchToolName = Exclude<HostedToolName, 'image_generate'>;
+export type HostedSearchToolName = Exclude<HostedToolName, 'image_generate' | 'web_fetch'>;
 
 /** How a call ran: natively in the model's request, through a search executor, or on an image endpoint. */
-export type HostedExecutionMode = 'native' | 'executor' | 'direct';
+export type HostedExecutionMode = 'native' | 'executor' | 'service' | 'direct';
 
 /** A positive record: a real response ran the tool on this (Source, model). Display only. */
 export type HostedSuccess = { source_id: string; model_id: string; mode: HostedExecutionMode; at: string };
@@ -1063,7 +1147,7 @@ export type HostedToolRunStatus = {
 };
 
 /** The overlay's list price for one hosted tool on a provider (`usd_per_1k` per `unit`). */
-export type HostedToolPriceUnit = 'call' | 'search' | 'post' | 'profile';
+export type HostedToolPriceUnit = 'call' | 'search' | 'post' | 'profile' | 'fetch';
 export type HostedToolListPrice = {
   unit: HostedToolPriceUnit;
   usd_per_1k: number;
@@ -1073,7 +1157,8 @@ export type HostedToolListPrice = {
 };
 
 /** A Source that can execute a search for models that cannot run it natively, with the vendor's executor model. */
-export type HostedExecutorCandidate = {
+export type HostedModelExecutorCandidate = {
+  kind: 'model';
   source_id: string;
   model_id: string;
   billing: 'monthly' | 'metered';
@@ -1081,6 +1166,40 @@ export type HostedExecutorCandidate = {
   relay: boolean;
   /** Null when no list price is known, never zero. */
   price: HostedToolListPrice | null;
+};
+
+/** A search service's catalog list price, in searches rather than model calls. */
+export type HostedServiceListPrice = HostedToolListPrice & { unit: 'search' };
+
+/** Effective settings. Saved settings and PUT patches keep omitted fields absent instead. */
+export type HostedSearchServiceSettings = { results: number; enabled: boolean };
+
+/** A search-service candidate in the active mixed search chain. */
+export type HostedServiceExecutorCandidate = {
+  kind: 'service';
+  source_id: string;
+  /** Catalog service id, e.g. exa/search, never a model name. */
+  model_id: string;
+  billing: 'metered';
+  relay: false;
+  price: HostedServiceListPrice;
+  settings: HostedSearchServiceSettings;
+  state: SourceState;
+  trial_pending: boolean;
+  cooldown_until: string | null;
+};
+export type HostedExecutorCandidate = HostedModelExecutorCandidate | HostedServiceExecutorCandidate;
+
+export type HostedSearchServiceVendor = {
+  id: string;
+  name: string;
+  price: HostedServiceListPrice;
+  /** Catalog-verified description; null means unknown, not no free tier. */
+  free_tier: string | null;
+  facts: { tool_only: boolean; auto_enroll: boolean; free_check: boolean; built_in?: boolean; requires_setup?: boolean };
+  results_max: number;
+  /** Includes opted-out Sources, so a disabled DeepSeek still reads as already added. */
+  source_ids: string[];
 };
 
 export type HostedModelRef = { source_id: string; model_id: string };
@@ -1093,15 +1212,31 @@ export type HostedImageModel = HostedModelRef & { description: string; billing: 
 
 type HostedToolBase = { enabled: boolean; status: HostedToolRunStatus };
 
-export type HostedSearchToolStatus = HostedToolBase & {
-  name: HostedSearchToolName;
+type HostedSearchToolBase = HostedToolBase & {
   /** The saved order; null when automatic. */
   executor_order: string[] | null;
   /** The order the gateway would try now. */
   effective_order: string[];
-  /** Every eligible executor, in effective order. */
-  executor_candidates: HostedExecutorCandidate[];
 };
+
+export type HostedWebSearchToolStatus = HostedSearchToolBase & {
+  name: 'web_search';
+  prefer_native: boolean;
+  /** Saved partial overrides, never effective defaults. PUT merges only supplied fields. */
+  services: Record<string, Partial<HostedSearchServiceSettings>>;
+  /** Server-owned creation order; clients never write this back. */
+  service_order: string[];
+  executor_candidates: HostedExecutorCandidate[];
+  /** Present on the active web-search read; older server reads may omit it. */
+  service_vendors?: HostedSearchServiceVendor[];
+};
+
+export type HostedXSearchToolStatus = HostedSearchToolBase & {
+  name: 'x_search';
+  executor_candidates: HostedModelExecutorCandidate[];
+};
+
+export type HostedSearchToolStatus = HostedWebSearchToolStatus | HostedXSearchToolStatus;
 
 export type HostedImageToolStatus = HostedToolBase & {
   name: 'image_generate';
@@ -1114,13 +1249,34 @@ export type HostedImageToolStatus = HostedToolBase & {
   image_offered_by: string[];
 };
 
-export type HostedToolStatus = HostedSearchToolStatus | HostedImageToolStatus;
+export type HostedToolStatus = HostedSearchToolStatus | HostedImageToolStatus | HostedWebFetchToolStatus;
+
+export type HostedFetchExecutorCandidate = Omit<HostedServiceExecutorCandidate, 'kind' | 'price' | 'settings'> & {
+  kind: 'local' | 'service';
+  price: HostedToolListPrice;
+  settings: { enabled: boolean };
+};
+
+export type HostedWebFetchToolStatus = HostedSearchToolBase & {
+  name: 'web_fetch';
+  services: Record<string, { enabled?: boolean }>;
+  executor_candidates: HostedFetchExecutorCandidate[];
+  service_vendors: {
+    id: string; name: string; price: HostedToolListPrice; capabilities: ['web_fetch'];
+    content_types: string[]; source_ids: string[];
+    facts: { built_in: boolean; requires_setup: boolean; auto_enroll: boolean };
+  }[];
+};
 
 export type HostedToolsStatus = { tools: HostedToolStatus[] };
 
 /** PUT /api/models/hosted-tools/<tool>, per field: an absent field is unchanged, `null` resets it. */
 export type HostedToolPut = {
   enabled?: boolean;
+  /** web_search only; a boolean, never null. */
+  prefer_native?: boolean;
+  /** web_search only; null removes a Source override or one of its saved fields. */
+  services?: Record<string, { [K in keyof HostedSearchServiceSettings]?: HostedSearchServiceSettings[K] | null } | null>;
   executor_order?: string[] | null;
   default_model?: HostedModelRef | null;
 };

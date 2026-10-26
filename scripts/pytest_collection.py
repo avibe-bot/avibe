@@ -73,7 +73,7 @@ def collect(args: list[str], cwd: Path = REPO_ROOT) -> list[dict]:
             # or a CI junit directory this run has nothing to report to.
             env={
                 **{name: value for name, value in os.environ.items() if name not in ("PYTEST_ADDOPTS", "AVIBE_CI_JUNIT_DIR")},
-                "PYTHONPATH": os.pathsep.join(filter(None, [str(REPO_ROOT), os.environ.get("PYTHONPATH")])),
+                "PYTHONPATH": os.pathsep.join(filter(None, [str(cwd), str(REPO_ROOT), os.environ.get("PYTHONPATH")])),
             },
             capture_output=True,
             text=True,

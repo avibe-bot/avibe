@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
+import pytest
 from sqlalchemy import select, update
 
 from storage.background import (
@@ -148,12 +150,12 @@ def test_cli_and_workbench_share_the_definition_read_projection(capsys) -> None:
         before_definitions = _rows(store, run_definitions)
         before_runs = _rows(store, agent_runs)
 
-        assert cli.cmd_task_list(page_request=PageRequest(limit=20)) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope(), page_request=PageRequest(limit=20)) == 0
         cli_tasks = {
             row["id"]: row
             for row in json.loads(capsys.readouterr().out)["definitions"]
         }
-        assert cli.cmd_watch_list(include_finished=True, page_request=PageRequest(limit=20)) == 0
+        assert cli.cmd_watch_list(scope=cli.SessionListScope(), include_finished=True, page_request=PageRequest(limit=20)) == 0
         cli_watches = {
             row["id"]: row
             for row in json.loads(capsys.readouterr().out)["definitions"]
@@ -180,23 +182,24 @@ def test_cli_and_workbench_share_the_definition_read_projection(capsys) -> None:
         )
         assert _canonical(cli_task_detail) == _canonical(api_tasks["queued-disabled"])
         assert cli_tasks["queued-disabled"]["lifecycle_state"] == "running"
-        assert cli_tasks["queued-disabled"]["running_since"] is None
-        assert cli_tasks["queued-disabled"]["state"] == "active"
+        assert "running_since" not in cli_tasks["queued-disabled"]
 
         for watch_id in api_watches:
-            assert _canonical(cli_watches[watch_id], watch=True) == _canonical(
-                api_watches[watch_id], watch=True
-            )
+            assert _canonical(cli_watches[watch_id]) == _canonical(api_watches[watch_id])
         assert _canonical(cli_watch_detail, watch=True) == _canonical(
             api_watches["waiting-live"], watch=True
         )
-        assert cli_watch_detail["runtime"]["pid"] == 1234
-        assert cli_unknown_watch_detail["process_alive"] is None
-        assert cli_unknown_watch_detail["runtime"] == {}
+        # The heartbeat record stays internal; ``process_alive`` states what it means.
+        assert "runtime" not in cli_watch_detail
+        assert cli_watch_detail["process_alive"] is True
+        # Never observed: no liveness to print.
+        assert {"process_alive", "runtime"}.isdisjoint(cli_unknown_watch_detail)
         assert api_watches["waiting-never"]["runtime"] == {}
 
+        # A list row names liveness only when it needs attention: an enabled
+        # watch whose observed waiter exited.
         expected = {
-            "waiting-live": ("waiting", None, True),
+            "waiting-live": ("waiting", None, None),
             "waiting-dead": ("waiting", None, False),
             "waiting-never": ("waiting", None, None),
             "paused": ("paused", None, None),
@@ -207,21 +210,14 @@ def test_cli_and_workbench_share_the_definition_read_projection(capsys) -> None:
         actual = {
             watch_id: (
                 row["lifecycle_state"],
-                row["lifecycle_detail"],
-                row["process_alive"],
+                row.get("lifecycle_detail"),
+                row.get("process_alive"),
             )
             for watch_id, row in cli_watches.items()
         }
         assert actual == expected
-        assert cli_watches["waiting-live"]["state"] == "running"
-        assert cli_watches["waiting-live"]["waiting_since"] == NOW
-        assert cli_watches["waiting-dead"]["state"] == "pending"
-        assert cli_watches["waiting-dead"]["waiting_since"] == NOW
-        assert cli_watches["waiting-never"]["state"] == "pending"
-        assert cli_watches["waiting-never"]["waiting_since"] == NOW
-        assert cli_watches["finished-normal"]["state"] == "completed"
-        assert cli_watches["finished-timeout"]["state"] == "failed"
-        assert cli_watches["finished-error"]["state"] == "failed"
+        for watch_id in ("waiting-live", "waiting-dead", "waiting-never"):
+            assert cli_watches[watch_id]["waiting_since"] == NOW
 
         assert _rows(store, run_definitions) == before_definitions
         assert _rows(store, agent_runs) == before_runs
@@ -248,13 +244,13 @@ def test_cli_definition_lists_page_before_enrichment(monkeypatch, capsys) -> Non
     monkeypatch.setattr(SQLiteBackgroundTaskStore, "_enrich_definitions", record_page)
 
     page_request = PageRequest(page=1, limit=2)
-    assert cli.cmd_task_list(page_request=page_request) == 0
+    assert cli.cmd_task_list(scope=cli.SessionListScope(), page_request=page_request) == 0
     task_payload = json.loads(capsys.readouterr().out)
-    assert cli.cmd_watch_list(page_request=page_request) == 0
+    assert cli.cmd_watch_list(scope=cli.SessionListScope(), page_request=page_request) == 0
     watch_payload = json.loads(capsys.readouterr().out)
 
-    assert task_payload["pagination"]["next_command"] == "vibe task list --page 2 --limit 2"
-    assert watch_payload["pagination"]["next_command"] == "vibe watch list --page 2 --limit 2"
+    assert task_payload["pagination"]["next_command"] == "vibe task list --global --page 2 --limit 2"
+    assert watch_payload["pagination"]["next_command"] == "vibe watch list --global --page 2 --limit 2"
     assert enriched_sizes == [("scheduled", 3), ("watch", 3)]
 
 
@@ -268,10 +264,11 @@ def test_task_list_pagination_is_stable_across_run_at_boundary(capsys) -> None:
             cron=None,
             run_at=FUTURE,
             created_at="2026-07-27T12:00:00+00:00",
+            updated_at="2026-07-27T12:01:00+00:00",
         )
         _task(store, "still-waiting", created_at="2026-07-27T12:01:00+00:00")
 
-        assert cli.cmd_task_list(page_request=PageRequest(page=1, limit=1)) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope(), page_request=PageRequest(page=1, limit=1)) == 0
         first_page = json.loads(capsys.readouterr().out)
 
         # Simulate the wall clock crossing run_at between offset pages.
@@ -282,7 +279,7 @@ def test_task_list_pagination_is_stable_across_run_at_boundary(capsys) -> None:
                 .values(run_at=PAST)
             )
 
-        assert cli.cmd_task_list(page_request=PageRequest(page=2, limit=1)) == 0
+        assert cli.cmd_task_list(scope=cli.SessionListScope(), page_request=PageRequest(page=2, limit=1)) == 0
         second_page = json.loads(capsys.readouterr().out)
 
         assert [first_page["definitions"][0]["id"], second_page["definitions"][0]["id"]] == [
@@ -361,6 +358,7 @@ def test_task_list_and_show_keep_unverifiable_retirements_unknown(capsys) -> Non
         )
 
         assert cli.cmd_task_list(
+            scope=cli.SessionListScope(),
             include_finished=True,
             page_request=PageRequest(limit=20),
         ) == 0
@@ -376,16 +374,14 @@ def test_task_list_and_show_keep_unverifiable_retirements_unknown(capsys) -> Non
         assert by_id["manual-run"]["lifecycle_state"] == "waiting"
         for task_id in ("legacy-ownerless", "consumed-owner-missing"):
             assert by_id[task_id]["lifecycle_state"] == "finished"
-            assert by_id[task_id]["lifecycle_detail"] is None
-            assert by_id[task_id]["state"] == "unknown"
+            assert "lifecycle_detail" not in by_id[task_id]
             assert cli.cmd_task_show(task_id) == 0
             shown = json.loads(capsys.readouterr().out)["definition"]
-            assert (shown["lifecycle_detail"], shown["state"]) == (None, "unknown")
+            assert (shown["lifecycle_state"], "lifecycle_detail" in shown) == ("finished", False)
         assert by_id["consumed-owner-success"]["lifecycle_detail"] == "normal"
-        assert by_id["consumed-owner-success"]["state"] == "completed"
         assert cli.cmd_task_show("consumed-owner-success") == 0
         shown = json.loads(capsys.readouterr().out)["definition"]
-        assert (shown["lifecycle_detail"], shown["state"]) == ("normal", "completed")
+        assert shown["lifecycle_detail"] == "normal"
     finally:
         store.close()
 
@@ -488,9 +484,76 @@ def test_public_metadata_nonobjects_degrade_without_rewriting_rows(capsys):
                 assert response.status_code == 200
                 assert response.get_json()[plural][0]["metadata"] == {}
                 assert command(identifier) == 0
-                assert json.loads(capsys.readouterr().out)[field]["metadata"] == {}
+                assert "metadata" not in json.loads(capsys.readouterr().out)[field]
             with store.engine.connect() as conn:
                 assert conn.execute(select(run_definitions.c.metadata_json)).scalars().all() == [encoded, encoded]
                 assert conn.execute(select(agent_runs.c.metadata_json)).scalar_one() == encoded
     finally:
         store.close()
+
+
+@pytest.mark.parametrize("kind", ["task", "watch"])
+def test_definition_list_q_searches_and_carries_into_next_command(kind, capsys, monkeypatch) -> None:
+    """Agents find a definition by its text instead of filtering pages themselves."""
+
+    add = _task if kind == "task" else _watch
+    store = SQLiteBackgroundTaskStore()
+    try:
+        for index in range(3):
+            add(store, f"{kind}-pr-{index}", name=f"Watch PR 2961 round {index}")
+        add(store, f"{kind}-other", name="Nightly sync")
+    finally:
+        store.close()
+
+    monkeypatch.setattr(sys, "argv", ["vibe", kind, "list", "--global", "--q", "2961", "--limit", "2"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [row["name"] for row in payload["definitions"]] == [
+        "Watch PR 2961 round 2",
+        "Watch PR 2961 round 1",
+    ]
+    assert payload["pagination"]["next_command"] == (
+        f"vibe {kind} list --global --q 2961 --page 2 --limit 2"
+    )
+
+
+@pytest.mark.parametrize("kind", ["task", "watch"])
+def test_definition_show_brief_is_the_list_row_and_show_drops_legacy_keys(kind, capsys) -> None:
+    add = _task if kind == "task" else _watch
+    store = SQLiteBackgroundTaskStore()
+    try:
+        add(
+            store,
+            f"{kind}-legacy",
+            message="Report the result.",
+            session_key="slack::channel::C123",
+            post_to="channel",
+            deliver_key="slack::channel::C123",
+        )
+    finally:
+        store.close()
+    list_command = cli.cmd_task_list if kind == "task" else cli.cmd_watch_list
+    show_command = cli.cmd_task_show if kind == "task" else cli.cmd_watch_show
+
+    assert list_command(scope=cli.SessionListScope()) == 0
+    row = json.loads(capsys.readouterr().out)["definitions"][0]
+    assert show_command(f"{kind}-legacy", brief=True) == 0
+    assert json.loads(capsys.readouterr().out)["definition"] == row
+
+    assert show_command(f"{kind}-legacy") == 0
+    shown = json.loads(capsys.readouterr().out)["definition"]
+    assert shown["message"] == "Report the result."
+    assert {
+        "state",
+        "last_status",
+        "display_name",
+        "prompt",
+        "prefix",
+        "session_key",
+        "post_to",
+        "deliver_key",
+        "session_platform",
+    }.isdisjoint(shown)

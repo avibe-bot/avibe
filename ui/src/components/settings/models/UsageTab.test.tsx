@@ -8,9 +8,18 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import en from '../../../i18n/en.json';
 import zh from '../../../i18n/zh.json';
 import { readyRegion } from './regionRead';
-import type { UsageBucket, UsageBucketRow, UsageCounters, UsageReport, UsageWindowKey } from './types';
+import type {
+  ServiceUsage,
+  UsageBucket,
+  UsageBucketEntry,
+  UsageBucketRow,
+  UsageCounters,
+  UsageReport,
+  UsageServiceBucketRow,
+  UsageWindowKey,
+} from './types';
 import { UsageTab } from './UsageTab';
-import { buildUsageCsv, csvCell } from './usageCsv';
+import { buildUsageCsv, csvCell, type UsageCsvHeaders } from './usageCsv';
 
 const i18n = createInstance();
 void i18n.use(initReactI18next).init({
@@ -38,7 +47,7 @@ const row = (over: Partial<UsageBucketRow> = {}): UsageBucketRow => ({
 
 const bucket = (
   key: string,
-  rows: UsageBucketRow[] = [row()],
+  rows: UsageBucketEntry[] = [row()],
   over: Partial<UsageBucket> = {},
 ): UsageBucket => ({
   key,
@@ -61,6 +70,7 @@ const report = (over: Partial<UsageReport> = {}): UsageReport => ({
     ...counters({ requests: 6, token_reports: 6, input_tokens: 300, cached_input_tokens: 75, output_tokens: 120 }),
     models: [{ model_id: 'model-a', label: 'Shared model', ...counters({ requests: 6, token_reports: 6, input_tokens: 300, cached_input_tokens: 75, output_tokens: 120 }) }],
   }],
+  services: [],
   days: [],
   window_key: '24h',
   granularity: 'hour',
@@ -82,6 +92,11 @@ const draw = (
     />
   </I18nextProvider>,
 );
+
+const CSV_HEADERS = Object.fromEntries([
+  'bucketKey', 'startAt', 'endAt', 'historyComplete', 'sourceId', 'modelId', 'ledgerKey', 'sourceLabel', 'modelLabel',
+  'requests', 'tokenReports', 'inputTokens', 'nonCachedInputTokens', 'cachedInputTokens', 'outputTokens', 'totalTokens',
+].map((key) => [key, key])) as UsageCsvHeaders;
 
 afterEach(cleanup);
 
@@ -602,6 +617,65 @@ describe('UsageTab', () => {
     } finally {
       await i18n.changeLanguage('en');
     }
+  });
+
+  it('MH-USAGE-037: tables search services below the models, adding only their cost to the API-price total', async () => {
+    const search = (over: Partial<UsageServiceBucketRow> = {}): UsageServiceBucketRow => ({
+      kind: 'service', source_id: 'src_exa', service_id: 'exa/search', requests: 3, billable_requests: 2, uncertain_requests: 1,
+      reported_requests: 2, reported_usd: 0.0135, api_cost_usd: 0.014, api_cost_lower_bound: true, ...over,
+    });
+    const listing = (entry: UsageServiceBucketRow, over: Partial<ServiceUsage> = {}): ServiceUsage => ({
+      source_id: entry.source_id, service_id: entry.service_id, label: null, service_label: null, last_metered_at: null,
+      requests: entry.requests, billable_requests: entry.billable_requests, uncertain_requests: entry.uncertain_requests,
+      reported_requests: entry.reported_requests, ...over,
+    });
+    const exa = search();
+    // A deleted Source, on a service a later catalog no longer prices.
+    const retired = search({ source_id: 'src_gone', service_id: 'retired/search', requests: 1, billable_requests: 1, uncertain_requests: 0, reported_requests: 0, reported_usd: 0, api_cost_usd: 0 });
+    const value = pricedReport();
+    value.buckets = [bucket('00', [...value.buckets[0]!.rows, exa, retired])];
+    value.services = [listing(exa, { label: 'Exa key', service_label: 'Exa', priced: true }), listing(retired, { priced: false })];
+    value.pricing = { ...value.pricing!, service_price_date: '2026-10-19' };
+    const { container } = draw(value);
+
+    const stats = container.querySelector('.model-hub-usage-stat-grid--priced')!;
+    // The model calls alone, and every cost beside the vendors' own figure.
+    expect(stats.textContent).toContain('Requests4');
+    expect(stats.textContent).toContain('≥ $0.51');
+    expect(stats.textContent).toContain('Vendors reported $0.01');
+    expect(stats.textContent).toContain('1 search request has no price and is left out');
+    const services = within(screen.getByRole('region', { name: /^Search services/ }));
+    const rowsOf = (scope: HTMLElement) => [...scope.querySelectorAll('tbody tr')].map((line) => [...line.children].map((cell) => cell.textContent));
+    expect(rowsOf(services.getByRole('table'))).toEqual([
+      ['Exa keyExa', '3', '2+1 with unknown billing', '≥ $0.01', '$0.01'],
+      ['Removed providersUsage kept after these providers were deleted', '1', '1', 'No price yet', '—'],
+    ]);
+    expect(services.getByRole('table').querySelector('tfoot')!.textContent).toBe('Total43+1 with unknown billing≥ $0.01$0.01');
+    expect(services.getByText(/Search prices from 2026-10-19/)).toBeTruthy();
+    const details = within(screen.getByRole('region', { name: /^Exact usage details/ }));
+    expect(details.queryByText(/Exa key|Removed providers/)).toBeNull();
+    // Exports and the model filter are model usage only; a tool-only Source is a Source.
+    expect(buildUsageCsv(value, { sourceIds: [], modelKeys: [] }, null, CSV_HEADERS, 'Unknown model')).not.toContain('search');
+    await userEvent.click(screen.getByRole('button', { name: 'All Source' }));
+    const options = (label: string) => within(screen.getByRole('listbox', { name: label })).getAllByRole('option').map((option) => option.textContent);
+    expect(options('Source')).toEqual(['All Source', 'Claude', 'Relay', 'Exa key', 'Removed providers']);
+    await userEvent.keyboard('{Escape}');
+    await userEvent.click(screen.getByRole('button', { name: 'All Model' }));
+    expect(options('Model')).toEqual(['All Model', 'Claude · Opus', 'Relay · Relay model']);
+    await userEvent.click(screen.getByRole('option', { name: 'Claude · Opus' }));
+    expect(services.getByText('No matching usage')).toBeTruthy();
+    expect(stats.textContent).toContain('$0.50');
+    cleanup();
+
+    // Search alone is usage, and without a price table it reads counts only.
+    const counted: UsageServiceBucketRow = {
+      kind: 'service', source_id: 'src_exa', service_id: 'exa/search', requests: 3, billable_requests: 2, uncertain_requests: 1, reported_requests: 2,
+    };
+    const only = draw(report({ sources: [], services: [listing(counted, { label: 'Exa key' })], buckets: [bucket('00', [counted])] }));
+    expect(screen.queryByText('No usage in this window')).toBeNull();
+    expect(only.container.querySelector('.model-hub-usage-stat-grid')!.textContent).toContain('Requests0');
+    const countsOnly = within(screen.getByRole('region', { name: /^Search services/ })).getByRole('table');
+    expect([...countsOnly.querySelectorAll('thead th')].map((cell) => cell.textContent)).toEqual(['Source / service', 'Requests', 'Billable']);
   });
 
   it('renders exact accounting and preserves source/model pair rows', () => {

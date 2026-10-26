@@ -177,6 +177,50 @@ def test_bindings_persist_across_calls_and_report_console_and_freshness() -> Non
     assert fourth["ok"] is True and fourth["result"] is True
 
 
+def test_top_level_let_and_const_redeclare_across_calls_in_any_order() -> None:
+    async def scenario(h: _Harness) -> list[dict]:
+        return [
+            await h.js("const win = 1"),
+            await h.js("let win = 2; win"),  # const -> let
+            await h.js("let win = 3; win"),  # let -> let
+            await h.js("const win = 4; win"),  # let -> const
+            await h.js("const win = 5; win"),  # const -> const
+            await h.js("const { a, b: [c] } = { a: 1, b: [2] }; a + c"),
+            await h.js("let a = 10, c = 20; win = 6; a + c + win"),
+        ]
+
+    results = _run(scenario)
+    assert all(result["ok"] is True for result in results), results
+    assert [result["result"] for result in results] == [None, 2, 3, 4, 5, 3, 36]
+
+
+def test_const_rewrite_leaves_text_property_names_and_loop_heads_unchanged() -> None:
+    source = (
+        'const text = "const x = 1" + `const ${"y"}` + /const z/.source; // const c\n'
+        "const shape = { const: 1 }, methods = { const() { return 2 } };\n"
+        "class Box { const = 3; static const() { return 4 } }\n"
+        "const values = [];\n"
+        "for (const item of [5, 6]) { values.push(item) }\n"
+        "({ text, key: shape.const, method: methods.const(), field: new Box().const,"
+        " statik: Box.const(), values })"
+    )
+
+    async def scenario(h: _Harness) -> list[dict]:
+        return [await h.js(source), await h.js("let text = 'again'; text")]
+
+    first, second = _run(scenario)
+    assert first["ok"] is True, first
+    assert first["result"] == {
+        "text": "const x = 1const yconst z",
+        "key": 1,
+        "method": 2,
+        "field": 3,
+        "statik": 4,
+        "values": [5, 6],
+    }
+    assert second["result"] == "again"
+
+
 def test_sdk_requests_carry_the_exact_turn_binding_and_report_screenshots() -> None:
     async def scenario(h: _Harness) -> tuple[dict, list[tuple[str, dict]], bytes]:
         h.driver.image = b"png-fixture"
@@ -535,24 +579,15 @@ def test_exceptions_and_unserializable_results_are_reported() -> None:
     assert "Circular" in cyclic["result_text"]
 
 
-@pytest.mark.parametrize(
-    ("language", "expected"),
-    [
-        ("en", "The JavaScript call failed: The JavaScript kernel was reset"),
-        ("zh", "JavaScript 调用失败：JavaScript 内核已重置"),
-    ],
-)
-def test_cli_envelope_and_localized_errors(
+def test_cli_envelope_and_errors(
     monkeypatch: pytest.MonkeyPatch,
     capsys,
     tmp_path: Path,
-    language: str,
-    expected: str,
 ) -> None:
     from vibe import cli
 
+    expected = "The JavaScript call failed: The JavaScript kernel was reset"
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses-cli")
-    monkeypatch.setattr(cli, "_configured_cli_language", lambda: language)
     seen: list[dict] = []
     code_file = tmp_path / "step.js"
     code_file.write_text("1 + 1", encoding="utf-8")

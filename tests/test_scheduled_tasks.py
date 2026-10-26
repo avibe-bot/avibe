@@ -8426,6 +8426,11 @@ def test_refresh_ending_the_last_activity_keeps_the_runs_first_cause(
             run_id=request.id,
         )
     if prior == "failed_sibling":
+        # The Turn already replied; its terminal waits on both Activities.
+        assert request_store._sqlite.defer_run_terminal(
+            request.id,
+            terminal_status="succeeded",
+        ) is True
         first = registry.complete(
             backend="claude",
             runtime_key="runtime-1",
@@ -8552,6 +8557,140 @@ def test_terminal_owned_activity_settles_deferred_run_once(
 
     assert service.settle_activity_runs(activity) == []
     assert request_store.get_run(request.id)["completed_at"] == completed_at
+
+
+def _service_with_activity_registry(tmp_path: Path):
+    request_store = TaskExecutionStore()
+    controller = _avibe_controller_double(
+        gate=SimpleNamespace(submit_scheduled=lambda *_args, **_kwargs: None, in_flight={}),
+        handle_scheduled_message=lambda *_args, **_kwargs: None,
+    )
+    registry = SessionActivityRegistry()
+    controller.agent_service = SimpleNamespace(activities=registry)
+    service = ScheduledTaskService(
+        controller=controller,
+        store=ScheduledTaskStore(tmp_path / "scheduled_tasks.json"),
+        request_store=request_store,
+    )
+    return request_store, registry, service
+
+
+@pytest.mark.parametrize("activity_status", ["stopped", "killed", "failed"])
+def test_an_activity_that_ends_during_its_turn_leaves_the_run_to_the_turn(
+    tmp_path: Path,
+    monkeypatch,
+    activity_status: str,
+) -> None:
+    """A background task the Agent stops, or sees fail, while its Turn still runs is one step of that Turn.
+
+    The Agent answers it in the same Turn, so the Turn's terminal decides the Run. A delegated Run that stopped its own
+    background test and then finished its work was settled ``canceled``, and its caller was told no result existed.
+    """
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    request_store, registry, service = _service_with_activity_registry(tmp_path)
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="claude",
+    )
+    assert request_store.claim(request.id) is not None
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="target-session",
+        activity_id="task-tests",
+        kind="background_task",
+        run_id=request.id,
+    )
+    activity = registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-tests",
+        status=activity_status,
+    )
+    assert activity is not None
+
+    assert service.settle_activity_runs(activity) == []
+    running = request_store.get_run(request.id)
+    assert running["status"] == "running"
+    assert "deferred_terminal_status" not in (running["result_payload"] or {})
+
+    result = request_store._sqlite.record_run_output(
+        request.id,
+        output_id="turn:final",
+        text="The work is done.",
+        terminal_status="succeeded",
+    )
+
+    assert result["terminal_transition"] is True
+    terminal = request_store.get_run(request.id)
+    assert terminal["status"] == "succeeded"
+    assert terminal["result_text"] == "The work is done."
+
+
+@pytest.mark.parametrize(
+    ("activity_status", "expected_status", "expected_lead"),
+    [
+        ("stopped", "canceled", "The run was canceled after producing the result below."),
+        ("failed", "failed", "The run failed after producing the result below."),
+    ],
+)
+def test_a_run_that_ends_badly_after_its_reply_still_calls_back_with_the_reply(
+    tmp_path: Path,
+    monkeypatch,
+    activity_status: str,
+    expected_status: str,
+    expected_lead: str,
+) -> None:
+    """The Turn replied, then a background task it left running stopped or failed. The Run ends that way, and its
+    caller receives the outcome together with the reply instead of a claim that no result was produced."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    caller_session_id = _make_avibe_session(monkeypatch, tmp_path)
+    request_store, registry, service = _service_with_activity_registry(tmp_path)
+    request = request_store.enqueue_agent_run(
+        session_id="target-session",
+        message="delegated work",
+        agent_name="claude",
+        callback_session_id=caller_session_id,
+    )
+    assert request_store.claim(request.id) is not None
+    registry.start(
+        backend="claude",
+        runtime_key="runtime-1",
+        session_id="target-session",
+        activity_id="task-tests",
+        kind="background_task",
+        run_id=request.id,
+    )
+    assert request_store.defer_run_terminal(
+        request.id,
+        terminal_status="succeeded",
+        result_text="The work is done.",
+    ) is True
+    activity = registry.complete(
+        backend="claude",
+        runtime_key="runtime-1",
+        activity_id="task-tests",
+        status=activity_status,
+    )
+    assert service.settle_activity_runs(activity) == [request.id]
+
+    asyncio.run(service._drain_callbacks())
+
+    original = request_store.get_run(request.id)
+    assert original["status"] == expected_status
+    callback_runs = [
+        run
+        for run in request_store.list_runs()
+        if run.get("source_kind") == "callback" and run.get("parent_run_id") == request.id
+    ]
+    assert len(callback_runs) == 1
+    message = callback_runs[0]["message"]
+    assert message.startswith(expected_lead)
+    assert message.endswith("The work is done.")
+    assert f"Background Activity task-tests {activity_status}" in message
 
 
 def test_failed_activity_intent_survives_until_last_owned_activity_finishes(

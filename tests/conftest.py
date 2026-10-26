@@ -133,7 +133,7 @@ _CALLER_ENV = (
 )
 # What the run started with, for `uses_real_paths` tests and the tripwire.
 _AMBIENT_ENV = {name: os.environ.get(name) for name in (*_HOME_ENV, *_CALLER_ENV)}
-_REAL_PATH_HOME = Path.__dict__["home"]
+_REAL_PATH_HOME = inspect.getattr_static(Path, "home")
 
 
 def _home_env(home: Path) -> dict[str, str]:

@@ -5,14 +5,19 @@ fn main() {
     // generate per-command permissions, so the capability files become the only
     // thing that can hand them out: `bootstrap.json` gives the bootstrap
     // commands only to the shell's own local page, `pet.json` gives the pet
-    // commands only to the pet window, and `main-pet-bind.json` gives the
-    // Workbench `pet_bind` alone.
+    // commands only to the pet window, `main-pet-bind.json` gives the
+    // Workbench `pet_bind` alone, and `main-computer-use.json` gives it the
+    // two Computer Use guide actions on macOS.
     let manifest = tauri_build::AppManifest::new().commands(&[
         "bootstrap_status",
         "bootstrap_retry",
         "open_install_docs",
+        "computer_use_enable",
+        "computer_use_open_permission",
         "pet_ready",
         "pet_set_expanded",
+        "pet_drag",
+        "pet_settle",
         "pet_hit_regions",
         "pet_set_dismissed",
         "pet_bind",

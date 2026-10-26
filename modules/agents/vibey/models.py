@@ -85,6 +85,10 @@ def _hosted_routes(raw: Any) -> tuple[dict[str, HostedToolRoute], Optional[Image
 def _hosted_route(tool: Any, entry: Any) -> HostedToolRoute:
     """One search tool's facts, exactly as the hop schema allows them: declared natively exactly when ``native`` is
     ``assumed`` (§3.4, §4.1)."""
+    if tool == "web_fetch":
+        if entry != {"native": "unsupported", "replay": "unsupported"}:
+            raise ValueError("web_fetch is function-only, with no native replay")
+        return HostedToolRoute(mode="proxy", replay=False)
     if tool not in HOSTED_TOOLS or not isinstance(entry, Mapping):
         raise ValueError("not a search tool entry")
     native, replay = entry.get("native"), entry.get("replay")
@@ -181,10 +185,12 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
         context_price_steps=tuple(sorted(steps)),
     )
     base_url = hop["base_url"]
+    original_protocol = protocol
     if protocol == "google":
         if not gateway_base_url:
             raise HopResolutionError("a google hop needs the gateway prefix to call Chat Completions")
         protocol, base_url = "openai_chat", f"{gateway_base_url.rstrip('/')}/v1"
+    origin_api = original_protocol if original_protocol != protocol else None
     endpoint = ModelEndpoint(
         protocol=protocol,
         base_url=base_url,
@@ -196,6 +202,7 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
         source_identity=hop["source_identity"],
         hosted_tools=hosted_tools,
         image_models=image_models,
+        origin_api=origin_api,
     )
     return ModelSelection(endpoint=endpoint, capabilities=capabilities)
 

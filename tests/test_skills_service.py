@@ -225,20 +225,108 @@ def test_preview_uses_list_flag(monkeypatch):
     assert rec.calls[0]["cwd"] == "/p"
 
 
-def test_remove_project_no_p_flag(monkeypatch):
-    rec = _Recorder({"ok": True})
+def test_remove_project_uses_installed_agent_links(monkeypatch):
+    rec = _SequenceRecorder(
+        [
+            {
+                "ok": True,
+                "skills": [
+                    {
+                        "name": "pdf-tools",
+                        "scope": "project",
+                        "agents": [{"id": "claude-code", "name": "Claude Code"}],
+                    }
+                ],
+            },
+            {"ok": True},
+        ]
+    )
     monkeypatch.setattr(skills, "_run_askill", rec)
     _run(skills.remove_skill("askill", "pdf-tools", scope="project", project_dir="/p", backends=["claude"]))
-    assert rec.calls[0]["args"] == ["remove", "pdf-tools", "-a", "claude-code", "opencode", "codex"]
+    assert rec.calls[0]["args"] == ["list", "-p"]
+    assert rec.calls[1]["args"] == ["remove", "pdf-tools", "-a", "claude-code"]
     assert rec.calls[0]["cwd"] == "/p"
+    assert rec.calls[1]["cwd"] == "/p"
 
 
-def test_remove_global(monkeypatch):
-    rec = _Recorder({"ok": True})
+def test_remove_global_uses_third_party_installed_agent(monkeypatch):
+    rec = _SequenceRecorder(
+        [
+            {
+                "ok": True,
+                "skills": [
+                    {
+                        "name": "beautiful-mermaid",
+                        "scope": "global",
+                        "agents": [{"id": "trae", "name": "Trae"}],
+                    }
+                ],
+            },
+            {"ok": True},
+        ]
+    )
     monkeypatch.setattr(skills, "_run_askill", rec)
-    _run(skills.remove_skill("askill", "pdf-tools", scope="global"))
-    assert rec.calls[0]["args"] == ["remove", "pdf-tools", "-g", "-a", "claude-code", "opencode", "codex"]
-    assert rec.calls[0]["cwd"] is None
+    _run(skills.remove_skill("askill", "beautiful-mermaid", scope="global"))
+    assert rec.calls[0]["args"] == ["list", "-g"]
+    assert rec.calls[1]["args"] == ["remove", "beautiful-mermaid", "-g", "-a", "trae"]
+    assert rec.calls[1]["cwd"] is None
+
+
+def test_remove_passes_every_installed_agent_not_only_detected_backends(monkeypatch):
+    rec = _SequenceRecorder(
+        [
+            {
+                "ok": True,
+                "skills": [
+                    {
+                        "name": "shared-skill",
+                        "scope": "global",
+                        "agents": [
+                            {"id": "claude-code", "name": "Claude Code"},
+                            {"id": "opencode", "name": "OpenCode"},
+                            {"id": "codex", "name": "Codex"},
+                            {"id": "trae", "name": "Trae"},
+                        ],
+                    }
+                ],
+            },
+            {"ok": True},
+        ]
+    )
+    monkeypatch.setattr(skills, "_run_askill", rec)
+    _run(skills.remove_skill("askill", "shared-skill", scope="global"))
+    assert rec.calls[1]["args"] == [
+        "remove",
+        "shared-skill",
+        "-g",
+        "-a",
+        "claude-code",
+        "opencode",
+        "codex",
+        "trae",
+    ]
+
+
+def test_remove_surfaces_askill_listing_errors(monkeypatch):
+    rec = _Recorder(
+        {
+            "ok": False,
+            "error": {
+                "code": "ASKILL_LIST_FAILED",
+                "message": "cannot read the global Skill catalog",
+                "details": {"retryable": True},
+            },
+        }
+    )
+    monkeypatch.setattr(skills, "_run_askill", rec)
+
+    with pytest.raises(skills.SkillsError) as exc_info:
+        _run(skills.remove_skill("askill", "beautiful-mermaid", scope="global"))
+
+    assert exc_info.value.code == "ASKILL_LIST_FAILED"
+    assert exc_info.value.message == "cannot read the global Skill catalog"
+    assert exc_info.value.details == {"retryable": True}
+    assert rec.calls == [{"path": "askill", "args": ["list", "-g"], "cwd": None}]
 
 
 def test_find_passes_query(monkeypatch):
@@ -644,7 +732,21 @@ def test_active_org_members_mutate_skills_without_owner_preflight(monkeypatch, t
         with engine.begin() as connection:
             _seed_skill_policy(connection, "private-skill", access_level="private")
 
-        member_recorder = _Recorder({"ok": True})
+        member_recorder = _SequenceRecorder(
+            [
+                {
+                    "ok": True,
+                    "skills": [
+                        {
+                            "name": "private-skill",
+                            "scope": "global",
+                            "agents": [{"id": "codex", "name": "Codex"}],
+                        }
+                    ],
+                },
+                {"ok": True},
+            ]
+        )
         monkeypatch.setattr(skills, "_run_askill", member_recorder)
         assert _run(
             skills.remove_skill(
@@ -655,7 +757,8 @@ def test_active_org_members_mutate_skills_without_owner_preflight(monkeypatch, t
             )
         ) == {"ok": True}
         assert [call["args"] for call in member_recorder.calls] == [
-            ["remove", "private-skill", "-g", "-a", "claude-code", "opencode", "codex"]
+            ["list", "-g"],
+            ["remove", "private-skill", "-g", "-a", "codex"],
         ]
         with engine.connect() as connection:
             assert resource_access_service.get_resource_policy(
@@ -734,12 +837,27 @@ def test_remove_skill_deletes_all_legacy_backend_policies(monkeypatch, tmp_path)
                 access_level="private",
                 backend="claude",
             )
-        recorder = _Recorder(
-            {
-                "ok": True,
-                "selectedAgents": ["codex", "claude"],
-                "removedAgents": ["codex"],
-            }
+        recorder = _SequenceRecorder(
+            [
+                {
+                    "ok": True,
+                    "skills": [
+                        {
+                            "name": "shared-skill",
+                            "scope": "global",
+                            "agents": [
+                                {"id": "codex", "name": "Codex"},
+                                {"id": "claude-code", "name": "Claude Code"},
+                            ],
+                        }
+                    ],
+                },
+                {
+                    "ok": True,
+                    "selectedAgents": ["codex", "claude"],
+                    "removedAgents": ["codex"],
+                },
+            ]
         )
         monkeypatch.setattr(skills, "_run_askill", recorder)
 
@@ -760,7 +878,8 @@ def test_remove_skill_deletes_all_legacy_backend_policies(monkeypatch, tmp_path)
 
     assert result["ok"] is True
     assert [call["args"] for call in recorder.calls] == [
-        ["remove", "shared-skill", "-g", "-a", "claude-code", "opencode", "codex"]
+        ["list", "-g"],
+        ["remove", "shared-skill", "-g", "-a", "codex", "claude-code"],
     ]
     assert codex_policy is None
     assert claude_policy is None

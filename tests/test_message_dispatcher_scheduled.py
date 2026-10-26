@@ -2463,7 +2463,7 @@ class MessageDispatcherScheduledTests(unittest.IsolatedAsyncioTestCase):
         terminal_runs = set()
 
         class _RequestStore:
-            def defer_run_terminal(self, run_id, *, terminal_status, error=None):
+            def defer_run_terminal(self, run_id, *, terminal_status, error=None, amend_only=False):
                 events.append(("defer", run_id, terminal_status))
 
             def settle_deferred_run(self, run_id, *, error):

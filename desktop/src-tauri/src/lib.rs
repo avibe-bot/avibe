@@ -24,6 +24,7 @@ use std::time::Duration;
 mod native_frame;
 mod notifications;
 mod pet;
+mod pet_native;
 mod update_install;
 mod updater;
 
@@ -95,6 +96,9 @@ const SETTINGS_DEEP_LINK: &str = "avibe://settings";
 /// A Workbench that handles it cancels it; an uncancelled one falls back to
 /// loading the deep link's destination.
 const OPEN_SETTINGS_EVENT: &str = "avibe:desktop-open-settings";
+/// Where a relaunch after a guide-driven Screen Recording grant returns.
+#[cfg(target_os = "macos")]
+const COMPUTER_USE_SETUP_DEEP_LINK: &str = "avibe://settings/computer-use";
 #[cfg(feature = "bundled-runtime")]
 const ACTIVITY_UNINSTALL: u8 = 3;
 
@@ -842,6 +846,41 @@ fn stop_for_session_end(app: &AppHandle) -> Option<impl std::future::Future<Outp
     })
 }
 
+/// The answer a quit gets without the question, if any. The Computer Use
+/// guide's Screen Recording step ends in macOS's "Quit & Reopen", which reaches
+/// the shell as an ordinary quit; the relaunched shell adopts a Runtime that
+/// kept running, so stopping it would only interrupt every Agent turn in
+/// flight. While that relaunch is pending, a quit keeps the Runtime.
+fn unasked_quit_choice(setup_relaunch_pending: bool) -> Option<QuitChoice> {
+    setup_relaunch_pending.then_some(QuitChoice::Keep)
+}
+
+fn setup_relaunch_pending(app: &AppHandle) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        computer_use::setup_resume_pending(app)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = app;
+        false
+    }
+}
+
+fn carry_out_quit(app: &AppHandle, choice: QuitChoice) {
+    match choice {
+        QuitChoice::Stop => stop_runtime(app.clone(), true),
+        QuitChoice::Keep => {
+            if claim_runtime_stop(&app.state::<Shell>().activity) {
+                exit_shell(app);
+            } else {
+                show_lifecycle_busy(app);
+            }
+        }
+        QuitChoice::Cancel => {}
+    }
+}
+
 fn request_runtime_lifecycle(app: AppHandle, quit: bool) {
     let shell = app.state::<Shell>();
     if !matches!(shell.activity.load(Ordering::SeqCst), ACTIVITY_IDLE | ACTIVITY_MONITOR) {
@@ -864,6 +903,13 @@ fn request_runtime_lifecycle(app: AppHandle, quit: bool) {
         shell.dialog_pending.store(false, Ordering::SeqCst);
         return;
     }
+    if quit {
+        if let Some(choice) = unasked_quit_choice(setup_relaunch_pending(&app)) {
+            carry_out_quit(&app, choice);
+            shell.dialog_pending.store(false, Ordering::SeqCst);
+            return;
+        }
+    }
     let catalog = native_tray_catalog();
     if quit {
         let callback_app = app.clone();
@@ -872,17 +918,7 @@ fn request_runtime_lifecycle(app: AppHandle, quit: bool) {
             .title(catalog.quit_title.clone())
             .buttons(quit_dialog_buttons(&catalog))
             .show_with_result(move |result| {
-                match quit_choice(result, &catalog) {
-                    QuitChoice::Stop => stop_runtime(callback_app.clone(), true),
-                    QuitChoice::Keep => {
-                        if claim_runtime_stop(&callback_app.state::<Shell>().activity) {
-                            exit_shell(&callback_app);
-                        } else {
-                            show_lifecycle_busy(&callback_app);
-                        }
-                    }
-                    QuitChoice::Cancel => {}
-                }
+                carry_out_quit(&callback_app, quit_choice(result, &catalog));
                 callback_app
                     .state::<Shell>()
                     .dialog_pending
@@ -1166,6 +1202,53 @@ fn open_install_docs(window: WebviewWindow) -> Result<(), String> {
     ensure_shell_ui(&window)?;
     tauri_plugin_opener::open_url(INSTALL_DOCS_URL, None::<&str>)
         .map_err(|_| "Installation help could not be opened.".to_owned())
+}
+
+/// The Computer Use guide's "Turn on": the tray toggle's on half.
+#[tauri::command]
+fn computer_use_enable(window: WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        computer_use_guide_controller(&window)?.turn_on()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = window;
+        Err(COMPUTER_USE_UNSUPPORTED.to_owned())
+    }
+}
+
+/// The Computer Use guide's "Open Settings" for one privacy pane, named by
+/// `pane` (`accessibility` or `screen_recording`). The page never supplies a
+/// URL, so this cannot become a general System Settings opener.
+#[tauri::command]
+fn computer_use_open_permission(window: WebviewWindow, pane: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let pane = computer_use::PermissionPane::parse(&pane).ok_or_else(|| "Not a permission pane.".to_owned())?;
+        computer_use_guide_controller(&window)?.open_permission(pane)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (window, pane);
+        Err(COMPUTER_USE_UNSUPPORTED.to_owned())
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+const COMPUTER_USE_UNSUPPORTED: &str = "Computer Use is only available on macOS.";
+
+/// The capability (`main-computer-use.json`) limits these commands to the main
+/// window on a loopback page; this also requires the Runtime the shell adopted,
+/// so a same-window page on another loopback port cannot drive them.
+#[cfg(target_os = "macos")]
+fn computer_use_guide_controller(window: &WebviewWindow) -> Result<tauri::State<'_, computer_use::Controller>, String> {
+    if !pet::is_workbench(window) {
+        return Err("This command is only available to the Avibe Workbench.".to_owned());
+    }
+    window
+        .try_state::<computer_use::Controller>()
+        .ok_or_else(|| "Computer Use is unavailable.".to_owned())
 }
 
 /// Runs the bootstrap state machine once, unless one is already running.
@@ -1495,7 +1578,9 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
         .on_new_window(|url, _features| handle_new_window_request(url));
     // macOS draws the page under a transparent native title bar (`tauri.conf.json`).
     #[cfg(target_os = "macos")]
-    let builder = builder.initialization_script(macos_title_bar::inset_script());
+    let builder = builder
+        .initialization_script(macos_title_bar::inset_script())
+        .initialization_script(DESKTOP_COMPUTER_USE_MARKER);
     let window = builder.build().ok()?;
     #[cfg(target_os = "macos")]
     {
@@ -1510,6 +1595,13 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
 /// WebView2 runs initialization scripts in subframes too, hence the frame check.
 const DESKTOP_SHELL_MARKER: &str =
     "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true });";
+
+/// Tells the Workbench that this shell answers the Computer Use guide's
+/// actions (`computer_use_enable`, `computer_use_open_permission`). Read by
+/// `ui/src/lib/desktopShell.ts`; a shell without it leaves the guide read-only.
+#[cfg(target_os = "macos")]
+const DESKTOP_COMPUTER_USE_MARKER: &str =
+    "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_COMPUTER_USE__', { value: true });";
 
 /// What happens to a browsing context the page asks for.
 #[derive(Debug, PartialEq, Eq)]
@@ -2099,7 +2191,7 @@ pub fn run() {
                     }
                     if let RunEvent::WindowEvent {
                         label,
-                        event: WindowEvent::Moved(_),
+                        event: WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. },
                         ..
                     } = event
                     {
@@ -2134,8 +2226,12 @@ pub fn run() {
             bootstrap_status,
             bootstrap_retry,
             open_install_docs,
+            computer_use_enable,
+            computer_use_open_permission,
             pet::pet_ready,
             pet::pet_set_expanded,
+            pet::pet_drag,
+            pet::pet_settle,
             pet::pet_hit_regions,
             pet::pet_set_dismissed,
             pet::pet_bind,
@@ -2181,6 +2277,11 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             macos_terminate::install(app.handle());
             if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
+                // A link the launch carries still wins: it is received last.
+                #[cfg(target_os = "macos")]
+                if computer_use::take_setup_resume(app.handle()) {
+                    links.receive([COMPUTER_USE_SETUP_DEEP_LINK]);
+                }
                 links.receive(
                     std::env::args_os()
                         .skip(1)
@@ -3362,5 +3463,23 @@ mod tests {
                 "{raw}"
             );
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_computer_use_guide_marker_and_resume_link_match_their_readers() {
+        assert!(DESKTOP_COMPUTER_USE_MARKER.starts_with("if (window.self === window.top)"));
+        assert!(DESKTOP_COMPUTER_USE_MARKER.contains("'__AVIBE_DESKTOP_COMPUTER_USE__'"));
+        let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../ui/src");
+        let shell = std::fs::read_to_string(ui.join("lib/desktopShell.ts")).unwrap();
+        assert!(shell.contains("window.__AVIBE_DESKTOP_COMPUTER_USE__ !== true"));
+        for command in ["'computer_use_enable'", "'computer_use_open_permission'"] {
+            assert!(shell.contains(command), "the Workbench must invoke {command}");
+        }
+        let target = avibe_runtime_host::deep_link::parse_deep_link(COMPUTER_USE_SETUP_DEEP_LINK).unwrap();
+        assert_eq!(target.path(), "/settings/computer-use");
+        assert!(std::fs::read_to_string(ui.join("lib/applicationRoutes.ts"))
+            .unwrap()
+            .contains("'/settings/computer-use'"));
     }
 }

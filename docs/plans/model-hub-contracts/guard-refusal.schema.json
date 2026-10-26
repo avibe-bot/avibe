@@ -61,7 +61,7 @@
   ],
   "properties": {
     "ok": { "const": false },
-    "contract_version": { "const": 17 },
+    "contract_version": { "const": 21 },
     "error": {
       "enum": [
         "source_last_supplier",
@@ -116,7 +116,7 @@
   "examples": [
     {
       "ok": false,
-      "contract_version": 17,
+      "contract_version": 21,
       "error": "source_model_in_route_chain",
       "detail": "modelHub.errors.source_model_in_route_chain",
       "would_remove_hops": [

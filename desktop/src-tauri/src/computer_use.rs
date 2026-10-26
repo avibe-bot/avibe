@@ -10,7 +10,7 @@ use std::process::Stdio;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use avibe_runtime_host::computer_use::{
     CapabilityCache, CapabilityProbe, CapabilityVerdict, ComputerUseLifecycle, ComputerUsePhase, ComputerUseRecord,
@@ -51,11 +51,23 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 const PERMISSION_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const PERMISSION_CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 const START_BACKOFF: Duration = Duration::from_secs(1);
+/// Written when the Workbench guide opens Screen Recording, so a macOS
+/// "Quit & Reopen" brings the relaunched shell back to the guide.
+const SETUP_RESUME_FILE: &str = "permission-setup-resume";
+/// How long after that request a launch still counts as its relaunch.
+const SETUP_RESUME_WINDOW: Duration = Duration::from_secs(15 * 60);
 const COMPUTER_USE_SCHEMA: u64 = COMPUTER_USE_SCHEMA_VERSION as u64;
 const DARWIN_SOCKET_PATH_MAX_BYTES: usize = 103;
 const SOCKET_DIRECTORY_MODE: u32 = 0o700;
 const SOCKET_FLAVOR_HEX_BYTES: usize = 12;
 const DAEMON_STDERR_TAIL_BYTES: usize = 8 * 1024;
+/// Upper bound, in milliseconds, of the driver's post-action window-change
+/// watch and the focus-steal lease it holds. The driver default is 1000 ms;
+/// see the Latency section of `docs/plans/desktop-computer-use.md`.
+const DAEMON_WINDOW_CHANGE_TIMEOUT_MS: &str = "500";
+/// Fixed virtual-cursor glide duration, in milliseconds. The driver default
+/// is speed-based and takes 0.45 to 1.5 s per position change.
+const DAEMON_CURSOR_GLIDE_MS: &str = "200";
 
 fn driver_command(driver: &Path) -> Command {
     let mut command = Command::new(driver);
@@ -124,8 +136,36 @@ impl Default for MenuView {
     }
 }
 
+/// A System Settings privacy pane the Workbench guide may open. The page names
+/// one of these; it never supplies a URL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PermissionPane {
+    Accessibility,
+    ScreenRecording,
+}
+
+impl PermissionPane {
+    pub(crate) fn parse(value: &str) -> Option<Self> {
+        match value {
+            "accessibility" => Some(Self::Accessibility),
+            "screen_recording" => Some(Self::ScreenRecording),
+            _ => None,
+        }
+    }
+
+    /// Checked on macOS 26.2: both land on their Privacy & Security list.
+    fn settings_url(self) -> &'static str {
+        match self {
+            Self::Accessibility => "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
+            Self::ScreenRecording => "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+        }
+    }
+}
+
 enum Event {
     Toggle,
+    Enable,
+    OpenPermission(PermissionPane),
     RuntimeReady { origin: LoopbackOrigin, adoption: bool },
     RuntimeLost,
     RuntimeStopped,
@@ -174,6 +214,27 @@ impl Controller {
         let _ = self.sender.send(Event::Toggle);
     }
 
+    /// Turns Computer Use on exactly as the tray toggle does, and does nothing
+    /// when it is already on: a page acting on a stale status must not turn it
+    /// off.
+    pub(crate) fn turn_on(&self) -> Result<(), String> {
+        self.request(Event::Enable)
+    }
+
+    /// Asks macOS for `pane`'s grant where it allows a prompt, then opens the
+    /// pane in System Settings.
+    pub(crate) fn open_permission(&self, pane: PermissionPane) -> Result<(), String> {
+        self.request(Event::OpenPermission(pane))
+    }
+
+    /// Hands a page request to the lifecycle. A degraded controller has no
+    /// lifecycle task, so the page is told the request went nowhere.
+    fn request(&self, event: Event) -> Result<(), String> {
+        self.sender
+            .send(event)
+            .map_err(|_| "Computer Use is unavailable.".to_owned())
+    }
+
     pub(crate) fn runtime_ready(&self, origin: LoopbackOrigin, adoption: bool) {
         let _ = self.sender.send(Event::RuntimeReady { origin, adoption });
     }
@@ -211,9 +272,15 @@ struct Paths {
     snapshot: PathBuf,
 }
 
+/// The directory the Runtime reads desktop state from (`desktop_computer_use_dir()`
+/// in `core/computer_use.py`). The updater publishes `update-status.json` here too.
+pub(crate) fn state_dir(app: &AppHandle) -> tauri::Result<PathBuf> {
+    Ok(configured_path(app.path().app_data_dir()?, STATE_DIR_ENV))
+}
+
 impl Paths {
     fn resolve(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
-        let state_dir = configured_path(app.path().app_data_dir()?, STATE_DIR_ENV);
+        let state_dir = state_dir(app)?;
         std::fs::create_dir_all(&state_dir)?;
         let owner_uid = std::fs::metadata(&state_dir)?.uid();
         let socket = short_socket_path(&state_dir, owner_uid);
@@ -342,6 +409,7 @@ struct RuntimeState {
     host_bundle_id: String,
     assets_valid: bool,
     pending_write: Option<ComputerUseRecord>,
+    setup_resume_armed: bool,
     started_at: Instant,
 }
 
@@ -381,6 +449,7 @@ impl RuntimeState {
             host_bundle_id: String::new(),
             assets_valid,
             pending_write: None,
+            setup_resume_armed: false,
             started_at: Instant::now(),
         };
         runtime.host_bundle_id = runtime.app.config().identifier.clone();
@@ -415,6 +484,12 @@ impl RuntimeState {
                     };
                     match event {
                         Event::Toggle => self.toggle().await,
+                        Event::Enable => {
+                            if !self.lifecycle.enabled() {
+                                self.toggle().await;
+                            }
+                        }
+                        Event::OpenPermission(pane) => self.open_permission(pane).await,
                         Event::RuntimeReady { origin, adoption } => {
                             self.runtime_ready(origin, adoption).await;
                         }
@@ -469,6 +544,21 @@ impl RuntimeState {
         }
         let directive = self.lifecycle.toggle_on(self.capabilities.current(), grants);
         self.apply(directive).await;
+    }
+
+    async fn open_permission(&mut self, pane: PermissionPane) {
+        match pane {
+            PermissionPane::Accessibility => request_accessibility_grant(&self.app, &self.diagnostics).await,
+            PermissionPane::ScreenRecording => {
+                // The full request also runs the one-pixel capture, which is
+                // what lists Avibe in the Screen Recording pane.
+                let _ = request_permissions(&self.app, &self.diagnostics).await;
+                self.setup_resume_armed = arm_setup_resume(&self.paths.state_dir, SystemTime::now()).is_ok();
+            }
+        }
+        open_permission_settings(&self.app, pane);
+        self.activated().await;
+        self.settle_setup_resume();
     }
 
     async fn runtime_ready(&mut self, origin: LoopbackOrigin, adoption: bool) {
@@ -538,8 +628,13 @@ impl RuntimeState {
             return;
         }
         if self.lifecycle.phase() == ComputerUsePhase::NeedsRuntime {
-            if let Some(directive) =
-                runtime_reprobe_directive(&mut self.lifecycle, &mut self.capabilities, self.origin.as_ref()).await
+            if let Some(directive) = runtime_reprobe_directive(
+                &mut self.lifecycle,
+                &mut self.capabilities,
+                self.origin.as_ref(),
+                silent_grants,
+            )
+            .await
             {
                 self.apply(directive).await;
             }
@@ -648,10 +743,20 @@ impl RuntimeState {
             return false;
         }
         self.publish_view();
+        self.settle_setup_resume();
         if directive.spawn_permission_probe {
             self.start_permission_probe().await;
         }
         true
+    }
+
+    /// Once this process has seen Screen Recording settle either way, no
+    /// relaunch is needed to finish the guide, so the marker goes.
+    fn settle_setup_resume(&mut self) {
+        if self.setup_resume_armed && !awaiting_screen_recording(self.lifecycle.phase(), self.lifecycle.reason()) {
+            let _ = std::fs::remove_file(self.paths.state_dir.join(SETUP_RESUME_FILE));
+            self.setup_resume_armed = false;
+        }
     }
 
     fn invalidate_start_retry(&mut self) {
@@ -872,6 +977,57 @@ impl RuntimeState {
     }
 }
 
+fn awaiting_screen_recording(phase: ComputerUsePhase, reason: Option<&str>) -> bool {
+    phase == ComputerUsePhase::NeedsPermission && reason == Some("screen_recording")
+}
+
+fn unix_seconds(time: SystemTime) -> u64 {
+    time.duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs())
+}
+
+fn arm_setup_resume(state_dir: &Path, now: SystemTime) -> io::Result<()> {
+    std::fs::write(state_dir.join(SETUP_RESUME_FILE), unix_seconds(now).to_string())
+}
+
+/// Whether a marker's contents name a request inside its window at `now`.
+fn setup_resume_in_window(contents: &str, now: SystemTime) -> bool {
+    let Ok(armed_at) = contents.trim().parse::<u64>() else {
+        return false;
+    };
+    let now = unix_seconds(now);
+    armed_at <= now && now - armed_at <= SETUP_RESUME_WINDOW.as_secs()
+}
+
+/// Consumes the marker a guide-driven Screen Recording request left, and says
+/// whether this launch is that request's relaunch. A marker is read once:
+/// stale or not, it never steers a second launch.
+fn take_setup_resume_at(state_dir: &Path, now: SystemTime) -> bool {
+    let path = state_dir.join(SETUP_RESUME_FILE);
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let _ = std::fs::remove_file(&path);
+    setup_resume_in_window(&contents, now)
+}
+
+/// Whether a guide-driven Screen Recording request is still waiting on its
+/// relaunch, so a quit now is most likely macOS's "Quit & Reopen". The marker
+/// stays for the relaunched shell to consume.
+fn setup_resume_pending_at(state_dir: &Path, now: SystemTime) -> bool {
+    std::fs::read_to_string(state_dir.join(SETUP_RESUME_FILE))
+        .is_ok_and(|contents| setup_resume_in_window(&contents, now))
+}
+
+/// Whether this launch should reopen the Computer Use guide.
+pub(crate) fn take_setup_resume(app: &AppHandle) -> bool {
+    state_dir(app).is_ok_and(|dir| take_setup_resume_at(&dir, SystemTime::now()))
+}
+
+/// Whether a quit now is the relaunch the Computer Use guide is waiting on.
+pub(crate) fn setup_resume_pending(app: &AppHandle) -> bool {
+    state_dir(app).is_ok_and(|dir| setup_resume_pending_at(&dir, SystemTime::now()))
+}
+
 fn restored_lifecycle(stored: &StoredComputerUseState, assets_valid: bool) -> ComputerUseLifecycle {
     let mut lifecycle = match stored {
         StoredComputerUseState::Current(record) => ComputerUseLifecycle::from_record(record),
@@ -890,14 +1046,16 @@ async fn runtime_reprobe_directive(
     lifecycle: &mut ComputerUseLifecycle,
     capabilities: &mut CapabilityCache,
     origin: Option<&LoopbackOrigin>,
+    read_grants: impl FnOnce() -> Grants,
 ) -> Option<LifecycleDirective> {
     if !lifecycle.enabled() || lifecycle.phase() != ComputerUsePhase::NeedsRuntime {
         return None;
     }
     let origin = origin?;
     let support = capabilities.observe(probe_capabilities(origin).await);
+    // Permissions must reflect the state after the awaited Runtime probe.
     let grants = if support == RuntimeSupport::Supported {
-        silent_grants()
+        read_grants()
     } else {
         Grants {
             accessibility: false,
@@ -1044,7 +1202,7 @@ async fn stop_daemon_process(mut daemon: Daemon, socket: &Path, diagnostics: &Bo
     let _ = std::fs::remove_file(socket);
 }
 
-fn spawn_daemon(driver: &Path, socket: &Path, host_bundle_id: &str, policy: &Path) -> io::Result<Daemon> {
+fn daemon_command(driver: &Path, socket: &Path, host_bundle_id: &str, policy: &Path) -> Command {
     let mut command = driver_command(driver);
     command
         .args([
@@ -1056,8 +1214,16 @@ fn spawn_daemon(driver: &Path, socket: &Path, host_bundle_id: &str, policy: &Pat
         ])
         .arg(socket)
         .args(["--host-bundle-id", host_bundle_id, "--permission-mode", "standard"])
+        .args(["--glide-ms", DAEMON_CURSOR_GLIDE_MS])
         .env("CUA_DRIVER_EMBEDDED_HOST_PID", std::process::id().to_string())
         .env("CUA_DRIVER_MANAGED_POLICY_FILE", policy)
+        .env("CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS", DAEMON_WINDOW_CHANGE_TIMEOUT_MS);
+    command
+}
+
+fn spawn_daemon(driver: &Path, socket: &Path, host_bundle_id: &str, policy: &Path) -> io::Result<Daemon> {
+    let mut command = daemon_command(driver, socket, host_bundle_id, policy);
+    command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -1751,6 +1917,30 @@ async fn request_permissions(app: &AppHandle, diagnostics: &BootstrapLog) -> Gra
     result.grants()
 }
 
+/// The Accessibility half of [`request_permissions`]: the system prompt lists
+/// Avibe in the pane, and Screen Recording is left alone.
+async fn request_accessibility_grant(app: &AppHandle, diagnostics: &BootstrapLog) {
+    let (sender, receiver) = oneshot::channel();
+    let dispatched = app.run_on_main_thread(move || {
+        let granted = if MainThreadMarker::new().is_some() {
+            Some(request_accessibility())
+        } else {
+            None
+        };
+        let _ = sender.send(granted);
+    });
+    let outcome = match dispatched {
+        Err(_) => "dispatch_failed".to_owned(),
+        Ok(()) => match timeout(PERMISSION_REQUEST_TIMEOUT, receiver).await {
+            Ok(Ok(Some(granted))) => granted.to_string(),
+            Ok(Ok(None)) => "non_main".to_owned(),
+            Ok(Err(_)) => "dropped".to_owned(),
+            Err(_) => "timed_out".to_owned(),
+        },
+    };
+    diagnostics.record("computer-use.accessibility-request", &[("accessibility", outcome)]);
+}
+
 fn request_accessibility() -> bool {
     // SAFETY: The dictionary contains two process-lifetime CoreFoundation
     // constants. The prompting call does not retain it after returning.
@@ -2019,16 +2209,17 @@ fn record_permission_request(diagnostics: &BootstrapLog, result: &PermissionRequ
 }
 
 fn open_missing_permission_settings(app: &AppHandle, grants: Grants) {
-    let screen_recording_needs_guidance = grants.accessibility && !grants.screen_recording;
-    let url = if !grants.accessibility {
-        "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+    let pane = if grants.accessibility {
+        PermissionPane::ScreenRecording
     } else {
-        "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        PermissionPane::Accessibility
     };
-    if tauri_plugin_opener::open_url(url, None::<&str>).is_err() {
-        let _ = app;
-    }
-    if screen_recording_needs_guidance {
+    open_permission_settings(app, pane);
+}
+
+fn open_permission_settings(app: &AppHandle, pane: PermissionPane) {
+    let _ = tauri_plugin_opener::open_url(pane.settings_url(), None::<&str>);
+    if pane == PermissionPane::ScreenRecording {
         let catalog = crate::native_catalog_for_locales(sys_locale::get_locales()).computer_use;
         app.dialog()
             .message(catalog.screen_recording_guide)
@@ -2187,6 +2378,12 @@ mod tests {
         assert_eq!(
             daemon_environment.get("CUA_DRIVER_MANAGED_POLICY_FILE"),
             Some(&policy.display().to_string())
+        );
+        assert_eq!(
+            daemon_environment
+                .get("CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS")
+                .map(String::as_str),
+            Some("500")
         );
         assert!(!daemon_environment.contains_key("HOME"));
 
@@ -2347,6 +2544,63 @@ esac
             );
         }
         (json!({"ok": true, "result": {"shutdown": true}}), true)
+    }
+
+    #[test]
+    fn daemon_command_pins_latency_tuning_and_the_whole_launch_contract() {
+        // Literal values on purpose: changing the 500 ms window-change watch or
+        // the 200 ms glide must be a visible test edit, not a silent drift.
+        // `--glide-ms` is a pinned-driver `serve` flag (cua-driver-rs v0.31.0,
+        // `CursorConfig::parse`), not listed in its `--help`.
+        let command = daemon_command(
+            Path::new("/opt/cua-driver"),
+            Path::new("/tmp/driver.sock"),
+            "bot.avibe.desktop.test",
+            Path::new("/tmp/policy.yaml"),
+        );
+        let command = command.as_std();
+        let arguments: Vec<&str> = command
+            .get_args()
+            .map(|argument| argument.to_str().expect("utf-8 argument"))
+            .collect();
+        assert_eq!(
+            arguments,
+            [
+                "serve",
+                "--embedded",
+                "--parent-liveness-stdio",
+                "--no-permissions-gate",
+                "--socket",
+                "/tmp/driver.sock",
+                "--host-bundle-id",
+                "bot.avibe.desktop.test",
+                "--permission-mode",
+                "standard",
+                "--glide-ms",
+                "200",
+            ]
+        );
+        let environment: BTreeMap<&str, Option<&str>> = command
+            .get_envs()
+            .map(|(name, value)| {
+                (
+                    name.to_str().expect("utf-8 name"),
+                    value.map(|value| value.to_str().expect("utf-8 value")),
+                )
+            })
+            .collect();
+        let host_pid = std::process::id().to_string();
+        let expected: BTreeMap<&str, Option<&str>> = [
+            ("CUA_DRIVER_EMBEDDED", Some("1")),
+            ("CUA_DRIVER_EMBEDDED_HOST_PID", Some(host_pid.as_str())),
+            ("CUA_DRIVER_MANAGED_POLICY_FILE", Some("/tmp/policy.yaml")),
+            ("CUA_DRIVER_RS_TELEMETRY_ENABLED", Some("0")),
+            ("CUA_DRIVER_RS_UPDATE_CHECK", Some("0")),
+            ("CUA_DRIVER_WINDOW_CHANGE_TIMEOUT_MS", Some("500")),
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(environment, expected);
     }
 
     #[test]
@@ -2661,6 +2915,139 @@ done
     }
 
     #[test]
+    fn a_degraded_controller_reports_that_page_requests_went_nowhere() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let controller = Controller {
+            sender,
+            view: Arc::new(Mutex::new(MenuView::default())),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
+            shutdown_started: AtomicBool::new(false),
+        };
+        assert!(controller.turn_on().is_ok());
+        assert!(controller.open_permission(PermissionPane::Accessibility).is_ok());
+        // `RuntimeState::new` failing drops the receiver; nothing will run.
+        drop(receiver);
+        assert!(controller.turn_on().is_err());
+        assert!(controller.open_permission(PermissionPane::ScreenRecording).is_err());
+    }
+
+    #[test]
+    fn the_guide_names_only_the_two_privacy_panes() {
+        assert_eq!(
+            PermissionPane::parse("accessibility"),
+            Some(PermissionPane::Accessibility)
+        );
+        assert_eq!(
+            PermissionPane::parse("screen_recording"),
+            Some(PermissionPane::ScreenRecording)
+        );
+        for rejected in [
+            "",
+            "Accessibility",
+            "screen-recording",
+            "camera",
+            "x-apple.systempreferences:",
+        ] {
+            assert_eq!(PermissionPane::parse(rejected), None, "{rejected}");
+        }
+        assert_eq!(
+            PermissionPane::Accessibility.settings_url(),
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        );
+        assert_eq!(
+            PermissionPane::ScreenRecording.settings_url(),
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+        );
+    }
+
+    #[test]
+    fn a_setup_resume_marker_steers_one_launch_inside_its_window() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let dir = temporary.path();
+        let armed = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        assert!(!take_setup_resume_at(dir, armed), "no marker, no resume");
+
+        arm_setup_resume(dir, armed).unwrap();
+        assert!(take_setup_resume_at(dir, armed + SETUP_RESUME_WINDOW));
+        assert!(
+            !take_setup_resume_at(dir, armed + SETUP_RESUME_WINDOW),
+            "a marker is consumed by the launch that reads it"
+        );
+
+        for (now, label) in [
+            (armed + SETUP_RESUME_WINDOW + Duration::from_secs(1), "stale"),
+            (armed - Duration::from_secs(1), "from the future"),
+        ] {
+            arm_setup_resume(dir, armed).unwrap();
+            assert!(!take_setup_resume_at(dir, now), "{label}");
+            assert!(
+                !dir.join(SETUP_RESUME_FILE).exists(),
+                "a {label} marker is still removed"
+            );
+        }
+
+        std::fs::write(dir.join(SETUP_RESUME_FILE), "not a time").unwrap();
+        assert!(!take_setup_resume_at(dir, armed));
+        assert!(!dir.join(SETUP_RESUME_FILE).exists());
+    }
+
+    /// macOS's Screen Recording "Quit & Reopen" arrives as an ordinary quit.
+    /// While the guide's marker is armed and inside its window, that quit keeps
+    /// the Runtime without asking, so the relaunched shell can adopt it; any
+    /// other quit asks as before. Deciding never consumes the marker.
+    #[test]
+    fn a_pending_setup_resume_keeps_the_runtime_on_quit_without_asking() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let dir = temporary.path();
+        let armed = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let quit_at = |now| crate::unasked_quit_choice(setup_resume_pending_at(dir, now));
+
+        assert_eq!(quit_at(armed), None, "no marker: the quit question is asked");
+
+        arm_setup_resume(dir, armed).unwrap();
+        for now in [armed, armed + SETUP_RESUME_WINDOW] {
+            assert_eq!(quit_at(now), Some(crate::QuitChoice::Keep));
+        }
+        assert!(
+            take_setup_resume_at(dir, armed + SETUP_RESUME_WINDOW),
+            "the relaunched shell still finds the marker the quit read"
+        );
+        assert_eq!(quit_at(armed), None, "a consumed marker no longer skips the question");
+
+        for (now, label) in [
+            (armed + SETUP_RESUME_WINDOW + Duration::from_secs(1), "expired"),
+            (armed - Duration::from_secs(1), "from the future"),
+        ] {
+            arm_setup_resume(dir, armed).unwrap();
+            assert_eq!(quit_at(now), None, "an {label} marker behaves as no marker");
+        }
+        std::fs::write(dir.join(SETUP_RESUME_FILE), "not a time").unwrap();
+        assert_eq!(quit_at(armed), None, "an unreadable marker behaves as no marker");
+    }
+
+    #[test]
+    fn only_a_pending_screen_recording_grant_keeps_the_resume_marker() {
+        assert!(awaiting_screen_recording(
+            ComputerUsePhase::NeedsPermission,
+            Some("screen_recording")
+        ));
+        assert!(!awaiting_screen_recording(
+            ComputerUsePhase::NeedsPermission,
+            Some("accessibility")
+        ));
+        for phase in [
+            ComputerUsePhase::Off,
+            ComputerUsePhase::Starting,
+            ComputerUsePhase::Ready,
+            ComputerUsePhase::Error,
+            ComputerUsePhase::Stopped,
+            ComputerUsePhase::NeedsRuntime,
+        ] {
+            assert!(!awaiting_screen_recording(phase, Some("screen_recording")), "{phase:?}");
+        }
+    }
+
+    #[test]
     fn restored_enablement_with_invalid_assets_cannot_spawn() {
         let record = ComputerUseRecord {
             schema_version: COMPUTER_USE_SCHEMA_VERSION,
@@ -2710,46 +3097,156 @@ done
             proxy_executable: None,
             host_bundle_id: None,
         };
-        let mut lifecycle = ComputerUseLifecycle::from_record(&record);
-        let mut capabilities = CapabilityCache::default();
-        capabilities.begin_adoption();
+        // This owner boundary must use fresh permissions after HTTP completes,
+        // not the host's TCC state or a snapshot taken before the await.
+        for (status, schema, grants, support, phase, reason) in [
+            (
+                200,
+                COMPUTER_USE_SCHEMA,
+                Grants::all(),
+                RuntimeSupport::Supported,
+                ComputerUsePhase::Starting,
+                None,
+            ),
+            (
+                200,
+                COMPUTER_USE_SCHEMA,
+                Grants {
+                    accessibility: false,
+                    screen_recording: true,
+                },
+                RuntimeSupport::Supported,
+                ComputerUsePhase::NeedsPermission,
+                Some("accessibility"),
+            ),
+            (
+                200,
+                COMPUTER_USE_SCHEMA,
+                Grants {
+                    accessibility: true,
+                    screen_recording: false,
+                },
+                RuntimeSupport::Supported,
+                ComputerUsePhase::NeedsPermission,
+                Some("screen_recording"),
+            ),
+            (
+                200,
+                COMPUTER_USE_SCHEMA,
+                Grants {
+                    accessibility: false,
+                    screen_recording: false,
+                },
+                RuntimeSupport::Supported,
+                ComputerUsePhase::NeedsPermission,
+                Some("accessibility"),
+            ),
+            (
+                200,
+                0,
+                Grants::all(),
+                RuntimeSupport::Unsupported,
+                ComputerUsePhase::NeedsRuntime,
+                Some("runtime_too_old"),
+            ),
+            (
+                503,
+                COMPUTER_USE_SCHEMA,
+                Grants::all(),
+                RuntimeSupport::Unknown,
+                ComputerUsePhase::NeedsRuntime,
+                Some("runtime_unavailable"),
+            ),
+        ] {
+            let mut lifecycle = ComputerUseLifecycle::from_record(&record);
+            let mut capabilities = CapabilityCache::default();
+            capabilities.begin_adoption();
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("capability listener");
-        let address = listener.local_addr().expect("capability listener address");
-        let origin = LoopbackOrigin::parse(&format!("http://{address}")).expect("loopback origin");
-        let server = tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-            let (mut stream, _) = listener.accept().await.expect("capability request");
-            let mut request = [0_u8; 1024];
-            let read = stream.read(&mut request).await.expect("capability request bytes");
-            assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /api/desktop/capabilities "));
-            let body =
-                format!(r#"{{"controller_id":"restarted-runtime","computer_use_schema":{COMPUTER_USE_SCHEMA}}}"#);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream
-                .write_all(response.as_bytes())
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
-                .expect("capability response");
-        });
-        let directive = runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin))
-            .await
-            .expect("normal tick reprobe");
-        server.await.expect("capability server");
+                .expect("capability listener");
+            let address = listener.local_addr().expect("capability listener address");
+            let origin = LoopbackOrigin::parse(&format!("http://{address}")).expect("loopback origin");
+            for (mut skipped, origin) in [(ComputerUseLifecycle::off(), Some(&origin)), (lifecycle.clone(), None)] {
+                assert_eq!(
+                    runtime_reprobe_directive(&mut skipped, &mut capabilities, origin, || panic!(
+                        "ineligible reprobe queried permissions"
+                    ))
+                    .await,
+                    None
+                );
+                assert_eq!(capabilities, CapabilityCache::default());
+            }
 
-        assert!(directive.spawn_daemon);
-        assert!(directive.write_state);
-        assert_eq!(capabilities.controller_id(), Some("restarted-runtime"));
-        assert_eq!(lifecycle.phase(), ComputerUsePhase::Starting);
-        assert_eq!(
-            runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin)).await,
-            None
-        );
+            let (request_seen, request_pending) = oneshot::channel();
+            let (release_response, response_released) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+                let (mut stream, _) = listener.accept().await.expect("capability request");
+                let mut request = [0_u8; 1024];
+                let read = stream.read(&mut request).await.expect("capability request bytes");
+                assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /api/desktop/capabilities "));
+                request_seen.send(()).expect("pending probe");
+                response_released.await.expect("release capability response");
+                let body = format!(r#"{{"controller_id":"restarted-runtime","computer_use_schema":{schema}}}"#);
+                let response = format!(
+                    "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("capability response");
+            });
+            let current_grants = std::cell::Cell::new(Grants {
+                accessibility: !grants.accessibility,
+                screen_recording: !grants.screen_recording,
+            });
+            let grant_reads = std::cell::Cell::new(0);
+            let reprobe = runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin), || {
+                grant_reads.set(grant_reads.get() + 1);
+                current_grants.get()
+            });
+            let change_permissions = async {
+                request_pending.await.expect("capability request in flight");
+                assert_eq!(grant_reads.get(), 0, "permissions read before the probe completed");
+                current_grants.set(grants);
+                release_response.send(()).expect("release pending response");
+            };
+            let (directive, ()) = timeout(Duration::from_secs(5), async {
+                tokio::join!(reprobe, change_permissions)
+            })
+            .await
+            .expect("bounded reprobe");
+            server.await.expect("capability server");
+
+            let supported = support == RuntimeSupport::Supported;
+            assert_eq!(grant_reads.get(), usize::from(supported));
+            assert_eq!(
+                directive,
+                Some(LifecycleDirective {
+                    spawn_daemon: phase == ComputerUsePhase::Starting,
+                    write_state: support != RuntimeSupport::Unknown,
+                    stop_permission_probe: !supported,
+                    ..LifecycleDirective::default()
+                }),
+                "{status}, {grants:?}"
+            );
+            assert_eq!(capabilities.controller_id(), Some("restarted-runtime"));
+            assert_eq!(capabilities.current(), support);
+            assert_eq!(lifecycle.phase(), phase);
+            assert_eq!(lifecycle.reason(), reason);
+            if supported {
+                assert_eq!(
+                    runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin), || panic!(
+                        "repeat reprobe queried permissions"
+                    ))
+                    .await,
+                    None
+                );
+            }
+        }
     }
 
     #[tokio::test]

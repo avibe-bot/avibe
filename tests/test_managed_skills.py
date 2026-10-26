@@ -10,6 +10,8 @@ import pytest
 
 from core import managed_skills
 from core.managed_skills import (
+    _skill_list_rows,
+    catalog_page,
     BUILTIN_SKILLS_ROOT_ENV,
     BUILTIN_SKILLS_SNAPSHOT_ENV,
     CATALOG_DESCRIPTION_MAX_CHARS,
@@ -29,7 +31,6 @@ from core.managed_skills import (
     publish_builtin_skills,
     render_skill_catalog_prompt,
     render_skill_content,
-    render_skill_list,
     resolve_skills,
 )
 from core.system_prompt_injection import build_system_prompt_injection
@@ -590,14 +591,14 @@ def test_catalog_paginates_stably_without_exposing_directories(tmp_path: Path) -
     assert "ordinary tasks do not require scanning every page" in prompt
     assert (
         "Consider whether any available Skills would help in the current situation. "
-        "Load those you choose with `vibe skill load -- <name>`; "
+        "Load those you choose with `vibe skill load -- <name> [<name> ...]`; "
         "reuse any already loaded in this conversation."
     ) in prompt
     assert "If the user requests a Skill by exact name, use that Skill." in prompt
     assert "Before acting on a task covered" not in prompt
     assert "remains in context" not in prompt
     assert "For non-explicit requests, only load Skill names listed here" in prompt
-    assert render_skill_list(skills, page=2) == "- skill-25: Description 25"
+    assert [skill.name for skill in catalog_page(skills, 2)[0]] == ["skill-25"]
     assert str(tmp_path) not in prompt
     assert render_skill_catalog_prompt([]) == ""
 
@@ -639,7 +640,7 @@ def test_manual_only_skill_is_loadable_but_not_advertised(tmp_path: Path) -> Non
 
     assert manual is not None
     assert manual.disable_model_invocation is True
-    assert render_skill_list([manual]) == ""
+    assert list(catalog_page([manual], 1)[0]) == []
     manual_prompt = render_skill_catalog_prompt([manual])
     assert "`vibe skill load -- <name>`" in manual_prompt
     assert (
@@ -673,15 +674,13 @@ def test_catalog_bounds_descriptions_and_row_bytes(tmp_path: Path) -> None:
         assert skill.description.endswith("...")
         skills.append(skill)
 
-    rows, notice = render_skill_list(skills).rsplit("\n", 1)
+    first_page, next_page = catalog_page(skills, 1)
+    rows = "\n".join(_skill_list_rows(first_page))
     assert len(rows.encode("utf-8")) <= CATALOG_PAGE_MAX_BYTES
-    assert notice == "More skills are available. Run `vibe skill list --page 2` to view more."
+    assert next_page == 2
 
-    first_page_names = [line.split(":", 1)[0][2:] for line in rows.splitlines()]
-    second_page = render_skill_list(skills, page=2)
-    assert second_page.splitlines()[0].startswith(
-        f"- skill-{len(first_page_names):02d}:"
-    )
+    second_page, _ = catalog_page(skills, 2)
+    assert second_page[0].name == f"skill-{len(first_page):02d}"
 
 
 def test_catalog_neutralizes_yaml_decoded_terminal_controls(tmp_path: Path) -> None:
@@ -696,8 +695,8 @@ def test_catalog_neutralizes_yaml_decoded_terminal_controls(tmp_path: Path) -> N
 
     assert skill is not None
     assert skill.description == "[31mred 0m"
-    assert "\x1b" not in render_skill_list([skill])
-    assert "\x9b" not in render_skill_list([skill])
+    assert "\x1b" not in "\n".join(_skill_list_rows([skill]))
+    assert "\x9b" not in "\n".join(_skill_list_rows([skill]))
 
 
 def test_system_prompt_catalog_reflects_add_edit_and_delete_each_render(tmp_path: Path, monkeypatch) -> None:

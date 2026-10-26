@@ -1,13 +1,14 @@
 """Feishu/Lark implementation of the IM client using lark-oapi SDK."""
 
 import asyncio
-from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS, display_name_for_backend
+from modules.agents.catalog import NATIVE_CLI_BACKENDS, display_name_for_backend
 import io
 import json
 import logging
 import os
 import threading
 import time
+from dataclasses import replace
 from typing import Any, Callable, Dict, List, Optional
 
 import aiohttp
@@ -31,16 +32,7 @@ from config.v2_config import LarkConfig
 from core.citations import spell_destination
 from core.reply_enhancer import inline_links
 from vibe.i18n import get_supported_languages, t as i18n_t
-from modules.agents.opencode.utils import (
-    build_claude_reasoning_options,
-    build_codex_reasoning_options,
-    format_claude_model_label,
-    build_opencode_model_option_items,
-    build_reasoning_effort_options,
-    resolve_model_reasoning_options,
-    resolve_opencode_allowed_providers,
-    resolve_opencode_provider_preferences,
-)
+from core.modals import DEFAULT_OPTION_VALUE, RouteDraft, RoutingModalData, route_option_label
 from modules.agents.native_sessions.display import format_display_summary, format_display_time
 from modules.agents.native_sessions.types import NativeResumeSession
 
@@ -116,6 +108,9 @@ def _normalize_emoji(emoji: str) -> str:
 
 class FeishuBot(BaseIMClient):
     """Feishu/Lark implementation of the IM client using lark-oapi SDK."""
+
+    # Bounds a routing card's select to the size OpenCode's model list always used.
+    route_option_limit = 100
 
     def __init__(self, config: LarkConfig):
         super().__init__(config)
@@ -2005,8 +2000,8 @@ class FeishuBot(BaseIMClient):
                     await self._handle_settings_form_submit(context, form_value)
                 elif button_name == "routing_backend_select":
                     await self._handle_routing_backend_select(context, form_value)
-                elif button_name == "routing_submit":
-                    await self._handle_routing_form_submit(context, form_value)
+                elif button_name.startswith("routing_submit"):
+                    await self._handle_routing_form_submit(context, form_value, button_name)
                 elif button_name.startswith("resume_submit"):
                     await self._handle_resume_form_submit(context, form_value, button_name)
                 elif button_name.startswith("question_submit"):
@@ -2091,58 +2086,42 @@ class FeishuBot(BaseIMClient):
             )
 
     async def _handle_routing_backend_select(self, context: MessageContext, form_value: Dict[str, Any]):
-        """Handle step 1 of routing: user selected a backend, now show backend-specific options."""
-        selected_backend = form_value.get("backend", "")
-        if not selected_backend:
-            logger.warning("Routing backend select submitted with empty backend")
+        """Handle step 1 of routing: the user picked an Agent, now show its route fields."""
+        selected_agent = form_value.get("agent", "")
+        if not selected_agent:
+            logger.warning("Routing agent select submitted with empty agent")
             return
 
         cache_key = f"{context.channel_id}:{context.user_id}"
-        cached = self._routing_cache.get(cache_key)
-        if not cached:
+        if cache_key not in self._routing_cache:
             logger.warning("No cached routing data for %s", cache_key)
             return
 
-        await self._send_routing_backend_options_card(
-            channel_id=context.channel_id,
-            selected_backend=selected_backend,
-            _user_id=context.user_id,
-            **cached,
-        )
+        await self._send_routing_backend_options_card(context.channel_id, selected_agent, context.user_id)
 
     @staticmethod
     def _normalize_routing_field_value(value: Any) -> Optional[str]:
-        if value in (None, "", "__default__"):
+        if value in (None, "", DEFAULT_OPTION_VALUE):
             return None
         return str(value)
 
+    # A routing card's select names (``<prefix>:<agent id>``) and the draft field each sets. The Agent is in
+    # every name, so a card acts on its own Agent even after the step-1 card opened another one.
+    _ROUTE_FIELDS = {"route_variant": "variant", "route_model": "model", "route_effort": "reasoning_effort"}
+
+    @classmethod
+    def _route_field(cls, name: object) -> tuple[Optional[str], str]:
+        """A routing control's draft field and Agent id, from its name."""
+        prefix, _, agent_id = str(name or "").partition(":")
+        return cls._ROUTE_FIELDS.get(prefix), agent_id
+
     @staticmethod
-    def _routing_draft_from_current(
-        current_routing: Any,
-        selected_backend: Optional[str] = None,
-    ) -> Dict[str, Optional[str]]:
-        fields = (
-            "opencode_agent",
-            "opencode_model",
-            "opencode_reasoning_effort",
-            "claude_agent",
-            "claude_model",
-            "claude_reasoning_effort",
-            "codex_agent",
-            "codex_model",
-            "codex_reasoning_effort",
-        )
-        draft: Dict[str, Optional[str]] = {}
-        for field_name in fields:
-            draft[field_name] = getattr(current_routing, field_name, None) if current_routing else None
-        if selected_backend in AGENT_BACKENDS and current_routing:
-            model = getattr(current_routing, "model", None)
-            reasoning_effort = getattr(current_routing, "reasoning_effort", None)
-            draft[f"{selected_backend}_model"] = draft.get(f"{selected_backend}_model") or model
-            draft[f"{selected_backend}_reasoning_effort"] = (
-                draft.get(f"{selected_backend}_reasoning_effort") or reasoning_effort
-            )
-        return draft
+    def _routing_draft(cache: Dict[str, Any], agent_id: str) -> RouteDraft:
+        """The Agent's choices on this card; one not yet shown starts from the stored route."""
+        drafts = cache.setdefault("drafts", {})
+        if agent_id not in drafts:
+            drafts[agent_id] = cache["routing"].stored_draft(agent_id)
+        return drafts[agent_id]
 
     @staticmethod
     def _extract_select_action_value(action: Dict[str, Any]) -> Optional[str]:
@@ -2183,103 +2162,50 @@ class FeishuBot(BaseIMClient):
             raise RuntimeError(f"Feishu patch card failed: {response.msg}")
 
     async def _handle_routing_select_change(self, context: MessageContext, action: Dict[str, Any]) -> bool:
-        field_name = action.get("name", "")
-        if not field_name:
+        draft_field, agent_id = self._route_field(action.get("name"))
+        if not draft_field:
+            return False
+        cache = self._routing_cache.get(f"{context.channel_id}:{context.user_id}")
+        if not cache or not agent_id or "routing" not in cache:
             return False
 
-        routing_field_map = {
-            "opencode_agent": "opencode_agent",
-            "opencode_model": "opencode_model",
-            "opencode_reasoning": "opencode_reasoning_effort",
-            "claude_agent": "claude_agent",
-            "claude_model": "claude_model",
-            "claude_reasoning": "claude_reasoning_effort",
-            "codex_agent": "codex_agent",
-            "codex_model": "codex_model",
-            "codex_reasoning": "codex_reasoning_effort",
-        }
-        routing_field = routing_field_map.get(field_name)
-        if not routing_field:
-            return False
-
-        cache_key = f"{context.channel_id}:{context.user_id}"
-        cache = self._routing_cache.get(cache_key)
-        if not cache:
-            return False
-
-        draft_routing = dict(
-            cache.get("draft_routing")
-            or self._routing_draft_from_current(cache.get("current_routing"), cache.get("_selected_backend"))
+        draft = self._routing_draft(cache, agent_id)
+        value = cache["routing"].menu(agent_id).chosen(
+            draft_field, self._normalize_routing_field_value(self._extract_select_action_value(action))
         )
-        selected_value = self._normalize_routing_field_value(self._extract_select_action_value(action))
-        draft_routing[routing_field] = selected_value
-
-        if routing_field == "claude_model":
-            draft_routing["claude_reasoning_effort"] = None
-
-        cache["draft_routing"] = draft_routing
-        self._routing_cache[cache_key] = cache
-
-        if routing_field != "claude_model" or cache.get("_selected_backend") != "claude":
+        if draft_field != "model":
+            cache["drafts"][agent_id] = replace(draft, **{draft_field: value})
             return True
-
-        card = self._build_routing_backend_options_card(
-            channel_id=context.channel_id,
-            selected_backend="claude",
-            _user_id=context.user_id,
-            **cache,
-        )
+        # A model change offers that model's efforts afresh, so the card is rebuilt around it.
+        cache["drafts"][agent_id] = draft.with_model(value)
+        card = self._build_routing_backend_options_card(context.channel_id, agent_id, context.user_id)
         await self._patch_card_message(context.message_id, card)
         return True
 
-    async def _handle_routing_form_submit(self, context: MessageContext, form_value: Dict[str, Any]):
-        """Handle step 2 routing form submission (backend-specific options)."""
-        # Backend is embedded in form as a disabled select or retrieved from cache
-        cache_key = f"{context.channel_id}:{context.user_id}"
-        cached = self._routing_cache.get(cache_key, {})
-        backend = form_value.get("backend", "")
-        if not backend:
-            # Fallback: get from cache
-            backend = cached.get("_selected_backend", "")
-
-        if not backend:
-            logger.warning("Routing form submitted with empty backend, ignoring")
+    async def _handle_routing_form_submit(self, context: MessageContext, form_value: Dict[str, Any], button_name: str):
+        """Handle step 2 routing form submission: the options card of the Agent its button names."""
+        cached = self._routing_cache.get(f"{context.channel_id}:{context.user_id}", {})
+        agent_id = button_name.partition(":")[2]
+        if not agent_id or "routing" not in cached:
+            logger.warning("Routing form submitted without an Agent or cached routing, ignoring")
             return
 
-        draft_routing = cached.get("draft_routing") or self._routing_draft_from_current(
-            cached.get("current_routing"),
-            backend,
-        )
-
-        def _val(form_key: str, routing_field: str) -> Optional[str]:
-            if form_key in form_value:
-                return self._normalize_routing_field_value(form_value.get(form_key))
-            return draft_routing.get(routing_field)
-
-        opencode_agent = _val("opencode_agent", "opencode_agent")
-        opencode_model = _val("opencode_model", "opencode_model")
-        opencode_reasoning = _val("opencode_reasoning", "opencode_reasoning_effort")
-        claude_agent = _val("claude_agent", "claude_agent")
-        claude_model = _val("claude_model", "claude_model")
-        claude_reasoning = _val("claude_reasoning", "claude_reasoning_effort")
-        codex_agent = _val("codex_agent", "codex_agent")
-        codex_model = _val("codex_model", "codex_model")
-        codex_reasoning = _val("codex_reasoning", "codex_reasoning_effort")
-
+        # The form carries what its selects show; a field it omits keeps the card's draft.
+        menu = cached["routing"].menu(agent_id)
+        changes = {}
+        for name, value in form_value.items():
+            draft_field, field_agent = self._route_field(name)
+            if draft_field and field_agent == agent_id:
+                changes[draft_field] = menu.chosen(draft_field, self._normalize_routing_field_value(value))
+        draft = replace(self._routing_draft(cached, agent_id), **changes)
         if self._on_routing_update:
             await self._on_routing_update(
                 user_id=context.user_id,
                 channel_id=context.channel_id,
-                backend=backend,
-                opencode_agent=opencode_agent,
-                opencode_model=opencode_model,
-                opencode_reasoning_effort=opencode_reasoning,
-                claude_agent=claude_agent,
-                claude_model=claude_model,
-                claude_reasoning_effort=claude_reasoning,
-                codex_agent=codex_agent,
-                codex_model=codex_model,
-                codex_reasoning_effort=codex_reasoning,
+                agent_id=agent_id,
+                variant=draft.variant,
+                model=draft.model,
+                reasoning_effort=draft.reasoning_effort,
                 is_dm=context.platform_specific.get("is_dm", False),
             )
 
@@ -2620,84 +2546,45 @@ class FeishuBot(BaseIMClient):
         except Exception as exc:
             logger.error("Failed to send CWD card: %s", exc)
 
-    async def open_routing_modal(
-        self,
-        trigger_id: Any,
-        channel_id: str = None,
-        current_backend: str = None,
-        **kwargs,
-    ):
-        """Step 1: send a card with only the backend selector.
+    async def open_routing_modal(self, trigger_id: Any, channel_id: str = None, routing: RoutingModalData = None):
+        """Step 1: send a card with only the Agent selector.
 
-        All backend/model/agent data is cached so that step 2
-        (``_send_routing_backend_options_card``) can render the
-        backend-specific options without re-fetching.
+        The route menus are cached so that step 2 (``_send_routing_backend_options_card``) renders the selected
+        Agent's options without re-fetching.
         """
         t = lambda key, **kw: self._t(key, channel_id, **kw)
 
-        registered_backends = kwargs.get("registered_backends", [])
-
-        # Cache everything for step 2, keyed by channel+user to avoid crosstalk
-        # when multiple users open routing in the same channel concurrently.
+        # Cache per channel+user, so users opening routing in one channel concurrently do not cross.
         cache_user_id = trigger_id.user_id if isinstance(trigger_id, MessageContext) else "unknown"
-        cache_key = f"{channel_id or ''}:{cache_user_id}"
-        self._routing_cache[cache_key] = {
-            "current_routing": kwargs.get("current_routing"),
-            "draft_routing": self._routing_draft_from_current(kwargs.get("current_routing"), current_backend),
-            "registered_backends": registered_backends,
-            "opencode_agents": kwargs.get("opencode_agents", []),
-            "opencode_models": kwargs.get("opencode_models", {}),
-            "opencode_default_config": kwargs.get("opencode_default_config", {}),
-            "claude_agents": kwargs.get("claude_agents", []),
-            "claude_models": kwargs.get("claude_models", []),
-            "codex_agents": kwargs.get("codex_agents", []),
-            "codex_models": kwargs.get("codex_models", []),
-            "backend_reasoning_options": kwargs.get("backend_reasoning_options", {}),
-        }
+        self._routing_cache[f"{channel_id or ''}:{cache_user_id}"] = {"routing": routing, "drafts": {}}
 
-        # --- Backend selector options ---
-        backend_options = []
-        for b in registered_backends:
-            backend_options.append(
-                {
-                    "text": {"tag": "plain_text", "content": display_name_for_backend(b)},
-                    "value": b,
-                }
-            )
-        backend_initial = (
-            current_backend
-            if current_backend and current_backend in registered_backends
-            else (registered_backends[0] if registered_backends else None)
-        )
-
-        if not backend_options:
-            # No backends — just show info
+        agent_options = [
+            {"text": {"tag": "plain_text", "content": agent.label[:60]}, "value": agent.id}
+            for agent in routing.agent_options()
+        ]
+        if not agent_options:
             ctx = MessageContext(user_id="system", channel_id=channel_id or "")
-            await self.send_message(ctx, "No agent backends available.")
+            await self.send_message(ctx, t("routing.noAgents"))
             return
 
         form_elements: list = [
-            {"tag": "markdown", "content": f"**{t('modal.routing.backend')}**"},
+            {"tag": "markdown", "content": f"**{t('modal.routing.agent')}**"},
             {
                 "tag": "select_static",
-                "name": "backend",
-                "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectBackend")},
-                "options": backend_options,
-                **({"initial_option": backend_initial} if backend_initial else {}),
+                "name": "agent",
+                "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectAgent")},
+                "options": agent_options,
+                "initial_option": routing.shown_agent(routing.current_agent),
             },
             {"tag": "markdown", "content": t("modal.routing.tip")},
             {
                 "tag": "button",
-                "text": {
-                    "tag": "plain_text",
-                    "content": t("common.next"),
-                },
+                "text": {"tag": "plain_text", "content": t("common.next")},
                 "type": "primary",
                 "action_type": "form_submit",
                 "name": "routing_backend_select",
             },
         ]
-
         card = {
             "schema": "2.0",
             "header": {
@@ -2706,297 +2593,97 @@ class FeishuBot(BaseIMClient):
             },
             "body": {
                 "direction": "vertical",
-                "elements": [
-                    {
-                        "tag": "form",
-                        "name": "routing_backend_form",
-                        "elements": form_elements,
-                    },
-                ],
+                "elements": [{"tag": "form", "name": "routing_backend_form", "elements": form_elements}],
             },
         }
-
         ctx = MessageContext(user_id="system", channel_id=channel_id or "")
         try:
             await self._send_card_to_channel(ctx, card)
         except Exception as exc:
             logger.error("Failed to send routing backend card: %s", exc)
 
-    def _build_routing_backend_options_card(
-        self,
-        channel_id: str,
-        selected_backend: str,
-        **kwargs,
-    ) -> Dict[str, Any]:
-        """Build the step-2 routing card for a selected backend."""
+    def _build_routing_backend_options_card(self, channel_id: str, agent_id: str, user_id: str) -> Dict[str, Any]:
+        """Build the step-2 routing card: the selected Agent's route fields."""
         t = lambda key, **kw: self._t(key, channel_id, **kw)
+        cache = self._routing_cache.setdefault(f"{channel_id}:{user_id}", {})
+        cache.setdefault("routing", RoutingModalData(agents=[], current_agent="", current_routing=None))
+        routing = cache["routing"]
+        agent = routing.agent(agent_id)
+        menu = routing.menu(agent_id)
+        draft = self._routing_draft(cache, agent_id)
+        backend_name = display_name_for_backend(agent.backend) if agent else ""
+        agent_label = agent.label if agent else agent_id
+        form_elements: list = [{"tag": "markdown", "content": f"**{t('modal.routing.agent')}**: {agent_label}"}]
 
-        current_routing = kwargs.get("current_routing")
-        draft_routing = kwargs.get("draft_routing") or {}
-        opencode_agents = kwargs.get("opencode_agents", [])
-        opencode_models = kwargs.get("opencode_models", {})
-        opencode_default_config = kwargs.get("opencode_default_config", {})
-        claude_agents = kwargs.get("claude_agents", [])
-        claude_models = kwargs.get("claude_models", [])
-        codex_agents = kwargs.get("codex_agents", [])
-        codex_models = kwargs.get("codex_models", [])
-        backend_reasoning_options = kwargs.get("backend_reasoning_options", {})
-
-        def _routing_value(field_name: str) -> Optional[str]:
-            if field_name in draft_routing:
-                return draft_routing[field_name]
-            return getattr(current_routing, field_name, None) if current_routing else None
-
-        # Store selected backend for the final submit handler
-        user_id = kwargs.get("_user_id", "unknown")
-        cache_key = f"{channel_id}:{user_id}"
-        cache = self._routing_cache.get(cache_key, {})
-        cache["_selected_backend"] = selected_backend
-        cache.setdefault("draft_routing", self._routing_draft_from_current(current_routing, selected_backend))
-        self._routing_cache[cache_key] = cache
-
-        form_elements: list = [
-            # Show selected backend (read-only display)
-            {"tag": "markdown", "content": f"**{t('modal.routing.backend')}**: `{selected_backend}`"},
-        ]
-
-        # ---- OpenCode section ----
-        if selected_backend == "opencode":
-            # OpenCode agent selector
-            if opencode_agents:
-                oc_agent_options = [{"text": {"tag": "plain_text", "content": "(Default)"}, "value": "__default__"}]
-                for agent_info in opencode_agents:
-                    name = agent_info if isinstance(agent_info, str) else agent_info.get("name", str(agent_info))
-                    oc_agent_options.append({"text": {"tag": "plain_text", "content": name}, "value": name})
-                oc_current_agent = _routing_value("opencode_agent")
-                form_elements.append({"tag": "markdown", "content": t("modal.routing.opencodeAgent")})
-                form_elements.append(
-                    {
-                        "tag": "select_static",
-                        "name": "opencode_agent",
-                        "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectOpencodeAgent")},
-                        "options": oc_agent_options,
-                        "initial_option": oc_current_agent if oc_current_agent else "__default__",
-                    }
-                )
-
-            # OpenCode model selector (using shared utility)
-            oc_current_model = _routing_value("opencode_model")
-            preferred_providers = resolve_opencode_provider_preferences(
-                opencode_default_config,
-                oc_current_model,
-            )
-            allowed_providers = resolve_opencode_allowed_providers(
-                opencode_default_config,
-                opencode_models,
-            )
-            model_entries = build_opencode_model_option_items(
-                opencode_models,
-                max_total=99,
-                preferred_providers=preferred_providers,
-                allowed_providers=allowed_providers,
-            )
-            if model_entries:
-                oc_model_options = [{"text": {"tag": "plain_text", "content": "(Default)"}, "value": "__default__"}]
-                for entry in model_entries:
-                    label = entry.get("label", "")
-                    value = entry.get("value", "")
-                    if not label or not value:
-                        continue
-                    oc_model_options.append({"text": {"tag": "plain_text", "content": label[:60]}, "value": value})
-                form_elements.append({"tag": "markdown", "content": t("modal.routing.model")})
-                form_elements.append(
-                    {
-                        "tag": "select_static",
-                        "name": "opencode_model",
-                        "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectModel")},
-                        "options": oc_model_options,
-                        "initial_option": oc_current_model if oc_current_model else "__default__",
-                    }
-                )
-
-            # OpenCode reasoning effort (using shared utility)
-            re_entries = build_reasoning_effort_options(opencode_models, oc_current_model)
-            re_options = []
-            for entry in re_entries:
-                label = entry.get("label", "")
-                value = entry.get("value", "")
-                if not label or not value:
-                    continue
-                re_options.append({"text": {"tag": "plain_text", "content": label}, "value": value})
-            oc_current_re = _routing_value("opencode_reasoning_effort")
-            if re_options:
-                form_elements.append({"tag": "markdown", "content": t("modal.routing.reasoningEffort")})
-                form_elements.append(
-                    {
-                        "tag": "select_static",
-                        "name": "opencode_reasoning",
-                        "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectReasoningEffort")},
-                        "options": re_options,
-                        "initial_option": oc_current_re if oc_current_re else "__default__",
-                    }
-                )
-
-        # ---- Claude section ----
-        elif selected_backend == "claude":
-            cl_current_model = _routing_value("claude_model")
-            # Claude agent selector
-            if claude_agents:
-                cl_agent_options = [{"text": {"tag": "plain_text", "content": "(Default)"}, "value": "__default__"}]
-                for agent_info in claude_agents:
-                    name = agent_info if isinstance(agent_info, str) else agent_info.get("name", str(agent_info))
-                    cl_agent_options.append({"text": {"tag": "plain_text", "content": name}, "value": name})
-                cl_current_agent = _routing_value("claude_agent")
-                form_elements.append({"tag": "markdown", "content": t("modal.routing.claudeAgent")})
-                form_elements.append(
-                    {
-                        "tag": "select_static",
-                        "name": "claude_agent",
-                        "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectClaudeAgent")},
-                        "options": cl_agent_options,
-                        "initial_option": cl_current_agent if cl_current_agent else "__default__",
-                    }
-                )
-
-            # Claude model selector
-            if claude_models:
-                cl_model_options = [{"text": {"tag": "plain_text", "content": "(Default)"}, "value": "__default__"}]
-                for m in claude_models:
-                    mid = m if isinstance(m, str) else m.get("id", str(m))
-                    cl_model_options.append(
-                        {"text": {"tag": "plain_text", "content": format_claude_model_label(mid)}, "value": mid}
-                    )
-                form_elements.append({"tag": "markdown", "content": t("modal.routing.model")})
-                form_elements.append(
-                    {
-                        "tag": "select_static",
-                        "name": "claude_model",
-                        "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectModel")},
-                        "options": cl_model_options,
-                        "initial_option": cl_current_model if cl_current_model else "__default__",
-                    }
-                )
-
-            cl_current_re = _routing_value("claude_reasoning_effort")
-            cl_re_defs = resolve_model_reasoning_options(
-                backend_reasoning_options.get("claude"),
-                cl_current_model,
-                build_claude_reasoning_options(cl_current_model),
-            )
-            if cl_current_re not in {item["value"] for item in cl_re_defs}:
-                cl_current_re = None
-            cl_re_options = []
-            for item in cl_re_defs:
-                cl_re_options.append({"text": {"tag": "plain_text", "content": item["label"]}, "value": item["value"]})
-            form_elements.append({"tag": "markdown", "content": t("modal.routing.reasoningEffort")})
+        def _select(field: str, name: str, label: str, placeholder: str, options, current) -> None:
+            effort = field == "reasoning_effort"
+            form_elements.append({"tag": "markdown", "content": label})
             form_elements.append(
                 {
                     "tag": "select_static",
-                    "name": "claude_reasoning",
-                    "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectReasoningEffort")},
-                    "options": cl_re_options,
-                    "initial_option": cl_current_re if cl_current_re else "__default__",
+                    "name": name,
+                    "placeholder": {"tag": "plain_text", "content": placeholder},
+                    "options": [
+                        {
+                            "text": {"tag": "plain_text", "content": route_option_label(t, option, effort=effort)[:60]},
+                            "value": option.value,
+                        }
+                        for option in [menu.default_option(field), *options]
+                    ],
+                    "initial_option": menu.shown_value(current),
                 }
             )
 
-        # ---- Codex section ----
-        elif selected_backend == "codex":
-            if codex_agents:
-                cx_agent_options = [{"text": {"tag": "plain_text", "content": "(Default)"}, "value": "__default__"}]
-                for agent_info in codex_agents:
-                    name = agent_info if isinstance(agent_info, str) else agent_info.get("name", str(agent_info))
-                    cx_agent_options.append({"text": {"tag": "plain_text", "content": name}, "value": name})
-                cx_current_agent = _routing_value("codex_agent")
-                form_elements.append({"tag": "markdown", "content": t("modal.routing.codexAgent")})
-                form_elements.append(
-                    {
-                        "tag": "select_static",
-                        "name": "codex_agent",
-                        "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectCodexAgent")},
-                        "options": cx_agent_options,
-                        "initial_option": cx_current_agent if cx_current_agent else "__default__",
-                    }
-                )
-
-            # Codex model selector
-            if codex_models:
-                cx_model_options = [{"text": {"tag": "plain_text", "content": "(Default)"}, "value": "__default__"}]
-                for m in codex_models:
-                    mid = m if isinstance(m, str) else m.get("id", str(m))
-                    cx_model_options.append({"text": {"tag": "plain_text", "content": mid}, "value": mid})
-                cx_current_model = _routing_value("codex_model")
-                form_elements.append({"tag": "markdown", "content": t("modal.routing.model")})
-                form_elements.append(
-                    {
-                        "tag": "select_static",
-                        "name": "codex_model",
-                        "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectModel")},
-                        "options": cx_model_options,
-                        "initial_option": cx_current_model if cx_current_model else "__default__",
-                    }
-                )
-
-            cx_current_model = _routing_value("codex_model")
-            codex_re_defs = resolve_model_reasoning_options(
-                backend_reasoning_options.get("codex"),
-                cx_current_model,
-                build_codex_reasoning_options(),
+        variants = menu.variant_options(draft.variant)
+        if variants:
+            _select(
+                "variant",
+                f"route_variant:{agent_id}",
+                t("modal.routing.backendAgent", backend=backend_name),
+                t("modal.routing.selectBackendAgent", backend=backend_name),
+                variants,
+                draft.variant,
             )
-            cx_re_options = []
-            for item in codex_re_defs:
-                cx_re_options.append({"text": {"tag": "plain_text", "content": item["label"]}, "value": item["value"]})
-            cx_current_re = _routing_value("codex_reasoning_effort")
-            if cx_current_re not in {item["value"] for item in codex_re_defs}:
-                cx_current_re = None
-            form_elements.append({"tag": "markdown", "content": t("modal.routing.codexReasoningEffort")})
-            form_elements.append(
-                {
-                    "tag": "select_static",
-                    "name": "codex_reasoning",
-                    "placeholder": {"tag": "plain_text", "content": t("modal.routing.selectReasoningEffort")},
-                    "options": cx_re_options,
-                    "initial_option": cx_current_re if cx_current_re else "__default__",
-                }
-            )
-
-        # Submit button
+        _select(
+            "model",
+            f"route_model:{agent_id}",
+            t("modal.routing.model"),
+            t("modal.routing.selectModel"),
+            menu.model_options(draft.model),
+            draft.model,
+        )
+        _select(
+            "reasoning_effort",
+            f"route_effort:{agent_id}",
+            t("modal.routing.reasoningEffort"),
+            t("modal.routing.selectReasoningEffort"),
+            menu.effort_options(draft.model, draft.reasoning_effort),
+            draft.reasoning_effort,
+        )
         form_elements.append(
             {
                 "tag": "button",
                 "text": {"tag": "plain_text", "content": t("common.save")},
                 "type": "primary",
                 "action_type": "form_submit",
-                "name": "routing_submit",
+                "name": f"routing_submit:{agent_id}",
             }
         )
-
         return {
             "schema": "2.0",
             "header": {
-                "title": {"tag": "plain_text", "content": f"{t('modal.routing.title')} — {selected_backend}"},
+                "title": {"tag": "plain_text", "content": f"{t('modal.routing.title')} — {agent_label}"},
                 "template": "blue",
             },
             "body": {
                 "direction": "vertical",
-                "elements": [
-                    {
-                        "tag": "form",
-                        "name": "routing_options_form",
-                        "elements": form_elements,
-                    },
-                ],
+                "elements": [{"tag": "form", "name": "routing_options_form", "elements": form_elements}],
             },
         }
 
-    async def _send_routing_backend_options_card(
-        self,
-        channel_id: str,
-        selected_backend: str,
-        **kwargs,
-    ):
-        """Step 2: send a card with options specific to the selected backend."""
-        card = self._build_routing_backend_options_card(channel_id, selected_backend, **kwargs)
-
+    async def _send_routing_backend_options_card(self, channel_id: str, agent_id: str, user_id: str):
+        """Step 2: send a card with the selected Agent's route fields."""
+        card = self._build_routing_backend_options_card(channel_id, agent_id, user_id)
         ctx = MessageContext(user_id="system", channel_id=channel_id or "")
         try:
             await self._send_card_to_channel(ctx, card)

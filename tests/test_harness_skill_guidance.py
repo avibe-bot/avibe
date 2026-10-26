@@ -112,21 +112,27 @@ def test_harness_guidance_examples_parse_against_the_real_cli() -> None:
 
 
 def test_avibe_skills_do_not_reintroduce_legacy_harness_guidance() -> None:
+    # Spellings the CLI no longer accepts; a Skill that still teaches one teaches a failing call.
     disallowed = (
         "--deliver-key",
-        "`--prefix`",
-        "vibe hook send",
+        "--post-to",
+        "--session-key",
+        "--send-now",
+        "--visibility foreground",
+        "--visibility background",
+        "--prefix",
+        "vibe hook",
         "--prompt`",
         "one-shot async run",
-        "vibe agent run --async",
+        "--async",
         "Delivery controls",
         "Legacy compatibility",
-        "`vibe agent run` takes `--async`",
         "current Agent Session ID",
     )
 
     for path in (
         "skills/use-avibe/SKILL.md",
+        "skills/use-avibe-harness/SKILL.md",
         "skills/background-watch-hook/SKILL.md",
         *(path.relative_to(ROOT).as_posix() for path in _use_avibe_references()),
     ):

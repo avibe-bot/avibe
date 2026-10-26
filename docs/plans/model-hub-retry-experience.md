@@ -192,6 +192,17 @@ upstream advice. A Source deadline must not move earlier due to another failure.
 Invalid, overflowing, or past values cannot cause a tight loop; fall back to
 the local policy and record only a sanitized diagnostic.
 
+For Claude HTTP 429s, the existing bounded unified-header projection can refine
+an ordinary rate limit to `quota_exhausted` when a shared 5h/7d rejection has a
+valid active reset. Ignore inactive windows and overage/model-only rejections;
+accept future resets no more than seven days plus one hour after header receipt.
+The latest valid shared reset joins `Retry-After`, `Retry-After-Ms`, local backoff,
+and the existing deadline in the same later-deadline policy. Invalid or ambiguous
+unified evidence preserves ordinary rate-limit handling and valid retry advice.
+Only the existing quota reason and derived deadline reach Source state, never
+raw unified headers. See `claude-subscription-cap-cooldown.md` for the evidence
+rules and validation contract.
+
 Do not clamp a valid long upstream delay down to the local cap and retry early.
 If it is outside this request's window, terminate this request truthfully while
 keeping the advisory deadline. Compare aware timestamps using the existing

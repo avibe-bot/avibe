@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
-import { ArrowRight, Loader2, Sparkles, X } from 'lucide-react';
+import { ArrowRight, Loader2, Sparkles } from 'lucide-react';
 
 import { useApi } from '../../context/ApiContext';
 import type { WorkbenchProject } from '../../context/ApiContext';
 import { Button } from '../ui/button';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '../ui/dialog';
 import { Select } from '../ui/select';
 import { errorMessage } from '@/lib/errorMessage';
 
@@ -92,34 +93,19 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
   const noProjects = projects !== null && projects.length === 0;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-[#080812F0] px-4"
-      role="dialog"
-      aria-modal="true"
-      aria-label={t('harness.createDialog.title')}
-      onClick={onClose}
-    >
-      <div
-        className="flex w-full max-w-[500px] flex-col items-center gap-5 rounded-2xl border border-violet/30 bg-surface p-7 shadow-[0_24px_48px_-6px_rgba(0,0,0,0.8),var(--shadow-glow-lg-violet)]"
-        onClick={(e) => e.stopPropagation()}
+    <Dialog open onOpenChange={(next) => { if (!next) onClose(); }}>
+      <DialogContent
+        closeLabel={t('harness.createDialog.cancel')}
+        className="flex min-w-0 max-h-[calc(100dvh-2rem)] w-full max-w-[500px] flex-col items-center gap-5 overflow-y-auto rounded-2xl border border-violet/30 bg-surface p-7 shadow-[0_24px_48px_-6px_rgba(0,0,0,0.8),var(--shadow-glow-lg-violet)]"
       >
-        <button
-          type="button"
-          aria-label={t('harness.createDialog.cancel')}
-          onClick={onClose}
-          className="absolute right-4 top-4 text-muted transition hover:text-foreground"
-        >
-          <X className="size-4" />
-        </button>
-
         {/* Hero icon — 64x64 violet-soft tile with glow */}
         <div className="flex size-16 items-center justify-center rounded-2xl border border-violet/30 bg-violet-soft text-violet-ink shadow-glow-md-violet">
           <Sparkles className="size-[30px]" />
         </div>
 
-        <div className="flex flex-col gap-1.5 text-center">
-          <div className="text-[20px] font-bold text-foreground">{t('harness.createDialog.title')}</div>
-          <div className="text-[12px] italic text-muted">{t('harness.createDialog.subtitle')}</div>
+        <div className="flex min-w-0 flex-col gap-1.5 text-center">
+          <DialogTitle className="text-[20px] font-bold text-foreground">{t('harness.createDialog.title')}</DialogTitle>
+          <DialogDescription className="text-[12px] italic text-muted">{t('harness.createDialog.subtitle')}</DialogDescription>
         </div>
 
         <div className="flex w-full flex-col gap-2.5 rounded-xl border border-border bg-foreground/[0.015] px-[18px] py-4">
@@ -193,7 +179,7 @@ export const CreateViaChatDialog: React.FC<CreateViaChatDialogProps> = ({ kind, 
             )}
           </Button>
         </div>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 };

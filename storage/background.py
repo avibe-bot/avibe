@@ -1103,6 +1103,16 @@ def _row_lifecycle_state(row: Any) -> Optional[str]:
         return None
 
 
+def _removed_at_field(row: Any) -> dict[str, Any]:
+    """``removed_at`` for a removed definition; nothing for a live one.
+
+    Only by-id reads admit removed rows, so list and Workbench payloads keep
+    their shape.
+    """
+
+    return {"removed_at": row["deleted_at"]} if row["deleted_at"] else {}
+
+
 def _definition_timed_out(metadata: Any) -> Optional[bool]:
     """Whether the scheduler stopped this definition's last fire, or ``None`` if unknown.
 
@@ -3442,10 +3452,12 @@ class SQLiteBackgroundTaskStore:
             "",
         )
         if enabled_first:
-            # Offset pagination needs a persisted ordering key. Lifecycle can
-            # change when the clock crosses run_at between page requests.
+            # Enabled rows lead, each group newest activity first, so the rows an
+            # Agent most likely means sit on page 1. Both keys are stored columns:
+            # lifecycle is derived and can change when the clock crosses run_at
+            # between page requests.
             enabled_rank = case((run_definitions.c.enabled != 0, 0), else_=1)
-            stmt = stmt.order_by(enabled_rank, run_definitions.c.created_at, run_definitions.c.id)
+            stmt = stmt.order_by(enabled_rank, activity.desc(), run_definitions.c.id.desc())
         elif newest_first:
             stmt = stmt.order_by(activity.desc(), run_definitions.c.id.desc())
         else:
@@ -3462,8 +3474,19 @@ class SQLiteBackgroundTaskStore:
     ) -> dict[str, int]:
         return self._definition_counts("scheduled", query=query, session_id=session_id)
 
-    def get_scheduled_task(self, definition_id: str) -> Optional[dict[str, Any]]:
-        stmt = self._definitions_query("scheduled").where(run_definitions.c.id == definition_id).limit(1)
+    def get_scheduled_task(
+        self, definition_id: str, *, include_removed: bool = False
+    ) -> Optional[dict[str, Any]]:
+        """One live task, or with ``include_removed`` also a removed one.
+
+        A removed row reads ``lifecycle_state: removed`` and carries ``removed_at``.
+        """
+
+        stmt = (
+            self._definitions_query("scheduled", include_removed=include_removed)
+            .where(run_definitions.c.id == definition_id)
+            .limit(1)
+        )
         with self.engine.connect() as conn:
             row = conn.execute(stmt).mappings().first()
             if row is None:
@@ -3698,10 +3721,12 @@ class SQLiteBackgroundTaskStore:
             "",
         )
         if enabled_first:
-            # Runtime and execution state may change between pages; the stored
-            # switch keeps the list order stable while those facts are enriched.
+            # Enabled rows lead, each group newest activity first, so the rows an
+            # Agent most likely means sit on page 1. Both keys are stored columns:
+            # lifecycle is derived and can change when the clock crosses run_at
+            # between page requests.
             enabled_rank = case((run_definitions.c.enabled != 0, 0), else_=1)
-            stmt = stmt.order_by(enabled_rank, run_definitions.c.created_at, run_definitions.c.id)
+            stmt = stmt.order_by(enabled_rank, activity.desc(), run_definitions.c.id.desc())
         elif newest_first:
             stmt = stmt.order_by(activity.desc(), run_definitions.c.id.desc())
         else:
@@ -3718,8 +3743,14 @@ class SQLiteBackgroundTaskStore:
     ) -> dict[str, int]:
         return self._definition_counts("watch", query=query, session_id=session_id)
 
-    def get_watch(self, watch_id: str) -> Optional[dict[str, Any]]:
-        stmt = self._definitions_query("watch").where(run_definitions.c.id == watch_id).limit(1)
+    def get_watch(self, watch_id: str, *, include_removed: bool = False) -> Optional[dict[str, Any]]:
+        """One live watch, or with ``include_removed`` also a removed one; see ``get_scheduled_task``."""
+
+        stmt = (
+            self._definitions_query("watch", include_removed=include_removed)
+            .where(run_definitions.c.id == watch_id)
+            .limit(1)
+        )
         with self.engine.connect() as conn:
             row = conn.execute(stmt).mappings().first()
             if row is None:
@@ -4579,11 +4610,14 @@ class SQLiteBackgroundTaskStore:
             )
         return page_result_from_limit_plus_one(rows, page_request)
 
-    def list_active_runs(self, *, limit: int) -> list[dict[str, Any]]:
-        """Return a bounded anomaly-first snapshot of operator-visible Runs."""
+    def list_active_runs(self, *, limit: int, session_id: Optional[str] = None) -> list[dict[str, Any]]:
+        """Return a bounded anomaly-first snapshot of operator-visible Runs.
+
+        ``session_id`` narrows it to one Session's Runs; ``None`` reads every Session.
+        """
 
         stmt = (
-            self._runs_query(exclude_run_type=(_WATCH_RUNTIME_RUN_TYPE,))
+            self._runs_query(exclude_run_type=(_WATCH_RUNTIME_RUN_TYPE,), session_id=session_id)
             .where(
                 agent_runs.c.status.in_(
                     _status_query_values("queued") + _status_query_values("running")
@@ -4630,13 +4664,18 @@ class SQLiteBackgroundTaskStore:
         definition_type: str,
         *,
         limit: int,
+        session_id: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Return a bounded snapshot of armed Tasks or Watches."""
+        """Return a bounded snapshot of armed Tasks or Watches.
+
+        ``session_id`` narrows it with the same Session ownership the Workbench
+        "this Session" filter uses; ``None`` reads every Session.
+        """
 
         if definition_type not in {"scheduled", "watch"}:
             raise ValueError("definition_type must be scheduled or watch")
         row_limit = max(0, int(limit))
-        stmt = self._definitions_query(definition_type).where(
+        stmt = self._definitions_query(definition_type, session_id=session_id).where(
             run_definitions.c.enabled != 0
         )
         converter = (
@@ -4812,7 +4851,19 @@ class SQLiteBackgroundTaskStore:
         if agent_backend:
             stmt = stmt.where(agent_runs.c.agent_backend == agent_backend)
         if session_id:
-            stmt = stmt.where(agent_runs.c.session_id == session_id)
+            # A Run belongs to the Session it runs in, the Session its result
+            # returns to, and the Session whose Agent dispatched it: a delegated
+            # Run is the dispatching Session's work as much as its target's.
+            stmt = stmt.where(
+                or_(
+                    agent_runs.c.session_id == session_id,
+                    agent_runs.c.callback_session_id == session_id,
+                    and_(
+                        agent_runs.c.source_kind == "agent",
+                        agent_runs.c.source_actor == session_id,
+                    ),
+                )
+            )
         if definition_id:
             stmt = stmt.where(agent_runs.c.definition_id == definition_id)
         if created_after:
@@ -4928,6 +4979,7 @@ class SQLiteBackgroundTaskStore:
         query: Optional[str] = None,
         session_id: Optional[str] = None,
         include_successful_finished: bool = True,
+        include_removed: bool = False,
         columns: Any = None,
     ):
         lifecycle = definition_lifecycle_expression(definition_type)
@@ -4936,11 +4988,20 @@ class SQLiteBackgroundTaskStore:
         else:
             # Every row carries its state, resolved by the same expression the
             # counts group by.
-            stmt = select(run_definitions, lifecycle.label("lifecycle_state"))
-        stmt = (
-            stmt.where(run_definitions.c.definition_type == definition_type)
-            .where(run_definitions.c.deleted_at.is_(None))
-        )
+            state = lifecycle
+            if include_removed:
+                # Only a by-id read admits removed rows, so ``removed`` never reaches
+                # a list or a count. Removal outranks every live fact: the switch, a
+                # retirement, and even a Run still in flight no longer describe what
+                # the definition will do.
+                state = case(
+                    (run_definitions.c.deleted_at.is_not(None), "removed"),
+                    else_=lifecycle,
+                )
+            stmt = select(run_definitions, state.label("lifecycle_state"))
+        stmt = stmt.where(run_definitions.c.definition_type == definition_type)
+        if not include_removed:
+            stmt = stmt.where(run_definitions.c.deleted_at.is_(None))
         # This Session filter powers the Harness "只看本会话" chip that the
         # background-work banner navigates into. Scheduled Tasks use creation
         # provenance as the authoritative owner: a create-per-run or pure command
@@ -6865,9 +6926,16 @@ class SQLiteBackgroundTaskStore:
         result_text: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
         updated_at: Optional[str] = None,
+        amend_only: bool = False,
         _conn: Any = None,
     ) -> bool:
-        """Remember a terminal intent and its evidence while an Activity blocks it."""
+        """Remember a terminal intent and its evidence while an Activity blocks it.
+
+        ``amend_only`` adds to an intent the Run's Turn already recorded and does
+        nothing when there is none: an owned Activity that ends while its Turn is
+        still running is a step the Agent sees and answers in that Turn, so the
+        Turn's own terminal decides the Run.
+        """
 
         now = updated_at or _utc_now_iso()
         row_to_publish = None
@@ -6881,6 +6949,8 @@ class SQLiteBackgroundTaskStore:
             result_payload = _json_loads(row["result_payload_json"], {})
             if not isinstance(result_payload, dict):
                 result_payload = {}
+            if amend_only and not result_payload.get("deferred_terminal_status"):
+                return False
             normalized = _stronger_terminal_status(
                 result_payload.get("deferred_terminal_status"),
                 terminal_status,
@@ -9106,6 +9176,7 @@ class SQLiteBackgroundTaskStore:
             "metadata": metadata,
             "resume_blocked": task_resume_block(metadata, row["session_id"]),
             "lifecycle_state": _row_lifecycle_state(row),
+            **_removed_at_field(row),
         }
 
     @staticmethod
@@ -9153,6 +9224,7 @@ class SQLiteBackgroundTaskStore:
             "last_exit_code": row["last_exit_code"],
             "metadata": metadata,
             "lifecycle_state": _row_lifecycle_state(row),
+            **_removed_at_field(row),
         }
 
     @staticmethod
@@ -9419,7 +9491,8 @@ class SQLiteBackgroundTaskStore:
             else:
                 row["lifecycle_finished_at"] = row.get("last_finished_at")
             row["next_run_at"] = compute_next_run_at(
-                enabled=bool(row.get("enabled")),
+                # A removed definition keeps its switch but never fires again.
+                enabled=bool(row.get("enabled")) and state != "removed",
                 schedule_type=row.get("schedule_type"),
                 cron=row.get("cron"),
                 run_at=row.get("run_at"),

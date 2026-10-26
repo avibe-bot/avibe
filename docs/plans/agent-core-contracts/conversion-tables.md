@@ -43,7 +43,7 @@ construct partials, mark terminal state, or parse final tool arguments.
 | --- | --- | --- |
 | Content accumulation and visible-output flag | `StreamAssembler.text_delta`, `thinking_delta`, `tool_start`, `tool_arguments` | `anthropic.py` content-block branches; `openai_chat.py` delta branches; `openai_responses.py` output/reasoning/tool branches |
 | Stable tool id and native id map | `StreamAssembler.bind_tool_identity`, `tool_start` → `_set_tool_id` | The stream index owns the slot. A non-empty native ID binds once; a different ID on an open slot raises a terminal `invalid_request` before identity/argument mutation. Missing IDs use the unique monotonic allocator. Identical repeats and the first late ID are accepted; closed slots ignore late data. Explicit canonical IDs use the same ownership map and receive a fresh fallback on collision. Native aliases route only indexless frames, never override an explicit index; Responses argument delta/done use the same bind-once check as item added/done. |
-| Final JSON argument validation | `StreamAssembler.finalize` → `parsed_arguments` | The three adapters call `finalize` once after their protocol terminator; malformed arguments are a C-2 terminal `invalid_request` deviation from Pi's permissive partial parser |
+| Final JSON argument validation | `StreamAssembler.finalize` → `parsed_arguments` | The three adapters keep strict `invalid_request` validation for malformed final arguments, but carry a safe partial with `{}` placeholders and `malformed_tool_calls` identities so Vibey can persist/skip the unsafe calls and continue from transcript; malformed provider metadata remains a terminal `invalid_request` deviation from Pi's permissive partial parser |
 | Usage and early usage retention | `set_usage` | Anthropic `message_start`/`message_delta`; Chat usage chunks; Responses terminal response |
 | Per-protocol usage field normalization | `_anthropic_usage`, `_openai_usage`, `_responses_usage` | One normalizer per adapter. Anthropic start and delta share the same non-null merge; Chat chunk and choice usage share the same counter-level fallback order. See the field ledger below. |
 | Partial on every error and abort | `StreamAssembler.partial`, `error`, `exception`, `aborted`, `incomplete` | `drive_sse_stream` owns HTTP, transport-read, error-body, cancellation, and translator exceptions; protocol translators only request assembler errors |
@@ -84,7 +84,7 @@ ignored without parsing.
 | `content_block_start` | `index: non-negative integer`, `content_block: object`, `content_block.type: string` | text/thinking `text`/`thinking`/`signature: string`; redacted `data: non-empty string`; tool `id`/`name: string`, `input: object` |
 | `content_block_delta` | `index: non-negative integer`, `delta: object`, `delta.type: string` | `text_delta.text`, `thinking_delta.thinking`, `signature_delta.signature`, `input_json_delta.partial_json: string`; present fields with a wrong type are terminal |
 | `content_block_stop` | `index: non-negative integer` | none |
-| `message_delta` | none | `delta: object`, `delta.stop_reason: string`, `usage: object` |
+| `message_delta` | none | `delta: object`, `delta.stop_reason: string`, `usage: object`; `delta.stop_details` is read only when it is an object, and only its string `category` and `explanation` (a refusal's diagnostic never fails the response) |
 | `message_stop` | none | none |
 | named SSE `error` | none: plain text or JSON error envelope accepted | classified before data-event dispatch, matching Pi |
 | data-only `error` | `error: object` when an envelope is present | `error.type`/`error.message: string`; provider extension fields such as `code` are ignored |
@@ -488,7 +488,7 @@ adapter was not included because the owner deferred it from v1.
 | `responses_empty_slots_ignore_late_deltas` | empty text and reasoning slots close on `output_item.done`; later deltas are ignored | same, with optional usage remaining absent | canonical optional usage |
 | `chat_finish_reason_end_maps_to_stop` | compatibility `finish_reason=end` maps to `stop`; no usage frame leaves Pi's initialized usage shape | same stop mapping; usage remains unknown | canonical optional usage |
 | `anthropic_null_delta_usage_preserves_message_start` | `message_start.input_tokens=7` survives null fields in `message_delta` | same | none |
-| `chat_malformed_tool_arguments` | Pi's permissive parser completes `read` with `{}` and `tool_use` | terminal `invalid_request` naming malformed arguments; partial has no tool block | C-2 canonical malformed-argument error |
+| `chat_malformed_tool_arguments` | Pi's permissive parser completes `read` with `{}` and `tool_use` | strict `invalid_request` with a safe partial call, `malformed_tool_calls`, and explicit transcript-only recovery permission; the loop records an error result and never executes the malformed call | C-2 strict validation plus Vibey recovery boundary |
 | `chat_eof_after_text_is_partial_abort` | missing finish reason becomes an error with text partial and Pi's initialized usage shape | `network` error with text partial and `retryable=false`; optional usage remains absent | C-2 retry boundary and canonical optional usage |
 | `anthropic_empty_block_end_then_error` | empty text block is ended before the overloaded error; Pi retains the empty block in partial and does not apply the empty-slot retry boundary | empty placeholder does not count as streamed output, so retry remains allowed and partial is omitted | C-2 retry boundary |
 | `anthropic_malformed_delta` | Pi's null delta raises a generic stream error with the empty text block in partial | known malformed metadata is terminal `invalid_request`; empty placeholder is omitted from partial | C-2 malformed-event classification and retry boundary |
@@ -523,7 +523,7 @@ Anthropic stream events:
 | `content_block_delta.signature_delta` | state | Appends to the thinking signature. |
 | `content_block_delta.input_json_delta` | delta | `ToolCallDelta`; the complete JSON is parsed at `Done`. |
 | `content_block_stop` | delta | `BlockEnd`. |
-| `message_delta.stop_reason` | delta/state | Normalized stop reason; usage fields are merged. |
+| `message_delta.stop_reason` | delta/state | Normalized stop reason; usage fields are merged. A `refusal` keeps `delta.stop_details` as its message's `error_message` (`category: …; explanation: …`, bounded to 1,000 characters). |
 | `message_delta.usage` with a non-object value | terminal `ProviderError` | `invalid_request`; malformed usage is never silently discarded. |
 | `message_stop` or clean EOF | Done or terminal `ProviderError` | `message_stop` yields `Done` when `message_delta.stop_reason` was present; after `message_start`, clean EOF without `message_stop` yields an incomplete error even when a stop reason was captured. A no-`message_start` stream with a stop reason follows Pi's clean-EOF completion path. |
 | `ping` | state | Ignored keepalive. |
@@ -655,7 +655,10 @@ These rows describe the wire mapping the `ai` lane implements.
   `TextBlock.citations`, and response-level facts go to `hosted_summary`. An `image_generation_call` is no hosted item:
   it is ignored like any undeclared item.
 - **Portable history.** A finished response's hosted calls become synthetic same-named calls and results, split around
-  the assistant message. There is one call per hosted block, and nothing folds. Each result shows its status line
+  the assistant message. There is one call per hosted block, except that an Anthropic use-only pending fragment
+  and its result-only completion are one logical call (`cross-provider.md`, 2026-10-22): one synthetic call in the
+  original parallel group, its result alongside the client results, and no second call in the completing response.
+  Each result shows its status line
   first and then every line attached to it. A response its
   turn is still waiting on (the request's last assistant message, stopped for tools) keeps each call in place as text.
   So does a hosted call that follows a client tool call of the same response, because a split there would separate
@@ -668,7 +671,12 @@ These rows describe the wire mapping the `ai` lane implements.
     model that served it (`x-avibe-pin-model`, when that id is ASCII). That response is the request's last assistant
     message, stopped for tools, with only tool results after it.
   - Any earlier response needs the hop's current `replay` for every tool it called, and every one of its calls must
-    have finished.
+    have finished (a later paired completion counts). Linked fragments of the currently continuing Anthropic
+    exchange follow its in-flight admission instead, including an internal `pause_turn` after the deferred result.
+  - Anthropic mixed groups preserve response 1 → client-result-only user → response 2. The result in response 2
+    carries only its `web_search_tool_result` in `native.payload`; the prior use remains in response 1. Both halves
+    must be admitted natively together, never an orphan result after a portable use. Reported counters stay on
+    the reporting response; the completion adds no inferred usage or cost.
   - Otherwise the calls take the portable form above. A continuation whose fresh hop is another Source therefore
     goes in place as text: one hop builds and serves each request.
 - **`pin_unavailable`.** The gateway's `409` `model_hub_pin_unavailable` / `pin_unavailable` answer to a pinned

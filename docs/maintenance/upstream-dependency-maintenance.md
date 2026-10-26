@@ -33,7 +33,7 @@ scheduled GitHub workflow, daemon, or live Task in a dependency PR.
 ## Weekly or on-demand procedure
 
 1. **Preflight ownership.** Inspect `vibe data query` for live Sessions and
-   Runs, `vibe watch list`, and `gh pr list --state open`. Do not touch another
+   Runs, `vibe watch list --global`, and `gh pr list --state open`. Do not touch another
    owner's dirty worktree or candidate branch. If a matching owner PR is live,
    coalesce into that work only when its owner explicitly accepts the handoff;
    otherwise report and skip.

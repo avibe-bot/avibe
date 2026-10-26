@@ -15,7 +15,7 @@ Reuse the request queue, approval surfaces, notification delivery, and callbacks
 ## Change contract
 
 1. Every agent-initiated delete is a request, for standard/protected and
-   static/keypair secrets. `vibe vault rm NAME [--reason TEXT] [--no-callback]`
+   static/keypair secrets. `vibe vault remove NAME [--reason TEXT] [--no-callback]`
    creates a pending `delete` request and returns its ID immediately, never
    deleting and with no bypass flag. Default value-free guidance:
    "Waiting for the user to approve deleting NAME in Avibe. Avibe resumes this
@@ -64,7 +64,7 @@ Reuse the request queue, approval surfaces, notification delivery, and callbacks
 8. IM notifications include `delete`, with backend `type.delete` i18n and the
    existing Vaults deep link. Approval remains on the Web.
 9. Update `skills/use-avibe-vault/SKILL.md`, bump its version, and document
-   `vibe vault rm NAME --reason "..."` as an approval request that resumes the
+   `vibe vault remove NAME --reason "..."` as an approval request that resumes the
    Session after the decision; never rerun it. CLI examples must parse.
 10. Out of scope: single-field deletion, changing the Web direct-delete flow,
     bulk deletion, and the parallel multi-field feature.
@@ -98,7 +98,7 @@ Avibe service, real home/keychain, or external tenant mutation. Tests run throug
 
 - Integrate the released multi-field implementation and Vaults UX from master;
   preserve whole-secret deletion, grant invalidation, and resident-scope release.
-- Reject `vibe vault rm NAME.field` with `vault_field_delete_forbidden` and point
+- Reject `vibe vault remove NAME.field` with `vault_field_delete_forbidden` and point
   to the Vaults page for single-field removal. The skill is version `0.4.0`.
 - A delete card snapshots `_field_metadata(secret)` at creation. Pending UI reads
   refresh its `kind`, `default_field`, `fields`, and optional `fields_state` from

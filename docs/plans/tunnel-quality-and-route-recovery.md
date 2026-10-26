@@ -379,7 +379,11 @@ timeouts are 500 ms and failures never block API or Doctor requests.
 
 The active connector quality evaluator consumes:
 
-- `cloudflared_tunnel_ha_connections`;
+- `/ready` `readyConnections`, the edge-registered connection count that every
+  `ha_connections` check below means. The `cloudflared_tunnel_ha_connections`
+  gauge is only a fallback for a `/ready` body without that count: cloudflared
+  raises it when a connection starts dialing, so it can read four while the
+  edge has registered one;
 - `cloudflared_tunnel_server_locations`;
 - `cloudflared_tunnel_request_errors` counter delta;
 - `quic_client_smoothed_rtt` per connection;

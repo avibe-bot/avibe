@@ -17,6 +17,24 @@
       "uniqueItems": true,
       "items": { "type": "string", "minLength": 1 },
       "description": "The exact hop tier declaration consulted when stripped_reasoning_efforts was produced."
+    },
+    "responseCorrelationId": {
+      "type": "object",
+      "required": ["header", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "header": {
+          "enum": ["request-id", "x-request-id"],
+          "description": "Canonical lowercase response header name. request-id is the provider request id; x-request-id is the relay/request correlation id."
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[\\u0021-\\u007e]+$",
+          "description": "Bounded printable-ASCII correlation value after credential-like and control-character rejection."
+        }
+      }
     }
   },
   "required": [
@@ -36,7 +54,7 @@
   "additionalProperties": false,
   "properties": {
     "contract_version": {
-      "enum": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+      "enum": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
       "$comment": "The only versioned object written to disk, so released versions form a set rather than a constant. Historical records validate after the existing persistence-read normalization of retired reasons; tests/fixtures/model_hub/released_v5_permission_denied.json exercises that boundary, not raw-file validation. Reading preserves the writer generation and requires no new route fields. New records carry the terminal member. Other versioned objects are ephemeral envelopes pinned to that value alone.",
       "description": "Generation that wrote this record. Readers retain every supported released value, apply existing retired-reason normalization independently of version, and do not require route_origin or manual_override."
     },
@@ -101,6 +119,13 @@
             "maxLength": 400,
             "description": "Optional error text for this attempt, credential-redacted, stripped of control and bidi characters, whitespace-collapsed, and bounded to 400 characters by the engine client: the upstream's message, or for a network attempt the engine's connection diagnostic. Display only; never read by classification. Absent when no message was observed and in historical records."
           },
+          "response_correlation_ids": {
+            "type": "array",
+            "maxItems": 2,
+            "uniqueItems": true,
+            "items": { "$ref": "#/definitions/responseCorrelationId" },
+            "description": "Optional bounded response correlation facts for this exact attempt. Only request-id and x-request-id survive; arbitrary response headers, controls and credential-like values are discarded."
+          },
           "reason": {
             "enum": [
               "quota_exhausted",
@@ -138,7 +163,14 @@
         "channel": { "enum": ["native_cli", "hub"] },
         "stripped_reasoning_efforts": { "$ref": "#/definitions/strippedReasoningEfforts" },
         "declared_reasoning_efforts": { "$ref": "#/definitions/declaredReasoningEfforts" },
-        "origin": { "$ref": "hop-origin.schema.json" }
+        "origin": { "$ref": "hop-origin.schema.json" },
+        "response_correlation_ids": {
+          "type": "array",
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/responseCorrelationId" },
+          "description": "Optional bounded response correlation facts for this exact served request."
+        }
       },
       "dependencies": {
         "stripped_reasoning_efforts": ["declared_reasoning_efforts"],
@@ -247,6 +279,13 @@
           "minLength": 1,
           "maxLength": 400,
           "description": "Optional upstream error message for this terminal attempt, under the same redaction and bound as failed_attempts[].upstream_detail. Display only; absent when no message was observed and in historical records."
+        },
+        "response_correlation_ids": {
+          "type": "array",
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/responseCorrelationId" },
+          "description": "Optional bounded response correlation facts for this exact terminal attempt."
         }
       },
       "dependencies": {
@@ -266,7 +305,8 @@
               "anyOf": [
                 { "required": ["http_status"] },
                 { "required": ["upstream_error_code"] },
-                { "required": ["upstream_detail"] }
+                { "required": ["upstream_detail"] },
+                { "required": ["response_correlation_ids"] }
               ]
             }
           },
@@ -487,7 +527,7 @@
   ],
   "examples": [
     {
-      "contract_version": 17,
+      "contract_version": 21,
       "turn_id": "turn_01k9x2m4",
       "ts": "2026-07-29T06:32:11Z",
       "agent": "claude",
@@ -512,7 +552,7 @@
       "blockers": []
     },
     {
-      "contract_version": 17,
+      "contract_version": 21,
       "turn_id": "turn_01k9x33p",
       "ts": "2026-07-29T06:41:02Z",
       "agent": "opencode",
@@ -533,7 +573,7 @@
       "blockers": []
     },
     {
-      "contract_version": 17,
+      "contract_version": 21,
       "turn_id": "turn_01k9x3zq",
       "ts": "2026-07-29T06:48:20Z",
       "agent": "codex",
@@ -553,7 +593,7 @@
       ]
     },
     {
-      "contract_version": 17,
+      "contract_version": 21,
       "turn_id": "turn_01k9x4b7",
       "ts": "2026-07-29T07:02:44Z",
       "agent": "claude",
@@ -573,7 +613,7 @@
       "blockers": []
     },
     {
-      "contract_version": 17,
+      "contract_version": 21,
       "turn_id": "turn_modelmissing01",
       "ts": "2026-09-05T17:31:10Z",
       "agent": "claude",
@@ -595,7 +635,7 @@
       "blockers": []
     },
     {
-      "contract_version": 17,
+      "contract_version": 21,
       "turn_id": "turn_01k9x5ca",
       "ts": "2026-07-29T07:08:00Z",
       "agent": "codex",

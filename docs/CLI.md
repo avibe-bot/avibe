@@ -15,15 +15,110 @@ vibe stop         # Stop all services
 
 ## Commands
 
+The `vibe` CLI is mostly called by Agents, so every command follows one grammar
+and one output rule.
+
+### Grammar
+
+- **Naming a Session.** `--session-id <id>` is the only way to name a Session.
+  A command that acts on one Session (`vibe session get`, `update`, `send-now`,
+  `queue list`, `queue remove`, the `vibe show` commands) defaults to the caller
+  Session from `AVIBE_SESSION_ID`, as the [Session-owned lists](#session-owned-lists)
+  do. Outside an Avibe Agent shell there is no default, and the command fails
+  with `missing_caller_session`.
+- **Naming anything else.** Agent names, run, task, watch, and Vault secret
+  ids, and a queued message id are positional:
+  `vibe session queue remove <message-id> --session-id <id>`.
+- **Message text.** `--message` or `--message-file`, on every command that sends
+  or stores a message.
+- **Visibility.** `--visible` makes a new or forked Session from `vibe agent run`
+  user-facing (new delegated Sessions are background by default).
+  `vibe session update` takes `--visible` or `--hidden`.
+- **One spelling.** There are no aliases, hidden compatibility flags, or
+  deprecated commands; a removed spelling fails as an unknown argument.
+
+### Output
+
+- **Agent-facing commands** (`agent`, `runs`, `harness`, `session`, `task`,
+  `watch`, `show`, `vault`, `data query`, `data skill-usage`, `skill list`, and
+  `status`) print one JSON object on stdout:
+  `{"schema_version": 1, "ok": true, "kind": "<kind>", ...fields}`. They accept
+  `--json`, which changes nothing. `vibe data query --format text` prints rows
+  as readable records instead.
+- **Failures** of those commands, and every argument error, print the same
+  envelope on stderr with `"ok": false`, `"kind": "error"`, a stable `code`, the
+  `error` text, and when useful a `hint`, `help_command`, and `details`. The exit
+  status is nonzero.
+- **Content commands** print the content itself: `vibe skill load` prints Skill
+  text, `vibe computer` prints its compact observation format (`--json` returns
+  the raw driver payload), `vibe vault run` passes through the output of the
+  command it runs, and `vibe debug prompt export` prints its export document.
+- **Operator commands** for a person at a terminal print text. `version`,
+  `check-update`, `doctor`, `runtime`, `remote` subcommands, `screenshot`, and
+  `data retention` print the JSON envelope with `--json`. The service lifecycle
+  commands `start`, `stop`, `restart`, `upgrade`, and the guided `vibe remote`
+  setup only print progress text and take no `--json`.
+- **Language.** CLI help, errors, hints, and notices are English, whatever the
+  configured UI language. IM, the Web UI, and notifications follow the
+  configured language; the Web doctor panel shows the same diagnostics as
+  `vibe doctor` in that language.
+
 ### Bounded list output
 
 Agent-facing collection commands share one pagination contract: `vibe agent list`,
-`vibe agent models`, `vibe runs list`, `vibe session list`, Vault list/find/tags,
-Show Page list/marks, `vibe data query`, `vibe task list`, and `vibe watch list`.
-They return 20 rows by default, accept `--page` and `--limit`, cap a page at 100,
-and never provide an unpaginated `--all` bypass. Follow
-`pagination.next_command` for the next page and use the corresponding `show` or
-`get` command for full record detail.
+`vibe agent models`, `vibe runs list`, `vibe session list`,
+`vibe session queue list`, Vault list/find/tags, Show Page list/marks,
+`vibe data query`, `vibe task list`, and `vibe watch list`. They return 20 rows
+by default and accept `--page` and `--limit`. A page holds at most 100 rows: a
+larger `--limit` reads 100, and `pagination.limit` reports the limit used. A
+`--limit` or `--page` below 1 is an `invalid_pagination` error. There is no
+unpaginated `--all` bypass. Follow `pagination.next_command` for the next page
+and use the corresponding `show` or `get` command for full record detail.
+`vibe skill list` pages the same Skill catalog the system prompt shows, so it
+takes `--page` only.
+
+List rows carry only what is needed to decide the next step and omit null,
+empty, and zero-valued fields, so an absent field means unset. A Show Page row
+is its `session_id`, `visibility`, `active_url` (the URL to share), `path` (the
+workspace to edit), and `updated_at`. An Agent row is its `name`, `backend`,
+`model`, `reasoning_effort`, `source`, and `updated_at`; a disabled Agent adds
+`enabled: false`. A Vault row, the same from `vibe vault list` and
+`vibe vault find`, is the secret's `name`, `kind`, `protection`, `fields` (a
+multi-field secret adds `default_field`, the field `NAME` alone selects),
+`tags`, `description`, `policy`, a keypair's `signing_addresses`, and
+`per_use_sign: true` when `vibe vault sign` can use the key; it never holds a
+value. `vibe task show`, `vibe watch show`, `vibe runs show`,
+`vibe session get`, `vibe agent show`, and `vibe show status` print the full
+record; add `--brief` to print exactly the row the matching list command
+prints. A removed Task or Watch shows `lifecycle_state: "removed"` and
+`removed_at`, and none of the live fields (`enabled`, health, next fire, or
+waiter state) it no longer has.
+
+### Session-owned lists
+
+`vibe harness status`, `vibe runs list`, `vibe task list`, `vibe watch list`,
+and `vibe show list` read records that belong to an Agent Session, and share one
+scope grammar:
+
+```bash
+vibe watch list                          # the caller Session (AVIBE_SESSION_ID)
+vibe watch list --session-id sesk8m4q2p7x   # another Session
+vibe watch list --global                 # every Session
+```
+
+Inside an Avibe Agent shell the caller Session is the default. Outside one there
+is no default: pass `--session-id` or `--global`, otherwise the command fails
+with `missing_caller_session`. The two flags cannot be combined. Each response
+reports the scope it read as `session_id` and `global`, and
+`pagination.next_command` repeats the scope flags you passed.
+
+A Session's Runs are the Runs it ran, dispatched from its Agent, or receives a
+result from, so delegated work stays visible to the Session that delegated it.
+Its Watches are the Watches that follow up in it, its Tasks the Tasks it created
+(or that run in it when the creator is unknown or gone), and its Show Page the
+page with its id; Watches and Tasks match the Workbench's "this Session" filter.
+`vibe harness status` keeps controller faults and any working-directory conflict
+that involves the Session.
 
 ## Remote Web UI Access
 
@@ -112,6 +207,9 @@ vibe status
 **Output:**
 ```json
 {
+  "schema_version": 1,
+  "ok": true,
+  "kind": "service_status",
   "state": "running",
   "running": true,
   "pid": 12345
@@ -131,15 +229,17 @@ their native Skill catalogs on Avibe-dispatched Turns.
 
 ```bash
 vibe skill list [--page N]
-vibe skill load -- <name>
+vibe skill load -- <name> [<name> ...]
 ```
 
-`list` prints the currently available names and descriptions in stable order,
-25 per page. Page 1 is also included in the Agent's system prompt; use the
-next-page command shown in the output when more Skills are available. `load`
-prints only the selected Skill body inside a `skill_content` element. Its
-`directory` attribute is an absolute path so the Agent can read references and
-run scripts stored beside `SKILL.md`.
+`list` returns the currently available names and descriptions in stable order
+as `skills`, with a `pagination` object. Page 1 is also included in the Agent's
+system prompt; follow `pagination.next_command` when more Skills are available.
+`load` prints each named Skill body inside its own `skill_content` element, in
+the order given. Its `directory` attribute is an absolute path so the Agent can
+read references and run scripts stored beside `SKILL.md`. An unknown name still
+prints the Skills that loaded, then fails with a `skill_not_found` error that
+lists the `missing` and `loaded` names.
 
 Avibe discovers existing Skills without moving them:
 
@@ -246,6 +346,36 @@ session and observation state are keyed by Avibe Session and are retired when
 the Session is explicitly ended or archived, rather than at every Turn
 boundary.
 
+### `vibe data query`
+
+Run one guarded read-only SQL statement against the local SQLite state database.
+Results return 20 rows per page by default and at most 100.
+
+```bash
+vibe data query --sql "select group_concat(name, ', ') as tables from pragma_table_list where schema = 'main'"
+vibe data query --sql "select group_concat(name, ', ') as columns from pragma_table_info('run_definitions')"
+vibe data query --sql "PRAGMA table_info(run_definitions)" --limit 100   # with types and keys
+vibe data query --sql "select id, status, created_at from agent_runs order by created_at desc"
+vibe data query --sql-file query.sql --limit 50
+vibe data query --sql "select created_at, author, content_text from messages where session_id = 'sesk8m4q2p7x' order by created_at" --format text
+```
+
+`--format text` prints each row as a record for reading long text such as a
+transcript or a message body: a `-[ RECORD n ]` line, then one `column: value`
+line per column. Values are printed as stored, with real newlines; a multi-line
+value starts on the line after its column name, indented two spaces, and SQL
+`NULL` prints as `(null)`. When more rows exist, the last line is
+`next_command: ...`, which keeps `--format text`. JSON stays the default, and
+errors are the JSON error envelope on stderr in both formats.
+
+The connection is read-only: writes, schema changes, `ATTACH`, and transactions
+are refused. The schema PRAGMAs `table_list`, `table_info`, `table_xinfo`,
+`index_list`, `index_info`, and `foreign_key_list` run as statements or as
+`pragma_*` table-valued functions; every other PRAGMA is refused. A
+`no such table` or `no such column` error carries a `hint` with the closest
+names and the table list, or the referenced tables' columns. Tasks and Watches
+are rows of `run_definitions` (`definition_type` is `scheduled` or `watch`).
+
 ### `vibe data skill-usage`
 
 Instance Owner-only local maintenance; these commands return JSON diagnostics,
@@ -285,6 +415,7 @@ Run diagnostic checks on your configuration.
 
 ```bash
 vibe doctor
+vibe doctor --json
 ```
 
 Run safe first-phase repairs explicitly:
@@ -350,7 +481,7 @@ vibe remote start
 vibe remote stop
 ```
 
-Use `--json` on these subcommands for machine-readable output.
+Use `--json` on these subcommands for the JSON envelope.
 
 ### `vibe screenshot`
 
@@ -364,47 +495,62 @@ vibe screenshot --json
 
 **Behavior:**
 - Saves to `~/.vibe_remote/screenshots/` by default
-- Prints the saved file path, or a JSON payload with `--json`
+- Prints the saved file path, or the JSON envelope with `--json`
 - Stays at the CLI layer only; it does not add IM commands, bot buttons, or agent prompt injection
 
 ### `vibe session`
 
-List, inspect, and rename Agent sessions. `list` and `get` are read-only; `update`
-changes the title only. Archived sessions are soft-deleted and never surfaced.
+List, inspect, update, and drive Agent sessions. `list` and `get` are read-only;
+`update` changes the title, visibility, or scope. Archived sessions are
+soft-deleted and never surfaced.
 
 ```bash
 vibe session list                       # active sessions, 20 per page by default, newest activity first
 vibe session list --type slack          # filter by platform (avibe = Web/Workbench)
-vibe session list --page 2 --limit 50   # request page 2 with 50 rows (maximum 100)
-vibe session get sesk8m4q2p7x           # full detail for one session
-vibe session get                        # inside an Avibe Agent shell, show the caller Session
-vibe session update sesk8m4q2p7x --title 'Release review'   # pass "" to clear the title
+vibe session list --page 2 --limit 50   # request page 2 with 50 rows (at most 100)
+vibe session get                        # inside an Avibe Agent shell, the caller Session
+vibe session get --session-id sesk8m4q2p7x                   # full detail for another Session
 vibe session update --title 'Release review'                 # inside an Avibe Agent shell
+vibe session update --title 'Release review' --if-untitled   # keep a title a user or Agent set
+vibe session update --session-id sesk8m4q2p7x --title ''     # clear the title
+vibe session update --session-id sesk8m4q2p7x --hidden       # background-only; --visible promotes it
+vibe session queue list --session-id sesk8m4q2p7x            # queued messages in FIFO order
+vibe session queue remove msg_queued123 --session-id sesk8m4q2p7x
+vibe session send-now --session-id sesk8m4q2p7x              # promote the exact queue head
 ```
 
-`--type` accepts a platform id: `avibe` (Web/Workbench), `slack`, `discord`,
-`telegram`, `lark`, `wechat`. For richer filtering — by agent, time range, message
-content, or cross-table joins — `list` and `get` point you to `vibe data query`.
-When `get` or `update` runs inside an Avibe-injected Agent shell, the session id
-may be omitted and defaults to the caller Session from `AVIBE_SESSION_ID`.
+Every command except `list` acts on one Session: `--session-id`, or the caller
+Session inside an Avibe Agent shell (see [Grammar](#grammar)). With `--if-untitled`,
+`update --title` writes only when no user or Agent has titled the Session; an
+automatic title still counts as untitled. The check and the write are one
+transaction, so a concurrent rename is never overwritten, and `updated: false`
+reports that the existing title was kept. `--type` accepts
+a platform id: `avibe` (Web/Workbench), `slack`, `discord`, `telegram`, `lark`,
+`wechat`. For richer filtering — by agent, time range, message content, or
+cross-table joins — use `vibe data query`.
 
 ### `vibe runs`
 
 List and inspect Agent run records.
 
 ```bash
-vibe runs list --session-id sesk8m4q2p7x --brief
+vibe runs list                         # inside an Avibe Agent shell, the caller Session's runs
+vibe runs list --global --definition-id <task-or-watch-id>   # every fire, across per-run Sessions
 vibe runs show run_abc123
 vibe runs show run_abc123 --brief      # status, timing, error, and callback fields only
 vibe runs show                         # inside an Avibe Agent shell, show the caller Run
 ```
 
-`vibe runs list` keeps its global listing behavior unless a filter such as
-`--session-id` is provided. `vibe runs show` can omit the run id inside an
+`vibe runs list` follows the [Session-owned list](#session-owned-lists) scope
+grammar. `vibe runs show` can omit the run id inside an
 Avibe-injected Agent run and defaults to `AVIBE_RUN_ID`. It prints the full
-record, with the text sent to the Agent as `message` and the reply as
-`result_text`; `--brief` prints the same compact row as `vibe runs list`, for
-status checks.
+record once: status and timing, `error`, the callback fields, the text sent to
+the Agent as `message`, the reply as `result_text`, and where the Run ran and
+came from (Agent, Session, `source_kind`, `source_session_id`,
+`parent_run_id`). Reply text delivered beside the final reply, such as a
+message sent mid-turn, is `other_outputs`; delivery bookkeeping, turn and
+process ids, and copies of other fields are not printed. `--brief` prints the
+same compact row as `vibe runs list`, for status checks.
 
 ### `vibe task`
 
@@ -432,8 +578,10 @@ Use `vibe task add --help` and `vibe task update --help` for the full command su
 
 When `vibe task add` runs inside an Avibe-injected Agent shell, `--session-id`
 may be omitted. Avibe defaults the task target to the caller Session from
-`AVIBE_SESSION_ID` and reports that default in the command output. Explicit
-`--session-id`, session creation flags, and delivery flags still win.
+`AVIBE_SESSION_ID`; the printed definition's `session_id` shows the resolved
+target. Explicit `--session-id` and session creation flags still win. To target
+an IM channel or thread that has no Session yet, create one with
+`--create-session` (or `--create-session-per-run`) and `--scope-id`.
 
 A pure command task (`--on-failure none`, the default) skips that caller-session
 default and takes no session, scope, or agent flags. Successful runs are silent;
@@ -463,9 +611,6 @@ and every other command records the directory you ran `vibe task add` from. For
 a message task `--cwd` still places the Session it creates, and is still refused
 for one that already exists.
 
-`--session-key` remains accepted for older scripts, but new tasks should use
-the Agent Session ID shown in the active Avibe prompt.
-
 ### `vibe agent run`
 
 Run an Agent directly. Runs are async by default and do not store a scheduled
@@ -475,35 +620,36 @@ task definition. Use `--sync` only when the terminal should wait for completion.
 vibe agent run --no-callback --agent release-reviewer --message 'Review the latest deployment result.'
 vibe agent run --sync --agent release-reviewer --message 'Review the latest deployment result and print it here.'
 vibe agent run --no-callback --session-id sesk8m4q2p7x --message 'The export finished. Share the summary.'
-vibe agent run --session-id sesk8m4q2p7x --send-now --message 'Apply this correction in the current turn.'
+vibe agent run --session-id sesk8m4q2p7x --queue --message 'Do this after the current turn.'
 vibe agent run --no-callback --fork-session sesk8m4q2p7x --message 'Explore this alternate fix from the current context.'
 vibe agent run --session-id sesworker123 --callback-session-id sescaller456 --message 'Run the delegated investigation.'
-vibe agent run --no-callback --create-session --scope-id slack::channel::C999 --agent release-reviewer --message 'Post the deployment summary.'
+vibe agent run --no-callback --scope-id slack::channel::C999 --visible --agent release-reviewer --message 'Post the deployment summary.'
 vibe agent run --close-after --no-callback --agent release-reviewer --message 'Run a disposable batch review.'
 ```
+
+Without `--session-id` or a fork flag, the run creates a new background Session
+for `--agent`; `--same-scope` or `--scope-id` places it, and `--visible` makes it
+user-facing.
 
 With an existing `--session-id`, the default admission is P1: Avibe steers the
 new Run into an active native Turn, starts it immediately when idle, or moves the
 same Delivery to the durable P3 queue after a definitive refusal/not-active
-receipt. It does not interrupt the active Turn.
-
-`--send-now` is valid only with an existing `--session-id` and explicitly selects
-the normal content-bearing P1 behavior: the new message steers an active native
-Turn, starts immediately when idle, and falls back to P3 after a definitive
-refusal. It never promotes an older queued message. `vibe session send-now` is
-the content-free P1 operation: it promotes the exact existing FIFO head without
-adding a message. A stale head is refused rather than replaced by the next queued
-item, and neither command calls Stop.
+receipt. It does not interrupt the active Turn, and it never promotes an older
+queued message. `--queue` puts the new Run in the P3 queue behind the active
+Turn instead. `vibe session send-now` is the content-free P1 operation: it
+promotes the exact existing FIFO head without adding a message. A stale head is
+refused rather than replaced by the next queued item, and neither command calls
+Stop.
 
 Use `--fork-session <session-id>` when a new Agent Session should branch from
 an existing Session's native backend context instead of starting blank. The new
 Session keeps the source backend. `--agent`, `--model`, and
 `--reasoning-effort` can override the forked Session only when the Agent backend
 stays the same; a cross-backend fork is rejected. Do not combine
-`--fork-session` with `--session-id` or `--create-session`.
+`--fork-session` with `--session-id`.
 
 `--model` and `--reasoning-effort` set the model of any new Session the run
-creates (a blank new Session, `--create-session`, or a fork), and the Session
+creates (a blank new Session or a fork), and the Session
 keeps it for its later turns. They are refused with `--session-id`; an existing
 Session's model is changed in the Web UI's Session model picker. The pair the
 new Session will run on (each override over the default it would otherwise
@@ -511,6 +657,12 @@ keep) is checked against the Agent's catalog. A Vibey model or effort its Model
 Hub menu does not offer, or a menu that cannot be loaded, is refused; for claude
 and codex an unknown value is a warning, since their bundled catalogs can lag
 behind a new release. `vibe agent models <agent>` lists valid values.
+
+The command prints one `run` object: its `id`, `status`, `run_type`,
+`agent_name`, and the `session_id`, `scope_id`, `visibility`, and
+`callback_session_id` Avibe resolved for it. `--sync` replaces it with the
+finished run record. `callback_notice` appears only when a run on the caller's
+own Session gets no callback because the result already lands there.
 
 Async runs need an explicit callback policy unless the command is running inside
 an Avibe-injected Agent environment. Use `--callback-session-id` when the final
@@ -521,9 +673,6 @@ default the callback to the current caller Session. The callback is independent
 from ordinary delivery: if the target run also posts to its IM scope, the caller
 Session still receives the result. Process messages such as system notes, tool
 calls, and intermediate assistant updates are not included.
-
-`vibe hook send` is kept only as a deprecated compatibility entrypoint. New
-automation should use `vibe agent run`.
 
 Use `--close-after` for a new or forked Session when the Agent runtime should be
 released after the Run settles while the Session, transcript, and Run record stay
@@ -561,19 +710,36 @@ vibe watch resume <watch-id>
 vibe watch remove <watch-id>
 ```
 
-`vibe task list` and `vibe watch list` return 20 definitions per page and
-include `pagination.next_command` when more rows exist. Successful one-shot
-definitions are hidden by default. Add `--include-finished` to page through
-history. List output is always bounded; there is no unpaginated `--all` mode.
-Task and watch commands use `definition` for one record and `definitions` for
-lists; they do not duplicate those records under command-specific aliases.
+`vibe task list` and `vibe watch list` read the caller Session by default (see
+[Session-owned lists](#session-owned-lists)), return 20 definitions per page, and
+include `pagination.next_command` when more rows exist. Enabled definitions come
+first, each group ordered by most recent activity. `--q <text>` searches the
+same text fields as the Workbench search (id, name, Agent, Session, message, and
+command) and is carried into `next_command`. Successful one-shot definitions are
+hidden by default. Add `--include-finished` to page through history. List output
+is always bounded; there is no unpaginated `--all` mode. Task and watch commands
+use `definition` for one record and `definitions` for lists; they do not
+duplicate those records under command-specific aliases.
+
 Both list and show read the same Harness projection as the Workbench:
-`lifecycle_state`, `lifecycle_detail`, `next_run_at`, `waiting_since`, and
-`running_since`; watch rows also include `process_alive`. For watches,
-`process_alive: null` means no waiter runtime has ever been observed, while
-`false` means an observed waiter has exited. The older `state` and task
-`last_status` fields remain compatibility-only display fields and do not define
-the lifecycle.
+`lifecycle_state` is the lifecycle, with `lifecycle_detail` and
+`lifecycle_finished_at` for a finished definition and `next_run_at`,
+`waiting_since`, or `running_since` while it is in play. A row names an unnamed
+definition by `message_preview` or `command_preview` and carries `last_error`
+and a non-zero `last_exit_code`. Rows and `show` print `health` (and a watch's
+`processing_health`) only when the verdict is not `healthy`, and failure
+counters only when non-zero. A watch row adds `process_alive: false`
+only when an enabled watch's observed waiter has exited; `vibe watch show`
+prints the observed `process_alive` and `runtime`, and omits both when no waiter
+has ever been observed. Task and watch add, update, pause, and resume print the
+same `definition` as `show`, plus `warnings` when there are any.
+
+`vibe task show` and `vibe watch show` also read a removed definition: the same
+projection with `lifecycle_state: "removed"` and `removed_at`. Lists never
+include removed definitions. `pause`, `resume`, `update`, `run`, and `remove` on
+a removed definition fail with `task_removed` / `watch_removed`, whose
+`details.removed_at` says when it was removed; `task_not_found` /
+`watch_not_found` means the id never existed.
 
 The waiter command is passed positionally after `--` (or as a single shell
 string via `--shell`). Use `vibe watch add --help` for the full surface,
@@ -581,13 +747,15 @@ including `--timeout` (per-cycle timeout in seconds), `--lifetime-timeout`
 (total wall-clock limit), `--forever`, `--retry-exit-code`, `--retry-delay`,
 `--name`, and session creation flags. Watches share `--session-id`,
 `--create-session`, `--create-session-per-run`, `--same-scope`, and `--scope-id`
-semantics with `vibe task`; direct `vibe agent run` uses `--create-session`
-for one-shot session creation. `vibe watch remove` hides the watch from management
+semantics with `vibe task`; `vibe agent run` creates a new Session whenever it
+names no `--session-id` and no fork. `vibe watch remove` hides the watch from management
 views while preserving existing run history in SQLite. Prefer `vibe watch`
 over ad-hoc `nohup` jobs when the
 user wants a managed background task with a guaranteed follow-up message.
 `--timeout` defaults to 21600 seconds; an explicit `--timeout 0` disables the
-per-cycle timeout, while any positive value is persisted unchanged.
+per-cycle timeout, while any positive value is persisted unchanged. A waiter exit
+listed in `--retry-exit-code` means "still waiting": the watch records it as
+`last_exit_code` and keeps `last_error` for real failures.
 
 ### `vibe version`
 
@@ -595,6 +763,7 @@ Show the installed version.
 
 ```bash
 vibe version
+vibe version --json
 ```
 
 ### `vibe check-update`
@@ -603,6 +772,7 @@ Check if a newer version is available.
 
 ```bash
 vibe check-update
+vibe check-update --json
 ```
 
 ### `vibe upgrade`
@@ -621,6 +791,16 @@ Activation moves every stable `vibe` launcher that already selects an Avibe
 install to the new version together, so no `PATH` lookup keeps an older build.
 Launchers that point anywhere else are never changed. See
 [Upgrading](UPGRADING.md#stable-launchers).
+
+When Avibe runs on a uv-managed CPython, the upgrade first moves that Python
+minor version to its newest patch release with
+`uv python install --upgrade --no-bin`, so CPython and OpenSSL security fixes
+arrive with Avibe releases. It never changes the minor version and adds no
+`python3.x` command to your `PATH`. As with `uv python upgrade`, other uv
+environments that follow this minor version's managed Python move to the new
+patch too. uv only knows patches released before its own version; with uv older
+than 0.9.10, offline, or when the download fails, the upgrade continues on the
+installed patch and logs why. Run `uv self update` to reach newer patches.
 
 ## Service Lifecycle
 

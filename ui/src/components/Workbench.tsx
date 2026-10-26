@@ -155,9 +155,10 @@ export const Workbench: React.FC = () => {
         </div>
       </div>
 
-      {/* Input — the project chips and the Agent picker stand above the shared
-          Composer, so where the session lands and which Agent runs it are both
-          visible before anything is typed. */}
+      {/* Input — the project chips stand above the shared Composer and the
+          Agent picker sits in its action row beside Send, as in a chat, so where
+          the session lands and which Agent runs it are both visible before
+          anything is typed. */}
       <div className="flex w-full max-w-[640px] flex-col gap-3">
         {ns.projects.length > 0 && (
           <ProjectPicker
@@ -168,26 +169,23 @@ export const Workbench: React.FC = () => {
             disabled={ns.sending}
           />
         )}
-        <div className="flex min-w-0 flex-col gap-2">
-          <div className="font-mono text-[11px] font-bold uppercase tracking-[0.08em] text-muted">{t('newSession.agent')}</div>
-          <AgentRoutePicker
-            value={ns.agentRoute}
-            agents={ns.agents}
-            onChange={ns.setAgentRoute}
-            defaultLabel={ns.effectiveDefaultAgentName
-              ? t('newSession.defaultAgentNamed', { name: ns.effectiveDefaultAgentName })
-              : t('newSession.defaultAgent')}
-            disabled={ns.sending}
-            align="start"
-            // Fill the column on mobile (≈ full screen); on desktop hug content
-            // and cap at 62% so it reads like the compact Chat-header picker
-            // instead of a full-width 640px bar. self-start defeats the flex-col
-            // stretch that would otherwise force the trigger to the column width.
-            triggerClassName="max-w-full sm:max-w-[62%] sm:self-start"
-          />
-        </div>
         <Composer
           stageMedia
+          layout="stacked"
+          actions={
+            <AgentRoutePicker
+              presentation="compact"
+              value={ns.agentRoute}
+              agents={ns.agents}
+              onChange={ns.setAgentRoute}
+              defaultLabel={ns.effectiveDefaultAgentName
+                ? t('newSession.defaultAgentNamed', { name: ns.effectiveDefaultAgentName })
+                : t('newSession.defaultAgent')}
+              disabled={ns.sending}
+              align="end"
+              triggerClassName="max-w-[min(60vw,360px)]"
+            />
+          }
           onSend={send}
           placeholder={t('workbench.home.inputPlaceholder')}
           disabled={ns.sending || !ns.loaded}

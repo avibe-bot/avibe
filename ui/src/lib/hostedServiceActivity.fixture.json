@@ -1,0 +1,206 @@
+{
+  "_comment": "Search-service cards (web-search-services.md §4.3, §6.5): the content.hosted payload core/hosted_activity.py projects from a chain with attempts and its Sources' current state, and the words each surface shows for it. tests/test_hosted_activity.py builds each payload from canonical C-1 records and checks the IM line; HostedToolRow.test.tsx renders the payload and checks the card. The note is the same sentence on both surfaces.",
+  "service_completed": {
+    "payload": {
+      "version": 1,
+      "call_id": "call_ws1",
+      "tool": "web_search",
+      "mode": "proxy",
+      "status": "completed",
+      "subject": "DeepSeek search API pricing",
+      "provider": "tavily",
+      "source_id": "src_tavily01",
+      "source_name": "Tavily",
+      "executor_kind": "service",
+      "sources": [
+        { "url": "https://api-docs.deepseek.com/guides/search-tool", "title": "Search tool", "snippet": "One HTTPS request returns ranked results." },
+        { "url": "https://api-docs.deepseek.com/quick_start/pricing", "title": "Models & Pricing" },
+        { "url": "https://www.tavily.com/pricing", "title": "Tavily pricing" },
+        { "url": "https://exa.ai/pricing", "title": "Exa pricing" },
+        { "url": "https://news.example.com/deepseek-search", "title": "DeepSeek adds a search API", "page_age": "2 days ago" }
+      ],
+      "images": [],
+      "attempts": [
+        { "source_id": "src_tavily01", "label": "Tavily", "kind": "service", "outcome": "completed", "cost": { "basis": "list", "usd": 0.008 } }
+      ],
+      "cost": { "basis": "list", "usd": 0.008, "calls": 1 }
+    },
+    "en": {
+      "chip": "Through Tavily",
+      "count": "5 sources",
+      "cost": "≈ $0.008",
+      "line": "🔎 Web search “DeepSeek search API pricing” · Tavily · 5 sources · ≈ $0.008"
+    },
+    "zh": {
+      "chip": "通过 Tavily",
+      "count": "5 个来源",
+      "cost": "≈ $0.008",
+      "line": "🔎 网页搜索 “DeepSeek search API pricing” · Tavily · 5 个来源 · ≈ $0.008"
+    }
+  },
+  "service_switch": {
+    "payload": {
+      "version": 1,
+      "call_id": "call_ws2",
+      "tool": "web_search",
+      "mode": "proxy",
+      "status": "completed",
+      "subject": "DeepSeek search API pricing",
+      "provider": "deepseek",
+      "source_id": "src_deepseek1",
+      "source_name": "DeepSeek",
+      "executor_kind": "service",
+      "sources": [
+        { "url": "https://api-docs.deepseek.com/guides/search-tool", "title": "Search tool", "snippet": "One HTTPS request returns ranked results." },
+        { "url": "https://api-docs.deepseek.com/quick_start/pricing", "title": "Models & Pricing" },
+        { "url": "https://www.tavily.com/pricing", "title": "Tavily pricing" },
+        { "url": "https://exa.ai/pricing", "title": "Exa pricing" },
+        { "url": "https://news.example.com/deepseek-search", "title": "DeepSeek adds a search API", "page_age": "2 days ago" }
+      ],
+      "images": [],
+      "attempts": [
+        {
+          "source_id": "src_tavily01",
+          "label": "Tavily",
+          "kind": "service",
+          "outcome": "failed",
+          "error_code": "service_key_invalid",
+          "reason_key": "reason.service_key_invalid",
+          "remedy_key": "repair.key",
+          "cost": { "basis": "list", "usd": 0 }
+        },
+        { "source_id": "src_deepseek1", "label": "DeepSeek", "kind": "service", "outcome": "completed", "cost": { "basis": "list", "usd": 0.00075 } }
+      ],
+      "switch": { "sources": ["Tavily"], "reason_key": "reason.service_key_invalid", "to": "DeepSeek" },
+      "cost": { "basis": "list", "usd": 0.00075, "calls": 1 }
+    },
+    "en": {
+      "chip": "Through DeepSeek",
+      "count": "5 sources",
+      "cost": "≈ $0.0008",
+      "note": "Tavily has an invalid key; switched to DeepSeek",
+      "line": "🔎 Web search “DeepSeek search API pricing” · Tavily has an invalid key; switched to DeepSeek · 5 sources · ≈ $0.0008"
+    },
+    "zh": {
+      "chip": "通过 DeepSeek",
+      "count": "5 个来源",
+      "cost": "≈ $0.0008",
+      "note": "Tavily 密钥无效，已改用 DeepSeek",
+      "line": "🔎 网页搜索 “DeepSeek search API pricing” · Tavily 密钥无效，已改用 DeepSeek · 5 个来源 · ≈ $0.0008"
+    }
+  },
+  "service_estimate": {
+    "payload": {
+      "version": 1,
+      "call_id": "call_ws3",
+      "tool": "web_search",
+      "mode": "proxy",
+      "status": "completed",
+      "subject": "DeepSeek search API pricing",
+      "provider": "exa",
+      "source_id": "src_exa00001",
+      "source_name": "Exa",
+      "executor_kind": "service",
+      "sources": [
+        { "url": "https://api-docs.deepseek.com/guides/search-tool", "title": "Search tool", "snippet": "One HTTPS request returns ranked results." },
+        { "url": "https://api-docs.deepseek.com/quick_start/pricing", "title": "Models & Pricing" },
+        { "url": "https://www.tavily.com/pricing", "title": "Tavily pricing" },
+        { "url": "https://exa.ai/pricing", "title": "Exa pricing" },
+        { "url": "https://news.example.com/deepseek-search", "title": "DeepSeek adds a search API", "page_age": "2 days ago" }
+      ],
+      "images": [],
+      "attempts": [
+        {
+          "source_id": "src_tavily01",
+          "label": "Tavily",
+          "kind": "service",
+          "outcome": "skipped",
+          "skipped": "cooling",
+          "retry_at": "2026-10-21T04:30:00Z",
+          "reason_key": "skip.cooling"
+        },
+        {
+          "source_id": "src_exa00001",
+          "label": "Exa",
+          "kind": "service",
+          "outcome": "completed",
+          "cost": { "basis": "reported", "usd": 0.008, "estimate": true }
+        }
+      ],
+      "cost": { "basis": "reported", "usd": 0.008, "calls": 1, "estimate": true }
+    },
+    "en": {
+      "chip": "Through Exa",
+      "count": "5 sources",
+      "cost": "≈ $0.008",
+      "line": "🔎 Web search “DeepSeek search API pricing” · Exa · 5 sources · ≈ $0.008"
+    },
+    "zh": {
+      "chip": "通过 Exa",
+      "count": "5 个来源",
+      "cost": "≈ $0.008",
+      "line": "🔎 网页搜索 “DeepSeek search API pricing” · Exa · 5 个来源 · ≈ $0.008"
+    }
+  },
+  "service_blocked": {
+    "payload": {
+      "version": 1,
+      "call_id": "call_ws4",
+      "tool": "web_search",
+      "mode": "proxy",
+      "status": "failed",
+      "error": "every search source is blocked or turned off",
+      "error_code": "search_sources_blocked",
+      "subject": "DeepSeek search API pricing",
+      "source_id": "src_deepseek1",
+      "source_name": "DeepSeek",
+      "executor_kind": "service",
+      "sources": [],
+      "images": [],
+      "attempts": [
+        {
+          "source_id": "src_tavily01",
+          "label": "Tavily",
+          "kind": "service",
+          "outcome": "skipped",
+          "skipped": "blocked",
+          "needs_action": "models.source.needs_action.credential_revoked",
+          "reason_key": "reason.service_key_invalid",
+          "remedy_key": "repair.key"
+        },
+        {
+          "source_id": "src_exa00001",
+          "label": "Exa",
+          "kind": "service",
+          "outcome": "skipped",
+          "skipped": "blocked",
+          "needs_action": "models.source.needs_action.balance_exhausted",
+          "reason_key": "reason.service_balance",
+          "remedy_key": "repair.balanceReenable"
+        },
+        {
+          "source_id": "src_deepseek1",
+          "label": "DeepSeek",
+          "kind": "service",
+          "outcome": "failed",
+          "error_code": "service_unavailable",
+          "reason_key": "reason.service_unavailable",
+          "cost": { "basis": "list", "usd": 0 }
+        }
+      ],
+      "cost": { "basis": "list", "usd": 0, "calls": 1 }
+    },
+    "en": {
+      "status": "Failed",
+      "cost": "$0",
+      "note": "Tavily needs a replacement key; Exa needs an account top-up, then re-enabling in Models › Tools; DeepSeek was unavailable",
+      "line": "🔎 Web search “DeepSeek search API pricing” · failed: all search sources are blocked or disabled · Tavily needs a replacement key; Exa needs an account top-up, then re-enabling in Models › Tools; DeepSeek was unavailable · $0"
+    },
+    "zh": {
+      "status": "失败",
+      "cost": "$0",
+      "note": "Tavily 需要更换密钥；Exa 需要充值，然后在 模型 › 工具 中重新启用；DeepSeek 暂时不可用",
+      "line": "🔎 网页搜索 “DeepSeek search API pricing” · 失败：所有搜索来源都被阻止或停用了 · Tavily 需要更换密钥；Exa 需要充值，然后在 模型 › 工具 中重新启用；DeepSeek 暂时不可用 · $0"
+    }
+  }
+}

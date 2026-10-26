@@ -1,6 +1,7 @@
 {
   "$comment": "Explicit ledger of existing lint debt, remeasured on unchanged source during the ESLint 10 migration (docs/maintenance/eslint-10-migration.md). `npm run lint` fails on anything not recorded here, on a recorded entry that grows, and on a recorded entry that shrinks without being re-recorded. See scripts/lint-baseline.mjs. Regenerate with `npm run lint:baseline`; raising a count needs a reviewer to agree in the PR.",
   "rationale": {
+    "avibe/localized-user-text": "Initial #2618 measurement on unchanged production TSX. Existing literal JSX copy, sentence/list glue and conservative technical-display diagnostics are recorded per file, not fixed by a whole-UI rewrite. New or increased counts fail; paying down debt must shrink this allowance. Review technical diagnostics against the narrow content policy rather than translating protocol data. See docs/plans/ui-localized-text-guard.md for boundaries, measured totals and the count-ratchet residual.",
     "@typescript-eslint/no-explicit-any": "The untyped edge of the Python API. Each one is a response body, an SSE event payload or a third-party callback that reaches the UI as `any`. Typing them is a per-endpoint contract change against the backend, not a lint fix, and doing it as one sweep would produce a diff nobody can review. The ratchet's job here is to stop a NEW endpoint from landing untyped; the recorded ones come down endpoint by endpoint.",
     "react-hooks/set-state-in-effect": "Legitimate-looking `reset derived state when the subject changes` and prop-mirroring effects in components with no test coverage. Each rewrite changes when a render happens, so each needs its own regression test first; batching them behind a lint deadline is how a subtle render-order bug ships.",
     "react-hooks/preserve-manual-memoization": "Advice for adopting the React Compiler, not a defect. `babel-plugin-react-compiler` is not in this project's Vite plugin list, so no shipped behaviour depends on these; they become actionable in the change that turns the compiler on.",
@@ -21,20 +22,33 @@
       "no-useless-assignment": 1
     },
     "src/App.tsx": {
+      "avibe/localized-user-text": 1,
       "react-hooks/set-state-in-effect": 1
+    },
+    "src/apps/LibraryApp.tsx": {
+      "avibe/localized-user-text": 1
     },
     "src/components/AppShell.tsx": {
       "@typescript-eslint/no-explicit-any": 2,
+      "avibe/localized-user-text": 2,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/InstallHint.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/RemoteAccess.tsx": {
+      "avibe/localized-user-text": 7,
       "react-hooks/purity": 1,
       "react-hooks/set-state-in-effect": 2
     },
+    "src/components/ShowPagesPage.tsx": {
+      "avibe/localized-user-text": 3
+    },
+    "src/components/ThemeToggle.tsx": {
+      "avibe/localized-user-text": 1
+    },
     "src/components/VersionBadge.tsx": {
+      "avibe/localized-user-text": 4,
       "react-hooks/immutability": 2
     },
     "src/components/Wizard.tsx": {
@@ -44,15 +58,32 @@
     "src/components/apps/AppWindow.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
+    "src/components/apps/Dock.tsx": {
+      "avibe/localized-user-text": 1
+    },
     "src/components/apps/windowChords.ts": {
       "no-useless-assignment": 1
     },
     "src/components/onboarding/BackendConnectionDialog.tsx": {
+      "avibe/localized-user-text": 2,
       "react-hooks/set-state-in-effect": 1
     },
+    "src/components/onboarding/providers/AddSourceDialog.tsx": {
+      "avibe/localized-user-text": 2
+    },
+    "src/components/onboarding/providers/ProviderCard.tsx": {
+      "avibe/localized-user-text": 2
+    },
+    "src/components/onboarding/providers/ProvidersScreen.tsx": {
+      "avibe/localized-user-text": 1
+    },
     "src/components/settings/BackendLifecycleChip.tsx": {
+      "avibe/localized-user-text": 1,
       "react-hooks/refs": 2,
       "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/settings/BackendOAuthPanel.tsx": {
+      "avibe/localized-user-text": 1
     },
     "src/components/settings/OpencodeProviderTestPanel.tsx": {
       "react-hooks/set-state-in-effect": 1
@@ -61,8 +92,15 @@
       "@typescript-eslint/no-explicit-any": 1,
       "react-hooks/set-state-in-effect": 1
     },
+    "src/components/settings/SettingsComputerUsePage.tsx": {
+      "avibe/localized-user-text": 1
+    },
+    "src/components/settings/SettingsLayout.tsx": {
+      "avibe/localized-user-text": 2
+    },
     "src/components/settings/SettingsMessagingPage.tsx": {
       "@typescript-eslint/no-explicit-any": 2,
+      "avibe/localized-user-text": 1,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/settings/SettingsPlatformsPage.tsx": {
@@ -70,6 +108,9 @@
     },
     "src/components/settings/SettingsServicePage.tsx": {
       "@typescript-eslint/no-explicit-any": 4
+    },
+    "src/components/settings/models/AgentCard.tsx": {
+      "avibe/localized-user-text": 5
     },
     "src/components/settings/models/BackendModelCatalogDialog.tsx": {
       "react-hooks/refs": 1,
@@ -84,20 +125,38 @@
     "src/components/settings/models/BackendSupplyModeCard.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
+    "src/components/settings/models/GatewayModule.tsx": {
+      "avibe/localized-user-text": 1
+    },
+    "src/components/settings/models/GuardImpact.tsx": {
+      "avibe/localized-user-text": 2
+    },
     "src/components/settings/models/MigrationDialog.tsx": {
+      "avibe/localized-user-text": 1,
       "react-hooks/set-state-in-effect": 2
     },
     "src/components/settings/models/OAuthConnectDialog.tsx": {
+      "avibe/localized-user-text": 2,
       "react-hooks/purity": 1,
       "react-hooks/refs": 3,
       "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/settings/models/QuotaTab.tsx": {
+      "avibe/localized-user-text": 10
     },
     "src/components/settings/models/RouteCandidatePopover.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/settings/models/RouteChainDialog.tsx": {
+      "avibe/localized-user-text": 2,
       "react-hooks/refs": 35,
       "react-hooks/set-state-in-effect": 2
+    },
+    "src/components/settings/models/RouteRecordedTurn.tsx": {
+      "avibe/localized-user-text": 6
+    },
+    "src/components/settings/models/SearchServiceParts.tsx": {
+      "avibe/localized-user-text": 1
     },
     "src/components/settings/models/SettingsModelsPage.tsx": {
       "react-hooks/preserve-manual-memoization": 4,
@@ -107,14 +166,29 @@
     "src/components/settings/models/SourceDetailPanel.test.tsx": {
       "react-hooks/refs": 1
     },
+    "src/components/settings/models/SourceDetailPanel.tsx": {
+      "avibe/localized-user-text": 6
+    },
     "src/components/settings/models/SourceOrderDrawer.tsx": {
+      "avibe/localized-user-text": 2,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/settings/models/SourceTestDialog.tsx": {
+      "avibe/localized-user-text": 2,
       "react-hooks/set-state-in-effect": 1
     },
+    "src/components/settings/models/TimeHint.tsx": {
+      "avibe/localized-user-text": 1
+    },
+    "src/components/settings/models/ToolsTab.tsx": {
+      "avibe/localized-user-text": 2
+    },
     "src/components/settings/models/UsageTab.tsx": {
+      "avibe/localized-user-text": 5,
       "react-hooks/set-state-in-effect": 5
+    },
+    "src/components/settings/models/WebFetchOrder.tsx": {
+      "avibe/localized-user-text": 2
     },
     "src/components/settings/models/modelsApi.ts": {
       "no-useless-assignment": 1
@@ -127,16 +201,21 @@
       "react-hooks/refs": 1
     },
     "src/components/settings/providers/BackendConnectionForm.tsx": {
+      "avibe/localized-user-text": 4,
       "react-hooks/refs": 3,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/settings/providers/OpencodeProviderConfig.tsx": {
+      "avibe/localized-user-text": 4,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/settings/shared/useBackendRuntime.ts": {
       "@typescript-eslint/no-explicit-any": 1,
       "preserve-caught-error": 1,
       "react-hooks/refs": 3
+    },
+    "src/components/shared/ProxyUrlField.tsx": {
+      "avibe/localized-user-text": 1
     },
     "src/components/shared/RoutingConfigPanel.tsx": {
       "@typescript-eslint/no-explicit-any": 2,
@@ -147,23 +226,28 @@
     },
     "src/components/steps/ChannelList.tsx": {
       "@typescript-eslint/no-explicit-any": 28,
+      "avibe/localized-user-text": 3,
       "react-hooks/immutability": 1,
       "react-hooks/set-state-in-effect": 3,
       "react-hooks/static-components": 1
     },
     "src/components/steps/DiscordConfig.tsx": {
       "@typescript-eslint/no-explicit-any": 6,
+      "avibe/localized-user-text": 3,
       "react-hooks/set-state-in-effect": 3
     },
     "src/components/steps/DoctorPanel.tsx": {
       "@typescript-eslint/no-explicit-any": 4,
+      "avibe/localized-user-text": 2,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/steps/LarkConfig.tsx": {
       "@typescript-eslint/no-explicit-any": 6,
+      "avibe/localized-user-text": 6,
       "react-hooks/set-state-in-effect": 3
     },
     "src/components/steps/LogsPanel.tsx": {
+      "avibe/localized-user-text": 11,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/steps/ModeSelection.tsx": {
@@ -176,46 +260,82 @@
     },
     "src/components/steps/SlackConfig.tsx": {
       "@typescript-eslint/no-explicit-any": 4,
+      "avibe/localized-user-text": 9,
       "react-hooks/immutability": 1,
       "react-hooks/set-state-in-effect": 2
     },
     "src/components/steps/Summary.tsx": {
-      "@typescript-eslint/no-explicit-any": 5
+      "@typescript-eslint/no-explicit-any": 5,
+      "avibe/localized-user-text": 2
     },
     "src/components/steps/TelegramConfig.tsx": {
       "@typescript-eslint/no-explicit-any": 4,
+      "avibe/localized-user-text": 5,
       "react-hooks/set-state-in-effect": 2
     },
     "src/components/steps/UserList.tsx": {
       "@typescript-eslint/no-explicit-any": 2,
+      "avibe/localized-user-text": 5,
       "react-hooks/set-state-in-effect": 2
     },
     "src/components/steps/WeChatConfig.tsx": {
       "@typescript-eslint/no-explicit-any": 4,
+      "avibe/localized-user-text": 2,
       "react-hooks/immutability": 1,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/steps/Welcome.tsx": {
       "react-hooks/immutability": 1
     },
+    "src/components/ui/combobox.tsx": {
+      "avibe/localized-user-text": 3
+    },
     "src/components/ui/confirm-dialog.tsx": {
+      "avibe/localized-user-text": 1,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/ui/editor-dialog.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
+    "src/components/ui/file-card.tsx": {
+      "avibe/localized-user-text": 3
+    },
     "src/components/ui/file-preview.tsx": {
+      "avibe/localized-user-text": 4,
       "no-useless-assignment": 1,
       "react-hooks/set-state-in-effect": 6
     },
+    "src/components/ui/file-viewer-modal.tsx": {
+      "avibe/localized-user-text": 1
+    },
+    "src/components/ui/folder-browser.tsx": {
+      "avibe/localized-user-text": 5
+    },
+    "src/components/ui/image-viewer.tsx": {
+      "avibe/localized-user-text": 1
+    },
+    "src/components/ui/markdown.tsx": {
+      "avibe/localized-user-text": 5
+    },
     "src/components/ui/secret-request-card.tsx": {
+      "avibe/localized-user-text": 3,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/ui/vault-approval-card.tsx": {
+      "avibe/localized-user-text": 1,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/ui/vault-chat-requests.tsx": {
       "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/ui/vault-field-list.tsx": {
+      "avibe/localized-user-text": 2
+    },
+    "src/components/ui/vault-lock-indicator.tsx": {
+      "avibe/localized-user-text": 1
+    },
+    "src/components/ui/vault-request-card.tsx": {
+      "avibe/localized-user-text": 1
     },
     "src/components/ui/vault-secret-form.tsx": {
       "react-hooks/refs": 1,
@@ -224,22 +344,53 @@
     "src/components/ui/vault-settings-dialog.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
+    "src/components/visual/BrandLogo.tsx": {
+      "avibe/localized-user-text": 1
+    },
+    "src/components/visual/EmbeddedConfigShell.tsx": {
+      "avibe/localized-user-text": 1
+    },
+    "src/components/visual/WizardChrome.tsx": {
+      "avibe/localized-user-text": 1
+    },
+    "src/components/workbench/AgentActivityGroup.tsx": {
+      "avibe/localized-user-text": 7
+    },
+    "src/components/workbench/AgentGraphCanvas.tsx": {
+      "avibe/localized-user-text": 1
+    },
     "src/components/workbench/AgentGraphDetail.tsx": {
+      "avibe/localized-user-text": 6,
       "react-hooks/refs": 2,
       "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/AgentGraphMobileList.tsx": {
+      "avibe/localized-user-text": 1
+    },
+    "src/components/workbench/AgentGraphNodeCard.tsx": {
+      "avibe/localized-user-text": 1
+    },
+    "src/components/workbench/AgentGraphOrphanStrip.tsx": {
+      "avibe/localized-user-text": 1
     },
     "src/components/workbench/AgentGraphTab.tsx": {
       "react-hooks/preserve-manual-memoization": 1,
       "react-hooks/set-state-in-effect": 3
     },
+    "src/components/workbench/AgentGraphTriggerChip.tsx": {
+      "avibe/localized-user-text": 2
+    },
     "src/components/workbench/AgentGraphTriggerDetail.tsx": {
+      "avibe/localized-user-text": 4,
       "react-hooks/refs": 2,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/workbench/AgentRoutePicker.tsx": {
+      "avibe/localized-user-text": 2,
       "react-hooks/set-state-in-effect": 2
     },
     "src/components/workbench/AgentsPage.tsx": {
+      "avibe/localized-user-text": 8,
       "no-useless-assignment": 1,
       "react-hooks/immutability": 1,
       "react-hooks/preserve-manual-memoization": 1,
@@ -247,6 +398,7 @@
       "react-hooks/set-state-in-effect": 4
     },
     "src/components/workbench/AppsFileBrowserPage.tsx": {
+      "avibe/localized-user-text": 4,
       "no-useless-assignment": 1,
       "react-hooks/immutability": 1,
       "react-hooks/preserve-manual-memoization": 9,
@@ -257,23 +409,31 @@
     },
     "src/components/workbench/ChatPage.tsx": {
       "@typescript-eslint/no-explicit-any": 1,
+      "avibe/localized-user-text": 11,
       "react-hooks/immutability": 1,
       "react-hooks/preserve-manual-memoization": 7,
       "react-hooks/refs": 6,
       "react-hooks/set-state-in-effect": 11
     },
     "src/components/workbench/Composer.tsx": {
+      "avibe/localized-user-text": 1,
       "react-hooks/set-state-in-effect": 3
     },
     "src/components/workbench/EditorApp.tsx": {
+      "avibe/localized-user-text": 2,
       "react-hooks/immutability": 1,
       "react-hooks/preserve-manual-memoization": 1,
       "react-hooks/set-state-in-effect": 2
     },
+    "src/components/workbench/EditorFontSizePopover.tsx": {
+      "avibe/localized-user-text": 3
+    },
     "src/components/workbench/EditorSearchView.tsx": {
+      "avibe/localized-user-text": 1,
       "react-hooks/set-state-in-effect": 2
     },
     "src/components/workbench/FailureDetails.tsx": {
+      "avibe/localized-user-text": 11,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/workbench/FileEditorPane.tsx": {
@@ -284,26 +444,44 @@
       "react-hooks/set-state-in-effect": 2
     },
     "src/components/workbench/FileTree.tsx": {
+      "avibe/localized-user-text": 2,
       "react-hooks/refs": 1,
       "react-hooks/set-state-in-effect": 3
     },
     "src/components/workbench/GlobalPromptsDialog.tsx": {
+      "avibe/localized-user-text": 1,
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/workbench/HarnessPage.tsx": {
+      "avibe/localized-user-text": 20,
       "react-hooks/set-state-in-effect": 7
+    },
+    "src/components/workbench/HostedToolRow.tsx": {
+      "avibe/localized-user-text": 14
+    },
+    "src/components/workbench/InboxPage.tsx": {
+      "avibe/localized-user-text": 4
     },
     "src/components/workbench/NewAgentDialog.tsx": {
       "react-hooks/set-state-in-effect": 3
     },
+    "src/components/workbench/NewProjectDialog.tsx": {
+      "avibe/localized-user-text": 2
+    },
     "src/components/workbench/ProjectAgentsMdDialog.tsx": {
       "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/ProjectsPage.tsx": {
+      "avibe/localized-user-text": 3
     },
     "src/components/workbench/QueuedAttachments.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/workbench/QuickReplies.tsx": {
       "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/SenderHead.tsx": {
+      "avibe/localized-user-text": 1
     },
     "src/components/workbench/ShowPageShareControl.tsx": {
       "no-useless-assignment": 1,
@@ -314,23 +492,48 @@
       "react-hooks/set-state-in-effect": 1
     },
     "src/components/workbench/SkillsPage.tsx": {
+      "avibe/localized-user-text": 1,
       "react-hooks/set-state-in-effect": 2
     },
     "src/components/workbench/TerminalView.tsx": {
+      "avibe/localized-user-text": 2,
       "react-hooks/set-state-in-effect": 1
     },
+    "src/components/workbench/VaultListTags.tsx": {
+      "avibe/localized-user-text": 1
+    },
     "src/components/workbench/VaultsPage.tsx": {
+      "avibe/localized-user-text": 8,
       "react-hooks/immutability": 1,
       "react-hooks/set-state-in-effect": 4
     },
     "src/components/workbench/WebPushControl.tsx": {
       "react-hooks/set-state-in-effect": 1
     },
+    "src/components/workbench/WorkbenchSidebar.tsx": {
+      "avibe/localized-user-text": 5
+    },
     "src/components/workbench/harnessLifecycle.test.ts": {
       "@typescript-eslint/no-explicit-any": 1
     },
+    "src/components/workbench/search/SearchResultGroup.tsx": {
+      "avibe/localized-user-text": 2
+    },
+    "src/components/workbench/skills/AddSkillDialog.tsx": {
+      "avibe/localized-user-text": 1
+    },
     "src/components/workbench/skills/BrowseRegistryDialog.tsx": {
+      "avibe/localized-user-text": 1,
       "react-hooks/set-state-in-effect": 1
+    },
+    "src/components/workbench/skills/QualityMeter.tsx": {
+      "avibe/localized-user-text": 1
+    },
+    "src/components/workbench/skills/SkillDetailPanel.tsx": {
+      "avibe/localized-user-text": 1
+    },
+    "src/components/workbench/skills/SkillRow.tsx": {
+      "avibe/localized-user-text": 2
     },
     "src/components/workbench/useSessionActions.tsx": {
       "react-hooks/refs": 5,
@@ -347,6 +550,9 @@
       "@typescript-eslint/no-explicit-any": 1,
       "no-useless-assignment": 1
     },
+    "src/context/ToastProvider.tsx": {
+      "avibe/localized-user-text": 1
+    },
     "src/context/WorkbenchInboxProvider.tsx": {
       "react-hooks/refs": 8
     },
@@ -357,6 +563,7 @@
       "@typescript-eslint/no-explicit-any": 1
     },
     "src/features/permissions/PermissionsPage.tsx": {
+      "avibe/localized-user-text": 5,
       "react-hooks/refs": 2
     },
     "src/features/permissions/api.ts": {
@@ -375,8 +582,12 @@
       "react-hooks/refs": 1,
       "react-hooks/set-state-in-effect": 1
     },
+    "src/pet/PetAvatar.tsx": {
+      "avibe/localized-user-text": 1
+    },
     "src/pet/PetPage.tsx": {
-      "react-hooks/preserve-manual-memoization": 3,
+      "avibe/localized-user-text": 3,
+      "react-hooks/preserve-manual-memoization": 2,
       "react-hooks/set-state-in-effect": 6
     }
   },

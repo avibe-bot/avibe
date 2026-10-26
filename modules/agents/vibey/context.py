@@ -140,7 +140,7 @@ def example_query(session_id: str, through_seq: int) -> Optional[str]:
         f" WHERE session_id='{session_id}' AND type='user' AND context_seq <= {int(through_seq)}"
         " ORDER BY context_seq LIMIT 50"
     )
-    return f'vibe data query --sql "{sql}"'
+    return f'vibe data query --sql "{sql}" --format text'
 
 
 def _environment(fields: Mapping[str, EnvironmentValue]) -> str:

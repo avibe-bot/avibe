@@ -273,10 +273,10 @@ export const VaultApprovalCard: React.FC<{
   const preparing = !isDelete && !busy && (!sandboxReady || bindings.pending);
 
   useEffect(() => {
-    if (needsProtectedApproval) void vault.refresh();
+    if (needsProtectedApproval && !approveInBrowser) void vault.refresh();
     // vault.refresh is stable (useCallback); only re-check when protected handling becomes required.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [needsProtectedApproval]);
+  }, [needsProtectedApproval, approveInBrowser]);
 
   const finish = useCallback(
     (run: () => Promise<void>) => {

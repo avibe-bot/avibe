@@ -41,10 +41,27 @@ for (const desktop of [false, true]) {
     const header = page.locator('[data-chat-header]');
     await expect(header).toBeVisible();
     await expect(header.getByRole('button', { name: '中文窗口会话' })).toBeVisible();
-    await expect(header.getByRole('button', { name: /gpt-fixture/ })).toBeVisible();
     await expect(header.getByRole('button', { name: 'Visualize', exact: true })).toBeVisible();
     await expect(header.getByRole('button', { name: 'Back', exact: true })).toBeVisible();
     await expect(header).toHaveCount(1);
+    // Desktop carries the session menu right after the title — not among the
+    // page-level controls on the right.
+    const sessionMenu = header.getByRole('button', { name: 'Session actions', exact: true });
+    await expect(sessionMenu).toHaveCount(1);
+    await expect(sessionMenu).toBeVisible();
+    const titleBox = await header.getByRole('button', { name: '中文窗口会话' }).boundingBox();
+    const menuBox = await sessionMenu.boundingBox();
+    const visualizeBox = await header.getByRole('button', { name: 'Visualize', exact: true }).boundingBox();
+    expect(menuBox!.x).toBeGreaterThanOrEqual(titleBox!.x + titleBox!.width - 1);
+    expect(menuBox!.x + menuBox!.width).toBeLessThan(visualizeBox!.x);
+    // The route picker answers "who replies to the next message", so it lives in
+    // the composer's action row, below the text — never in the header.
+    const routePicker = page.getByRole('button', { name: /gpt-fixture/ });
+    await expect(header.getByRole('button', { name: /gpt-fixture/ })).toHaveCount(0);
+    await expect(routePicker).toHaveCount(1);
+    const textboxBox = await page.getByRole('textbox').last().boundingBox();
+    const pickerBox = await routePicker.boundingBox();
+    expect(pickerBox!.y).toBeGreaterThanOrEqual(textboxBox!.y + textboxBox!.height - 1);
 
     if (desktop) {
       await expect(page.locator('[data-desktop-window-chrome] [data-chat-header]')).toHaveCount(1);
@@ -76,7 +93,7 @@ for (const desktop of [false, true]) {
       expect(composer).not.toBeNull();
       expect(toolbar!.x).toBeCloseTo(composer!.x, 0);
       expect(toolbar!.width).toBeCloseTo(composer!.width, 0);
-      await expect(header.getByRole('button', { name: /gpt-fixture/ })).toBeVisible();
+      await expect(routePicker).toBeVisible();
       await expect(header.getByRole('button', { name: 'Visualize', exact: true })).toBeVisible();
       if (width === 2000) {
         await page.screenshot({ path: `e2e/.artifacts/workbench-general/shots/chat-chrome-${desktop ? 'native' : 'web'}-wide.png` });
@@ -86,7 +103,7 @@ for (const desktop of [false, true]) {
     await header.getByRole('button', { name: '中文窗口会话' }).click();
     await expect(header.locator('input')).toBeFocused();
     await header.locator('input').press('Escape');
-    await header.getByRole('button', { name: /gpt-fixture/ }).click();
+    await routePicker.click();
     await expect(page.getByRole('dialog')).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(page.getByRole('dialog')).toBeHidden();

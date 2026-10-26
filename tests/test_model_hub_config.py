@@ -97,7 +97,7 @@ def test_auto_detect_asks_for_responses_before_chat():
 
 def test_unsaved_observation_schema_closes_all_terminal_shapes():
     schema = _schema("observation-result.schema.json")
-    assert schema["properties"]["contract_version"]["const"] == 17
+    assert schema["properties"]["contract_version"]["const"] == 21
     assert tuple(schema["properties"]["outcome"]["enum"]) == tuple(
         member.value for member in ObservationOutcome
     )
@@ -121,7 +121,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
 
     def payload(observation: SourceObservation) -> dict:
         return {
-            "contract_version": 17,
+            "contract_version": 21,
             "outcome": observation.outcome.value,
             "reachable": observation.reachable,
             "authenticated": (
@@ -737,7 +737,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
 
     route_refusal = {
         "ok": False,
-        "contract_version": 17,
+        "contract_version": 21,
         "error": "source_in_route_chain",
         "detail": "modelHub.errors.source_in_route_chain",
         "would_remove_hops": [hop],
@@ -753,7 +753,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
     }
     candidate_refusal = {
         "ok": False,
-        "contract_version": 17,
+        "contract_version": 21,
         "error": "candidate_suppliers_changed",
         "detail": "modelHub.errors.candidate_suppliers_changed",
         "changed": {
@@ -837,7 +837,7 @@ def test_v8_mirror_registry_is_executable_and_complete():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
-    assert registry["contract_version"] == 17
+    assert registry["contract_version"] == 21
     ids = [entry["id"] for entry in registry["entries"]]
     assert ids
     assert len(ids) == len(set(ids))
@@ -974,8 +974,8 @@ def test_model_hub_authority_closure_anchors_the_persisted_version_floor(monkeyp
         "kind": "contract_version_schema_drift",
         "domain": "V1",
         "file": "docs/plans/model-hub-contracts/turn-provenance.schema.json",
-        "values": [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
-        "expected": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+        "values": [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
+        "expected": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
     } in result["findings"]
 
 
@@ -993,7 +993,17 @@ def _versioned_nodes(node):
             yield from _versioned_nodes(item)
 
 
-def test_api_response_envelope_stays_versioned():
+def test_turn_provenance_keeps_released_v20_and_current_v21_read_shapes():
+    """KEX-1: the v21 mirror still accepts the released v20 provenance version."""
+    schema = _schema("turn-provenance.schema.json")
+    validator = Draft7Validator(schema)
+    for version in (20, 21):
+        example = copy.deepcopy(schema["examples"][0])
+        example["contract_version"] = version
+        validator.validate(example)
+
+
+
     assert any(_versioned_nodes(_schema("api-response.schema.json")))
 
 
@@ -1003,6 +1013,64 @@ def test_turn_provenance_contract_preserves_an_empty_stripped_effort():
     payload["served"]["declared_reasoning_efforts"] = []
 
     _assert_valid("turn-provenance.schema.json", payload)
+
+
+def test_turn_provenance_correlation_ids_are_strict_and_attempt_scoped():
+    served = copy.deepcopy(_schema("turn-provenance.schema.json")["examples"][0])
+    served["served"]["response_correlation_ids"] = [
+        {"header": "request-id", "value": "provider-request-1"},
+        {"header": "x-request-id", "value": "relay-request-1"},
+    ]
+    _assert_valid("turn-provenance.schema.json", served)
+
+    terminal = copy.deepcopy(served)
+    terminal.update(
+        outcome="failed_terminal",
+        failed_attempts=[],
+        served=None,
+        terminal_error={
+            "source_id": "src_anthkey01",
+            "configured_model_id": "claude-opus-4-6",
+            "channel": "hub",
+            "reason": "protocol_error",
+            "stream_started": False,
+            "response_correlation_ids": [
+                {"header": "x-request-id", "value": "relay-terminal-1"},
+            ],
+        },
+    )
+    _assert_valid("turn-provenance.schema.json", terminal)
+
+    for invalid_id in (
+        {"header": "set-cookie", "value": "session=secret"},
+        {"header": "request-id", "value": "bad\nvalue"},
+        {"header": "request-id", "value": "r" * 257},
+    ):
+        invalid = copy.deepcopy(served)
+        invalid["served"]["response_correlation_ids"] = [invalid_id]
+        with pytest.raises(ValidationError):
+            Draft7Validator(_schema("turn-provenance.schema.json")).validate(invalid)
+
+    backend_error = copy.deepcopy(terminal)
+    backend_error["terminal_error"] = {
+        "source_id": "src_anthkey01",
+        "configured_model_id": "claude-opus-4-6",
+        "channel": "hub",
+        "reason": "backend_error",
+        "stream_started": None,
+        "response_correlation_ids": [
+            {"header": "request-id", "value": "not-a-backend-fact"},
+        ],
+    }
+    with pytest.raises(ValidationError):
+        Draft7Validator(_schema("turn-provenance.schema.json")).validate(backend_error)
+
+    canceled = copy.deepcopy(_schema("turn-provenance.schema.json")["examples"][-1])
+    canceled["canceled_attempt"]["response_correlation_ids"] = [
+        {"header": "request-id", "value": "not-a-served-response"},
+    ]
+    with pytest.raises(ValidationError):
+        Draft7Validator(_schema("turn-provenance.schema.json")).validate(canceled)
 
 
 def test_permission_denial_contract_has_no_fallback_member():
@@ -1286,7 +1354,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
         with pytest.raises(ValidationError):
             chain_validator.validate(interrupted)
     exact_hop = {
-        "contract_version": 17,
+        "contract_version": 21,
         "backend": "claude",
         "model_id": "claude-opus-4-6",
         "manual_override": None,

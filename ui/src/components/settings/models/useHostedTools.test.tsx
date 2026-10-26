@@ -17,6 +17,7 @@ import { useHostedTools } from './useHostedTools';
 const status = (enabled: boolean): HostedToolsStatus => ({
   tools: [{
     name: 'web_search',
+    prefer_native: true, services: {}, service_order: [],
     enabled,
     status: { latest_ok: null, verified: [], refused: [] },
     executor_order: null,
@@ -46,6 +47,7 @@ const wrapper: React.FC<{ children: React.ReactNode }> = ({ children }) => (
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('useHostedTools ordering', () => {
@@ -263,6 +265,34 @@ describe('useHostedTools ordering', () => {
 
     await act(async () => { clear.resolve(status(true)); await writes[1]; });
     expect(result.current.pending.has('web_search')).toBe(false);
+  });
+
+  // Retry has no status payload: unlike PUT/clear it must keep the write queue
+  // held through its follow-up GET, or an older read could overwrite a later save.
+  it.each([
+    ['web_search', 'src_exa000001'], ['web_search', 'src_exakeyless'],
+    ['web_fetch', 'src_exakeyless'], ['web_fetch', 'src_jinakeyless'],
+  ] as const)('serializes a %s retry and authoritative read before subsequent settings writes for %s', async (tool, sourceId) => {
+    const refresh = deferred<HostedToolsStatus>();
+    vi.spyOn(document, 'cookie', 'get').mockReturnValue('vibe_csrf_token=fixture-token');
+    const get = vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValueOnce(status(false)).mockReturnValueOnce(refresh.promise);
+    const fetch = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+    vi.stubGlobal('fetch', fetch);
+    const put = vi.spyOn(modelsApi, 'putHostedTool').mockResolvedValue(status(false));
+    const { result } = renderHook(() => useHostedTools(true), { wrapper });
+    await waitFor(() => expect(shown(result.current.read)).toBe(false));
+    let retrying!: Promise<void>;
+    act(() => { retrying = tool === 'web_fetch' ? result.current.retryFetch(sourceId) : result.current.retryService(sourceId); });
+    await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
+    expect(fetch).toHaveBeenCalledWith(`/api/models/hosted-tools/${tool}/services/${sourceId}/retry`, expect.objectContaining({ method: 'POST', body: '{}' }));
+    expect(result.current.pending.has(tool)).toBe(true);
+    let saving!: Promise<void>;
+    act(() => { saving = result.current.save(tool, { services: { [sourceId]: { enabled: false } } }); });
+    expect(put).not.toHaveBeenCalled();
+    await act(async () => { refresh.resolve(status(true)); await retrying; await saving; });
+    expect(put).toHaveBeenCalledWith(tool, { services: { [sourceId]: { enabled: false } } });
+    expect(shown(result.current.read)).toBe(false);
+    expect(result.current.pending.has(tool)).toBe(false);
   });
 
   it('MH-HOSTED-UI-007: queues a clear behind a write like any write, so its answer lands last', async () => {

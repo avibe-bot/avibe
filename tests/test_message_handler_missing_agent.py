@@ -107,3 +107,288 @@ def test_dispatched_missing_agent_preserves_primary_delivery_in_terminal_contrac
         "delivered": True,
     }
     assert controller.im_client.sent == []
+
+
+def test_an_agent_that_cannot_run_offers_to_continue_on_vibey(monkeypatch):
+    """A disabled or deleted Agent ends the turn with a notice that names it and
+    offers Vibey: the Workbench draws the offer as a button from data, a chat app
+    is told where to switch. Without a built-in Vibey there is nothing to offer,
+    and a backend that is missing is offered Vibey unless Vibey is what is missing."""
+    from unittest.mock import AsyncMock, patch
+
+    from core.backend_failure import CONTINUE_ON_VIBEY_NEXT_STEP
+    from core.vibe_agents import AgentUnavailableError
+
+    from modules.agents.model_hub import ModelSupplyRefusal
+
+    # The Model Hub supplies Vibey a model unless a case below says otherwise.
+    monkeypatch.setattr("modules.agents.model_hub.hub_supply_refusal", lambda _controller, _backend, _lang: None)
+    controller = _StubController()
+    controller.im_client.formatter = SimpleNamespace(escape_special_chars=lambda text: text)
+    vibey = SimpleNamespace(name="vibey")
+    controller.vibe_agent_store = SimpleNamespace(
+        get=lambda _name: None, get_builtin_default_agent_for_backend=lambda backend: vibey
+    )
+    handler = MessageHandler(controller)
+    workbench = MessageContext(user_id="U1", channel_id="ses-1", platform="avibe")
+    telegram = MessageContext(user_id="U1", channel_id="C1", platform="telegram")
+    disabled = AgentUnavailableError("agent 'codex' is disabled", agent_name="codex", reason="disabled")
+    deleted = AgentUnavailableError("agent 'reviewer' not found", agent_name="reviewer", reason="missing")
+
+    def emitted_for(*calls):
+        emitted = AsyncMock()
+        with patch.dict(MessageHandler._emit_agent_cannot_run.__globals__, emit_backend_failure=emitted):
+            for call in calls:
+                anyio.run(*call)
+        return emitted.await_args_list
+
+    workbench_call, im_call, deleted_call = emitted_for(
+        (handler._emit_agent_dispatch_failure, workbench, None, disabled),
+        (handler._emit_agent_dispatch_failure, telegram, None, disabled),
+        (handler._emit_agent_dispatch_failure, workbench, None, deleted),
+    )
+    disabled_text = handler._t("error.agentUnavailable.disabled", agent="Codex")
+    assert workbench_call.kwargs["display_text"] == (
+        f"❌ {disabled_text}\n{handler._t('error.continueOnVibey.workbench')}"
+    )
+    assert workbench_call.kwargs["output"].metadata["failure_next_step"] == CONTINUE_ON_VIBEY_NEXT_STEP
+    assert workbench_call.kwargs["cause"] is disabled
+    assert im_call.kwargs["display_text"] == f"❌ {disabled_text}\n{handler._t('error.continueOnVibey.im')}"
+    assert im_call.kwargs["output"] is None
+    assert handler._t("error.agentUnavailable.missing", agent="reviewer") in deleted_call.kwargs["display_text"]
+    # Resolved by id, a deleted Agent names only its id; the session still knows its name.
+    by_id = AgentUnavailableError("agent id 'a1b2' not found", agent_name="a1b2", reason="missing")
+    targeted = MessageContext(
+        user_id="U1",
+        channel_id="ses-1",
+        platform="avibe",
+        platform_specific={"agent_session_target": {"id": "ses-1", "agent_id": "a1b2", "agent_name": "reviewer"}},
+    )
+    (by_id_call,) = emitted_for((handler._emit_agent_dispatch_failure, targeted, None, by_id))
+    assert handler._t("error.agentUnavailable.missing", agent="reviewer") in by_id_call.kwargs["display_text"]
+    assert "a1b2" not in by_id_call.kwargs["display_text"]
+    assert "agent 'codex' is disabled" not in workbench_call.kwargs["display_text"]
+
+    controller.vibe_agent_store = SimpleNamespace(
+        get=lambda _name: None, get_builtin_default_agent_for_backend=lambda backend: None
+    )
+    (no_vibey,) = emitted_for((handler._emit_agent_dispatch_failure, workbench, None, disabled))
+    assert no_vibey.kwargs["display_text"] == f"❌ {disabled_text}"
+    assert no_vibey.kwargs["output"] is None
+
+    # Vibey exists but the Model Hub supplies it no model: the continuation would only
+    # fail again, so it is not offered either.
+    controller.vibe_agent_store = SimpleNamespace(
+        get=lambda _name: None, get_builtin_default_agent_for_backend=lambda backend: vibey
+    )
+    monkeypatch.setattr(
+        "modules.agents.model_hub.hub_supply_refusal",
+        lambda _controller, backend, _lang: ModelSupplyRefusal("no source", fixed_in_models=True),
+    )
+    (no_supply,) = emitted_for((handler._emit_agent_dispatch_failure, workbench, None, disabled))
+    assert no_supply.kwargs["display_text"] == f"❌ {disabled_text}"
+    assert no_supply.kwargs["output"] is None
+    monkeypatch.setattr("modules.agents.model_hub.hub_supply_refusal", lambda _controller, _backend, _lang: None)
+
+    controller.vibe_agent_store = SimpleNamespace(
+        get=lambda _name: None, get_builtin_default_agent_for_backend=lambda backend: vibey
+    )
+    request = AgentRequest(
+        context=workbench,
+        message="hello",
+        user_message="hello",
+        working_path="/tmp",
+        base_session_id="base",
+        composite_session_id="base:/tmp",
+        session_key="avibe::ses-1",
+    )
+    for target, offered in (("codex", True), ("vibey", False)):
+        (call,) = emitted_for((lambda t=target: handler._handle_missing_agent(workbench, t, request=request),))
+        assert (call.kwargs["output"] is not None) is offered
+        assert (handler._t("error.continueOnVibey.workbench") in call.kwargs["display_text"]) is offered
+
+
+def test_an_agent_that_cannot_run_holds_its_input_only_where_it_can_be_retried():
+    """Retrying on its own would fail the same way. In the Workbench an input that never
+    reached the backend is held for an explicit retry: continue on Vibey, or Retry once
+    the Agent is back. A chat app has no Retry, so once its notice is delivered its
+    input is retired rather than holding every later message behind it. One that
+    reached the backend is left alone."""
+    from unittest.mock import patch
+
+    from core.native_dispatch_phase import (
+        DISPATCH_PHASE_ATTEMPTING,
+        DISPATCH_PHASE_PREWRITE,
+        backend_dispatch_attempted,
+        prewrite_failure_evidence,
+        set_dispatch_phase,
+    )
+    from core.vibe_agents import AgentUnavailableError
+
+    controller = _StubController()
+    controller.im_client.formatter = SimpleNamespace(escape_special_chars=lambda text: text)
+    handler = MessageHandler(controller)
+    disabled = AgentUnavailableError("agent 'codex' is disabled", agent_name="codex", reason="disabled")
+
+    def failed(platform, phase, *, delivered=True, settle_raises=False):
+        context = MessageContext(user_id="U1", channel_id="ses-1", platform=platform)
+        set_dispatch_phase(context, phase)
+
+        async def notify(*_args, delivery=None, **_kwargs):
+            if delivered and delivery is not None:
+                delivery.delivered_id = "notice-1"
+            if settle_raises:
+                raise RuntimeError("turn settlement failed")
+            return False
+
+        with patch.dict(MessageHandler._emit_agent_cannot_run.__globals__, emit_backend_failure=notify):
+            try:
+                anyio.run(handler._emit_agent_dispatch_failure, context, None, disabled)
+            except RuntimeError:
+                assert settle_raises
+        return context
+
+    workbench = failed("avibe", DISPATCH_PHASE_PREWRITE)
+    assert backend_dispatch_attempted(workbench) is False
+    # This controller has no built-in Vibey, so nothing else is offered.
+    assert prewrite_failure_evidence(workbench) == {
+        "reason": "agent_unavailable_no_alternative",
+        "requires_explicit_retry": True,
+    }
+    chat_app = failed("telegram", DISPATCH_PHASE_PREWRITE)
+    assert prewrite_failure_evidence(chat_app) == {"reason": "agent_unavailable", "retire_input": True}
+    # Not told to send it again, so the input is left to the ordinary retries.
+    assert prewrite_failure_evidence(failed("telegram", DISPATCH_PHASE_PREWRITE, delivered=False)) == {}
+    # Told, then settling the turn raised: still retired, or it would run twice.
+    assert prewrite_failure_evidence(failed("telegram", DISPATCH_PHASE_PREWRITE, settle_raises=True)) == {
+        "reason": "agent_unavailable",
+        "retire_input": True,
+    }
+    for platform in ("avibe", "telegram"):
+        assert prewrite_failure_evidence(failed(platform, DISPATCH_PHASE_ATTEMPTING)) == {}
+
+
+def test_a_workbench_hold_records_whether_vibey_was_offered():
+    """The held input's hint names Continue on Vibey only when its notice has that
+    button; without it the notice offers Retry, which the general hint names."""
+    from unittest.mock import AsyncMock, patch
+
+    from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, prewrite_failure_evidence, set_dispatch_phase
+    from core.vibe_agents import AgentUnavailableError
+
+    controller = _StubController()
+    disabled = AgentUnavailableError("agent 'codex' is disabled", agent_name="codex", reason="disabled")
+    reasons = {}
+    for available in (SimpleNamespace(name="vibey"), None):
+        controller.vibe_agent_store = SimpleNamespace(
+            get=lambda _name: None, get_builtin_default_agent_for_backend=lambda backend, a=available: a
+        )
+        handler = MessageHandler(controller)
+        context = MessageContext(user_id="U1", channel_id="ses-1", platform="avibe")
+        set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+        with patch("modules.agents.model_hub.hub_supply_refusal", lambda _controller, _backend, _lang: None), patch.dict(
+            MessageHandler._emit_agent_cannot_run.__globals__, emit_backend_failure=AsyncMock()
+        ):
+            anyio.run(handler._emit_agent_dispatch_failure, context, None, disabled)
+        reasons[available is not None] = prewrite_failure_evidence(context)
+    assert reasons[True] == {"reason": "agent_unavailable", "requires_explicit_retry": True}
+    assert reasons[False] == {"reason": "agent_unavailable_no_alternative", "requires_explicit_retry": True}
+
+
+def test_a_background_chat_app_session_holds_its_input_without_a_resend_promise():
+    """A background session's notice is never sent out, only kept in its history, so
+    its input waits for a retry as a Workbench one does and nothing says to resend."""
+    from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, prewrite_failure_evidence, set_dispatch_phase
+    from core.vibe_agents import AgentUnavailableError
+    from unittest.mock import patch
+
+    controller = _StubController()
+    controller.im_client.formatter = SimpleNamespace(escape_special_chars=lambda text: text)
+    handler = MessageHandler(controller)
+    context = MessageContext(
+        user_id="U1", channel_id="C1", platform="telegram", platform_specific={"suppress_delivery": True}
+    )
+    set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+    seen = {}
+
+    async def notify(*_args, delivery=None, display_text=None, **_kwargs):
+        seen.update(text=display_text, delivery=delivery)
+        return False
+
+    disabled = AgentUnavailableError("agent 'codex' is disabled", agent_name="codex", reason="disabled")
+    with patch.dict(MessageHandler._emit_agent_cannot_run.__globals__, emit_backend_failure=notify):
+        anyio.run(handler._emit_agent_dispatch_failure, context, None, disabled)
+    assert seen["text"] == f"❌ {handler._t('error.agentUnavailable.disabled', agent='Codex')}"
+    assert seen["delivery"] is None
+    assert prewrite_failure_evidence(context) == {
+        "reason": "agent_unavailable_no_alternative",
+        "requires_explicit_retry": True,
+    }
+
+
+def test_a_chat_app_is_told_to_resend_when_vibey_is_not_offered():
+    """Its input is retired, so with nothing to continue on it must be sent again."""
+    from unittest.mock import AsyncMock, patch
+
+    from core.vibe_agents import AgentUnavailableError
+
+    controller = _StubController()
+    controller.im_client.formatter = SimpleNamespace(escape_special_chars=lambda text: text)
+    controller.vibe_agent_store = SimpleNamespace(
+        get=lambda _name: None, get_builtin_default_agent_for_backend=lambda backend: None
+    )
+    handler = MessageHandler(controller)
+    disabled = AgentUnavailableError("agent 'codex' is disabled", agent_name="codex", reason="disabled")
+    calls = {}
+    for platform in ("telegram", "avibe"):
+        emitted = AsyncMock()
+        with patch.dict(MessageHandler._emit_agent_cannot_run.__globals__, emit_backend_failure=emitted):
+            anyio.run(
+                handler._emit_agent_dispatch_failure,
+                MessageContext(user_id="U1", channel_id="C1", platform=platform),
+                None,
+                disabled,
+            )
+        calls[platform] = emitted.await_args.kwargs["display_text"]
+    resend = handler._t("error.agentUnavailable.resendLater")
+    assert calls["telegram"].endswith(f"\n{resend}")
+    # The Workbench holds the input for Retry, so it says nothing of the kind.
+    assert resend not in calls["avibe"]
+
+
+def test_a_harness_run_in_a_chat_app_is_not_told_to_resend_its_prompt():
+    """A scheduled task, Watch, or Agent run settles its own input: its chat-app notice
+    names only the Agent that cannot run, and its input is not retired by the notice."""
+    from unittest.mock import patch
+
+    from core.native_dispatch_phase import DISPATCH_PHASE_PREWRITE, prewrite_failure_evidence, set_dispatch_phase
+    from core.vibe_agents import AgentUnavailableError
+
+    controller = _StubController()
+    controller.im_client.formatter = SimpleNamespace(escape_special_chars=lambda text: text)
+    vibey = SimpleNamespace(name="vibey")
+    for available in (vibey, None):
+        controller.vibe_agent_store = SimpleNamespace(
+            get=lambda _name: None, get_builtin_default_agent_for_backend=lambda backend, a=available: a
+        )
+        handler = MessageHandler(controller)
+        context = MessageContext(
+            user_id="U1", channel_id="C1", platform="telegram",
+            platform_specific={"task_execution_id": "run-1", "task_trigger_kind": "scheduled"},
+        )
+        set_dispatch_phase(context, DISPATCH_PHASE_PREWRITE)
+        seen = {}
+
+        async def notify(*_args, delivery=None, display_text=None, **_kwargs):
+            seen["text"] = display_text
+            if delivery is not None:
+                delivery.delivered_id = "notice-1"
+            return False
+
+        disabled = AgentUnavailableError("agent 'codex' is disabled", agent_name="codex", reason="disabled")
+        with patch("modules.agents.model_hub.hub_supply_refusal", lambda _controller, _backend, _lang: None), patch.dict(
+            MessageHandler._emit_agent_cannot_run.__globals__, emit_backend_failure=notify
+        ):
+            anyio.run(handler._emit_agent_dispatch_failure, context, None, disabled)
+        assert seen["text"] == f"❌ {handler._t('error.agentUnavailable.disabled', agent='Codex')}"
+        assert prewrite_failure_evidence(context) == {}

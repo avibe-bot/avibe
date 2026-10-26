@@ -539,9 +539,11 @@ def test_g3_settlement_returns_are_consumed() -> None:
 
 
 def test_settlement_generations_are_reserved_only_at_attempt_start() -> None:
+    """Search re-enable is the one explicit non-attempt exception (model-hub.md settlement freshness)."""
     allowed_owners = {
-        SERVICE: {"_invoke_admitted"},
+        SERVICE: {"_invoke_admitted", "_reenable_search_service"},
         ROUTER: {"resolve"},
+        ROOT / "core/handlers/model_hub/search_chain.py": {"invoke", "on_sent"},
     }
     for path, expected in allowed_owners.items():
         tree = _tree(path)
@@ -1264,13 +1266,17 @@ def test_machine_error_field_access_has_one_extractor() -> None:
         if path.name == "migration.py":
             continue  # its ``type`` field is an auth-record kind, not an error code
         tree = _tree(path)
-        # Request history and declared tools discriminate request items, not
-        # error envelopes. Exempt only those functions' type reads; code reads
-        # and the rest of request.py remain subject to the extraction-owner guard.
-        functions = _functions(tree) if path.name == "request.py" else {}
+        # History, declared tools and MCP content blocks discriminate payload
+        # items, not error envelopes. Exempt only these functions' type reads;
+        # code reads and all other functions still have one extraction owner.
+        type_readers = {
+            "request.py": ("_plain_history", "declared_tool_types", "replays_history_items"),
+            "fetch_services.py": ("_mcp_payload",),
+        }
+        functions = _functions(tree) if path.name in type_readers else {}
         history_nodes = {
             node
-            for name in ("_plain_history", "declared_tool_types", "replays_history_items")
+            for name in type_readers.get(path.name, ())
             if (history := functions.get(name)) is not None
             for node in ast.walk(history)
         }

@@ -108,7 +108,10 @@ Execution controls:
 
 ### Deprecating `vibe hook send`
 
-Compatibility window:
+The compatibility window has closed: `vibe hook send` is removed, and stored
+`hook_send` run records stay readable.
+
+Compatibility window (historical):
 
 ```bash
 vibe hook send ... -> vibe agent run ...
@@ -628,6 +631,8 @@ General rules:
 - `kind` identifies the returned object type, such as `agent_run`,
   `run_definition`, or `agent_runs`.
 - Human output may be shorter, but `--json` output should be stable.
+- Records omit null, empty, and zero-valued fields; a Run is one `run` object,
+  with no top-level copies of its fields.
 
 Synchronous Agent Run success:
 
@@ -652,7 +657,6 @@ Asynchronous Agent Run accepted, or a synchronous run converted to async after
 {
   "schema_version": 1,
   "ok": true,
-  "accepted": true,
   "kind": "agent_run",
   "run": {
     "id": "run123",
@@ -678,8 +682,7 @@ Task/Watch definition creation success:
     "session_id": "sesnew12345",
     "scope_id": "slack::channel::C123",
     "next_run_at": "2026-06-01T09:00:00+08:00"
-  },
-  "warnings": []
+  }
 }
 ```
 
@@ -690,10 +693,6 @@ Task/Watch definition creation success:
   "schema_version": 1,
   "ok": true,
   "kind": "agent_run",
-  "definition": {
-    "id": "def123",
-    "definition_type": "scheduled"
-  },
   "run": {
     "id": "run123",
     "status": "queued",
@@ -718,12 +717,8 @@ Task/Watch definition creation success:
     "source_kind": "cli",
     "agent_name": "release-reviewer",
     "session_id": "sesnew12345",
-    "definition_id": null,
     "created_at": "2026-05-21T17:00:00Z",
-    "started_at": "2026-05-21T17:00:03Z",
-    "completed_at": null,
-    "result_text": null,
-    "error": null
+    "started_at": "2026-05-21T17:00:03Z"
   }
 }
 ```
@@ -742,7 +737,6 @@ Task/Watch definition creation success:
       "status": "running",
       "agent_name": "release-reviewer",
       "session_id": "sesnew12345",
-      "definition_id": null,
       "created_at": "2026-05-21T17:00:00Z"
     }
   ]

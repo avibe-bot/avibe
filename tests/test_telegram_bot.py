@@ -20,6 +20,7 @@ from core.processing_indicator import (
     STOPPED_REACTION_EMOJI,
 )
 from core.message_context import resolve_context_thread_id
+from core.modals import AgentChoice, RoutingModalData
 from modules.agents.native_sessions import NativeResumeSession
 from modules.agents.catalog import AGENT_BACKENDS
 from modules.im import InlineButton, InlineKeyboard, MessageContext
@@ -1314,235 +1315,100 @@ def test_resume_callback_submits_selected_session() -> None:
     )
 
 
-def test_routing_callback_save_persists_selected_backend() -> None:
-    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
-    context = MessageContext(
+def _routing_state(context, names, current):
+    """A routing form listing one Agent per name; a name that is no backend is a user Agent on Claude Code."""
+    from modules.im.telegram import _TelegramRoutingState
+
+    agents = [AgentChoice(f"id-{name}", name, name if name in AGENT_BACKENDS else "claude") for name in names]
+    return _TelegramRoutingState(
+        message_id="88",
+        channel_id=context.channel_id,
+        thread_id=None,
+        user_id=context.user_id,
+        is_dm=False,
+        routing=RoutingModalData(agents=agents, current_agent=f"id-{current}", current_routing=None),
+        agent=f"id-{current}",
+    )
+
+
+def _routing_context() -> MessageContext:
+    return MessageContext(
         user_id="42",
         channel_id="-100123",
         message_id="88",
         platform="telegram",
         platform_specific={"is_dm": False},
     )
-    bot._routing_states[bot._interaction_scope_key(context)] = SimpleNamespace(
-        message_id="88",
-        channel_id=context.channel_id,
-        user_id=context.user_id,
-        is_dm=False,
-        backend="codex",
-        opencode_agent=None,
-        opencode_model=None,
-        opencode_reasoning_effort=None,
-        claude_agent=None,
-        claude_model=None,
-        claude_reasoning_effort=None,
-        codex_model="gpt-5",
-        codex_reasoning_effort="high",
-        picker_field=None,
-        picker_page=0,
-    )
-    bot._controller = SimpleNamespace(
-        settings_handler=SimpleNamespace(handle_routing_update=AsyncMock()),
-    )
-
-    with patch.object(bot, "_delete_interaction_message", new=AsyncMock()) as delete_mock:
-        asyncio.run(bot._handle_routing_callback(context, "tg_route:save"))
-
-    delete_mock.assert_awaited_once_with(context, "88")
-    bot._controller.settings_handler.handle_routing_update.assert_awaited_once()
 
 
-def test_routing_state_marks_current_backend_in_first_row() -> None:
+def test_routing_state_marks_current_agent_in_first_row() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
-    state = SimpleNamespace(
-        registered_backends=list(ROUTING_BACKENDS),
-        backend="claude",
-        opencode_agent=None,
-        opencode_model=None,
-        opencode_reasoning_effort=None,
-        claude_agent="reviewer",
-        claude_model="claude-sonnet-4-6",
-        claude_reasoning_effort="high",
-        codex_model=None,
-        codex_reasoning_effort=None,
-        picker_field=None,
-        picker_page=0,
-    )
 
-    _, keyboard = bot._render_routing_state(state)
+    _, keyboard = bot._render_routing_state(_routing_state(_routing_context(), ROUTING_BACKENDS, "opencode"))
 
+    # Agent names are free text, so the buttons carry list positions within Telegram's 64-byte callback data.
     assert [button.callback_data for button in keyboard.buttons[0]] == [
-        "tg_route:backend:vibey",
-        "tg_route:backend:opencode",
-        "tg_route:backend:claude",
+        "tg_route:agent:0",
+        "tg_route:agent:1",
+        "tg_route:agent:2",
     ]
-    assert keyboard.buttons[0][2].text.startswith("☑️ ")
+    assert keyboard.buttons[0][1].text == "☑️ opencode"
 
 
-def test_routing_codex_reasoning_uses_shared_catalog_options() -> None:
+def test_routing_summary_bounds_an_unbounded_model_label() -> None:
+    from config.v2_settings import RoutingSettings
+    from core.modals import BackendRouteMenu, RouteOption
+
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
-    state = SimpleNamespace(
-        picker_field="codex_reasoning_effort",
-        codex_model="gpt-5.6-terra",
-        backend_reasoning_options={
-            "codex": {
-                "gpt-5.6-terra": [
-                    {"value": "__default__", "label": "(Default)"},
-                    {"value": "ultra", "label": "Ultra"},
-                ]
-            }
-        },
-    )
+    state = _routing_state(_routing_context(), ["vibey"], "vibey")
+    state.routing.current_routing = RoutingSettings(agent_name="vibey", model="m" * 5000)
+    state.routing.menus["vibey"] = BackendRouteMenu("vibey", models=[RouteOption("m" * 5000, "Label " * 1000)])
 
-    assert bot._routing_picker_options(state) == [
-        (bot._t("common.default"), None),
-        ("Ultra", "ultra"),
-    ]
+    text, keyboard = bot._render_routing_state(state)
+
+    assert len(text) < 1000
+    assert all(len(button.text) <= 40 for row in keyboard.buttons for button in row)
 
 
-def test_open_routing_modal_clears_stale_catalog_effort() -> None:
+def test_routing_callback_agent_switches_without_nested_picker() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
-    context = MessageContext(
-        user_id="42",
-        channel_id="-100123",
-        message_id="88",
-        platform="telegram",
-        platform_specific={"is_dm": False},
-    )
-    current_routing = SimpleNamespace(
-        model="gpt-5.6-terra",
-        reasoning_effort="minimal",
-        codex_agent=None,
-    )
-
-    with patch.object(bot, "send_message_with_buttons", new=AsyncMock(return_value="99")):
-        asyncio.run(
-            bot.open_routing_modal(
-                context,
-                context.channel_id,
-                current_routing=current_routing,
-                current_backend="codex",
-                registered_backends=["codex"],
-                codex_models=["gpt-5.6-terra"],
-                backend_reasoning_options={
-                    "codex": {
-                        "gpt-5.6-terra": [
-                            {"value": "__default__", "label": "(Default)"},
-                            {"value": "ultra", "label": "Ultra"},
-                        ]
-                    }
-                },
-            )
-        )
-
-    state = bot._routing_states[bot._interaction_scope_key(context)]
-    assert state.codex_reasoning_effort is None
-
-
-def test_routing_callback_backend_switches_without_nested_picker() -> None:
-    bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
-    context = MessageContext(
-        user_id="42",
-        channel_id="-100123",
-        message_id="88",
-        platform="telegram",
-        platform_specific={"is_dm": False},
-    )
-    bot._routing_states[bot._interaction_scope_key(context)] = SimpleNamespace(
-        message_id="88",
-        channel_id=context.channel_id,
-        user_id=context.user_id,
-        is_dm=False,
-        registered_backends=list(ROUTING_BACKENDS),
-        backend="opencode",
-        opencode_agent=None,
-        opencode_model=None,
-        opencode_reasoning_effort=None,
-        claude_agent=None,
-        claude_model=None,
-        claude_reasoning_effort=None,
-        codex_model=None,
-        codex_reasoning_effort=None,
-        picker_field=None,
-        picker_page=0,
-    )
+    context = _routing_context()
+    bot._routing_states[bot._interaction_scope_key(context)] = _routing_state(context, ROUTING_BACKENDS, "opencode")
 
     with patch.object(bot, "edit_message", new=AsyncMock(return_value=True)) as edit_mock:
-        asyncio.run(bot._handle_routing_callback(context, "tg_route:backend:claude"))
+        asyncio.run(bot._handle_routing_callback(context, "tg_route:agent:2"))
 
     state = bot._routing_states[bot._interaction_scope_key(context)]
-    assert state.backend == "claude"
+    assert state.agent == f"id-{ROUTING_BACKENDS[2]}"
     assert state.picker_field is None
     edit_mock.assert_awaited_once()
 
 
-@pytest.mark.parametrize("extra_backend", ["vibey", "extra"])
-def test_routing_state_keeps_backend_picker_entry_for_extra_backends(extra_backend) -> None:
+def test_routing_state_keeps_agent_picker_entry_for_more_agents() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
-    state = SimpleNamespace(
-        registered_backends=[*ROUTING_BACKENDS, *([] if extra_backend in ROUTING_BACKENDS else [extra_backend])],
-        backend=extra_backend,
-        opencode_agent=None,
-        opencode_model=None,
-        opencode_reasoning_effort=None,
-        claude_agent=None,
-        claude_model=None,
-        claude_reasoning_effort=None,
-        codex_model=None,
-        codex_reasoning_effort=None,
-        picker_field=None,
-        picker_page=0,
-    )
 
-    text, keyboard = bot._render_routing_state(state)
-    if extra_backend == "vibey":
-        assert "Vibey" in text
+    text, keyboard = bot._render_routing_state(_routing_state(_routing_context(), [*ROUTING_BACKENDS, "pm"], "pm"))
 
-    assert [button.callback_data for button in keyboard.buttons[0]] == [
-        "tg_route:backend:vibey",
-        "tg_route:backend:opencode",
-        "tg_route:backend:claude",
-    ]
-    assert keyboard.buttons[1][0].callback_data == "tg_route:field:backend"
+    assert "pm · Claude Code" in text
+    assert len(keyboard.buttons[0]) == 3
+    assert keyboard.buttons[1][0].callback_data == "tg_route:field:agent"
 
 
-@pytest.mark.parametrize("extra_backend", ["vibey", "extra"])
-def test_routing_callback_backend_picker_can_select_extra_backend(extra_backend) -> None:
+def test_routing_callback_agent_picker_can_select_an_agent_past_the_first_row() -> None:
     bot = TelegramBot(TelegramConfig(bot_token="123456:test-token"))
-    context = MessageContext(
-        user_id="42",
-        channel_id="-100123",
-        message_id="88",
-        platform="telegram",
-        platform_specific={"is_dm": False},
-    )
-    bot._routing_states[bot._interaction_scope_key(context)] = SimpleNamespace(
-        message_id="88",
-        channel_id=context.channel_id,
-        user_id=context.user_id,
-        is_dm=False,
-        registered_backends=[*ROUTING_BACKENDS, *([] if extra_backend in ROUTING_BACKENDS else [extra_backend])],
-        backend="opencode",
-        opencode_agent=None,
-        opencode_model=None,
-        opencode_reasoning_effort=None,
-        claude_agent=None,
-        claude_model=None,
-        claude_reasoning_effort=None,
-        codex_model=None,
-        codex_reasoning_effort=None,
-        picker_field=None,
-        picker_page=0,
+    context = _routing_context()
+    bot._routing_states[bot._interaction_scope_key(context)] = _routing_state(
+        context, [*ROUTING_BACKENDS, "pm"], "opencode"
     )
 
     with patch.object(bot, "edit_message", new=AsyncMock(return_value=True)) as edit_mock:
-        asyncio.run(bot._handle_routing_callback(context, "tg_route:field:backend"))
+        asyncio.run(bot._handle_routing_callback(context, "tg_route:field:agent"))
         state = bot._routing_states[bot._interaction_scope_key(context)]
-        asyncio.run(bot._handle_routing_callback(
-            context, f"tg_route:option:{state.registered_backends.index(extra_backend)}",
-        ))
+        values = [value for _, value in bot._routing_picker_options(state)]
+        asyncio.run(bot._handle_routing_callback(context, f"tg_route:option:{values.index('id-pm')}"))
 
     state = bot._routing_states[bot._interaction_scope_key(context)]
-    assert state.backend == extra_backend
+    assert state.agent == "id-pm"
     assert state.picker_field is None
     assert edit_mock.await_count == 2
 

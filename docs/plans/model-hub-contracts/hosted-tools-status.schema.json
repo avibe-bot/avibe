@@ -13,7 +13,8 @@
       "items": {
         "oneOf": [
           { "$ref": "#/definitions/SearchTool" },
-          { "$ref": "#/definitions/ImageTool" }
+          { "$ref": "#/definitions/ImageTool" },
+          { "$ref": "#/definitions/FetchTool" }
         ]
       }
     }
@@ -37,7 +38,7 @@
               "properties": {
                 "source_id": { "$ref": "#/definitions/SourceId" },
                 "model_id": { "type": "string", "minLength": 1 },
-                "mode": { "enum": ["native", "executor", "direct"] },
+                "mode": { "enum": ["native", "executor", "service", "direct"] },
                 "at": { "$ref": "#/definitions/Moment" }
               }
             }
@@ -67,7 +68,7 @@
             "properties": {
               "source_id": { "$ref": "#/definitions/SourceId" },
               "model_id": { "type": "string", "minLength": 1 },
-              "mode": { "enum": ["native", "executor", "direct"] },
+              "mode": { "enum": ["native", "executor", "service", "direct"] },
               "at": { "$ref": "#/definitions/Moment" }
             }
           }
@@ -80,7 +81,7 @@
       "required": ["unit", "usd_per_1k", "extra", "as_of", "url"],
       "additionalProperties": false,
       "properties": {
-        "unit": { "enum": ["call", "search", "post", "profile"] },
+        "unit": { "enum": ["call", "search", "post", "profile", "fetch"] },
         "usd_per_1k": { "type": "number", "minimum": 0 },
         "extra": {
           "type": "array",
@@ -89,7 +90,7 @@
             "required": ["unit", "usd_per_1k"],
             "additionalProperties": false,
             "properties": {
-              "unit": { "enum": ["call", "search", "post", "profile"] },
+              "unit": { "enum": ["call", "search", "post", "profile", "fetch"] },
               "usd_per_1k": { "type": "number", "minimum": 0 }
             }
           }
@@ -98,12 +99,103 @@
         "url": { "type": "string", "pattern": "^https://" }
       }
     },
+    "ServiceListPrice": {
+      "allOf": [{ "$ref": "#/definitions/ListPrice" }, { "properties": { "unit": { "const": "search" } } }]
+    },
+    "SavedServiceSettings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "results": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "ServiceSettings": {
+      "allOf": [
+        { "$ref": "#/definitions/SavedServiceSettings" },
+        { "required": ["results", "enabled"] }
+      ]
+    },
+    "ModelExecutor": {
+      "type": "object",
+      "required": ["kind", "source_id", "model_id", "billing", "relay", "price"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "model" },
+        "source_id": { "$ref": "#/definitions/SourceId" },
+        "model_id": { "type": "string", "minLength": 1 },
+        "billing": { "enum": ["monthly", "metered"] },
+        "relay": { "type": "boolean", "description": "A non-official endpoint is priced at its vendor's API price." },
+        "price": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ListPrice" }] }
+      }
+    },
+    "ServiceExecutor": {
+      "type": "object",
+      "description": "A search API's catalog service id occupies model_id; Source health and one-shot trial state are display facts, not a probe.",
+      "required": ["kind", "source_id", "model_id", "billing", "relay", "price", "settings", "state", "trial_pending", "cooldown_until"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "const": "service" },
+        "source_id": { "$ref": "#/definitions/SourceId" },
+        "model_id": { "type": "string", "minLength": 1 },
+        "billing": { "const": "metered" },
+        "relay": { "const": false },
+        "price": { "$ref": "#/definitions/ServiceListPrice" },
+        "settings": { "$ref": "#/definitions/ServiceSettings" },
+        "state": { "$ref": "source.schema.json#/properties/state" },
+        "trial_pending": { "type": "boolean" },
+        "cooldown_until": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/Moment" }] }
+      }
+    },
+    "ServiceVendor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "price", "free_tier", "facts", "results_max", "source_ids"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "price": { "$ref": "#/definitions/ServiceListPrice" },
+        "free_tier": { "type": ["string", "null"], "description": "Catalog-verified free-tier description, null when unknown (not a claim of no free tier). The built-in keyless Exa row may state its free IP-rate-limited access." },
+        "facts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tool_only", "auto_enroll", "free_check"],
+          "properties": {
+            "tool_only": { "type": "boolean" },
+            "auto_enroll": { "type": "boolean" },
+            "free_check": { "type": "boolean" },
+            "built_in": { "type": "boolean", "description": "True for a catalog-provided Source that needs no setup and is not addable." },
+            "requires_setup": { "type": "boolean" }          }
+        },
+        "results_max": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "source_ids": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/definitions/SourceId" }, "description": "All current search-capable Sources for this vendor, including opted-out Sources. A built-in vendor contains its synthetic Source id; empty means not added for ordinary vendors." }
+      }
+    },
     "SearchTool": {
       "type": "object",
       "required": ["name", "enabled", "status", "executor_order", "effective_order", "executor_candidates"],
       "additionalProperties": false,
+      "allOf": [{
+        "if": { "properties": { "name": { "const": "web_search" } } },
+        "then": { "required": ["prefer_native", "services", "service_order"] },
+        "else": {
+          "properties": {
+            "prefer_native": false, "services": false, "service_order": false, "service_vendors": false,
+            "executor_candidates": { "items": { "$ref": "#/definitions/ModelExecutor" } }
+          }
+        }
+      }],
       "properties": {
         "name": { "enum": ["web_search", "x_search"] },
+        "prefer_native": { "type": "boolean", "description": "Saved preference, true when absent; active search hops honor it." },
+        "services": {
+          "type": "object",
+          "description": "Saved partial overrides for currently search-capable Sources, not resolved defaults. Extant retargeted/retired Sources are omitted while incapable, but their overrides remain in config for when capability returns. Removed Sources are ignored and obsolete catalog bounds read clamped.",
+          "propertyNames": { "$ref": "#/definitions/SourceId" },
+          "additionalProperties": { "$ref": "#/definitions/SavedServiceSettings" }
+        },
+        "service_order": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/definitions/SourceId" }, "description": "Server-owned tool-only Source creation order, skipping ids that no longer name a Source. Read-only; absent config reads as an empty list." },
+        "service_vendors": { "type": "array", "items": { "$ref": "#/definitions/ServiceVendor" }, "description": "Catalog vendors exposed with active service candidates and execution." },
         "enabled": { "type": "boolean" },
         "status": { "$ref": "#/definitions/Status" },
         "executor_order": {
@@ -114,19 +206,53 @@
         "executor_candidates": {
           "type": "array",
           "description": "Every eligible executor Source for the tool, in effective order, with its vendor's executor model; a Claude subscription never is one.",
-          "items": {
-            "type": "object",
-            "required": ["source_id", "model_id", "billing", "relay", "price"],
-            "additionalProperties": false,
-            "properties": {
-              "source_id": { "$ref": "#/definitions/SourceId" },
-              "model_id": { "type": "string", "minLength": 1 },
-              "billing": { "enum": ["monthly", "metered"] },
-              "relay": { "type": "boolean", "description": "An API-key Source on an endpoint other than its vendor's own: its price is labelled \"at API price\"." },
-              "price": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/ListPrice" }] }
-            }
-          }
+          "items": { "oneOf": [{ "$ref": "#/definitions/ModelExecutor" }, { "$ref": "#/definitions/ServiceExecutor" }] }
         }
+      }
+    },
+    "FetchSettings": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"enabled": {"type": "boolean"}}
+    },
+    "FetchExecutor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["kind", "source_id", "model_id", "billing", "relay", "price", "settings", "state", "trial_pending", "cooldown_until"],
+      "properties": {
+        "kind": {"enum": ["local", "service"]},
+        "source_id": {"$ref": "#/definitions/SourceId"},
+        "model_id": {"type": "string", "minLength": 1},
+        "billing": {"const": "metered"}, "relay": {"const": false},
+        "price": {"$ref": "#/definitions/ListPrice"},
+        "settings": {"allOf": [{"$ref": "#/definitions/FetchSettings"}, {"required": ["enabled"]}]},
+        "state": {"$ref": "source.schema.json#/properties/state"},
+        "trial_pending": {"type": "boolean"},
+        "cooldown_until": {"oneOf": [{"type": "null"}, {"$ref": "#/definitions/Moment"}]}
+      }
+    },
+    "FetchVendor": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "price", "capabilities", "content_types", "source_ids", "facts"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1},
+        "price": {"$ref": "#/definitions/ListPrice"},
+        "capabilities": {"const": ["web_fetch"]},
+        "content_types": {"type": "array", "items": {"enum": ["html", "pdf", "text", "markdown", "json"]}},
+        "source_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/definitions/SourceId"}},
+        "facts": {"type": "object", "additionalProperties": false, "required": ["built_in", "requires_setup", "auto_enroll"],
+                  "properties": {"built_in": {"type": "boolean"}, "requires_setup": {"type": "boolean"}, "auto_enroll": {"type": "boolean"}}}
+      }
+    },
+    "FetchTool": {
+      "type": "object", "additionalProperties": false,
+      "description": "Hidden while WEB_FETCH_ACTIVE is false. Saved choices remain readable and writable independently of activation.",
+      "required": ["name", "enabled", "status", "executor_order", "effective_order", "executor_candidates", "services", "service_vendors"],
+      "properties": {
+        "name": {"const": "web_fetch"}, "enabled": {"type": "boolean"}, "status": {"$ref": "#/definitions/Status"},
+        "executor_order": {"oneOf": [{"type": "null"}, {"type": "array", "uniqueItems": true, "items": {"$ref": "#/definitions/SourceId"}}]},
+        "effective_order": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/definitions/SourceId"}},
+        "executor_candidates": {"type": "array", "items": {"$ref": "#/definitions/FetchExecutor"}},
+        "services": {"type": "object", "propertyNames": {"$ref": "#/definitions/SourceId"}, "additionalProperties": {"$ref": "#/definitions/FetchSettings"}},
+        "service_vendors": {"type": "array", "items": {"$ref": "#/definitions/FetchVendor"}}
       }
     },
     "ImageTool": {

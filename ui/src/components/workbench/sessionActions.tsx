@@ -6,7 +6,7 @@ import type { LucideIcon } from 'lucide-react';
 
 import { Button } from '../ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
-import { mobileChatSessionActions } from './chatSessionActions';
+import { chatHeaderSessionActions, mobileChatSessionActions } from './chatSessionActions';
 import { SESSION_ROW_ACTION_BUTTON_CLASS } from './sessionRowLayout';
 
 // Presentation half of the shared session action menu: the ⋯ trigger and the menu
@@ -14,7 +14,7 @@ import { SESSION_ROW_ACTION_BUTTON_CLASS } from './sessionRowLayout';
 // header. The actions themselves (labels, writes, pending state) come from
 // useSessionActions.tsx; surfaces opt into only the capabilities they can render.
 
-export type SessionActionId = 'pin' | 'reference' | 'fork' | 'pet' | 'rename' | 'hide' | 'archive';
+export type SessionActionId = 'pin' | 'reference' | 'fork' | 'pet' | 'rename' | 'visibility' | 'archive';
 
 /** Menu grouping — rendered with a hairline divider between groups. */
 export type SessionActionGroup = 'organize' | 'continue' | 'lifecycle';
@@ -247,20 +247,27 @@ export const SessionActionMenuContent: React.FC<{
   );
 };
 
-// Chat keeps this compact action entry point on mobile only. Owning the responsive
-// wrapper here makes the breakpoint part of the tested component contract instead
-// of an incidental class buried in the large ChatPage render tree. Rename is also
-// removed at this presentation boundary so future callers cannot reintroduce it.
-export const MobileChatSessionActionMenu: React.FC<{
+// The chat header's session menu. It sits in a different place per viewport —
+// beside the title on desktop, at the far right of the compact mobile bar — so the
+// header mounts one of each and this wrapper owns which breakpoint shows which.
+// Owning the responsive wrapper here makes the breakpoint part of the tested
+// component contract instead of an incidental class buried in the large ChatPage
+// render tree. Rename is also removed at this presentation boundary so future
+// callers cannot reintroduce it.
+export const ChatSessionActionMenu: React.FC<{
   actions: SessionActionDescriptor[];
   label: string;
-}> = ({ actions, label }) => {
+  /** ``compact``: the mobile bar (below ``md``). ``wide``: desktop, beside the title. */
+  viewport: 'compact' | 'wide';
+}> = ({ actions, label, viewport }) => {
   const [open, setOpen] = useState(false);
-  const visibleActions = mobileChatSessionActions(actions);
+  const compact = viewport === 'compact';
+  const visibleActions = compact ? mobileChatSessionActions(actions) : chatHeaderSessionActions(actions);
   if (visibleActions.length === 0) return null;
 
   return (
-    <div className="md:hidden">
+    // ``wide`` pulls in against the title so the trigger reads as part of it.
+    <div className={compact ? 'md:hidden' : '-ml-1.5 hidden shrink-0 md:block'}>
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
           <SessionActionsTrigger label={label} open={open} variant="bar" />
@@ -268,7 +275,7 @@ export const MobileChatSessionActionMenu: React.FC<{
         <SessionActionMenuContent
           actions={visibleActions}
           label={label}
-          align="end"
+          align={compact ? 'end' : 'start'}
           onClose={() => setOpen(false)}
         />
       </Popover>

@@ -15,6 +15,7 @@ import { MANAGE_COMMIT_ACTIONS } from './manage';
 import type { ModelsSurfaceKind } from './modelHubSurfaceState';
 import { ApiCallError, modelsApi } from './modelsApi';
 import { QUOTA_PENDING_REREADS, QUOTA_PENDING_REREAD_MS, SettingsModelsPage as SettingsModelsRoute } from './SettingsModelsPage';
+import { ACTIVE_SEARCH, SEARCH_SOURCES } from './searchServices.fixtures';
 import { hasNativeSubscriptionCustody, SUBSCRIPTION_VENDORS } from './subscriptionOptions';
 import { CONTRACT_VERSION, type AgentBackend, type AgentChain, type AgentSupply, type BackendModel, type HostedToolsStatus, type MigrationItem, type RuntimeDependency, type RuntimeManifest, type QuotaSummary, type Source, type UsageReport } from './types';
 
@@ -48,7 +49,7 @@ const manifest = {
 } satisfies RuntimeManifest;
 
 const runtime: RuntimeDependency = {
-  contract_version: 17,
+  contract_version: 21,
   manifest,
   status: { installed_version: '1', verified: true, health: 'ok' },
 };
@@ -119,7 +120,7 @@ const takeoverAgent: AgentSupply = {
 };
 
 const takeoverChain: AgentChain = { manual_override: {hops:[{source_id:'src_head',model_id:'gpt-5.6-sol'},{source_id:'src_relay',model_id:'gpt-5.6-sol'}]}, route_origin: "manual" as const,
-  contract_version: 17,
+  contract_version: 21,
   backend: 'codex',
   model_id: 'gpt-5.6-sol',
   current: { source_id: 'src_relay', model_id: 'gpt-5.6-sol' },
@@ -151,6 +152,7 @@ const usageSummary: UsageReport = {
     output_tokens: 4120,
     models: [{ model_id: 'claude-opus-4-6', label: 'claude-opus-4-6', requests: 12, token_reports: 12, input_tokens: 148230, cached_input_tokens: 96010, output_tokens: 4120 }],
   }],
+  services: [],
   days: [{ day: '2026-08-18', requests: 12, token_reports: 12, input_tokens: 148230, cached_input_tokens: 96010, output_tokens: 4120 }],
   window_key: '24h',
   granularity: 'hour',
@@ -222,7 +224,7 @@ const routedHubAgent: AgentSupply = {
 const routedChain: AgentChain = {
   manual_override: { hops: [{ source_id: retainedSource.id, model_id: routedModelId }] },
   route_origin: 'manual' as const,
-  contract_version: 17,
+  contract_version: 21,
   backend: 'claude',
   model_id: routedModelId,
   current: { source_id: retainedSource.id, model_id: routedModelId },
@@ -252,7 +254,7 @@ const routedImpact = {
 const unused = { latest_ok: null, verified: [], refused: [] };
 const hostedToolsStatus: HostedToolsStatus = {
   tools: [
-    { name: 'web_search', enabled: true, status: unused, executor_order: null, effective_order: [], executor_candidates: [] },
+    { name: 'web_search', prefer_native: true, services: {}, service_order: [], enabled: true, status: unused, executor_order: null, effective_order: [], executor_candidates: [] },
     { name: 'x_search', enabled: true, status: unused, executor_order: null, effective_order: [], executor_candidates: [] },
     { name: 'image_generate', enabled: true, status: unused, default_model: null, effective_default: null, models: [], image_offered_by: [] },
   ],
@@ -270,6 +272,7 @@ const renderPage = (
   sources: Source[],
   agents?: AgentSupply[],
   runtimeValue: RuntimeDependency = runtime,
+  toolsValue: HostedToolsStatus = hostedToolsStatus,
 ) => {
   vi.spyOn(modelsApi, 'listSources').mockResolvedValue(sources);
   vi.spyOn(modelsApi, 'listAgents').mockResolvedValue(agents ?? [
@@ -283,7 +286,7 @@ const renderPage = (
   vi.spyOn(modelsApi, 'getUsageSummary').mockResolvedValue(usageSummary);
   vi.spyOn(modelsApi, 'getQuota').mockResolvedValue(quotaSummary);
   vi.spyOn(modelsApi, 'refreshQuota').mockResolvedValue(quotaSummary);
-  vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(hostedToolsStatus);
+  vi.spyOn(modelsApi, 'getHostedTools').mockResolvedValue(toolsValue);
   return render(
     <ToastProvider>
       <I18nextProvider i18n={i18n}>
@@ -2807,19 +2810,53 @@ describe('SettingsModelsPage quota region', () => {
 // How the Tools tab is READ. What it says once read is `ToolsTab.test.tsx`'s
 // subject; here the read is the tab's own, off the landing's first paint.
 describe('SettingsModelsPage tools region', () => {
-  it('MH-HOSTED-UI-005: leaves the hosted-tools report unread until its tab opens, then re-reads on every open', async () => {
+  // Components cannot prove page selection/mutation wiring: a service detail
+  // must reach the shared settings owner and DeepSeek's existing key journey.
+  it('connects active Tools service details to settings and the ordinary model Source key management', async () => {
+    const put = vi.spyOn(modelsApi, 'putHostedTool').mockResolvedValue({ tools: [ACTIVE_SEARCH] });
+    renderPage(SEARCH_SOURCES, undefined, runtime, { tools: [ACTIVE_SEARCH] });
+    await screen.findByRole('button', { name: 'Add provider' });
+    await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
+    const opener = await screen.findByRole('button', { name: 'DeepSeek' });
+    await userEvent.click(opener);
+    await userEvent.click(await screen.findByRole('switch', { name: 'Use for web search' }));
+    await waitFor(() => expect(put).toHaveBeenCalledWith('web_search', { services: { src_deepseek1: { enabled: true } } }));
+    await userEvent.click(screen.getByRole('button', { name: 'Manage provider key' }));
+    const keyDialog = await screen.findByRole('dialog', { name: 'Replace the API key for “DeepSeek”' });
+    await userEvent.click(within(keyDialog).getAllByRole('button', { name: 'Cancel' }).at(-1)!);
+    expect(await screen.findByText('deepseek-chat')).toBeTruthy();
+    await closeSourceDetails();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: 'DeepSeek' })));
+    await userEvent.click(screen.getByRole('button', { name: 'Add search service' }));
+    expect(await screen.findByRole('dialog', { name: 'Add search service' })).toBeTruthy();
+  });
+
+  it('MH-USAGE-038: leaves a service detail for the Usage tab, whose window the detail read never moved', async () => {
+    renderPage(SEARCH_SOURCES, undefined, runtime, { tools: [ACTIVE_SEARCH] });
+    await screen.findByRole('button', { name: 'Add provider' });
+    await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Exa' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'View usage' }));
+    await waitFor(() => expect(screen.getByRole('tab', { name: /^Usage$/ }).getAttribute('aria-selected')).toBe('true'));
+    await waitFor(() => expect(vi.mocked(modelsApi.getUsageSummary).mock.calls).toEqual([['60d'], ['24h']]));
+    expect(screen.getByRole('radio', { name: '24 hours', checked: true })).toBeTruthy();
+    expect(screen.queryByRole('heading', { name: 'Exa' })).toBeNull();
+  });
+
+  it('MH-HOSTED-UI-005: reads activation on Sources without gating first paint, then refreshes when its surface changes', async () => {
     renderPage([retainedSource]);
     await screen.findByText('Retained source');
     const read = vi.mocked(modelsApi.getHostedTools);
-    expect(read).not.toHaveBeenCalled();
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
 
     await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
     await screen.findByRole('region', { name: /^Web search$|^网页搜索$/ });
-    expect(read).toHaveBeenCalledTimes(1);
+    expect(read).toHaveBeenCalledTimes(2);
 
     await userEvent.click(screen.getByRole('tab', { name: /^Sources & gateway$|^供应商与路由$/ }));
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(3));
     await userEvent.click(screen.getByRole('tab', { name: /^Tools$|^工具$/ }));
-    await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(read).toHaveBeenCalledTimes(4));
   });
 
   it('MH-HOSTED-UI-005: reads the hosted-tools report again after a committed Source change, since a Source change can drop its evidence', async () => {

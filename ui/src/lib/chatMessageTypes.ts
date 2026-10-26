@@ -101,6 +101,16 @@ export function isRetryableFailureNotice(
     && !(Array.isArray(metadata.watch_ids) && metadata.watch_ids.length > 0);
 }
 
+// A notice whose Agent cannot run (disabled, deleted, or its backend unavailable), which
+// offers to move the session to Vibey and run the failed message there
+// (``failure_next_step: continue_on_vibey``). That action replaces the plain Retry, which
+// would only fail the same way again.
+export function offersContinueOnVibey(
+  message: TerminalAgentMessageCandidate & { source?: string | null },
+): boolean {
+  return isRetryableFailureNotice(message) && message.metadata?.failure_next_step === 'continue_on_vibey';
+}
+
 // The Retry states in which the notice's continuation is admitted: it was queued,
 // claimed, or accepted into a Turn. ``reserved`` and ``retired`` are not.
 export const ADMITTED_RETRY_STATES: readonly string[] = ['queued', 'claimed', 'accepted'];

@@ -9,10 +9,13 @@ rows, so the field names here are a shipped surface.
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Literal, Mapping, Optional, Union
+
+logger = logging.getLogger(__name__)
 
 ProtocolName = Literal["anthropic", "openai_chat", "openai_responses", "google"]
 PROTOCOLS: tuple[str, ...] = ("anthropic", "openai_chat", "openai_responses", "google")
@@ -30,11 +33,16 @@ _ERROR_CODE_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 #: The tools a provider runs natively, each a ``HostedToolBlock`` in assistant content (``vibey-hosted-tools.md`` §4.2).
 HostedToolName = Literal["web_search", "x_search"]
 HOSTED_TOOLS: tuple[str, ...] = ("web_search", "x_search")
-#: The tools whose ``ToolResultMessage`` carries ``hosted``: a proxied search, and every ``image_generate`` call.
-HOSTED_RESULT_TOOLS: tuple[str, ...] = (*HOSTED_TOOLS, "image_generate")
+#: Tools whose function results carry hosted metadata, including dormant fetch history.
+HOSTED_RESULT_TOOLS: tuple[str, ...] = (*HOSTED_TOOLS, "image_generate", "web_fetch")
 EXECUTION_MODES: tuple[str, ...] = ("proxy", "direct")
 HostedStatus = Literal["completed", "failed", "incomplete", "pending"]
 HOSTED_STATUSES: tuple[str, ...] = ("completed", "failed", "incomplete", "pending")
+HostedAttemptKind = Literal["service", "model", "local"]
+HostedAttemptOutcome = Literal["completed", "failed", "skipped"]
+HOSTED_ATTEMPT_KINDS: tuple[str, ...] = ("service", "model", "local")
+HOSTED_ATTEMPT_OUTCOMES: tuple[str, ...] = ("completed", "failed", "skipped")
+HOSTED_SKIP_REASONS: tuple[str, ...] = ("blocked", "disabled", "cooling", "query_too_long", "unavailable", "unsupported_type", "service_busy")
 HOSTED_ERROR_MAX_CHARS = 400
 #: The largest hosted count a summary holds: the largest integer every JSON reader holds exactly. A provider's count
 #: past it is no count, and no price or display has to survive one.
@@ -67,6 +75,26 @@ HOSTED_ERROR_CODES: tuple[str, ...] = (
     "search_not_run",
     "search_failed",
     "response_ended_early",
+    "service_key_invalid",
+    "service_balance",
+    "service_limit",
+    "service_unavailable",
+    "service_rate_limited",
+    "service_refused",
+    "service_unreadable",
+    "search_query_too_long",
+    "search_sources_blocked",
+    "service_busy",
+    "fetch_target_unreadable",
+    "fetch_url_blocked",
+    "fetch_dns_unverified",
+    "fetch_challenge",
+    "fetch_js_shell",
+    "fetch_timeout",
+    "fetch_unsupported_content",
+    "fetch_refused",
+    "fetch_unavailable",
+    "fetch_sources_blocked",
 )
 COST_BASES: tuple[str, ...] = ("reported", "list", "included")
 SOURCE_BILLINGS: tuple[str, ...] = ("monthly", "metered")
@@ -374,6 +402,54 @@ def image_deliverable(image: HostedImage) -> bool:
 
 
 @dataclass(frozen=True)
+class HostedAttempt:
+    """One candidate reached by a search chain, including candidates skipped before a request."""
+
+    source_id: str
+    label: str
+    kind: HostedAttemptKind
+    outcome: HostedAttemptOutcome
+    error_code: Optional[str] = None
+    skipped: Optional[str] = None
+    retry_at: Optional[str] = None
+    needs_action: Optional[str] = None
+    cost: Optional[HostedCost] = None
+    superseded: Optional[bool] = None
+
+    def __post_init__(self) -> None:
+        _require(self.source_id, str, "attempt source id")
+        if not _SOURCE_ID_RE.fullmatch(self.source_id):
+            raise ValueError(f"invalid source id: {self.source_id!r}")
+        _require_text(self.label, "attempt label")
+        if len(self.label) > 64:
+            raise ValueError("attempt label is at most 64 characters")
+        _require(self.kind, str, "attempt kind")
+        if self.kind not in HOSTED_ATTEMPT_KINDS:
+            raise ValueError(f"unknown attempt kind: {self.kind}")
+        _require(self.outcome, str, "attempt outcome")
+        if self.outcome not in HOSTED_ATTEMPT_OUTCOMES:
+            raise ValueError(f"unknown attempt outcome: {self.outcome}")
+        _require(self.error_code, str, "attempt error code", optional=True)
+        if self.error_code is not None and not _ERROR_CODE_RE.fullmatch(self.error_code):
+            raise ValueError("attempt error code is snake_case")
+        _require(self.skipped, str, "attempt skip reason", optional=True)
+        if self.skipped is not None and self.skipped not in HOSTED_SKIP_REASONS:
+            raise ValueError(f"unknown attempt skip reason: {self.skipped}")
+        _require_text(self.retry_at, "attempt retry_at", optional=True)
+        _require_text(self.needs_action, "attempt needs_action", optional=True)
+        _require(self.cost, HostedCost, "attempt cost", optional=True)
+        _require(self.superseded, bool, "attempt superseded", optional=True)
+        if self.outcome == "skipped" and self.skipped is None:
+            raise ValueError("a skipped attempt needs a skip reason")
+        if self.outcome != "skipped" and self.skipped is not None:
+            raise ValueError("only a skipped attempt has a skip reason")
+        if self.skipped != "cooling" and self.retry_at is not None:
+            raise ValueError("only a cooling attempt has retry_at")
+        if self.outcome == "completed" and self.error_code is not None:
+            raise ValueError("a completed attempt has no error code")
+
+
+@dataclass(frozen=True)
 class HostedRecord:
     """Per-call facts. ``images`` is set exactly for ``image_generate`` (possibly empty).
 
@@ -389,6 +465,7 @@ class HostedRecord:
     sources: tuple[HostedSource, ...] = ()
     images: Optional[tuple[HostedImage, ...]] = None
     error_code: Optional[str] = None
+    attempts: Optional[tuple[HostedAttempt, ...]] = None
 
     def __post_init__(self) -> None:
         _require(self.status, str, "hosted status")
@@ -408,10 +485,96 @@ class HostedRecord:
             not isinstance(self.images, tuple) or not all(isinstance(i, HostedImage) for i in self.images)
         ):
             raise ValueError("hosted images must be a tuple of HostedImage")
+        if self.attempts is not None and (
+            not isinstance(self.attempts, tuple) or not all(isinstance(a, HostedAttempt) for a in self.attempts)
+        ):
+            raise ValueError("hosted attempts must be a tuple of HostedAttempt")
 
     def check_tool(self, tool: str) -> None:
+        if tool == "web_fetch":
+            raise ValueError("web_fetch requires a WebFetchRecord")
         if (self.images is not None) != (tool == "image_generate"):
             raise ValueError("a hosted record lists images exactly for image_generate")
+
+
+@dataclass(frozen=True)
+class WebFetchRecord:
+    """Immutable bounded page facts, discriminated by the enclosing tool name.
+
+    The ordinary tool content is the same capped quotation, not a hidden page
+    archive. Search's released HostedRecord is intentionally unchanged.
+    """
+
+    status: Literal["completed", "failed"]
+    requested_url: str
+    content: str
+    size_bytes: int
+    retrieved_at: str
+    truncated: bool = False
+    truncation_reason: Optional[Literal["budget", "provider_limit"]] = None
+    budget_method: str = "utf8_bytes_div4_v1"
+    final_url: Optional[str] = None
+    canonical_url: Optional[str] = None
+    title: Optional[str] = None
+    content_type: Optional[str] = None
+    source_content_type: Optional[str] = None
+    source_size_bytes: Optional[int] = None
+    error: Optional[str] = None
+    error_code: Optional[str] = None
+    attempts: tuple[HostedAttempt, ...] = ()
+    transport_degraded: Optional[bool] = None
+    transport_degraded_reason: Optional[str] = None
+    charset_fallback: Optional[bool] = None
+
+    def __post_init__(self) -> None:
+        from datetime import datetime, timedelta
+        from .web_fetch import frame_fetch_record
+
+        if self.status not in ("completed", "failed"):
+            raise ValueError("fetch status must be completed or failed")
+        for name, bound in (("requested_url", 8192), ("final_url", 8192), ("canonical_url", 8192),
+                            ("title", 300), ("content_type", 128), ("source_content_type", 128),
+                            ("error", 1000), ("transport_degraded_reason", 400)):
+            value = getattr(self, name)
+            _require(value, str, f"fetch {name}", optional=name != "requested_url")
+            if value is not None and len(value) > bound:
+                raise ValueError(f"fetch {name} exceeds {bound} characters")
+        if (self.error is not None) != (self.status == "failed") or self.error == "":
+            raise ValueError("a fetch error is present exactly for failed records")
+        _require(self.error_code, str, "fetch error code", optional=True)
+        if self.error_code is not None and (self.error is None or not _ERROR_CODE_RE.fullmatch(self.error_code)):
+            raise ValueError("a fetch error code is snake_case and comes only with an error")
+        _require(self.content, str, "fetch content")
+        _require(self.size_bytes, int, "fetch size_bytes")
+        if self.size_bytes != len(self.content.encode("utf-8", "surrogatepass")):
+            raise ValueError("fetch size_bytes must equal retained UTF-8 bytes")
+        _require(self.source_size_bytes, int, "fetch source_size_bytes", optional=True)
+        if self.source_size_bytes is not None and not 0 <= self.source_size_bytes <= MAX_HOSTED_COUNT:
+            raise ValueError("fetch source_size_bytes is a nonnegative safe integer")
+        _require(self.truncated, bool, "fetch truncated")
+        if self.truncation_reason not in (None, "budget", "provider_limit") or self.truncated != (self.truncation_reason is not None):
+            raise ValueError("fetch truncation must carry its reason")
+        if self.budget_method != "utf8_bytes_div4_v1":
+            raise ValueError("unknown fetch budget method")
+        _require(self.retrieved_at, str, "fetch retrieved_at")
+        try:
+            instant = datetime.fromisoformat(self.retrieved_at.replace("Z", "+00:00"))
+            if instant.utcoffset() != timedelta(0):
+                raise ValueError
+        except ValueError:
+            raise ValueError("fetch retrieved_at must be UTC") from None
+        if not isinstance(self.attempts, tuple) or not all(isinstance(a, HostedAttempt) for a in self.attempts):
+            raise ValueError("fetch attempts must be a tuple of HostedAttempt")
+        for name in ("transport_degraded", "charset_fallback"):
+            _require(getattr(self, name), bool, f"fetch {name}", optional=True)
+        if self.transport_degraded_reason is not None and self.transport_degraded is not True:
+            raise ValueError("a transport degradation reason needs transport_degraded")
+        if len(frame_fetch_record(self).encode("utf-8", "surrogatepass")) > 48000:
+            raise ValueError("fetch frame exceeds the 48000-byte budget")
+
+    def check_tool(self, tool: str) -> None:
+        if tool != "web_fetch":
+            raise ValueError("WebFetchRecord belongs only to web_fetch")
 
 
 @dataclass(frozen=True)
@@ -460,6 +623,7 @@ class HostedCost:
 
     basis: str
     usd: Optional[float] = None
+    estimate: Optional[bool] = None
 
     def __post_init__(self) -> None:
         _require(self.basis, str, "cost basis")
@@ -473,6 +637,9 @@ class HostedCost:
             require_json_value(self.usd, "cost usd")
             if self.usd < 0:
                 raise ValueError("cost usd must not be negative")
+        _require(self.estimate, bool, "cost estimate", optional=True)
+        if self.estimate and self.usd is None:
+            raise ValueError("an estimated cost needs usd")
 
 
 @dataclass(frozen=True)
@@ -526,7 +693,7 @@ class ProxyExecution:
     absent when the call never reached one. ``cost`` is this attempt's own; ``failed_attempts`` lists the earlier
     billed ones, and ``core/hosted_activity`` totals them for display."""
 
-    executor_origin: Origin
+    executor_origin: Union[Origin, ServiceExecutorOrigin]
     executor_source_id: str
     executor_billing: str
     cost: Optional[HostedCost] = None
@@ -541,7 +708,8 @@ class ProxyExecution:
             isinstance(attempt, FailedAttempt) for attempt in self.failed_attempts
         ):
             raise ValueError("failed attempts must be a tuple of FailedAttempt")
-        _require(self.executor_origin, Origin, "executor origin")
+        if not isinstance(self.executor_origin, (Origin, ServiceExecutorOrigin)):
+            raise ValueError("executor origin must be Origin or ServiceExecutorOrigin")
         _require(self.executor_source_id, str, "executor source id")
         if not _SOURCE_ID_RE.fullmatch(self.executor_source_id):
             raise ValueError(f"invalid source id: {self.executor_source_id!r}")
@@ -571,7 +739,7 @@ class HostedResult:
     ``image_generate``, the model it ran on, the prompt the endpoint revised it to when it did, and the output's
     resolved size and quality when the endpoint reports them."""
 
-    record: HostedRecord
+    record: Union[HostedRecord, WebFetchRecord]
     execution: Optional[ProxyExecution] = None
     action: Optional[HostedAction] = None
     #: A search call that ran as its function only because the turn's own Source refused it natively; absent when it
@@ -579,7 +747,8 @@ class HostedResult:
     fallback_from: Optional[HostedFallback] = None
 
     def __post_init__(self) -> None:
-        _require(self.record, HostedRecord, "hosted record")
+        if not isinstance(self.record, (HostedRecord, WebFetchRecord)):
+            raise ValueError("hosted record must be HostedRecord or WebFetchRecord")
         _require(self.execution, ProxyExecution, "proxy execution", optional=True)
         _require(self.action, HostedAction, "hosted result action", optional=True)
         _require(self.fallback_from, HostedFallback, "hosted fallback", optional=True)
@@ -606,6 +775,24 @@ class Origin:
             raise ValueError("an origin needs a provider and a model")
         if self.api not in PROTOCOLS:
             raise ValueError(f"unknown protocol: {self.api}")
+
+
+@dataclass(frozen=True)
+class ServiceExecutorOrigin:
+    """A hosted service/local origin, distinct from the four assistant-model wire protocols."""
+
+    provider: str
+    api: Literal["search_api", "fetch_api", "local_fetch"]
+    model: str
+
+    def __post_init__(self) -> None:
+        _require(self.provider, str, "service origin.provider")
+        _require(self.api, str, "service origin.api")
+        if self.api not in ("search_api", "fetch_api", "local_fetch"):
+            raise ValueError("service origin api must be search_api, fetch_api or local_fetch")
+        _require(self.model, str, "service origin.model")
+        if not self.provider or not self.model:
+            raise ValueError("a service origin needs a provider and a service id")
 
 
 @dataclass(frozen=True)
@@ -700,6 +887,10 @@ class ToolResultMessage:
             if self.tool_name not in HOSTED_RESULT_TOOLS:
                 raise ValueError(f"{self.tool_name} is not a hosted tool")
             self.hosted.record.check_tool(self.tool_name)
+            if isinstance(self.hosted.record, WebFetchRecord):
+                from .web_fetch import frame_fetch_record
+                if self.content != (TextBlock(text=frame_fetch_record(self.hosted.record)),):
+                    raise ValueError("web_fetch ordinary content must equal the complete capped frame")
             if self.hosted.action is not None and not self.hosted.action.fits(self.tool_name):
                 raise ValueError(f"a {self.hosted.action.type} action does not belong to {self.tool_name}")
             if self.hosted.fallback_from is not None and self.tool_name not in HOSTED_TOOLS:
@@ -780,11 +971,16 @@ def _source_from_dict(data: Any) -> HostedSource:
     return HostedSource(**_read(data, "hosted source", {"url": str}, {"title": str, "snippet": str, "page_age": str}))
 
 
-def _record_to_dict(record: HostedRecord) -> dict[str, Any]:
+def _record_to_dict(record: Union[HostedRecord, WebFetchRecord]) -> dict[str, Any]:
+    if isinstance(record, WebFetchRecord):
+        from .web_fetch import fetch_record_to_dict
+        return fetch_record_to_dict(record)
     out: dict[str, Any] = {"status": record.status}
     _put(out, "error", record.error)
     _put(out, "error_code", record.error_code)
     out["sources"] = [_source_to_dict(source) for source in record.sources]
+    if record.attempts is not None:
+        out["attempts"] = [_attempt_to_dict(attempt) for attempt in record.attempts]
     if record.images is not None:
         images = []
         for image in record.images:
@@ -798,7 +994,12 @@ def _record_to_dict(record: HostedRecord) -> dict[str, Any]:
 
 
 def _record_from_dict(data: Any) -> HostedRecord:
-    f = _read(data, "hosted record", {"status": str, "sources": list}, {"error": str, "error_code": str, "images": list})
+    f = _read(
+        data,
+        "hosted record",
+        {"status": str, "sources": list},
+        {"error": str, "error_code": str, "images": list, "attempts": list},
+    )
     images = None
     if "images" in f:
         images = tuple(
@@ -813,6 +1014,7 @@ def _record_from_dict(data: Any) -> HostedRecord:
         sources=tuple(_source_from_dict(source) for source in f["sources"]),
         images=images,
         error_code=f.get("error_code"),
+        attempts=tuple(_attempt_from_dict(attempt) for attempt in f["attempts"]) if "attempts" in f else None,
     )
 
 
@@ -835,16 +1037,60 @@ def _action_from_dict(data: Any) -> HostedAction:
     return HostedAction(**f)
 
 
+def _attempt_to_dict(attempt: HostedAttempt) -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "source_id": attempt.source_id,
+        "label": attempt.label,
+        "kind": attempt.kind,
+        "outcome": attempt.outcome,
+    }
+    for name in ("error_code", "skipped", "retry_at", "needs_action"):
+        _put(out, name, getattr(attempt, name))
+    if attempt.cost is not None:
+        out["cost"] = _cost_to_dict(attempt.cost)
+    _put(out, "superseded", attempt.superseded)
+    return out
+
+
+def _attempt_from_dict(data: Any) -> HostedAttempt:
+    f = _read(
+        data,
+        "hosted attempt",
+        {"source_id": str, "label": str, "kind": str, "outcome": str},
+        {
+            "error_code": str,
+            "skipped": str,
+            "retry_at": str,
+            "needs_action": str,
+            "cost": dict,
+            "superseded": bool,
+        },
+    )
+    return HostedAttempt(
+        source_id=f["source_id"],
+        label=f["label"],
+        kind=f["kind"],
+        outcome=f["outcome"],
+        error_code=f.get("error_code"),
+        skipped=f.get("skipped"),
+        retry_at=f.get("retry_at"),
+        needs_action=f.get("needs_action"),
+        cost=_cost_from_dict(f["cost"]) if "cost" in f else None,
+        superseded=f.get("superseded"),
+    )
+
+
 def _cost_to_dict(cost: HostedCost) -> dict[str, Any]:
     out: dict[str, Any] = {"basis": cost.basis}
     _put(out, "usd", cost.usd)
+    _put(out, "estimate", cost.estimate)
     return out
 
 
 def _cost_from_dict(data: Any) -> HostedCost:
     if isinstance(data, Mapping) and isinstance(data.get("usd"), int) and not isinstance(data.get("usd"), bool):
         data = {**data, "usd": float(data["usd"])}
-    return HostedCost(**_read(data, "hosted cost", {"basis": str}, {"usd": float}))
+    return HostedCost(**_read(data, "hosted cost", {"basis": str}, {"usd": float, "estimate": bool}))
 
 
 def _citation_to_dict(citation: Citation) -> dict[str, Any]:
@@ -891,7 +1137,55 @@ def _block_to_dict(block: Any) -> dict[str, Any]:
     raise TypeError(f"not a content block: {type(block).__name__}")
 
 
-def _block_from_dict(data: Any, allowed_types: tuple[str, ...]) -> Any:
+def _unknown_hosted_text(data: Mapping[str, Any]) -> str:
+    """Render an unknown native hosted block without validating its future shape."""
+
+    tool = data.get("tool")
+    tool_name = tool if isinstance(tool, str) and tool else "hosted tool"
+    action = data.get("action") if isinstance(data.get("action"), Mapping) else {}
+    record = data.get("record") if isinstance(data.get("record"), Mapping) else {}
+    queries: list[str] = []
+    raw_queries = action.get("queries")
+    if isinstance(raw_queries, list):
+        queries.extend(query for query in raw_queries if isinstance(query, str) and query)
+    for name in ("query", "url"):
+        value = action.get(name)
+        if isinstance(value, str) and value and value not in queries:
+            queries.append(value)
+    lines: list[str] = []
+    status = record.get("status")
+    if isinstance(status, str) and status and status != "completed":
+        suffix = ": no result" if status == "pending" else ""
+        lines.append(f"[{tool_name} {status}{suffix}]")
+    error = record.get("error")
+    if isinstance(error, str) and error:
+        lines.append(f"Error: {error}")
+    if queries:
+        lines.append(f"[{tool_name}: {'; '.join(queries)}]")
+    raw_sources = record.get("sources")
+    if isinstance(raw_sources, list):
+        for number, source in enumerate(raw_sources, 1):
+            if not isinstance(source, Mapping):
+                continue
+            url = source.get("url") if isinstance(source.get("url"), str) else None
+            title = source.get("title") if isinstance(source.get("title"), str) else None
+            snippet = source.get("snippet") if isinstance(source.get("snippet"), str) else None
+            page_age = source.get("page_age") if isinstance(source.get("page_age"), str) else None
+            if not any((url, title, snippet, page_age)):
+                continue
+            lines.append(f"{number}. {title or url or snippet or page_age}")
+            if title and url:
+                lines.append(f"   {url}")
+            if snippet:
+                lines.append(f"   {snippet}")
+            if page_age:
+                lines.append(f"   Published: {page_age}")
+    return "\n".join(lines) if lines else f"[{tool_name} result unavailable in this version]"
+
+
+def _block_from_dict(
+    data: Any, allowed_types: tuple[str, ...], *, unknown_hosted_tools: list[str] | None = None
+) -> Any:
     kind = data.get("type") if isinstance(data, Mapping) else None
     if kind not in allowed_types:
         raise ValueError(f"block type {kind!r} is not allowed here")
@@ -911,6 +1205,11 @@ def _block_from_dict(data: Any, allowed_types: tuple[str, ...]) -> Any:
             )
         return TextBlock(text=f.get("text"), ref=ref, citations=citations)
     if kind == "hosted_tool":
+        raw_tool = data.get("tool") if isinstance(data, Mapping) else None
+        if isinstance(raw_tool, str) and raw_tool not in HOSTED_TOOLS:
+            if unknown_hosted_tools is not None:
+                unknown_hosted_tools.append(raw_tool)
+            return TextBlock(text=_unknown_hosted_text(data))
         f = _read(
             data,
             "hosted tool block",
@@ -960,6 +1259,17 @@ def origin_from_dict(data: Any) -> Origin:
     return Origin(**_read(data, "origin", {"provider": str, "api": str, "model": str}))
 
 
+def executor_origin_to_dict(origin: Union[Origin, ServiceExecutorOrigin]) -> dict[str, str]:
+    return {"provider": origin.provider, "api": origin.api, "model": origin.model}
+
+
+def executor_origin_from_dict(data: Any) -> Union[Origin, ServiceExecutorOrigin]:
+    fields = _read(data, "executor origin", {"provider": str, "api": str, "model": str})
+    if fields["api"] in ("search_api", "fetch_api", "local_fetch"):
+        return ServiceExecutorOrigin(**fields)
+    return Origin(**fields)
+
+
 def message_to_dict(message: Message) -> dict[str, Any]:
     if isinstance(message, UserMessage):
         return {"role": "user", "content": [_block_to_dict(b) for b in message.content]}
@@ -998,11 +1308,7 @@ def message_to_dict(message: Message) -> dict[str, Any]:
             if execution is not None:
                 hosted_result["execution"] = {
                     "mode": execution.mode,
-                    "executor_origin": {
-                        "provider": execution.executor_origin.provider,
-                        "api": execution.executor_origin.api,
-                        "model": execution.executor_origin.model,
-                    },
+                    "executor_origin": executor_origin_to_dict(execution.executor_origin),
                     "executor_source_id": execution.executor_source_id,
                     "executor_billing": execution.executor_billing,
                 }
@@ -1038,8 +1344,22 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
             {"role": str, "content": list, "origin": dict, "stop_reason": str},
             {"usage": dict, "error_message": str, "hosted_summary": dict, "source_identity": str},
         )
+        # Decode calls before their aggregate: unknown calls make response-wide facts unusable.
+        unknown_hosted_tools: list[str] = []
+        content = tuple(
+            _block_from_dict(
+                b, ("text", "thinking", "tool_call", "hosted_tool"), unknown_hosted_tools=unknown_hosted_tools
+            )
+            for b in f["content"]
+        )
         summary = None
-        if "hosted_summary" in f:
+        if unknown_hosted_tools:
+            logger.warning("stored message contains an unrecognized hosted tool; loading it portably")
+            # Do not interpret a discarded aggregate's future shape. Keep an empty envelope for known blocks,
+            # but do not invent a missing summary; retained blocks and the message envelope remain strict.
+            if "hosted_summary" in f and any(isinstance(block, HostedToolBlock) for block in content):
+                summary = HostedSummary()
+        elif "hosted_summary" in f:
             h = _read(f["hosted_summary"], "hosted summary", {"counts": dict, "cited_sources": list}, {"cost": dict})
             summary = HostedSummary(
                 # A release before the bound may have stored a count past it: that counter is dropped, not refused,
@@ -1053,7 +1373,7 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
                 cost=_cost_from_dict(h["cost"]) if "cost" in h else None,
             )
         return AssistantMessage(
-            content=tuple(_block_from_dict(b, ("text", "thinking", "tool_call", "hosted_tool")) for b in f["content"]),
+            content=content,
             origin=origin_from_dict(f["origin"]),
             stop_reason=f["stop_reason"],
             usage=usage_from_dict(f["usage"]) if "usage" in f else None,
@@ -1069,7 +1389,8 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
             {"hosted": dict},
         )
         hosted_result = None
-        if "hosted" in f:
+        unknown_hosted_tool = "hosted" in f and f["tool_name"] not in HOSTED_RESULT_TOOLS
+        if "hosted" in f and not unknown_hosted_tool:
             h = _read(
                 f["hosted"], "hosted result", {"record": dict}, {"execution": dict, "action": dict, "fallback_from": dict}
             )
@@ -1097,7 +1418,7 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
                         )
                     )
                 execution = ProxyExecution(
-                    executor_origin=origin_from_dict(e["executor_origin"]),
+                    executor_origin=executor_origin_from_dict(e["executor_origin"]),
                     executor_source_id=e["executor_source_id"],
                     executor_billing=e["executor_billing"],
                     cost=_cost_from_dict(e["cost"]) if "cost" in e else None,
@@ -1107,12 +1428,19 @@ def message_from_dict(data: Mapping[str, Any]) -> Message:
             fallback = None
             if "fallback_from" in h:
                 fallback = HostedFallback(_read(h["fallback_from"], "hosted fallback", {"source_id": str})["source_id"])
+            if f["tool_name"] == "web_fetch":
+                from .web_fetch import fetch_record_from_dict
+                record = fetch_record_from_dict(h["record"])
+            else:
+                record = _record_from_dict(h["record"])
             hosted_result = HostedResult(
-                record=_record_from_dict(h["record"]),
+                record=record,
                 execution=execution,
                 action=_action_from_dict(h["action"]) if "action" in h else None,
                 fallback_from=fallback,
             )
+        if unknown_hosted_tool:
+            logger.warning("stored message contains an unrecognized hosted tool; loading it portably")
         return ToolResultMessage(
             tool_call_id=f["tool_call_id"],
             tool_name=f["tool_name"],

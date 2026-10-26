@@ -80,7 +80,7 @@ def _add_test_watch(
     )
 
 
-def test_watch_help_describes_session_id_guidance(capsys) -> None:
+def test_watch_help_examples_use_the_caller_session_default(capsys) -> None:
     parser = cli.build_parser()
 
     with pytest.raises(SystemExit) as exc:
@@ -88,38 +88,9 @@ def test_watch_help_describes_session_id_guidance(capsys) -> None:
 
     assert exc.value.code == 0
     captured = capsys.readouterr()
-    assert "managed background watchers" in captured.out
-    assert "vibe watch add --session-id sesk8m4q2p7x --name 'Wait for export' --message" in captured.out
     assert "{add,update,list,show,pause,resume,remove}" in captured.out
-
-
-def test_watch_add_help_mentions_shell_and_lifetime_timeout(capsys) -> None:
-    parser = cli.build_parser()
-
-    with pytest.raises(SystemExit) as exc:
-        parser.parse_args(["watch", "add", "--help"])
-
-    assert exc.value.code == 0
-    captured = capsys.readouterr()
-    normalized_help = " ".join(captured.out.split())
-    assert "Pass either --shell '<command>' or a command after '--'." in captured.out
-    assert "--lifetime-timeout" in captured.out
-    assert "vibe watch add --session-id sesk8m4q2p7x --message 'The export finished. Inspect it and continue.'" in captured.out
-    assert "watches follow up in this conversation by default" in captured.out
-    assert "Prefer --message or --message-file for follow-up instructions" in captured.out
-    assert "Terminal failures also send a follow-up and disable the watch." in captured.out
-    assert "an allowed `--retry-exit-code` keeps waiting" in captured.out
-    assert "A once Watch stops after its first event" in captured.out
-    assert "five-second safety delay" in captured.out
-    assert "automatically pause the Watch" in captured.out
-    assert "a once Watch ends and a forever Watch re-arms" in captured.out
-    assert "A once waiter that is still waiting must use a retry exit code" in captured.out
-    assert "If this is your first time using this command, read this whole help entry before creating a watch." in captured.out
-    assert "Use 0 for no per-cycle timeout" in normalized_help
-    assert "--same-scope" in captured.out
-    assert "--scope-id" in captured.out
-    assert "--post-to" not in captured.out
-    assert "--deliver-key" not in captured.out
+    assert "vibe watch add --name 'Wait for export' --message" in captured.out
+    assert "--session-id" not in captured.out
 
 
 def test_watch_update_preserves_archived_agent_reference(tmp_path: Path, capsys) -> None:
@@ -198,15 +169,7 @@ def test_watch_list_help_describes_bounded_history(capsys) -> None:
 
 
 def test_watch_add_parser_keeps_top_level_command_name() -> None:
-    args = _parse_watch_add(
-        [
-            "--session-key",
-            "slack::channel::C123",
-            "--",
-            "python3",
-            "wait.py",
-        ]
-    )
+    args = _parse_watch_add(["--session-id", "sesk8m4q2p7x", "--", "python3", "wait.py"])
 
     assert args.command == "watch"
     assert args.watch_command == "add"
@@ -222,7 +185,7 @@ def test_watch_update_parser_accepts_argv_command_replacement() -> None:
 
 
 def test_watch_add_missing_command_is_structured_json() -> None:
-    args = _parse_watch_add(["--session-key", "slack::channel::C123"])
+    args = _parse_watch_add(["--session-id", "sesk8m4q2p7x"])
 
     with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
         result, payload = _capture_stderr_json(cli.cmd_watch_add, args)
@@ -236,10 +199,11 @@ def test_watch_add_accepts_lifetime_timeout_for_retrying_once_watch(
     tmp_path: Path,
     capsys,
 ) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--lifetime-timeout",
             "10",
             "--shell",
@@ -268,11 +232,12 @@ def test_watch_add_accepts_lifetime_timeout_for_retrying_once_watch(
     assert payload["definition"]["lifetime_timeout_seconds"] == 10
 
 
-def test_watch_add_rejects_missing_cwd() -> None:
+def test_watch_add_rejects_missing_cwd(tmp_path: Path) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--cwd",
             "/tmp/definitely-missing-watch-dir",
             "--shell",
@@ -322,7 +287,7 @@ def test_watch_add_create_per_run_ignores_unresolved_legacy_scope_backend(tmp_pa
     args = _parse_watch_add(
         [
             "--create-session-per-run",
-            "--deliver-key",
+            "--scope-id",
             "slack::channel::C123",
             "--shell",
             "echo done",
@@ -415,15 +380,16 @@ def test_watch_add_releases_create_once_session_when_definition_write_fails(
 
 
 def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--name",
             "Wait for export",
-            "--prefix",
+            "--message",
             "Export finished.",
             "--shell",
             "python3 scripts/wait.py",
@@ -444,7 +410,7 @@ def test_watch_add_creates_shell_watch(tmp_path: Path, capsys) -> None:
     assert "watch" not in payload
     assert payload["definition"]["name"] == "Wait for export"
     assert payload["definition"]["shell_command"] == "python3 scripts/wait.py"
-    assert payload["definition"]["command"] == []
+    assert "command" not in payload["definition"]
     assert payload["definition"]["mode"] == "once"
     assert payload["definition"]["retry_exit_codes"] == [75]
 
@@ -453,14 +419,15 @@ def test_remote_editor_watch_add_starts_and_persists_authorization_context(
     tmp_path: Path,
     capsys,
 ) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store_path = tmp_path / "watches.json"
     runtime_path = tmp_path / "watch_runtime.json"
     store = ManagedWatchStore(store_path)
     runtime_store = WatchRuntimeStateStore(runtime_path)
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--shell",
             "python3 scripts/wait.py",
         ]
@@ -574,7 +541,7 @@ def test_watch_add_create_per_run_scope_id_records_session_scope_metadata(tmp_pa
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["session_policy"] == "create_per_run"
-    assert payload["definition"]["deliver_key"] is None
+    assert payload["definition"].get("deliver_key") is None
     assert payload["definition"]["cwd"] == str(invoke_dir)
     assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-scope-watch"
     assert "session_workdir" not in payload["definition"]["metadata"]
@@ -612,8 +579,8 @@ def test_watch_add_create_per_run_without_scope_records_standalone_definition(tm
     assert result == 0
     watch = json.loads(capsys.readouterr().out)["definition"]
     assert watch["session_policy"] == "create_per_run"
-    assert watch["session_id"] is None
-    assert watch["deliver_key"] is None
+    assert watch.get("session_id") is None
+    assert watch.get("deliver_key") is None
     assert "session_scope_id" not in watch["metadata"]
     assert "session_workdir" not in watch["metadata"]
 
@@ -731,20 +698,18 @@ def test_watch_add_defaults_target_to_caller_session(tmp_path: Path, capsys) -> 
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["session_id"] == "sesCaller"
     assert payload["definition"]["session_policy"] == "existing"
-    assert payload["session_default_notice"] == {
-        "code": "session_defaulted_to_caller",
-        "message": "Watch target Session defaulted to this Agent Session.",
-        "session_id": "sesCaller",
-    }
+    # The defaulted target is the definition's session_id; no notice repeats it.
+    assert set(payload) == {"schema_version", "ok", "kind", "definition"}
 
 
 def test_watch_add_accepts_message_template(tmp_path: Path, capsys) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--message",
             "Summarize the waiter output.",
             "--shell",
@@ -763,16 +728,17 @@ def test_watch_add_accepts_message_template(tmp_path: Path, capsys) -> None:
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["message"] == "Summarize the waiter output."
-    assert payload["definition"]["prefix"] is None
+    assert payload["definition"].get("prefix") is None
 
 
 def test_watch_add_creates_exec_watch_with_retry_codes(tmp_path: Path, capsys) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--forever",
             "--timeout",
             "600",
@@ -819,12 +785,13 @@ def test_watch_add_timeout_round_trips_through_persisted_read(
     timeout_args: list[str],
     expected_timeout: float,
 ) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store = ManagedWatchStore()
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             *timeout_args,
             "--shell",
             "exit 75",
@@ -859,14 +826,15 @@ def test_watch_add_timeout_round_trips_through_persisted_read(
 
 
 def test_watch_add_persists_absolute_cwd(tmp_path: Path, capsys, monkeypatch: pytest.MonkeyPatch) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     workdir = tmp_path / "repo"
     workdir.mkdir()
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--cwd",
             str(workdir.relative_to(tmp_path)),
             "--shell",
@@ -890,12 +858,13 @@ def test_watch_add_persists_absolute_cwd(tmp_path: Path, capsys, monkeypatch: py
 
 
 def test_watch_add_returns_structured_error_when_startup_fails(tmp_path: Path) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     args = _parse_watch_add(
         [
-            "--session-key",
-            "slack::channel::C123",
+            "--session-id",
+            session_id,
             "--shell",
             "python3 scripts/wait.py",
         ]
@@ -1065,17 +1034,21 @@ def test_wait_for_watch_startup_rejects_watch_that_fails_before_stable_window(tm
     assert exc.value.code == "watch_startup_failed"
 
 
-def test_watch_list_brief_includes_runtime_state(tmp_path: Path, capsys) -> None:
+def test_watch_list_row_carries_only_decision_fields(tmp_path: Path, capsys) -> None:
+    """A list row is the compact projection: what an Agent decides its next step from."""
+
     store = ManagedWatchStore()
     runtime_store = WatchRuntimeStateStore()
-    watch = store.add_watch(
-        name="Watch CI",
+    retrying = _add_test_watch(store, name="Watch CI", mode="forever")
+    dead = _add_test_watch(store, name="Dead waiter", mode="forever")
+    unnamed = store.add_watch(
+        name=None,
         session_key="slack::channel::C123",
-        command=["python3", "wait.py"],
+        command=["python3", "wait.py", "--pr", "7"],
         shell_command=None,
         prefix=None,
         cwd=None,
-        mode="forever",
+        mode="once",
         timeout_seconds=600,
         lifetime_timeout_seconds=0,
         retry_exit_codes=[75],
@@ -1083,15 +1056,24 @@ def test_watch_list_brief_includes_runtime_state(tmp_path: Path, capsys) -> None
         post_to=None,
         deliver_key=None,
     )
+    # A configured retry exit: the waiter is healthy and still waiting.
+    assert store.mark_cycle_start(retrying.id)
+    assert store.mark_cycle_result(retrying.id, exit_code=75, error=None)
     runtime_store.write(
         {
             "watches": {
-                watch.id: {
+                retrying.id: {
                     "running": True,
                     "pid": 1234,
                     "started_at": "2026-04-02T00:00:00+00:00",
                     "updated_at": "2026-04-02T00:00:00+00:00",
-                }
+                },
+                dead.id: {
+                    "running": False,
+                    "pid": 2345,
+                    "started_at": "2026-04-02T00:00:00+00:00",
+                    "updated_at": "2026-04-02T00:00:00+00:00",
+                },
             }
         }
     )
@@ -1100,12 +1082,23 @@ def test_watch_list_brief_includes_runtime_state(tmp_path: Path, capsys) -> None
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
-        result = cli.cmd_watch_list(brief=True)
+        result = cli.cmd_watch_list(scope=cli.SessionListScope())
 
     assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["definitions"][0]["state"] == "running"
-    assert payload["definitions"][0]["mode"] == "forever"
+    rows = {row["id"]: row for row in json.loads(capsys.readouterr().out)["definitions"]}
+    assert set(rows[retrying.id]) == {
+        "id",
+        "name",
+        "mode",
+        "lifecycle_state",
+        "waiting_since",
+        "last_exit_code",
+    }
+    assert (rows[retrying.id]["lifecycle_state"], rows[retrying.id]["last_exit_code"]) == ("waiting", 75)
+    # An enabled watch whose observed waiter exited is the one liveness worth naming.
+    assert rows[dead.id]["process_alive"] is False
+    assert "name" not in rows[unnamed.id]
+    assert rows[unnamed.id]["command_preview"] == "python3 wait.py --pr 7"
 
 
 def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) -> None:
@@ -1125,14 +1118,15 @@ def test_watch_list_hides_finished_one_shots_by_default(tmp_path: Path, capsys) 
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
-        result = cli.cmd_watch_list(brief=True)
+        result = cli.cmd_watch_list(scope=cli.SessionListScope())
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     ids = {item["id"] for item in payload["definitions"]}
     assert ids == {active.id, failed.id, paused.id, failed_forever.id}
     assert completed.id not in ids
-    assert next(item for item in payload["definitions"] if item["id"] == failed.id)["state"] == "failed"
+    failed_row = next(item for item in payload["definitions"] if item["id"] == failed.id)
+    assert (failed_row["lifecycle_state"], failed_row["lifecycle_detail"]) == ("finished", "error")
 
 
 def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, capsys) -> None:
@@ -1148,11 +1142,11 @@ def test_resumed_then_paused_one_shot_remains_in_default_list(tmp_path: Path, ca
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
-        assert cli.cmd_watch_list() == 0
+        assert cli.cmd_watch_list(scope=cli.SessionListScope()) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert [item["id"] for item in payload["definitions"]] == [watch.id]
-    assert payload["definitions"][0]["state"] == "paused"
+    assert payload["definitions"][0]["lifecycle_state"] == "paused"
 
 
 def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
@@ -1187,11 +1181,11 @@ def test_paused_forever_watch_changed_to_once_starts_new_lifecycle(
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
-        assert cli.cmd_watch_list() == 0
+        assert cli.cmd_watch_list(scope=cli.SessionListScope()) == 0
 
     payload = json.loads(capsys.readouterr().out)
     assert [item["id"] for item in payload["definitions"]] == [watch.id]
-    assert payload["definitions"][0]["state"] == "paused"
+    assert payload["definitions"][0]["lifecycle_state"] == "paused"
 
 
 def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
@@ -1204,7 +1198,7 @@ def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
-        result = cli.cmd_watch_list(brief=True)
+        result = cli.cmd_watch_list(scope=cli.SessionListScope())
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1216,7 +1210,7 @@ def test_watch_list_defaults_to_first_page(tmp_path: Path, capsys) -> None:
         "returned": 20,
         "has_more": True,
         "next_page": 2,
-        "next_command": "vibe watch list --page 2 --limit 20",
+        "next_command": "vibe watch list --global --page 2 --limit 20",
     }
 
 
@@ -1230,7 +1224,7 @@ def test_watch_list_cli_dispatches_pagination_flags(
     for index in range(3):
         _add_test_watch(store, name=f"Watch {index}")
 
-    monkeypatch.setattr(sys, "argv", ["vibe", "watch", "list", "--limit", "2"])
+    monkeypatch.setattr(sys, "argv", ["vibe", "watch", "list", "--global", "--limit", "2"])
     with (
         patch("vibe.cli._watch_store", return_value=store),
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
@@ -1241,7 +1235,7 @@ def test_watch_list_cli_dispatches_pagination_flags(
     assert exc.value.code == 0
     payload = json.loads(capsys.readouterr().out)
     assert len(payload["definitions"]) == 2
-    assert payload["pagination"]["next_command"] == "vibe watch list --page 2 --limit 2"
+    assert payload["pagination"]["next_command"] == "vibe watch list --global --page 2 --limit 2"
 
 
 def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, capsys) -> None:
@@ -1256,8 +1250,8 @@ def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, cap
         patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
     ):
         result = cli.cmd_watch_list(
+            scope=cli.SessionListScope(),
             include_finished=True,
-            brief=True,
             page_request=cli.PageRequest(page=1, limit=2),
         )
 
@@ -1266,7 +1260,7 @@ def test_watch_list_include_finished_keeps_history_paginated(tmp_path: Path, cap
     assert len(payload["definitions"]) == 2
     assert payload["pagination"]["has_more"] is True
     assert payload["pagination"]["next_command"] == (
-        "vibe watch list --include-finished --page 2 --limit 2"
+        "vibe watch list --global --include-finished --page 2 --limit 2"
     )
 
 
@@ -1275,6 +1269,40 @@ def test_watch_show_missing_returns_structured_error() -> None:
 
     assert result == 1
     assert payload["code"] == "watch_not_found"
+
+
+def test_removed_watch_reads_as_removed_and_refuses_mutations(capsys) -> None:
+    # Watches are removed at close-out and checked again later; a bare
+    # ``watch_not_found`` could not be told apart from a mistyped id.
+    store = ManagedWatchStore()
+    watch = _add_test_watch(store, name="Watch CI")
+    assert store.remove_watch(watch.id) is True
+
+    assert cli.cmd_watch_show(watch.id) == 0
+    definition = json.loads(capsys.readouterr().out)["definition"]
+    assert definition["id"] == watch.id
+    assert definition["name"] == "Watch CI"
+    assert definition["lifecycle_state"] == "removed"
+    # Nothing about it can still run, so it carries no live state.
+    assert not {"enabled", "health", "process_alive", "waiting_since", "next_run_at", "runtime"} & set(definition)
+    removed_at = definition["removed_at"]
+    assert removed_at
+    assert cli.cmd_watch_show(watch.id, brief=True) == 0
+    row = json.loads(capsys.readouterr().out)["definition"]
+    assert (row["lifecycle_state"], row["removed_at"]) == ("removed", removed_at)
+    assert not {"health", "process_alive", "waiting_since"} & set(row)
+
+    mutations = [
+        (cli.cmd_watch_set_enabled, (watch.id, False)),
+        (cli.cmd_watch_set_enabled, (watch.id, True)),
+        (cli.cmd_watch_update, (_parse_watch_update([watch.id, "--name", "Renamed"]),)),
+        (cli.cmd_watch_remove, (watch.id,)),
+    ]
+    for command, args in mutations:
+        result, payload = _capture_stderr_json(command, *args)
+        assert result == 1
+        assert payload["code"] == "watch_removed"
+        assert payload["details"] == {"watch_id": watch.id, "removed_at": removed_at}
 
 
 def test_watch_pause_resume_and_remove_update_store(tmp_path: Path, capsys) -> None:
@@ -1314,6 +1342,7 @@ def test_watch_pause_resume_and_remove_update_store(tmp_path: Path, capsys) -> N
 
 
 def test_watch_update_renames_and_retargets_watch(tmp_path: Path, capsys) -> None:
+    session_id = _create_bare_agent_session(workdir=tmp_path)
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
     watch = store.add_watch(
@@ -1336,11 +1365,9 @@ def test_watch_update_renames_and_retargets_watch(tmp_path: Path, capsys) -> Non
             watch.id,
             "--name",
             "Watch deploy",
-            "--session-key",
-            "slack::channel::C456",
-            "--post-to",
-            "channel",
-            "--prefix",
+            "--session-id",
+            session_id,
+            "--message",
             "Deploy finished.",
             "--forever",
             "--timeout",
@@ -1369,9 +1396,9 @@ def test_watch_update_renames_and_retargets_watch(tmp_path: Path, capsys) -> Non
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["id"] == watch.id
     assert payload["definition"]["name"] == "Watch deploy"
-    assert payload["definition"]["session_key"] == "slack::channel::C456"
-    assert payload["definition"]["post_to"] == "channel"
-    assert payload["definition"]["prefix"] == "Deploy finished."
+    assert payload["definition"]["session_id"] == session_id
+    assert payload["definition"]["message"] == "Deploy finished."
+    assert {"session_key", "post_to", "deliver_key", "prefix"}.isdisjoint(payload["definition"])
     assert payload["definition"]["mode"] == "forever"
     assert payload["definition"]["timeout_seconds"] == 1200
     assert payload["definition"]["lifetime_timeout_seconds"] == 7200
@@ -1413,40 +1440,6 @@ def test_watch_update_accepts_zero_timeout(tmp_path: Path, capsys) -> None:
     assert store.get_watch(watch.id).timeout_seconds == 0
 
 
-def test_watch_update_session_key_clears_previous_session_id(tmp_path: Path, capsys) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
-    watch = store.add_watch(
-        name="Watch CI",
-        session_key="",
-        session_id="sesk8m4q2p7x",
-        command=["python3", "wait.py"],
-        shell_command=None,
-        prefix=None,
-        cwd=None,
-        mode="once",
-        timeout_seconds=600,
-        lifetime_timeout_seconds=0,
-        retry_exit_codes=[75],
-        retry_delay_seconds=30,
-        post_to=None,
-        deliver_key=None,
-    )
-    args = _parse_watch_update([watch.id, "--session-key", "slack::channel::C456"])
-
-    with (
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-        patch("vibe.cli._watch_runtime_store", return_value=runtime_store),
-    ):
-        result = cli.cmd_watch_update(args)
-
-    assert result == 0
-    payload = json.loads(capsys.readouterr().out)
-    assert payload["definition"]["session_id"] is None
-    assert payload["definition"]["session_key"] == "slack::channel::C456"
-
-
 def test_watch_update_reset_delivery_preserves_creation_scope_metadata(tmp_path: Path, capsys) -> None:
     store = ManagedWatchStore(tmp_path / "watches.json")
     runtime_store = WatchRuntimeStateStore(tmp_path / "watch_runtime.json")
@@ -1485,8 +1478,8 @@ def test_watch_update_reset_delivery_preserves_creation_scope_metadata(tmp_path:
 
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["definition"]["post_to"] is None
-    assert payload["definition"]["deliver_key"] is None
+    assert payload["definition"].get("post_to") is None
+    assert payload["definition"].get("deliver_key") is None
     assert payload["definition"]["metadata"]["session_scope_id"] == "avibe::project::proj-reset-watch"
     assert payload["definition"]["metadata"]["session_workdir"] == str(tmp_path)
 
@@ -1521,7 +1514,7 @@ def test_watch_update_replaces_argv_command(tmp_path: Path, capsys) -> None:
     assert result == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["definition"]["command"] == ["python3", "wait_deploy.py", "--flag", "value"]
-    assert payload["definition"]["shell_command"] is None
+    assert payload["definition"].get("shell_command") is None
 
 
 def test_watch_update_no_changes_returns_structured_error(tmp_path: Path) -> None:
@@ -1667,57 +1660,6 @@ def test_watch_update_allows_cwd_for_already_reserved_create_once_watch(tmp_path
     assert payload["definition"]["session_id"] == "sesExisting"
     assert payload["definition"]["cwd"] == str(new_cwd)
     assert "session_workdir" not in payload["definition"]["metadata"]
-
-
-def test_watch_update_rejects_deprecated_prompt_argument(tmp_path: Path) -> None:
-    store = ManagedWatchStore(tmp_path / "watches.json")
-    watch = store.add_watch(
-        name="Watch CI",
-        session_key="slack::channel::C123",
-        command=["python3", "wait.py"],
-        shell_command=None,
-        prefix=None,
-        cwd=None,
-        mode="once",
-        timeout_seconds=600,
-        lifetime_timeout_seconds=0,
-        retry_exit_codes=[75],
-        retry_delay_seconds=30,
-        post_to=None,
-        deliver_key=None,
-    )
-    args = _parse_watch_update([watch.id, "--prompt", "hello"])
-
-    with (
-        patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})),
-        patch("vibe.cli._watch_store", return_value=store),
-    ):
-        result, payload = _capture_stderr_json(cli.cmd_watch_update, args)
-
-    assert result == 1
-    assert payload["code"] == "deprecated_prompt_argument"
-    assert "--message" in payload["hint"]
-
-
-def test_watch_add_rejects_deprecated_prompt_argument() -> None:
-    args = _parse_watch_add(
-        [
-            "--session-key",
-            "slack::channel::C123",
-            "--prompt",
-            "hello",
-            "--",
-            "python3",
-            "wait.py",
-        ]
-    )
-
-    with patch("vibe.cli._ensure_config", return_value=_configured_v2({"slack"})):
-        result, payload = _capture_stderr_json(cli.cmd_watch_add, args)
-
-    assert result == 1
-    assert payload["code"] == "deprecated_prompt_argument"
-    assert "--message" in payload["hint"]
 
 
 def test_watch_update_rejects_agent_together_with_clear_agent(tmp_path: Path) -> None:
@@ -2143,14 +2085,23 @@ def test_watch_add_refuses_the_reserved_session_with_no_side_effects(
     )
 
 
-def test_watch_add_help_states_the_no_event_marker_contract() -> None:
+def test_watch_add_help_states_the_waiter_contract(capsys) -> None:
     """The help is a live caller of the waiter contract, not a description of it.
 
     A custom waiter written from this text is what the supervisor then judges, so
     guidance that named the exit code but not the marker sent people straight into
     a watch that reports a failure and disables itself.
     """
-    text = cli._watch_add_examples_text()
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["watch", "add", "--help"])
+    text = capsys.readouterr().out
 
-    assert str(watches.NO_EVENT_EXIT_CODE) in text
-    assert watches.NO_EVENT_MARKER in text
+    assert "0      one new event" in text
+    assert f"{watches.DEFAULT_RETRY_EXIT_CODE}     still waiting (any --retry-exit-code)" in text
+    assert f"{watches.NO_EVENT_EXIT_CODE}     plus the stderr line '{watches.NO_EVENT_MARKER}'" in text
+    assert f"A bare {watches.NO_EVENT_EXIT_CODE} is a failure" in text
+    assert "failure (124 = timed out)" in text
+    assert "A once Watch stops at its first event or quiet cycle; --forever re-arms after each." in text
+    assert "rapid repeats pause the Watch" in text
+    first_example = next(line for line in text.splitlines() if line.strip().startswith("vibe watch add"))
+    assert "--session-id" not in first_example

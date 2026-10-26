@@ -166,8 +166,7 @@ Principle: `agent_runs` remains the only store; views are projections.
   - no scope param + caller context → **caller session's scope**,
     `visibility='background'`; cwd rule unchanged (caller shell cwd).
   - `--same-scope` / `--scope-id` → as today; visibility defaults to
-    `background` for delegated runs; explicit `--visibility foreground`
-    opt-in.
+    `background` for delegated runs; explicit `--visible` opt-in.
   - no caller and no scope (human CLI outside a session) → **standalone**
     (`scope_id=NULL`) + `visibility='background'` + show-workspace workdir.
   - task/watch `create_per_run` sessions → definition's `session_scope_id`
@@ -192,7 +191,7 @@ Principle: `agent_runs` remains the only store; views are projections.
 - API: `PATCH /api/sessions/:id { visibility }`; scope move is a separate
   operation (`{ scope_id }`, may be NULL for standalone) that does not touch
   the session's snapshotted workdir.
-- CLI: `vibe session update --visibility foreground|background` and
+- CLI: `vibe session update --visible|--hidden` and
   `--scope-id <scopes.id>|none`; agent-facing so an agent can surface a
   session it wrongly backgrounded.
 - UI: graph detail panel buttons (`移到前台` / `隐藏`); session list row menu

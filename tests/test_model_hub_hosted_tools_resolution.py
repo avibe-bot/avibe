@@ -14,6 +14,7 @@ from datetime import date, datetime, timezone
 import pytest
 
 from config.v2_config import (
+    KEYLESS_EXA_SOURCE_ID,
     ModelHubAgentSupplyConfig,
     ModelHubConfig,
     ModelHubHostedToolConfig,
@@ -21,6 +22,7 @@ from config.v2_config import (
     ModelHubModelConfig,
     ModelHubSourceConfig,
     ModelHubSourceStateConfig,
+    model_hub_builtin_source,
 )
 from core.handlers.model_hub import hosted_tools as hosted_tools_module
 from core.handlers.model_hub.capability_evidence import (
@@ -79,7 +81,7 @@ IMAGE_MODELS = {
 
 
 @pytest.fixture(autouse=True)
-def _overlay(monkeypatch):
+def _overlay(monkeypatch, request):
     monkeypatch.setattr(
         hosted_tools_module, "source_executor_models", lambda vendor, protocol: EXECUTOR_MODELS.get(vendor, ()),
     )
@@ -87,6 +89,18 @@ def _overlay(monkeypatch):
     monkeypatch.setattr(
         hosted_tools_module, "source_image_models", lambda vendor, protocol, listed: IMAGE_MODELS.get(vendor, ()),
     )
+    # These cases pin model-executor priors and ordering. The active keyless Exa
+    # chain is covered by the owning search-chain tests; omit that catalog service
+    # from this model-only fixture without changing the shipped activation predicate.
+    original_service = hosted_tools_module.model_hub_search_service
+
+    def without_keyless(source):
+        if source.id == KEYLESS_EXA_SOURCE_ID:
+            return None
+        return original_service(source)
+
+    hosted_tools_module.model_hub_search_service = without_keyless
+    request.addfinalizer(lambda: setattr(hosted_tools_module, "model_hub_search_service", original_service))
     # The bundled overlay's vendors; which of them list image models is `IMAGE_MODELS`.
     monkeypatch.setattr(hosted_tools_module, "bundled_provider_vendors", lambda: dict.fromkeys(("anthropic", "openai", "xai")))
 
@@ -300,13 +314,21 @@ def test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_i
     with the identity it was built under, and the image enum; a hop states facts only, the enum's params sorted."""
     evidence = _evidence(tmp_path)
     turn = freeze_turn_tools(_config(), evidence=evidence, spec_for=_spec_for)
-    assert turn.tools == {"web_search", "x_search", "image_generate"}
+    assert turn.tools == {"web_search", "x_search", "image_generate", "web_fetch"}
     assert turn.executors == {
         "web_search": (
-            ExecutorSlot("src_xai00001", "grok-fast", identity_digest(XAI)),
-            ExecutorSlot("src_oai00001", "gpt-mini", identity_digest(OPENAI)),
+            ExecutorSlot("src_xai00001", "grok-fast", identity_digest(XAI), label="src_xai00001"),
+            ExecutorSlot("src_oai00001", "gpt-mini", identity_digest(OPENAI), label="src_oai00001"),
         ),
         "x_search": (ExecutorSlot("src_xai00001", "grok-fast", identity_digest(XAI)),),
+        "web_fetch": tuple(
+            ExecutorSlot(sid, model, identity_digest(model_hub_builtin_source(sid)), kind=kind)
+            for sid, model, kind in (
+                ("src_localfetch", "local/fetch", "local"),
+                ("src_exakeyless", "exa/mcp", "service"),
+                ("src_jinakeyless", "jina/reader", "service"),
+            )
+        ),
     }
     image = {"description": "Grok Imagine", "params": ["images", "size"], "size_forms": ["pixels"]}
     assert hop_hosted_tools(turn, OPENAI, "gpt-6-astra", evidence=evidence, spec_for=_spec_for) == {
@@ -316,6 +338,7 @@ def test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_i
         },
         # OpenAI does not run X search: the hop takes the function.
         "x_search": {"native": "unsupported", "replay": "unsupported"},
+        "web_fetch": {"native": "unsupported", "replay": "unsupported"},
         "image_generate": {
             "models": [
                 {"source_id": "src_xai00001", "model_id": "grok-imagine-image", **image},
@@ -330,7 +353,10 @@ def test_a_turn_freezes_its_tools_executors_and_image_enum_and_each_hop_states_i
         "native": "unsupported", "replay": "unsupported", "refused": True,
     }
     # Off, or with no image model available, a tool is not declared at all.
-    off = _config({"x_search": ModelHubHostedToolConfig(enabled=False)}, sources=[CLAUDE_SUB, OPENAI, GEMINI])
+    off = _config({
+        "x_search": ModelHubHostedToolConfig(enabled=False),
+        "web_fetch": ModelHubHostedToolConfig(enabled=False),
+    }, sources=[CLAUDE_SUB, OPENAI, GEMINI])
     turn = freeze_turn_tools(
         off, evidence=_evidence(tmp_path / "o", (OPENAI, "gpt-image-2", "image_generate", "call")), spec_for=_spec_for,
     )
@@ -352,7 +378,7 @@ def test_the_tools_read_states_saved_and_effective_values_and_what_real_use_show
     config = _config({"web_search": ModelHubHostedToolConfig(executor_order=("src_oai00001",))})
     status = hosted_tools_status(config, evidence=evidence, spec_for=_spec_for, image_price=lambda _source, _spec: None)
     by_name = {tool["name"]: tool for tool in status["tools"]}
-    assert list(by_name) == ["web_search", "x_search", "image_generate"]
+    assert list(by_name) == ["web_search", "x_search", "image_generate", "web_fetch"]
     web = by_name["web_search"]
     assert web["enabled"] is True and by_name["x_search"]["enabled"] is True
     assert web["executor_order"] == ["src_oai00001"]

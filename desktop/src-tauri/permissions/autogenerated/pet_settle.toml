@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pet-settle"
+description = "Enables the pet_settle command without any pre-configured scope."
+commands.allow = ["pet_settle"]
+
+[[permission]]
+identifier = "deny-pet-settle"
+description = "Denies the pet_settle command without any pre-configured scope."
+commands.deny = ["pet_settle"]
