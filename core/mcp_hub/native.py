@@ -209,7 +209,12 @@ def _to_native(source: str, definition: dict[str, Any], previous: Any, path: Pat
             return entry
         entry.update(command=transport["command"], args=list(transport.get("args") or []))
         if transport.get("env"):
-            env_names = set(kept.get("env_vars") or []) if isinstance(kept.get("env_vars"), list) else set()
+            raw_names = kept.get("env_vars") if isinstance(kept.get("env_vars"), list) else []
+            env_names = {
+                item if isinstance(item, str) else item.get("name")
+                for item in raw_names
+                if isinstance(item, str) or isinstance(item, dict) and isinstance(item.get("name"), str)
+            }
             explicit = kept.get("env") if isinstance(kept.get("env"), dict) else {}
             entry["env"] = {
                 key: value

@@ -1759,7 +1759,7 @@ def apply_resource_governance(resource_governor: Any | None, pid: int | None) ->
         apply_to_pid(pid, label="opencode serve")
 
 
-def _launch_environment(spec: OpenCodeLaunchSpec, overlay_path: Optional[Path]) -> dict[str, str]:
+async def _launch_environment(spec: OpenCodeLaunchSpec, overlay_path: Optional[Path]) -> dict[str, str]:
     env = os.environ.copy()
     env[DESKTOP_ROLE_ENV] = DESKTOP_OPENCODE_ROLE
     env["OPENCODE_ENABLE_EXA"] = "1"
@@ -1778,7 +1778,7 @@ def _launch_environment(spec: OpenCodeLaunchSpec, overlay_path: Optional[Path]) 
     # removes OpenCode's independently assembled native Catalog.
     env["OPENCODE_CONFIG_CONTENT"] = _managed_runtime_config_content(
         env.get("OPENCODE_CONFIG_CONTENT"),
-        opencode_disabled_mcp(),
+        await asyncio.to_thread(opencode_disabled_mcp),
     )
     return env
 
@@ -1835,7 +1835,7 @@ async def start_generation(
         overlay_path = generation_records_dir() / f"{generation_id}.overlay.json"
         overlay_path.parent.mkdir(parents=True, exist_ok=True)
         write_atomic(overlay_path, spec.overlay_file_content or spec.overlay_inline_content.encode())
-    env = _launch_environment(spec, overlay_path)
+    env = await _launch_environment(spec, overlay_path)
     exited_pid: int | None = None
     exit_code: int | None = None
     # A process that survives its stop keeps its record and overlay; its

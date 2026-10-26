@@ -175,6 +175,16 @@ def test_codex_env_var_edit_is_written_as_explicit_env(native_files, monkeypatch
     assert stored["env"]["TOKEN"] == "new"
 
 
+def test_codex_env_var_object_shape_survives_replace(native_files, monkeypatch):
+    _claude, codex, _opencode = native_files
+    monkeypatch.setenv("TOKEN", "old")
+    codex.write_text(CODEX + '\n[mcp_servers.object-env]\ncommand = "srv"\nenv_vars = [{name = "TOKEN", source = "local"}]\n')
+    definition = repository.read_definition("object-env")
+    native.write(definition)
+    stored = tomllib.loads(codex.read_text())["mcp_servers"]["object-env"]
+    assert stored["env_vars"] == [{"name": "TOKEN", "source": "local"}]
+
+
 def test_opencode_local_cwd_is_resolved_from_native_file(native_files):
     _claude, _codex, opencode = native_files
     data = json.loads(opencode.read_text())
