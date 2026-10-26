@@ -31,6 +31,11 @@ _MAX_OBSERVED_OPAQUE_BYTES = 512 * 1024
 _MAX_IDENTITIES_PER_FINGERPRINT = 2
 _TYPE_FIELD = "type"
 
+# The finite protocol-owned opaque slots are mirrored by observation and filtering:
+# Anthropic thinking.signature / redacted_thinking.data; Responses reasoning.encrypted_content;
+# Chat reasoning_details.signature|data|encrypted_content and tool_calls[].extra_content.google.thought_signature;
+# Google model content parts[].thoughtSignature. Nested arguments, results, schemas, and user data are never slots.
+
 
 def _event_type(value: Any) -> Any:
     """Read event/item type without treating it as an error-envelope extractor."""
@@ -116,18 +121,6 @@ class OpaqueProvenanceRegistry:
             self._records.move_to_end(fingerprint)
             return True
 
-    def snapshot_metadata(self) -> dict[str, Any]:
-        """Testing/diagnostic metadata; no opaque value is returned."""
-
-        with self._lock:
-            self._expire_locked(time.monotonic())
-            return {
-                "size": len(self._records),
-                "max_entries": self.max_entries,
-                "fingerprints": tuple(self._records),
-                "identity_counts": tuple(sorted(len(item.identities) for item in self._records.values())),
-            }
-
     def begin_response(self, protocol: str, identity: str | None) -> "OpaqueResponseObserver":
         return OpaqueResponseObserver(self, protocol, identity)
 
@@ -141,13 +134,12 @@ class _StagedOpaque:
 @dataclass
 class _BufferedOpaqueScope:
     kind: str | None = None
-    has_function_call: bool = False
-    thought: bool = False
     pending: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
 class _BufferedGoogleContent:
+    role: str | None = None
     parts: list[_BufferedOpaqueScope] = field(default_factory=list)
 
 
@@ -261,10 +253,12 @@ class OpaqueResponseObserver:
         scope.pending.append((slot, value))
         self._buffered_pending_bytes += value_bytes
 
-    def _flush_buffered(self, scope: _BufferedOpaqueScope) -> None:
+    def _flush_buffered(self, scope: _BufferedOpaqueScope, *, suffix: str | None = None) -> None:
         for slot, value in scope.pending:
-            self._buffered_pending_bytes -= len(value.encode("utf-8"))
-            self._stage(value, slot=slot, fragment=False)
+            value_bytes = len(value.encode("utf-8"))
+            self._buffered_pending_bytes -= value_bytes
+            if suffix is None or slot.endswith(suffix):
+                self._stage(value, slot=slot, fragment=False)
         scope.pending.clear()
 
     def _discard_buffered(self, scope: _BufferedOpaqueScope) -> None:
@@ -310,10 +304,10 @@ class OpaqueResponseObserver:
             elif prefix == "content.item" and event == "end_map":
                 scope = self._buffered_anthropic_item
                 if scope is not None:
-                    if (scope.kind == "thinking" and any(slot.endswith(".signature") for slot, _ in scope.pending)) or (
-                        scope.kind == "redacted_thinking" and any(slot.endswith(".data") for slot, _ in scope.pending)
-                    ):
-                        self._flush_buffered(scope)
+                    if scope.kind == "thinking":
+                        self._flush_buffered(scope, suffix=".signature")
+                    elif scope.kind == "redacted_thinking":
+                        self._flush_buffered(scope, suffix=".data")
                     else:
                         self._discard_buffered(scope)
                 self._buffered_anthropic_item = None
@@ -327,14 +321,11 @@ class OpaqueResponseObserver:
         if self.protocol == "google":
             if prefix == "candidates.item.content" and event == "start_map":
                 self._buffered_google_content = _BufferedGoogleContent()
+            elif prefix == "candidates.item.content.role" and event == "string":
+                if self._buffered_google_content is not None:
+                    self._buffered_google_content.role = value
             elif prefix == "candidates.item.content.parts.item" and event == "start_map":
                 self._buffered_google_part = _BufferedOpaqueScope()
-            elif prefix == "candidates.item.content.parts.item.functionCall" and event == "start_map":
-                if self._buffered_google_part is not None:
-                    self._buffered_google_part.has_function_call = True
-            elif prefix == "candidates.item.content.parts.item.thought" and event == "boolean":
-                if self._buffered_google_part is not None:
-                    self._buffered_google_part.thought = value is True
             elif prefix == "candidates.item.content.parts.item.thoughtSignature" and event == "string":
                 if self._buffered_google_part is not None:
                     self._hold_buffered(self._buffered_google_part, prefix, value)
@@ -347,7 +338,7 @@ class OpaqueResponseObserver:
                 content = self._buffered_google_content
                 if content is not None:
                     for part in content.parts:
-                        if part.thought or part.has_function_call:
+                        if content.role == "model":
                             self._flush_buffered(part)
                         else:
                             self._discard_buffered(part)
@@ -406,6 +397,17 @@ def _response_is_terminal(protocol: str, payload: Any) -> bool:
     if protocol == "openai_chat":
         return False
     return False
+
+
+def _google_model_content(value: Any) -> bool:
+    return isinstance(value, Mapping) and value.get("role") == "model"
+
+
+def _google_model_part_signature(value: Any) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    signature = value.get("thoughtSignature")
+    return signature if isinstance(signature, str) else None
 
 
 def _response_opaque_values(protocol: str, payload: Any) -> list[tuple[str, str, bool]]:
@@ -503,17 +505,14 @@ def _response_opaque_values(protocol: str, payload: Any) -> list[tuple[str, str,
         if isinstance(candidates, list):
             for candidate_index, candidate in enumerate(candidates):
                 content = candidate.get("content") if isinstance(candidate, Mapping) else None
-                if not isinstance(content, Mapping) or content.get("role") != "model":
+                if not _google_model_content(content):
                     continue
                 parts = content.get("parts")
                 if isinstance(parts, list):
                     for part_index, part in enumerate(parts):
-                        if (
-                            isinstance(part, Mapping)
-                            and isinstance(part.get("thoughtSignature"), str)
-                            and (part.get("thought") is True or isinstance(part.get("functionCall"), Mapping))
-                        ):
-                            values.append((f"google:{candidate_index}:{part_index}", part["thoughtSignature"], False))
+                        signature = _google_model_part_signature(part)
+                        if signature is not None:
+                            values.append((f"google:{candidate_index}:{part_index}", signature, False))
     return values
 
 
@@ -609,6 +608,17 @@ def _filter_responses_input(items: list[Any], registry: OpaqueProvenanceRegistry
     return output
 
 
+def _portable_chat_reasoning_detail(detail: Mapping[str, Any]) -> list[dict[str, str]]:
+    portable: list[dict[str, str]] = []
+    text = detail.get("text")
+    if isinstance(text, str) and text:
+        portable.append({"type": "reasoning.text", "text": text})
+    summary = detail.get("summary")
+    if isinstance(summary, str) and summary:
+        portable.append({"type": "reasoning.summary", "summary": summary})
+    return portable
+
+
 def _filter_chat_messages(messages: list[Any], registry: OpaqueProvenanceRegistry, identity: str | None) -> list[Any]:
     output: list[Any] = []
     for message in messages:
@@ -624,10 +634,14 @@ def _filter_chat_messages(messages: list[Any], registry: OpaqueProvenanceRegistr
                     kept_details.append(detail)
                     continue
                 kept = dict(detail)
+                rejected_opaque = False
                 for key in ("signature", "data", "encrypted_content"):
                     if key in kept and not _accepted(registry, "openai_chat", kept[key], identity):
                         kept.pop(key, None)
-                if kept:
+                        rejected_opaque = True
+                if rejected_opaque:
+                    kept_details.extend(_portable_chat_reasoning_detail(kept))
+                elif kept:
                     kept_details.append(kept)
             item["reasoning_details"] = kept_details
         tool_calls = item.get("tool_calls")
@@ -653,19 +667,15 @@ def _filter_google_contents(contents: list[Any], registry: OpaqueProvenanceRegis
             continue
         item = copy.deepcopy(dict(content))
         parts = item.get("parts")
-        if isinstance(parts, list):
+        if isinstance(parts, list) and _google_model_content(item):
             kept = []
             for part in parts:
-                if (
-                    isinstance(part, Mapping)
-                    and "thoughtSignature" in part
-                    and (part.get("thought") is True or isinstance(part.get("functionCall"), Mapping))
-                ):
-                    if not _accepted(registry, "google", part.get("thoughtSignature"), identity):
-                        part = dict(part)
-                        part.pop("thoughtSignature", None)
-                        if part.get("thought") is True and not isinstance(part.get("functionCall"), Mapping):
-                            part.pop("thought", None)
+                signature = _google_model_part_signature(part)
+                if signature is not None and not _accepted(registry, "google", signature, identity):
+                    part = dict(part)
+                    part.pop("thoughtSignature", None)
+                    if part.get("thought") is True and not isinstance(part.get("functionCall"), Mapping):
+                        part.pop("thought", None)
                 kept.append(part)
             item["parts"] = kept
         output.append(item)

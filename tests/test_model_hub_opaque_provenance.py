@@ -218,9 +218,62 @@ def test_bounded_eviction_and_process_restart_are_unknown(registry: OpaqueProven
     assert not small.accepts("anthropic", "second", "B")
     assert not small.accepts("anthropic", "second", "C")
     assert not OpaqueProvenanceRegistry().accepts("anthropic", "second", "A")
-    metadata = small.snapshot_metadata()
-    assert "first" not in json.dumps(metadata)
-    assert "second" not in json.dumps(metadata)
+
+
+def test_unknown_chat_encrypted_detail_is_removed_without_readable_fallback() -> None:
+    """Rejected encrypted reasoning shells must not reach the upstream adapter."""
+
+    payload = {
+        "messages": [
+            {
+                "role": "assistant",
+                "reasoning_details": [
+                    {
+                        "type": "reasoning.encrypted",
+                        "id": "foreign-detail",
+                        "format": "opaque-v1",
+                        "data": "foreign-ciphertext",
+                        "index": 3,
+                    }
+                ],
+            }
+        ]
+    }
+
+    assert filter_opaque_history(payload, protocol="openai_chat", identity="B", registry=OpaqueProvenanceRegistry()) == {
+        "messages": [{"role": "assistant", "reasoning_details": []}]
+    }
+
+
+def test_rejected_chat_encrypted_detail_keeps_readable_text() -> None:
+    payload = {
+        "messages": [
+            {
+                "role": "assistant",
+                "reasoning_details": [
+                    {
+                        "type": "reasoning.encrypted",
+                        "id": "foreign-detail",
+                        "data": "foreign-ciphertext",
+                        "text": "portable reasoning",
+                        "summary": "portable summary",
+                    }
+                ],
+            }
+        ]
+    }
+
+    assert filter_opaque_history(payload, protocol="openai_chat", identity="B", registry=OpaqueProvenanceRegistry()) == {
+        "messages": [
+            {
+                "role": "assistant",
+                "reasoning_details": [
+                    {"type": "reasoning.text", "text": "portable reasoning"},
+                    {"type": "reasoning.summary", "summary": "portable summary"},
+                ],
+            }
+        ]
+    }
 
 
 def test_buffered_and_streaming_observation_commit_only_complete_responses(
@@ -383,22 +436,32 @@ def test_tool_call_opaque_metadata_is_exact_and_independent_of_arguments() -> No
     assert request["messages"][0]["tool_calls"][1]["extra_content"]["google"]["thought_signature"] == "foreign-signature"
 
 
-def test_google_function_call_signature_is_filtered_without_touching_tool_data() -> None:
-    """MH-OPAQUE-SHAPE-003: Google call signatures are opaque on model parts, not in user data."""
+def test_google_model_part_signature_is_filtered_without_touching_nested_user_data() -> None:
+    """MH-OPAQUE-SHAPE-003: every model Part owns its direct signature field."""
 
     registry = OpaqueProvenanceRegistry()
     registry.observe("google", "google-known", "A")
+    registry.observe("google", "google-foreign", "B")
+    registry.observe("google", "google-ambiguous", "A")
+    registry.observe("google", "google-ambiguous", "B")
     request = {
         "contents": [
             {
                 "role": "model",
                 "parts": [
-                    {"functionCall": {"name": "echo", "args": {"signature": "user-data"}}, "thoughtSignature": "google-known"},
-                    {"functionCall": {"name": "echo", "args": {"signature": "user-data"}}, "thoughtSignature": "foreign-signature"},
-                    {"text": "visible", "thought": True, "thoughtSignature": "unknown-thought"},
+                    {"text": "visible", "thoughtSignature": "google-known"},
+                    {"text": "", "thoughtSignature": "google-foreign"},
+                    {"inlineData": {"mimeType": "image/png", "data": "image-data"}, "thoughtSignature": "google-ambiguous"},
+                    {"functionCall": {"name": "echo", "args": {"signature": "user-data"}}, "thoughtSignature": "unknown-signature"},
                 ],
             },
-            {"role": "user", "parts": [{"functionResponse": {"name": "echo", "response": {"signature": "user-data"}}, "thoughtSignature": "user-data"}]},
+            {
+                "role": "user",
+                "parts": [{
+                    "functionResponse": {"name": "echo", "response": {"signature": "user-data"}},
+                    "thoughtSignature": "user-data",
+                }],
+            },
         ],
     }
     filtered = filter_opaque_history(
@@ -409,12 +472,19 @@ def test_google_function_call_signature_is_filtered_without_touching_tool_data()
             {
                 "role": "model",
                 "parts": [
-                    {"functionCall": {"name": "echo", "args": {"signature": "user-data"}}, "thoughtSignature": "google-known"},
+                    {"text": "visible", "thoughtSignature": "google-known"},
+                    {"text": ""},
+                    {"inlineData": {"mimeType": "image/png", "data": "image-data"}},
                     {"functionCall": {"name": "echo", "args": {"signature": "user-data"}}},
-                    {"text": "visible"},
                 ],
             },
-            {"role": "user", "parts": [{"functionResponse": {"name": "echo", "response": {"signature": "user-data"}}, "thoughtSignature": "user-data"}]},
+            {
+                "role": "user",
+                "parts": [{
+                    "functionResponse": {"name": "echo", "response": {"signature": "user-data"}},
+                    "thoughtSignature": "user-data",
+                }],
+            },
         ],
     }
 
@@ -454,6 +524,9 @@ def test_buffered_observation_uses_exact_protocol_paths_and_block_types() -> Non
     google.observe_buffered(json.dumps({
         "candidates": [
             {"content": {"role": "model", "parts": [
+                {"text": "Visible answer", "thoughtSignature": "google-text-opaque"},
+                {"text": "", "thoughtSignature": "google-empty-opaque"},
+                {"inlineData": {"mimeType": "image/png", "data": "synthetic-image-data"}, "thoughtSignature": "google-image-opaque"},
                 {"functionCall": {"name": "echo", "args": {}}, "thoughtSignature": "google-call-opaque"},
             ]}},
             {"content": {"role": "user", "parts": [
@@ -469,7 +542,14 @@ def test_buffered_observation_uses_exact_protocol_paths_and_block_types() -> Non
     chat_stream.finish(complete=True)
 
     google_stream = registry.begin_response("google", "A")
-    google_stream.feed(b'data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"echo","args":{}},"thoughtSignature":"google-stream-opaque"}]}}]}\n\n')
+    google_stream.feed(('data: ' + json.dumps({
+        "candidates": [{"content": {"role": "model", "parts": [
+            {"text": "Visible answer", "thoughtSignature": "google-stream-text"},
+            {"text": "", "thoughtSignature": "google-stream-empty"},
+            {"inlineData": {"mimeType": "image/png", "data": "stream-image-data"}, "thoughtSignature": "google-stream-image"},
+            {"functionCall": {"name": "echo", "args": {}}, "thoughtSignature": "google-stream-call"},
+        ]}}],
+    }) + '\n\n').encode())
     google_stream.finish(complete=True)
 
     assert registry.accepts("anthropic", "anthropic-opaque", "A")
@@ -478,9 +558,32 @@ def test_buffered_observation_uses_exact_protocol_paths_and_block_types() -> Non
     assert not registry.accepts("openai_responses", "function-field", "A")
     assert registry.accepts("openai_chat", "chat-tool-opaque", "A")
     assert registry.accepts("openai_chat", "chat-stream-opaque", "A")
+    assert registry.accepts("google", "google-text-opaque", "A")
+    assert registry.accepts("google", "google-empty-opaque", "A")
+    assert registry.accepts("google", "google-image-opaque", "A")
     assert registry.accepts("google", "google-call-opaque", "A")
+    assert registry.accepts("google", "google-stream-text", "A")
+    assert registry.accepts("google", "google-stream-empty", "A")
+    assert registry.accepts("google", "google-stream-image", "A")
+    assert registry.accepts("google", "google-stream-call", "A")
     assert not registry.accepts("google", "google-user-field", "A")
-    assert registry.accepts("google", "google-stream-opaque", "A")
+
+
+def test_buffered_anthropic_observation_commits_only_the_item_owned_field() -> None:
+    registry = OpaqueProvenanceRegistry()
+    observer = registry.begin_response("anthropic", "A")
+    observer.observe_buffered(json.dumps({
+        "content": [
+            {"type": "thinking", "signature": "thinking-signature", "data": "thinking-data"},
+            {"type": "redacted_thinking", "signature": "redacted-signature", "data": "redacted-data"},
+        ],
+    }).encode())
+    observer.finish(complete=True)
+
+    assert registry.accepts("anthropic", "thinking-signature", "A")
+    assert not registry.accepts("anthropic", "thinking-data", "A")
+    assert not registry.accepts("anthropic", "redacted-signature", "A")
+    assert registry.accepts("anthropic", "redacted-data", "A")
 
 
 def test_responses_orphan_reasoning_is_rerendered_as_visible_summary() -> None:
