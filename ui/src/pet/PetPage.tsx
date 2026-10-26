@@ -367,8 +367,10 @@ const PetSurface: React.FC = () => {
   // hover while its window is not key, and the pet never takes focus itself.
   const [hovered, setHovered] = useState(false);
   const [hoverSuppressed, setHoverSuppressed] = useState(false);
+  const shellHoveredRef = useRef(false);
   const hoverSuppressedRef = useRef(false);
   const handlePetHover = useCallback((next: boolean) => {
+    shellHoveredRef.current = next;
     if (next && hoverSuppressedRef.current) {
       setHovered(false);
       return;
@@ -627,7 +629,8 @@ const PetSurface: React.FC = () => {
   useLayoutEffect(() => { dockActiveRef.current = voice.busy || composing; }, [voice.busy, composing]);
   const suppressDock = useCallback(() => {
     if (dockActiveRef.current) return;
-    hoverSuppressedRef.current = true;
+    // The shell emits transitions only; an already-outside pointer can enter next.
+    hoverSuppressedRef.current = shellHoveredRef.current;
     setHoverSuppressed(true);
     setHovered(false);
     avatarRef.current?.blur();

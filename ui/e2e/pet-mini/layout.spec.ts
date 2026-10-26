@@ -1284,6 +1284,27 @@ for (const initiallyOpen of [false, true]) {
   });
 }
 
+test('idle dock recovers on the first shell enter when the pointer left before blur', async ({ page }) => {
+  await page.goto('/e2e/pet-mini/fixture.html?main=false&activities=0&asr=1');
+  const avatar = page.locator('.pet-mini-avatar-button');
+  const dock = page.locator('.pet-mini-dock');
+  await avatar.hover();
+  await avatar.focus();
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: true } })));
+  await expect(dock).toHaveCSS('opacity', '1');
+  await page.mouse.move(0, 0);
+  await page.evaluate(() => {
+    window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: false } }));
+    window.dispatchEvent(new Event('blur'));
+  });
+  await expect(dock).toHaveCSS('opacity', '0');
+  await expect(avatar).not.toBeFocused();
+  // No additional leave or window focus: the first shell enter must recover.
+  await page.evaluate(() => window.dispatchEvent(new CustomEvent('avibe:pet-hover', { detail: { hover: true } })));
+  await expect(dock).toHaveCSS('opacity', '1');
+  await expect(dock).toHaveCSS('pointer-events', 'auto');
+});
+
 for (const theme of ['light', 'dark']) {
   for (const cause of ['double-click', 'blur']) {
     test(`idle dock hides after ${cause} until shell leave/re-enter (${theme})`, async ({ page }, testInfo) => {

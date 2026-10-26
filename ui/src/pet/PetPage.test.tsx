@@ -1913,6 +1913,35 @@ describe('desktop mini v2 interaction contract', () => {
     expect(wrap.classList.contains('is-hovered')).toBe(true);
   });
 
+  it.each(['blur', 'open'])('restores the idle dock on the first enter when already outside before %s', async (cause) => {
+    mainSession('S'); render(<PetPage />);
+    const avatar = await screen.findByLabelText('pet.recentTurns');
+    const wrap = avatar.closest('.pet-mini-avatar-wrap')!;
+    const hover = (value: boolean) => act(() => {
+      window.dispatchEvent(new CustomEvent(PET_HOVER_EVENT, { detail: { hover: value } }));
+    });
+    hover(true);
+    if (cause === 'open') {
+      const opened = deferred<void>();
+      const { petBridge } = await import('./petBridge');
+      vi.spyOn(petBridge, 'open').mockReturnValue(opened.promise);
+      await userEvent.dblClick(avatar);
+      // The pointer leaves while the session handoff is still pending.
+      hover(false);
+      act(() => window.dispatchEvent(new Event('blur')));
+      await act(async () => opened.resolve());
+    } else {
+      hover(false);
+      act(() => window.dispatchEvent(new Event('blur')));
+    }
+    expect(wrap.classList.contains('is-hovered')).toBe(false);
+    expect(wrap.classList.contains('is-hover-suppressed')).toBe(true);
+    // The shell emits transitions only: no second false arrives before enter.
+    hover(true);
+    expect(wrap.classList.contains('is-hover-suppressed')).toBe(false);
+    expect(wrap.classList.contains('is-hovered')).toBe(true);
+  });
+
   it('keeps the typing dock active through a double-click and window blur', async () => {
     mainSession('S'); render(<PetPage />);
     await userEvent.click(await screen.findByLabelText('pet.keyboard.open'));

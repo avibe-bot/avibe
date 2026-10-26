@@ -373,7 +373,9 @@ Known data limitations for P1:
   Opening the session, or losing the pet window's key while neither dictating
   nor typing, clears the hover state and blurs Vibey. The page suppresses the
   dock while the shell still reports the pointer over Vibey; the next
-  `hover: false` arms it again, and a later `hover: true` shows it. CSS
+  `hover: false` arms it again, and a later `hover: true` shows it. If the
+  shell already reported `hover: false` before suppression, the first new
+  `hover: true` restores the dock without requiring another leave. CSS
   `:hover` and focus cannot bypass this suppression. The dock remains visible
   while dictation, finishing, or typing is active. A double-click's first
   press does not open history, so it does not mark a lingering reply as seen;
@@ -419,7 +421,8 @@ Known data limitations for P1:
     enters or leaves them, and the page shows the dock while it is set. CSS
     `:hover` still applies where the webview does see hover, except while the
     idle dock is suppressed after opening Avibe or losing key. In that case
-    it stays hidden until the shell reports a leave followed by a new enter,
+    it stays hidden until the shell reports a leave followed by a new enter
+    (or just a new enter if the pointer was already outside),
     even while the pet window remains unfocused.
   - It stays visible while dictating or typing, and is always visible on
     devices without hover (`@media (hover: none)`).
