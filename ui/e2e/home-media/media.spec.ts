@@ -41,6 +41,8 @@ test('draft files follow final project and Agent selection through picker cancel
   await page.getByRole('dialog').getByRole('button', { name: en.workbench.newProjectDialog.create, exact: true }).click();
   await expect(projectChip('另一个项目')).toHaveClass(/bg-mint-soft/);
   await page.getByRole('button', { name: /codex/ }).first().click();
+  // The composer's picker keeps Agents one level below its model page.
+  await page.getByRole('button', { name: /^Agent/ }).click();
   await page.getByRole('button', { name: /^claude/ }).click();
   await page.keyboard.press('Escape');
   await page.getByTestId('settings-entry').click();
@@ -143,12 +145,12 @@ for (const width of [320, 375, 390, 1366, 1600]) {
       await expect(page.getByRole('heading', { name: copy.workbench.home.heroTitle })).toBeVisible();
       await expect(page.getByRole('button', { name: copy.chat.compose.voice, exact: true })).toBeVisible();
       expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
-      // The home now uses the composer's single-row box, the same one the chat
-      // page uses, and that mode gives its controls a 28x36 target of their own.
-      // Fixed numbers either way: the control must not shrink or stretch with
-      // the viewport, the language or the theme.
+      // The home uses the composer's two-row box, the same one the chat page
+      // uses, and that box gives Attach a 36x36 target of its own on the action
+      // row. Fixed numbers either way: the control must not shrink or stretch
+      // with the viewport, the language or the theme.
       const attachBox = await page.getByRole('button', { name: copy.chat.compose.attach }).boundingBox();
-      expect(attachBox?.width).toBe(28);
+      expect(attachBox?.width).toBe(36);
       expect(attachBox?.height).toBe(36);
       await page.getByRole('button', { name: copy.chat.compose.attach }).focus();
       await expect(page.getByRole('button', { name: copy.chat.compose.attach })).toBeFocused();

@@ -116,7 +116,10 @@ test('C-SETTINGS-02: preserves picked Agent/workspace, Unicode draft and history
   await workspace.click();
   const agent = page.getByRole('button', { name: /codex|claude/ }).first();
   await agent.click();
-  await page.locator('[data-radix-popper-content-wrapper]').getByRole('button', { name: 'claude', exact: true }).click();
+  // The composer's picker keeps Agents one level below its model page.
+  const menu = page.locator('[data-radix-popper-content-wrapper]');
+  await menu.getByRole('button', { name: /^Agent/ }).click();
+  await menu.getByRole('button', { name: /^claude/ }).click();
   await expect(agent).toContainText('claude');
   await textarea(page).evaluate((node) => { node.setAttribute('data-origin-instance', 'preserved'); });
   const index = await page.evaluate(() => window.history.state.idx);
