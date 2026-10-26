@@ -96,9 +96,7 @@ def definition_from_provider(name: str, server: object, *, description: object =
     validate_name(name)
     if not isinstance(server, dict):
         raise _invalid("server", f"mcpServers.{name} must be an object.")
-    unknown = sorted(set(server) - _PROVIDER_FIELDS)
-    if unknown:
-        raise _invalid(unknown[0], f"Unsupported field {unknown[0]!r}.")
+    # Backend-owned extras (env_vars, timeouts, …) are ignored, not rejected.
     kind = server.get("type")
     if kind == "sse":
         raise McpHubError(

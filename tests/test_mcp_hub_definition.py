@@ -70,7 +70,6 @@ def test_provider_type_spellings_and_ignored_enabled():
          "invalid_definition", "headers.Authorization"),
         ({"command": "x", "env": {"K": "${HOME:-/tmp}"}}, "invalid_definition", "env.K"),
         ({"command": "x", "cwd": "relative/dir"}, "invalid_definition", "cwd"),
-        ({"command": "x", "timeout": 5}, "invalid_definition", "timeout"),
         ({"url": "https://example.invalid/mcp", "args": ["a"]}, "invalid_definition", "args"),
     ],
 )

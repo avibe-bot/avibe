@@ -135,6 +135,31 @@ enabled = false
     assert repository.read_definition("computer-use")["transport"]["cwd"] == str(codex.parent)
 
 
+def test_codex_backend_extras_are_ignored_not_errors(native_files):
+    _claude, codex, _opencode = native_files
+    extra = '''
+[mcp_ mar servers.node_repl]
+command = "/bin/node_repl"
+args = []
+startup_timeout_sec = 120
+env_ mar vars = ["BROWSER_USE_ACCESS_EXECUTOR_ID"]
+
+[mcp_servers.node_repl.env]
+CODEX_HOME = "/tmp/codex"
+'''
+    extra = extra.replace('mcp_ mar servers', 'mcp_servers').replace('env_ mar vars', 'env_vars')
+    before = CODEX + extra
+    codex.write_text(before)
+    summary = {item["name"]: item for item in repository.list_packages()}["node_repl"]
+    assert summary["status"] == "draft" and "error" not in summary
+    transport = repository.read_definition("node_repl")["transport"]
+    assert transport["command"] == "/bin/node_repl" and transport["env"] == {"CODEX_HOME": "/tmp/codex"}
+    native.write(repository.read_definition("node_repl"))
+    stored = tomllib.loads(codex.read_text())["mcp_servers"]["node_repl"]
+    assert stored["startup_timeout_sec"] == 120
+    assert stored["env_vars"] == ["BROWSER_USE_ACCESS_EXECUTOR_ID"]
+
+
 def test_natively_disabled_entry_generates_like_any_draft(native_files, runtime):
     import sys
     from pathlib import Path

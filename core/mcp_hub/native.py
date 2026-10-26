@@ -32,7 +32,7 @@ CLAUDE, CODEX, OPENCODE = "claude", "codex", "opencode"
 SOURCES = (CLAUDE, CODEX, OPENCODE)
 
 # Native keys that carry no connection meaning for the Hub; kept on rewrite.
-_CODEX_KEPT = {"enabled", "startup_timeout_sec", "startup_timeout_ms", "tool_timeout_sec", "enabled_tools", "disabled_tools"}
+_CODEX_KEPT = {"enabled", "startup_timeout_sec", "startup_timeout_ms", "tool_timeout_sec", "enabled_tools", "disabled_tools", "env_vars"}
 _OPENCODE_KEPT = {"enabled", "timeout"}
 
 
