@@ -1899,6 +1899,7 @@ class CLIProxyEngineAdapter:
                     raise
             except Exception:  # noqa: BLE001
                 pass
+        await self._keyless_exa_client.close()
         await asyncio.to_thread(self.supervisor.stop)
 
     async def status(self) -> EngineStatus:

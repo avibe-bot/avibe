@@ -8,6 +8,7 @@ settlement, C-1 serialization and metering; only the credential adapter is faked
 import asyncio
 import copy
 import json
+import logging
 import threading
 from dataclasses import replace
 from datetime import timedelta
@@ -426,8 +427,61 @@ async def test_keyless_overlapping_searches_settle_rate_limit_before_next_admiss
 
 
 @pytest.mark.asyncio
+async def test_failed_keyless_service_attempt_logs_redacted_transport_facts(tmp_path, monkeypatch, caplog):
+    service = owner(
+        tmp_path,
+        (),
+        include_keyless=True,
+        web={
+            "executor_order": [KEYLESS_EXA_SOURCE_ID],
+            "executor_order_kinds": {KEYLESS_EXA_SOURCE_ID: "service"},
+            "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
+        },
+    )
+    caplog.set_level(logging.WARNING, logger="core.handlers.model_hub.service_diagnostics")
+    response = wire(
+        200,
+        {"jsonrpc": "2.0", "id": 1, "error": {"code": -32001, "message": "secret query body"}},
+        headers={"x-avibe-mcp-phase": "tools_call"},
+    )
+    answers(monkeypatch, service, response)
+    await run(service, query="secret query")
+    records = [record for record in caplog.records if record.name == "core.handlers.model_hub.service_diagnostics"]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert records[0].levelno == logging.WARNING
+    assert "tool=web_search" in message
+    assert "source_id=src_exakeyless" in message
+    assert "service_id=exa/mcp" in message
+    assert "outcome=failed" in message
+    assert "error_code=service_unavailable" in message
+    assert "transport_cause=jsonrpc_error=-32001" in message
+    assert "elapsed_ms=" in message
+    assert "phase=tools_call" in message
+    assert "secret query" not in message and "secret query body" not in message
+
+
+@pytest.mark.asyncio
+async def test_failed_keyed_service_attempt_logs_http_status_without_body(tmp_path, monkeypatch, caplog):
+    service = owner(tmp_path, ("tavily",))
+    caplog.set_level(logging.WARNING, logger="core.handlers.model_hub.service_diagnostics")
+    answers(monkeypatch, service, wire(503, {"detail": "secret body for query"}))
+    await run(service, query="secret query")
+    records = [record for record in caplog.records if record.name == "core.handlers.model_hub.service_diagnostics"]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "tool=web_search" in message
+    assert "source_id=src_tavily01" in message
+    assert "service_id=tavily/search" in message
+    assert "error_code=service_unavailable" in message
+    assert "transport_cause=http_status=503" in message
+    assert "phase=" not in message
+    assert "secret query" not in message and "secret body for query" not in message
+
+
+@pytest.mark.asyncio
 async def test_keyless_queued_waiter_times_out_before_admission(tmp_path, monkeypatch):
-    """KEX-2: lock wait consumes the attempt budget and never sends a keyless request."""
+    """KEX-2: the capped semaphore wait consumes the attempt budget and never sends a fourth call."""
     service = owner(
         tmp_path,
         (),
@@ -438,18 +492,139 @@ async def test_keyless_queued_waiter_times_out_before_admission(tmp_path, monkey
             "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
         },
     )
-    monkeypatch.setattr(search_chain, "ATTEMPT_SECONDS", 0.01)
-    await service._keyless_exa_attempt_lock.acquire()
+    monkeypatch.setattr(search_chain, "KEYLESS_EXA_SEARCH_ATTEMPT_SECONDS", 0.01)
+    semaphore = service._keyless_exa_call_semaphore
+    for _ in range(3):
+        await semaphore.acquire()
     calls = answers(monkeypatch, service, wire())
     try:
         result = await run(service)
     finally:
-        service._keyless_exa_attempt_lock.release()
+        for _ in range(3):
+            semaphore.release()
     assert calls == []
     assert result["record"]["attempts"] == [{
         "source_id": KEYLESS_EXA_SOURCE_ID, "label": "Exa (free)", "kind": "service",
         "outcome": "skipped", "skipped": "unavailable",
     }]
+
+
+@pytest.mark.asyncio
+async def test_keyless_attempts_run_concurrently_up_to_the_small_cap(tmp_path, monkeypatch):
+    service = owner(
+        tmp_path,
+        (),
+        include_keyless=True,
+        web={
+            "executor_order": [KEYLESS_EXA_SOURCE_ID],
+            "executor_order_kinds": {KEYLESS_EXA_SOURCE_ID: "service"},
+            "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
+        },
+    )
+    monkeypatch.setattr(search_chain, "call_timeout", lambda tool: 1)
+    active = maximum = 0
+    entered = []
+
+    async def search(*args, on_sent):
+        nonlocal active, maximum
+        await on_sent()
+        active += 1
+        maximum = max(maximum, active)
+        entered.append(True)
+        await asyncio.sleep(0.05)
+        active -= 1
+        return wire()
+
+    monkeypatch.setattr(service.adapter, "search", search, raising=False)
+    results = await asyncio.gather(*(run(service, query=f"query-{index}") for index in range(4)))
+    assert all(result["record"]["status"] == "completed" for result in results)
+    assert len(entered) == 4
+    assert maximum == 3
+
+
+@pytest.mark.asyncio
+async def test_keyless_inflight_success_does_not_clear_a_published_shared_cooldown(tmp_path, monkeypatch):
+    service = owner(
+        tmp_path,
+        (),
+        include_keyless=True,
+        web={
+            "executor_order": [KEYLESS_EXA_SOURCE_ID],
+            "executor_order_kinds": {KEYLESS_EXA_SOURCE_ID: "service"},
+            "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
+        },
+    )
+    started = asyncio.Event()
+    first_release = asyncio.Event()
+    second_release = asyncio.Event()
+    calls = 0
+
+    async def search(*args, on_sent):
+        nonlocal calls
+        await on_sent()
+        calls += 1
+        index = calls
+        if calls == 2:
+            started.set()
+        if index == 1:
+            await first_release.wait()
+            return wire(503, {"error": {"message": "temporary"}})
+        await second_release.wait()
+        return wire()
+
+    monkeypatch.setattr(service.adapter, "search", search, raising=False)
+    first = asyncio.create_task(run(service, query="first"))
+    second = asyncio.create_task(run(service, query="second"))
+    await asyncio.wait_for(started.wait(), timeout=1)
+    first_release.set()
+    first_result = await first
+    source = model_hub_keyless_exa_source()
+    assert first_result["record"]["error_code"] == "service_unavailable"
+    assert service._service_cooldowns.until(source, KEYLESS_EXA_SERVICE_ID, NOW) is not None
+    second_release.set()
+    second_result = await second
+    assert second_result["record"]["status"] == "completed"
+    assert service._service_cooldowns.until(source, KEYLESS_EXA_SERVICE_ID, NOW) is not None
+    third = await run(service, query="after-cooldown")
+    assert third["record"]["attempts"][0]["skipped"] == "cooling"
+    assert calls == 2
+
+    service = owner(
+        tmp_path,
+        (),
+        include_keyless=True,
+        web={
+            "executor_order": [KEYLESS_EXA_SOURCE_ID],
+            "executor_order_kinds": {KEYLESS_EXA_SOURCE_ID: "service"},
+            "services": {KEYLESS_EXA_SOURCE_ID: {"enabled": True, "results": 3}},
+        },
+    )
+    success_release = asyncio.Event()
+    failure_started = asyncio.Event()
+    calls = 0
+
+    async def success_then_failure(*args, on_sent):
+        nonlocal calls
+        await on_sent()
+        calls += 1
+        if calls == 1:
+            await success_release.wait()
+            return wire()
+        failure_started.set()
+        return wire(503, {"error": {"message": "temporary"}})
+
+    monkeypatch.setattr(service.adapter, "search", success_then_failure, raising=False)
+    success = asyncio.create_task(run(service, query="success-first"))
+    failure = asyncio.create_task(run(service, query="failure-second"))
+    await asyncio.wait_for(failure_started.wait(), timeout=1)
+    failure_result = await failure
+    assert failure_result["record"]["error_code"] == "service_unavailable"
+    assert service._service_cooldowns.until(source, KEYLESS_EXA_SERVICE_ID, NOW) is not None
+    success_release.set()
+    success_result = await success
+    assert success_result["record"]["status"] == "completed"
+    assert service._service_cooldowns.until(source, KEYLESS_EXA_SERVICE_ID, NOW) is not None
+    assert (await run(service, query="after-success-settlement"))["record"]["attempts"][0]["skipped"] == "cooling"
 
 
 @pytest.mark.asyncio

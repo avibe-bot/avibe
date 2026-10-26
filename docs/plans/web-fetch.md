@@ -494,11 +494,14 @@ fetch transient cooldown is not model-routing health.
 
 ### 5.4 Keyless Exa and Jina
 
-**Exa:** reuse #2924 §§3/5/6/9 for identity, session lock, schema refresh,
-SSE/JSON-RPC parsing, deadlines, admission and shared cooldown. Fetch-specific
-failure scope in §6 explicitly overrides #2924 §5.3/§6's generic `isError` /
-cooldown classification, not the shared identity or cooldown used for genuine
-service failures.
+**Exa:** reuse #2924 §§3/5/6/9 for identity, session setup, schema cache,
+SSE/JSON-RPC parsing, deadlines, admission and shared cooldown. Session
+establishment (`initialize`, `notifications/initialized`, and `tools/list`) is
+single-flight, while `tools/call` requests run concurrently by JSON-RPC id
+under the small per-runtime keyless-call cap. Fetch-specific failure scope in
+§6 explicitly overrides #2924 §5.3/§6's generic `isError` / cooldown
+classification, not the shared identity or cooldown used for genuine service
+failures.
 Endpoint
 is `https://mcp.exa.ai/mcp?tools=web_search_advanced_exa,web_fetch_exa`; do not
 create another session keyed by tool or revert search to `web_search_exa`.

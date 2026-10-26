@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -11,6 +12,7 @@ import pytest
 
 from core.handlers.model_hub.adapter import SearchResponse
 from core.handlers.model_hub.search_services import ServiceCooldowns, map_response
+from core.handlers.model_hub.service_diagnostics import transport_cause
 from config.v2_config import model_hub_keyless_exa_source
 from vibe.model_hub_runtime.api_key_vendors import search_service
 from vibe.model_hub_runtime.keyless_exa_mcp import KeylessExaMcpClient
@@ -19,6 +21,11 @@ from vibe.model_hub_runtime.keyless_exa_mcp import KeylessExaMcpClient
 NOW = datetime(2026, 10, 24, 6, 0, tzinfo=timezone.utc)
 SERVICE = search_service("exa-mcp", "search")
 assert SERVICE is not None
+
+
+def test_service_diagnostics_reads_jsonrpc_error_from_sse_without_content() -> None:
+    body = b'event: message\ndata: {"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"secret body"}}\n\n'
+    assert transport_cause(SearchResponse(200, {}, body)) == "jsonrpc_error=-32001"
 
 
 def _rpc(request_id: int, result: object) -> dict:
@@ -56,7 +63,7 @@ async def _mcp_stub(
 
     async def handle(request: web.Request) -> web.StreamResponse:
         payload = await request.json()
-        calls.append({"headers": dict(request.headers), "payload": payload})
+        calls.append({"connection": id(request.transport), "headers": dict(request.headers), "payload": payload})
         method = payload["method"]
         request_id = payload.get("id")
         if method == "initialize":
@@ -135,6 +142,7 @@ async def test_keyless_mcp_negotiates_once_adapts_live_schema_and_maps_highlight
             },
             on_sent=lambda: sent.append(True),
         )
+        await client.close()
 
     assert [call["payload"]["method"] for call in calls] == [
         "initialize", "notifications/initialized", "tools/list", "tools/call",
@@ -177,9 +185,11 @@ async def test_fetch_reuses_search_mcp_session_and_sends_explicit_page_bound(sse
         await client.search({"query": "avibe", "numResults": 1, "enableHighlights": True, "textMaxCharacters": 1})
         sent = []
         response = await client.fetch({"urls": ["https://example.com/"], "maxCharacters": 48000}, on_sent=lambda: sent.append(True))
+        await client.close()
     assert [call["payload"]["method"] for call in calls] == [
-        "initialize", "notifications/initialized", "tools/list", "tools/call", "tools/list", "tools/call",
+        "initialize", "notifications/initialized", "tools/list", "tools/call", "tools/call",
     ]
+    assert len({call["connection"] for call in calls}) == 1
     assert calls[-1]["headers"]["Mcp-Session-Id"] == calls[-3]["headers"]["Mcp-Session-Id"]
     assert calls[-1]["payload"]["params"] == {
         "name": "web_fetch_exa", "arguments": {"urls": ["https://example.com/"], "maxCharacters": 48000},
@@ -205,7 +215,9 @@ async def test_fetch_incompatible_live_schema_or_arguments_never_send(variant):
         arguments.pop("urls")
     async with _mcp_stub(fetch_schema=schema) as (endpoint, calls):
         sent = []
-        response = await KeylessExaMcpClient(endpoint=endpoint).fetch(arguments, on_sent=lambda: sent.append(True))
+        client = KeylessExaMcpClient(endpoint=endpoint)
+        response = await client.fetch(arguments, on_sent=lambda: sent.append(True))
+        await client.close()
     assert response.error == "invalid_endpoint"
     assert sent == []
     assert [call["payload"]["method"] for call in calls] == ["initialize", "notifications/initialized", "tools/list"]
@@ -215,7 +227,9 @@ async def test_fetch_incompatible_live_schema_or_arguments_never_send(variant):
 async def test_keyless_mcp_does_not_continue_after_initialized_transport_error() -> None:
     """KEX-2: notification transport failures stop the handshake before tools/list."""
     async with _mcp_stub(notification_status=500) as (endpoint, calls):
-        response = await KeylessExaMcpClient(endpoint=endpoint).search({"query": "avibe"})
+        client = KeylessExaMcpClient(endpoint=endpoint)
+        response = await client.search({"query": "avibe"})
+        await client.close()
     assert response.http_status == 500
     assert [call["payload"]["method"] for call in calls] == ["initialize", "notifications/initialized"]
 
@@ -227,6 +241,7 @@ async def test_keyless_mcp_discards_session_after_invalid_initialization() -> No
         client = KeylessExaMcpClient(endpoint=endpoint)
         first = await client.search({"query": "first"})
         second = await client.search({"query": "second", "numResults": 1, "enableHighlights": True, "textMaxCharacters": 1})
+        await client.close()
     assert first.error == "connection"
     assert second.http_status == 200
     assert [call["payload"]["method"] for call in calls] == [
@@ -235,16 +250,35 @@ async def test_keyless_mcp_discards_session_after_invalid_initialization() -> No
 
 
 @pytest.mark.asyncio
-async def test_keyless_mcp_refreshes_tools_schema_for_each_search_on_one_session() -> None:
-    """KEX-2: a reused session still refreshes tools/list before every admitted search."""
+async def test_keyless_mcp_caches_tools_schema_for_warm_searches_on_one_session() -> None:
+    """KEX-2: a warm session caches tools/list until the server invalidates it."""
     async with _mcp_stub() as (endpoint, calls):
         client = KeylessExaMcpClient(endpoint=endpoint, client_version="test")
         arguments = {"query": "avibe", "numResults": 1, "enableHighlights": True, "textMaxCharacters": 1}
         await client.search(arguments)
         await client.search(arguments)
+        await client.close()
     assert [call["payload"]["method"] for call in calls] == [
-        "initialize", "notifications/initialized", "tools/list", "tools/call", "tools/list", "tools/call",
+        "initialize", "notifications/initialized", "tools/list", "tools/call", "tools/call",
     ]
+    assert len({call["connection"] for call in calls}) == 1
+
+
+@pytest.mark.asyncio
+async def test_keyless_mcp_parallel_calls_share_setup_but_not_tool_calls() -> None:
+    """KEX-2: setup is single-flight; independent JSON-RPC calls run concurrently."""
+    async with _mcp_stub() as (endpoint, calls):
+        client = KeylessExaMcpClient(endpoint=endpoint, client_version="test")
+        arguments = {"query": "avibe", "numResults": 1, "enableHighlights": True, "textMaxCharacters": 1}
+        responses = await asyncio.gather(client.search(arguments), client.search(arguments))
+        await client.close()
+    assert all(response.http_status == 200 for response in responses)
+    methods = [call["payload"]["method"] for call in calls]
+    assert methods[:3] == ["initialize", "notifications/initialized", "tools/list"]
+    assert methods.count("initialize") == methods.count("tools/list") == 1
+    tool_calls = [call for call in calls if call["payload"]["method"] == "tools/call"]
+    assert len(tool_calls) == 2
+    assert len({call["payload"]["id"] for call in tool_calls}) == 2
 
 
 @pytest.mark.asyncio
@@ -257,6 +291,7 @@ async def test_keyless_mcp_replays_one_stale_pre_tool_session_without_double_cou
             {"query": "avibe", "numResults": 1, "enableHighlights": True, "textMaxCharacters": 1},
             on_sent=lambda: admitted.append(True),
         )
+        await client.close()
     assert response.http_status == 200
     assert admitted == [True]
     assert [call["payload"]["method"] for call in calls] == [
@@ -269,7 +304,9 @@ async def test_keyless_mcp_replays_one_stale_pre_tool_session_without_double_cou
 async def test_keyless_mcp_rejects_a_schema_without_text_bound_before_tools_call() -> None:
     """KEX-2: a missing required highlight/text control is unavailable without sending a call."""
     async with _mcp_stub(missing="textMaxCharacters") as (endpoint, calls):
-        response = await KeylessExaMcpClient(endpoint=endpoint).search({"query": "avibe", "numResults": 3})
+        client = KeylessExaMcpClient(endpoint=endpoint)
+        response = await client.search({"query": "avibe", "numResults": 3})
+        await client.close()
     assert response.error == "invalid_endpoint"
     assert [call["payload"]["method"] for call in calls] == [
         "initialize", "notifications/initialized", "tools/list",

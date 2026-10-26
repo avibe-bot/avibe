@@ -27,7 +27,14 @@ from .hosted_executor import ExecutorCall, Failure, call_timeout, failed_record
 from .hosted_turn import ExecutorSlot, TurnHostedTools
 from .resolver import parse_model_hub_timestamp
 from .retry import source_identity
-from .search_services import ATTEMPT_SECONDS, ZERO, map_response, search_request
+from .search_services import (
+    ATTEMPT_SECONDS,
+    KEYLESS_EXA_SEARCH_ATTEMPT_SECONDS,
+    ZERO,
+    map_response,
+    search_request,
+)
+from .service_diagnostics import log_service_failure
 
 if TYPE_CHECKING:
     from .service import ModelHubService
@@ -218,23 +225,38 @@ class SearchChain:
 
     async def service_attempt(self, slot, source, catalog):
         loop = asyncio.get_running_loop()
-        attempt_deadline = loop.time() + max(0.0, min(ATTEMPT_SECONDS, self.deadline - loop.time()))
+        started_at = loop.time()
+        budget = KEYLESS_EXA_SEARCH_ATTEMPT_SECONDS if is_keyless_exa_source(source) else ATTEMPT_SECONDS
+        attempt_deadline = loop.time() + max(0.0, min(budget, self.deadline - loop.time()))
         if is_keyless_exa_source(source):
             remaining = max(0.0, attempt_deadline - loop.time())
             try:
-                await asyncio.wait_for(self.owner._keyless_exa_attempt_lock.acquire(), timeout=remaining)
+                await asyncio.wait_for(self.owner._keyless_exa_call_semaphore.acquire(), timeout=remaining)
             except asyncio.TimeoutError:
+                log_service_failure(
+                    tool=self.call.tool,
+                    source_id=slot.source_id,
+                    service_id=slot.model_id,
+                    outcome="failed",
+                    error_code="service_unavailable",
+                    response=SearchResponse(None, {}, None, "timeout"),
+                    elapsed_ms=round((loop.time() - started_at) * 1000),
+                )
                 return None, {
                     "source_id": slot.source_id, "label": source.display_name[:64],
                     "kind": "service", "outcome": "skipped", "skipped": "unavailable",
                 }
             try:
-                return await self._service_attempt_locked(slot, source, catalog, attempt_deadline=attempt_deadline)
+                return await self._service_attempt_locked(
+                    slot, source, catalog, attempt_deadline=attempt_deadline, started_at=started_at,
+                )
             finally:
-                self.owner._keyless_exa_attempt_lock.release()
-        return await self._service_attempt_locked(slot, source, catalog, attempt_deadline=attempt_deadline)
+                self.owner._keyless_exa_call_semaphore.release()
+        return await self._service_attempt_locked(
+            slot, source, catalog, attempt_deadline=attempt_deadline, started_at=started_at,
+        )
 
-    async def _service_attempt_locked(self, slot, source, catalog, *, attempt_deadline: float):
+    async def _service_attempt_locked(self, slot, source, catalog, *, attempt_deadline: float, started_at: float):
         from .service import _ExecutorAttempt
 
         owner = self.owner
@@ -354,6 +376,16 @@ class SearchChain:
                 # Stop is not a vendor failure. Keep billing/authentication facts
                 # but never infer an unreadable response or a retry deadline.
                 result = replace(result, cooling=False)
+            if not stopped and (result.record["status"] != "completed" or response.error == "timeout"):
+                log_service_failure(
+                    tool=self.call.tool,
+                    source_id=source.id,
+                    service_id=slot.model_id,
+                    outcome="failed",
+                    error_code=result.record.get("error_code") or "service_unavailable",
+                    response=response,
+                    elapsed_ms=round((asyncio.get_running_loop().time() - started_at) * 1000),
+                )
             # Queue first, synchronously; stopped calls cannot lose sent usage.
             write = owner.usage_writer.record_service(
                 source_id=source.id, service_id=slot.model_id, billable=result.billable,
@@ -366,14 +398,14 @@ class SearchChain:
                 current = source if keyless_source else next((s for s in previous.sources if s.id == source.id), None)
                 identity_current = keyless_source or (current is not None and source_identity(current) == source_identity(source))
                 health_current = not keyless_source and identity_current and owner._settlement_current(current, health_generation)
-                cooldown_current = identity_current and owner._service_cooldowns.current(current, slot.model_id, cooldown_generation)
+                cooldown_admitted = identity_current and owner._service_cooldowns.same_epoch(current, slot.model_id, cooldown_generation)
                 writes_health = result.blocker is not None or result.authenticated
                 writes_cooldown = result.cooling or result.record["status"] == "completed"
                 superseded = (
                     (health_generation is not None and writes_health and not health_current)
-                    or (cooldown_generation is not None and writes_cooldown and not cooldown_current)
+                    or (cooldown_generation is not None and writes_cooldown and not cooldown_admitted)
                 )
-                if cooldown_current:
+                if cooldown_admitted:
                     owner._service_cooldowns.settle(current, slot.model_id, cooldown_generation, result, response, ended_at)
                 if health_current:
                     state = current.state
