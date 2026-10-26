@@ -131,27 +131,87 @@ is not part of the application or private Runtime.
 - Intel macOS (`x86_64-apple-darwin`);
 - Windows x64 (`x86_64-pc-windows-msvc`).
 
-The manual macOS path is credential-gated; whichever state it produces is recorded
-in a target-qualified `.SIGNATURE` metadata file next to the artifact hashes:
+Windows NSIS artifacts remain unsigned acceptance builds; Authenticode is
+tracked in [#1976](https://github.com/avibe-bot/avibe/issues/1976). Windows ARM64
+stays outside the current product gate.
 
-- **With repository secrets configured** (`APPLE_CERTIFICATE` +
-  `APPLE_CERTIFICATE_PASSWORD`, `APPLE_API_KEY` + `APPLE_API_ISSUER` +
-  `APPLE_API_PRIVATE_KEY`, optional `APPLE_SIGNING_IDENTITY`) the workflow
-  Developer ID signs the .app, notarizes it through the App Store Connect
-  API key, staples the ticket, and verifies the produced signature
-  (`SIGNATURE: app-identity-signed`). The credential set must be complete —
-  a partially populated set fails the build rather than silently producing a
-  signed-but-unnotarized artifact.
-- **Without those secrets** the app inside the DMG is ad-hoc signed so macOS can
-  verify its complete app/resource structure; it has no trusted developer
-  identity. The outer DMG is unsigned and unnotarized.
+### macOS signing and notarization
 
-Two signing layers are deliberately NOT in this workflow yet and remain
-tracked release gates (see [#1976](https://github.com/avibe-bot/avibe/issues/1976)):
-signing/notarizing the outer DMG image itself, and signing the Mach-O
-binaries inside the embedded `runtime.zip` before archiving. Windows
-signing is likewise not yet implemented; NSIS artifacts remain unsigned
-acceptance builds. Windows ARM64 stays outside the current product gate.
+Every macOS tag build (`gh-vX.Y.ZrcN` TEST and `vX.Y.Z` stable) is Developer ID
+signed and notarized, and fails rather than publish an ad-hoc app. The
+`desktop-updater` Environment holds the Apple set: `APPLE_CERTIFICATE` (base64
+`.p12`), `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_TEAM_ID`,
+`APPLE_API_KEY`, `APPLE_API_ISSUER`, and `APPLE_API_PRIVATE_KEY` (the raw `.p8`
+App Store Connect key). `scripts/macos_signing.py` owns every step. Tauri seals
+the bundle ad hoc and never receives Apple credentials, so it cannot sign or
+notarize on its own.
+
+1. **Credentials.** The identity goes into a temporary runner keychain and the
+   notary key into a `0600` file; both are deleted when the job ends. A tag build
+   with a missing or partial set fails before anything is built. A manual build
+   accepts the complete set or none of it. `APPLE_TEAM_ID` must equal the pinned
+   Team.
+2. **Runtime.** `build-runtime-bundle.py` signs every Mach-O of the private
+   Runtime with the hardened runtime and a secure timestamp after compiling its
+   bytecode, and before the startup probe, `runtime.zip`, its manifest, and the
+   tree hash. The notary service opens nested archives, so one unsigned binary
+   there rejects the whole app. Libraries carry no entitlements. Python and Node
+   are signed with fixed identifiers and the entitlements in `entitlements/`,
+   each of which records the evidence for every key it holds. An executable
+   without a reviewed identity fails the build. Signatures are embedded in each
+   file, so first-launch extraction is unchanged: the archive and tree hashes
+   simply cover the signed bytes.
+3. **App.** The Cua Driver helper and then Avibe.app are signed, the app is
+   notarized with `notarytool` through the API key, and its ticket is stapled.
+   The launch smoke test, the DMG, and the updater archive all use this final
+   app.
+4. **DMG.** The image is signed, notarized, and stapled, then checked the way a
+   download is: `stapler validate`, `spctl -a -t open --context
+   context:primary-signature`, `spctl -a -t exec` on the app, and both code
+   identities on the app inside the mounted image.
+
+**Code identity. These identifiers and the Team must never change.** macOS binds
+Accessibility and Screen Recording grants, and Keychain item approvals, to each
+program's designated requirement (DR). Signed releases keep them across updates
+only while the identifier and Team stay the same; changing either drops every
+user's grants. The signer compares each DR exactly with:
+
+```text
+designated => identifier "<identifier>" and anchor apple generic and certificate 1[field.1.2.840.113635.100.6.2.6] /* exists */ and certificate leaf[field.1.2.840.113635.100.6.1.13] /* exists */ and certificate leaf[subject.OU] = "68B2SQ6YK3"
+```
+
+| Code | Identifier |
+| --- | --- |
+| Avibe.app | `bot.avibe.desktop` |
+| Cua Driver helper | `bot.avibe.desktop.cua-driver` |
+| Runtime Python | `bot.avibe.desktop.runtime.python` |
+| Runtime Node | `bot.avibe.desktop.runtime.node` |
+
+Ad-hoc builds had a per-build DR, so macOS treats the first signed build as a new
+program: users grant Computer Use permissions and Keychain access once more, and
+later signed updates keep them.
+
+**Entitlements.** The app keeps only microphone input (`src-tauri/Entitlements.plist`).
+Node needs a code-generation exception (`allow-jit` on Apple silicon,
+`allow-unsigned-executable-memory` on Intel, whose V8 does not use `MAP_JIT`) and
+`disable-library-validation`, because the Show Runtime and npm-installed Agent
+backends load native addons this Team did not sign. Python and the helper need
+none. GitHub's macOS runners enforce neither library validation nor the JIT
+restriction, so CI proves signing and notarization but not that entitlements are
+sufficient. Check an entitlement change on a Mac with System Integrity
+Protection enabled, for example by running the signed `python` and `node` from an
+extracted `runtime.zip` in a scratch directory.
+
+**Manual builds** (`workflow_dispatch`) sign and notarize the same way when the
+complete set is configured. With none of it, the app is ad-hoc signed, the
+Runtime keeps its upstream signatures, and the DMG is unsigned. The
+target-qualified `.SIGNATURE` metadata file records what was produced:
+
+| Build | `.SIGNATURE` layers |
+| --- | --- |
+| Signed (every tag build) | `runtime-developer-id-signed`, `app-developer-id-notarized-stapled`, `dmg-developer-id-notarized-stapled` |
+| Manual without credentials | `runtime-unsigned`, `app-adhoc`, `dmg-unsigned-unnotarized` |
+| Windows | `installer-unsigned` |
 
 ### Initial test distribution
 
@@ -162,35 +222,37 @@ All three native builds must succeed before the existing release job publishes
 the GitHub prerelease. Official stable `vX.Y.Z` releases use the same desktop builder only when the G2
 stable signing gate below is enabled; PyPI publication retains its sole finalizer.
 
-TEST builds never receive Apple or Windows signing credentials, even when the
-repository has them configured. The macOS app is ad-hoc signed, its outer DMG
-is unsigned/unnotarized, and the Windows NSIS installer is unsigned. Each raw
+The macOS app and DMG are Developer ID signed, notarized, and stapled as
+described above; the Windows NSIS installer is unsigned. Each raw
 DMG/EXE download has a target-qualified `.SHA256SUMS`, `.SIGNATURE`,
 `.SOURCE.json`, and `.runtime-manifest.json` alongside it. `SIGNATURE` describes
 the verified layer; it is not a cryptographic signature. Hashes and source
 metadata are checked before upload and downloaded desktop bytes are checked
-again before publication. New `.SOURCE.json` records use schema 2; every macOS
-record includes the pinned Cua Driver source archive, patch, tool snapshot,
-prepared binary, packaged binary, and code-signing provenance. The verifier
-still accepts already published schema-1 records as legacy input. A failed
+again before publication. New `.SOURCE.json` records use schema 3, which
+requires the signed macOS layers; every macOS record includes the pinned Cua
+Driver source archive, patch, tool snapshot, prepared binary, packaged binary,
+and code-signing provenance. The verifier still accepts already published
+schema-1 and schema-2 records, with their ad-hoc macOS layers, as legacy input.
+A failed
 build or check leaves the release unpublished.
 Existing asset bytes cannot be overwritten; a changed build requires a new rc.
 Already-published releases cannot be retrofitted with missing desktop assets.
 
 The manual workflow remains available for artifact-only builds: select a source
-ref and SemVer version in Actions. It retains optional Developer ID signing and
-notarization when its complete Apple secret set is configured. Actions artifacts
+ref and SemVer version in Actions. It signs and notarizes when the complete
+Apple set is configured and stays ad-hoc when none of it is. Actions artifacts
 are retained for 14 days; automatic update metadata is disabled unless the G2 signing gate below is configured.
 
 See [Desktop TEST installation](../docs/desktop-test-installation.md) for
-architecture selection, hash checks, app-specific Gatekeeper/SmartScreen
-approval, signed and manual upgrades that preserve `~/.avibe`, and removal.
+architecture selection, hash and Gatekeeper checks, SmartScreen approval,
+signed and manual upgrades that preserve `~/.avibe`, and removal.
 Python, Avibe, Node, and npm are bundled; no separate installation is required.
 
 Release operators need the existing `OPENAI_API_KEY` for AI notes, Actions
 permissions to read runtime sources and write GitHub Releases, and all three
-hosted native runners. Apple/Windows signing credentials are not prerequisites
-for TEST publication. Do not create a tag or dispatch a release without owner
+hosted native runners, plus the complete Apple set in `desktop-updater`; a tag
+build without it fails. Windows signing credentials are not prerequisites. Do
+not create a tag or dispatch a release without owner
 authorization. Start with a new rc on the approved source; wait for all runtime,
 package, and desktop builds plus the sole `release_ai` finalizer. A rerun may
 reuse identical bytes in a draft, but native rebuilds are not guaranteed to be
@@ -482,8 +544,8 @@ Security → Microphone. `tests/notarization_preflight.rs` pins both facts.
 `cargo clippy -D warnings`, `cargo test`, `cargo build`. It does not bundle or
 sign. `.github/workflows/desktop-package.yml` builds architecture-specific,
 self-contained DMG and NSIS artifacts, both manually and as the reusable TEST
-build unit for `.github/workflows/release_ai.yml`. The manual signing policy and
-the deterministic TEST policy are described above. Native packaging and a real
+build unit for `.github/workflows/release_ai.yml`. Its signing policy is
+described above. Native packaging and a real
 installation on each supported architecture remain separate acceptance gates
 from unit/contract tests.
 
