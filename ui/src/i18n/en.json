@@ -2570,6 +2570,7 @@
         "keylessEmpty": "Exa (free) is built in, needs no key, and searches before model executors. Added search services precede it. List prices: {{prices}}. Plans and actual bills may differ.",
         "vendorPrice": "{{vendor}} ${{usd}} / 1k searches",
         "priceDate": "API list price · {{date}}",
+        "builtInPrice": "Built in · no key or setup",
         "priceNote": "Prices are the catalog's dated API list prices. Free allowances, plans and actual bills may differ.",
         "custody": "Search service keys stay with the gateway, like other provider keys. They are never passed to the model or Agent.",
         "keylessQueryDestination": "Queries go directly from this Avibe runtime to Exa (mcp.exa.ai); Exa can see the connection's IP.",

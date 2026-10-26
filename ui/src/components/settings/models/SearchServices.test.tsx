@@ -148,6 +148,25 @@ describe('search service activation and mixed order', () => {
     expect(onViewOrder).toHaveBeenCalledOnce();
   });
 
+  it.each(['en', 'zh'])('labels a zero price as built in, never as a dated API list price, in %s', (lng) => {
+    const locale = i18n.cloneInstance({ lng });
+    const listPrice = (date: string) => locale.t('settings.models.searchServices.priceDate', { date }) as string;
+    render(wrap(<ToolsTab read={readyRegion({ tools: [KEYLESS_ACTIVE_SEARCH] })} sources={SEARCH_SOURCES} pending={new Set()} onSave={vi.fn()} onClear={vi.fn()} onRetry={vi.fn()} />, lng));
+    const keylessRow = document.querySelector('[data-executor="src_exakeyless"]') as HTMLElement;
+    const keyless = KEYLESS_ACTIVE_SEARCH.executor_candidates.find((row) => row.source_id === 'src_exakeyless')!;
+    expect(within(keylessRow).getByText(locale.t('settings.models.searchServices.builtInPrice') as string)).toBeTruthy();
+    expect(keylessRow.textContent).not.toContain(listPrice(keyless.price.as_of));
+    // A paid service keeps its dated list-price link.
+    const paid = KEYLESS_ACTIVE_SEARCH.executor_candidates.find((row) => row.kind === 'service' && row.price.usd_per_1k > 0)!;
+    const paidRow = document.querySelector(`[data-executor="${paid.source_id}"]`) as HTMLElement;
+    expect(within(paidRow).getByRole('link', { name: listPrice(paid.price.as_of) })).toBeTruthy();
+    cleanup();
+    addDialog(KEYLESS_ACTIVE_SEARCH, lng);
+    const builtInCard = screen.getByRole('region', { name: locale.t('settings.models.searchServices.vendorName.exa-mcp') as string });
+    expect(within(builtInCard).getByText(locale.t('settings.models.searchServices.builtInPrice') as string)).toBeTruthy();
+    expect(builtInCard.textContent).not.toContain(listPrice(keyless.price.as_of));
+  });
+
   it('saves the built-in keyless Exa row switch without opening credential actions', async () => {
     const onSave = vi.fn();
     tab(KEYLESS_ACTIVE_SEARCH, onSave);
