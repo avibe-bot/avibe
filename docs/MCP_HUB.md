@@ -39,7 +39,7 @@ vibe mcp add --json-stdin < servers.json
 - `vibe mcp remove <name>` deletes the server from every one of these files.
 - A `cwd` you enter in Hub (page or `vibe mcp add`) must be absolute. Without one, the server runs in the Agent default directory.
 - A relative `cwd` already in a backend config file (for example `cwd = "."` in `~/.codex/config.toml`) is resolved against that file's directory, for every backend. A relative command such as `./server` then runs from that directory.
-- Native names are kept as written (underscores and mixed case included). `vibe mcp add` cannot use the management verbs as a server name.
+- Native extras Hub does not use (timeouts, native `enabled`, …) are ignored, except Codex `env_vars`: those names are copied from the parent environment at read/generate. `${VAR}` placeholders are still not expanded.
 - A Codex/OpenCode server with `enabled = false` is marked as disabled there, but Hub can still generate and call it; that switch only controls the backend's own loading.
 - If you delete a generated server from the native file, Hub keeps the published package and marks it deleted in that backend until you run `vibe mcp remove`.
 - `${VAR}` placeholders are not expanded. Enter the literal value; an existing entry that uses one is listed with an error.

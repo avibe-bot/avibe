@@ -123,7 +123,33 @@ def _from_codex(entry: dict[str, Any]) -> dict[str, Any]:
     server = {key: value for key, value in entry.items() if key not in _CODEX_KEPT}
     if "http_headers" in server:
         server["headers"] = server.pop("http_headers")
+    copied = _env_from_codex_env_vars(entry.get("env_vars"))
+    if copied:
+        explicit = server.get("env") if isinstance(server.get("env"), dict) else {}
+        server["env"] = {**copied, **{key: value for key, value in explicit.items() if isinstance(key, str)}}
     return server
+
+
+def _env_from_codex_env_vars(value: object) -> dict[str, str]:
+    """Copy named parent-env keys into the server process; missing names are skipped."""
+
+    if not isinstance(value, list):
+        return {}
+    copied: dict[str, str] = {}
+    for item in value:
+        if isinstance(item, str):
+            name = item
+            source = "local"
+        elif isinstance(item, dict) and isinstance(item.get("name"), str):
+            name = item["name"]
+            raw = item.get("source")
+            source = raw if isinstance(raw, str) and raw else "local"
+        else:
+            continue
+        if source != "local" or name not in os.environ:
+            continue
+        copied[name] = os.environ[name]
+    return copied
 
 
 def _from_opencode(entry: dict[str, Any]) -> dict[str, Any]:
