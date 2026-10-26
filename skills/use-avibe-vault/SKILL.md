@@ -2,7 +2,7 @@
 name: use-avibe-vault
 slug: use-avibe-vault
 description: Use Avibe Vault for API keys, tokens, passwords, protected credentials, authenticated HTTP requests, or digest signing without exposing secret values to the agent.
-version: 0.5.0
+version: 0.5.1
 ---
 
 # Use Avibe Vault
@@ -25,6 +25,7 @@ Rules:
 - `export` remains deprecated and has no delivery. Prefer `run`; advanced `inject` writes a restricted-permission file, so use it only for tools that require file-based configuration.
 - With `vibe vault run`, the child process receives static secrets as environment variables, so never run commands that may print env vars, debug config, or secret-bearing errors.
 - When protected `run` / `fetch` needs approval, Avibe automatically asks the user to decrypt and authorize access, and the command waits for that approval (540 seconds by default; `--approval-wait SECONDS` or `--no-approval-wait` to change it). If the command then succeeds, it ran once: do not run it again. If it returns `approval_required`, `approval_wait_timeout`, or `approval_handed_off`, or your call to it is stopped before it gets the approval, the command did not run; Avibe resumes this session once the request is decided, and after an approval you run the same `run` / `fetch` command once.
+- If a Vault command fails with `avault_authorization_required`, avault needs a one-time macOS Keychain authorization on the Mac running Avibe, and nothing was delivered or signed. Do not retry, and do not run `avault` or `vibe vault key authorize` yourself: ask the user to choose Authorize avault on the Vault page (or to run `vibe vault key authorize` on that Mac), then run the command once after they confirm.
 - When protected `sign` needs approval, Avibe creates a browser signing request and returns immediately. Do not rerun `sign`; when Avibe resumes this session, follow the callback instruction to read the completed request result and continue with the returned signature.
 
 Common commands:

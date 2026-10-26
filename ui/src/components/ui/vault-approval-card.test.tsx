@@ -17,6 +17,10 @@ const api = vi.hoisted(() => ({
   saveVaultSettings: vi.fn(),
   denyVaultRequest: vi.fn(),
   approveVaultDeleteRequest: vi.fn(),
+  listVaultSecrets: vi.fn(),
+  signVaultDigest: vi.fn(),
+  getAvaultAuthorization: vi.fn(),
+  authorizeAvault: vi.fn(),
 }));
 const useVaultSandboxWarm = vi.hoisted(() => vi.fn((_enabled: boolean) => true));
 const authorization = vi.hoisted(() => ({ capabilities: { can_use_vault_secrets: true, can_manage_instance: true } }));
@@ -61,6 +65,15 @@ const protectedAccess = {
       { grant_id: 'grant_1', unlock_material: [{ name: 'PROTON_BRIDGE_SMTP_PASSWORD', kind: 'static', envelope }] },
     ],
   },
+} satisfies VaultRequest;
+
+const standardSignRequest = {
+  ...protectedAccess,
+  id: 'vrq_sign',
+  request_type: 'sign',
+  secret_name: 'ETH_KEY',
+  delivery: { digest: '00'.repeat(32), scheme: 'ecdsa-secp256k1-recoverable' },
+  card: { request_type: 'sign', secret_name: 'ETH_KEY', kind: 'keypair', protection: 'standard' },
 } satisfies VaultRequest;
 
 const deleteRequest = {
@@ -350,6 +363,26 @@ describe('VaultApprovalCard protected access approval', () => {
 
     await vi.waitFor(() => expect(within(screen.getByRole('dialog', { name: /Delete "OLD_TOKEN"/i })).getByText('Delete failed')).toBeTruthy());
     expect(screen.getByRole('button', { name: /^delete$/i })).toBeTruthy();
+  });
+
+  it('offers Authorize avault when a standard signature needs the Keychain authorization', async () => {
+    api.listVaultSecrets.mockResolvedValue({ ok: true, secrets: [] });
+    api.getAvaultAuthorization.mockResolvedValue({ ok: true, required: true, detected_at: null, attempt: null });
+    api.signVaultDigest.mockRejectedValue(
+      Object.assign(new Error('avault sign failed: run `avault key authorize`'), { code: 'avault_authorization_required' }),
+    );
+    const onResolved = vi.fn();
+    render(
+      <I18nextProvider i18n={i18n}>
+        <VaultApprovalCard request={standardSignRequest} onResolved={onResolved} onCancel={vi.fn()} />
+      </I18nextProvider>,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: en.vaults.approval.sign }));
+
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: en.vaults.avaultAuthorization.action })).toBeTruthy());
+    expect(screen.queryByText(/avault key authorize/)).toBeNull();
+    expect(onResolved).not.toHaveBeenCalled();
   });
 
   it('renders and approves a standard delete request in one click', async () => {

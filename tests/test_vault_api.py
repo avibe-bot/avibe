@@ -2605,6 +2605,39 @@ def test_agent_sign_marks_claimed_request_failed_when_signature_validation_rejec
     assert fetched["request"]["delivery"]["failure"] == {"request_type": "sign", "reason": "signature_rejected"}
 
 
+def test_sign_approval_stays_pending_when_avault_needs_keychain_authorization(monkeypatch):
+    sign = Mock(side_effect=api.AvaultAuthorizationRequiredError("macOS Keychain needs a one-time authorization"))
+    monkeypatch.setattr(api, "avault_sign", sign)
+    monkeypatch.setattr(api, "avault_seal_blind_box", Mock(return_value=_sealed("key")))
+    api.create_vault_secret(
+        {
+            "name": "ETH_KEY",
+            "kind": "keypair",
+            "signer_kind": "local",
+            "blind_box": {"scheme": "hpke-x25519-hkdfsha256-aes256gcm-v1", "enc": "enc", "ct": "ct"},
+        }
+    )
+    requested = api.request_vault_sign(
+        {"name": "ETH_KEY", "digest": "00" * 32, "scheme": "ecdsa-secp256k1-recoverable", "session_id": "ses_1"}
+    )
+
+    with pytest.raises(api.VaultApiError) as exc:
+        api.vault_sign(
+            {
+                "name": "ETH_KEY",
+                "digest": "00" * 32,
+                "scheme": "ecdsa-secp256k1-recoverable",
+                "request_id": requested["request"]["id"],
+            }
+        )
+
+    # Nothing was signed: the same request can be approved again once avault is authorized.
+    assert exc.value.code == "avault_authorization_required"
+    fetched = api.get_vault_request(requested["request"]["id"])["request"]
+    assert fetched["status"] == "pending" and fetched["decided_at"] is None
+    assert "failure" not in fetched["delivery"]
+
+
 def test_vault_sign_rejects_non_keypair_secret(monkeypatch):
     from unittest.mock import Mock
 

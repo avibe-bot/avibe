@@ -5848,6 +5848,24 @@ def vault_agent_pubkey_get():
         return _vault_error_response(exc)
 
 
+@app.route("/api/vault/avault-authorization", methods=["GET"])
+def vault_avault_authorization_get():
+    from vibe import api
+
+    return jsonify(api.get_avault_authorization_status())
+
+
+@app.route("/api/vault/avault-authorization", methods=["POST"])
+def vault_avault_authorization_post():
+    from vibe import api
+
+    # Machine-level, like dependency repair: the Keychain dialog appears on the host's screen.
+    authorization_context = getattr(g, "authorization_context", None)
+    if authorization_context is None or not authorization_context.can_manage_instance:
+        return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+    return jsonify(api.start_avault_authorization())
+
+
 @app.route("/api/vault/sandbox/root-metadata", methods=["GET"])
 def vault_sandbox_root_metadata_get():
     from vibe import api

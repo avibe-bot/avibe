@@ -378,6 +378,43 @@ as an fd-forwarding special case.
 
 This is an internal store selection inside `avault`, not an Avibe-level plugin layer.
 
+### 13.1 macOS Keychain authorization (avault 0.1.8+)
+
+Keychain lets a binary read the master-key item only after the user approves that
+binary's code identity. Developer ID releases (identifier `bot.avibe.avault`, Team
+`68B2SQ6YK3`) share one designated requirement, so a user approves once; a key an
+ad-hoc release created needs that approval once after the upgrade. avault never
+prompts from a background call: it reports `keychain_authorization_required` (one-shot
+exit 77, agent frame `code`), and only `avault key authorize` may show the dialog
+(avault `docs/DESIGN.md`, "Keychain authorization"). Avibe's side:
+
+- **Detection.** Every capturing one-shot verb loads the master key first, so exit 77
+  there is the contract; older avault exits 70 for every failure. One-shot `deliver
+  run` exits with its child's status, so a 77 there counts only when a fresh `pubkey`
+  check (0.1.8+ only) also reports it: avault loads the key before it starts the
+  child, so no secret left avault. Resident-agent frames map `code` the same way.
+  All of them become `AvaultAuthorizationRequiredError`, a pre-handoff failure:
+  one-shot grants are released, and a claimed standard sign request returns to
+  pending so the user can approve it again.
+- **One error.** The Vault API and the `vibe vault` CLI report
+  `avault_authorization_required`; the CLI hint tells an Agent to ask the user and
+  not retry or run avault itself.
+- **Shared record.** `vibe/avault_authorization.py` keeps one "authorization
+  required" record under the state directory for every process; any successful
+  master-key read clears it. The Vault page, Settings → Dependencies
+  (`authorization_required`), and Doctor read it and offer the action.
+- **Explicit action only.** The Web "Authorize avault" button (instance managers)
+  and `vibe vault key authorize` (refused inside an Agent session) run `avault key
+  authorize` once; concurrent Web requests in one process join one attempt, and
+  avault's own gate shares one dialog across processes. Pollers, retries, Doctor
+  repair, and Agent tools never authorize. A failed attempt is reported by avault's
+  exit status plus this process's own login session (`no_gui_session`), never by
+  parsing avault's text.
+- **Proactive check.** After `install_avault` replaces a binary on macOS with 0.1.8+
+  and resets the resident agent, one silent `pubkey` sets or clears the record, so
+  the UI offers the action before a real request fails. Like a first Vault use, it
+  creates the master key when none exists.
+
 ---
 
 ## 14. Project shape
