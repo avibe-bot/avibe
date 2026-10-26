@@ -141,6 +141,13 @@ def _installable_avault_release(
 
     monkeypatch.setattr(api.shutil, "which", lambda _binary: None)
     monkeypatch.setattr(api, "_candidate_cli_paths", fake_candidate_cli_paths)
+    # Resolution also scans raw PATH entries. Drop any that hold an avault, so the
+    # developer's own avault is never what these tests resolve, probe, or run.
+    ambient = os.environ.get("PATH", "").split(os.pathsep)
+    monkeypatch.setenv(
+        "PATH",
+        os.pathsep.join(entry for entry in ambient if entry and not any((Path(entry) / name).exists() for name in ("avault", "avault.exe"))),
+    )
     return calls, member_name
 
 
@@ -543,6 +550,45 @@ def test_install_avault_downloads_the_pinned_archive_verifies_and_installs(monke
     else:
         assert api.resolve_cli_path("avault") == str(installed)
     assert calls == [f"https://dl.avibe.bot/avault/releases/v{api.AVAULT_VERSION}/avault-{api.AVAULT_VERSION}-{target}.tar.gz"]
+
+
+@pytest.mark.parametrize(
+    ("system", "machine", "target", "had_binary", "new_version", "pubkey_status", "expected_calls", "required"),
+    [
+        # Replacing an ad-hoc binary on a Mac: one silent master-key read decides.
+        ("Darwin", "arm64", "macos-arm64", True, None, 77, ["version", "pubkey"], True),
+        ("Darwin", "arm64", "macos-arm64", True, None, 0, ["version", "pubkey"], False),
+        # Nothing to migrate, no Keychain, or an avault whose background reads may still prompt.
+        ("Darwin", "arm64", "macos-arm64", False, None, 77, [], False),
+        ("Linux", "x86_64", "linux-x64", True, None, 77, [], False),
+        ("Darwin", "arm64", "macos-arm64", True, "0.1.7", 77, ["version"], False),
+    ],
+)
+def test_install_avault_checks_keychain_authorization_after_replacing_a_binary(
+    monkeypatch, tmp_path, system, machine, target, had_binary, new_version, pubkey_status, expected_calls, required
+):
+    monkeypatch.setattr("platform.system", lambda: system)
+    monkeypatch.setattr("platform.machine", lambda: machine)
+    calls = tmp_path / "calls"
+    content = (
+        "#!/bin/sh\n"
+        '[ "$1" = "--store" ] && shift 2\n'
+        f'echo "$*" >> "{calls}"\n'
+        f'case "$1" in version) echo "avault {new_version or api.AVAULT_VERSION}";; pubkey) exit {pubkey_status};; esac\n'
+    ).encode()
+    _installable_avault_release(monkeypatch, target=target, content=content)
+    installed = api._avault_managed_bin_path(target)
+    if had_binary:
+        installed.parent.mkdir(parents=True, exist_ok=True)
+        installed.write_text("#!/bin/sh\necho avault 0.1.7\n")
+        installed.chmod(0o755)
+    monkeypatch.setattr(api, "_resolve_avault_cli_path", lambda: str(installed) if installed.exists() else None)
+
+    out = api.install_avault(force=True)
+
+    assert out["ok"] is True
+    assert (calls.read_text().splitlines() if calls.exists() else []) == expected_calls
+    assert api.get_avault_authorization_status()["required"] is required
 
 
 def test_install_avault_checksum_mismatch_installs_nothing(monkeypatch):

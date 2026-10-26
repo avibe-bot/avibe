@@ -4789,6 +4789,24 @@ def claim_sign_request(
     return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
 
 
+def release_sign_request_claim(conn: Connection, request_id: str) -> dict[str, Any]:
+    """Return a claimed sign request to pending because avault signed nothing.
+
+    Only for a failure before signing that the user can fix and approve again,
+    such as avault's one-time Keychain authorization: the claim existed to stop
+    a second signature, and there was no first one.
+    """
+    result = conn.execute(
+        vault_requests.update()
+        .where(vault_requests.c.id == request_id, vault_requests.c.request_type == "sign", vault_requests.c.status == "signing")
+        .values(status="pending", decided_at=None)
+    )
+    if result.rowcount != 1:
+        raise InvalidRequestError("sign request is not signing")
+    updated = conn.execute(select(vault_requests).where(vault_requests.c.id == request_id)).mappings().one()
+    return _request_row_payload(dict(updated), conn=conn, audience=REQUEST_AUDIENCE_AGENT)
+
+
 def fail_sign_request(conn: Connection, request_id: str, *, reason: str | None = None) -> dict[str, Any]:
     row_dict = _load_request_for_transition(
         conn,

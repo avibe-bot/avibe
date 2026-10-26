@@ -109,7 +109,7 @@ from vibe.upgrade import (
     verify_upgrade_candidate,
 )
 from vibe.restart_supervisor import schedule_restart
-from vibe import backend_model_catalog
+from vibe import avault_authorization, backend_model_catalog
 from vibe.i18n import t as backend_t
 from modules.agents.catalog import (
     AGENT_BACKENDS,
@@ -2528,6 +2528,8 @@ def _notify_vault_request_created(request: dict | None) -> None:
 
 def _vault_api_error_from_avault(exc: "AvaultError", *, prefix: str) -> VaultApiError:
     message = str(exc)
+    if isinstance(exc, AvaultAuthorizationRequiredError):
+        return VaultApiError(f"{prefix}: {message}", code=exc.code, status=409)
     if "requires avault >=" in message:
         return VaultApiError(f"{prefix}: {message}", code="avault_upgrade_required", status=409)
     return VaultApiError(f"{prefix}: {message}", code="avault_failed")
@@ -2748,7 +2750,7 @@ def get_vault_pubkey() -> dict:
     try:
         return {"ok": True, **avault_pubkey()}
     except AvaultError as exc:
-        raise VaultApiError(f"avault pubkey failed: {exc}", code="avault_failed") from exc
+        raise _vault_api_error_from_avault(exc, prefix="avault pubkey failed") from exc
 
 
 def get_vault_agent_pubkey() -> dict:
@@ -3750,7 +3752,7 @@ def create_vault_secret(
             try:
                 sealed = avault_seal_blind_box(name, blind_box)
             except AvaultError as exc:
-                raise VaultApiError(f"avault blind-box seal failed: {exc}", code="avault_failed") from exc
+                raise _vault_api_error_from_avault(exc, prefix="avault blind-box seal failed") from exc
         else:
             raise VaultApiError(
                 "standard create requires a browser blind_box",
@@ -3770,7 +3772,7 @@ def create_vault_secret(
             try:
                 field_sealed = avault_seal_blind_box(record_name, spec["blind_box"])
             except AvaultError as exc:
-                raise VaultApiError(f"avault blind-box seal failed: {exc}", code="avault_failed") from exc
+                raise _vault_api_error_from_avault(exc, prefix="avault blind-box seal failed") from exc
         else:
             field_sealed = _sealed_from_payload(spec["sealed"])
         sealed_fields.append({"name": field_name, "record": record_name, "sealed": field_sealed})
@@ -3972,7 +3974,7 @@ def update_vault_secret_field(
         try:
             sealed = avault_seal_blind_box(record_name, blind_box)
         except AvaultError as exc:
-            raise VaultApiError(f"avault blind-box seal failed: {exc}", code="avault_failed") from exc
+            raise _vault_api_error_from_avault(exc, prefix="avault blind-box seal failed") from exc
     elif protection == "protected":
         if "blind_box" in payload:
             raise VaultApiError("protected field updates require sealed", code="invalid_request", status=409)
@@ -5572,13 +5574,13 @@ def vault_sign(payload: dict) -> dict:
             _notify_vault_request_created(approval_required_request)
         return protected_response
 
-    def _fail_claimed_request(reason: str) -> None:
+    def _settle_claimed_request(settle: Callable[[Any, str], dict]) -> None:
         request_id = str(payload.get("request_id") or "")
         if not request_id:
             return
         with contextlib.suppress(Exception):
             with engine.begin() as conn:
-                request = vault_service.fail_sign_request(conn, request_id, reason=reason)
+                request = settle(conn, request_id)
             _publish_vaults_updated(
                 scope="request",
                 request_id=request.get("id") or request_id,
@@ -5586,8 +5588,16 @@ def vault_sign(payload: dict) -> dict:
                 secret_name=request.get("secret_name"),
             )
 
+    def _fail_claimed_request(reason: str) -> None:
+        _settle_claimed_request(lambda conn, request_id: vault_service.fail_sign_request(conn, request_id, reason=reason))
+
     try:
         signature = avault_sign(key_envelope, digest, scheme, name=name)
+    except AvaultAuthorizationRequiredBeforeHandoffError as exc:
+        # Nothing was signed, so the approval stays pending: the user authorizes
+        # avault and approves the same request again instead of the Agent re-asking.
+        _settle_claimed_request(vault_service.release_sign_request_claim)
+        raise _vault_api_error_from_avault(exc, prefix="avault sign failed") from exc
     except AvaultError as exc:
         _fail_claimed_request("avault_failed")
         raise VaultApiError(f"avault sign failed: {exc}", code="avault_failed") from exc
@@ -8686,19 +8696,26 @@ AVAULT_PROTECTED_RECORD_MIN_VERSION = "0.1.6"
 # 0.103.16) to reject the compromised eMudhra/emSign intermediates, so older
 # binaries must not receive credentials for HTTPS egress.
 AVAULT_FETCH_TLS_MIN_VERSION = "0.1.7"
-# Installer pin must reference a published release. v0.1.7 refreshes the
-# outbound TLS trust (webpki-roots 1.0.10 / rustls-webpki 0.103.16) so delivery
-# fetches reject the compromised eMudhra/emSign intermediates.
-AVAULT_VERSION = "0.1.7"
+# avault 0.1.8 is the first Developer ID signed release. From it on, no
+# background Keychain read shows a dialog: one the item does not trust yet
+# reports keychain_authorization_required (one-shot exit 77, agent frame
+# ``code``), and ``avault key authorize`` is the only verb that may prompt.
+# Older binaries have neither, and their background reads may still prompt.
+AVAULT_KEYCHAIN_AUTHORIZATION_MIN_VERSION = "0.1.8"
+# Installer pin must reference a published release. v0.1.8 is the first
+# Developer ID signed release (identifier bot.avibe.avault, Team 68B2SQ6YK3): a
+# master key an ad-hoc release created needs one "Authorize avault" after the
+# upgrade, and later signed releases read it without asking again.
+AVAULT_VERSION = "0.1.8"
 # (sha256, size) of each AVAULT_VERSION archive by target, copied from that
 # release's manifest.json so the download is verified whichever source served it.
 _AVAULT_ARCHIVES = {
-    "linux-arm64": ("22bbed967ba7403e323549eb8b161c2d918c1f5ed692f38d4e3b1049ad7d23dd", 3256706),
-    "linux-x64": ("ccc329b92a70c2d5b583b66725b0780a0f182975f2cbe6e7501232d9963ceb4c", 3580615),
-    "macos-arm64": ("d6e5fe7911c571d05734213af5c1b17332b3d7a71635f60c68887bd2dc977998", 1462107),
-    "macos-x64": ("56874a51ef37aab01be137898b3220c4a78bdbff0fc5362a862a42dd18a0abcc", 1583787),
-    "windows-arm64": ("6f7f7cbc69decb280a78e4936cfef7c15e95820168df981a3020393937f4c7aa", 1325310),
-    "windows-x64": ("c49cf29062fa5f22eab76e7785c040006a6fcf9fabf84667c120f8e99f5ccf0a", 1406456),
+    "linux-arm64": ("b22d237b97ab2ed3143f498bebce4affbe6a2617c2d50abcb48c1c668351799f", 3273950),
+    "linux-x64": ("6f64d8e089fa859889db53472616a065c9bb3e500b4ad04267bd1b2dd29366e1", 3596395),
+    "macos-arm64": ("2dc4b81c4ab3995e519e86854011ee1c38ae9696310d94d1eeaa8d0fe25725bd", 1480823),
+    "macos-x64": ("f3c46c612c2bee449d29f9480552437349ba97f9a89f523f2d4d368a4e5a3959", 1643862),
+    "windows-arm64": ("0cc42e23e63218f4301b89c527a9109ed02adf6c0e226d1332046e6af0eb4c8f", 1324833),
+    "windows-x64": ("5432be1d9e07b3069a1a010f71f885481b72f694175f2b7e46d92162ea6adee3", 1406676),
 }
 
 
@@ -9128,6 +9145,8 @@ def install_avault(force: bool = False) -> dict:
             _clear_macos_quarantine(install_path)
         _persist_avault_cli_path(str(install_path))
         _reset_avault_agent_after_binary_change(reason="install_avault")
+        if path:
+            _check_avault_keychain_authorization_after_upgrade()
 
         return {
             "ok": True,
@@ -9410,6 +9429,38 @@ class AvaultPreHandoffError(AvaultError):
     """avault failed before receiving an envelope or performing delivery."""
 
 
+class AvaultAuthorizationRequiredError(AvaultError):
+    """macOS Keychain has not yet approved this avault binary for the master key.
+
+    The user fixes it once with an explicit "Authorize avault" action; retrying
+    the call cannot. One-shot ``deliver run`` raises this class itself, because
+    it cannot prove its child never ran, so that delivery stays fail-closed.
+    """
+
+    code = "avault_authorization_required"
+
+
+class AvaultAuthorizationRequiredBeforeHandoffError(AvaultAuthorizationRequiredError, AvaultPreHandoffError):
+    """avault could not load the master key, so nothing was decrypted, delivered, or signed."""
+
+
+# One-shot exit status for keychain_authorization_required (avault 0.1.8+, EX_NOPERM).
+_AVAULT_EXIT_AUTHORIZATION_REQUIRED = 77
+# ``avault key authorize`` waits for a person to reach the Mac and answer the dialog.
+_AVAULT_AUTHORIZE_TIMEOUT_SECONDS = 600.0
+_AVAULT_AUTHORIZE_DETAIL_LIMIT = 500
+
+
+def _avault_authorization_required(
+    detail: str | None = None,
+    *,
+    before_handoff: bool = True,
+) -> AvaultAuthorizationRequiredError:
+    avault_authorization.record_authorization_required()
+    error = AvaultAuthorizationRequiredBeforeHandoffError if before_handoff else AvaultAuthorizationRequiredError
+    return error(detail or "avault needs a one-time macOS Keychain authorization on the Mac running Avibe")
+
+
 def _avault_detail(proc: "subprocess.CompletedProcess") -> str:
     """Best-effort, secret-free detail from a failed avault run (its stderr)."""
     raw = proc.stderr
@@ -9461,10 +9512,15 @@ def _run_avault(
     stdin: bytes | None = None,
     timeout: float = _AVAULT_TIMEOUT_SECONDS,
 ) -> "subprocess.CompletedProcess":
-    """Run a capturing one-shot avault command. Bulk blobs go via ``stdin``."""
+    """Run a capturing one-shot avault command. Bulk blobs go via ``stdin``.
+
+    Every capturing verb loads the master key first, so exit 77 here is always
+    avault's keychain_authorization_required (older releases exit 70 for every
+    failure) and success shows the key is readable.
+    """
     path = _require_avault_path()
     try:
-        return subprocess.run(
+        proc = subprocess.run(
             [path, *_avault_args(args)],
             input=stdin,
             capture_output=True,
@@ -9476,6 +9532,59 @@ def _run_avault(
         raise AvaultPreHandoffError("avault binary not found") from exc
     except subprocess.TimeoutExpired as exc:
         raise AvaultError("avault timed out") from exc
+    if proc.returncode == _AVAULT_EXIT_AUTHORIZATION_REQUIRED:
+        raise _avault_authorization_required(_avault_detail(proc))
+    if proc.returncode == 0:
+        avault_authorization.clear_authorization_required()
+    return proc
+
+
+def _raise_if_agent_authorization_required(exc: Exception) -> None:
+    """Re-raise a resident-agent ``keychain_authorization_required`` frame as Avibe's error."""
+    from vibe.avault_agent import AvaultAgentAuthorizationRequiredError
+
+    if isinstance(exc, AvaultAgentAuthorizationRequiredError):
+        raise _avault_authorization_required(str(exc)) from exc
+
+
+def _avault_supports_keychain_authorization(path: str | None) -> bool:
+    return _version_at_least(_probe_avault_version(path), AVAULT_KEYCHAIN_AUTHORIZATION_MIN_VERSION)
+
+
+def _avault_master_key_needs_authorization() -> bool | None:
+    """Ask avault, without any prompt, whether it can read the master key.
+
+    Runs one-shot ``pubkey``, which loads the master key (and, like the first
+    Vault use, creates it when none exists). True means authorization is
+    required, False that the key loaded, None that the check failed otherwise.
+    Callers must gate this on AVAULT_KEYCHAIN_AUTHORIZATION_MIN_VERSION: an
+    older binary's background read may still prompt.
+    """
+    try:
+        _run_avault(["pubkey"])
+    except AvaultAuthorizationRequiredError:
+        return True
+    except AvaultError:
+        logger.warning("avault master-key check failed", exc_info=True)
+        return None
+    return False
+
+
+def _check_avault_keychain_authorization_after_upgrade() -> None:
+    """Record, without prompting, whether the binary just installed needs authorization.
+
+    A Developer ID avault cannot read a master key an ad-hoc release created
+    until the user authorizes it once, so look right after replacing the binary
+    and let the Web UI offer the action before a real Vault call fails.
+    """
+    if platform.system() != "Darwin":
+        return
+    try:
+        if not _avault_supports_keychain_authorization(_resolve_avault_cli_path()):
+            return
+        _avault_master_key_needs_authorization()
+    except Exception:  # noqa: BLE001 - the install already succeeded
+        logger.warning("install_avault: avault Keychain authorization check failed", exc_info=True)
 
 
 def _envelope_payload(sealed) -> dict:
@@ -9508,6 +9617,7 @@ def avault_agent_pubkey() -> dict:
     try:
         payload = _avault_agent_client().pubkey()
     except AvaultAgentError as exc:
+        _raise_if_agent_authorization_required(exc)
         raise AvaultError(str(exc)) from exc
     public_key = payload.get("public_key")
     fingerprint = payload.get("fingerprint")
@@ -9596,6 +9706,9 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
     (``128 + signal`` if signalled). Delivery is fail-closed: once avault returns
     an exit code, callers must treat the secret as handed to the child unless a
     future avault protocol provides a distinct pre-handoff failure signal.
+    keychain_authorization_required is not one here: 77 may be the child's own
+    status, so it is raised as ``AvaultAuthorizationRequiredError`` (still
+    fail-closed) only when ``_deliver_run_needed_authorization`` confirms it.
     """
     path = _require_avault_path()
     payload = json.dumps(
@@ -9622,7 +9735,21 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
         # which surfaces its exit code.
         pass
     exit_code = proc.wait()
+    if exit_code == _AVAULT_EXIT_AUTHORIZATION_REQUIRED and _deliver_run_needed_authorization(path):
+        raise _avault_authorization_required(before_handoff=False)
     return {"exit_code": exit_code, "delivered": True}
+
+
+def _deliver_run_needed_authorization(path: str) -> bool:
+    """Whether one-shot ``deliver run``'s exit 77 most likely was avault's own.
+
+    ``deliver run`` exits with its child's status, so 77 alone is ambiguous. A
+    fresh master-key check that also needs authorization makes avault's own
+    failure the likely cause, but it cannot prove that no child ran (the
+    Keychain may have locked while one did), so callers keep the delivery
+    fail-closed and only report the authorization the user must give.
+    """
+    return _avault_supports_keychain_authorization(path) and _avault_master_key_needs_authorization() is True
 
 
 def _agent_secret_payload(secret: dict, *, target_field: str) -> dict:
@@ -9658,6 +9785,7 @@ def avault_agent_grant(
             deks=deks,
         )
     except AvaultAgentError as exc:
+        _raise_if_agent_authorization_required(exc)
         raise AvaultError(str(exc)) from exc
 
 
@@ -9682,6 +9810,7 @@ def avault_agent_release(*, grant_id: str) -> dict:
     try:
         return AvaultAgentClient(_avault_agent_manager().socket_path, timeout=1.0).release(grant_id=grant_id)
     except AvaultAgentError as exc:
+        _raise_if_agent_authorization_required(exc)
         raise AvaultError(str(exc)) from exc
 
 
@@ -9784,6 +9913,7 @@ def avault_agent_deliver_run(
             context=context,
         )
     except AvaultAgentError as exc:
+        _raise_if_agent_authorization_required(exc)
         if _avault_agent_error_is_absent(str(exc)):
             raise AvaultPreHandoffError(str(exc)) from exc
         raise AvaultError(str(exc)) from exc
@@ -9826,6 +9956,7 @@ def avault_agent_deliver_fetch(
             context=context,
         )
     except AvaultAgentError as exc:
+        _raise_if_agent_authorization_required(exc)
         if _avault_agent_error_is_absent(str(exc)):
             raise AvaultPreHandoffError(str(exc)) from exc
         raise AvaultError(str(exc)) from exc
@@ -9850,6 +9981,7 @@ def avault_agent_deliver_inject(
             secrets=[_agent_secret_payload(secret, target_field="key") for secret in secrets],
         )
     except AvaultAgentError as exc:
+        _raise_if_agent_authorization_required(exc)
         if _avault_agent_error_is_absent(str(exc)):
             raise AvaultPreHandoffError(str(exc)) from exc
         raise AvaultError(str(exc)) from exc
@@ -9916,6 +10048,88 @@ def avault_key_import(blob: dict, passphrase: str, *, force: bool = False) -> No
     proc = _run_avault(args, stdin=body)
     if proc.returncode != 0:
         raise AvaultError(_avault_detail(proc) or "avault key import failed")
+
+
+def avault_key_authorize() -> dict:
+    """Run ``avault key authorize`` once: the only avault call that may show a dialog.
+
+    It asks macOS to let this avault binary read the existing master key; the
+    dialog appears on the screen of the Mac running this process, never in a
+    browser. Call it only for an explicit user action (the Web "Authorize
+    avault" button or ``vibe vault key authorize``), never from a poller, a
+    retry, or an Agent tool. avault itself shares one dialog among concurrent
+    callers and suppresses new ones for 120 s after a deny or cancel.
+
+    Returns ``{"ok", "reason", "detail"?}``. ``reason`` is ``authorized``,
+    ``not_applicable`` (no Keychain off macOS), ``avault_missing``,
+    ``avault_upgrade_required``, ``timed_out``, ``no_gui_session`` (this process
+    provably cannot show the dialog), or ``not_completed`` (denied, cancelled,
+    still cooling down, or failed; avault's own ``detail`` says which).
+    """
+    if platform.system() != "Darwin":
+        return {"ok": True, "reason": "not_applicable"}
+    path = _resolve_avault_cli_path()
+    if not path:
+        return {"ok": False, "reason": "avault_missing"}
+    if not _avault_supports_keychain_authorization(path):
+        return {"ok": False, "reason": "avault_upgrade_required"}
+    try:
+        proc = subprocess.run(
+            [path, *_avault_args(["key", "authorize"])],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=_AVAULT_AUTHORIZE_TIMEOUT_SECONDS,
+            env=_command_env_for(path),
+            **isolated_subprocess_kwargs(),
+        )
+    except FileNotFoundError:
+        return {"ok": False, "reason": "avault_missing"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "reason": "timed_out"}
+    if proc.returncode == 0:
+        avault_authorization.clear_authorization_required()
+        return {"ok": True, "reason": "authorized"}
+    # avault exits 70 for a deny, a cancel, the cooldown after one, and a session
+    # that cannot show the dialog alike; tell the last apart from this process's
+    # own login session instead of parsing avault's text.
+    result = {"ok": False, "reason": "no_gui_session" if _process_cannot_show_macos_dialogs() else "not_completed"}
+    detail = _avault_detail(proc)
+    if detail:
+        result["detail"] = detail[-_AVAULT_AUTHORIZE_DETAIL_LIMIT:]
+    return result
+
+
+def _process_cannot_show_macos_dialogs() -> bool:
+    """True only when this process provably runs outside the logged-in desktop session.
+
+    A process started over SSH, or with nobody logged in at the desktop, has no
+    window server to show the Keychain dialog on. An inconclusive probe is not
+    proof, so it reads as False.
+    """
+    try:
+        from vibe.macos_session_diagnostics import MacOSSessionProbe
+
+        context = MacOSSessionProbe().capture_context()
+    except Exception:  # noqa: BLE001 - a diagnostic only refines the message
+        return False
+    return context.gui_domain_available is False or context.asid_match is False
+
+
+def get_avault_authorization_status() -> dict:
+    """Whether avault needs the one-time Keychain authorization, and this process's last attempt."""
+    record = avault_authorization.read_record()
+    return {
+        "ok": True,
+        "required": record is not None,
+        "detected_at": record.get("detected_at") if record else None,
+        "attempt": avault_authorization.current_attempt(),
+    }
+
+
+def start_avault_authorization() -> dict:
+    """Start the user's "Authorize avault" action, or join the one already running."""
+    avault_authorization.start_authorization(avault_key_authorize)
+    return get_avault_authorization_status()
 
 
 def _askill_auto_update_disabled() -> bool:
@@ -10326,6 +10540,7 @@ def dependencies_status(*, offline: bool = False, dependency_ids: list[str] | No
             "latest_version": AVAULT_VERSION,
             "has_update": bool(av["installed"] and not _version_at_least(av.get("version"), AVAULT_VERSION)),
             "status": av["status"],
+            "authorization_required": bool(av["installed"]) and avault_authorization.authorization_required(),
         }
     if requested.intersection({"show-runtime", "node"}):
         deps["show-runtime"], deps["node"] = _show_runtime_dependencies_status(offline=offline)

@@ -7,6 +7,8 @@ import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
 import { MAX_VAULT_FIELDS, vaultDefaultField, vaultFieldNameIssue, vaultFieldNames, vaultRecordName } from '@/lib/vaultFields';
+import { isAvaultAuthorizationRequired } from '@/lib/useAvaultAuthorization';
+import { AvaultAuthorizationNotice } from './avault-authorization-notice';
 import { Button } from './button';
 import {
   VaultFieldList,
@@ -69,6 +71,8 @@ export function VaultSecretFieldsEditor({
   const [focusedName, setFocusedName] = useState<'default' | 'new' | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The last write failed because avault needs its one-time Keychain authorization.
+  const [needsAvaultAuthorization, setNeedsAvaultAuthorization] = useState(false);
   const [saved, setSaved] = useState(false);
   const [draftNotice, setDraftNotice] = useState<string | null>(null);
   const fields = vaultFieldNames(current);
@@ -180,6 +184,7 @@ export function VaultSecretFieldsEditor({
     setBusy(true);
     onBusyChange(true);
     setError(null);
+    setNeedsAvaultAuthorization(false);
     setSaved(false);
     setDraftNotice(null);
     try {
@@ -218,6 +223,8 @@ export function VaultSecretFieldsEditor({
         } catch (refreshError) {
           setError(vaultErrorMessage(t, refreshError, t('vaults.dialog.errors.updateFailed')));
         }
+      } else if (isAvaultAuthorizationRequired(err)) {
+        setNeedsAvaultAuthorization(true);
       } else {
         setError(vaultErrorMessage(t, err, t('vaults.dialog.errors.updateFailed')));
       }
@@ -437,6 +444,7 @@ export function VaultSecretFieldsEditor({
         onContinueInBrowser={() => openVaultsInBrowser({ kind: 'edit', secretName: current.name })} />}
       {busy && <Loader2 className="size-4 animate-spin text-muted" />}
       {saved && <p role="status" className="text-xs text-mint-ink">{t('vaults.fields.saved')}</p>}
+      {needsAvaultAuthorization && <AvaultAuthorizationNotice forceVisible />}
       {error && <p role="alert" className="text-xs text-destructive-ink">{error}</p>}
     </div>
   );

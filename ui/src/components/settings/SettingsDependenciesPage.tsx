@@ -32,6 +32,7 @@ import {
 } from './SettingsDependenciesPage.logic';
 import { errorMessage } from '@/lib/errorMessage';
 import { useDependencyChecks } from './useDependencyChecks';
+import { AvaultAuthorizationNotice } from '../ui/avault-authorization-notice';
 
 // Mirrors design.pen "vibe-remote — Settings · Dependencies": one card per
 // required local runtime (icon tile + name/REQUIRED + detail + status pill +
@@ -277,6 +278,10 @@ export const SettingsDependenciesPage: React.FC = () => {
                     className="border-t border-destructive/30 pt-3 text-[11px] leading-snug text-destructive-ink"
                   >
                     {persistedFailure}
+                  </div>
+                ) : d.id === 'avault' && d.authorization_required ? (
+                  <div className="border-t border-border pt-3">
+                    <AvaultAuthorizationNotice forceVisible />
                   </div>
                 ) : undefined}
               />

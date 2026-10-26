@@ -46,6 +46,15 @@ it('keeps a stale field DELETE inline instead of showing a global toast', async 
   expect(showToast).not.toHaveBeenCalled();
 });
 
+// The Authorize avault notice polls this read; an error body taken for a status would
+// drop the running attempt and end the polling before the person at the Mac answers.
+it('rejects a failed avault authorization status read without a toast', async () => {
+  apiFetch.mockResolvedValue(new Response(JSON.stringify({ ok: false, error: 'unavailable' }), { status: 503 }));
+  const { result } = renderHook(useApi, { wrapper: ApiProvider });
+  await expect(result.current.getAvaultAuthorization()).rejects.toMatchObject({ status: 503 });
+  expect(showToast).not.toHaveBeenCalled();
+});
+
 it.each([
   'invalid_field_name', 'field_exists', 'field_not_found', 'too_many_fields',
   'fields_not_supported', 'record_mismatch', 'secret_conflict', 'fields_corrupt',
