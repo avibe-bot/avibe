@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import functools
 import json
 import logging
@@ -76,6 +77,7 @@ from core.os_errors import local_error_detail
 
 _MAX_REQUEST_BYTES: Final = 128 * 1024 * 1024
 _BUFFERED_RESPONSE_MEMORY_BYTES: Final = 256 * 1024
+_MAX_REPLAY_BUFFER_BYTES: Final = 128 * 1024 * 1024
 _RESPONSE_CHUNK_BYTES: Final = 64 * 1024
 # Claude Code aborts a stream whose response headers miss its first-byte window
 # and treats a byte-silent body as stalled. Resolution can outlast both through
@@ -243,6 +245,30 @@ class _TurnExecution:
     # A large buffered JSON body whose headers have already left. A local disk
     # failure can no longer replace its HTTP status or append an SSE ending.
     buffered_response: web.StreamResponse | None = None
+    # An initial Responses stream is held until its terminal is known. This
+    # flag is armed only after the entire body is safely stored, never during
+    # cancellation or a failed spool write.
+    buffered_stream: BinaryIO | None = None
+    retry_buffered_overload: bool = False
+
+    def next_attempt(self) -> None:
+        """Retire a fully settled/metered discarded attempt without ending its request."""
+
+        assert self.settlement_task is not None and self.settlement_task.done()
+        assert not self.owes_metering and self.stream_response is None
+        self.resolved = None
+        self.handle = None
+        self.settlement_task = None
+        self.settlement_origin = None
+        self.settlement_recorded = False
+        self.terminal_fact_committed = False
+        self.rendered_turn_outcome = None
+        self.wire_state = None
+        self.handle_outcome = None
+        self.completed_at = None
+        self.usage_write = None
+        self.buffered_stream = None
+        self.retry_buffered_overload = False
 
     @property
     def upstream_observation(self) -> ProtocolSSEState | None:
@@ -1143,6 +1169,32 @@ class ModelHubTurnGateway:
             )
 
         protocol = "google" if google_request else _REQUEST_PROTOCOLS[endpoint]
+        replayed = False
+
+        def adopt(resolved: ResolvedInvocation) -> None:
+            # Own the body before buffering, health writes, or keepalive teardown
+            # can be cancelled. Each callback closes only its captured handle.
+            execution.resolved = resolved
+            if resolved.handle is not None and resolved.handle.stream is not None:
+                execution.handle = resolved.handle
+                resources.push_async_callback(resolved.handle.close_stream)
+
+        async def prepare_response(resolved: ResolvedInvocation) -> RawCallOutcome | None:
+            nonlocal replayed
+            adopt(resolved)
+            if replayed or resolved.outcome is not None or execution.handle is None:
+                return None
+            outcome, settlement = await self._buffer_responses_stream(execution, terminalizer, resources)
+            if settlement.decision is None or settlement.decision.action != "fallback":
+                return None
+            # The first partial text/tool calls never reached the consumer. Its
+            # attempt has already settled and been metered, independently of
+            # whatever the next route resolves to (including a local refusal).
+            await run_owned_in_thread(execution.buffered_stream.close)
+            replayed = True
+            execution.next_attempt()
+            return outcome
+
         try:
             caller_headers = {
                 name.lower(): value for name, value in request.headers.items() if name.lower() in FORWARDED_CALLER_HEADERS
@@ -1174,13 +1226,13 @@ class ModelHubTurnGateway:
                     supply_channel="hub",
                     attempt_observer=observe_attempt,
                     recovery_observer=terminalizer.update_recovery,
+                    prepare_response=(
+                        prepare_response if stream and protocol == "openai_responses"
+                        and self.service.recovery.window_seconds > 0 else None
+                    ),
                 )
-                # Owned before the keepalive stops, so a cancellation while it
-                # stops still closes and meters a Source stream already won.
-                execution.resolved = resolved
-                if resolved.handle is not None and resolved.handle.stream is not None:
-                    execution.handle = resolved.handle
-                    resources.push_async_callback(resolved.handle.close_stream)
+                if execution.resolved is not resolved:
+                    adopt(resolved)
         except ModelHubError as exc:
             if exc.code == PIN_UNAVAILABLE_CODE:
                 # Never shown to the user: Vibey re-renders the request in
@@ -1237,7 +1289,7 @@ class ModelHubTurnGateway:
             response.headers.update(_response_origin_headers(exc))
             return await self._through_committed_stream(execution, protocol, response)
 
-        if execution.handle is not None:
+        if execution.handle is not None and execution.settlement_task is None:
             # The execution boundary must own cleanup before an awaited health
             # write: cancellation here still settles and meters this handle.
             await self.service._observe_handle_recovery(
@@ -1327,6 +1379,65 @@ class ModelHubTurnGateway:
         await self._downstream_io(committed.write_eof())
         return committed
 
+    async def _buffer_responses_stream(
+        self,
+        execution: _TurnExecution,
+        terminalizer: GatewayTurnTerminalizer,
+        resources: AsyncExitStack,
+    ) -> tuple[RawCallOutcome, HandleSettlement]:
+        """Observe and settle one uncommitted stream; no content leaves here."""
+
+        handle = execution.handle
+        assert handle is not None and handle.stream is not None
+        payload = tempfile.SpooledTemporaryFile(max_size=_BUFFERED_RESPONSE_MEMORY_BYTES)
+        execution.buffered_stream = payload
+        resources.push_async_callback(run_owned_in_thread, payload.close)
+        wire_state = ProtocolSSEState("openai_responses")
+        execution.wire_state = wire_state
+        buffered_bytes = 0
+        try:
+            async for chunk in handle.stream:
+                await wire_state.observe_async(chunk)
+                buffered_bytes += len(chunk)
+                if buffered_bytes > _MAX_REPLAY_BUFFER_BYTES:
+                    raise OSError(errno.EFBIG, "Model Hub response replay buffer limit exceeded")
+                await run_owned_in_thread(payload.write, chunk)
+            execution.completed_at = self._now()
+            # Match the bounded wire facts before the engine's display/code
+            # sanitizers can elide an unknown code or normalize message text.
+            # A root `type:error` selects the SSE envelope, not an error class.
+            error_types = set(wire_state.error_type_candidates)
+            if () in wire_state.error_envelope_paths:
+                error_types.discard("error")
+            execution.retry_buffered_overload = (
+                wire_state.terminal_outcome == "failed_terminal"
+                and wire_state.model_output_started
+                and error_types | set(wire_state.error_code_candidates) == {"server_error"}
+                and wire_state.error_message == "Our servers are currently overloaded. Please try again later."
+            )
+            outcome, settlement, _rendered = await self._settle_metered_turn(
+                execution, terminalizer, termination_origin="upstream_terminal", defer_projection=True,
+            )
+            await run_owned_in_thread(payload.seek, 0)
+        except OSError as exc:
+            # A local spool failure is never a reason to replay the upstream.
+            # Meter/settle its actual observation before reporting delivery loss.
+            execution.retry_buffered_overload = False
+            await self._settle_metered_turn(
+                execution, terminalizer, termination_origin="upstream_terminal", defer_projection=True,
+            )
+            raise ModelHubError(
+                "engine_down", status=502, turn_outcome=ENGINE_DOWN_TURN_OUTCOME,
+                local_error_detail=local_error_detail(exc),
+            ) from exc
+        assert outcome is not None and settlement is not None
+        return outcome, settlement
+
+    @staticmethod
+    async def _read_buffered_stream(payload: BinaryIO) -> AsyncIterator[bytes]:
+        while chunk := await run_owned_in_thread(payload.read, _RESPONSE_CHUNK_BYTES):
+            yield chunk
+
     async def _resolved_response(
         self,
         request: web.Request,
@@ -1339,9 +1450,9 @@ class ModelHubTurnGateway:
     ) -> web.StreamResponse:
         if resolved.supply_channel != "hub":
             return self._error_response(status=409, code="mode_switch_blocked")
-        # Resolution has crossed the engine's first-output barrier or already
-        # settled successfully: this request can no longer fail over. The same
-        # admitted origin is held by its provenance attempt.
+        # Resolution crossed the engine's first-output barrier. A Responses
+        # overload may have been discarded before this point; only the final
+        # admitted producer supplies these downstream headers.
         origin_headers = _response_origin_headers(resolved)
         if resolved.outcome is not None:
             # A call that reached the resolver's own hands has already been
@@ -1451,21 +1562,43 @@ class ModelHubTurnGateway:
         if response is None:
             response = web.StreamResponse(status=200, headers={**_SSE_RESPONSE_HEADERS, **origin_headers})
             await self._downstream_io(response.prepare(request))
+        buffered = execution.buffered_stream
+        # Track what actually leaves, not the already-complete spooled wire. A
+        # disk read can fail between frames; only forwarded bytes may determine
+        # whether a terminal is still owed or a partial frame needs invalidating.
         wire_state = ProtocolSSEState(protocol)
         execution.wire_state = wire_state
+        body = self._read_buffered_stream(buffered) if buffered is not None else handle.stream
         tool_name_rewriter = StreamingToolNameRewriter(execution.response_tool_aliases)
-        async for chunk in handle.stream:
-            output_started_before = wire_state.model_output_started
-            await wire_state.observe_async(chunk)
-            if wire_state.model_output_started and not output_started_before:
-                terminalizer.mark_stream_started()
-            rewritten = tool_name_rewriter.feed(chunk)
-            if rewritten:
-                await self._downstream_io(response.write(rewritten))
-        trailing = tool_name_rewriter.finish()
-        if trailing:
-            await self._downstream_io(response.write(trailing))
-        execution.completed_at = self._now()
+        try:
+            async for chunk in body:
+                output_started_before = wire_state.model_output_started
+                await wire_state.observe_async(chunk)
+                if wire_state.model_output_started and not output_started_before:
+                    terminalizer.mark_stream_started()
+                rewritten = tool_name_rewriter.feed(chunk)
+                if rewritten:
+                    await self._downstream_io(response.write(rewritten))
+            trailing = tool_name_rewriter.finish()
+            if trailing:
+                await self._downstream_io(response.write(trailing))
+        except OSError as exc:
+            if buffered is None or isinstance(exc, _DownstreamDisconnected):
+                raise
+            # The producer was already settled/metered before local playback.
+            # Delivery loss must not turn its success into Source ill health.
+            detail = local_error_detail(exc)
+            terminalizer.engine_down(local_error_detail=detail)
+            rendered = self._commit_and_render_turn_outcome(
+                execution, terminalizer, replace(ENGINE_DOWN_TURN_OUTCOME, local_error_detail=detail),
+            )
+            await self._write_stream_terminal_copy(
+                response, protocol, rendered, wire_state, forwarded_terminal=wire_state.terminal_outcome,
+            )
+            await self._downstream_io(response.write_eof())
+            return response
+        if execution.completed_at is None:
+            execution.completed_at = self._now()
         _outcome, _settlement, rendered = await self._settle_metered_turn(
             execution,
             terminalizer,
@@ -1815,6 +1948,7 @@ class ModelHubTurnGateway:
             outcome,
             termination_origin=termination_origin,
             record_attempt=record_attempt,
+            retry_buffered_overload=execution.retry_buffered_overload,
         )
         if termination_origin == "downstream_cancel":
             return settlement.outcome, settlement

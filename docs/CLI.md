@@ -891,6 +891,26 @@ vibe restart --delay-seconds 60
 
 The Model Hub engine process is named `cli-proxy-api` (hyphenated); `pgrep cliproxyapi` therefore always returns no match.
 
+#### Responses streams and overload recovery
+
+With automatic Model Hub recovery enabled, the first OpenAI Responses stream is
+buffered before delivery, including compatible custom Sources. You may therefore
+see no incremental text, reasoning, or tool calls until that response ends.
+If it ends with the exact `server_error` message
+`Our servers are currently overloaded. Please try again later.`, Model Hub
+discards that partial response and retries once through your configured route,
+within the same recovery window. Only the final attempt reaches the Agent.
+Other streamed errors and other protocols do not gain post-output retries.
+
+The retry itself streams normally and is not replayed again after output.
+Both upstream attempts are counted in usage and may be billed; provider-hosted
+tools can also have run on the discarded attempt. This prevents duplicate
+**downstream** text/tool calls, not duplicate provider-side execution. No Source
+order, credentials, or backend settings are changed by recovery. The initial
+response buffer uses at most 256 KiB of RAM before spilling to temporary disk,
+with a 128 MiB total cap. A disk error or an oversized response ends locally
+without another replay.
+
 ## Web UI Controls
 
 The web UI (`http://127.0.0.1:5123`) provides the same controls:

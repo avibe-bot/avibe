@@ -10595,12 +10595,14 @@ class ModelHubService:
         *,
         termination_origin: HandleTerminationOrigin,
         record_attempt: Callable[[RawCallOutcome, ResolutionDecision], None],
+        retry_buffered_overload: bool = False,
     ) -> HandleSettlement:
         """Settle every consumed hub handle before its terminal facts are exposed."""
 
         try:
             return await self._settle_handle_outcome(
                 resolved, outcome, termination_origin=termination_origin, record_attempt=record_attempt,
+                retry_buffered_overload=retry_buffered_overload,
             )
         finally:
             if resolved is not None:
@@ -10613,8 +10615,9 @@ class ModelHubService:
         *,
         termination_origin: HandleTerminationOrigin,
         record_attempt: Callable[[RawCallOutcome, ResolutionDecision], None],
+        retry_buffered_overload: bool,
     ) -> HandleSettlement:
-        if resolved is not None and resolved.handle is not None:
+        if resolved is not None and resolved.handle is not None and not retry_buffered_overload:
             await self._observe_handle_recovery(
                 resolved.source_id, resolved.settlement_generation, resolved.handle,
                 backend=resolved.backend, model_id=resolved.requested_model_id,
@@ -10639,6 +10642,25 @@ class ModelHubService:
             resolved.credential_ref,
             outcome,
         )
+        # Only the gateway can grant this after matching the exact overload
+        # in a fully buffered, uncommitted Responses body. Keep the upstream
+        # stream_started fact intact for usage and provenance.
+        retry_overload = (
+            retry_buffered_overload
+            and outcome.kind is RawOutcomeKind.HTTP_ERROR and outcome.http_status == 200
+            and outcome.stream_started
+            and decision.action == "surface" and decision.reason == "server_error"
+        )
+        if retry_overload:
+            decision = replace(decision, action="fallback", error_code=None)
+        elif retry_buffered_overload and resolved.handle is not None:
+            # Preserve ordinary first-output recovery evidence, but not for the
+            # discarded overload: it must extend the existing failure streak,
+            # not briefly announce recovery and reset its own backoff.
+            await self._observe_handle_recovery(
+                resolved.source_id, resolved.settlement_generation, resolved.handle,
+                backend=resolved.backend, model_id=resolved.requested_model_id,
+            )
         record_attempt(outcome, decision)
         if decision.action == "return":
             if self._verified_recovery_outcome(outcome):
@@ -10662,7 +10684,7 @@ class ModelHubService:
                     decision=decision,
                 ),
             )
-        if decision.action != "surface":
+        if decision.action != "surface" and not retry_overload:
             raise AssertionError("consumed streams cannot retry or fall through")
         source_transition_persisted: bool | None = None
         if decision.reason is not None:
@@ -10681,6 +10703,10 @@ class ModelHubService:
                     settlement_generation=resolved.settlement_generation,
                     outcome=outcome,
                 )
+        if retry_overload:
+            # An attempt failed, not the Turn. The resolver still owns its
+            # original recovery window, routing, and the eventual terminal.
+            return HandleSettlement(outcome=outcome, decision=decision, turn_outcome=None)
         return HandleSettlement(
             outcome=outcome,
             decision=decision,
@@ -11673,9 +11699,16 @@ class ModelHubService:
             )
 
     async def resolve_with_recovery(
-        self, *, recovery_observer: Callable[[dict | None], None] | None = None, **kwargs,
+        self, *, recovery_observer: Callable[[dict | None], None] | None = None,
+        prepare_response: Callable[[ResolvedInvocation], Awaitable[RawCallOutcome | None]] | None = None,
+        **kwargs,
     ) -> ResolvedInvocation:
-        """One pending model request, including all fallback passes and waits."""
+        """One pending model request, including all fallback passes and waits.
+
+        A gateway may buffer and settle a response before committing it. It
+        returns only a settled retryable outcome, never an unconsumed handle;
+        that replay shares this pending request rather than opening a new window.
+        """
 
         if self.recovery.window_seconds == 0:
             # Explicit opt-out for single-walk probes and characterization tests.
@@ -11685,7 +11718,17 @@ class ModelHubService:
         try:
             while True:
                 try:
-                    return await self.resolve(**kwargs, recovery_request=pending)
+                    resolved = await self.resolve(**kwargs, recovery_request=pending)
+                    retry_outcome = await prepare_response(resolved) if prepare_response is not None else None
+                    if retry_outcome is None:
+                        return resolved
+                    pending.start()
+                    pending.reason = "server_error"
+                    pending.last_upstream_failure = self._upstream_failure(resolved.source_label, retry_outcome)
+                    if getattr(kwargs.get("request"), "pinned_hop", None) is not None:
+                        # Never replay opaque continuation content on a different
+                        # hop. Its caller owns re-rendering the portable request.
+                        raise _pin_unavailable()
                 except ModelHubError as exc:
                     projection = exc.turn_outcome
                     if (
