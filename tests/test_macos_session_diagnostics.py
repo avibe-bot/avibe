@@ -166,6 +166,7 @@ def test_login_session_classifier_does_not_flag_normal_session_shapes() -> None:
     ]
     assert [login_session_state(item) for item in normal] == ["healthy"] * 4
     assert login_session_state(context(gui_available=False, gui_error="absent")) == "no_gui_session"
+    assert login_session_state(context(gui_asid=120002), service_pid_is_target=True) == "stale_login_session"
 
 
 def test_launchctl_snapshot_parsing_uses_security_context_fixture() -> None:

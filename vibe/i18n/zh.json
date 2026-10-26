@@ -1377,6 +1377,7 @@
       "splitLaunchers": "稳定 vibe 启动器指向了不同的安装：{launchers}",
       "launchersInStep": "{count} 个稳定 vibe 启动器都指向 Avibe {version}",
       "loginSessionHealthy": "Avibe 服务运行在当前 macOS 登录会话中",
+      "loginSessionLocalFallback": "未发现正在运行的 Avibe 服务；未将 macOS 登录会话状态作为服务健康状态",
       "loginSessionUnknown": "无法验证 macOS 登录会话",
       "noGuiSession": "没有可用的桌面 GUI 会话；无头或 SSH 使用属于正常情况",
       "staleLoginSession": "Avibe 仍运行在一个已经结束的 macOS 登录会话中",

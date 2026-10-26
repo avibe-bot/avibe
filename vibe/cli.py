@@ -12301,7 +12301,15 @@ def _show_runtime_doctor_items(*, language: str = "en", deep: bool = False) -> l
 def _macos_login_session_doctor_items(*, language: str = "en") -> list[dict]:
     if platform.system() != "Darwin":
         return []
-    state = api.macos_login_session_state()
+    owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
+    if owner_pid:
+        state = api.macos_login_session_state(service_pid=owner_pid)
+    else:
+        return [{
+            "status": "pass",
+            "code": "login_session_local_fallback",
+            "message": i18n_t("doctor.item.loginSessionLocalFallback", language),
+        }]
     if state == "stale_login_session":
         return [{
             "status": "fail",

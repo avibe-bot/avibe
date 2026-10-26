@@ -233,6 +233,34 @@ describe('AppShell stale login session notice', () => {
 
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('errors.stale_login_session'));
   });
+
+  it('rechecks the state while the Workbench stays visible', async () => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
+    const intervalSpy = vi.spyOn(window, 'setInterval').mockImplementation((callback) => {
+      void Promise.resolve().then(() => (callback as () => void)());
+      return 1;
+    });
+    api.getMacOSLoginSessionStatus
+      .mockResolvedValueOnce({ ok: true, state: 'healthy' })
+      .mockResolvedValueOnce({ ok: true, state: 'stale_login_session' });
+
+    try {
+      render(
+        <MemoryRouter initialEntries={['/']}>
+          <Routes>
+            <Route element={<AppShell />}>
+              <Route path="/" element={<div>workbench</div>} />
+            </Route>
+          </Routes>
+        </MemoryRouter>,
+      );
+      await waitFor(() => expect(api.getMacOSLoginSessionStatus).toHaveBeenCalledTimes(1));
+      await waitFor(() => expect(api.getMacOSLoginSessionStatus).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(screen.getByRole('alert')).toBeTruthy());
+    } finally {
+      intervalSpy.mockRestore();
+    }
+  });
 });
 
 describe('AppShell setup access', () => {

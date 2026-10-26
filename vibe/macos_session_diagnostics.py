@@ -154,9 +154,13 @@ def is_stale_login_session(context: SessionContext) -> bool:
     return context.service_error_class == "user_lookup_failed"
 
 
-def login_session_state(context: SessionContext) -> str:
+def login_session_state(context: SessionContext, *, service_pid_is_target: bool = False) -> str:
     """Classify the current process without treating inconclusive probes as stale."""
-    if is_stale_login_session(context):
+    if is_stale_login_session(context) or (
+        service_pid_is_target
+        and context.gui_domain_available is True
+        and context.asid_match is False
+    ):
         return "stale_login_session"
     if context.gui_domain_available is False:
         return "no_gui_session"
@@ -211,6 +215,7 @@ class MacOSSessionProbe:
         command_runner: CommandRunner = run_bounded_command,
         console_user_reader: ConsoleUserReader = read_console_user,
         service_user_reader: ServiceUserReader = read_service_user,
+        service_pid_is_target: bool = False,
         command_timeout: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
         dns_hostname: str = DNS_PROBE_HOSTNAME,
     ) -> None:
@@ -219,6 +224,7 @@ class MacOSSessionProbe:
         self._command_runner = command_runner
         self._console_user_reader = console_user_reader
         self._service_user_reader = service_user_reader
+        self._service_pid_is_target = service_pid_is_target
         self._command_timeout = command_timeout
         self._dns_hostname = dns_hostname
         self._service_asid: int | None = None
@@ -230,11 +236,12 @@ class MacOSSessionProbe:
             console_user, console_error = None, "probe_error"
 
         service_error = None
-        try:
-            _service_user, service_user_error = self._service_user_reader(self.service_uid)
-        except Exception:
-            service_user_error = "probe_error"
-        service_error = service_user_error
+        if not self._service_pid_is_target:
+            try:
+                _service_user, service_user_error = self._service_user_reader(self.service_uid)
+            except Exception:
+                service_user_error = "probe_error"
+            service_error = service_user_error
         if self._service_asid is None:
             result = self._command_runner(
                 ["/bin/launchctl", "print", f"pid/{self.service_pid}"],

@@ -33,6 +33,7 @@ import logoImg from '../assets/logo.png';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import { APP_SHELL_SCROLL_ID, forgetMobileProjectsListUnlessPreserved } from '../lib/mobileProjectsListMemory';
 import { useIsDesktop } from '../lib/useIsDesktop';
+import { onPageReactivated } from '../lib/pageActivity';
 import { adoptPersistedLanguage } from '../lib/useLanguageSelection';
 import { isOwnerOnlyPath } from '../lib/adminNavigation';
 import { useSettingsResumePath } from '../lib/settingsSectionMemory';
@@ -90,6 +91,8 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
 
 type CenterButton = { label: string; icon: React.ComponentType<{ className?: string }>; to?: string; onClick?: () => void };
 
+const MACOS_SESSION_NOTICE_REFRESH_MS = 30_000;
+
 const MacOSStaleLoginSessionNotice: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
@@ -97,12 +100,22 @@ const MacOSStaleLoginSessionNotice: React.FC = () => {
 
   useEffect(() => {
     let active = true;
-    void api.getMacOSLoginSessionStatus().then((result) => {
-      if (active) setStale(result.state === 'stale_login_session');
-    }).catch(() => {
-      // A diagnostic notice must not make the Workbench unavailable.
-    });
-    return () => { active = false; };
+    const read = () => {
+      if (document.visibilityState !== 'visible') return;
+      void api.getMacOSLoginSessionStatus().then((result) => {
+        if (active) setStale(result.state === 'stale_login_session');
+      }).catch(() => {
+        // A diagnostic notice must not make the Workbench unavailable.
+      });
+    };
+    read();
+    const interval = window.setInterval(read, MACOS_SESSION_NOTICE_REFRESH_MS);
+    const stopReactivation = onPageReactivated(read);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+      stopReactivation();
+    };
   }, [api]);
 
   if (!stale) return null;

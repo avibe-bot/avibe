@@ -9431,14 +9431,18 @@ class AvaultError(Exception):
     avault is designed to keep secrets out of its stdout/stderr and errors."""
 
 
+class AvaultPreHandoffError(AvaultError):
+    """avault failed before receiving an envelope or performing delivery."""
+
+
 class AvaultStaleLoginSessionError(AvaultError):
     """The Avibe process outlived the macOS login session that owns its user services."""
 
     code = "stale_login_session"
 
 
-class AvaultPreHandoffError(AvaultError):
-    """avault failed before receiving an envelope or performing delivery."""
+class AvaultStaleLoginSessionBeforeHandoffError(AvaultStaleLoginSessionError, AvaultPreHandoffError):
+    """The stale-session check stopped a Vault operation before any handoff."""
 
 
 class AvaultAuthorizationRequiredError(AvaultError):
@@ -9729,7 +9733,7 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
     fail-closed) only when ``_deliver_run_needed_authorization`` confirms it.
     """
     if macos_login_session_state() == "stale_login_session":
-        raise AvaultStaleLoginSessionError(backend_t("errors.staleLoginSession"))
+        raise AvaultStaleLoginSessionBeforeHandoffError(backend_t("errors.staleLoginSession"))
     path = _require_avault_path()
     payload = json.dumps(
         [
@@ -10125,14 +10129,19 @@ def avault_key_authorize() -> dict:
     return result
 
 
-def macos_login_session_state() -> str:
-    """Return the redacted login-session state for this process."""
+def macos_login_session_state(*, service_pid: int | None = None) -> str:
+    """Return the redacted login-session state for this process or a target service."""
     if platform.system() != "Darwin":
         return "not_applicable"
     try:
         from vibe.macos_session_diagnostics import MacOSSessionProbe, login_session_state
 
-        return login_session_state(MacOSSessionProbe().capture_context())
+        target = service_pid is not None and service_pid != os.getpid()
+        context = MacOSSessionProbe(
+            service_pid=service_pid,
+            service_pid_is_target=target,
+        ).capture_context()
+        return login_session_state(context, service_pid_is_target=target)
     except Exception:  # noqa: BLE001 - diagnostics must never block a Vault call
         return "unknown"
 

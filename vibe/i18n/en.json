@@ -1377,6 +1377,7 @@
       "splitLaunchers": "Stable vibe launchers select different installs: {launchers}",
       "launchersInStep": "{count} stable vibe launchers select Avibe {version}",
       "loginSessionHealthy": "The Avibe service is running in the current macOS login session",
+      "loginSessionLocalFallback": "No running Avibe service was found; macOS login-session status was not used as service health",
       "loginSessionUnknown": "The macOS login session could not be verified",
       "noGuiSession": "No desktop GUI session is available; this is expected for headless or SSH use",
       "staleLoginSession": "Avibe is still running in a macOS login session that has ended",

@@ -51,8 +51,9 @@ def test_stale_login_session_replaces_raw_avault_failure(mac_avault, monkeypatch
         api.avault_pubkey()
 
     assert exc.value.code == "stale_login_session"
-    with pytest.raises(api.AvaultStaleLoginSessionError):
+    with pytest.raises(api.AvaultStaleLoginSessionError) as exc:
         api.avault_deliver_run(_secret(), ["sh", "-c", "exit 0"])
+    assert isinstance(exc.value, api.AvaultPreHandoffError)
     status = api.get_avault_authorization_status()
     assert status["login_session_state"] == "stale_login_session"
 
@@ -214,12 +215,20 @@ def test_status_readers_and_failed_calls_never_authorize(mac_avault, monkeypatch
 
 def test_doctor_reports_stale_login_session_with_restart_action(monkeypatch):
     monkeypatch.setattr(api.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(api, "macos_login_session_state", lambda: "stale_login_session")
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 4242)
+    calls = []
+
+    def probe(**kwargs):
+        calls.append(kwargs)
+        return "stale_login_session"
+
+    monkeypatch.setattr(api, "macos_login_session_state", probe)
 
     item = cli._macos_login_session_doctor_items(language="en")[0]
 
     assert item["status"] == "fail"
     assert item["code"] == "stale_login_session"
+    assert calls == [{"service_pid": 4242}]
     assert "vibe restart" in item["action"]
 
 
