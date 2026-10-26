@@ -389,8 +389,8 @@ async def test_keyless_rate_limit_settles_service_cooldown_without_persisted_sou
 
 
 @pytest.mark.asyncio
-async def test_keyless_overlapping_searches_settle_rate_limit_before_next_admission(tmp_path, monkeypatch):
-    """KEX-2: a queued keyless turn cannot invalidate the active cooldown generation."""
+async def test_keyless_parallel_searches_preserve_cooldown_after_failure(tmp_path, monkeypatch):
+    """KEX-2: concurrent calls do not serialize, and a failure remains shared after a success."""
     service = owner(
         tmp_path,
         (),
@@ -403,6 +403,7 @@ async def test_keyless_overlapping_searches_settle_rate_limit_before_next_admiss
     )
     entered = asyncio.Event()
     release = asyncio.Event()
+    second_entered = asyncio.Event()
     calls = []
 
     async def search(source_id, vendor, service_id, credential_ref, request, *, on_sent):
@@ -412,18 +413,21 @@ async def test_keyless_overlapping_searches_settle_rate_limit_before_next_admiss
             entered.set()
             await release.wait()
             return wire(429, {"error": {"message": "slow down"}}, headers={"Retry-After": "60"})
-        raise AssertionError("queued keyless search reached the adapter")
+        second_entered.set()
+        await release.wait()
+        return wire()
 
     monkeypatch.setattr(service.adapter, "search", search, raising=False)
     active = asyncio.create_task(run(service))
     await entered.wait()
     queued = asyncio.create_task(run(service))
-    await asyncio.sleep(0)
+    await second_entered.wait()
     release.set()
     first, second = await asyncio.gather(active, queued)
-    assert calls == [(KEYLESS_EXA_SOURCE_ID, KEYLESS_EXA_SERVICE_ID)]
+    assert len(calls) == 2
     assert first["record"]["attempts"][0]["error_code"] == "service_rate_limited"
-    assert second["record"]["attempts"][0]["skipped"] == "cooling"
+    assert second["record"]["status"] == "completed"
+    assert service._service_cooldowns.until(model_hub_keyless_exa_source(), KEYLESS_EXA_SERVICE_ID, NOW) is not None
 
 
 @pytest.mark.asyncio

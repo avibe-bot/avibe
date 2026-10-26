@@ -16,6 +16,7 @@ from .adapter import SearchResponse
 
 
 logger = logging.getLogger(__name__)
+_JSONRPC_ERROR_CODE_FIELD = "code"
 
 
 def _safe_field(value: object) -> str:
@@ -58,7 +59,7 @@ def _jsonrpc_error_code(values: tuple[Mapping[str, Any], ...]) -> str | None:
         error = value.get("error")
         if not isinstance(error, Mapping):
             continue
-        code = error.get("code")
+        code = error.get(_JSONRPC_ERROR_CODE_FIELD)
         if isinstance(code, (str, int)) and not isinstance(code, bool):
             return _safe_field(code)
     return None
