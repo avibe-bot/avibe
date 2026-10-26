@@ -4509,11 +4509,11 @@ def test_a_route_cache_ttl_reaches_vibey_selection_endpoint() -> None:
         backend="vibey", channel="hub", requested_model="gpt-6-astra", target_model="gpt-6-astra",
         runtime_model="gpt-6-astra", source_id="src_openai001", source_identity="sha256:openai-identity",
         gateway_base_url="http://hub.invalid/vibey", gateway_token="hub-token",
-        protocol="openai_responses", provider="openai", cache_ttl="12h", cache_ttl_wire=True,
+        protocol="openai_responses", provider="openai", cache_ttl="30m", cache_ttl_wire=True,
     ).to_hop_resolution()
 
     endpoint = selection_from_hop(hop).endpoint
-    assert endpoint.cache_ttl == "12h"
+    assert endpoint.cache_ttl == "30m"
     assert endpoint.cache_ttl_wire is True
 
 

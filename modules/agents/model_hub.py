@@ -130,9 +130,9 @@ class ModelHubLaunch:
     provider: Optional[str] = None
     input_limit: Optional[int] = None
     supports_images: Optional[bool] = None
-    # Vibey only: the route-local prompt-cache lifetime override. The C-9
-    # clock remains keyed by provider/model because response rows do not carry
-    # a per-Source identity.
+    # Vibey only: the route-local prompt-cache lifetime override. Canonical
+    # response rows and served-hop metadata carry Source identity, but the C-9
+    # clock intentionally remains keyed by provider/model rather than Source.
     cache_ttl: CacheTtl | None = None
     cache_ttl_wire: bool = False
     # Vibey only: each enabled hosted tool's mode, declaration, executor and replay.

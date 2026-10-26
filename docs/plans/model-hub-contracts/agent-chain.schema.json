@@ -20,7 +20,7 @@
           "additionalProperties": false,
           "properties": {
             "cache_ttl": {
-              "enum": ["5m", "30m", "1h", "12h", null],
+              "enum": ["5m", "30m", "1h", null],
               "description": "Optional route-wide C-9 cache lifetime override; unset uses the built-in estimate."
             },
             "hops": {

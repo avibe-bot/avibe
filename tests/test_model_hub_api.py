@@ -500,7 +500,7 @@ def _set_claude_route_fixture(
     return hops
 
 
-def test_vibey_route_cache_ttl_persists_and_rejects_unsupported_12h(tmp_path):
+def test_vibey_route_cache_ttl_persists_30m_and_rejects_unsupported_12h(tmp_path):
     service, store, _ = _service(tmp_path)
     model_id = "gpt-6-astra"
     source = ModelHubSourceConfig(
@@ -525,12 +525,11 @@ def test_vibey_route_cache_ttl_persists_and_rejects_unsupported_12h(tmp_path):
     saved = asyncio.run(service.set_agent_chain(
         "vibey",
         model_id,
-        {"hops": [{"source_id": source.id, "model_id": model_id}], "cache_ttl": "12h"},
+        {"hops": [{"source_id": source.id, "model_id": model_id}], "cache_ttl": "30m"},
     ))
-    assert saved["chain"]["manual_override"]["cache_ttl"] == "12h"
-    assert store.config.agents["vibey"].routes[model_id].cache_ttl == "12h"
+    assert saved["chain"]["manual_override"]["cache_ttl"] == "30m"
+    assert store.config.agents["vibey"].routes[model_id].cache_ttl == "30m"
 
-    store.config.sources[0].base_url = "https://relay.example.test/v1"
     with pytest.raises(ModelHubError) as raised:
         asyncio.run(service.set_agent_chain(
             "vibey",

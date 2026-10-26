@@ -23,6 +23,7 @@ import { cn } from "@/lib/utils";
 import { getBackendUiMeta } from "@/lib/agentBackends";
 import { useIsMobile } from "@/lib/useIsMobile";
 import { GuardDialog } from "./GuardDialog";
+import { Field } from "./dialogFields";
 import { GuardImpact, type GuardPlan } from "./GuardImpact";
 import { confirmGuardPlan, sendAgreed, unansweredRefusal } from "./guardedWrite";
 import { RouteCandidatePopover } from "./RouteCandidatePopover";
@@ -1155,27 +1156,33 @@ export const RouteChainDialog: React.FC<{
             {t(manualDraft ? "settings.models.routing.manualHint" : "settings.models.routing.follows", { backend })}
           </p>
           {agent?.backend === "vibey" && manualDraft && (
-            <label className="mt-3 flex flex-col gap-1 text-sm">
-              <span className="font-semibold">{t("settings.models.routing.cacheTtl.label")}</span>
-              <select
-                className="rounded border border-border bg-surface px-2 py-1.5 text-foreground"
-                value={cacheTtlDraft ?? ""}
-                onChange={(event) => setCacheTtlDraft((event.target.value || null) as CacheTtl | null)}
-                disabled={phase !== "ready" || previewPending}
-              >
-                <option value="">{t("settings.models.routing.cacheTtl.default")}</option>
-                <option value="5m">{t("settings.models.routing.cacheTtl.5m")}</option>
-                <option value="30m">{t("settings.models.routing.cacheTtl.30m")}</option>
-                <option value="1h">{t("settings.models.routing.cacheTtl.1h")}</option>
-                <option value="12h">{t("settings.models.routing.cacheTtl.12h")}</option>
-              </select>
-              <span className="text-xs text-muted">{t("settings.models.routing.cacheTtl.help")}</span>
-              {saveErrorCode === "cache_ttl_unsupported" && (
-                <span role="alert" className="text-xs text-danger">
-                  {t("errors.cache_ttl_unsupported")}
-                </span>
+            <Field
+              className="mt-3 text-sm"
+              label={t("settings.models.routing.cacheTtl.label")}
+              hint={t("settings.models.routing.cacheTtl.help")}
+            >
+              {(id) => (
+                <>
+                  <select
+                    id={id}
+                    className="rounded border border-border bg-surface px-2 py-1.5 text-foreground"
+                    value={cacheTtlDraft ?? ""}
+                    onChange={(event) => setCacheTtlDraft((event.target.value || null) as CacheTtl | null)}
+                    disabled={phase !== "ready" || previewPending}
+                  >
+                    <option value="">{t("settings.models.routing.cacheTtl.default")}</option>
+                    <option value="5m">{t("settings.models.routing.cacheTtl.5m")}</option>
+                    <option value="30m">{t("settings.models.routing.cacheTtl.30m")}</option>
+                    <option value="1h">{t("settings.models.routing.cacheTtl.1h")}</option>
+                  </select>
+                  {saveErrorCode === "cache_ttl_unsupported" && (
+                    <span role="alert" className="text-xs text-danger">
+                      {t("errors.cache_ttl_unsupported")}
+                    </span>
+                  )}
+                </>
               )}
-            </label>
+            </Field>
           )}
         </div>
         {!unresolvedPreview && <div inert={previewPending} className="model-hub-route-list flex flex-col">

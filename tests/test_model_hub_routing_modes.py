@@ -54,20 +54,19 @@ def test_prompt_cache_override_is_route_wide_and_openai_wire_eligible():
     agent.sources.order = [source.id]
     route = ModelHubRouteConfig(
         hops=(ModelHubRouteHopConfig(source.id, "gpt-6-astra"),),
-        cache_ttl="12h",
+        cache_ttl="30m",
     )
     agent.routes["gpt-6-astra"] = route
 
     validate_cache_ttl_override(config, "vibey", route)
     resolution = resolve_model_hub_turn(config, "vibey", "gpt-6-astra")
-    assert resolution.cache_ttl == "12h"
+    assert resolution.cache_ttl == "30m"
     assert resolution.cache_ttl_wire is True
 
     source.base_url = "https://relay.example.test/v1"
-    with pytest.raises(ValueError, match="official OpenAI"):
-        validate_cache_ttl_override(config, "vibey", route)
+    validate_cache_ttl_override(config, "vibey", route)
     resolution = resolve_model_hub_turn(config, "vibey", "gpt-6-astra")
-    assert resolution.cache_ttl is None
+    assert resolution.cache_ttl == "30m"
     assert resolution.cache_ttl_wire is False
 
 
@@ -78,7 +77,7 @@ def test_prompt_cache_override_rejects_unsupported_official_values():
         hops=(ModelHubRouteHopConfig(source.id, "gpt-6-astra"),),
         cache_ttl="1h",
     )
-    with pytest.raises(ValueError, match="only 30m or 12h"):
+    with pytest.raises(ValueError, match="only 30m"):
         validate_cache_ttl_override(config, "vibey", route)
 
 

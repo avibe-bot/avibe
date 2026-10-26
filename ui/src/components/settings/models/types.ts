@@ -415,7 +415,7 @@ export type RouteHopRef = RouteHop & {
   position: number;
 };
 
-export type CacheTtl = '5m' | '30m' | '1h' | '12h';
+export type CacheTtl = '5m' | '30m' | '1h';
 export type AgentRoute = {
   hops: RouteHop[];
   cache_ttl?: CacheTtl | null;

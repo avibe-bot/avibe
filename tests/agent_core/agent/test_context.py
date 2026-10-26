@@ -556,9 +556,9 @@ def test_a_route_cache_override_wins_over_provider_family():
         "gpt-6-astra",
         "",
         provider="openai",
-        cache_ttl="12h",
+        cache_ttl="1h",
     )
-    assert cache_ttl_s(endpoint) == 43_200
+    assert cache_ttl_s(endpoint) == 3_600
 
 
 def _random_rows(seed: int) -> list[ContextEntry]:

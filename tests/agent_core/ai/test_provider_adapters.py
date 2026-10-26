@@ -81,8 +81,7 @@ def _request(
     [
         (None, False, None),
         ("30m", True, {"ttl": "30m"}),
-        ("12h", True, {"ttl": "12h"}),
-        ("12h", False, None),  # a relay may use the local estimate, never OpenAI's wire option
+        ("30m", False, None),  # relays may keep the local estimate, never OpenAI's wire option
     ],
 )
 def test_responses_prompt_cache_retention_is_wired_only_when_model_hub_confirms_it(

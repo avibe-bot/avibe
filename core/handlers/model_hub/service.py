@@ -5959,7 +5959,13 @@ class ModelHubService:
             })
             if any(normalized_model_id(hop["model_id"]) != hop["model_id"] for hop in payload["hops"]):
                 raise ValueError("noncanonical model")
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as error:
+            if payload.get("cache_ttl") is not None:
+                raise ModelHubError(
+                    "cache_ttl_unsupported",
+                    status=422,
+                    data={"reason": str(error)},
+                ) from None
             raise ModelHubError("mapping_target_unavailable", status=409) from None
         return await self._write_agent_chain(backend, model_id, route, payload)
 
@@ -6020,7 +6026,13 @@ class ModelHubService:
             route = ModelHubRouteConfig.from_payload(raw) if raw is not None else None
             if raw is not None and any(normalized_model_id(hop["model_id"]) != hop["model_id"] for hop in raw["hops"]):
                 raise ValueError("noncanonical model")
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as error:
+            if isinstance(raw, dict) and raw.get("cache_ttl") is not None:
+                raise ModelHubError(
+                    "cache_ttl_unsupported",
+                    status=422,
+                    data={"reason": str(error)},
+                ) from None
             raise ModelHubError("mapping_target_unavailable", status=409) from None
         config = self._clone_config(self.store.load())
         agent = self._validate_route_override(config, backend, model_id, route)

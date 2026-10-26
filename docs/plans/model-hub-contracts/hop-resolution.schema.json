@@ -21,7 +21,7 @@
     },
     "provider": { "type": "string" },
     "cache_ttl": {
-      "enum": ["5m", "30m", "1h", "12h", null],
+      "enum": ["5m", "30m", "1h", null],
       "description": "Validated Model Hub route-local cache lifetime override; unset uses the built-in C-9 estimate."
     },
     "cache_ttl_wire": {

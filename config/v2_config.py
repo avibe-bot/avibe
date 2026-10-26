@@ -2562,7 +2562,7 @@ class ModelHubRouteHopConfig:
 @dataclass
 class ModelHubRouteConfig:
     hops: tuple[ModelHubRouteHopConfig, ...] = ()
-    cache_ttl: Optional[Literal["5m", "30m", "1h", "12h"]] = None
+    cache_ttl: Optional[Literal["5m", "30m", "1h"]] = None
 
     @classmethod
     def from_payload(cls, payload: object, *, repairing: bool = False) -> "ModelHubRouteConfig":
@@ -2574,7 +2574,7 @@ class ModelHubRouteConfig:
         cache_ttl = payload.get("cache_ttl")
         if cache_ttl is not None and (
             not isinstance(cache_ttl, str)
-            or cache_ttl not in {"5m", "30m", "1h", "12h"}
+            or cache_ttl not in {"5m", "30m", "1h"}
         ):
             raise ValueError("Config 'model_hub.agents.routes.cache_ttl' is invalid")
         return cls(
