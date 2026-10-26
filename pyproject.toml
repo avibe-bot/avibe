@@ -71,7 +71,7 @@ dependencies = [
     "requests>=2.31.0",
     # The fail-closed redacting transport is audited against this exact SDK.
     # Upgrade only with vibe/sentry_integration.py and its real-SDK tests.
-    "sentry-sdk==2.56.0",
+    "sentry-sdk==2.73.0",
     "python-socks[asyncio]>=2.0.0",
     "aiohttp-socks>=0.8.0",
     "httpx[http2,socks]>=0.27",
