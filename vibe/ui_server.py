@@ -5848,6 +5848,13 @@ def vault_agent_pubkey_get():
         return _vault_error_response(exc)
 
 
+@app.route("/api/macos/login-session", methods=["GET"])
+def macos_login_session_get():
+    from vibe import api
+
+    return jsonify(api.get_macos_login_session_status())
+
+
 @app.route("/api/vault/avault-authorization", methods=["GET"])
 def vault_avault_authorization_get():
     from vibe import api

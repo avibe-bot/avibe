@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   ArrowUpRight,
+  AlertTriangle,
   Download,
   Hexagon,
   KeyRound,
@@ -57,7 +58,7 @@ export const SettingsDependenciesPage: React.FC = () => {
   const api = useApi();
   const { showToast } = useToast();
 
-  const { checks, refresh: refreshDependencies, checking } = useDependencyChecks(api.listDependencies);
+  const { checks, refresh: refreshDependencies, checking, loginSessionState } = useDependencyChecks(api.listDependencies);
   const [busy, setBusy] = useState<string | null>(null);
   useEffect(() => { void refreshDependencies(); }, [refreshDependencies]);
   // A closed backend reason/message is often a snake_case token rather than human copy. Localize any
@@ -152,6 +153,13 @@ export const SettingsDependenciesPage: React.FC = () => {
             <ShieldCheck className="size-4 shrink-0 text-mint-ink" />
             <span className="text-[13px] leading-snug text-foreground">{t('settings.dependencies.autoBanner')}</span>
           </div>
+
+          {loginSessionState === 'stale_login_session' && (
+            <div role="alert" className="flex items-start gap-3 rounded-xl border border-destructive/35 bg-destructive/8 px-5 py-3.5 text-[13px] leading-snug text-destructive-ink">
+              <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+              <span>{t('errors.stale_login_session')}</span>
+            </div>
+          )}
 
           {Object.entries(DEP_META).map(([id, meta]) => {
             const check = checks[id];

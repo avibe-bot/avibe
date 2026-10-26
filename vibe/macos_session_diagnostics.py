@@ -41,6 +41,7 @@ class CommandResult:
 
 CommandRunner = Callable[[Sequence[str], float], CommandResult]
 ConsoleUserReader = Callable[[], tuple[str | None, str | None]]
+ServiceUserReader = Callable[[int], tuple[str | None, str | None]]
 
 
 def run_bounded_command(command: Sequence[str], timeout: float) -> CommandResult:
@@ -78,6 +79,23 @@ def read_console_user() -> tuple[str | None, str | None]:
     except FileNotFoundError:
         return None, "console_missing"
     except KeyError:
+        return None, "user_lookup_failed"
+    except PermissionError:
+        return None, "permission"
+    except OSError:
+        return None, "os_error"
+
+
+def read_service_user(service_uid: int) -> tuple[str | None, str | None]:
+    """Resolve the service UID through the process's own Directory Services context."""
+    if pwd is None:
+        return None, "tool_missing"
+    try:
+        return pwd.getpwuid(service_uid).pw_name, None
+    except KeyError:
+        # A process inherited from an ended macOS login can keep running while
+        # Directory Services no longer resolves its original user. This is the
+        # positive signal that does not depend on launchctl's GUI-domain query.
         return None, "user_lookup_failed"
     except PermissionError:
         return None, "permission"
@@ -131,6 +149,22 @@ class SessionContext:
         return self.service_asid == self.gui_asid
 
 
+def is_stale_login_session(context: SessionContext) -> bool:
+    """Return true only for the process-local Directory Services failure signal."""
+    return context.service_error_class == "user_lookup_failed"
+
+
+def login_session_state(context: SessionContext) -> str:
+    """Classify the current process without treating inconclusive probes as stale."""
+    if is_stale_login_session(context):
+        return "stale_login_session"
+    if context.gui_domain_available is False:
+        return "no_gui_session"
+    if context.gui_domain_available is None:
+        return "unknown"
+    return "healthy"
+
+
 @dataclass(frozen=True)
 class DnsProbeState:
     state: str
@@ -153,6 +187,7 @@ class SessionDiagnosticSnapshot:
             "gui_asid": self.context.gui_asid,
             "gui_domain_available": self.context.gui_domain_available,
             "asid_match": self.context.asid_match,
+            "login_session_state": login_session_state(self.context),
             "dns_state": self.dns.state,
         }
         optional_fields = {
@@ -175,6 +210,7 @@ class MacOSSessionProbe:
         service_uid: int | None = None,
         command_runner: CommandRunner = run_bounded_command,
         console_user_reader: ConsoleUserReader = read_console_user,
+        service_user_reader: ServiceUserReader = read_service_user,
         command_timeout: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
         dns_hostname: str = DNS_PROBE_HOSTNAME,
     ) -> None:
@@ -182,6 +218,7 @@ class MacOSSessionProbe:
         self.service_uid = service_uid if service_uid is not None else os.getuid()
         self._command_runner = command_runner
         self._console_user_reader = console_user_reader
+        self._service_user_reader = service_user_reader
         self._command_timeout = command_timeout
         self._dns_hostname = dns_hostname
         self._service_asid: int | None = None
@@ -193,6 +230,11 @@ class MacOSSessionProbe:
             console_user, console_error = None, "probe_error"
 
         service_error = None
+        try:
+            _service_user, service_user_error = self._service_user_reader(self.service_uid)
+        except Exception:
+            service_user_error = "probe_error"
+        service_error = service_user_error
         if self._service_asid is None:
             result = self._command_runner(
                 ["/bin/launchctl", "print", f"pid/{self.service_pid}"],
@@ -200,10 +242,11 @@ class MacOSSessionProbe:
             )
             if result.returncode == 0:
                 self._service_asid = parse_launchctl_asid(result.output)
-                if self._service_asid is None:
+                if self._service_asid is None and service_error is None:
                     service_error = "parse_error"
             else:
-                service_error = _command_error_class(result)
+                if service_error is None:
+                    service_error = _command_error_class(result)
 
         gui_result = self._command_runner(
             ["/bin/launchctl", "print", f"gui/{self.service_uid}"],
@@ -254,6 +297,8 @@ def _context_transition_reasons(previous: SessionContext, current: SessionContex
         current.console_error_class,
     ):
         reasons.append("console_user_change")
+    if previous.service_error_class != current.service_error_class:
+        reasons.append("service_identity_change")
     if (
         previous.gui_domain_available,
         previous.gui_asid,
@@ -403,8 +448,7 @@ class MacOSSessionMonitor:
         payload = json.dumps(snapshot.event(reasons), sort_keys=True, separators=(",", ":"))
         context = snapshot.context
         warning = (
-            context.gui_domain_available is not True
-            or context.asid_match is False
+            login_session_state(context) != "healthy"
             or snapshot.dns.state == "failed"
             or snapshot.dns.error_class is not None
             or any(

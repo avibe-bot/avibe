@@ -90,6 +90,30 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
 
 type CenterButton = { label: string; icon: React.ComponentType<{ className?: string }>; to?: string; onClick?: () => void };
 
+const MacOSStaleLoginSessionNotice: React.FC = () => {
+  const { t } = useTranslation();
+  const api = useApi();
+  const [stale, setStale] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    void api.getMacOSLoginSessionStatus().then((result) => {
+      if (active) setStale(result.state === 'stale_login_session');
+    }).catch(() => {
+      // A diagnostic notice must not make the Workbench unavailable.
+    });
+    return () => { active = false; };
+  }, [api]);
+
+  if (!stale) return null;
+  return (
+    <div role="alert" className="mx-4 mb-4 flex items-start gap-3 rounded-xl border border-destructive/35 bg-destructive/8 px-4 py-3 text-[13px] leading-snug text-destructive-ink md:mx-10">
+      <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+      <span>{t('errors.stale_login_session')}</span>
+    </div>
+  );
+};
+
 // Workbench mobile tabs flank a raised new-session action.
 const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> = ({ items, center }) => {
   // No center action means a plain even row of tabs.
@@ -618,6 +642,7 @@ export const AppShell: React.FC = () => {
           )
         )}
       >
+        <MacOSStaleLoginSessionNotice />
         <div className={clsx(
           'w-full',
           chromeless

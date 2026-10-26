@@ -2849,6 +2849,7 @@
   },
   "errors": {
     "avault_authorization_required": "avault 需要在运行 Avibe 的 Mac 上完成一次性的 macOS 钥匙串授权。请选择「授权 avault」，然后在那台 Mac 上回应对话框。",
+    "stale_login_session": "Avibe 仍运行在一个已经结束的 macOS 登录会话中。请在 Mac 当前桌面的终端运行 `vibe restart`，然后重试。请不要重复重试此操作。",
     "invalid_field_name": "字段名须为 1–64 个小写字母、数字或下划线，且以字母开头。",
     "cache_ttl_unsupported": "此路由不支持该缓存时长。请使用内置估计或符合供应商能力的值。",
     "field_exists": "此字段名已存在，请使用其他名称。",

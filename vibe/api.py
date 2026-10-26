@@ -2527,6 +2527,12 @@ def _notify_vault_request_created(request: dict | None) -> None:
 
 
 def _vault_api_error_from_avault(exc: "AvaultError", *, prefix: str) -> VaultApiError:
+    if isinstance(exc, AvaultStaleLoginSessionError):
+        return VaultApiError(
+            backend_t("errors.staleLoginSession"),
+            code=exc.code,
+            status=409,
+        )
     message = str(exc)
     if isinstance(exc, AvaultAuthorizationRequiredError):
         return VaultApiError(f"{prefix}: {message}", code=exc.code, status=409)
@@ -9425,6 +9431,12 @@ class AvaultError(Exception):
     avault is designed to keep secrets out of its stdout/stderr and errors."""
 
 
+class AvaultStaleLoginSessionError(AvaultError):
+    """The Avibe process outlived the macOS login session that owns its user services."""
+
+    code = "stale_login_session"
+
+
 class AvaultPreHandoffError(AvaultError):
     """avault failed before receiving an envelope or performing delivery."""
 
@@ -9532,6 +9544,8 @@ def _run_avault(
         raise AvaultPreHandoffError("avault binary not found") from exc
     except subprocess.TimeoutExpired as exc:
         raise AvaultError("avault timed out") from exc
+    if proc.returncode != 0 and macos_login_session_state() == "stale_login_session":
+        raise AvaultStaleLoginSessionError(backend_t("errors.staleLoginSession"))
     if proc.returncode == _AVAULT_EXIT_AUTHORIZATION_REQUIRED:
         raise _avault_authorization_required(_avault_detail(proc))
     if proc.returncode == 0:
@@ -9543,6 +9557,10 @@ def _raise_if_agent_authorization_required(exc: Exception) -> None:
     """Re-raise a resident-agent ``keychain_authorization_required`` frame as Avibe's error."""
     from vibe.avault_agent import AvaultAgentAuthorizationRequiredError
 
+    if isinstance(exc, AvaultStaleLoginSessionError):
+        raise
+    if macos_login_session_state() == "stale_login_session":
+        raise AvaultStaleLoginSessionError(backend_t("errors.staleLoginSession")) from exc
     if isinstance(exc, AvaultAgentAuthorizationRequiredError):
         raise _avault_authorization_required(str(exc)) from exc
 
@@ -9710,6 +9728,8 @@ def avault_deliver_run(secrets: list[dict], command: list[str]) -> dict:
     status, so it is raised as ``AvaultAuthorizationRequiredError`` (still
     fail-closed) only when ``_deliver_run_needed_authorization`` confirms it.
     """
+    if macos_login_session_state() == "stale_login_session":
+        raise AvaultStaleLoginSessionError(backend_t("errors.staleLoginSession"))
     path = _require_avault_path()
     payload = json.dumps(
         [
@@ -10062,7 +10082,8 @@ def avault_key_authorize() -> dict:
 
     Returns ``{"ok", "reason", "detail"?}``. ``reason`` is ``authorized``,
     ``not_applicable`` (no Keychain off macOS), ``avault_missing``,
-    ``avault_upgrade_required``, ``timed_out``, ``no_gui_session`` (this process
+    ``avault_upgrade_required``, ``timed_out``, ``stale_login_session`` (the
+    process outlived its macOS login session), ``no_gui_session`` (this process
     provably cannot show the dialog), or ``not_completed`` (denied, cancelled,
     still cooling down, or failed; avault's own ``detail`` says which).
     """
@@ -10090,29 +10111,46 @@ def avault_key_authorize() -> dict:
         avault_authorization.clear_authorization_required()
         return {"ok": True, "reason": "authorized"}
     # avault exits 70 for a deny, a cancel, the cooldown after one, and a session
-    # that cannot show the dialog alike; tell the last apart from this process's
-    # own login session instead of parsing avault's text.
-    result = {"ok": False, "reason": "no_gui_session" if _process_cannot_show_macos_dialogs() else "not_completed"}
+    # that cannot show the dialog alike; classify the process's own session first.
+    session_state = macos_login_session_state()
+    if session_state == "stale_login_session":
+        result = {"ok": False, "reason": session_state}
+    elif session_state == "no_gui_session" or _process_cannot_show_macos_dialogs():
+        result = {"ok": False, "reason": "no_gui_session"}
+    else:
+        result = {"ok": False, "reason": "not_completed"}
     detail = _avault_detail(proc)
-    if detail:
+    if detail and result["reason"] != "stale_login_session":
         result["detail"] = detail[-_AVAULT_AUTHORIZE_DETAIL_LIMIT:]
     return result
+
+
+def macos_login_session_state() -> str:
+    """Return the redacted login-session state for this process."""
+    if platform.system() != "Darwin":
+        return "not_applicable"
+    try:
+        from vibe.macos_session_diagnostics import MacOSSessionProbe, login_session_state
+
+        return login_session_state(MacOSSessionProbe().capture_context())
+    except Exception:  # noqa: BLE001 - diagnostics must never block a Vault call
+        return "unknown"
+
+
+def get_macos_login_session_status() -> dict:
+    """Expose only the actionable login-session state to Web/remote surfaces."""
+    state = macos_login_session_state()
+    return {"ok": True, "state": state}
 
 
 def _process_cannot_show_macos_dialogs() -> bool:
     """True only when this process provably runs outside the logged-in desktop session.
 
-    A process started over SSH, or with nobody logged in at the desktop, has no
-    window server to show the Keychain dialog on. An inconclusive probe is not
-    proof, so it reads as False.
+    The result distinguishes an ended login session from a normal headless or
+    SSH-launched process so the user receives the only recovery that can work.
     """
-    try:
-        from vibe.macos_session_diagnostics import MacOSSessionProbe
-
-        context = MacOSSessionProbe().capture_context()
-    except Exception:  # noqa: BLE001 - a diagnostic only refines the message
-        return False
-    return context.gui_domain_available is False or context.asid_match is False
+    state = macos_login_session_state()
+    return state in {"stale_login_session", "no_gui_session"}
 
 
 def get_avault_authorization_status() -> dict:
@@ -10123,6 +10161,7 @@ def get_avault_authorization_status() -> dict:
         "required": record is not None,
         "detected_at": record.get("detected_at") if record else None,
         "attempt": avault_authorization.current_attempt(),
+        "login_session_state": macos_login_session_state(),
     }
 
 
@@ -10574,6 +10613,7 @@ def dependencies_status(*, offline: bool = False, dependency_ids: list[str] | No
             or generation_before != generation_after
         ),
         "reconciling_dependencies": sorted(active_before | active_after),
+        "login_session_state": macos_login_session_state(),
     }
 
 

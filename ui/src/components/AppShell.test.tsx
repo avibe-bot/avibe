@@ -49,6 +49,7 @@ const viewport = vi.hoisted(() => {
 const api = vi.hoisted(() => ({
   getConfig: vi.fn(),
   getVersion: vi.fn(),
+  getMacOSLoginSessionStatus: vi.fn(),
 }));
 const status = vi.hoisted(() => ({ state: 'ready' as const }));
 const inbox = vi.hoisted(() => ({ totalUnread: 0 }));
@@ -207,12 +208,31 @@ beforeEach(() => {
   i18n = makeI18n();
   api.getConfig.mockResolvedValue({ platforms: { enabled: [] } });
   api.getVersion.mockResolvedValue({ version: 'test' });
+  api.getMacOSLoginSessionStatus.mockResolvedValue({ ok: true, state: 'healthy' });
 });
 
 afterEach(() => {
   cleanup();
   clearMobileProjectsListSnapshot();
   vi.clearAllMocks();
+});
+
+describe('AppShell stale login session notice', () => {
+  it('shows the restart instruction when the service outlived the macOS login session', async () => {
+    api.getMacOSLoginSessionStatus.mockResolvedValue({ ok: true, state: 'stale_login_session' });
+
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/" element={<div>workbench</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('errors.stale_login_session'));
+  });
 });
 
 describe('AppShell setup access', () => {

@@ -609,6 +609,7 @@ export type ApiContextType = {
   detectCli: (binary: string, backend?: string) => Promise<CliDetectionResult>;
   installAgent: (name: string) => Promise<InstallResult>;
   listDependencies: (options?: DependencyReadOptions) => Promise<DependenciesResult>;
+  getMacOSLoginSessionStatus: () => Promise<MacOSLoginSessionStatus>;
   installDependency: (dep: string) => Promise<InstallResult>;
   getBackendConnection: (name: AgentBackendId) => Promise<BackendConnectionState>;
   getBackendRuntime: (name: string, cliPath?: string) => Promise<BackendRuntimeInfo>;
@@ -1995,11 +1996,18 @@ export type AvaultAuthorizationStatus = {
   required: boolean;
   detected_at: string | null;
   attempt: AvaultAuthorizationAttempt | null;
+  login_session_state?: MacOSLoginSessionStatus['state'];
+};
+
+export type MacOSLoginSessionStatus = {
+  ok: boolean;
+  state: 'healthy' | 'stale_login_session' | 'no_gui_session' | 'unknown' | 'not_applicable';
 };
 
 export type DependenciesResult = {
   ok: boolean;
   deps: DependencyItem[];
+  login_session_state?: MacOSLoginSessionStatus['state'];
   reconciling?: boolean;
   reconciling_dependencies?: string[];
 };
@@ -3622,6 +3630,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const path = `/api/dependencies${query ? `?${query}` : ''}`;
       return withApiDeadline(15_000, signal, (requestSignal) => getJson(path, { signal: requestSignal }));
     },
+    getMacOSLoginSessionStatus: () => getJson('/api/macos/login-session'),
     installDependency: (dep) => startAndPollDependencyInstall(dep),
     getBackendConnection: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/connection`),
     getBackendRuntime: (name, cliPath) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime${cliPath === undefined ? '' : `?cli_path=${encodeURIComponent(cliPath)}`}`),
