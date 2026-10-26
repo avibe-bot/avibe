@@ -376,24 +376,45 @@ def test_cache_write_subsets_and_folded_incomplete_reports_are_exact():
         input_tokens=100,
         cached_input_tokens=10,
         output_tokens=0,
-        cache_write_input_tokens=80,
-        cache_write_1h_input_tokens=60,
+        cache_write_input_tokens=60,
+        cache_write_1h_input_tokens=0,
         cache_write_30m_input_tokens=40,
         cache_write_12h_input_tokens=30,
     )
     assert invalid.cache_write_1h_input_tokens + invalid.cache_write_30m_input_tokens + invalid.cache_write_12h_input_tokens <= invalid.cache_write_input_tokens
     assert invalid.cache_write_input_tokens <= invalid.input_tokens - invalid.cached_input_tokens
     assert invalid.cache_write_ttl_uncaptured_reports == 1
+    invalid_with_witness = ProtocolUsageReport.of(
+        input_tokens=100,
+        cached_input_tokens=10,
+        output_tokens=0,
+        cache_write_input_tokens=60,
+        cache_write_1h_input_tokens=0,
+        cache_write_30m_input_tokens=40,
+        cache_write_12h_input_tokens=30,
+        cache_write_ttl_uncaptured_reports=1,
+    )
+    assert invalid_with_witness == invalid
+    extracted_invalid = extract_protocol_usage(
+        "openai_responses",
+        {"usage": {
+            "input_tokens": 100,
+            "input_tokens_details": {
+                "cached_tokens": 10,
+                "cache_write_tokens": 60,
+                "cache_write_tokens_details": {"ttl_30m_tokens": 40, "ttl_12h_tokens": 30},
+            },
+            "output_tokens": 0,
+        }},
+    )
+    assert extracted_invalid == invalid
 
     now = datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc)
     complete = ProtocolUsageReport.of(
         input_tokens=100, cached_input_tokens=10, output_tokens=1,
         cache_write_input_tokens=80, cache_write_30m_input_tokens=30, cache_write_12h_input_tokens=50,
     )
-    incomplete = ProtocolUsageReport.of(
-        input_tokens=50, cached_input_tokens=5, output_tokens=1,
-        cache_write_input_tokens=20, cache_write_ttl_uncaptured_reports=1,
-    )
+    incomplete = invalid
     calls = [
         UsageCall("src_openai", "gpt-5.6-oracle", complete, now),
         UsageCall("src_openai", "gpt-5.6-oracle", incomplete, now),
@@ -404,7 +425,7 @@ def test_cache_write_subsets_and_folded_incomplete_reports_are_exact():
     assert forward.usage == reverse.usage
     assert forward.usage is not None
     assert forward.usage.cache_write_ttl_uncaptured_reports == 1
-    assert forward.usage.cache_write_30m_input_tokens == 60
+    assert forward.usage.cache_write_30m_input_tokens == 100
 
 def test_priced_usage_with_unknown_parts_is_a_floor():
     """MH-PRICE-005: Requests without a token report, or tokens with no price, make the priced figure a lower bound."""

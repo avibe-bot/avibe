@@ -17,6 +17,7 @@ import {
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
+import { Select } from "@/components/ui/select";
 import { ResponsiveMenu } from "@/components/ui/responsive-menu";
 import { SegmentedRadio } from "@/components/ui/segmented";
 import { cn } from "@/lib/utils";
@@ -1163,9 +1164,9 @@ export const RouteChainDialog: React.FC<{
             >
               {(id) => (
                 <>
-                  <select
+                  <Select
                     id={id}
-                    className="rounded border border-border bg-surface px-2 py-1.5 text-foreground"
+                    wrapperClassName="w-fit"
                     value={cacheTtlDraft ?? ""}
                     onChange={(event) => setCacheTtlDraft((event.target.value || null) as CacheTtl | null)}
                     disabled={phase !== "ready" || previewPending}
@@ -1175,7 +1176,7 @@ export const RouteChainDialog: React.FC<{
                     <option value="30m">{t("settings.models.routing.cacheTtl.30m")}</option>
                     <option value="1h">{t("settings.models.routing.cacheTtl.1h")}</option>
                     <option value="12h">{t("settings.models.routing.cacheTtl.12h")}</option>
-                  </select>
+                  </Select>
                   {saveErrorCode === "cache_ttl_unsupported" && (
                     <span role="alert" className="text-xs text-danger">
                       {t("errors.cache_ttl_unsupported")}

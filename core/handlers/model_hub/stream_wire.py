@@ -471,7 +471,7 @@ class ProtocolUsageReport:
         cache_write_12h = min(
             cache_write_12h_input_tokens, max(0, cache_write - cache_write_1h - cache_write_30m)
         )
-        ttl_uncaptured = max(0, cache_write_ttl_uncaptured_reports) + int(invalid_ttl)
+        ttl_uncaptured = max(max(0, cache_write_ttl_uncaptured_reports), int(invalid_ttl))
         return cls(
             input_tokens=input_tokens,
             cached_input_tokens=cached,
