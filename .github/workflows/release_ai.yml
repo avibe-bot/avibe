@@ -77,8 +77,9 @@ jobs:
       release_tag: ${{ needs.resolve-desktop-release.outputs.tag }}
       updater_enabled: ${{ needs.resolve-desktop-release.outputs.updater_enabled == 'true' }}
     # A called job's Environment secrets resolve empty unless the caller inherits
-    # (actions/runner#4453). On this path the callee reads only the updater pair from
-    # desktop-updater; Apple identities stay gated to manual dispatch.
+    # (actions/runner#4453). The callee reads the updater pair and, on macOS, the
+    # Apple set from desktop-updater: every tag build is Developer ID signed and
+    # notarized, and fails without the complete set.
     secrets: inherit
 
   resolve-show-runtime-ref:

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The private Runtime's Python interpreter on Intel. Every entitlement
+	     here must carry evidence that this process needs it.
+
+	     allow-unsigned-executable-memory: on x86_64, libffi allocates each
+	     ctypes and cffi callback closure (curl_cffi's transfer-progress hook
+	     in web fetch) in anonymous memory that is writable and executable,
+	     without MAP_JIT. The hardened runtime denies that mapping (EACCES), and
+	     libffi falls back to a temporary-file double mapping, which fails too
+	     and which it retries forever: the first callback hangs the process.
+	     allow-jit does not help, because libffi does not ask for MAP_JIT. This entitlement is the minimum that runs both kinds of
+	     callback. Apple silicon needs none (see runtime-python-aarch64.plist).
+
+	     Library validation stays on, for the reasons recorded in
+	     runtime-python-aarch64.plist: the interpreter maps only its own
+	     Team-signed Runtime tree and Apple's system frameworks.
+
+	     The fixed identifier bot.avibe.desktop.runtime.python, not the
+	     versioned file name, keeps this interpreter's designated requirement
+	     and therefore its Keychain item access stable across Python upgrades. -->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+</dict>
+</plist>

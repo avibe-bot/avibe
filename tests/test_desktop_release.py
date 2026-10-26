@@ -114,10 +114,24 @@ def assemble_assets(root, source=SOURCE):
             }
         release.record(version=VERSION, target=target, tag=TAG, source_sha=source,
                        installer=installer, runtime=runtime, output=output,
-                       signing=release.signature(target).strip(), **driver_args)
+                       signing=release.RELEASE_SIGNING_PROFILE[system], **driver_args)
         for path in output.iterdir():
             shutil.copyfile(path, directory / path.name)
     return directory
+
+
+def rewrite_record(directory, target, *, source=None, signature=None):
+    """Replace a target's source record and/or SIGNATURE and re-hash, so only
+    the semantic checks can tell."""
+    names = release.asset_names(VERSION, target)
+    if source is not None:
+        (directory / names[2]).write_text(json.dumps(source, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if signature is not None:
+        (directory / names[3]).write_text(signature, encoding="utf-8")
+    (directory / names[4]).write_text(
+        "".join(f"{release.digest(directory / name)}  {name}\n" for name in sorted(names[:4])),
+        encoding="utf-8",
+    )
 
 
 def git(directory, *args):
@@ -183,6 +197,7 @@ def test_manual_prepare_retains_optional_signing_and_native_version(tmp_path):
                     "files": {
                         "Helpers/cua-driver": "binaries/cua-driver-aarch64-apple-darwin",
                     },
+                    "signingIdentity": "-",
                 },
                 "resources": {
                     "../cua-driver/policy.yaml": "computer-use/policy.yaml",
@@ -215,28 +230,38 @@ def test_real_assembled_assets_pass_the_release_consumer(tmp_path):
         source = json.loads(
             (directory / release.asset_names(VERSION, target)[2]).read_text()
         )
-        assert source["schema_version"] == 2
+        assert source["schema_version"] == 3
+        signature = (directory / release.asset_names(VERSION, target)[3]).read_text()
+        if "darwin" in target:
+            assert signature == (
+                "runtime-developer-id-signed\n"
+                "app-developer-id-notarized-stapled\n"
+                "dmg-developer-id-notarized-stapled\n"
+            )
+        else:
+            assert signature == "installer-unsigned\n"
 
 
-def test_verify_accepts_published_schema_one_macos_metadata_without_driver(tmp_path):
+@pytest.mark.parametrize("schema", [1, 2])
+def test_verify_accepts_published_legacy_records_with_their_adhoc_layers(tmp_path, schema):
     directory = assemble_assets(tmp_path)
     for target, (system, _arch, _suffix) in release.TARGETS.items():
-        if system != "macos":
-            continue
         names = release.asset_names(VERSION, target)
-        source_path = directory / names[2]
-        source = json.loads(source_path.read_text(encoding="utf-8"))
-        source["schema_version"] = 1
-        source.pop("computer_use_driver", None)
-        source_path.write_text(json.dumps(source, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        (directory / names[4]).write_text(
-            "".join(
-                f"{release.digest(directory / name)}  {name}\n"
-                for name in sorted(names[:4])
-            ),
-            encoding="utf-8",
-        )
+        source = json.loads((directory / names[2]).read_text(encoding="utf-8"))
+        source["schema_version"] = schema
+        if schema == 1:
+            source.pop("computer_use_driver", None)
+        legacy = "app-adhoc\ndmg-unsigned-unnotarized\n" if system == "macos" else None
+        rewrite_record(directory, target, source=source, signature=legacy)
     assert len(release.verify(directory, TAG, SOURCE)) == 15
+
+
+def test_verify_requires_signed_macos_layers_on_current_records(tmp_path):
+    directory = assemble_assets(tmp_path)
+    target = "aarch64-apple-darwin"
+    rewrite_record(directory, target, signature="app-adhoc\ndmg-unsigned-unnotarized\n")
+    with pytest.raises(ValueError, match="signature policy"):
+        release.verify(directory, TAG, SOURCE)
 
 
 def test_verify_rejects_schema_two_macos_metadata_without_driver(tmp_path):
@@ -249,7 +274,7 @@ def test_verify_rejects_schema_two_macos_metadata_without_driver(tmp_path):
     names = release.asset_names(VERSION, target)
     source_path = directory / names[2]
     source = json.loads(source_path.read_text(encoding="utf-8"))
-    assert source["schema_version"] == 2
+    assert source["schema_version"] == 3
     source.pop("computer_use_driver")
     source_path.write_text(
         json.dumps(source, indent=2, sort_keys=True) + "\n",
@@ -399,7 +424,7 @@ def test_workflow_record_command_feeds_the_release_consumer(tmp_path, target):
                             env={**os.environ, "PATH": f"{binaries}{os.pathsep}{os.environ['PATH']}",
                                  "AVIBE_DESKTOP_VERSION": VERSION, "RELEASE_TAG": TAG, "TARGET": target,
                                  "RUNNER_OS": "macOS" if "darwin" in target else "Windows",
-                                 "signature_state": "app-adhoc",
+                                 "apple_signing": "enabled",
                                  "driver_packaged_path": str(work / "cua-driver"),
                                  "driver_provenance_path": str(work / "driver-provenance.json"),
                                  "driver_packaged_cdhash": "5" * 40},
@@ -443,7 +468,7 @@ def test_consumer_rejects_incomplete_or_mismatched_release(tmp_path, mutation):
         release.verify(directory, TAG, SOURCE)
 
 
-@pytest.mark.parametrize("mutation", ["archive", "version", "signing"])
+@pytest.mark.parametrize("mutation", ["archive", "version", "signing", "ad-hoc-release"])
 def test_producer_rejects_incorrect_runtime_or_signing(tmp_path, mutation):
     assemble_assets(tmp_path)
     target = next(iter(release.TARGETS))
@@ -466,12 +491,26 @@ def test_producer_rejects_incorrect_runtime_or_signing(tmp_path, mutation):
             }
         release.record(version=VERSION, target=target, tag=TAG, source_sha=SOURCE,
                        installer=work / "native installer.dmg", runtime=work / "runtime",
-                       output=work / "rejected", signing="identity" if mutation == "signing"
-                       else release.signature(target).strip(), **driver_args)
+                       output=work / "rejected", signing={"signing": "identity", "ad-hoc-release": "ad-hoc"}.get(
+                           mutation, "developer-id"), **driver_args)
     assert not (work / "rejected").exists()
 
 
-def test_workflow_preserves_manual_path_and_isolates_test_signing():
+@pytest.mark.parametrize(("profile", "layers"), [
+    ("developer-id", "runtime-developer-id-signed\napp-developer-id-notarized-stapled\ndmg-developer-id-notarized-stapled\n"),
+    ("ad-hoc", "runtime-unsigned\napp-adhoc\ndmg-unsigned-unnotarized\n"),
+])
+def test_manual_record_names_the_layers_it_produced(tmp_path, profile, layers):
+    assemble_assets(tmp_path)
+    work = tmp_path / "aarch64-apple-darwin"
+    release.record(version="3.1.2-dev.1", target="aarch64-apple-darwin", tag="", source_sha=SOURCE,
+                   installer=work / "native installer.dmg", runtime=work / "runtime", output=work / "manual",
+                   signing=profile, prepared_driver=work / "prepared-cua-driver", driver=work / "cua-driver",
+                   driver_provenance_path=work / "driver-provenance.json", driver_cdhash="5" * 40)
+    assert (work / "manual" / "Avibe_3.1.2-dev.1_aarch64-apple-darwin.SIGNATURE").read_text() == layers
+
+
+def test_workflow_signs_every_macos_layer_before_recording():
     package = workflow("desktop-package.yml")
     triggers = package.get("on", package.get(True))
     assert set(triggers) == {"workflow_dispatch", "workflow_call"}
@@ -486,26 +525,46 @@ def test_workflow_preserves_manual_path_and_isolates_test_signing():
     steps = build["steps"]
     assert steps[0]["with"]["ref"] == "${{ inputs.source_sha || github.sha }}"
     assert {entry["target"] for entry in build["strategy"]["matrix"]["include"]} == set(release.TARGETS)
-    assert steps.index(step("Prepare package version")) < steps.index(step("Build verified private Runtime"))
-    credentials = step("Export Apple signing credentials when configured")
-    assert credentials["if"] == "runner.os == 'macOS' && inputs.release_tag == ''"
+    assert not any("continue-on-error" in item for item in steps)
+    order = [
+        "Prepare package version",
+        "Import Apple signing identity",
+        "Build verified private Runtime",
+        "Verify prepared Cua Driver provenance",
+        "Build self-contained installer",
+        "Sign macOS app",
+        "Smoke-test macOS app launch",
+        "Create headless-safe DMG",
+        "Sign and notarize macOS DMG",
+        "Record artifact hashes",
+        "Sign and verify final updater artifacts",
+    ]
+    assert [steps.index(step(name)) for name in order] == sorted(steps.index(step(name)) for name in order)
+    # Every macOS build imports: a tag build fails there without the complete set.
+    identity = step("Import Apple signing identity")
+    assert identity["if"] == "runner.os == 'macOS'"
+    assert identity["env"]["RELEASE_TAG"] == "${{ inputs.release_tag }}"
+    assert "import-identity" in identity["run"]
     prepared_driver = step("Verify prepared Cua Driver provenance")
     assert prepared_driver["if"] == "runner.os == 'macOS'"
     assert "verify-driver-prepared" in prepared_driver["run"]
-    assert steps.index(prepared_driver) + 1 == steps.index(
-        step("Build self-contained installer")
-    )
-    signing = step("Verify macOS app signature matches the signing path")["run"]
-    assert signing.count(
-        "--preserve-metadata=identifier,entitlements,flags,runtime"
-    ) == 2
-    assert "\"$driver\"" in signing
-    assert "\"$app\"" in signing
+    assert steps.index(prepared_driver) + 1 == steps.index(step("Build self-contained installer"))
+    signing = step("Sign macOS app")["run"]
+    assert "macos_signing.py sign-app" in signing and "macos_signing.py notarize" in signing
+    assert "release builds must be Developer ID signed" in signing
+    # The manual no-credential branch keeps the ad-hoc, inside-out seal.
+    assert signing.count("--preserve-metadata=identifier,entitlements,flags,runtime") == 2
     assert "--deep --sign" not in signing
     assert "Contents/Helpers/cua-driver" in signing
     assert "Contents/MacOS/cua-driver" in signing
+    dmg = step("Sign and notarize macOS DMG")
+    assert dmg["if"] == "runner.os == 'macOS' && env.apple_signing == 'enabled'"
+    for command in ("sign-dmg", "notarize", "verify-release"):
+        assert f"macos_signing.py {command}" in dmg["run"]
     assert "NotSigned" in step("Verify unsigned Windows installer")["run"]
-    assert steps[-1]["uses"] == "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+    assert steps[-2]["uses"] == "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+    assert steps[-1]["name"] == "Remove Apple signing material"
+    assert steps[-1]["if"] == "always() && runner.os == 'macOS'"
     workflow_text = (ROOT / ".github/workflows/desktop-package.yml").read_text(encoding="utf-8")
     assert "computer-use-test-overrides" not in workflow_text
     assert "AVIBE_COMPUTER_USE_DRIVER_PATH" not in workflow_text
@@ -545,40 +604,31 @@ def test_secret_scanner_fails_closed_on_every_noncanonical_form(value, names):
     assert secret_references({"env": {"VALUE": value}}) == names
 
 
-def test_inherited_secrets_reach_test_builds_only_as_the_updater_pair():
+def test_apple_secrets_reach_only_the_identity_import_and_never_tauri():
     package = workflow("desktop-package.yml")
     assert package["on" if "on" in package else True]["workflow_call"]["inputs"]["release_tag"]["required"] is True
     assert secret_references({key: value for key, value in package.items() if key != "jobs"}) == set()
     updater = {"TAURI_SIGNING_PRIVATE_KEY", "TAURI_SIGNING_PRIVATE_KEY_PASSWORD"}
-    reachable = set()
+    apple = {
+        "APPLE_CERTIFICATE", "APPLE_CERTIFICATE_PASSWORD", "APPLE_SIGNING_IDENTITY", "APPLE_TEAM_ID",
+        "APPLE_API_KEY", "APPLE_API_ISSUER", "APPLE_API_PRIVATE_KEY",
+    }
+    by_step = {}
     for job in package["jobs"].values():
         assert secret_references({key: value for key, value in job.items() if key != "steps"}) == set()
         for item in job["steps"]:
             names = secret_references(item)
             assert None not in names, item.get("name")
-            if names - updater:
-                condition = item.get("if", "")
-                assert "||" not in condition, item.get("name")
-                assert re.fullmatch(r"(.+ && )?inputs\.release_tag == ''", condition), item.get("name")
-            else:
-                reachable |= names
-    assert reachable == updater
-
-
-@pytest.mark.parametrize("configured", [False, True])
-def test_manual_apple_export_still_consumes_complete_optional_credentials(tmp_path, configured):
-    export = step("Export Apple signing credentials when configured")
-    env = {**os.environ, **{key: "" for key in export["env"]},
-           "GITHUB_ENV": str(tmp_path / "env"), "TMPDIR": str(tmp_path)}
-    if configured:
-        env.update({key: "fixture-value" for key in export["env"]})
-    result = subprocess.run(["bash", "-e", "-c", export["run"]], env=env, capture_output=True, text=True)
-    assert result.returncode == 0, result.stderr
-    exported = (tmp_path / "env").read_text()
-    assert f"apple_signing={'enabled' if configured else 'absent'}" in exported
-    if configured:
-        key = next(line.split("=", 1)[1] for line in exported.splitlines() if line.startswith("APPLE_API_KEY_PATH="))
-        assert Path(key).read_text() == "fixture-value"
+            if names:
+                by_step[item["name"]] = names
+    assert by_step.pop("Import Apple signing identity") == apple
+    assert set().union(*by_step.values()) == updater
+    # Exported names stay outside what tauri-bundler reads, so the bundler can
+    # never sign or notarize with an identity on its own.
+    import_run = step("Import Apple signing identity")["run"]
+    assert "--env-file \"$GITHUB_ENV\"" in import_run
+    installer = step("Build self-contained installer")
+    assert not any(key.startswith("APPLE_") for key in installer.get("env", {}))
 
 
 @pytest.mark.parametrize("state", ["new", "draft-partial", "published-identical", "published-legacy",
