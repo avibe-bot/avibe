@@ -20,11 +20,11 @@ metadata naming the signed layers, **not a cryptographic signature file**.
 Hashes detect changed downloads; on macOS, Apple's signature and notarization
 establish the developer identity.
 
-On macOS, the DMG, the app inside it, and every program the app runs are signed
-with Avibe's Developer ID (Team `68B2SQ6YK3`) and notarized by Apple, with the
-tickets stapled. Open the DMG, drag Avibe to Applications, and launch it; macOS
-opens it after its usual first-launch confirmation, with no Privacy & Security
-override. If macOS instead says Avibe is damaged or cannot be verified, do not
+On macOS, the DMG, the app inside it, and every program bundled with the app are
+signed with Avibe's Developer ID (Team `68B2SQ6YK3`) and notarized by Apple,
+with the tickets stapled. Open the DMG, drag Avibe to Applications, and launch
+it; macOS opens it after its usual first-launch confirmation, with no Privacy &
+Security override. If macOS instead says Avibe is damaged or cannot be verified, do not
 override it: delete the download and fetch it again. To check a download
 yourself, `spctl --assess --type open --context context:primary-signature -v
 <file>.dmg` and, after installing, `spctl --assess -v /Applications/Avibe.app`
