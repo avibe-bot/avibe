@@ -233,6 +233,7 @@ from .provenance import (
     no_candidate_decision,
     produce_turn_outcome,
 )
+from .opaque_provenance import OpaqueProvenanceRegistry, filter_opaque_history
 from .request import ModelHubRequest, without_opaque_history
 from .reasoning_tiers import catalog_wire_efforts, rederive_persisted_tiers, resolve_reasoning_tiers
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
@@ -1022,6 +1023,9 @@ class ResolvedInvocation:
     settlement_generation: Optional[int] = None
     verification_pending: Optional[str] = None
     origin: HopOrigin | None = None
+    # The credential-free Source identity used by native opaque-history admission.
+    # It never participates in wire or persisted origin projections.
+    source_identity: str | None = None
     # Vibey: the catalog tools the request declared natively, which a served
     # response may prove ran (``vibey-hosted-tools.md`` §3.2).
     hosted_calls: frozenset[str] = frozenset()
@@ -1529,6 +1533,7 @@ class ModelHubService:
         price_table: Callable[[], PriceTable] | None = None,
         models_dev_catalog: Callable[[], Mapping[str, Any]] | None = None,
         capability_evidence: CapabilityEvidenceStore | None = None,
+        opaque_provenance: OpaqueProvenanceRegistry | None = None,
     ):
         self.store = store
         self.adapter = adapter
@@ -1566,6 +1571,9 @@ class ModelHubService:
         self.capability_evidence = capability_evidence or CapabilityEvidenceStore(
             events.path.parent / "model_hub_capability_evidence.json"
         )
+        # Opaque provider continuations are process-local by design. Unlike turn
+        # provenance and capability evidence, this registry never touches disk.
+        self.opaque_provenance = opaque_provenance or OpaqueProvenanceRegistry()
         # Bundled state that never changes while this process runs, resolved once
         # here at startup so that no request path reads a file on the loop.
         self.engine_stamp = engine_stamp()
@@ -10858,6 +10866,7 @@ class ModelHubService:
                 ):
                     raise _InvocationPlanChanged
                 attempt_request = request
+                identity = identity_digest(source)
                 if backend == "vibey":
                     reason = _google_admission_skip_reason(
                         getattr(request, "protocol", None), source.protocol, model_id, stream,
@@ -10868,7 +10877,7 @@ class ModelHubService:
                     # hop, including fallback/refresh. Persisted ids stay intact;
                     # refusal must precede a transport, attempt, or recovery slot.
                     try:
-                        origin = HopOrigin(source.vendor, source.protocol, model_id, source.id)
+                        origin = HopOrigin(source.vendor, source.protocol, model_id, source.id, identity)
                         origin.response_headers()
                     except ServedHopHeaderTooLarge:
                         raise ModelHubError("served_hop_too_large", status=422) from None
@@ -10878,7 +10887,6 @@ class ModelHubService:
                     # serving one is read on this final snapshot, so a key rotated
                     # while the engine was prepared counts.
                     primary = getattr(request, "primary_origin", None)
-                    identity = identity_digest(source)
                     other_account = (
                         primary != origin or primary.source != origin.source or primary.identity != identity
                     )
@@ -10904,6 +10912,17 @@ class ModelHubService:
                     claim = getattr(request, "pin_identity_claim", None)
                     if hosted and (claim is None or not claim(identity, bool(hosted.in_flight))):
                         raise _pin_unavailable()
+                else:
+                    # Native Codex, Claude, and OpenCode callers do not have a
+                    # portable provenance record. Keep only opaque values observed
+                    # under this exact Source identity; unknown, evicted, and
+                    # ambiguous values fail safe.
+                    attempt_request = filter_opaque_history(
+                        request,
+                        protocol=getattr(request, "protocol", ""),
+                        identity=identity,
+                        registry=self.opaque_provenance,
+                    )
                 if self._engine_synced:
                     if recovery_request is not None and recovery_request.expired:
                         raise _RecoveryWindowClosed
@@ -11062,7 +11081,8 @@ class ModelHubService:
                 decision,
                 (),
                 (),
-                HopOrigin(source.vendor, source.protocol, source_model_id, source.id) if backend == "vibey" else None,
+                HopOrigin(source.vendor, source.protocol, source_model_id, source.id, identity_digest(source))
+                if backend == "vibey" else None,
             )
         if decision.action == "fallback" or (
             decision.action == "surface"
@@ -11304,8 +11324,9 @@ class ModelHubService:
             if source is None or target_model is None:
                 raise AssertionError("runnable hop must have an exact identity")
             verification_pending = source.verification_pending
+            identity = identity_digest(source)
             origin = (
-                HopOrigin(source.vendor, source.protocol, target_model, source.id, identity_digest(source))
+                HopOrigin(source.vendor, source.protocol, target_model, source.id, identity)
                 if backend == "vibey" else None
             )
             if source.supply_channel == "native_cli":
@@ -11417,6 +11438,7 @@ class ModelHubService:
                     settlement_generation=settlement_generation,
                     verification_pending=verification_pending,
                     origin=origin,
+                    source_identity=identity,
                     hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                 )
             decision = await self._classify_source_outcome(source, outcome)
@@ -11483,6 +11505,7 @@ class ModelHubService:
                         settlement_generation=settlement_generation,
                         verification_pending=verification_pending,
                         origin=origin,
+                        source_identity=identity,
                         hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
@@ -11539,6 +11562,7 @@ class ModelHubService:
                     settlement_generation=settlement_generation,
                     verification_pending=verification_pending,
                     origin=origin,
+                    source_identity=identity,
                 )
             if (
                 pinned_hop is not None

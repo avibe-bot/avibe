@@ -131,7 +131,7 @@ class ModelHubLaunch:
     supports_images: Optional[bool] = None
     # Vibey only: each enabled hosted tool's mode, declaration, executor and replay.
     hosted_tools: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
-    # Vibey only: the Source's credential-free identity, from the snapshot its origin came from (C-6).
+    # Hub launches: the Source's credential-free identity, from the snapshot its origin came from.
     source_identity: Optional[str] = None
     # Vibey only: where the target model's list price steps up with its context, ascending (C-6, C-9 section 1).
     context_price_steps: tuple[int, ...] = ()
@@ -895,6 +895,8 @@ class ModelHubRuntimeRouter:
         gateway_request_model_id: Optional[str] = None,
         primary_origin: HopOrigin | None = None,
         hosted_tools: TurnHostedTools | None = None,
+        request_scoped: bool | None = None,
+        primary_identity: str | None = None,
     ) -> tuple[str, str]:
         if self.turn_gateway is not None:
             return await self.turn_gateway.endpoint(
@@ -906,8 +908,13 @@ class ModelHubRuntimeRouter:
                 source_id=source_id,
                 via_mapping=via_mapping,
                 gateway_request_model_id=gateway_request_model_id,
-                request_scoped=backend == "codex",
+                request_scoped=(
+                    request_scoped
+                    if request_scoped is not None
+                    else backend in {"codex", "opencode"}
+                ),
                 **({"primary_origin": primary_origin} if primary_origin is not None else {}),
+                **({"primary_identity": primary_identity} if primary_identity is not None else {}),
                 **({"hosted_tools": hosted_tools} if hosted_tools is not None else {}),
             )
         await self.service._ensure_engine_synced()
@@ -1265,7 +1272,7 @@ class ModelHubRuntimeRouter:
                 if self.turn_gateway is not None and backend == "codex"
                 else target_model
             )
-            identity = identity_digest(source) if backend == "vibey" else None
+            identity = identity_digest(source)
             # A turn's first resolution freezes its hosted tools, executor
             # orders and image models; later attempts of the turn keep them
             # (settings apply from the next turn) and recompute only their
@@ -1282,20 +1289,24 @@ class ModelHubRuntimeRouter:
                 if frozen is not None
                 else {}
             )
+            route_origin = (
+                HopOrigin(source.vendor, source.protocol, target_model, source.id, identity)
+                if backend == "vibey" else None
+            )
             gateway_base_url, gateway_token = await self._gateway_credentials(
                 backend,
                 process_scope=str(process_scope or "").strip() or f"{backend}:untracked",
-                turn_id=turn_id,
+                # OpenCode's shared server has no exact turn discriminator. Its
+                # route handle still carries Source identity, but must not create
+                # persisted turn provenance from a caller-supplied turn token.
+                turn_id=None if backend == "opencode" else turn_id,
                 requested_model_id=requested_model,
                 resolved_model_id=target_model,
                 source_id=source.id,
                 via_mapping=False,
                 gateway_request_model_id=runtime_model,
-                # The origin and the identity come from one snapshot of the Source.
-                primary_origin=(
-                    HopOrigin(source.vendor, source.protocol, target_model, source.id, identity)
-                    if identity is not None else None
-                ),
+                primary_origin=route_origin,
+                primary_identity=identity,
                 # The executor endpoint runs only what the turn froze.
                 hosted_tools=frozen,
             )
@@ -1303,14 +1314,18 @@ class ModelHubRuntimeRouter:
                 prefix = await self._source_prefix(source.id)
                 runtime_model = f"{prefix}/{target_model}"
             request_metadata: dict[str, str] = {}
-            if self.turn_gateway is not None and backend == "codex":
+            if self.turn_gateway is not None and backend in {"codex", "opencode"}:
                 request_metadata = self.turn_gateway.correlation.gateway_request_metadata(
-                    backend=backend, token=gateway_token, turn_id=turn_id,
+                    backend=backend,
+                    token=gateway_token,
+                    turn_id=None if backend == "opencode" else turn_id,
                     route=PreparedGatewayRoute(
                         requested_model_id=requested_model,
                         resolved_model_id=target_model,
                         source_id=source.id,
                         gateway_request_model_id=runtime_model,
+                        primary_origin=route_origin,
+                        primary_identity=identity,
                     ),
                 )
             elif self.turn_gateway is not None and backend == "vibey" and str(turn_id or "").strip():
@@ -1531,7 +1546,6 @@ class ModelHubRuntimeRouter:
             runtime_model = identifier
             projected_model = project_opencode_public_model(backend_model)
             projected_model["id"] = runtime_model
-            provider["models"][identifier] = projected_model
             projected_identifiers.append(identifier)
             model_provider_ids.append((identifier, overlay_provider_id))
             if resolution.source is not None:
@@ -1540,7 +1554,48 @@ class ModelHubRuntimeRouter:
                     else next(hop for hop in resolution.inspected_hops if hop.source_id == resolution.source.id)
                 )
                 if candidate.source is None or candidate.model_id is None:
+                    provider["models"][identifier] = projected_model
                     continue
+                identity = identity_digest(candidate.source)
+                request_metadata: dict[str, str] = {}
+                if self.turn_gateway is not None:
+                    route = PreparedGatewayRoute(
+                        requested_model_id=identifier,
+                        resolved_model_id=candidate.model_id,
+                        source_id=candidate.source.id,
+                        gateway_request_model_id=runtime_model,
+                        primary_identity=identity,
+                    )
+                    correlation = getattr(self.turn_gateway, "correlation", None)
+                    if correlation is not None:
+                        prepare_gateway_turn = getattr(correlation, "prepare_gateway_turn", None)
+                        if callable(prepare_gateway_turn):
+                            prepare_gateway_turn(
+                                backend="opencode",
+                                token=gateway_token,
+                                turn_id=None,
+                                requested_model_id=identifier,
+                                resolved_model_id=candidate.model_id,
+                                source_id=candidate.source.id,
+                                via_mapping=False,
+                                gateway_request_model_id=runtime_model,
+                                primary_identity=identity,
+                            )
+                        request_metadata = correlation.gateway_request_metadata(
+                            backend="opencode",
+                            token=gateway_token,
+                            turn_id=None,
+                            route=route,
+                        )
+                    if request_metadata:
+                        # OpenCode sends this only to Avibe's loopback gateway;
+                        # the gateway consumes it and never forwards it upstream.
+                        projected_model["headers"] = {
+                            "x-avibe-opencode-route": json.dumps(
+                                request_metadata, ensure_ascii=True, separators=(",", ":")
+                            )
+                        }
+                provider["models"][identifier] = projected_model
                 available_identifiers.append(identifier)
                 launches.append(
                     ModelHubLaunch(
@@ -1552,8 +1607,14 @@ class ModelHubRuntimeRouter:
                         source_id=candidate.source.id,
                         gateway_base_url=gateway_base_url,
                         gateway_token=gateway_token,
+                        gateway_request_metadata=request_metadata,
+                        protocol=candidate.source.protocol,
+                        provider=candidate.source.vendor,
+                        source_identity=identity,
                     )
                 )
+            else:
+                provider["models"][identifier] = projected_model
 
         content = (
             json.dumps(

@@ -33,7 +33,12 @@ from config.v2_config import (
     ModelHubSourceStateConfig,
 )
 from core.handlers.model_hub.adapter import RawOutcomeKind
+from core.handlers.model_hub.capability_evidence import identity_digest
 from core.handlers.model_hub.pricing import PriceTable
+from core.handlers.model_hub.opaque_provenance import (
+    OpaqueProvenanceRegistry,
+    filter_opaque_history,
+)
 from core.handlers.model_hub.provenance import BoundedProvenanceStore, SERVED_HOP_HEADER
 from core.handlers.model_hub.request import ModelHubRequest
 from core.handlers.model_hub.service import ModelHubError
@@ -419,8 +424,8 @@ async def test_opaque_history_origin_survives_recovery_walks(tmp_path, recovered
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ["claude", "codex", "opencode"])
-async def test_native_history_is_not_scrubbed_by_vibey_origin_policy(tmp_path, backend):
-    """Native callers have no primary-origin metadata; their existing policy stays intact."""
+async def test_native_history_is_filtered_without_opaque_provenance(tmp_path, backend):
+    """Native callers fail safe when opaque response provenance is unavailable."""
     protocol = {"claude": "anthropic", "codex": "openai_responses", "opencode": "openai_chat"}[backend]
     primary = _source("src_primary01", "Primary", protocol=protocol)
     fallback = _source("src_fallback01", "Fallback", vendor="custom", protocol=protocol)
@@ -430,13 +435,18 @@ async def test_native_history_is_not_scrubbed_by_vibey_origin_policy(tmp_path, b
     ])
     selected = _canonicalize_fixed_test_routes(service)
     signed, _plain = _signed_history(protocol)
-    original = copy.deepcopy(signed)
     await service.resolve(
         backend=backend, model_id=selected.get(backend, "shared-model"),
         request=ModelHubRequest(signed, protocol=protocol), stream=False,
     )
     assert [entry[0] for entry in service.adapter.invocations] == [primary.id, fallback.id]
-    assert service.adapter.requests == [original, original]
+    expected = filter_opaque_history(
+        signed,
+        protocol=protocol,
+        identity=None,
+        registry=OpaqueProvenanceRegistry(),
+    )
+    assert service.adapter.requests == [expected, expected]
 
 
 @pytest.mark.asyncio
@@ -685,7 +695,13 @@ async def test_the_next_vibey_call_takes_the_failed_over_source_while_the_last_c
     """
     primary = _source("src_primary01", "Primary", vendor="openai", protocol="openai_responses", model_id="gpt-x")
     fallback = _source("src_fallback01", "Fallback", vendor="openai", protocol="openai_responses", model_id="gpt-x")
-    answer = _body("openai_responses", True)
+    answer = (
+        b'event: response.output_item.done\ndata: '
+        b'{"type":"response.output_item.done","item":{"type":"reasoning",'
+        b'"encrypted_content":"race-opaque"}}\n\n'
+        b'event: response.completed\ndata: {"type":"response.completed",'
+        b'"response":{"id":"resp_1","status":"completed"}}\n\n'
+    )
     settling = _SettlingLiveHandle(
         _outcome(RawOutcomeKind.SUCCESS, source_id=fallback.id, stream_started=True), (answer,), held=held,
     )
@@ -709,6 +725,10 @@ async def test_the_next_vibey_call_takes_the_failed_over_source_while_the_last_c
                 received = b""
                 while b"response.completed" not in received:
                     received += await response.content.readany()
+                assert b"response.completed" in received
+                assert service.opaque_provenance.accepts(
+                    "openai_responses", "race-opaque", identity_digest(fallback),
+                )
                 # The terminal event is in: the next call resolves while this one still settles.
                 following = asyncio.create_task(
                     router.resolve_hop("menu-alias", process_scope="vibey:test", turn_id=turn_id)
