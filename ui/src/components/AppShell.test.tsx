@@ -993,6 +993,23 @@ describe('AppShell remote Apps access', () => {
     expect(surface.parentElement?.className).not.toContain('px-4 py-5');
   });
 
+  it('keeps the sidebar offset for desktop embedded apps', async () => {
+    viewport.isDesktop = true;
+    render(
+      <MemoryRouter initialEntries={['/apps/terminal']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/apps/terminal" element={<div data-testid="desktop-terminal-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    const surface = await screen.findByTestId('desktop-terminal-surface');
+    expect(document.querySelector('main')?.className).toContain('md:ml-[var(--app-sidebar-w)]');
+    expect(surface.parentElement?.className).toContain('md:px-10 md:py-8');
+  });
+
   it.each([
     ['owner', true],
     ['member', false],

@@ -634,7 +634,10 @@ export const AppShell: React.FC = () => {
           // the document itself never scrolls. Desktop: normal flow (min-h-screen
           // + sidebar offset).
           isFullHeightApp
-            ? 'min-h-0 flex flex-1 flex-col overflow-hidden'
+            ? clsx(
+              'min-h-0 flex flex-1 flex-col overflow-hidden',
+              !chromeless && 'md:ml-[var(--app-sidebar-w)] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
+            )
             : settingsCoversSidebar
               ? 'min-h-0 flex-1 overflow-hidden md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
             : isFullScreenMobile
@@ -658,7 +661,7 @@ export const AppShell: React.FC = () => {
         <div className={clsx(
           'w-full',
           isFullHeightApp
-            ? 'min-h-0 flex-1 p-0'
+            ? clsx('min-h-0 flex-1 p-0', !chromeless && 'md:mx-auto md:h-auto md:px-10 md:py-8')
             : isSettings
               ? 'h-full p-0 md:h-auto md:min-h-screen'
               : isFullScreenMobile
