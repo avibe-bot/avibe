@@ -141,6 +141,13 @@ def _installable_avault_release(
 
     monkeypatch.setattr(api.shutil, "which", lambda _binary: None)
     monkeypatch.setattr(api, "_candidate_cli_paths", fake_candidate_cli_paths)
+    # Resolution also scans raw PATH entries. Drop any that hold an avault, so the
+    # developer's own avault is never what these tests resolve, probe, or run.
+    ambient = os.environ.get("PATH", "").split(os.pathsep)
+    monkeypatch.setenv(
+        "PATH",
+        os.pathsep.join(entry for entry in ambient if entry and not any((Path(entry) / name).exists() for name in ("avault", "avault.exe"))),
+    )
     return calls, member_name
 
 

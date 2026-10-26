@@ -18851,6 +18851,8 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("vault", "remove"): "editor",
     ("vault", "key", "export"): "owner",
     ("vault", "key", "import"): "owner",
+    # Lets this machine's avault read its key; the Web action is instance-level too.
+    ("vault", "key", "authorize"): "owner",
     # Show: reading a page is Viewer work and writing to one is Editor work; the
     # page's own ACL still decides which page, on both sides.
     ("show", "list"): "viewer",

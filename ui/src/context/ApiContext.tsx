@@ -4070,7 +4070,14 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     listVaultSecrets: (opts) => getCachedJson('/api/vault/secrets', 1500, opts),
     getVaultPubkey: () => getCachedJson('/api/vault/pubkey', 1500),
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
-    getAvaultAuthorization: () => getJson('/api/vault/avault-authorization', { handleError: false }),
+    getAvaultAuthorization: async () => {
+      // Polled while an attempt runs: a failed read rejects quietly, so the caller keeps
+      // its last status and keeps polling instead of taking an error body for a status.
+      const path = '/api/vault/avault-authorization';
+      const res = await apiFetch(path);
+      if (!res.ok) throw new ApiError(`Request failed: ${path} (${res.status})`, res.status, null);
+      return res.json();
+    },
     authorizeAvault: () => postJson('/api/vault/avault-authorization', {}),
     getVaultSandboxRootMetadata: () => getCachedJson('/api/vault/sandbox/root-metadata', 1500, { handleError: false }),
     createVaultAgentBindingsBatch: (payload) =>
