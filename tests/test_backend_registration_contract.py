@@ -68,6 +68,7 @@ PYTHON_DECLARATIONS = {
     ("vibe/cli_health.py", "Dict", NATIVE): (1, "native", "Backend-specific native CLI version grammars, not another Agent universe."),
     ("vibe/cli_repair.py", "Dict", NATIVE): (2, "native", "npm package and Homebrew formula coordinates for source-preserving native CLI repair."),
     ("vibe/global_agents_md.py", "Dict", NATIVE): (1, "native", "Native global instruction filenames."),
+    ("core/mcp_hub/native.py", "Tuple", frozenset({"claude", "codex", "opencode"})): (1, "native", "Native MCP config files Hub reads as the connection store."),
     ("vibe/model_hub_runtime/adapter.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Native subscription vendors."),
     ("vibe/model_hub_runtime/state.py", "Dict", frozenset({"claude", "codex"})): (1, "native_subset", "Vendor aliases, including provider names."),
     ("storage/alembic/versions/20260529_0007_backfill_scope_agent_names.py", "Set", NATIVE): (1, "native", "Immutable released migration predating Avibe."),
@@ -75,6 +76,7 @@ PYTHON_DECLARATIONS = {
 }
 
 TYPESCRIPT_DECLARATIONS = {
+    ("ui/src/context/ApiContext.tsx", frozenset({"claude", "codex", "opencode"})): (1, "native", "MCP Hub native source labels."),
     ("ui/src/context/ApiContext.tsx", frozenset({"claude", "codex"})): (
         4, "native_subset", "Account-level native auth endpoints; OpenCode uses provider auth.",
     ),
@@ -184,4 +186,8 @@ def test_backend_universes_are_catalog_owned_and_literals_are_classified():
         f"Import catalog-derived Agent/native types or classify capability subsets: {locations_ts}"
     )
     for (_path, members), (_count, relation, reason) in TYPESCRIPT_DECLARATIONS.items():
-        assert reason and relation == "native_subset" and members < NATIVE
+        assert reason
+        if relation == "native":
+            assert members == NATIVE
+        else:
+            assert relation == "native_subset" and members < NATIVE

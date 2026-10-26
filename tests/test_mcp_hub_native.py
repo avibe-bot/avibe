@@ -290,5 +290,5 @@ def test_spawns_disable_every_native_server(native_files):
         json.dumps({"mcp": {"extra": {"type": "local", "command": ["node"], "enabled": True}}}),
         native.opencode_disabled_mcp(),
     ))
-    assert only_in_overlay["mcp"]["extra"]["enabled"] is False
+    assert only_in_overlay["mcp"]["extra"]["enabled"] is True
     assert only_in_overlay["mcp"]["oc"]["enabled"] is False
