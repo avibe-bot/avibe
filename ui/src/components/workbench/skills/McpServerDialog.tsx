@@ -9,7 +9,6 @@ import { Button } from '../../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '../../ui/dialog';
 import { Input } from '../../ui/input';
 import { Label } from '../../ui/label';
-import { Textarea } from '../../ui/textarea';
 
 // One env/header row. ``stored`` marks a key whose value lives in the native
 // file: its value is never sent to the browser, and a blank draft keeps it.
@@ -18,7 +17,7 @@ type Pair = { key: string; value: string; stored: boolean };
 type Draft = {
   description: string;
   command: string;
-  args: string;
+  args: string[];
   cwd: string;
   url: string;
   env: Pair[];
@@ -36,7 +35,7 @@ const draftOf = (definition: McpDefinition): Draft => {
   return {
     description: definition.description ?? '',
     command: transport.command ?? '',
-    args: (transport.args ?? []).join('\n'),
+    args: [...(transport.args ?? [])],
     cwd: transport.cwd ?? '',
     url: transport.url ?? '',
     env: pairs(transport.env, transport.has_env),
@@ -63,15 +62,19 @@ export const McpServerDialog: React.FC<McpServerDialogProps> = ({ name, canManag
   const [draft, setDraft] = useState<Draft | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<'save' | 'generate' | null>(null);
+  const writable = canManage;
 
   const apply = (res: Awaited<ReturnType<typeof api.getMcpServer>>) => {
-    if (!res.ok || !res.definition) {
+    if (!res.ok) {
       setLoadError(describe(res.error));
+      setSummary(res.server ?? null);
       return;
     }
     setSummary(res.server ?? null);
-    setStdio(res.definition.transport.type === 'stdio');
-    setDraft(draftOf(res.definition));
+    if (res.definition) {
+      setStdio(res.definition.transport.type === 'stdio');
+      setDraft(draftOf(res.definition));
+    }
   };
 
   const load = async (target: string) => apply(await api.getMcpServer(target));
@@ -86,8 +89,7 @@ export const McpServerDialog: React.FC<McpServerDialogProps> = ({ name, canManag
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [api, name]);
+  }, [api, describe, name]);
 
   const update = (patch: Partial<Draft>) => setDraft((current) => (current ? { ...current, ...patch } : current));
 
@@ -96,9 +98,9 @@ export const McpServerDialog: React.FC<McpServerDialogProps> = ({ name, canManag
     const server: Record<string, unknown> = stdio
       ? {
           command: draft.command,
-          args: draft.args.split('\n').map((item) => item.trim()).filter(Boolean),
+          args: draft.args,
           env: toMap(draft.env),
-          ...(draft.cwd.trim() ? { cwd: draft.cwd.trim() } : {}),
+          ...(summary?.hasCwd && draft.cwd.trim() ? { cwd: draft.cwd.trim() } : {}),
         }
       : { type: 'http', url: draft.url, headers: toMap(draft.headers) };
     setBusy('save');
@@ -144,7 +146,7 @@ export const McpServerDialog: React.FC<McpServerDialogProps> = ({ name, canManag
             <Input
               className="w-2/5 font-mono text-[12px]"
               value={row.key}
-              disabled={!canManage || row.stored}
+              disabled={!writable || row.stored}
               placeholder={t('mcpHub.edit.key')}
               onChange={(event) => setRows(rows.map((item, i) => (i === index ? { ...item, key: event.target.value } : item)))}
             />
@@ -153,11 +155,11 @@ export const McpServerDialog: React.FC<McpServerDialogProps> = ({ name, canManag
               type="password"
               autoComplete="off"
               value={row.value}
-              disabled={!canManage}
+              disabled={!writable}
               placeholder={row.stored ? t('mcpHub.edit.keepValue') : t('mcpHub.edit.value')}
               onChange={(event) => setRows(rows.map((item, i) => (i === index ? { ...item, value: event.target.value } : item)))}
             />
-            {canManage ? (
+            {writable ? (
               <Button type="button" variant="ghost" size="xs" aria-label={t('mcpHub.edit.removeKey')}
                 onClick={() => setRows(rows.filter((_, i) => i !== index))}>
                 <X className="size-3.5" />
@@ -165,7 +167,7 @@ export const McpServerDialog: React.FC<McpServerDialogProps> = ({ name, canManag
             ) : null}
           </div>
         ))}
-        {canManage ? (
+        {writable ? (
           <Button type="button" variant="outline" size="xs" className="self-start"
             onClick={() => setRows([...rows, { key: '', value: '', stored: false }])}>
             <Plus className="size-3.5" />
@@ -182,7 +184,7 @@ export const McpServerDialog: React.FC<McpServerDialogProps> = ({ name, canManag
       <Input
         className={mono ? 'font-mono text-[12px]' : 'text-[12px]'}
         value={draft?.[field] ?? ''}
-        disabled={!canManage}
+        disabled={!writable}
         placeholder={field === 'cwd' ? t('mcpHub.edit.cwdPlaceholder') : undefined}
         onChange={(event) => update({ [field]: event.target.value } as Partial<Draft>)}
       />
@@ -219,14 +221,33 @@ export const McpServerDialog: React.FC<McpServerDialogProps> = ({ name, canManag
                 {text('command')}
                 <div className="flex flex-col gap-1.5">
                   <Label>{t('mcpHub.edit.args')}</Label>
-                  <Textarea
-                    className="min-h-[72px] font-mono text-[12px]"
-                    value={draft.args}
-                    disabled={!canManage}
-                    onChange={(event) => update({ args: event.target.value })}
-                  />
+                  {draft.args.map((arg, index) => (
+                    <div key={index} className="flex items-center gap-1.5">
+                      <Input
+                        className="flex-1 font-mono text-[12px]"
+                        value={arg}
+                        disabled={!writable}
+                        onChange={(event) => update({ args: draft.args.map((item, i) => (i === index ? event.target.value : item)) })}
+                      />
+                      {writable ? (
+                        <Button type="button" variant="ghost" size="xs" aria-label={t('mcpHub.edit.removeArg')}
+                          onClick={() => update({ args: draft.args.filter((_, i) => i !== index) })}>
+                          <X className="size-3.5" />
+                        </Button>
+                      ) : null}
+                    </div>
+                  ))}
+                  {writable ? (
+                    <Button type="button" variant="outline" size="xs" className="self-start"
+                      onClick={() => update({ args: [...draft.args, ''] })}>
+                      <Plus className="size-3.5" />
+                      {t('mcpHub.edit.addArg')}
+                    </Button>
+                  ) : null}
                 </div>
-                {text('cwd')}
+                {summary?.hasCwd ? text('cwd') : (
+                  <p className="text-[11px] text-muted">{t('mcpHub.edit.cwdCodexOnly')}</p>
+                )}
                 {mapEditor('env')}
               </>
             ) : (
@@ -238,7 +259,7 @@ export const McpServerDialog: React.FC<McpServerDialogProps> = ({ name, canManag
           </div>
         ) : null}
 
-        {canManage && draft ? (
+        {writable && draft ? (
           <DialogFooter className="gap-2">
             {summary?.pendingChanges ? (
               <Button type="button" variant="outline" disabled={busy !== null} onClick={() => void onRegenerate()}>

@@ -199,7 +199,7 @@ class McpRuntime:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._start_lock = threading.Lock()
-        self._package_locks: dict[str, asyncio.Lock] = {}
+        self._package_locks: dict[Any, asyncio.Lock] = {}
         self._connections: dict[tuple, _Connection] = {}
         self._stdio_open = 0
         self._sweeper: Optional[asyncio.Task] = None
@@ -486,15 +486,20 @@ class McpRuntime:
 
     async def _call_once(self, name, revision, session_id, definition, tool, arguments):
         key = (name, revision, session_id)
-        connection = self._connections.get(key) if session_id else None
-        if connection is None or not connection.alive:
+        if session_id:
+            lock = self._package_locks.setdefault(("open",) + key, asyncio.Lock())
+            async with lock:
+                connection = self._connections.get(key)
+                if connection is None or not connection.alive:
+                    connection = _Connection(self, key, definition)
+                    self._connections[key] = connection
+                    await connection.open()
+        else:
             connection = _Connection(self, key, definition)
-            if session_id:
-                self._connections[key] = connection
             await connection.open()
         try:
             async with connection.lock:
-                if not connection.alive:
+                if not connection.alive or connection.client is None:
                     raise McpHubError("connection", "The MCP connection closed; retry the call.")
                 connection.last_used = time.monotonic()
                 outcome_unknown = True

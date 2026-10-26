@@ -315,6 +315,7 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
         source = native_server.source if native_server is not None else _state(name).get("source")
         if native_server is not None:
             summary["sourcePath"] = str(native_server.path)
+            summary["hasCwd"] = native_server.has_cwd or native_server.source == native.CODEX
             if not native_server.native_enabled:
                 summary["nativeEnabled"] = False
         if source in native.SOURCES:
@@ -332,6 +333,8 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
         if isinstance(definition, dict) and isinstance(definition.get("transport"), dict):
             summary["transport"] = definition["transport"]["type"]
     except McpHubError as exc:
+        if exc.type == "not_found":
+            raise
         if exc.type != "needs_regeneration":
             logger.warning("MCP package %s disabled: %s", name, exc.message)
             summary["error"] = exc.payload()

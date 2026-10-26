@@ -78,6 +78,23 @@ def test_parse_save_generate_tools_and_state_through_the_api(owner):
     assert client.get("/api/mcp/echo").status_code == 404
 
 
+def test_detail_returns_list_rows_that_404ed_before(owner, tmp_path):
+    from core.mcp_hub import native
+
+    client = app.test_client()
+    headers = csrf_headers(client)
+    assert client.post("/api/mcp/save", json={"text": PASTE}, headers=headers).status_code == 200
+    assert client.post("/api/mcp/echo/generate", headers=headers).get_json()["ok"]
+    native.remove("echo")
+    listed = {item["name"]: item for item in client.get("/api/mcp").get_json()["servers"]}
+    assert listed["echo"]["nativeDeleted"] is True
+    detail = client.get("/api/mcp/echo")
+    assert detail.status_code == 200
+    body = detail.get_json()
+    assert body["ok"] is True and body["server"]["nativeDeleted"] is True
+    assert body.get("definition", {}).get("name") == "echo" or "definition" in body or body["server"]["name"] == "echo"
+
+
 @pytest.mark.parametrize(
     ("method", "path", "role"),
     [

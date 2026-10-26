@@ -1,7 +1,6 @@
 # Avibe MCP Hub MVP design
 
-> Status: design only. No implementation, dependency installation, commit or push is authorized by this document.
-> Decided: official latest stable Python MCP SDK (pin at implementation), instance-global scope, no OAuth, no generated Skills.
+> Status: implemented (instance-global Hub). Official latest stable Python MCP SDK, no OAuth, no generated Skills.
 > Model: discover tools at generation time, persist a static CLI package, explicitly regenerate to update.
 > Principle: smallest complete design; reuse existing caller context, IPC, credentials, i18n and owner lifecycle; no speculative defenses.
 
@@ -11,7 +10,7 @@ Add MCP Hub to the Skills page. A user pastes a provider `mcpServers` JSON block
 
 **Native MCP is off; Hub owns the same files.** Claude, Codex and OpenCode must not load their own MCP servers in Avibe sessions. Hub does not copy configs into `~/.avibe/mcp` as a second store of connection definitions. It reads and writes the backends' existing files:
 
-- Claude: `~/.claude.json` `mcpServers` (and project `.mcp.json` when present)
+- Claude: `~/.claude.json` `mcpServers`
 - Codex: `~/.codex/config.toml` `[mcp_servers.<name>]`
 - OpenCode: `~/.config/opencode/opencode.json` `mcp`
 
@@ -29,8 +28,7 @@ Out of scope: OAuth, SSE (explicit `unsupported_transport_sse` error), project s
 
 ```text
 <avibe-home>/mcp/<name>/
-  definition.json          # editable connection definition (may hold plaintext env/header values)
-  state.json               # {"enabled": bool}
+  state.json               # Avibe-side: enabled, description, last native source
   current.json             # pointer to the published revision
   revisions/<revision>/    # <revision> = generation timestamp + random suffix
     definition.json        # immutable snapshot of the definition used to generate and to connect
@@ -39,7 +37,7 @@ Out of scope: OAuth, SSE (explicit `unsupported_transport_sse` error), project s
     commands.json          # generated flags and help
 ```
 
-- `definition.json` and `state.json` are the only authorities; nothing is duplicated into V2 config or another registry. Every file is written with the existing `config/atomic_io.py` `write_atomic`.
+- Native files are the connection store. Avibe home holds `state.json`, `current.json` and revision snapshots (including `revisions/*/definition.json`). Nothing is duplicated into V2 config. Every file is written with the existing `config/atomic_io.py` `write_atomic`.
 - `commands.json` is declarative data interpreted by the shared `vibe mcp` runner, not code. Tool implementations stay on the server/executable.
 - Revisions are derived data: a revision whose `formatVersion` this release does not read is shown as "needs regeneration" (definition kept, nothing deleted) instead of being migrated. Any other unreadable, invalid or future-format file of a package (`definition.json`, `state.json`, `current.json`) disables only that package with a warning; startup never fails and bad files are not overwritten.
 

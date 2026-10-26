@@ -12,8 +12,6 @@ import { Switch } from '../../ui/switch';
 import { Textarea } from '../../ui/textarea';
 import { McpServerDialog } from './McpServerDialog';
 
-const PLACEHOLDER = '{\n  "mcpServers": {\n    "docs": { "type": "http", "url": "https://example.invalid/mcp" }\n  }\n}';
-
 // MCP Hub on the Skills page (docs/plans/mcp-hub-mvp.md §8): paste → parse →
 // save → generate, then enable/disable, browse static tools, delete.
 export const McpHubSection: React.FC = () => {
@@ -58,12 +56,14 @@ export const McpHubSection: React.FC = () => {
   const refresh = useCallback(async () => {
     const res = await api.listMcpServers();
     if (res.ok) setServers(res.servers ?? []);
+    else showToast(describe(res.error), 'error');
   }, [api]);
 
   useEffect(() => {
     let cancelled = false;
     void api.listMcpServers().then((res) => {
       if (!cancelled && res.ok) setServers(res.servers ?? []);
+      else if (!cancelled) showToast(describe(res.error), 'error');
     });
     return () => {
       cancelled = true;
@@ -110,7 +110,7 @@ export const McpHubSection: React.FC = () => {
       <div className="flex items-center gap-2">
         <Plug className="size-3.5 text-cyan-ink" />
         <span className="font-mono text-[10.5px] font-bold uppercase tracking-[0.1em] text-muted">{t('mcpHub.title')}</span>
-        <span className="font-mono text-[10px] text-muted">· {t('mcpHub.subtitle')}</span>
+        <span className="font-mono text-[10px] text-muted">{t('mcpHub.subtitleDot', { subtitle: t('mcpHub.subtitle') })}</span>
       </div>
 
       {servers.length === 0 ? (
@@ -141,7 +141,6 @@ export const McpHubSection: React.FC = () => {
               {server.nativeEnabled === false && server.source ? (
                 <Badge variant="warning">{t(`mcpHub.disabledIn.${server.source}`)}</Badge>
               ) : null}
-              {server.status === 'error' ? <Badge variant="destructive">{t('mcpHub.configError')}</Badge> : null}
               {server.pendingChanges ? <Badge variant="secondary">{t('mcpHub.pendingChanges')}</Badge> : null}
               <span className="min-w-0 flex-1 truncate text-[12px] text-muted">
                 {server.error?.message || generateBlocked(server) || server.description || ''}
@@ -152,7 +151,7 @@ export const McpHubSection: React.FC = () => {
                     t('mcpHub.toolCount', { count: server.toolCount ?? 0 }),
                     server.serverVersion ? t('mcpHub.serverVersion', { version: server.serverVersion }) : null,
                     generatedLabel(server) ? t('mcpHub.generatedAt', { time: generatedLabel(server) }) : null,
-                  ].filter(Boolean).join(' · ')}
+                  ].filter(Boolean).reduce((acc: string, part) => (acc ? t('mcpHub.dotJoin', { a: acc, b: part as string }) : (part as string)), '')}
                 </span>
               ) : null}
               {server.status === 'generated' ? (
@@ -218,8 +217,7 @@ export const McpHubSection: React.FC = () => {
           </div>
           {tools.items.map((tool) => (
             <div key={tool.name} className="text-[12px]">
-              <span className="font-mono text-foreground">vibe mcp {tools.name} {tool.name}</span>
-              <span className="text-muted"> {tool.flags.map((flag) => flag.flag).join(' ')}</span>
+              <span className="font-mono text-foreground">{t('mcpHub.toolCommand', { server: tools.name, tool: tool.name, flags: tool.flags.map((flag) => flag.flag).join(' ') }).trim()}</span>
               {tool.description ? <div className="text-muted">{tool.description}</div> : null}
             </div>
           ))}
@@ -235,15 +233,16 @@ export const McpHubSection: React.FC = () => {
               setText(event.target.value);
               setPreview(null);
             }}
-            placeholder={PLACEHOLDER}
+            placeholder={t('mcpHub.pastePlaceholder')}
             className="min-h-[120px] font-mono text-[11.5px]"
           />
           {preview ? (
             <div className="flex flex-col gap-1 text-[12px]">
               {preview.map((item) => (
                 <div key={item.name} className="font-mono">
-                  {item.name} · {item.transport?.type}
-                  {item.exists ? ` · ${t('mcpHub.exists')}` : ''}
+                  {item.exists
+                    ? t('mcpHub.previewExists', { name: item.name, type: item.transport?.type ?? '', exists: t('mcpHub.exists') })
+                    : t('mcpHub.previewItem', { name: item.name, type: item.transport?.type ?? '' })}
                 </div>
               ))}
             </div>

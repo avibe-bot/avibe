@@ -247,3 +247,10 @@ def test_spawns_disable_every_native_server(native_files):
 
     overlay = json.loads(managed_opencode_runtime_config_content(None, native.opencode_disabled_mcp()))
     assert overlay["mcp"] == {"oc": {**OPENCODE["mcp"]["oc"], "enabled": False}}
+
+    only_in_overlay = json.loads(managed_opencode_runtime_config_content(
+        json.dumps({"mcp": {"extra": {"type": "local", "command": ["node"], "enabled": True}}}),
+        native.opencode_disabled_mcp(),
+    ))
+    assert only_in_overlay["mcp"]["extra"]["enabled"] is False
+    assert only_in_overlay["mcp"]["oc"]["enabled"] is False

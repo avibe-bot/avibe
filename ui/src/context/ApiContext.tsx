@@ -555,6 +555,7 @@ export interface McpServerSummary {
   toolCount?: number;
   pendingChanges?: boolean;
   diagnostics?: string[];
+  hasCwd?: boolean;
   error?: { type: string; message: string };
 }
 export interface McpError { type: string; message: string; field?: string; hint?: string }
@@ -921,7 +922,7 @@ export type ApiContextType = {
   getMcpTools: (name: string) => Promise<McpResult & { tools?: McpTool[]; revision?: string }>;
   runMcpOperation: (name: string, operation: 'generate' | 'enable' | 'disable') => Promise<McpResult>;
   removeMcp: (name: string) => Promise<McpResult>;
-  getMcpServer: (name: string) => Promise<McpResult & { server?: McpServerSummary; definition?: McpDefinition }>;
+  getMcpServer: (name: string) => Promise<McpResult & { server?: McpServerSummary; definition?: McpDefinition; partial?: boolean }>;
   updateMcp: (name: string, body: { server: Record<string, unknown>; description: string }) => Promise<McpResult>;
   previewSkillSource: (source: string, params?: { projectId?: string }) => Promise<SkillsPreviewResult>;
   addSkill: (payload: { source: string; scope: SkillScope; projectId?: string; backends?: string[]; all?: boolean; skill?: string; copy?: boolean }) => Promise<SkillsMutationResult>;

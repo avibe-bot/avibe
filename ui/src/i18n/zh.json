@@ -6304,6 +6304,14 @@
     "toolsOf": "{{name}} 的工具",
     "pendingChanges": "有未生成的修改",
     "failed": "MCP 操作失败。",
+    "dotJoin": "{{a}} · {{b}}",
+    "headerLine": "{{title}} · {{subtitle}}",
+    "subtitleDot": "· {{subtitle}}",
+    "previewItem": "{{name}} · {{type}}",
+    "previewExists": "{{name}} · {{type}} · {{exists}}",
+    "pastePlaceholder": "{\n  \"mcpServers\": {\n    \"docs\": { \"type\": \"http\", \"url\": \"https://example.invalid/mcp\" }\n  }\n}",
+    "toolCommand": "vibe mcp {{server}} {{tool}} {{flags}}",
+
     "source": {
       "claude": "Claude 配置",
       "codex": "Codex 配置",
@@ -6360,7 +6368,10 @@
       "value": "值",
       "keepValue": "已保存 — 留空保持不变",
       "addKey": "添加",
-      "removeKey": "移除"
+      "removeKey": "移除",
+      "addArg": "添加参数",
+      "removeArg": "移除参数",
+      "cwdCodexOnly": "工作目录只保存在 Codex 配置里。需要 cwd 的新服务器会写入 ~/.codex/config.toml。"
     }
   }
 }

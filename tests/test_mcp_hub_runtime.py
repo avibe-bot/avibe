@@ -96,6 +96,16 @@ def test_calls_return_envelopes_and_respect_enabled_state(generated):
     assert _run(generated, "call", {"name": "echo", "tool": "echo", "arguments": {"text": "x"}})["status"] == "ok"
 
 
+def test_concurrent_first_calls_in_one_session_share_the_open(generated):
+    async def both():
+        first = generated.submit("call", {"name": "echo", "tool": "echo", "arguments": {"text": "a"}, "sessionId": "ses-race"})
+        second = generated.submit("call", {"name": "echo", "tool": "echo", "arguments": {"text": "b"}, "sessionId": "ses-race"})
+        return await asyncio.gather(first, second)
+
+    bodies = [json.loads(body) for _status, body in asyncio.run(both())]
+    assert all(item["status"] == "ok" for item in bodies), bodies
+
+
 def test_stdio_process_cap_reports_capacity(generated, monkeypatch):
     monkeypatch.setattr(mcp_runtime, "STDIO_PROCESS_CAP", 0)
     result = _run(generated, "call", {"name": "echo", "tool": "echo", "arguments": {"text": "x"}})

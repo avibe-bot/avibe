@@ -130,6 +130,13 @@ def managed_opencode_runtime_config_content(
     for name, entry in (disabled_mcp or {}).items():
         current = managed_mcp.get(name)
         managed_mcp[name] = {**(current if isinstance(current, dict) else entry), "enabled": False}
+    # Overlay-only names (OPENCODE_CONFIG_CONTENT, not in the user's file) stay
+    # enabled unless we disable every remaining mcp.* too.
+    for name, entry in list(managed_mcp.items()):
+        if isinstance(entry, dict):
+            managed_mcp[name] = {**entry, "enabled": False}
+        else:
+            managed_mcp[name] = {"enabled": False}
     if managed_mcp:
         payload["mcp"] = managed_mcp
     else:

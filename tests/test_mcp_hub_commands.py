@@ -90,8 +90,15 @@ def test_validation_uses_the_published_schema():
 
 def test_unhandleable_schema_is_json_only_and_unvalidated():
     remote = {"name": "remote", "inputSchema": {"$ref": "https://example.invalid/schema.json"}}
+    nested = {
+        "name": "nested",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"filter": {"$ref": "https://example.invalid/filter.json"}},
+        },
+    }
     invalid = {"name": "invalid", "inputSchema": {"type": "object", "properties": {"a": {"type": 5}}}}
-    for tool in (remote, invalid):
+    for tool in (remote, nested, invalid):
         command = build_command(tool)
         assert command["validated"] is False and command["flags"] == []
         validate_arguments(tool, {"anything": 1})  # not validated, not a failure

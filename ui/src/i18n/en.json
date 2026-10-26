@@ -6304,6 +6304,14 @@
     "toolsOf": "Tools of {{name}}",
     "pendingChanges": "Pending changes",
     "failed": "MCP operation failed.",
+    "dotJoin": "{{a}} · {{b}}",
+    "headerLine": "{{title}} · {{subtitle}}",
+    "subtitleDot": "· {{subtitle}}",
+    "previewItem": "{{name}} · {{type}}",
+    "previewExists": "{{name}} · {{type}} · {{exists}}",
+    "pastePlaceholder": "{\n  \"mcpServers\": {\n    \"docs\": { \"type\": \"http\", \"url\": \"https://example.invalid/mcp\" }\n  }\n}",
+    "toolCommand": "vibe mcp {{server}} {{tool}} {{flags}}",
+
     "source": {
       "claude": "Claude config",
       "codex": "Codex config",
@@ -6360,7 +6368,10 @@
       "value": "Value",
       "keepValue": "Stored — leave blank to keep",
       "addKey": "Add",
-      "removeKey": "Remove"
+      "removeKey": "Remove",
+      "addArg": "Add argument",
+      "removeArg": "Remove argument",
+      "cwdCodexOnly": "A working directory is stored only for Codex. New servers that need one are written to ~/.codex/config.toml."
     }
   }
 }

@@ -79,8 +79,17 @@ async def save(body: dict[str, Any]) -> dict[str, Any]:
 async def detail(name: str) -> dict[str, Any]:
     def _read() -> dict[str, Any]:
         summary = repository.summarize(name)
-        definition = repository.read_definition(name)
-        return {"ok": True, "server": summary, "definition": masked_definition(definition)}
+        payload: dict[str, Any] = {"ok": True, "server": summary}
+        published = repository.read_published(name)
+        native_error = summary.get("error")
+        try:
+            payload["definition"] = masked_definition(repository.read_definition(name))
+        except McpHubError:
+            if published is not None:
+                payload["definition"] = masked_definition(published["definition"])
+            elif native_error:
+                payload["partial"] = True
+        return payload
 
     return await asyncio.to_thread(_read)
 

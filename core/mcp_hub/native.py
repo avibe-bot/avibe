@@ -221,6 +221,7 @@ class NativeServer:
     definition: Optional[dict[str, Any]]
     error: Optional[McpHubError]
     native_enabled: bool = True
+    has_cwd: bool = False
 
 
 def _native_enabled(source: str, entry: dict[str, Any]) -> bool:
@@ -264,10 +265,18 @@ def read_all(descriptions: Optional[dict[str, str]] = None) -> dict[str, NativeS
                     raise McpHubError("invalid_definition", f"{source} entry {name!r} is not an object.")
                 enabled = _native_enabled(source, entry)
                 definition = _from_native(source, str(name), entry, path, descriptions.get(str(name)))
-                servers[str(name)] = NativeServer(str(name), source, path, definition, None, native_enabled=enabled)
+                servers[str(name)] = NativeServer(
+                    str(name), source, path, definition, None, native_enabled=enabled, has_cwd="cwd" in entry
+                )
             except McpHubError as exc:
                 servers[str(name)] = NativeServer(
-                    str(name), source, path, None, exc, native_enabled=isinstance(entry, dict) and _native_enabled(source, entry)
+                    str(name),
+                    source,
+                    path,
+                    None,
+                    exc,
+                    native_enabled=isinstance(entry, dict) and _native_enabled(source, entry),
+                    has_cwd=isinstance(entry, dict) and "cwd" in entry,
                 )
     return servers
 
