@@ -2570,6 +2570,7 @@
         "keylessEmpty": "Exa（免费）已内置，无需密钥，在模型代搜之前搜索。添加的搜索服务会排在它前面。标价：{{prices}}。套餐和实际账单可能不同。",
         "vendorPrice": "{{vendor}} ${{usd}} / 千次",
         "priceDate": "API 标价 · {{date}}",
+        "builtInPrice": "内置 · 无需密钥或设置",
         "priceNote": "价格为目录标注日期的 API 标价，免费额度、套餐与实际账单可能不同。",
         "custody": "搜索服务的密钥和其他供应商一样由网关保管，不会交给模型或 Agent。",
         "keylessQueryDestination": "查询会从此 Avibe 运行时直接发送到 Exa（mcp.exa.ai）；Exa 可看到该连接的 IP。",
