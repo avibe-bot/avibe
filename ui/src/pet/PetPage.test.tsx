@@ -1318,9 +1318,9 @@ describe('PetPage review fixes, round 14', () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith('pet_set_expanded', { expanded: true }));
     expect(order).toEqual([true]);
     // A second panel command while the expand is still in flight: a Vibey
-    // click, which opens the history (the panel is not confirmed open, so
+    // keyboard activation, which opens the history (the panel is not confirmed open, so
     // nothing is open to close). It waits its turn behind the first.
-    await userEvent.click(screen.getByLabelText('pet.recentTurns'));
+    fireEvent.click(screen.getByLabelText('pet.recentTurns'));
     expect(order).toEqual([true]);
     await act(async () => first.resolve({ panel_side: 'left', panel_edge: 'bottom' }));
     await waitFor(() => expect(order).toEqual([true, true]));
@@ -1887,6 +1887,70 @@ describe('desktop mini v2 interaction contract', () => {
     expect(wrap.classList.contains('is-hovered')).toBe(false);
   });
 
+  it.each(['blur', 'open'])('suppresses the idle dock after %s until shell leave and re-enter', async (cause) => {
+    mainSession('S'); render(<PetPage />);
+    const avatar = await screen.findByLabelText('pet.recentTurns');
+    const wrap = avatar.closest('.pet-mini-avatar-wrap')!;
+    const hover = (value: boolean) => act(() => {
+      window.dispatchEvent(new CustomEvent(PET_HOVER_EVENT, { detail: { hover: value } }));
+    });
+    hover(true);
+    act(() => avatar.focus());
+    if (cause === 'open') {
+      const { petBridge } = await import('./petBridge');
+      vi.spyOn(petBridge, 'open').mockResolvedValue();
+      await userEvent.dblClick(avatar);
+    } else act(() => window.dispatchEvent(new Event('blur')));
+    expect(wrap.classList.contains('is-hovered')).toBe(false);
+    expect(wrap.classList.contains('is-hover-suppressed')).toBe(true);
+    expect(document.activeElement).not.toBe(avatar);
+    hover(true);
+    expect(wrap.classList.contains('is-hovered')).toBe(false);
+    hover(false);
+    expect(wrap.classList.contains('is-hover-suppressed')).toBe(true);
+    hover(true);
+    expect(wrap.classList.contains('is-hover-suppressed')).toBe(false);
+    expect(wrap.classList.contains('is-hovered')).toBe(true);
+  });
+
+  it('keeps the typing dock active through a double-click and window blur', async () => {
+    mainSession('S'); render(<PetPage />);
+    await userEvent.click(await screen.findByLabelText('pet.keyboard.open'));
+    const input = await screen.findByRole('textbox');
+    const { petBridge } = await import('./petBridge');
+    vi.spyOn(petBridge, 'open').mockResolvedValue();
+    await userEvent.dblClick(screen.getByLabelText('pet.recentTurns'));
+    act(() => window.dispatchEvent(new Event('blur')));
+    expect(document.querySelector('.pet-mini-dock.is-active')).not.toBeNull();
+    expect(document.querySelector('.is-hover-suppressed')).toBeNull();
+    expect(screen.getByRole('textbox')).toBe(input);
+  });
+
+  it('keeps listening and finishing docks active through double-click and blur', async () => {
+    const done = deferred<string>();
+    const finish = vi.fn();
+    class Dictation { done = done.promise; start = async () => {}; finish = finish; abort = () => {}; }
+    await withVoiceEnv(() => true, Dictation, async () => {
+      mainSession('S'); render(<PetPage />);
+      await userEvent.click(await screen.findByLabelText('pet.voice.open'));
+      await waitFor(() => expect(pose()).toBe('listening'));
+      const { petBridge } = await import('./petBridge');
+      vi.spyOn(petBridge, 'open').mockResolvedValue();
+      await userEvent.dblClick(screen.getByLabelText('pet.recentTurns'));
+      act(() => window.dispatchEvent(new Event('blur')));
+      expect(pose()).toBe('listening');
+      expect(document.querySelector('.pet-mini-dock.is-active')).not.toBeNull();
+      expect(document.querySelector('.is-hover-suppressed')).toBeNull();
+      await userEvent.click(screen.getByLabelText('pet.voice.stop'));
+      expect(finish).toHaveBeenCalledOnce();
+      act(() => window.dispatchEvent(new Event('blur')));
+      expect(document.querySelector('.pet-mini-dock.is-active')).not.toBeNull();
+      expect(document.querySelector('.is-hover-suppressed')).toBeNull();
+      await act(async () => done.resolve('transcript'));
+      expect(await screen.findByRole('textbox')).toBeTruthy();
+    });
+  });
+
   it('keeps the unread count visible until the inbox confirms the result was read', async () => {
     tails.S = [message('u', 'S', { author: 'user', type: 'user' }), message('r', 'S', { read_at: null })];
     unreadBySession = { S: 1 };
@@ -2088,44 +2152,103 @@ describe('desktop mini v2 interaction contract', () => {
     });
   });
 
-  it('a double-click opens the conversation in Avibe and leaves the history as before', async () => {
-    const invoke = vi.fn((command: string) => {
-      if (command === 'pet_ready') return Promise.resolve({ binding: 'S', revision: 1, summon_pending: null });
-      if (command === 'pet_open') return Promise.resolve(null);
-      return Promise.resolve({ panel_side: 'left', panel_edge: 'bottom' });
-    });
-    Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
-    Object.defineProperty(window, '__TAURI_INTERNALS__', { value: { invoke }, configurable: true });
-    try {
-      withHistory();
-      mainSession('S'); render(<PetPage />);
-      await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
-      const avatar = screen.getByLabelText('pet.recentTurns');
-      const opens = () => invoke.mock.calls.filter(([command]) => command === 'pet_open');
-      // Closed before: closed after, with the conversation opened once.
-      await userEvent.setup().dblClick(avatar);
-      await waitFor(() => expect(opens()).toEqual([['pet_open', { link: 'avibe://session/S' }]]));
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
-      expect(historyIsOpen()).toBe(false);
-      expect(avatar.getAttribute('aria-expanded')).toBe('false');
-      // Open before: open after.
-      await userEvent.click(avatar);
-      await waitFor(() => expect(historyIsOpen()).toBe(true));
-      await userEvent.setup().dblClick(avatar);
-      await waitFor(() => expect(opens()).toHaveLength(2));
-      await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
-      expect(historyIsOpen()).toBe(true);
-      expect(avatar.getAttribute('aria-expanded')).toBe('true');
-      // Keyboard activation (no click count) and single clicks never open it.
+  it.each([false, true])('a double-click opens once without ever toggling history (initially open=%s)', async (initiallyOpen) => {
+    withHistory();
+    mainSession('S'); render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    const { petBridge } = await import('./petBridge');
+    const opens = vi.spyOn(petBridge, 'open').mockResolvedValue();
+    const panel = vi.spyOn(petBridge, 'setExpanded');
+    const avatar = screen.getByLabelText('pet.recentTurns');
+    if (initiallyOpen) {
       fireEvent.click(avatar);
-      await waitFor(() => expect(historyIsOpen()).toBe(false));
-      await userEvent.click(avatar);
       await waitFor(() => expect(historyIsOpen()).toBe(true));
-      expect(opens()).toHaveLength(2);
-    } finally {
-      Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
-      Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
     }
+    panel.mockClear();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.dblClick(avatar);
+    expect(historyIsOpen()).toBe(initiallyOpen);
+    expect(panel).not.toHaveBeenCalled();
+    expect(opens).toHaveBeenCalledExactlyOnceWith('avibe://session/S');
+    // The main window taking key is part of the double-click, not a collapse.
+    act(() => window.dispatchEvent(new Event('blur')));
+    await act(async () => vi.advanceTimersByTime(1000));
+    expect(historyIsOpen()).toBe(initiallyOpen);
+    expect(panel).not.toHaveBeenCalled();
+    expect(opens).toHaveBeenCalledTimes(1);
+  });
+
+  it('confirms single pointer clicks after 450ms, while keyboard activation is immediate', async () => {
+    withHistory();
+    mainSession('S'); render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    const { petBridge } = await import('./petBridge');
+    const opens = vi.spyOn(petBridge, 'open').mockResolvedValue();
+    const avatar = screen.getByLabelText('pet.recentTurns');
+    vi.useFakeTimers();
+    for (const next of [true, false]) {
+      fireEvent.pointerDown(avatar, { button: 0 });
+      fireEvent.pointerUp(avatar);
+      expect(historyIsOpen()).toBe(!next);
+      await act(async () => vi.advanceTimersByTime(449));
+      expect(historyIsOpen()).toBe(!next);
+      await act(async () => vi.advanceTimersByTime(1));
+      expect(historyIsOpen()).toBe(next);
+    }
+    await act(async () => fireEvent.click(avatar));
+    expect(historyIsOpen()).toBe(true);
+    await act(async () => fireEvent.click(avatar));
+    expect(historyIsOpen()).toBe(false);
+    expect(opens).not.toHaveBeenCalled();
+  });
+
+  it.each([1, 2])('pairs a second press with click count %s before the first timer can fire', async (clicks) => {
+    withHistory();
+    mainSession('S'); render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    const { petBridge } = await import('./petBridge');
+    const opens = vi.spyOn(petBridge, 'open').mockResolvedValue();
+    const panel = vi.spyOn(petBridge, 'setExpanded');
+    const avatar = screen.getByLabelText('pet.recentTurns');
+    vi.useFakeTimers();
+    fireEvent.pointerDown(avatar, { button: 0 });
+    fireEvent.mouseDown(avatar, { detail: 1 });
+    fireEvent.pointerUp(avatar);
+    await act(async () => vi.advanceTimersByTime(440));
+    expect(historyIsOpen()).toBe(false);
+    fireEvent.pointerDown(avatar, { button: 0 });
+    fireEvent.mouseDown(avatar, { detail: clicks });
+    await act(async () => vi.advanceTimersByTime(100));
+    expect(panel).not.toHaveBeenCalled();
+    fireEvent.pointerUp(avatar);
+    fireEvent.doubleClick(avatar);
+    await act(async () => vi.advanceTimersByTime(1000));
+    expect(panel).not.toHaveBeenCalled();
+    expect(opens).toHaveBeenCalledExactlyOnceWith('avibe://session/S');
+  });
+
+  it.each(['hold', 'drag', 'cancel', 'leave'])('a %s cancels a pending click and cannot open the conversation', async (gesture) => {
+    withHistory();
+    mainSession('S'); render(<PetPage />);
+    await waitFor(() => expect(document.querySelector('.pet-mini-reply-bubble')?.textContent).toContain('Old reply'));
+    const { petBridge } = await import('./petBridge');
+    const opens = vi.spyOn(petBridge, 'open').mockResolvedValue();
+    const avatar = screen.getByLabelText('pet.recentTurns');
+    vi.useFakeTimers();
+    fireEvent.pointerDown(avatar, { button: 0 });
+    fireEvent.pointerUp(avatar);
+    fireEvent.pointerDown(avatar, { button: 0, clientX: 0, clientY: 0 });
+    fireEvent.mouseDown(avatar, { detail: 2 });
+    if (gesture === 'hold') await act(async () => vi.advanceTimersByTime(320));
+    if (gesture === 'drag') fireEvent.pointerMove(avatar, { buttons: 1, clientX: 20, clientY: 0 });
+    if (gesture === 'cancel') fireEvent.pointerCancel(avatar);
+    if (gesture === 'leave') fireEvent.pointerLeave(avatar);
+    fireEvent.pointerUp(avatar);
+    fireEvent.doubleClick(avatar);
+    await act(async () => vi.advanceTimersByTime(1000));
+    expect(historyIsOpen()).toBe(false);
+    expect(opens).not.toHaveBeenCalled();
   });
 
   it('a quick click after a hold is a single click, not a double-click', async () => {
@@ -2155,7 +2278,7 @@ describe('desktop mini v2 interaction contract', () => {
     expect(invoke.mock.calls.filter(([command]) => command === 'pet_open')).toEqual([]);
   });
 
-  it('a double-click that first collapsed the card list puts the list back', async () => {
+  it('a double-click never collapses the expanded card list, while a confirmed single click does', async () => {
     canUseAgents = true;
     const row = workingIn('running').agents[0];
     runningAgents = { ...workingIn('running'), agents: [
@@ -2167,9 +2290,23 @@ describe('desktop mini v2 interaction contract', () => {
     await waitFor(() => expect(document.querySelector('.pet-mini-collapsed')).not.toBeNull());
     await showCards();
     await waitFor(() => expect(document.querySelector('.pet-mini-scroll')).not.toBeNull());
-    await userEvent.setup().dblClick(screen.getByLabelText('pet.recentTurns'));
-    await act(async () => new Promise((resolve) => setTimeout(resolve, 15)));
+    const { petBridge } = await import('./petBridge');
+    vi.spyOn(petBridge, 'open').mockResolvedValue();
+    const panel = vi.spyOn(petBridge, 'setExpanded');
+    const avatar = screen.getByLabelText('pet.recentTurns');
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    await user.dblClick(avatar);
     expect(document.querySelector('.pet-mini-scroll')).not.toBeNull();
+    expect(panel).not.toHaveBeenCalled();
+    await act(async () => vi.advanceTimersByTime(1000));
+    expect(document.querySelector('.pet-mini-scroll')).not.toBeNull();
+    expect(panel).not.toHaveBeenCalled();
+    expect(historyIsOpen()).toBe(false);
+    await user.click(avatar);
+    expect(document.querySelector('.pet-mini-scroll')).not.toBeNull();
+    await act(async () => vi.advanceTimersByTime(450));
+    expect(document.querySelector('.pet-mini-scroll')).toBeNull();
     expect(historyIsOpen()).toBe(false);
   });
 });
@@ -2758,6 +2895,23 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     await waitFor(() => expect(document.querySelector('.pet-mini-reply-toggle')?.textContent).toContain('pet.repliedPrefix'));
     expect(compact()).toBe(false);
     expect(bubbleOpen()).toBe(true);
+  });
+
+  it('a double-click leaves the lingering reply unseen and on its original timer', async () => {
+    await runToResult();
+    const { petBridge } = await import('./petBridge');
+    const opens = vi.spyOn(petBridge, 'open').mockResolvedValue();
+    const panel = vi.spyOn(petBridge, 'setExpanded');
+    await userEvent.dblClick(screen.getByLabelText('pet.recentTurns'));
+    expect(opens).toHaveBeenCalledExactlyOnceWith('avibe://session/S');
+    expect(panel).not.toHaveBeenCalled();
+    expect(markRead).not.toHaveBeenCalled();
+    expect(bubbleOpen()).toBe(true);
+    await act(async () => vi.advanceTimersByTime(1000));
+    expect(document.querySelector('.pet-mini-detail.is-open')).toBeNull();
+    expect(bubbleOpen()).toBe(true);
+    await act(async () => vi.advanceTimersByTime(9500));
+    expect(bubbleOpen()).toBe(false);
   });
 
   it('keeps the bubble open from running to its result, then shows the reply for 10s', async () => {

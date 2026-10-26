@@ -355,14 +355,29 @@ Known data limitations for P1:
   history opens and closes above the input or the marquee, which keep their
   draft, focus, caret and capture. A click on Vibey is not leaving the input:
   the input keeps the focus (Vibey's press does not take it).
-- **Double-click Vibey** (owner decision, 2026-10-23) opens Vibey's
+- **Double-click Vibey** (owner decision, 2026-10-26) opens Vibey's
   conversation in the Avibe main window (`avibe://session/<main>`, routed to
-  `/chat/<id>`). A single click is never delayed: the first click of a
-  double-click acts at once like any click, and the second puts the history
-  and the card list back as they were before the first, then opens the window.
-  The double-click is the platform's own (the press's click count), so its
-  speed follows the system setting. A hold or a drag is never a click, and
-  keyboard activation is always a single click.
+  `/chat/<id>`). A pointer click waits for the double-click window before it
+  toggles Vibey's history, so the first press of a double-click has no visible
+  effect and cannot collapse the card list. A second press inside the
+  double-click window cancels that pending single click and opens the window,
+  leaving history and cards exactly as they were before the gesture. The page
+  pairs the platform click count with the elapsed time between presses, and
+  also honours a native `dblclick` event without opening the session twice.
+  This v1 uses a 450ms page interval; matching the native macOS
+  `NSEvent.doubleClickInterval` remains a known gap. Keyboard activation
+  (`event.detail === 0`) toggles immediately. A hold or a drag is never a
+  click, and a pointer cancel or leaving Vibey before release cancels any
+  pending click.
+
+  Opening the session, or losing the pet window's key while neither dictating
+  nor typing, clears the hover state and blurs Vibey. The page suppresses the
+  dock while the shell still reports the pointer over Vibey; the next
+  `hover: false` arms it again, and a later `hover: true` shows it. CSS
+  `:hover` and focus cannot bypass this suppression. The dock remains visible
+  while dictation, finishing, or typing is active. A double-click's first
+  press does not open history, so it does not mark a lingering reply as seen;
+  “looked at means done” still requires a history the user actually opened.
 
   Every branch leaves the shell's panel state matching what is drawn, so
   nothing stays expanded out of sight. Vibey's button is labelled "Recent
@@ -402,7 +417,10 @@ Known data limitations for P1:
     the rects of Vibey and the dock `hover: true` in `pet_hit_regions`; the
     cursor poller (§9.2) sends `avibe:pet-hover { hover }` when the cursor
     enters or leaves them, and the page shows the dock while it is set. CSS
-    `:hover` still applies where the webview does see hover.
+    `:hover` still applies where the webview does see hover, except while the
+    idle dock is suppressed after opening Avibe or losing key. In that case
+    it stays hidden until the shell reports a leave followed by a new enter,
+    even while the pet window remains unfocused.
   - It stays visible while dictating or typing, and is always visible on
     devices without hover (`@media (hover: none)`).
 
@@ -910,6 +928,7 @@ GET /api/sessions/main
 - [ ] Vibey's bubble is content-sized and centred while it only says
       thinking/waiting, and widens from the centre when the reply arrives.
 - [ ] A double-click on Vibey opens its conversation in Avibe and leaves the
-      history and cards as they were; single clicks are not delayed.
+      history and cards as they were; pointer single clicks take the
+      double-click window to confirm.
 - [ ] Reduced motion turns everything above into instant switches.
 - [ ] Icons are SVG. All copy is localized in en and zh.
