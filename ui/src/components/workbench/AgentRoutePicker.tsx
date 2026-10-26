@@ -453,14 +453,16 @@ export const AgentRoutePicker: React.FC<AgentRoutePickerProps> = ({
             /* The composer's quiet trigger names who answers; whether that Agent is
                inherited from the default is the menu's Agent row to say. When the
                action row runs short (a phone with Queue and Stop showing), detail
-               gives way before the Agent: effort first, then the model. Each part
-               that no longer fits wraps onto a second line this one-line box
-               clips, so a part is either whole or gone — never an ellipsis. */
+               gives way before the Agent: effort first, then the model. Each detail
+               part that no longer fits wraps onto a second line this one-line box
+               clips, so a detail is either whole or gone — never an ellipsis. */
             <span
               data-route-trigger-parts=""
               className="flex h-5 min-w-0 flex-wrap content-start items-center justify-end gap-x-1.5 overflow-hidden"
             >
-              <span className="h-5 max-w-40 shrink-0 truncate font-semibold leading-5 text-foreground">{agentLabel}</span>
+              {/* The name keeps its line: detail wraps away first, and only a name
+                  wider than the whole row, or than 10rem, ends in an ellipsis. */}
+              <span className="h-5 min-w-0 max-w-40 truncate font-semibold leading-5 text-foreground">{agentLabel}</span>
               {currentModel && (
                 <span
                   data-route-detail="model"

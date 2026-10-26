@@ -9,11 +9,11 @@ import { open, serveProduct } from './support';
 const SESSION_ID = 'route-trigger-fixture';
 const EFFORTS = ['low', 'medium', 'high', 'xhigh'].map((value) => ({ value, label: value }));
 
-async function serveChat(page: Page, { running }: { running: boolean }) {
+async function serveChat(page: Page, { running, agentName = 'pm-claude' }: { running: boolean; agentName?: string }) {
   const denied = await serveProduct(page);
   const session = {
     id: SESSION_ID, scope_id: 'fixture', project_id: 'proj-1', title: 'Route trigger',
-    agent_id: 'agt-pm', agent_name: 'pm-claude', agent_backend: 'claude', model: 'claude-opus-4-7',
+    agent_id: 'agt-pm', agent_name: agentName, agent_backend: 'claude', model: 'claude-opus-4-7',
     reasoning_effort: 'xhigh', status: 'active', agent_status: running ? 'running' : 'idle', pinned: false,
     workdir: '/fixture/work', native_session_id: 'native-1', metadata: {},
     created_at: '2026-10-26T00:00:00Z', updated_at: '2026-10-26T00:00:00Z',
@@ -22,9 +22,9 @@ async function serveChat(page: Page, { running }: { running: boolean }) {
     in_flight: running, foreground: running ? 'running' : 'idle', native_turn_started: running,
     pending_input_count: 0, background_activities: [], pending_activity_output_count: 0, connection: 'connected',
   };
-  const agents = [{ id: 'agt-pm', name: 'pm-claude', backend: 'claude', enabled: true, model: 'claude-opus-4-7', reasoning_effort: 'xhigh' }];
+  const agents = [{ id: 'agt-pm', name: agentName, backend: 'claude', enabled: true, model: 'claude-opus-4-7', reasoning_effort: 'xhigh' }];
   await page.route(`**/api/sessions/${SESSION_ID}/bootstrap`, (route) => route.fulfill({ json: {
-    session, capabilities: { can_chat: true }, agents, default_agent_name: 'pm-claude', config: { ui: {} },
+    session, capabilities: { can_chat: true }, agents, default_agent_name: agentName, config: { ui: {} },
     messages: [], queued: [], next_after_id: null, next_before_id: null,
     draft: { text: '', updated_at: null }, turn_state: turnState,
   } }));
@@ -64,9 +64,11 @@ async function shownDetails(parts: Locator): Promise<string[]> {
   return shown;
 }
 
-async function expectAgentWhole(parts: Locator) {
-  const agent = parts.locator(':scope > span:not([data-route-detail])');
-  await expect(agent).toHaveText('pm-claude');
+const agentOf = (parts: Locator) => parts.locator(':scope > span:not([data-route-detail])');
+
+async function expectAgentWhole(parts: Locator, name = 'pm-claude') {
+  const agent = agentOf(parts);
+  await expect(agent).toHaveText(name);
   expect(await agent.evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
   expect(inside((await agent.boundingBox())!, (await parts.boundingBox())!)).toBe(true);
 }
@@ -104,5 +106,27 @@ test('a roomy row shows the Agent, model and effort together', async ({ page }) 
   await expect(parts.locator('[data-route-detail="model"]')).toHaveText('Claude Opus 4.7');
   await expectAgentWhole(parts);
   expect(await shownDetails(parts)).toEqual(['model', 'effort']);
+  expect(denied).toEqual([]);
+});
+
+test('a name wider than a crowded phone row keeps its beginning and ends in an ellipsis', async ({ page }) => {
+  const name = 'pm-claude-research-lead';
+  const denied = await serveChat(page, { running: true, agentName: name });
+  await page.setViewportSize({ width: 320, height: 760 });
+  await open(page, `/chat/${SESSION_ID}`);
+  await expect(page.getByRole('button', { name: 'Stop', exact: true })).toBeVisible();
+  await page.locator('main [contenteditable="true"]').last().click();
+  await page.keyboard.type('Run the next step after this one');
+  await expect(page.getByRole('button', { name: 'Send to queue', exact: true })).toBeVisible();
+
+  const parts = page.locator('main').getByRole('button', { name: new RegExp(name) }).locator('[data-route-trigger-parts]');
+  const agent = agentOf(parts);
+  await expect(agent).toHaveText(name);
+  // The label fits the line it holds, so its start is never clipped away.
+  expect(inside((await agent.boundingBox())!, (await parts.boundingBox())!)).toBe(true);
+  expect(await agent.evaluate((node) => getComputedStyle(node).textOverflow)).toBe('ellipsis');
+  expect(await agent.evaluate((node) => node.scrollWidth > node.clientWidth)).toBe(true);
+  expect(await shownDetails(parts)).toEqual([]);
+  await page.screenshot({ path: 'e2e/.artifacts/workbench-general/shots/composer-route-trigger-long-name.png' });
   expect(denied).toEqual([]);
 });
