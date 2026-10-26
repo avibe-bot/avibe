@@ -9549,7 +9549,12 @@ def _run_avault(
     except subprocess.TimeoutExpired as exc:
         raise AvaultError("avault timed out") from exc
     if proc.returncode != 0 and macos_login_session_state() == "stale_login_session":
-        raise AvaultStaleLoginSessionError(backend_t("errors.staleLoginSession"))
+        error = (
+            AvaultStaleLoginSessionBeforeHandoffError
+            if proc.returncode == _AVAULT_EXIT_AUTHORIZATION_REQUIRED
+            else AvaultStaleLoginSessionError
+        )
+        raise error(backend_t("errors.staleLoginSession"))
     if proc.returncode == _AVAULT_EXIT_AUTHORIZATION_REQUIRED:
         raise _avault_authorization_required(_avault_detail(proc))
     if proc.returncode == 0:
@@ -9566,7 +9571,7 @@ def _raise_if_agent_authorization_required(exc: Exception) -> None:
     if macos_login_session_state() == "stale_login_session":
         error = (
             AvaultStaleLoginSessionBeforeHandoffError
-            if _avault_agent_error_is_absent(str(exc))
+            if isinstance(exc, AvaultAgentAuthorizationRequiredError) or _avault_agent_error_is_absent(str(exc))
             else AvaultStaleLoginSessionError
         )
         raise error(backend_t("errors.staleLoginSession")) from exc

@@ -51,6 +51,7 @@ def test_stale_login_session_replaces_raw_avault_failure(mac_avault, monkeypatch
         api.avault_pubkey()
 
     assert exc.value.code == "stale_login_session"
+    assert isinstance(exc.value, api.AvaultStaleLoginSessionBeforeHandoffError)
     with pytest.raises(api.AvaultStaleLoginSessionError) as exc:
         api.avault_deliver_run(_secret(), ["sh", "-c", "exit 0"])
     assert isinstance(exc.value, api.AvaultPreHandoffError)
@@ -118,6 +119,23 @@ def test_agent_authorization_frame_becomes_the_same_pre_handoff_error(mac_avault
         api.avault_agent_deliver_inject(grant_id="vgr_1", path="/tmp/out.env", fmt="dotenv", secrets=[])
     assert isinstance(exc.value, api.AvaultAuthorizationRequiredError)
     assert api.get_avault_authorization_status()["required"] is True
+
+
+def test_stale_agent_authorization_frame_preserves_pre_handoff(monkeypatch):
+    from vibe.avault_agent import AvaultAgentAuthorizationRequiredError
+
+    class Client:
+        def deliver_inject(self, **_kwargs):
+            raise AvaultAgentAuthorizationRequiredError("macOS Keychain needs a one-time authorization")
+
+    monkeypatch.setattr(api, "_avault_agent_client", Client)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "macos_login_session_state", lambda: "stale_login_session")
+
+    with pytest.raises(api.AvaultStaleLoginSessionBeforeHandoffError) as exc:
+        api.avault_agent_deliver_inject(grant_id="vgr_1", path="/tmp/out.env", fmt="dotenv", secrets=[])
+
+    assert isinstance(exc.value, api.AvaultPreHandoffError)
 
 
 def _wait_for_attempt() -> dict:
