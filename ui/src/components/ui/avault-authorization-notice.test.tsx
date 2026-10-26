@@ -77,6 +77,24 @@ describe('AvaultAuthorizationNotice', () => {
     expect(screen.queryByRole('alert')).toBeNull();
   });
 
+  // An Agent's failed Vault call records the requirement in another process while the
+  // Vault page stays open; the banner must still appear without remounting the page.
+  it('shows the notice once the requirement is recorded after the page opened', async () => {
+    api.getAvaultAuthorization.mockResolvedValueOnce(status({ required: false }));
+    renderNotice();
+    await settle();
+    expect(screen.queryByRole('alert')).toBeNull();
+
+    api.getAvaultAuthorization.mockResolvedValue(status());
+    await act(async () => {
+      vi.advanceTimersByTime(15_000);
+    });
+    await settle();
+
+    expect(screen.getByRole('alert')).toBeTruthy();
+    expect(api.authorizeAvault).not.toHaveBeenCalled();
+  });
+
   it('says where the dialog appears and runs one authorization per click until it finishes', async () => {
     api.getAvaultAuthorization.mockResolvedValueOnce(status());
     api.authorizeAvault.mockResolvedValue(status({ attempt: attempt('running') }));
