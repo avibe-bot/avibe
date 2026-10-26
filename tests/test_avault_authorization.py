@@ -58,6 +58,20 @@ def test_stale_login_session_replaces_raw_avault_failure(mac_avault, monkeypatch
     assert status["login_session_state"] == "stale_login_session"
 
 
+def test_target_service_state_comes_from_the_running_service(monkeypatch):
+    from vibe import internal_client
+
+    monkeypatch.setattr(api.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(internal_client, "health_identity_sync", lambda: {
+        "ok": True,
+        "service": "vibe-remote-internal",
+        "version": 1,
+        "macos_login_session_state": "stale_login_session",
+    })
+
+    assert api.macos_login_session_state(service_pid=4242) == "stale_login_session"
+
+
 def test_avault_without_the_contract_keeps_todays_failures(mac_avault):
     avault = mac_avault(version="0.1.7", unauthorized_status=70)
 

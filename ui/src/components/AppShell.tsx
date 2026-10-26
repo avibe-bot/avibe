@@ -120,7 +120,7 @@ const MacOSStaleLoginSessionNotice: React.FC = () => {
 
   if (!stale) return null;
   return (
-    <div role="alert" className="mx-4 mb-4 flex items-start gap-3 rounded-xl border border-destructive/35 bg-destructive/8 px-4 py-3 text-[13px] leading-snug text-destructive-ink md:mx-10">
+    <div role="alert" className="shrink-0 mx-4 mb-4 flex items-start gap-3 rounded-xl border border-destructive/35 bg-destructive/8 px-4 py-3 text-[13px] leading-snug text-destructive-ink md:mx-10">
       <AlertTriangle className="mt-0.5 size-4 shrink-0" />
       <span>{t('errors.stale_login_session')}</span>
     </div>
@@ -456,6 +456,7 @@ export const AppShell: React.FC = () => {
   const isSettings = settingsOpen;
   const isShowPageApp = surfaceLocation.pathname.startsWith('/apps/show/');
   const isBuiltinApp = isStandaloneAppRoutePath(surfaceLocation.pathname);
+  const isFullHeightApp = chromeless || isBuiltinApp || isShowPageApp;
   const isFullScreenMobile = isChat || isSearch || isSettings || isShowPageApp || isBuiltinApp;
   // `/` is the Workbench canvas root and the only route board 04 draws. It reads
   // the surface location, so Settings opened over the home keeps the home's own
@@ -632,10 +633,8 @@ export const AppShell: React.FC = () => {
           // Mobile: the internal scroll area of the locked flex-column shell, so
           // the document itself never scrolls. Desktop: normal flow (min-h-screen
           // + sidebar offset).
-          chromeless
-            // Single-app tab: no sidebar offset, no scroll, no page glow — the app body
-            // is the only thing in the viewport and sizes itself to this box (h-full).
-            ? 'min-h-0 flex-1 overflow-hidden'
+          isFullHeightApp
+            ? 'min-h-0 flex flex-1 flex-col overflow-hidden'
             : settingsCoversSidebar
               ? 'min-h-0 flex-1 overflow-hidden md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
             : isFullScreenMobile
@@ -658,8 +657,8 @@ export const AppShell: React.FC = () => {
         <MacOSStaleLoginSessionNotice />
         <div className={clsx(
           'w-full',
-          chromeless
-            ? 'h-full'
+          isFullHeightApp
+            ? 'min-h-0 flex-1 p-0'
             : isSettings
               ? 'h-full p-0 md:h-auto md:min-h-screen'
               : isFullScreenMobile

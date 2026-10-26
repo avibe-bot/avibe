@@ -234,6 +234,23 @@ describe('AppShell stale login session notice', () => {
     await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('errors.stale_login_session'));
   });
 
+  it('reserves notice space on full-height app surfaces', async () => {
+    api.getMacOSLoginSessionStatus.mockResolvedValue({ ok: true, state: 'stale_login_session' });
+
+    render(
+      <MemoryRouter initialEntries={['/apps/terminal']}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/apps/terminal" element={<div data-testid="terminal-surface" />} />
+          </Route>
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await screen.findByRole('alert');
+    expect(document.querySelector('main')?.className).toContain('flex-col');
+    expect(screen.getByTestId('terminal-surface').parentElement?.className).toContain('min-h-0 flex-1 p-0');
+  });
   it('rechecks the state while the Workbench stays visible', async () => {
     Object.defineProperty(document, 'visibilityState', { configurable: true, value: 'visible' });
     const intervalSpy = vi.spyOn(window, 'setInterval').mockImplementation((callback) => {
@@ -954,7 +971,7 @@ describe('AppShell remote Apps access', () => {
     const surface = await screen.findByTestId('show-page-surface');
     expect(screen.queryByRole('banner')).toBeNull();
     expect(document.querySelector('nav.fixed.inset-x-0.bottom-0')).toBeNull();
-    expect(surface.parentElement?.className).toContain('h-full p-0');
+    expect(surface.parentElement?.className).toContain('min-h-0 flex-1 p-0');
     expect(surface.parentElement?.className).not.toContain('px-4 py-5');
   });
 
@@ -972,7 +989,7 @@ describe('AppShell remote Apps access', () => {
     const surface = await screen.findByTestId('builtin-app-surface');
     expect(screen.queryByRole('banner')).toBeNull();
     expect(document.querySelector('nav.fixed.inset-x-0.bottom-0')).toBeNull();
-    expect(surface.parentElement?.className).toContain('h-full p-0');
+    expect(surface.parentElement?.className).toContain('min-h-0 flex-1 p-0');
     expect(surface.parentElement?.className).not.toContain('px-4 py-5');
   });
 

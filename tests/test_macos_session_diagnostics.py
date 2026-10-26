@@ -138,6 +138,21 @@ def make_monitor(logger: logging.Logger, probe, *, dns_interval: float = 300.0):
     return monitor, threads
 
 
+def test_monitor_exposes_cached_service_state() -> None:
+    logger = logging.getLogger("macos-session-state-test")
+    monitor, _threads = make_monitor(
+        logger,
+        FakeProbe(
+            [context(service_error="user_lookup_failed")],
+            [DnsProbeState("healthy")],
+        ),
+    )
+
+    assert monitor.current_state == "unknown"
+    monitor.poll_once(now=0.0)
+    assert monitor.current_state == "stale_login_session"
+
+
 def test_stale_login_session_uses_directory_services_failure_from_recorded_case() -> None:
     probe = MacOSSessionProbe(
         service_pid=4242,
@@ -166,7 +181,7 @@ def test_login_session_classifier_does_not_flag_normal_session_shapes() -> None:
     ]
     assert [login_session_state(item) for item in normal] == ["healthy"] * 4
     assert login_session_state(context(gui_available=False, gui_error="absent")) == "no_gui_session"
-    assert login_session_state(context(gui_asid=120002), service_pid_is_target=True) == "stale_login_session"
+    assert login_session_state(context(gui_asid=120002)) == "healthy"
 
 
 def test_launchctl_snapshot_parsing_uses_security_context_fixture() -> None:

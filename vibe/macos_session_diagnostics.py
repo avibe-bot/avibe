@@ -154,13 +154,9 @@ def is_stale_login_session(context: SessionContext) -> bool:
     return context.service_error_class == "user_lookup_failed"
 
 
-def login_session_state(context: SessionContext, *, service_pid_is_target: bool = False) -> str:
+def login_session_state(context: SessionContext) -> str:
     """Classify the current process without treating inconclusive probes as stale."""
-    if is_stale_login_session(context) or (
-        service_pid_is_target
-        and context.gui_domain_available is True
-        and context.asid_match is False
-    ):
+    if is_stale_login_session(context):
         return "stale_login_session"
     if context.gui_domain_available is False:
         return "no_gui_session"
@@ -355,6 +351,11 @@ class MacOSSessionMonitor:
         self._last_snapshot: SessionDiagnosticSnapshot | None = None
         self._last_dns_probe_at: float | None = None
 
+    @property
+    def current_state(self) -> str:
+        snapshot = self._last_snapshot
+        return "unknown" if snapshot is None else login_session_state(snapshot.context)
+
     def start(self) -> None:
         if not self._enabled or self._thread is not None:
             return
@@ -473,13 +474,24 @@ class MacOSSessionMonitor:
             self._logger.info("macos_session_diagnostic %s", payload)
 
 
+_active_monitor: MacOSSessionMonitor | None = None
+
+
+def current_macos_session_state() -> str | None:
+    """Return the service process's cached session state, if diagnostics run."""
+    monitor = _active_monitor
+    return None if monitor is None else monitor.current_state
+
+
 def start_macos_session_diagnostics(
     logger: logging.Logger,
     *,
     platform: str = sys.platform,
 ) -> MacOSSessionMonitor:
     """Start diagnostics best-effort; probe failures never block the service."""
+    global _active_monitor
     monitor = MacOSSessionMonitor(logger, platform=platform)
+    _active_monitor = monitor
     try:
         monitor.start()
     except Exception:

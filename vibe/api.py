@@ -10137,11 +10137,20 @@ def macos_login_session_state(*, service_pid: int | None = None) -> str:
         from vibe.macos_session_diagnostics import MacOSSessionProbe, login_session_state
 
         target = service_pid is not None and service_pid != os.getpid()
+        if target:
+            try:
+                from vibe.internal_client import health_identity_sync
+
+                service_state = (health_identity_sync() or {}).get("macos_login_session_state")
+                if service_state in {"healthy", "stale_login_session", "no_gui_session", "unknown"}:
+                    return service_state
+            except Exception:  # noqa: BLE001 - diagnostics must never block a Vault call
+                pass
         context = MacOSSessionProbe(
             service_pid=service_pid,
             service_pid_is_target=target,
         ).capture_context()
-        return login_session_state(context, service_pid_is_target=target)
+        return login_session_state(context)
     except Exception:  # noqa: BLE001 - diagnostics must never block a Vault call
         return "unknown"
 
