@@ -38,6 +38,7 @@ async function serveProduct(page: Page, lang: Lang = 'en') {
     if (path === '/api/dock') return route.fulfill({ json: {
       dock: { order: ['files', 'terminal', 'editor', 'library'], pins: [] },
     } });
+    if (path === '/api/macos/login-session') return route.fulfill({ json: { ok: true, state: 'healthy' } });
     if (inheritedReads.has(path)) return route.fallback();
     audit.unknown.push(`${request.method()} ${request.url()}`);
     return route.abort();
