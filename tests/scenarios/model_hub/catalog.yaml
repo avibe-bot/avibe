@@ -843,6 +843,14 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_retry_lifecycle.py::test_a_plan_or_billing_429_settles_its_source_by_the_code_that_names_it
+  - id: MH-RETRY-ADVICE-004
+    name: Shared Claude cap resets persist as quota cooldowns without early probes or raw header disclosure
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_claude_cap_headers_drive_persisted_recovery_without_early_probes
+    related_tests:
+      - tests/test_model_hub_claude_caps.py
   - id: MH-RETRY-EVIDENCE-001
     name: Unknown buffered success passes through without proving recovery
     status: covered

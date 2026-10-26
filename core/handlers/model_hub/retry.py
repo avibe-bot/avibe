@@ -262,6 +262,7 @@ class RecoveryPolicy:
         retry_after: str | None = None,
         retry_after_ms: int | None = None,
         response_received_at: datetime | None = None,
+        upstream_retry_at: datetime | None = None,
     ) -> tuple[datetime, bool]:
         state = self._state(source)
         if state is not None and state.failed_generation is not None and generation <= state.failed_generation:
@@ -279,7 +280,7 @@ class RecoveryPolicy:
             received,
             milliseconds=retry_after_ms,
         )
-        deadline = max(now + timedelta(seconds=local), upstream or now)
+        deadline = max(now + timedelta(seconds=local), upstream or now, upstream_retry_at or now)
         eligible_at = mono + (deadline - now).total_seconds()
         if state is not None:
             eligible_at = max(eligible_at, state.eligible_at)
