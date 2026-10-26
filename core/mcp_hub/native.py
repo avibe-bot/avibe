@@ -214,7 +214,7 @@ def _to_native(source: str, definition: dict[str, Any], previous: Any, path: Pat
             entry["env"] = {
                 key: value
                 for key, value in transport["env"].items()
-                if key not in env_names or key in explicit
+                if key not in env_names or key in explicit or value != os.environ.get(key)
             }
         if cwd:
             entry["cwd"] = cwd

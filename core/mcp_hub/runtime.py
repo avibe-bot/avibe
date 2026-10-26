@@ -342,7 +342,9 @@ class McpRuntime:
             try:
                 definition = merge_preserved_secrets(definition, repository.read_definition(name))
             except McpHubError:
-                pass
+                published = repository.read_published(name)
+                if published is not None:
+                    definition = merge_preserved_secrets(definition, published["definition"])
         repository.write_definition(definition)
         return name
 

@@ -163,6 +163,18 @@ CODEX_HOME = "/tmp/codex"
     assert stored["env_vars"] == ["HUB_TEST_PRESENT", "HUB_TEST_MISSING"]
 
 
+def test_codex_env_var_edit_is_written_as_explicit_env(native_files, monkeypatch):
+    _claude, codex, _opencode = native_files
+    monkeypatch.setenv("TOKEN", "old")
+    codex.write_text(CODEX + '\n[mcp_servers.editable]\ncommand = "srv"\nenv_vars = ["TOKEN"]\n')
+    definition = repository.read_definition("editable")
+    definition["transport"]["env"]["TOKEN"] = "new"
+    native.write(definition)
+    stored = tomllib.loads(codex.read_text())["mcp_servers"]["editable"]
+    assert stored["env_vars"] == ["TOKEN"]
+    assert stored["env"]["TOKEN"] == "new"
+
+
 def test_opencode_local_cwd_is_resolved_from_native_file(native_files):
     _claude, _codex, opencode = native_files
     data = json.loads(opencode.read_text())
