@@ -47,6 +47,7 @@ from core.handlers.model_hub.json_wire import (
 from core.handlers.model_hub.request import FORWARDED_CALLER_HEADERS
 from core.os_errors import local_os_errno
 from core.handlers.model_hub.stream_wire import (
+    GOOGLE_ERROR_STATUS_MACHINE_CODES,
     ErrorEnvelopePath,
     ProtocolObservation,
     ProtocolSSEState,
@@ -806,6 +807,9 @@ class EngineClient:
                         observed_payload,
                         outcome="failed_terminal",
                         error_payload=payload,
+                        error_envelope_paths=(
+                            observed_payload.error_envelope_paths or _HTTP_ERROR_ENVELOPE_PATHS
+                        ),
                         message=f"upstream returned HTTP {response.status}",
                         recovery_verified=False,
                     ),
@@ -1711,14 +1715,21 @@ def _project_root_map(reader: BinaryIO) -> bool:
     return root_is_map
 
 
+# Where an HTTP error body that matched none of its protocol's envelopes may
+# still carry one: Google answers its REST and OpenAI-compatible endpoints with
+# the RPC envelope wrapped in a one-element array.
+_HTTP_ERROR_ENVELOPE_PATHS: tuple[ErrorEnvelopePath, ...] = (("error",), ("*", "error"))
+
+
 def _project_raw_error_fields(
     reader: BinaryIO,
     envelope_paths: tuple[ErrorEnvelopePath, ...] = (("error",),),
 ) -> tuple[str | None, str | None, tuple[str, ...]]:
+    fields = ("type", "code", "status")
     selected_paths = {
         path
         for envelope_path in envelope_paths
-        for path in (envelope_path, (*envelope_path, "type"), (*envelope_path, "code"))
+        for path in (envelope_path, *((*envelope_path, field) for field in fields))
     }
     maps: set[ErrorEnvelopePath] = set()
     values: dict[JSONPath, object] = {}
@@ -1733,13 +1744,13 @@ def _project_raw_error_fields(
             if path == envelope_path:
                 if event == "replace":
                     maps.discard(envelope_path)
-                    values.pop((*envelope_path, "type"), None)
-                    values.pop((*envelope_path, "code"), None)
+                    for field in fields:
+                        values.pop((*envelope_path, field), None)
                 elif event == "start_map":
                     maps.add(envelope_path)
                 elif event == "start_array":
                     maps.discard(envelope_path)
-            elif path in {(*envelope_path, "type"), (*envelope_path, "code")}:
+            elif path in {(*envelope_path, field) for field in fields}:
                 if event == "replace":
                     values.pop(path, None)
                 elif event == "scalar":
@@ -1753,11 +1764,19 @@ def _project_raw_error_fields(
         if path in maps
         if (code := _safe_error_code(values.get((*path, "type")))) is not None
     ]
+
+    def envelope_code(path: ErrorEnvelopePath) -> str | None:
+        value = values.get((*path, "code"))
+        if type(value) is int and isinstance(values.get((*path, "status")), str):
+            # A Google RPC envelope names its class by HTTP status, as native Gemini errors do.
+            value = GOOGLE_ERROR_STATUS_MACHINE_CODES.get(value)
+        return _safe_error_code(value)
+
     codes = [
         code
         for path in envelope_paths
         if path in maps
-        if (code := _safe_error_code(values.get((*path, "code")))) is not None
+        if (code := envelope_code(path)) is not None
     ]
     candidates = tuple(dict.fromkeys((*types, *codes)))
     return types[0] if types else None, codes[0] if codes else None, candidates

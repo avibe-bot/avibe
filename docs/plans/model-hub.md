@@ -672,7 +672,10 @@ The complete observation surface is limited to these facts:
 1. An official error envelope at a terminal position is `failed_terminal`; machine-code
    extraction reads only the protocol's declared C12 trust roots. Classification reads
    only those machine codes, never the engine client's own account of how the call
-   ended.
+   ended. An HTTP error body that matches none of its protocol's roots is also read at
+   Google's array-wrapped RPC envelope (`[{"error": …}]`), and a Google RPC envelope
+   (one with a string `status`) projects its integer `code` to a machine code as a
+   native Gemini error does, whatever protocol the Source speaks.
 2. An official success terminal is `served` when its discriminator identity matches. For
    named SSE events this is the minimal `(event name, data.type)` match. This is
    discriminator-only observation, not validation of the remaining envelope members or

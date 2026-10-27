@@ -8909,6 +8909,71 @@ def test_engine_reported_upstream_transport_failure_takes_network_recovery(
     assert (outcome.http_status is None) is (kind is RawOutcomeKind.NETWORK_ERROR)
 
 
+_GEMINI_SIGNATURE_REFUSAL = "Function call is missing a thought_signature in functionCall parts."
+
+
+@pytest.mark.parametrize(
+    ("body", "surfaced"),
+    [
+        # Gemini's OpenAI-compatible endpoint, relayed as is by the engine.
+        ([{"error": {"code": 400, "message": _GEMINI_SIGNATURE_REFUSAL, "status": "INVALID_ARGUMENT"}}], True),
+        ({"error": {"code": 400, "message": _GEMINI_SIGNATURE_REFUSAL, "status": "INVALID_ARGUMENT"}}, True),
+        # Only a Google RPC envelope's integer code names its class.
+        ({"error": {"code": 400, "message": _GEMINI_SIGNATURE_REFUSAL}}, False),
+    ],
+    ids=["google-array", "google-object", "integer-code-only"],
+)
+def test_engine_google_rpc_http_error_is_a_request_refusal_with_its_detail(body: object, surfaced: bool) -> None:
+    """A Google 400 relayed on a Chat Source names the rejected request, not an unknown Source failure."""
+
+    from aiohttp import web
+
+    async def run():
+        async def respond(_request: web.Request) -> web.Response:
+            return web.json_response(body, status=400)
+
+        app = web.Application()
+        app.router.add_post("/{path:.*}", respond)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        await web.TCPSite(runner, "127.0.0.1", 0).start()
+        try:
+            handle = await EngineClient(
+                EngineConnection(
+                    base_url=f"http://127.0.0.1:{runner.addresses[0][1]}",
+                    management_key="management-key",
+                    gateway_token="gateway-token",
+                )
+            ).invoke(
+                SourceRecord(
+                    source_id="src_fixture123",
+                    vendor="gemini",
+                    protocol="openai_chat",
+                    base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+                    credential_ref="cred_fixture123",
+                    allowed_origins=(),
+                    model_ids=("model-a",),
+                    prefix="source-fixture123",
+                ),
+                "model-a",
+                {"stream": True},
+                stream=True,
+            )
+            return await handle.outcome()
+        finally:
+            await runner.cleanup()
+
+    outcome = asyncio.run(run())
+    decision = classify_outcome(outcome)
+
+    assert outcome.http_status == 400
+    assert outcome.upstream_detail == _GEMINI_SIGNATURE_REFUSAL
+    if surfaced:
+        assert (decision.action, decision.error_code) == ("surface", "upstream_request_invalid")
+    else:
+        assert (decision.action, decision.reason) == ("fallback", "unclassified_error")
+
+
 @pytest.mark.parametrize(
     "payload",
     [
