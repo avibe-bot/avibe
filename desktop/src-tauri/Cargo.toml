@@ -41,7 +41,7 @@ tauri-plugin-notification = "2"
 tauri-plugin-opener = "2"
 # 2.5.4 sends a new Windows IPC format that a running 2.5.3 shell silently ignores.
 # Keep forwarding compatible with older shells; unpin after mixed-version validation.
-tauri-plugin-single-instance = "=2.5.4"
+tauri-plugin-single-instance = "=2.5.3"
 tauri-plugin-window-state = "2"
 tempfile = "3"
 tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "sync"] }
