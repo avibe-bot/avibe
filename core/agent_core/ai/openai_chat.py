@@ -514,6 +514,7 @@ class OpenAIChatAdapter(ProviderAdapter):
                                     if terminal is not None:
                                         yield terminal
                                     return
+                            signature = _tool_call_signature(raw)
                             function = raw.get("function")
                             if function is not None and not isinstance(function, Mapping):
                                 terminal = assembler.terminal(
@@ -542,7 +543,9 @@ class OpenAIChatAdapter(ProviderAdapter):
                                         yield terminal
                                     return
                                 name = _string(raw_name)
-                                start = assembler.tool_start(key, name=name or None, native_id=raw_id or None)
+                                start = assembler.tool_start(
+                                    key, name=name or None, native_id=raw_id or None, signature=signature
+                                )
                                 if start is not None:
                                     yield start
                                     pending = assembler.pending_tool_arguments(key)
@@ -563,8 +566,8 @@ class OpenAIChatAdapter(ProviderAdapter):
                                 emitted = assembler.tool_arguments(key, arguments)
                                 if emitted is not None:
                                     yield emitted
-                            elif raw_id:
-                                assembler.tool_start(key, native_id=raw_id)
+                            elif raw_id or signature:
+                                assembler.tool_start(key, native_id=raw_id or None, signature=signature)
                     legacy_function = delta.get("function_call")
                     if legacy_function is not None:
                         if not isinstance(legacy_function, Mapping):
@@ -766,14 +769,7 @@ def _message_to_chat(
                 output["reasoning_content"] = block.text
         calls = [block for block in message.content if isinstance(block, ToolCallBlock)]
         if calls:
-            output["tool_calls"] = [
-                {
-                    "id": call.id,
-                    "type": "function",
-                    "function": {"name": call.name, "arguments": json.dumps(dict(call.arguments), ensure_ascii=False)},
-                }
-                for call in calls
-            ]
+            output["tool_calls"] = [_tool_call_to_chat(call) for call in calls]
         if output["content"] is None and "tool_calls" not in output:
             output["content"] = ""
         return output
@@ -876,6 +872,30 @@ def _first_reasoning_delta(delta: Mapping[str, Any]) -> tuple[str | None, str]:
         if isinstance(value, str) and value:
             return key, value
     return None, ""
+
+
+def _tool_call_to_chat(call: ToolCallBlock) -> dict[str, Any]:
+    output: dict[str, Any] = {
+        "id": call.id,
+        "type": "function",
+        "function": {"name": call.name, "arguments": json.dumps(dict(call.arguments), ensure_ascii=False)},
+    }
+    if call.signature is not None:
+        # Gemini rejects a replayed function call that lost the thought signature it was served with.
+        output["extra_content"] = {"google": {"thought_signature": call.signature}}
+    return output
+
+
+def _tool_call_signature(raw: Mapping[str, Any]) -> str | None:
+    """Gemini's thought signature for one Chat tool call (``extra_content.google.thought_signature``).
+
+    A vendor extension, so a missing or malformed value is ignored rather than failing the response.
+    """
+
+    extra_content = raw.get("extra_content")
+    google = extra_content.get("google") if isinstance(extra_content, Mapping) else None
+    signature = google.get("thought_signature") if isinstance(google, Mapping) else None
+    return signature if isinstance(signature, str) and signature else None
 
 
 def _signature_details(signature: str) -> Any:
