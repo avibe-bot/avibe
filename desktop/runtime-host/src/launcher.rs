@@ -12,13 +12,15 @@
 
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{mpsc, Arc, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::bootstrap_log::BootstrapLog;
 use crate::login_path::{login_shell_path, LoginPath};
@@ -108,6 +110,7 @@ const MAX_STDERR_TAIL_BYTES: usize = 4 * 1024;
 /// gone, and a diagnostic is worth waiting a moment for and nothing more.
 const STDERR_DRAIN: Duration = Duration::from_secs(2);
 const MAX_ENDPOINT_BYTES: u64 = 4096;
+static ENDPOINT_CACHE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -224,6 +227,13 @@ pub trait ResolvedRuntimeLauncher: Send + Sync {
     /// Only a Runtime serving this id is this launcher's own.
     fn expected_runtime_id(&self) -> Option<&str> {
         None
+    }
+
+    /// If this attempt initially used a cached endpoint, refresh it from the
+    /// current Runtime before starting. A cache miss returns `None`, so the
+    /// normal endpoint path does not run twice.
+    fn refresh_endpoint(&self) -> Result<Option<LoopbackOrigin>, LaunchError> {
+        Ok(None)
     }
 
     /// Stops the Runtime whose identity is `runtime_id`, and nothing else.
@@ -356,13 +366,15 @@ impl InstalledVibeLauncher {
 impl RuntimeLauncher for InstalledVibeLauncher {
     fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
         Ok(Arc::new(ResolvedVibeExecutable {
-            command: RuntimeCommand::installed(self.resolve_executable()?),
+            command: ready_command(RuntimeCommand::installed(self.resolve_executable()?)),
+            private: None,
             expected_runtime_id: None,
-            cleanup: None,
-            // A development shell drives an install it does not own and has no
-            // application data directory to write diagnostics into.
+            active_root: Mutex::new(None),
+            cached_origin: Mutex::new(None),
+            endpoint_cache: None,
             log: BootstrapLog::disabled(),
             login_path: OnceLock::new(),
+            command_build: Mutex::new(()),
         }))
     }
 }
@@ -372,14 +384,20 @@ impl RuntimeLauncher for InstalledVibeLauncher {
 pub struct BundledVibeLauncher {
     bundle: PrivateRuntimeBundle,
     backend_root: PathBuf,
+    endpoint_cache: PathBuf,
     log: BootstrapLog,
 }
 
 impl BundledVibeLauncher {
     pub fn new(bundle_dir: PathBuf, install_root: PathBuf, backend_root: PathBuf, log: BootstrapLog) -> Self {
+        let endpoint_cache = install_root
+            .parent()
+            .unwrap_or(install_root.as_path())
+            .join("runtime-endpoint.json");
         Self {
             bundle: PrivateRuntimeBundle::new(bundle_dir, install_root),
             backend_root,
+            endpoint_cache,
             log,
         }
     }
@@ -387,32 +405,20 @@ impl BundledVibeLauncher {
 
 impl RuntimeLauncher for BundledVibeLauncher {
     fn resolve(&self) -> Result<Arc<dyn ResolvedRuntimeLauncher>, LaunchError> {
-        let started = Instant::now();
-        let prepared = self.bundle.prepare();
-        record_runtime_prepare(&self.log, &prepared, started.elapsed());
-        let runtime = prepared.map_err(|_| LaunchError::RuntimeInstall)?;
-        if runtime.reused && claim_audit(&runtime.root) {
-            let (bundle, root, log) = (self.bundle.clone(), runtime.root.clone(), self.log.clone());
-            std::thread::spawn(move || {
-                let started = Instant::now();
-                let audited = bundle.audit(&root);
-                record_runtime_audit(&log, &audited, started.elapsed());
-            });
-        }
-        let runtime_id = runtime.runtime_id.clone();
+        let runtime_id = self.bundle.runtime_id().map_err(|_| LaunchError::RuntimeInstall)?;
         Ok(Arc::new(ResolvedVibeExecutable {
-            command: RuntimeCommand::private(
-                runtime.root.clone(),
-                runtime.python,
-                runtime.node,
-                runtime.npm_cli,
-                self.backend_root.clone(),
-                &runtime_id,
-            ),
+            command: OnceLock::new(),
+            private: Some(PrivateRuntimeSpec {
+                bundle: self.bundle.clone(),
+                backend_root: self.backend_root.clone(),
+            }),
             expected_runtime_id: Some(runtime_id),
-            cleanup: Some((self.bundle.clone(), runtime.root)),
+            active_root: Mutex::new(None),
+            cached_origin: Mutex::new(read_endpoint_cache(&self.endpoint_cache)),
+            endpoint_cache: Some(self.endpoint_cache.clone()),
             log: self.log.clone(),
             login_path: OnceLock::new(),
+            command_build: Mutex::new(()),
         }))
     }
 
@@ -421,7 +427,9 @@ impl RuntimeLauncher for BundledVibeLauncher {
     }
 
     fn remove_private_files(&self) -> Result<(), LaunchError> {
-        self.bundle.remove_all().map_err(|_| LaunchError::RuntimeRemoval)
+        self.bundle.remove_all().map_err(|_| LaunchError::RuntimeRemoval)?;
+        remove_endpoint_cache(&self.endpoint_cache);
+        Ok(())
     }
 
     fn remove_unverified_private_files(&self) -> Result<(), LaunchError> {
@@ -429,7 +437,9 @@ impl RuntimeLauncher for BundledVibeLauncher {
         // the Runtime tree too.
         validate_private_directory_root(&self.backend_root)?;
         self.bundle.remove_all().map_err(|_| LaunchError::RuntimeRemoval)?;
-        remove_private_directory_root(&self.backend_root)
+        remove_private_directory_root(&self.backend_root)?;
+        remove_endpoint_cache(&self.endpoint_cache);
+        Ok(())
     }
 }
 
@@ -453,17 +463,137 @@ fn remove_private_directory_root(path: &Path) -> Result<(), LaunchError> {
     Ok(())
 }
 
+fn ready_command(command: RuntimeCommand) -> OnceLock<RuntimeCommand> {
+    let slot = OnceLock::new();
+    let _ = slot.set(command);
+    slot
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct EndpointCache {
+    schema_version: u32,
+    origin: String,
+}
+
+fn read_endpoint_cache(path: &Path) -> Option<LoopbackOrigin> {
+    let bytes = fs::read(path).ok()?;
+    if bytes.len() > MAX_ENDPOINT_BYTES as usize {
+        return None;
+    }
+    let cache: EndpointCache = serde_json::from_slice(&bytes).ok()?;
+    if cache.schema_version != 1 {
+        return None;
+    }
+    LoopbackOrigin::parse(&cache.origin).ok()
+}
+
+/// The cache is only a startup hint. Every write is best effort and atomic so a
+/// crash cannot turn a partial descriptor into a trusted origin.
+fn write_endpoint_cache(path: &Path, origin: &LoopbackOrigin) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let sequence = ENDPOINT_CACHE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let temporary = parent.join(format!(".runtime-endpoint-{}-{sequence}", std::process::id()));
+    let payload = EndpointCache {
+        schema_version: 1,
+        origin: origin.as_str().to_owned(),
+    };
+    let result = (|| {
+        let bytes = serde_json::to_vec(&payload).map_err(|_| ())?;
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|_| ())?;
+        file.write_all(&bytes).map_err(|_| ())?;
+        file.sync_all().map_err(|_| ())?;
+        fs::rename(&temporary, path).map_err(|_| ())
+    })();
+    if result.is_err() {
+        // Windows does not replace an existing file with rename. The cache is
+        // disposable, so a retry that removes only this app-owned path is safe.
+        let _ = fs::remove_file(path);
+        let _ = fs::rename(&temporary, path);
+    }
+    let _ = fs::remove_file(temporary);
+}
+
+fn remove_endpoint_cache(path: &Path) {
+    let _ = fs::remove_file(path);
+}
+
+#[derive(Debug, Clone)]
+struct PrivateRuntimeSpec {
+    bundle: PrivateRuntimeBundle,
+    backend_root: PathBuf,
+}
+
 #[derive(Debug)]
 struct ResolvedVibeExecutable {
-    command: RuntimeCommand,
+    /// The private Runtime command is lazy: a healthy Runtime can be adopted
+    /// from the cached endpoint without extracting or validating its tree first.
+    command: OnceLock<RuntimeCommand>,
+    private: Option<PrivateRuntimeSpec>,
     expected_runtime_id: Option<String>,
-    cleanup: Option<(PrivateRuntimeBundle, PathBuf)>,
+    active_root: Mutex<Option<PathBuf>>,
+    cached_origin: Mutex<Option<LoopbackOrigin>>,
+    endpoint_cache: Option<PathBuf>,
     log: BootstrapLog,
     /// The `PATH` this attempt's Runtime start inherits. See `login_path`.
     login_path: OnceLock<LoginPath>,
+    command_build: Mutex<()>,
 }
 
 impl ResolvedVibeExecutable {
+    /// Prepare the exact command used by endpoint, lifecycle and start verbs.
+    ///
+    /// This is deliberately later than `resolve()`: the desktop normally keeps
+    /// the Runtime alive after its window closes, so a cached healthy endpoint
+    /// should be adoptable without touching the private Runtime tree at all.
+    fn command(&self) -> Result<&RuntimeCommand, LaunchError> {
+        if let Some(command) = self.command.get() {
+            return Ok(command);
+        }
+        let _guard = self
+            .command_build
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(command) = self.command.get() {
+            return Ok(command);
+        }
+        let Some(private) = &self.private else {
+            return Err(LaunchError::ExecutableNotFound);
+        };
+        let started = Instant::now();
+        let prepared = private.bundle.prepare();
+        record_runtime_prepare(&self.log, &prepared, started.elapsed());
+        let runtime = prepared.map_err(|_| LaunchError::RuntimeInstall)?;
+        if runtime.reused && claim_audit(&runtime.root) {
+            let (bundle, root, log) = (private.bundle.clone(), runtime.root.clone(), self.log.clone());
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                let audited = bundle.audit(&root);
+                record_runtime_audit(&log, &audited, started.elapsed());
+            });
+        }
+        let command = RuntimeCommand::private(
+            runtime.root.clone(),
+            runtime.python,
+            runtime.node,
+            runtime.npm_cli,
+            private.backend_root.clone(),
+            &runtime.runtime_id,
+        );
+        let _ = self.command.set(command);
+        *self.active_root.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(runtime.root);
+        Ok(self.command.get().expect("private Runtime command was just stored"))
+    }
+
     /// The `PATH` the Runtime about to be started inherits, looked up once per
     /// start attempt.
     ///
@@ -493,10 +623,48 @@ impl ResolvedVibeExecutable {
 
 impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
     fn endpoint(&self) -> Result<LoopbackOrigin, LaunchError> {
-        query_endpoint(&self.command, &self.log)
+        if let Some(origin) = self
+            .cached_origin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+        {
+            return Ok(origin);
+        }
+        let origin = query_endpoint(self.command()?, &self.log)?;
+        if let Some(path) = &self.endpoint_cache {
+            write_endpoint_cache(path, &origin);
+        }
+        Ok(origin)
+    }
+
+    fn refresh_endpoint(&self) -> Result<Option<LoopbackOrigin>, LaunchError> {
+        let had_cached_origin = self
+            .cached_origin
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .is_some();
+        if !had_cached_origin {
+            return Ok(None);
+        }
+        let origin = match query_endpoint(self.command()?, &self.log) {
+            Ok(origin) => origin,
+            Err(error) => {
+                if let Some(path) = &self.endpoint_cache {
+                    remove_endpoint_cache(path);
+                }
+                return Err(error);
+            }
+        };
+        if let Some(path) = &self.endpoint_cache {
+            write_endpoint_cache(path, &origin);
+        }
+        Ok(Some(origin))
     }
 
     fn prepare_launch(&self) {
+        let _ = self.command();
         let _ = self.login_path();
     }
 
@@ -507,7 +675,7 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
         let hand_over = hand_over && identified;
         let login_path = self.login_path();
         let started = Instant::now();
-        let child = spawn_detached(&self.command, hand_over, login_path).map_err(LaunchError::Spawn)?;
+        let child = spawn_detached(self.command()?, hand_over, login_path).map_err(LaunchError::Spawn)?;
         let pid = child.id();
         let watch = LaunchWatch::default();
 
@@ -545,21 +713,27 @@ impl ResolvedRuntimeLauncher for ResolvedVibeExecutable {
     }
 
     fn stop(&self, runtime_id: &str) -> CliOutcome {
-        run_lifecycle_verb(&self.command, &stop_arguments(runtime_id), &self.log, "runtime.stop")
+        let Ok(command) = self.command() else {
+            return CliOutcome::Unrunnable;
+        };
+        run_lifecycle_verb(command, &stop_arguments(runtime_id), &self.log, "runtime.stop")
     }
 
     fn remove_backends(&self) -> CliOutcome {
-        run_lifecycle_verb(
-            &self.command,
-            &REMOVE_BACKENDS_ARGS,
-            &self.log,
-            "runtime.remove_backends",
-        )
+        let Ok(command) = self.command() else {
+            return CliOutcome::Unrunnable;
+        };
+        run_lifecycle_verb(command, &REMOVE_BACKENDS_ARGS, &self.log, "runtime.remove_backends")
     }
 
     fn prune_superseded(&self) {
-        if let Some((bundle, active_root)) = &self.cleanup {
-            let _ = bundle.prune_superseded(active_root);
+        let active_root = self
+            .active_root
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        if let (Some(private), Some(active_root)) = (&self.private, active_root) {
+            let _ = private.bundle.prune_superseded(&active_root);
         }
     }
 }
@@ -1709,12 +1883,76 @@ mod tests {
     #[cfg(unix)]
     fn identified(executable: PathBuf) -> ResolvedVibeExecutable {
         ResolvedVibeExecutable {
-            command: RuntimeCommand::installed(executable),
+            command: ready_command(RuntimeCommand::installed(executable)),
+            private: None,
             expected_runtime_id: Some("a".repeat(64)),
-            cleanup: None,
+            active_root: Mutex::new(None),
+            cached_origin: Mutex::new(None),
+            endpoint_cache: None,
             log: BootstrapLog::disabled(),
             login_path: OnceLock::new(),
+            command_build: Mutex::new(()),
         }
+    }
+
+    /// A healthy Runtime survives the shell window, so resolving its launcher
+    /// must not extract a missing or damaged private tree before the first
+    /// readiness probe. Before lazy resolution this failed at `resolve()`.
+    #[test]
+    fn bundled_resolve_adopts_a_cached_endpoint_without_preparing_the_runtime_tree() {
+        let root = scratch_dir("cached-endpoint");
+        let bundle_dir = root.join("bundle");
+        let install_root = root.join("application-data").join("runtime");
+        let endpoint_cache = root.join("application-data").join("runtime-endpoint.json");
+        std::fs::create_dir_all(&bundle_dir).expect("bundle directory");
+        std::fs::write(
+            bundle_dir.join("runtime-manifest.json"),
+            serde_json::json!({
+                "schema_version": 2,
+                "runtime_version": "1.0.0",
+                "os": std::env::consts::OS,
+                "arch": std::env::consts::ARCH,
+                "archive": "runtime.zip",
+                "archive_sha256": "a".repeat(64),
+                "archive_size": 1,
+                "unpacked_size": 1,
+                "entry_count": 1,
+                "tree_sha256": "b".repeat(64),
+                "python_entrypoint": "python/bin/python3",
+                "node_entrypoint": "tools/bin/node",
+                "npm_entrypoint": "tools/npm/bin/npm-cli.js",
+                "python_distribution": {"url": "https://example.invalid/python", "sha256": "c".repeat(64)},
+                "node_distribution": {"url": "https://example.invalid/node", "sha256": "d".repeat(64)},
+                "npm_version": "1.0.0",
+                "avibe_wheel": {"name": "avibe.whl", "sha256": "e".repeat(64)}
+            })
+            .to_string(),
+        )
+        .expect("manifest");
+        std::fs::create_dir_all(endpoint_cache.parent().expect("cache parent")).expect("cache parent");
+        std::fs::write(
+            &endpoint_cache,
+            r#"{"schema_version":1,"origin":"http://127.0.0.1:6123"}"#,
+        )
+        .expect("endpoint cache");
+
+        let launcher = BundledVibeLauncher::new(
+            bundle_dir,
+            install_root.clone(),
+            root.join("application-data").join("backends"),
+            BootstrapLog::disabled(),
+        );
+        let resolved = launcher.resolve().expect("manifest-only resolution");
+
+        assert_eq!(
+            resolved.endpoint().expect("cached endpoint").as_str(),
+            "http://127.0.0.1:6123"
+        );
+        assert!(
+            !install_root.exists(),
+            "a cached healthy endpoint must not prepare a private Runtime install"
+        );
+        std::fs::remove_dir_all(root).ok();
     }
 
     /// A lookup that failed, or a version manager installed while the app

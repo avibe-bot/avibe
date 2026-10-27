@@ -395,7 +395,7 @@ impl RuntimeHost {
     /// Runs the state machine once and returns its terminal status.
     pub async fn bootstrap(&self, sink: &dyn StatusSink, trigger: BootstrapTrigger) -> BootstrapStatus {
         let run = self.launched_runtime().begin_run();
-        let (origin, resolved_launcher) = match self.resolve_origin().await {
+        let (mut origin, resolved_launcher) = match self.resolve_origin().await {
             Ok(resolved) => resolved,
             Err(error) => {
                 return publish(
@@ -414,7 +414,43 @@ impl RuntimeHost {
         // This app's Runtime and any Runtime that is not a desktop predecessor
         // are adopted. A predecessor with another desktop identity is replaced
         // only by this app's `vibe start`, and only when this run may hand over.
-        let presence = self.observe_presence(run, &origin, resolved_launcher.as_ref()).await;
+        let mut presence = self.observe_presence(run, &origin, resolved_launcher.as_ref()).await;
+        let can_adopt_without_refresh = matches!(presence, Presence::Mine { ready: true } | Presence::Unmanaged)
+            || (!identified && matches!(presence, Presence::Foreign { ready: true, .. }));
+        if !can_adopt_without_refresh {
+            if let Some(launcher) = resolved_launcher.clone() {
+                let refreshed = tokio::task::spawn_blocking(move || launcher.refresh_endpoint()).await;
+                match refreshed {
+                    Ok(Ok(Some(refreshed_origin))) => {
+                        origin = refreshed_origin;
+                        presence = self.observe_presence(run, &origin, resolved_launcher.as_ref()).await;
+                    }
+                    Ok(Ok(None)) => {}
+                    Ok(Err(error)) => {
+                        return publish(
+                            sink,
+                            BootstrapStatus::failed(
+                                &origin,
+                                attempt,
+                                BootstrapNotice::new(error.notice_code()),
+                                error.is_retryable(),
+                            ),
+                        );
+                    }
+                    Err(_) => {
+                        return publish(
+                            sink,
+                            BootstrapStatus::failed(
+                                &origin,
+                                attempt,
+                                BootstrapNotice::new(BootstrapNoticeCode::RuntimeDiscoveryFailed),
+                                true,
+                            ),
+                        );
+                    }
+                }
+            }
+        }
         match presence {
             Presence::Mine { ready: true } | Presence::Unmanaged => {
                 return self
