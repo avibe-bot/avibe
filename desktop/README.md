@@ -566,8 +566,14 @@ before download and replacement, and offers **Skip this version**. Startup
 checks silently and lets the badge provide the prompt. A native dialog is used
 only when there is no reachable Workbench window or the fixed popover event
 cannot be dispatched, such as a check that finishes before the webview loads.
-The tray/menu shows checking, current, available, downloading, installing,
-disabled, and error states.
+Native state changes are pushed to the Workbench, including checks started by
+the **Use TEST Updates** menu item. The state marks whether an available release
+came from an explicit check, so an automatic check honors **Skip this version**
+while an explicit check can offer the same release again. If a newer Workbench
+runs under an older shell that rejects `desktop_update_state`, the Workbench
+uses Runtime version reads and the legacy `avibe://updates` native path until
+the shell is upgraded. The tray/menu shows checking, current, available,
+downloading, installing, disabled, and error states.
 The **Use TEST Updates** toggle persists beside the private Runtime, defaults on
 for prerelease app versions and off for stable versions, and never downgrades.
 Browsers and Python installations retain their existing update behavior.

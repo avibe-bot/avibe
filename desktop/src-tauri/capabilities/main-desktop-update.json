@@ -8,6 +8,7 @@
     "urls": ["http://127.0.0.1:*/*", "http://[\\:\\:1]:*/*"]
   },
   "permissions": [
+    "core:event:default",
     "allow-desktop-update-state",
     "allow-desktop-update-check",
     "allow-desktop-update-install",

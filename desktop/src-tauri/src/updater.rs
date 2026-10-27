@@ -15,13 +15,14 @@ use std::{
 };
 use tauri::{
     menu::{CheckMenuItem, MenuItem},
-    AppHandle, Manager, WebviewWindow,
+    AppHandle, Emitter, Manager, WebviewWindow,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
 
 pub const MENU_ID: &str = "desktop-update";
 pub const CHANNEL_ID: &str = "desktop-update-test";
 pub const OPEN_URL: &str = "avibe://updates";
+pub const STATE_EVENT: &str = "avibe:desktop-update-state";
 const KEY: &str = match option_env!("AVIBE_DESKTOP_UPDATER_PUBLIC_KEY") {
     Some(key) => key,
     None => "",
@@ -82,6 +83,7 @@ struct State {
     latest: Option<String>,
     channel: Channel,
     manifest: Option<Manifest>,
+    availability_interactive: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -91,6 +93,7 @@ pub struct DesktopUpdateState {
     latest: Option<String>,
     channel: Channel,
     skipped_version: Option<String>,
+    interactive: bool,
 }
 pub struct Updater {
     state: Mutex<State>,
@@ -154,6 +157,7 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
             latest: None,
             channel,
             manifest: None,
+            availability_interactive: false,
         }),
         busy: AtomicBool::new(false),
         source: AtomicUsize::new(0),
@@ -174,18 +178,27 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
 }
 fn set_state(app: &AppHandle, phase: Phase, latest: Option<String>) {
     let updater = app.state::<Updater>();
-    let mut state = updater.state.lock().expect("updater state");
-    state.phase = phase;
-    if matches!(phase, Phase::Checking | Phase::Current | Phase::Disabled | Phase::Error) {
-        state.manifest = None;
-    }
-    if latest.is_some() || phase == Phase::Checking {
-        state.latest = latest;
+    {
+        let mut state = updater.state.lock().expect("updater state");
+        state.phase = phase;
+        if matches!(phase, Phase::Checking | Phase::Current | Phase::Disabled | Phase::Error) {
+            state.manifest = None;
+        }
+        if !matches!(
+            phase,
+            Phase::Available | Phase::Checking | Phase::Downloading | Phase::Installing
+        ) {
+            state.availability_interactive = false;
+        }
+        if latest.is_some() || phase == Phase::Checking {
+            state.latest = latest;
+        }
     }
     let _ = updater
         .menu
         .set_text(format!("{} — {}", label(phase, &catalog()), app.package_info().version));
     let _ = updater.channel_menu.set_enabled(!updater.busy.load(Ordering::SeqCst));
+    emit_state(app);
 }
 
 fn state_snapshot(app: &AppHandle) -> DesktopUpdateState {
@@ -196,7 +209,12 @@ fn state_snapshot(app: &AppHandle) -> DesktopUpdateState {
         latest: state.latest.clone(),
         channel: state.channel,
         skipped_version: skipped_version(&updater),
+        interactive: state.availability_interactive,
     }
+}
+
+fn emit_state(app: &AppHandle) {
+    let _ = app.emit_to(super::MAIN_WINDOW, STATE_EVENT, state_snapshot(app));
 }
 
 fn ensure_workbench(window: &WebviewWindow) -> Result<(), String> {
@@ -216,6 +234,7 @@ fn set_available(app: &AppHandle, manifest: Manifest) {
     let latest = manifest.version.clone();
     set_state(app, Phase::Available, Some(latest));
     app.state::<Updater>().state.lock().expect("updater state").manifest = Some(manifest);
+    emit_state(app);
 }
 pub fn toggle_channel(app: &AppHandle) {
     let updater = app.state::<Updater>();
@@ -240,6 +259,7 @@ pub fn toggle_channel(app: &AppHandle) {
         show(app, &catalog().check_failed, None);
         return;
     }
+    emit_state(app);
     check(app.clone(), true);
 }
 fn show(app: &AppHandle, message: &str, latest: Option<&str>) {
@@ -458,6 +478,7 @@ pub fn check(app: AppHandle, interactive: bool) {
         return;
     }
     let channel = updater.state.lock().expect("updater state").channel;
+    updater.state.lock().expect("updater state").availability_interactive = interactive;
     set_state(&app, Phase::Checking, None);
     tauri::async_runtime::spawn(async move {
         match find_update(&app, channel).await {
@@ -594,6 +615,7 @@ fn finish(app: &AppHandle) {
     let updater = app.state::<Updater>();
     updater.busy.store(false, Ordering::SeqCst);
     let _ = updater.channel_menu.set_enabled(true);
+    emit_state(app);
 }
 fn install(app: AppHandle, manifest: Manifest) {
     set_state(&app, Phase::Downloading, None);
@@ -695,6 +717,27 @@ mod tests {
     }
 
     #[test]
+    fn desktop_update_state_serializes_the_interactive_check_contract() {
+        let state = DesktopUpdateState {
+            phase: Phase::Available,
+            latest: Some("3.2.3".to_owned()),
+            channel: Channel::Test,
+            skipped_version: Some("3.2.3".to_owned()),
+            interactive: true,
+        };
+        assert_eq!(
+            serde_json::to_value(state).unwrap(),
+            serde_json::json!({
+                "phase": "available",
+                "latest": "3.2.3",
+                "channel": "test",
+                "skippedVersion": "3.2.3",
+                "interactive": true,
+            })
+        );
+    }
+
+    #[test]
     fn check_results_produce_their_record_and_other_phases_publish_nothing() {
         for phase in [
             Phase::Idle,
@@ -712,6 +755,7 @@ mod tests {
                 latest: Some("3.2.3".to_owned()),
                 channel: Channel::Test,
                 manifest: None,
+                availability_interactive: false,
             };
             let expected = match phase {
                 Phase::Current => Some(UpdateStatusPhase::Current),

@@ -11,18 +11,20 @@ const api = vi.hoisted(() => ({
   getConfig: vi.fn(async () => ({ update: { auto_update: true } })),
   doUpgrade: vi.fn(async () => ({ ok: true, message: 'Upgrade successful', output: null, restarting: false })),
 }));
-const desktopInvoke = vi.hoisted(() => vi.fn(async (command: string) => {
+const defaultDesktopInvoke = vi.hoisted(() => async (command: string) => {
   if (command === 'desktop_update_state') {
-    return { phase: 'available', latest: '10.0.0', channel: 'stable', skippedVersion: null };
+    return { phase: 'available', latest: '10.0.0', channel: 'stable', skippedVersion: null, interactive: true };
   }
   return undefined;
-}));
+});
+const desktopInvoke = vi.hoisted(() => vi.fn(defaultDesktopInvoke));
 vi.mock('../context/ApiContext', () => ({ useApi: () => api }));
 vi.mock('../lib/useIsDesktop', () => ({ useIsDesktop: () => true }));
 
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  desktopInvoke.mockImplementation(defaultDesktopInvoke);
   delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
   delete (window as { __AVIBE_DESKTOP_VERSION__?: string }).__AVIBE_DESKTOP_VERSION__;
   delete (window as { __AVIBE_DESKTOP_UPDATES_HANDLED__?: boolean }).__AVIBE_DESKTOP_UPDATES_HANDLED__;
@@ -104,6 +106,7 @@ describe('desktop version ownership', () => {
   it('acknowledges the native open request when the desktop updater IPC is available', async () => {
     renderInShell('3.2.2-rc.13', '3.2.2rc13', '3.2.3', true);
     await screen.findByTitle('v3.2.2-rc.13');
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_state'));
     const event = new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true });
     expect(window.dispatchEvent(event)).toBe(false);
     expect(await screen.findByRole('dialog')).toBeTruthy();
@@ -127,6 +130,54 @@ describe('desktop version ownership', () => {
     await vi.waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
   });
 
+  it('suppresses a skipped release for automatic checks but offers it after an explicit refresh', async () => {
+    let state = {
+      phase: 'available',
+      latest: '3.2.3',
+      channel: 'stable',
+      skippedVersion: '3.2.3',
+      interactive: false,
+    };
+    desktopInvoke.mockImplementation(async (command: string) => {
+      if (command === 'desktop_update_state') return state;
+      if (command === 'desktop_update_check') {
+        state = { ...state, interactive: true };
+      }
+      return undefined;
+    });
+    renderInShell('3.2.2-rc.13', '3.2.2rc13', null, true, {
+      current: '3.2.2rc13',
+      latest: null,
+      has_update: false,
+      managed_by: 'desktop',
+    });
+
+    const entry = await screen.findByTitle('v3.2.2-rc.13');
+    expect(entry.className).not.toContain('text-gold-ink');
+
+    fireEvent.click(entry);
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.checkUpdate') }));
+    expect(await screen.findByText(i18n.t('dashboard.desktopManagedUpdateAvailable', { to: '3.2.3' }))).toBeTruthy();
+    expect(entry.className).toContain('text-gold-ink');
+  });
+
+  it('falls back to Runtime version reads when an older shell lacks the updater command', async () => {
+    desktopInvoke.mockImplementation(async (command: string) => {
+      if (command === 'desktop_update_state') throw new Error('unknown command');
+      return undefined;
+    });
+    renderInShell('3.2.2-rc.13', '3.2.2rc13', null, true, {
+      current: '3.2.2rc13',
+      latest: '3.2.3',
+      has_update: true,
+      managed_by: 'desktop',
+    });
+
+    const entry = await screen.findByTitle('v3.2.2-rc.13');
+    await vi.waitFor(() => expect(entry.className).toContain('text-gold-ink'));
+    expect(api.getVersion).toHaveBeenCalledWith({ cache: false });
+  });
+
   it('uses shell updater ownership even when the adopted Runtime omits managed_by', async () => {
     renderInShell('3.2.2-rc.13', '3.2.2rc13', null, true, {
       current: '3.2.2rc13',
@@ -144,7 +195,7 @@ describe('desktop version ownership', () => {
   it('renders the desktop updater error state in the popover', async () => {
     desktopInvoke.mockImplementation(async (command: string) => {
       if (command === 'desktop_update_state') {
-        return { phase: 'error', latest: null, channel: 'stable', skippedVersion: null };
+        return { phase: 'error', latest: null, channel: 'stable', skippedVersion: null, interactive: false };
       }
       return undefined;
     });
@@ -162,7 +213,7 @@ describe('desktop version ownership', () => {
   it('renders the desktop updater disabled state in the popover', async () => {
     desktopInvoke.mockImplementation(async (command: string) => {
       if (command === 'desktop_update_state') {
-        return { phase: 'disabled', latest: null, channel: 'stable', skippedVersion: null };
+        return { phase: 'disabled', latest: null, channel: 'stable', skippedVersion: null, interactive: false };
       }
       return undefined;
     });

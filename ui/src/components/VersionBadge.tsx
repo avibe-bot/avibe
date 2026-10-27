@@ -17,6 +17,8 @@ import {
   DESKTOP_OPEN_UPDATES_EVENT,
   desktopUpdateShellActions,
   isDesktopShell,
+  listenDesktopUpdateState,
+  type DesktopUpdateShellActions,
   type DesktopUpdateState,
 } from '../lib/desktopShell';
 import { useIsDesktop } from '../lib/useIsDesktop';
@@ -57,7 +59,11 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const api = useApi();
   const inDesktopShell = isDesktopShell();
   const isDesktop = useIsDesktop();
-  const desktopActions = React.useMemo(() => desktopUpdateShellActions(), []);
+  const shellActions = React.useMemo(() => desktopUpdateShellActions(), []);
+  const [desktopActions, setDesktopActions] = React.useState<DesktopUpdateShellActions | null>(shellActions);
+  const [desktopUpdaterStatus, setDesktopUpdaterStatus] = React.useState<'pending' | 'available' | 'unavailable'>(
+    shellActions ? 'pending' : 'unavailable',
+  );
   const [versionInfo, setVersionInfo] = React.useState<VersionInfo | null>(null);
   const [desktopUpdateState, setDesktopUpdateState] = React.useState<DesktopUpdateState | null>(null);
   const [isPopupOpen, setIsPopupOpen] = React.useState(false);
@@ -104,10 +110,23 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   };
 
   const readDesktopUpdateState = async (): Promise<DesktopUpdateState | null> => {
-    if (!desktopActions) return null;
-    const state = await desktopActions.getState();
-    setDesktopUpdateState(state);
-    return state;
+    const actions = desktopActions;
+    if (!actions) return null;
+    try {
+      const state = await actions.getState();
+      setDesktopUpdateState(state);
+      setDesktopUpdaterStatus('available');
+      return state;
+    } catch (error) {
+      // A newer Workbench can be adopted by an older shell whose generic
+      // Tauri IPC exists but does not know the desktop updater commands.
+      // Treat the command rejection as the compatibility boundary and fall
+      // back to the legacy deep link plus Runtime version reads.
+      setDesktopActions(null);
+      setDesktopUpdaterStatus('unavailable');
+      setDesktopUpdateState(null);
+      throw error;
+    }
   };
 
   const waitForDesktopUpdate = async (): Promise<DesktopUpdateState | null> => {
@@ -126,11 +145,13 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   // just finished shows at once.
   const checkVersion = async (fresh = false) => {
     setChecking(true);
+    const actions = desktopActions;
+    const rereadVersion = fresh || Boolean(actions);
+    let nativeStateAvailable = false;
     try {
-      const rereadVersion = fresh || Boolean(desktopActions);
-      if (desktopActions) {
+      if (actions) {
         if (fresh) {
-          await desktopActions.check();
+          await actions.check();
           await waitForDesktopUpdate();
         } else {
           const state = await readDesktopUpdateState();
@@ -138,12 +159,14 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
             await waitForDesktopUpdate();
           }
         }
+        nativeStateAvailable = true;
       }
-      const info = await api.getVersion(rereadVersion ? { cache: false } : undefined);
+    } catch (e) {
+      console.error('Failed to check desktop update state:', e);
+    }
+    try {
+      const info = await api.getVersion(rereadVersion || nativeStateAvailable ? { cache: false } : undefined);
       setVersionInfo(info);
-      if (desktopActions && !fresh) {
-        await readDesktopUpdateState();
-      }
     } catch (e) {
       console.error('Failed to check version:', e);
     } finally {
@@ -154,7 +177,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   React.useEffect(() => {
     if (!inDesktopShell) return;
     const handleOpenUpdates = (event: Event) => {
-      if (!desktopActions) return;
+      if (!desktopActions || desktopUpdaterStatus !== 'available') return;
       window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = true;
       event.preventDefault();
       setIsPopupOpen(true);
@@ -164,7 +187,33 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     return () => window.removeEventListener(DESKTOP_OPEN_UPDATES_EVENT, handleOpenUpdates);
     // The updater actions and API are stable for the lifetime of the Workbench.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [inDesktopShell]);
+  }, [desktopUpdaterStatus, inDesktopShell]);
+
+  React.useEffect(() => {
+    if (!inDesktopShell || desktopUpdaterStatus !== 'available') return;
+    let active = true;
+    let unlisten: (() => Promise<void>) | null = null;
+    void listenDesktopUpdateState((state) => {
+      if (!active) return;
+      setDesktopUpdateState(state);
+      setChecking(state.phase === 'checking');
+      setUpgrading(['downloading', 'installing'].includes(state.phase));
+    }).then((cleanup) => {
+      if (!active) {
+        void cleanup?.();
+      } else {
+        unlisten = cleanup;
+      }
+    }).catch((error) => {
+      // State snapshots remain the compatibility fallback when the shell has
+      // updater IPC but lacks the event plugin permission.
+      console.error('Failed to subscribe to desktop update state:', error);
+    });
+    return () => {
+      active = false;
+      void unlisten?.();
+    };
+  }, [desktopUpdaterStatus, inDesktopShell]);
 
   React.useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -213,7 +262,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   // badge before the Runtime's status file has been reread.
   const hasUpdate = desktopActions
     ? desktopUpdateState?.phase === 'available'
-      && desktopUpdateState.skippedVersion !== desktopUpdateState.latest
+      && (desktopUpdateState.interactive || desktopUpdateState.skippedVersion !== desktopUpdateState.latest)
     : versionInfo?.has_update === true;
   // The desktop app reports SemVer; show it in the Runtime's PEP 440 form.
   const latestVersion = isDesktopManaged && desktopUpdateState?.latest
@@ -257,6 +306,12 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     }
   };
 
+  const handleBadgeClick = () => {
+    if (inDesktopShell && desktopUpdaterStatus !== 'available') {
+      window.location.href = 'avibe://updates';
+    }
+  };
+
   return (
     <Popover open={isPopupOpen} onOpenChange={setIsPopupOpen}>
       <div className="relative" ref={popupRef}>
@@ -264,6 +319,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
         <PopoverTrigger asChild>
           <button
             type="button"
+            onClick={handleBadgeClick}
             className={cn(
               badgeVariants({ variant: hasUpdate || hasVersionSkew ? 'warning' : 'secondary' }),
               interactiveBadgeTriggerClassName,

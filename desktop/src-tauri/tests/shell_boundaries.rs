@@ -122,6 +122,7 @@ fn desktop_update_commands_are_workbench_scoped() {
     assert_eq!(
         capability["permissions"],
         serde_json::json!([
+            "core:event:default",
             "allow-desktop-update-state",
             "allow-desktop-update-check",
             "allow-desktop-update-install",
