@@ -1,7 +1,7 @@
 import { DesktopDragRegion } from './DesktopDragRegion';
 import { DesktopWindowChrome } from './DesktopWindowChrome';
 import { desktopDragRegion } from '../lib/desktopShell';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, Navigate, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { AlertTriangle, FolderTree, Grid2x2, Inbox, LayoutGrid, Plus, Settings } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -33,6 +33,7 @@ import logoImg from '../assets/logo.png';
 import { useViewportHeightVar } from '../lib/useViewportHeightVar';
 import { APP_SHELL_SCROLL_ID, forgetMobileProjectsListUnlessPreserved } from '../lib/mobileProjectsListMemory';
 import { useIsDesktop } from '../lib/useIsDesktop';
+import { onPageReactivated } from '../lib/pageActivity';
 import { adoptPersistedLanguage } from '../lib/useLanguageSelection';
 import { isOwnerOnlyPath } from '../lib/adminNavigation';
 import { useSettingsResumePath } from '../lib/settingsSectionMemory';
@@ -89,6 +90,69 @@ const MobileNavLink: React.FC<{ item: ShellNavItem }> = ({ item }) => {
 };
 
 type CenterButton = { label: string; icon: React.ComponentType<{ className?: string }>; to?: string; onClick?: () => void };
+
+const MACOS_SESSION_NOTICE_REFRESH_MS = 30_000;
+const MACOS_SESSION_NOTICE_HEIGHT_VAR = '--macos-stale-login-session-notice-h';
+
+const MacOSStaleLoginSessionNotice: React.FC<{ overlay?: boolean }> = ({ overlay = false }) => {
+  const { t } = useTranslation();
+  const api = useApi();
+  const [stale, setStale] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const read = () => {
+      if (document.visibilityState !== 'visible') return;
+      void api.getMacOSLoginSessionStatus().then((result) => {
+        if (active) setStale(result.state === 'stale_login_session');
+      }).catch(() => {
+        // A diagnostic notice must not make the Workbench unavailable.
+      });
+    };
+    read();
+    const interval = window.setInterval(read, MACOS_SESSION_NOTICE_REFRESH_MS);
+    const stopReactivation = onPageReactivated(read);
+    return () => {
+      active = false;
+      window.clearInterval(interval);
+      stopReactivation();
+    };
+  }, [api]);
+
+  const noticeRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const notice = noticeRef.current;
+    const main = notice?.closest('main');
+    if (!overlay || !stale || !notice || !main) return undefined;
+
+    const updateHeight = () => {
+      main.style.setProperty(MACOS_SESSION_NOTICE_HEIGHT_VAR, `${notice.getBoundingClientRect().height}px`);
+    };
+    updateHeight();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updateHeight);
+    observer?.observe(notice);
+    return () => {
+      observer?.disconnect();
+      main.style.removeProperty(MACOS_SESSION_NOTICE_HEIGHT_VAR);
+    };
+  }, [overlay, stale]);
+
+  if (!stale) return null;
+  return (
+    <div
+      ref={noticeRef}
+      role="alert"
+      className={clsx(
+        'shrink-0 mx-4 mb-4 flex items-start gap-3 rounded-xl border border-destructive/35 bg-destructive/8 px-4 py-3 text-[13px] leading-snug text-destructive-ink md:mx-10',
+        overlay && 'fixed inset-x-0 top-0 z-50 m-0 rounded-none border-x-0 border-t-0 px-4 pb-3 pt-[calc(0.75rem+env(safe-area-inset-top))] md:hidden',
+      )}
+    >
+      <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+      <span>{t('errors.stale_login_session')}</span>
+    </div>
+  );
+};
 
 // Workbench mobile tabs flank a raised new-session action.
 const MobileTabBar: React.FC<{ items: ShellNavItem[]; center?: CenterButton }> = ({ items, center }) => {
@@ -419,6 +483,7 @@ export const AppShell: React.FC = () => {
   const isSettings = settingsOpen;
   const isShowPageApp = surfaceLocation.pathname.startsWith('/apps/show/');
   const isBuiltinApp = isStandaloneAppRoutePath(surfaceLocation.pathname);
+  const isFullHeightApp = chromeless || isBuiltinApp || isShowPageApp;
   const isFullScreenMobile = isChat || isSearch || isSettings || isShowPageApp || isBuiltinApp;
   // `/` is the Workbench canvas root and the only route board 04 draws. It reads
   // the surface location, so Settings opened over the home keeps the home's own
@@ -595,10 +660,11 @@ export const AppShell: React.FC = () => {
           // Mobile: the internal scroll area of the locked flex-column shell, so
           // the document itself never scrolls. Desktop: normal flow (min-h-screen
           // + sidebar offset).
-          chromeless
-            // Single-app tab: no sidebar offset, no scroll, no page glow — the app body
-            // is the only thing in the viewport and sizes itself to this box (h-full).
-            ? 'min-h-0 flex-1 overflow-hidden'
+          isFullHeightApp
+            ? clsx(
+              'min-h-0 flex flex-1 flex-col overflow-hidden',
+              !chromeless && 'md:ml-[var(--app-sidebar-w)] md:min-h-screen md:flex-none md:overflow-visible md:pb-0',
+            )
             : settingsCoversSidebar
               ? 'min-h-0 flex-1 overflow-hidden md:min-h-screen md:flex-none md:overflow-visible md:pb-0'
             : isFullScreenMobile
@@ -618,10 +684,11 @@ export const AppShell: React.FC = () => {
           )
         )}
       >
+        <MacOSStaleLoginSessionNotice overlay={(isChat || isSearch) && !isDesktop} />
         <div className={clsx(
           'w-full',
-          chromeless
-            ? 'h-full'
+          isFullHeightApp
+            ? clsx('min-h-0 flex-1 p-0', !chromeless && 'md:mx-auto md:h-auto md:px-10 md:py-8')
             : isSettings
               ? 'h-full p-0 md:h-auto md:min-h-screen'
               : isFullScreenMobile

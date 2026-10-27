@@ -1,8 +1,25 @@
 name: desktop-self-contained-package
 
-# Manual artifacts retain optional Apple identity signing. Reusable TEST builds
-# use ad-hoc OS signatures. Updater keys come only from desktop-updater.
+# Release (tag) builds Developer ID sign and notarize every macOS layer and fail
+# without the complete Apple credential set; manual builds sign when the whole
+# set is configured and stay ad-hoc when none of it is. Apple and updater keys
+# come only from desktop-updater.
+#
+# Only reruns of the same tag can read a tag's caches, so release builds
+# restore caches but never save them. The unsigned cache warm-up (a master push
+# that changes a Rust cache input, and a daily run) builds every target without
+# signing or uploading anything; release builds restore its default-branch
+# caches.
 on:
+  push:
+    branches: [master]
+    paths:
+      - desktop/Cargo.lock
+      - desktop/cua-driver/**
+      - desktop/scripts/prepare-cua-driver.py
+      - .github/workflows/desktop-package.yml
+  schedule:
+    - cron: "41 18 * * *"
   workflow_dispatch:
     inputs:
       version:
@@ -23,7 +40,7 @@ on:
         type: boolean
         default: false
       release_tag:
-        description: Canonical gh-vX.Y.ZrcN TEST tag
+        description: Canonical gh-vX.Y.ZrcN TEST or vX.Y.Z stable tag
         required: true
         type: string
 
@@ -39,6 +56,10 @@ jobs:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     environment: desktop-updater
+    env:
+      # Never a release: a release build always carries its tag.
+      DESKTOP_CACHE_WARMUP: ${{ !inputs.release_tag && (github.event_name == 'push' || github.event_name == 'schedule') }}
+      DESKTOP_VERSION: ${{ inputs.version || '0.0.0' }}
     strategy:
       fail-fast: false
       matrix:
@@ -69,21 +90,43 @@ jobs:
             ui/package-lock.json
             desktop/package-lock.json
 
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884  # v10.3.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e  # v10.3.2
         with:
           enable-cache: true
           cache-dependency-glob: uv.lock
           prune-cache: true
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      # Cargo artifacts and a prepared Cua Driver are reused only from the same
+      # compiler and Apple SDK; a toolchain change starts a new cache entry.
+      - name: Resolve build cache identity
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          fingerprint() {
+            python -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])'
+          }
+          echo "rustc=$(rustc -vV | fingerprint)" >> "$GITHUB_OUTPUT"
+          if [ "$RUNNER_OS" = macOS ]; then
+            echo "apple=$({ xcodebuild -version; xcrun --sdk macosx --show-sdk-build-version; } | fingerprint)" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Dependencies only: bundles and final binaries are rebuilt every time.
+      # The warm-up restores its exact key only, so each entry starts clean.
+      - name: Restore Rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            desktop/target
-          key: ${{ runner.os }}-${{ matrix.target }}-desktop-package-${{ hashFiles('desktop/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.target }}-desktop-package-
+            desktop/target/release/.fingerprint
+            desktop/target/release/build
+            desktop/target/release/deps
+            desktop/target/cua-driver-patched
+          key: ${{ runner.os }}-${{ matrix.target }}-desktop-package-${{ steps.toolchain.outputs.rustc }}-${{ hashFiles('desktop/Cargo.lock', 'desktop/cua-driver/sources.json') }}
+          restore-keys: ${{ env.DESKTOP_CACHE_WARMUP != 'true' && format('{0}-{1}-desktop-package-{2}-', runner.os, matrix.target, steps.toolchain.outputs.rustc) || '' }}
 
       - name: Build Workbench
         working-directory: ui
@@ -100,7 +143,7 @@ jobs:
       - name: Prepare package version
         shell: bash
         env:
-          AVIBE_DESKTOP_VERSION: ${{ inputs.version }}
+          AVIBE_DESKTOP_VERSION: ${{ env.DESKTOP_VERSION }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
@@ -121,6 +164,29 @@ jobs:
           python scripts/desktop_updater.py configure \
             --config desktop/tauri.release.conf.json --env-file "$GITHUB_ENV" ${args[@]+"${args[@]}"}
 
+      # Signing must exist before the Runtime is built: every Mach-O inside
+      # runtime.zip is signed before the archive and its hashes exist. A tag
+      # build fails here on a missing or partial credential set; a manual build
+      # accepts the complete set or none of it. Only identity, keychain, and
+      # notary key locations leave this step, under names Tauri never reads.
+      # The cache warm-up alone skips it and stays ad-hoc.
+      - name: Import Apple signing identity
+        if: runner.os == 'macOS' && env.DESKTOP_CACHE_WARMUP != 'true'
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
+        run: >
+          python desktop/scripts/macos_signing.py import-identity
+          --release-tag "$RELEASE_TAG" --env-file "$GITHUB_ENV"
+          --work-dir "$RUNNER_TEMP/apple-signing"
+
+      # Reads AVIBE_CODESIGN_IDENTITY/KEYCHAIN when the identity was imported.
       - name: Build verified private Runtime
         run: >
           python desktop/scripts/build-runtime-bundle.py
@@ -132,83 +198,37 @@ jobs:
           python -m pip install --disable-pip-version-check
           --only-binary=:all: "PyYAML==6.0.3"
 
+      # The pinned helper's inputs never change between releases. A restored
+      # helper is kept only when its provenance names exactly these inputs and
+      # it passes the checks a fresh build passes; otherwise it is rebuilt.
+      - name: Restore prepared Cua Driver
+        id: cua-driver-cache
+        if: runner.os == 'macOS'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}
+            desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}.provenance.json
+          key: cua-driver-${{ matrix.target }}-${{ steps.toolchain.outputs.apple }}-${{ hashFiles('desktop/cua-driver/**', 'desktop/scripts/prepare-cua-driver.py') }}
+
       - name: Prepare pinned Cua Driver sidecar
         if: runner.os == 'macOS'
         run: >
           python desktop/scripts/prepare-cua-driver.py
-          --target "${{ matrix.target }}"
+          --target "${{ matrix.target }}" --reuse-verified
+
+      - name: Save prepared Cua Driver
+        if: runner.os == 'macOS' && !inputs.release_tag && steps.cua-driver-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}
+            desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}.provenance.json
+          key: ${{ steps.cua-driver-cache.outputs.cache-primary-key }}
 
       - name: Clean prior bundle output
         shell: bash
         run: rm -rf desktop/target/release/bundle
-
-      # Secrets that are unset expand to the empty string, which tauri-bundler
-      # would read as a present-but-empty certificate and fail on. Export each
-      # variable only when its secret is non-empty, so absence keeps the
-      # unsigned acceptance path exactly as before.
-      - name: Export Apple signing credentials when configured
-        if: runner.os == 'macOS' && inputs.release_tag == ''
-        shell: bash
-        env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-          APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-        run: |
-          set -eu
-          # Validate the credential set atomically. Half-configured sets must
-          # fail the build rather than silently produce a lesser artifact:
-          # certificate without notarization credentials would ship
-          # Developer-ID-signed but unnotarized; notarization credentials
-          # without the certificate would submit the unsigned acceptance
-          # build to Apple. All-or-nothing.
-          # Any-set implies all-set within each group; then the two groups
-          # must agree. A partially populated group is an operator error and
-          # fails loudly instead of silently passing as "absent".
-          cert_vars="APPLE_CERTIFICATE:$APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD:$APPLE_CERTIFICATE_PASSWORD"
-          api_vars="APPLE_API_KEY:$APPLE_API_KEY APPLE_API_ISSUER:$APPLE_API_ISSUER APPLE_API_PRIVATE_KEY:$APPLE_API_PRIVATE_KEY"
-          check_group() {
-            group_name="$1"; shift
-            set_count=0; total=0; missing=""
-            for pair in "$@"; do
-              name="${pair%%:*}"; value="${pair#*:}"
-              total=$((total + 1))
-              if [ -n "$value" ]; then set_count=$((set_count + 1)); else missing="$missing $name"; fi
-            done
-            if [ "$set_count" -gt 0 ] && [ "$set_count" -ne "$total" ]; then
-              echo "::error::${group_name} credential group is partially configured; missing:$missing. Set the whole group, or none of it."
-              exit 1
-            fi
-            [ "$set_count" -eq "$total" ]
-          }
-          if check_group "Apple signing" $cert_vars; then have_cert=1; else have_cert=0; fi
-          if check_group "Apple notarization" $api_vars; then have_api=1; else have_api=0; fi
-          if [ "$have_cert" != "$have_api" ]; then
-            echo "::error::Apple credentials are half-configured: the signing group (APPLE_CERTIFICATE + APPLE_CERTIFICATE_PASSWORD) and the notarization group (APPLE_API_KEY + APPLE_API_ISSUER + APPLE_API_PRIVATE_KEY) must be set together or omitted together."
-            exit 1
-          fi
-          if [ "$have_cert" = "1" ]; then
-            echo "APPLE_CERTIFICATE=$APPLE_CERTIFICATE" >> "$GITHUB_ENV"
-            echo "APPLE_CERTIFICATE_PASSWORD=$APPLE_CERTIFICATE_PASSWORD" >> "$GITHUB_ENV"
-            if [ -n "${APPLE_SIGNING_IDENTITY:-}" ]; then
-              echo "APPLE_SIGNING_IDENTITY=$APPLE_SIGNING_IDENTITY" >> "$GITHUB_ENV"
-            fi
-            # The ApiKey notarization auth needs the .p8 private key ON DISK at
-            # APPLE_API_KEY_PATH; without it tauri-bundler falls back to
-            # searching ./private_keys and $HOME, which the runner never has,
-            # and notarization is skipped with only a warning.
-            key_dir="$(mktemp -d)"
-            key_file="$key_dir/AuthKey_${APPLE_API_KEY}.p8"
-            printf '%s' "$APPLE_API_PRIVATE_KEY" > "$key_file"
-            echo "APPLE_API_KEY=$APPLE_API_KEY" >> "$GITHUB_ENV"
-            echo "APPLE_API_ISSUER=$APPLE_API_ISSUER" >> "$GITHUB_ENV"
-            echo "APPLE_API_KEY_PATH=$key_file" >> "$GITHUB_ENV"
-            echo "apple_signing=enabled" >> "$GITHUB_ENV"
-          else
-            echo "apple_signing=absent" >> "$GITHUB_ENV"
-          fi
 
       - name: Verify prepared Cua Driver provenance
         if: runner.os == 'macOS'
@@ -227,16 +247,31 @@ jobs:
           --features bundled-runtime
           --config tauri.release.conf.json
 
-      # Assert the inner app matches the credentials that were exported. NOTE
-      # the layer boundary recorded here: this describes the .app INSIDE the
-      # DMG only. The DMG image itself and the Mach-O binaries inside the
-      # embedded runtime.zip are NOT signed/notarized by this workflow yet —
-      # those layers are tracked in the distribution-signing-completion issue
-      # and remain release gates.
-      - name: Verify macOS app signature matches the signing path
+      - name: Save Rust build cache
+        if: ${{ !inputs.release_tag && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target/release/.fingerprint
+            desktop/target/release/build
+            desktop/target/release/deps
+            desktop/target/cua-driver-patched
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+
+      # The .app inside the DMG. A signed build signs the Cua Driver helper and
+      # then the app with the Team's Developer ID, pins both code identities,
+      # and notarizes and staples the app. The smoke test, the DMG, and the
+      # updater archive all use this final app. Only a manual build without
+      # credentials reaches the ad-hoc branch.
+      - name: Sign macOS app
         if: runner.os == 'macOS'
         working-directory: desktop
         shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -eu
           app="target/release/bundle/macos/Avibe.app"
@@ -247,27 +282,12 @@ jobs:
             echo "stale Cua Driver copy found in Contents/MacOS" >&2
             exit 1
           }
-          # Same detection as create-macos-dmg.sh: identity signatures print
-          # `Signature size=...` and Authority lines (verbose=4); only ad-hoc
-          # prints `Signature=adhoc`.
-          adhoc="$(codesign -dv "$app" 2>&1 | sed -n 's/^Signature=adhoc$/p' || true)"
-          authority="$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^Authority=//p' | head -1 || true)"
           if [ "${apple_signing:-absent}" = "enabled" ]; then
-            if [ -n "$adhoc" ] || [ -z "$authority" ]; then
-              echo "signing credentials were exported but Avibe.app is not identity-signed" >&2
-              exit 1
-            fi
-            driver_authority="$(codesign -dv --verbose=4 "$driver" 2>&1 | sed -n 's/^Authority=//p' | head -1 || true)"
-            app_team="$(codesign -dv --verbose=4 "$app" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -1 || true)"
-            driver_team="$(codesign -dv --verbose=4 "$driver" 2>&1 | sed -n 's/^TeamIdentifier=//p' | head -1 || true)"
-            if [ -z "$driver_authority" ] || [ "$driver_authority" != "$authority" ] \
-              || [ -z "$app_team" ] || [ "$driver_team" != "$app_team" ]; then
-              echo "Cua Driver helper does not match the outer app signing identity" >&2
-              exit 1
-            fi
-            codesign --verify --strict "$driver"
-            codesign --verify --deep --strict "$app"
-            echo "signature_state=app-identity-signed (${authority})" >> "$GITHUB_ENV"
+            python scripts/macos_signing.py sign-app "$app"
+            python scripts/macos_signing.py notarize "$app"
+          elif [ -n "$RELEASE_TAG" ]; then
+            echo "release builds must be Developer ID signed" >&2
+            exit 1
           else
             # Sign nested code from the inside out. `--deep` is deliberately a
             # verification option only; it must not choose what gets signed.
@@ -281,7 +301,6 @@ jobs:
             codesign --verify --deep --strict "$app"
             codesign -dv "$app" 2>&1 | grep -q '^Signature=adhoc$'
             codesign -dv "$driver" 2>&1 | grep -q '^Signature=adhoc$'
-            echo "signature_state=app-adhoc" >> "$GITHUB_ENV"
           fi
           APP_PATH="$app" python - <<'PY'
           import os
@@ -357,7 +376,23 @@ jobs:
         run: >
           sh scripts/create-macos-dmg.sh
           target/release/bundle/macos/Avibe.app
-          "target/release/bundle/dmg/Avibe_${{ inputs.version }}_${{ matrix.target }}.dmg"
+          "target/release/bundle/dmg/Avibe_${{ env.DESKTOP_VERSION }}_${{ matrix.target }}.dmg"
+
+      # The DMG carries the stapled app; it is signed, notarized, and stapled
+      # itself, then the shipped shapes are checked the way Gatekeeper sees a
+      # download: staples, spctl verdicts, and both pinned code identities,
+      # including those of the app inside the mounted image.
+      - name: Sign and notarize macOS DMG
+        if: runner.os == 'macOS' && env.apple_signing == 'enabled'
+        working-directory: desktop
+        shell: bash
+        run: |
+          set -eu
+          dmg="target/release/bundle/dmg/Avibe_${{ env.DESKTOP_VERSION }}_${{ matrix.target }}.dmg"
+          python scripts/macos_signing.py sign-dmg "$dmg"
+          python scripts/macos_signing.py notarize "$dmg"
+          python scripts/macos_signing.py verify-release \
+            --app target/release/bundle/macos/Avibe.app --dmg "$dmg"
 
       - name: Verify unsigned Windows installer
         if: runner.os == 'Windows'
@@ -371,7 +406,7 @@ jobs:
       - name: Record artifact hashes
         shell: bash
         env:
-          AVIBE_DESKTOP_VERSION: ${{ inputs.version }}
+          AVIBE_DESKTOP_VERSION: ${{ env.DESKTOP_VERSION }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           TARGET: ${{ matrix.target }}
           RUNNER_OS: ${{ runner.os }}
@@ -381,7 +416,9 @@ jobs:
           [ "${#installers[@]}" -eq 1 ] || { echo "Expected exactly one installer" >&2; exit 1; }
           driver_args=()
           if [ "$RUNNER_OS" = "macOS" ]; then
-            signing="${signature_state}"$'\ndmg-unsigned-unnotarized'
+            # Every signing step fails the job, so `enabled` here means the
+            # Runtime, app, and DMG were all signed, notarized, and verified.
+            if [ "${apple_signing:-absent}" = "enabled" ]; then signing=developer-id; else signing=ad-hoc; fi
             driver_args=(
               --prepared-driver "desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}"
               --driver "$driver_packaged_path"
@@ -389,7 +426,7 @@ jobs:
               --driver-cdhash "$driver_packaged_cdhash"
             )
           else
-            signing="installer-unsigned"
+            signing=unsigned
           fi
           python scripts/desktop_release.py record \
             --version "$AVIBE_DESKTOP_VERSION" --target "$TARGET" --tag "$RELEASE_TAG" \
@@ -412,8 +449,13 @@ jobs:
             --target "$TARGET" --app desktop/target/release/bundle/macos/Avibe.app
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        if: env.DESKTOP_CACHE_WARMUP != 'true'
         with:
-          name: avibe-desktop-${{ inputs.version }}-${{ matrix.target }}
+          name: avibe-desktop-${{ env.DESKTOP_VERSION }}-${{ matrix.target }}
           path: desktop-package/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Remove Apple signing material
+        if: always() && runner.os == 'macOS'
+        run: python desktop/scripts/macos_signing.py cleanup --work-dir "$RUNNER_TEMP/apple-signing"

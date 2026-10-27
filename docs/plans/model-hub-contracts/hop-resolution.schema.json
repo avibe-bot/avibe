@@ -20,6 +20,14 @@
       "description": "The primary hop Source's credential-free identity (identity_digest), from the snapshot its origin came from. The consumer replays opaque payloads only to a hop of the identity that served them."
     },
     "provider": { "type": "string" },
+    "cache_ttl": {
+      "enum": ["5m", "30m", "1h", "12h", null],
+      "description": "Validated Model Hub route-local cache lifetime override; unset uses the built-in C-9 estimate. Confirmed official OpenAI Responses GPT-5.6+ routes may explicitly request 30m or 12h; relays do not receive OpenAI-specific cache options."
+    },
+    "cache_ttl_wire": {
+      "type": "boolean",
+      "description": "True only when the adapter may send cache_ttl as a provider-specific request option."
+    },
     "request_headers": { "type": "object", "additionalProperties": { "type": "string" } },
     "capabilities": {
       "type": "object",

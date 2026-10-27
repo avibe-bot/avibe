@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The Cua Driver helper (Contents/Helpers/cua-driver). Every entitlement
+	     here must carry evidence that this process needs it; today there is
+	     none.
+
+	     The shell starts the driver in embedded mode, which never disclaims
+	     responsibility: Avibe.app stays the responsible process, so macOS
+	     attributes Accessibility, Screen Recording, and any Automation consent
+	     to the app's code identity, not to this helper's entitlements.
+
+	     Deliberately absent: com.apple.security.automation.apple-events and
+	     com.apple.security.device.screen-capture, which upstream signs its
+	     standalone driver with. Screen capture has no hardened-runtime
+	     entitlement; TCC alone grants it. launch_app attaches an oapp Apple
+	     Event to an NSWorkspace launch, and a hardened process with no
+	     entitlements, even as its own responsible process, launches an app
+	     with that event attached. AppleScript that set_value runs goes
+	     through a separate /usr/bin/osascript process. -->
+</dict>
+</plist>

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
+from datetime import datetime
 from typing import Final, Literal, Mapping, Optional
 
 from .adapter import RawCallOutcome, RawOutcomeKind
+from .claude_rate_limits import claude_subscription_reset
 
 ResolutionAction = Literal["return", "surface", "refresh", "fallback"]
 MachineErrorFamily = Literal["auth", "request", "server", "transient", "terminal"]
@@ -186,6 +188,8 @@ class ResolutionDecision:
     error_code: Optional[str] = None
     cooldown_seconds: int = 0
     downstream_status: int | None = None
+    # Derived upstream advice only; no header values cross classification.
+    retry_at: datetime | None = None
 
 
 _TERMINAL_OUTCOME_CATEGORIES: Mapping[
@@ -359,6 +363,10 @@ def classify_outcome(
         outcome,
         refresh_attempted=refresh_attempted,
     )
+    if decision.reason == "rate_limited":
+        retry_at = claude_subscription_reset(outcome)
+        if retry_at is not None:
+            decision = replace(decision, reason="quota_exhausted", cooldown_seconds=300, retry_at=retry_at)
     if not outcome.stream_started:
         return decision
     # Output already reached the caller, so replay is terminal. Retain a

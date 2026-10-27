@@ -23,6 +23,7 @@ const api = vi.hoisted(() => ({
   createVaultRevealContext: vi.fn(),
   denyVaultRequest: vi.fn(),
   fulfillVaultAccessRequest: vi.fn(),
+  getAvaultAuthorization: vi.fn(async () => ({ ok: true, required: false, detected_at: null, attempt: null })),
   getVaultGrants: vi.fn(),
   getVaultRequests: vi.fn(),
   getVaultSettings: vi.fn(),

@@ -498,13 +498,14 @@ runtime, endpoint, authentication mode, and honest client identity—not per
 MCP tool name. This makes the same initialized client reusable for the phase-2
 `web_fetch_exa` tool without creating a second session or rate-limit burst. It
 is not written to disk and is not shared with another runtime. A per-session
-async lock spans session lookup or creation, initialize,
-`notifications/initialized`, `tools/list`, schema invalidation, and
-`tools/call`; lock wait consumes the same overall 30-second service deadline.
-At most one tool call is admitted for a session at a time, which avoids
-response association and burst surprises without adding a scheduler.
+async lock covers only session establishment (`initialize`,
+`notifications/initialized`, and the first `tools/list`) plus any required
+schema refresh. Once setup is ready, `tools/call` requests run concurrently
+under independent JSON-RPC ids; the service layer caps active keyless Exa
+calls at three per runtime to respect the shared per-IP limit.
 
-The first call, within the one service attempt's existing 30-second cap, does:
+The first call, within the one service attempt's existing **15-second search**
+cap (or the designed **30-second fetch** cap), does:
 
 1. connect over HTTPS to the pinned `mcp.exa.ai` host;
 2. send MCP `initialize` with the supported protocol version, no capabilities
@@ -523,21 +524,19 @@ its conforming HTTP 202 response with an empty body as success. Do not apply
 that empty-body exception to `initialize`, `tools/list`, or `tools/call`, which
 must return a matching JSON-RPC response.
 
-Later calls reuse the session, but each admitted search refreshes `tools/list`
-under the same lock before mapping arguments; this bounded refresh is the
-authoritative protection against schema changes when no idle receive stream is
-open. It is not a new search request and does not increment usage. A
-`notifications/tools/list_changed` message received in any active response
-stream still invalidates the cache immediately, so the next call's mandatory
-refresh uses the new schema. A missing/expired session is reinitialized once
-before the request. If a session-bound `notifications/initialized`,
-`tools/list`, or `tools/call` exchange receives the MCP session-not-found
-response (the standard HTTP 404/session error, not an endpoint/protocol 404),
-clear the stale session, initialize again, resend `notifications/initialized`,
-and replay the affected pre-tool request once within the original deadline;
-this is safe because the server has not accepted the tool call. Once the
-replay's `tools/call` request bytes begin, Avibe never retries it automatically:
-a retry could duplicate a search and a usage request.
+Later calls reuse the session and cached `tools/list`; a warm call sends no
+second listing. A `notifications/tools/list_changed` message, a re-established
+session, or a tool-call schema error invalidates the cache, and the next call
+refreshes it under the setup lock before mapping arguments. The refresh is not
+a new search request and does not increment usage. A missing/expired session is
+reinitialized once before the request. If a session-bound
+`notifications/initialized`, `tools/list`, or `tools/call` exchange receives
+the MCP session-not-found response (the standard HTTP 404/session error, not
+an endpoint/protocol 404), clear the stale session, initialize again, resend
+`notifications/initialized`, and replay the affected pre-tool request once
+within the original deadline; this is safe because the server has not accepted
+the tool call. Once the replay's `tools/call` request bytes begin, Avibe never
+retries it automatically: a retry could duplicate a search and a usage request.
 
 Every exchange uses `Accept: application/json, text/event-stream`,
 `Content-Type: application/json`, and the retained negotiated
@@ -546,11 +545,12 @@ Every exchange uses `Accept: application/json, text/event-stream`,
 `event: message` / `data: <JSON-RPC>` shape and a single `application/json`
 JSON-RPC response, matching the response id in either form. A
 `notifications/tools/list_changed` notification is not discarded as
-unrelated: it invalidates any cached schema, and the next call's mandatory
-`tools/list` refresh runs before building arguments. The implementation does
-not depend on an always-open idle receive stream; the bounded per-call refresh
-is the correctness rule. The 8 MiB existing response-body cap applies to either
-response form; notifications are processed only within that cap.
+unrelated: it invalidates any cached schema, and the next call refreshes
+`tools/list` before building arguments. A schema error from `tools/call` uses
+the same invalidation path. The implementation does not depend on an always-
+open idle receive stream; the cached session schema remains authoritative until
+one of these invalidation events. The 8 MiB existing response-body cap applies
+to either response form; notifications are processed only within that cap.
 
 No API key, bearer token, Vault reference, or user credential is present in the
 MCP request. The adapter is still the custody/transport boundary and returns
@@ -585,11 +585,12 @@ highlight and `textMaxCharacters` controls, classify the service as
 `service_unavailable` rather than silently switching to the ambiguous text
 formatter.
 
-Use a single overall 30-second service deadline, including a cold-session
-initialize/list. Connection/TLS setup has the existing 5-second transport
-budget; each subsequent exchange receives only the remaining deadline. A
-reused session gives the `tools/call` the full remaining 30 seconds. The
-search chain's single 180-second budget remains authoritative.
+Use a **15-second** overall search service deadline, including a cold-session
+initialize/list and any capped admission wait. Fetch keeps its designed
+**30-second** service deadline. Connection/TLS setup has the existing 5-second
+transport budget; each exchange receives only the remaining deadline. A warm
+session gives `tools/call` the remaining budget without another `tools/list`.
+The search chain's single 180-second budget remains authoritative.
 
 ### 5.3 Response mapping
 
@@ -918,16 +919,17 @@ coordinated activation; no lane merges this design PR.
    turn/service and mapped to advanced `numResults`; the adapter sends only the
    selected highlight controls and never forwards model-supplied filters,
    summaries, or crawl fields.
-6. A reused MCP session performs one initialize lifecycle and one bounded
-   `tools/list` refresh before each attempted tool call; cold starts serialize
-   that lifecycle under the session lock; the negotiated protocol version is
-   validated and reused; `tools/list_changed` causes a fresh list before the
-   next call; an expired session can reinitialize and replay once only before
-   the server accepts the tool call, but an admitted call is never automatically
-   duplicated. The same session/client boundary is reusable for
-   `web_fetch_exa` in phase 2.
-7. All service work fits the existing 30-second service cap and 180-second
-   chain deadline; no blocking parse runs on the controller loop.
+6. A reused MCP session performs one initialize lifecycle and caches one
+   `tools/list` response for the session; setup is single-flight, while
+   `tools/call` requests are concurrent under a three-call per-runtime cap; the
+   negotiated protocol version is validated and reused; `tools/list_changed`,
+   re-establishment, or a schema error causes a fresh list; an expired session
+   can reinitialize and replay once only before the server accepts the tool
+   call, but an admitted call is never automatically duplicated. The same
+   session/client boundary is reusable for `web_fetch_exa` in phase 2.
+7. Keyless Exa search work fits its 15-second service cap, fetch retains its
+   30-second cap, and both retain the 180-second chain deadline; no blocking
+   parse runs on the controller loop.
 8. Valid results are highlights-only, bounded, ordered, and become one
    canonical completed record. The advanced adapter requests at most the
    defensive one-character text field, ignores it, and never requests or
@@ -970,16 +972,22 @@ JSON-RPC fixtures:
 - `web_fetch_exa` is a phase-2 parser fixture only; the shared session/client
   boundary accepts it as a second validated tool without a second initialize or
   session key; no phase-2 production activation is implied by the test.
-- Session reuse sends one initialize and one `tools/list` refresh per search for
-  two searches; an expired session returns the standard session-not-found 404
+- Session reuse sends one initialize lifecycle and one `tools/list` total for
+  two warm calls; an expired session returns the standard session-not-found 404
   during initialization notification or before the tool call, reinitializes,
   resends the notification, and reconnects/replays the affected pre-tool
   request once before admission; a connection failure after the call is sent is
-  not retried.
+  not retried. The stub also proves keep-alive connection reuse and two
+  concurrent `tools/call` ids after one setup.
 - The stub can emit `notifications/tools/list_changed`; the cached schema is
   invalidated and the next call performs `tools/list` before mapping arguments.
-- Two parallel cold starts share one initialize/list lifecycle under the lock,
-  and lock wait consumes the service deadline.
+- The service-chain fixtures prove at most three keyless Exa calls are active,
+  that search uses a 15-second attempt cap, and that a cooldown published by
+  one attempt is visible to new admissions without allowing an in-flight call
+  to clear it.
+- Two parallel cold starts share one initialize/list lifecycle under the setup
+  lock; calls do not queue behind a turn-wide lock, and semaphore wait consumes
+  the service attempt deadline.
 - The transport fixture covers both SSE and direct `application/json` JSON-RPC
   responses.
 - HTTP 429 with `Retry-After`, HTTP 429 with reset headers (including

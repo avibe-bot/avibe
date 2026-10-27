@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from vibe.avault_agent import DEFAULT_AGENT_IDLE_TIMEOUT_SECS, AvaultAgentClient, AvaultAgentError, AvaultAgentManager
+from vibe.avault_agent import AvaultAgentAuthorizationRequiredError
 from vibe.avault_agent import _ensure_agent_socket_parent, _remove_stale_agent_socket, default_agent_socket_path
 
 
@@ -118,6 +119,24 @@ def test_agent_client_surfaces_agent_errors(tmp_path):
                     }
                 ],
             )
+
+
+@pytest.mark.parametrize(
+    ("frame", "authorization_required"),
+    [
+        ({"ok": False, "error": "macOS Keychain needs a one-time authorization", "code": "keychain_authorization_required"}, True),
+        # Pre-0.1.8 agents send no code; a code Avibe does not know is ignored.
+        ({"ok": False, "error": "failed to load the master key"}, False),
+        ({"ok": False, "error": "failed to load the master key", "code": "some_future_code"}, False),
+    ],
+)
+def test_agent_client_types_only_the_keychain_authorization_code(frame, authorization_required):
+    socket_path = Path(tempfile.mkdtemp(prefix="avault-agent-", dir="/tmp")) / "s"
+    with FakeAgentServer(socket_path, [frame]):
+        with pytest.raises(AvaultAgentError, match=frame["error"]) as exc:
+            AvaultAgentClient(socket_path).release(grant_id="vgr_api")
+
+    assert isinstance(exc.value, AvaultAgentAuthorizationRequiredError) is authorization_required
 
 
 def test_agent_socket_path_uses_avibe_home_and_secures_directories(tmp_path, monkeypatch):

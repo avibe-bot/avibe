@@ -30,6 +30,7 @@ export function useDependencyChecks(read: ReadDependencies) {
     ])),
   ));
   const requests = useRef(new Map<string, AbortController>());
+  const [loginSessionState, setLoginSessionState] = useState<DependenciesResult['login_session_state']>(undefined);
   const timers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   useEffect(() => {
@@ -66,6 +67,7 @@ export function useDependencyChecks(read: ReadDependencies) {
         if (!result.ok || !Array.isArray(result.deps) || ids.some((id) => !result.deps.some((dep) => dep.id === id))) {
           throw new Error('Incomplete dependency inspection');
         }
+        setLoginSessionState(result.login_session_state);
         const byId = new Map(result.deps.map((dep) => [dep.id, dep]));
         update((_previous, id) => ({
           data: byId.get(id)!, checking: false, error: null,
@@ -87,5 +89,5 @@ export function useDependencyChecks(read: ReadDependencies) {
     }));
   }, [read]);
 
-  return { checks, refresh, checking: Object.values(checks).some((check) => check.checking) };
+  return { checks, refresh, checking: Object.values(checks).some((check) => check.checking), loginSessionState };
 }

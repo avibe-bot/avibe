@@ -114,7 +114,7 @@ export const sameRouteDraft = (left: RouteHop[], right: RouteHop[]): boolean =>
   left.every((hop, index) => identity(hop) === identity(right[index]));
 
 export const sameManualOverride = (left: ManualRouteOverride | null, right: ManualRouteOverride | null): boolean =>
-  sameRouteDraft(left?.hops ?? [], right?.hops ?? []);
+  sameRouteDraft(left?.hops ?? [], right?.hops ?? []) && (left?.cache_ttl ?? null) === (right?.cache_ttl ?? null);
 
 export const routeChainMatchesAttempt = (
   chain: AgentChain,

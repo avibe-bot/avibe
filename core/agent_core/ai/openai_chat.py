@@ -817,6 +817,7 @@ def _normalize_stop(
     normalized = {
         "length": "length",
         "max_tokens": "length",
+        "model_context_window_exceeded": "length",
         "content_filter": "safety",
         "recitation": "safety",
         "refusal": "refusal",

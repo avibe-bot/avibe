@@ -24,6 +24,7 @@ import {
   previewRenderKind,
 } from '@/lib/filePreview';
 import { FIT_VIEW, type ImageView, clampPan, maxScale, oneToOneScale, toggleScale, zoomPercent, zoomToPoint } from '@/lib/imageZoom';
+import { shouldRenderPdfPages } from '@/lib/pdfPreview';
 import { useLatestRef } from '@/lib/useLatestRef';
 
 // ── Shared file-preview kernel ("Quick Look") ───────────────────────────────
@@ -51,6 +52,8 @@ export type PreviewSource = {
 // JSON tree is the one renderer whose dep can't be dynamic-imported inline (it's a component), so it
 // lives in its own module and loads lazily here.
 const PreviewJson = React.lazy(() => import('@/components/ui/preview-json'));
+// pdf.js and its worker, for the PDF reader used on phones and tablets (see PdfView).
+const PdfPages = React.lazy(() => import('@/components/ui/pdf-pages'));
 
 // ``onDownload`` — optional. When set, the image renderer's control cluster shows a download button
 // that invokes it. Only a shell that does NOT already expose its own download affordance should pass
@@ -306,10 +309,20 @@ const ImageBody: React.FC<{ src: string; name?: string; className?: string; onDo
 };
 
 // ── PDF ───────────────────────────────────────────────────────────────────────
-// The browser's built-in viewer via an <iframe>. The backend serves PDF inline (same-origin), so no
-// JS engine is shipped and it frames without CSP trouble.
+// The browser's built-in viewer via an <iframe> where it is a real reader (desktop browsers and the
+// desktop shells): the backend serves PDF inline (same-origin), so it frames without CSP trouble and
+// brings search, selection and printing. Phones and tablets get our own page renderer instead
+// (``shouldRenderPdfPages``): iOS paints only a framed PDF's first page and Android frames nothing.
 const PdfView: React.FC<{ url: string; className?: string }> = ({ url, className }) => {
   const { t } = useTranslation();
+  const [renderPages] = React.useState(() => shouldRenderPdfPages());
+  if (renderPages) {
+    return (
+      <React.Suspense fallback={<Spinner className={clsx('!bg-[#0c0c0f]', className)} />}>
+        <PdfPages key={url} url={url} className={className} />
+      </React.Suspense>
+    );
+  }
   return <iframe title={t('preview.title')} src={url} className={clsx('h-full w-full border-0 bg-white', className)} />;
 };
 

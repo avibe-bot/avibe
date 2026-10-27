@@ -13,7 +13,14 @@ import {
 import { cn } from '@/lib/utils';
 import { setConfigField } from '@/lib/configMutations';
 import { scheduleUpgradeReload } from '../lib/upgradeReload';
-import { isDesktopShell } from '../lib/desktopShell';
+import {
+  DESKTOP_OPEN_UPDATES_EVENT,
+  desktopUpdateShellActions,
+  isDesktopShell,
+  listenDesktopUpdateState,
+  type DesktopUpdateShellActions,
+  type DesktopUpdateState,
+} from '../lib/desktopShell';
 import { useIsDesktop } from '../lib/useIsDesktop';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 
@@ -52,7 +59,13 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const api = useApi();
   const inDesktopShell = isDesktopShell();
   const isDesktop = useIsDesktop();
+  const shellActions = React.useMemo(() => desktopUpdateShellActions(), []);
+  const [desktopActions, setDesktopActions] = React.useState<DesktopUpdateShellActions | null>(shellActions);
+  const [desktopUpdaterStatus, setDesktopUpdaterStatus] = React.useState<'pending' | 'available' | 'unavailable'>(
+    shellActions ? 'pending' : 'unavailable',
+  );
   const [versionInfo, setVersionInfo] = React.useState<VersionInfo | null>(null);
+  const [desktopUpdateState, setDesktopUpdateState] = React.useState<DesktopUpdateState | null>(null);
   const [isPopupOpen, setIsPopupOpen] = React.useState(false);
   const [checking, setChecking] = React.useState(false);
   const [upgrading, setUpgrading] = React.useState(false);
@@ -62,13 +75,6 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const [savingAutoUpdate, setSavingAutoUpdate] = React.useState(false);
   const popupRef = React.useRef<HTMLDivElement>(null);
   const popupId = React.useId();
-
-  React.useEffect(() => {
-    checkVersion();
-    // The shell owns updates; it reads the Runtime's version only to show skew.
-    if (inDesktopShell) return;
-    loadAutoUpdateSetting();
-  }, []);
 
   React.useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -103,12 +109,63 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     }
   };
 
+  const readDesktopUpdateState = async (): Promise<DesktopUpdateState | null> => {
+    const actions = desktopActions;
+    if (!actions) return null;
+    try {
+      const state = await actions.getState();
+      setDesktopUpdateState(state);
+      setDesktopUpdaterStatus('available');
+      return state;
+    } catch (error) {
+      // A newer Workbench can be adopted by an older shell whose generic
+      // Tauri IPC exists but does not know the desktop updater commands.
+      // Treat the command rejection as the compatibility boundary and fall
+      // back to the legacy deep link plus Runtime version reads.
+      setDesktopActions(null);
+      setDesktopUpdaterStatus('unavailable');
+      setDesktopUpdateState(null);
+      throw error;
+    }
+  };
+
+  const waitForDesktopUpdate = async (): Promise<DesktopUpdateState | null> => {
+    if (!desktopActions) return null;
+    while (true) {
+      const state = await readDesktopUpdateState();
+      if (!state || !['checking', 'downloading', 'installing'].includes(state.phase)) {
+        return state;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return readDesktopUpdateState();
+  };
+
   // An explicit refresh skips the shared read cache, so a check the desktop app
   // just finished shows at once.
   const checkVersion = async (fresh = false) => {
     setChecking(true);
+    const actions = desktopActions;
+    const rereadVersion = fresh || Boolean(actions);
+    let nativeStateAvailable = false;
     try {
-      const info = await api.getVersion(fresh ? { cache: false } : undefined);
+      if (actions) {
+        if (fresh) {
+          await actions.check();
+          await waitForDesktopUpdate();
+        } else {
+          const state = await readDesktopUpdateState();
+          if (state && ['checking', 'downloading', 'installing'].includes(state.phase)) {
+            await waitForDesktopUpdate();
+          }
+        }
+        nativeStateAvailable = true;
+      }
+    } catch (e) {
+      console.error('Failed to check desktop update state:', e);
+    }
+    try {
+      const info = await api.getVersion(rereadVersion || nativeStateAvailable ? { cache: false } : undefined);
       setVersionInfo(info);
     } catch (e) {
       console.error('Failed to check version:', e);
@@ -117,10 +174,69 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     }
   };
 
+  React.useEffect(() => {
+    if (!inDesktopShell) return;
+    const handleOpenUpdates = (event: Event) => {
+      if (!desktopActions || desktopUpdaterStatus !== 'available') return;
+      window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = true;
+      event.preventDefault();
+      setIsPopupOpen(true);
+      void checkVersion(true);
+    };
+    window.addEventListener(DESKTOP_OPEN_UPDATES_EVENT, handleOpenUpdates);
+    return () => window.removeEventListener(DESKTOP_OPEN_UPDATES_EVENT, handleOpenUpdates);
+    // The updater actions and API are stable for the lifetime of the Workbench.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [desktopUpdaterStatus, inDesktopShell]);
+
+  React.useEffect(() => {
+    if (!inDesktopShell || desktopUpdaterStatus !== 'available') return;
+    let active = true;
+    let unlisten: (() => Promise<void>) | null = null;
+    void listenDesktopUpdateState((state) => {
+      if (!active) return;
+      setDesktopUpdateState(state);
+      setChecking(state.phase === 'checking');
+      setUpgrading(['downloading', 'installing'].includes(state.phase));
+    }).then((cleanup) => {
+      if (!active) {
+        void cleanup?.();
+      } else {
+        unlisten = cleanup;
+      }
+    }).catch((error) => {
+      // State snapshots remain the compatibility fallback when the shell has
+      // updater IPC but lacks the event plugin permission.
+      console.error('Failed to subscribe to desktop update state:', error);
+    });
+    return () => {
+      active = false;
+      void unlisten?.();
+    };
+  }, [desktopUpdaterStatus, inDesktopShell]);
+
+  React.useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void checkVersion();
+      // The shell owns updates; it reads the Runtime's version only to show skew.
+      if (!inDesktopShell) void loadAutoUpdateSetting();
+    }, 0);
+    return () => window.clearTimeout(timer);
+    // This runs once per mounted badge. The desktop path waits one task so the
+    // shell's startup updater can publish its result.
+    // The API and updater actions are stable for the lifetime of the Workbench.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const handleUpgrade = async () => {
     setUpgrading(true);
     setUpgradeResult(null);
     try {
+      if (isDesktopManaged && desktopActions) {
+        await desktopActions.install();
+        await waitForDesktopUpdate();
+        return;
+      }
       const result = await api.doUpgrade();
       setUpgradeResult(result);
       if (result.ok) {
@@ -140,12 +256,21 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     }
   };
 
-  // A desktop-managed Runtime relays the desktop app's own conclusion, so the
-  // dot may light, but only that app installs: it never gets an Upgrade button.
-  const hasUpdate = !inDesktopShell && versionInfo?.has_update === true;
-  const isDesktopManaged = versionInfo?.managed_by === 'desktop';
+  const isDesktopManaged = inDesktopShell || versionInfo?.managed_by === 'desktop';
+  const nativeUpdateStateAvailable = Boolean(desktopActions && desktopUpdateState);
+  // A desktop-managed Runtime relays the desktop app's own conclusion. The
+  // shell also exposes its in-memory state so a fresh native check lights the
+  // badge before the Runtime's status file has been reread.
+  const hasUpdate = desktopActions
+    ? desktopUpdateState?.phase === 'available'
+      && (desktopUpdateState.interactive || desktopUpdateState.skippedVersion !== desktopUpdateState.latest)
+    : versionInfo?.has_update === true;
   // The desktop app reports SemVer; show it in the Runtime's PEP 440 form.
-  const latestVersion = versionInfo?.latest ? normalizeVersion(versionInfo.latest) : null;
+  const latestVersion = isDesktopManaged && desktopUpdateState?.latest
+    ? normalizeVersion(desktopUpdateState.latest)
+    : versionInfo?.latest
+      ? normalizeVersion(versionInfo.latest)
+      : null;
   const shellVersion = inDesktopShell ? window.__AVIBE_DESKTOP_VERSION__ : undefined;
   const runtimeVersion = versionInfo?.current;
   // A shell can serve a Runtime it did not start, such as one it adopted.
@@ -163,19 +288,39 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const badgeTitle = hasVersionSkew
     ? t('dashboard.runtimeVersionSkew', { app: shellVersion, runtime: runtimeVersion })
     : isSourceBuild
-      ? `${t('dashboard.sourceRevision')}: ${sourceRevision || t('dashboard.unknownRevision')}${versionInfo?.build?.dirty ? ` (${t('dashboard.dirtySource')})` : ''}`
-      : `v${currentVersion}`;
+      ? t(versionInfo?.build?.dirty ? 'dashboard.sourceRevisionTitleDirty' : 'dashboard.sourceRevisionTitle', {
+        revision: sourceRevision || t('dashboard.unknownRevision'),
+      })
+      : t('dashboard.versionTitle', { version: currentVersion });
   // Desktop details belong in the shared floating layer, outside the sidebar.
   // Phones retain their fixed panel below the header.
   const Popup = isDesktop ? PopoverContent : 'div';
 
+  const handleSkipDesktopUpdate = async () => {
+    if (!desktopActions) return;
+    try {
+      await desktopActions.skip();
+      await readDesktopUpdateState();
+      setIsPopupOpen(false);
+    } catch (e) {
+      console.error('Failed to skip desktop update:', e);
+    }
+  };
+
+  const handleBadgeClick = () => {
+    if (inDesktopShell && desktopUpdaterStatus !== 'available') {
+      window.location.href = 'avibe://updates';
+    }
+  };
+
   return (
-    <Popover open={!inDesktopShell && isPopupOpen} onOpenChange={setIsPopupOpen}>
+    <Popover open={isPopupOpen} onOpenChange={setIsPopupOpen}>
       <div className="relative" ref={popupRef}>
         {/* Version Badge trigger */}
         <PopoverTrigger asChild>
           <button
             type="button"
+            onClick={handleBadgeClick}
             className={cn(
               badgeVariants({ variant: hasUpdate || hasVersionSkew ? 'warning' : 'secondary' }),
               interactiveBadgeTriggerClassName,
@@ -183,13 +328,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
             )}
             title={badgeTitle}
             aria-controls={popupId}
-            onClick={inDesktopShell ? (event) => {
-              event.preventDefault();
-              window.location.href = 'avibe://updates';
-            } : undefined}
           >
             {hasVersionSkew && <AlertCircle size={12} aria-hidden="true" />}
-            {isSourceBuild ? <GitCommitHorizontal size={12} /> : 'v'}
+            {isSourceBuild ? <GitCommitHorizontal size={12} /> : t('dashboard.versionPrefix')}
             {displayVersion}
             {hasUpdate && (
               <span className="absolute -top-1 -right-1 size-2.5 rounded-full border-2 border-background bg-gold animate-pulse" />
@@ -251,8 +392,11 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                 <div className="flex items-start justify-between gap-3 text-sm">
                   <span className="shrink-0 text-muted">{t('dashboard.sourceRevision')}</span>
                   <span className="max-w-[10rem] break-all text-right font-mono font-medium text-foreground">
-                    {sourceRevision || t('dashboard.unknownRevision')}
-                    {versionInfo?.build?.dirty ? ` (${t('dashboard.dirtySource')})` : ''}
+                    {versionInfo?.build?.dirty
+                      ? t('dashboard.sourceRevisionDirty', {
+                        revision: sourceRevision || t('dashboard.unknownRevision'),
+                      })
+                      : sourceRevision || t('dashboard.unknownRevision')}
                   </span>
                 </div>
               )}
@@ -262,7 +406,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                 <span className="text-muted">
                   {t(isSourceBuild ? 'dashboard.packageVersion' : 'dashboard.currentVersion')}
                 </span>
-                <span className="max-w-[10rem] break-all text-right font-mono font-medium text-foreground">{currentVersion}</span>
+                <span className="max-w-[10rem] break-all text-right font-mono font-medium text-foreground">
+                  {t('dashboard.versionValue', { version: currentVersion })}
+                </span>
               </div>
 
               {/* Latest Version */}
@@ -274,7 +420,35 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
               )}
 
               {/* Update Status */}
-              {!isSourceBuild && (isDesktopManaged && hasUpdate ? (
+              {!isSourceBuild && (isDesktopManaged && desktopUpdateState?.phase === 'checking' ? (
+                <div className="flex items-center gap-2 rounded-md border border-cyan/30 bg-cyan/10 px-3 py-2 text-sm text-cyan-ink">
+                  <RefreshCw size={16} className="shrink-0 animate-spin" />
+                  <span>{t('dashboard.checking')}</span>
+                </div>
+              ) : isDesktopManaged && ['downloading', 'installing'].includes(desktopUpdateState?.phase ?? '') ? (
+                <div className="flex items-center gap-2 rounded-md border border-cyan/30 bg-cyan/10 px-3 py-2 text-sm text-cyan-ink">
+                  <RefreshCw size={16} className="shrink-0 animate-spin" />
+                  <span>{t('dashboard.upgrading')}</span>
+                </div>
+              ) : isDesktopManaged && desktopUpdateState?.phase === 'installed' ? (
+                <div className="flex items-center gap-2 rounded-md border border-mint/25 bg-mint/10 px-3 py-2 text-sm text-mint-ink">
+                  <Check size={16} className="shrink-0" />
+                  <span>{t('dashboard.upgradeSuccess')}</span>
+                </div>
+              ) : isDesktopManaged && desktopUpdateState?.phase === 'disabled' ? (
+                <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 px-3 py-2 text-sm text-muted">
+                  <AlertCircle size={16} className="shrink-0" />
+                  <span>{t('dashboard.checkFailed')}</span>
+                </div>
+              ) : isDesktopManaged && (
+                desktopUpdateState?.phase === 'error'
+                || (!nativeUpdateStateAvailable && versionInfo?.error)
+              ) ? (
+                <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
+                  <AlertCircle size={16} className="shrink-0" />
+                  <span>{t('dashboard.checkFailed')}</span>
+                </div>
+              ) : isDesktopManaged && hasUpdate ? (
                 <div className="flex items-center gap-2 rounded-md border border-gold/30 bg-gold/10 px-3 py-2 text-sm text-gold-ink">
                   <AlertCircle size={16} className="shrink-0" />
                   <span>{t('dashboard.desktopManagedUpdateAvailable', { to: latestVersion })}</span>
@@ -295,12 +469,12 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                     })}
                   </span>
                 </div>
-              ) : versionInfo && !versionInfo.error ? (
+              ) : versionInfo && (!versionInfo.error || desktopUpdateState?.phase === 'current') ? (
                 <div className="flex items-center gap-2 rounded-md border border-mint/25 bg-mint/10 px-3 py-2 text-sm text-mint-ink">
                   <Check size={16} className="shrink-0" />
                   <span>{t('dashboard.upToDate')}</span>
                 </div>
-              ) : versionInfo?.error ? (
+              ) : versionInfo?.error && !nativeUpdateStateAvailable ? (
                 <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
                   <AlertCircle size={16} className="shrink-0" />
                   <span>{t('dashboard.checkFailed')}</span>
@@ -355,12 +529,24 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
             </div>
 
             {/* Actions */}
-            {hasUpdate && !isDesktopManaged && !restarting && (
+            {hasUpdate && !restarting && (
               <div className="flex justify-end border-t border-border px-4 py-3">
-                <Button variant="brand" size="xs" onClick={handleUpgrade} disabled={upgrading}>
-                  <Download size={14} className={upgrading ? 'animate-bounce' : ''} />
-                  {upgrading ? t('dashboard.upgrading') : t('dashboard.upgradeNow')}
-                </Button>
+                {isDesktopManaged && desktopActions && desktopUpdateState?.phase === 'available' ? (
+                  <div className="flex items-center gap-2">
+                    <Button variant="ghost" size="xs" onClick={handleSkipDesktopUpdate} disabled={upgrading}>
+                      {t('dashboard.skipUpdate')}
+                    </Button>
+                    <Button variant="brand" size="xs" onClick={handleUpgrade} disabled={upgrading}>
+                      <Download size={14} className={upgrading ? 'animate-bounce' : ''} />
+                      {upgrading ? t('dashboard.upgrading') : t('dashboard.upgradeNow')}
+                    </Button>
+                  </div>
+                ) : !isDesktopManaged ? (
+                  <Button variant="brand" size="xs" onClick={handleUpgrade} disabled={upgrading}>
+                    <Download size={14} className={upgrading ? 'animate-bounce' : ''} />
+                    {upgrading ? t('dashboard.upgrading') : t('dashboard.upgradeNow')}
+                  </Button>
+                ) : null}
               </div>
             )}
           </Popup>

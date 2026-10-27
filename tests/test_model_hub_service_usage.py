@@ -50,7 +50,10 @@ MODEL_COUNTERS = {
     "output_tokens",
     "cache_write_input_tokens",
     "cache_write_1h_input_tokens",
+    "cache_write_30m_input_tokens",
+    "cache_write_12h_input_tokens",
     "cache_write_uncaptured_reports",
+    "cache_write_ttl_uncaptured_reports",
 }
 
 

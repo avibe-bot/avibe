@@ -43,6 +43,7 @@ class _Exchange:
     received_at: datetime | None = None
     messages: tuple[Mapping[str, Any], ...] = ()
     request_id: int | None = None
+    phase: str | None = None
 
 
 def _parse_messages(body: bytes | None) -> tuple[Mapping[str, Any], ...]:
@@ -122,7 +123,7 @@ def _tool_properties(
 
 
 class KeylessExaMcpClient:
-    """One serialized MCP session, reusable by Exa search and future fetch."""
+    """Reusable MCP session with single-flight setup and concurrent tool calls."""
 
     def __init__(
         self,
@@ -136,11 +137,48 @@ class KeylessExaMcpClient:
         self.client_version = client_version
         self.timeout_seconds = timeout_seconds
         self.connect_timeout_seconds = connect_timeout_seconds
-        self._lock = asyncio.Lock()
+        self._setup_lock = asyncio.Lock()
         self._session_id: str | None = None
         self._protocol_version: str | None = None
         self._tools: dict[str, Mapping[str, Any]] | None = None
         self._next_id = 0
+        self._http_session: aiohttp.ClientSession | None = None
+        self._trace_config = aiohttp.TraceConfig()
+        self._trace_config.on_request_headers_sent.append(self._on_request_headers_sent)
+
+    @staticmethod
+    async def _on_request_headers_sent(_session, trace_ctx, _params) -> None:
+        request_ctx = getattr(trace_ctx, "trace_request_ctx", None)
+        if not isinstance(request_ctx, Mapping):
+            return
+        callback = request_ctx.get("on_sent")
+        callback_state = request_ctx.get("callback_state")
+        if not callable(callback) or not isinstance(callback_state, dict) or callback_state.get("called"):
+            return
+        admission = callback()
+        if inspect.isawaitable(admission):
+            await admission
+        callback_state["called"] = True
+
+    async def _http(self) -> aiohttp.ClientSession:
+        session = self._http_session
+        if session is None or session.closed:
+            session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self.timeout_seconds),
+                connector=aiohttp.TCPConnector(limit=10, force_close=False),
+                trust_env=False,
+                trace_configs=[self._trace_config],
+            )
+            self._http_session = session
+        return session
+
+    async def close(self) -> None:
+        """Close the keep-alive client at runtime shutdown."""
+
+        session, self._http_session = self._http_session, None
+        self._clear_session()
+        if session is not None and not session.closed:
+            await session.close()
 
     def _request_id(self) -> int:
         self._next_id += 1
@@ -165,7 +203,7 @@ class KeylessExaMcpClient:
         notification: bool = False,
     ) -> _Exchange:
         if time.monotonic() >= deadline:
-            return _Exchange(None, {}, None, "timeout")
+            return _Exchange(None, {}, None, "timeout", phase=method)
         request_id = None if notification else self._request_id()
         payload: dict[str, Any] = {"jsonrpc": "2.0", "method": method}
         if request_id is not None:
@@ -182,76 +220,70 @@ class KeylessExaMcpClient:
         }
         if self._session_id is not None:
             headers[MCP_SESSION_HEADER] = self._session_id
-        callback_called = False
+        callback_state = {"called": False}
         response_status: int | None = None
         response_headers: dict[str, str] = {}
         response_received_at: datetime | None = None
-
         timeout_total = max(0.001, deadline - time.monotonic())
         timeout = aiohttp.ClientTimeout(
             total=timeout_total,
             connect=min(self.connect_timeout_seconds, timeout_total),
         )
-
-        class McpRequest(aiohttp.ClientRequest):
-            async def send(self, conn):
-                nonlocal callback_called
-                if not callback_called and on_sent is not None:
-                    admission = on_sent()
-                    if inspect.isawaitable(admission):
-                        await admission
-                    callback_called = True
-                return await super().send(conn)
+        trace_request_ctx = (
+            {"on_sent": on_sent, "callback_state": callback_state}
+            if on_sent is not None else None
+        )
 
         try:
-            async with aiohttp.ClientSession(
+            session = await self._http()
+            async with session.post(
+                self.endpoint,
+                headers=headers,
+                json=payload,
+                allow_redirects=False,
                 timeout=timeout,
-                trust_env=False,
-                request_class=McpRequest,
-            ) as session:
-                async with session.post(
-                    self.endpoint,
-                    headers=headers,
-                    json=payload,
-                    allow_redirects=False,
-                ) as response:
-                    response_status = response.status
-                    response_received_at = datetime.now(timezone.utc)
-                    response_headers = {
-                        name: value
-                        for name, value in response.headers.items()
-                        if name.lower() in {
-                            "content-type", "retry-after", "x-ratelimit-reset", "mcp-session-id", "date", "content-length",
-                        }
+                trace_request_ctx=trace_request_ctx,
+            ) as response:
+                response_status = response.status
+                response_received_at = datetime.now(timezone.utc)
+                response_headers = {
+                    name: value
+                    for name, value in response.headers.items()
+                    if name.lower() in {
+                        "content-type", "retry-after", "x-ratelimit-reset", "mcp-session-id", "date", "content-length",
                     }
-                    body, too_large = await _read_bounded(response.content)
-                    if too_large:
-                        return _Exchange(
-                            response_status, response_headers, None, "body_too_large", callback_called,
-                            response_received_at, request_id=request_id,
-                        )
-                    messages = await asyncio.to_thread(_parse_messages, body)
-                    if request_id is not None and not messages and body:
-                        # Preserve malformed/opaque errors for the service mapper.
-                        return _Exchange(
-                            response_status, response_headers, body, "", callback_called,
-                            response_received_at, request_id=request_id,
-                        )
+                }
+                body, too_large = await _read_bounded(response.content)
+                if too_large:
                     return _Exchange(
-                        response_status, response_headers, body, "", callback_called,
-                        response_received_at, messages, request_id,
+                        response_status, response_headers, None, "body_too_large", callback_state["called"],
+                        response_received_at, request_id=request_id, phase=method,
                     )
+                messages = await asyncio.to_thread(_parse_messages, body)
+                if request_id is not None and not messages and body:
+                    # Preserve malformed/opaque errors for the service mapper.
+                    return _Exchange(
+                        response_status, response_headers, body, "", callback_state["called"],
+                        response_received_at, request_id=request_id, phase=method,
+                    )
+                return _Exchange(
+                    response_status, response_headers, body, "", callback_state["called"],
+                    response_received_at, messages, request_id, method,
+                )
         except asyncio.CancelledError:
             return _Exchange(
-                response_status, response_headers, None, "cancelled", callback_called, response_received_at,
+                response_status, response_headers, None, "cancelled", callback_state["called"],
+                response_received_at, phase=method,
             )
         except asyncio.TimeoutError:
             return _Exchange(
-                response_status, response_headers, None, "timeout", callback_called, response_received_at,
+                response_status, response_headers, None, "timeout", callback_state["called"],
+                response_received_at, phase=method,
             )
-        except (aiohttp.ClientError, OSError, ValueError):
+        except (aiohttp.ClientError, OSError, RuntimeError, ValueError):
             return _Exchange(
-                response_status, response_headers, None, "connection", callback_called, response_received_at,
+                response_status, response_headers, None, "connection", callback_state["called"],
+                response_received_at, phase=method,
             )
 
     async def _initialize(self, *, deadline: float) -> _Exchange:
@@ -277,7 +309,7 @@ class KeylessExaMcpClient:
             if exchange.status == 200 and exchange.messages and not exchange.error:
                 return _Exchange(
                     exchange.status, exchange.headers, exchange.body, "connection", exchange.sent,
-                    exchange.received_at, exchange.messages, exchange.request_id,
+                    exchange.received_at, exchange.messages, exchange.request_id, exchange.phase,
                 )
             return exchange
         self._protocol_version = protocol
@@ -313,6 +345,30 @@ class KeylessExaMcpClient:
         self._tools = tools
         return None
 
+    async def _ensure_ready(self, *, deadline: float) -> _Exchange | None:
+        """Single-flight only the session setup and cached schema refresh."""
+
+        async with self._setup_lock:
+            if self._session_id is None:
+                initialized = await self._initialize(deadline=deadline)
+                if initialized.error or initialized.status != 200 or self._session_id is None:
+                    return initialized
+            if self._tools is None:
+                return await self._list_tools(deadline=deadline)
+        return None
+
+    async def _clear_if_stale(self, session_id: str | None) -> None:
+        async with self._setup_lock:
+            if session_id is None or self._session_id == session_id:
+                self._clear_session()
+
+    @staticmethod
+    def _schema_changed(exchange: _Exchange) -> bool:
+        message = _matching_message(exchange.messages, exchange.request_id) if exchange.request_id is not None else None
+        error = message.get("error") if isinstance(message, Mapping) else None
+        code = error.get("code") if isinstance(error, Mapping) else None
+        return code in {-32601, -32602}
+
     @staticmethod
     def _adapt_arguments(properties: Mapping[str, Any], arguments: Mapping[str, Any]) -> dict[str, Any] | None:
         # The live schema is authoritative. Unknown catalog defaults never cross
@@ -328,68 +384,66 @@ class KeylessExaMcpClient:
         on_sent: Callable[[], Awaitable[None] | None] | None = None,
     ) -> SearchResponse:
         """Call one live-schema MCP tool; retry one stale session before the call."""
-        async with self._lock:
-            deadline = time.monotonic() + self.timeout_seconds
-            last: _Exchange | None = None
-            sent_callback_called = False
 
-            async def admit_once() -> None:
-                nonlocal sent_callback_called
-                if sent_callback_called or on_sent is None:
-                    return
-                admission = on_sent()
-                if inspect.isawaitable(admission):
-                    await admission
-                sent_callback_called = True
+        deadline = time.monotonic() + self.timeout_seconds
+        last: _Exchange | None = None
+        sent_callback_called = False
 
-            for _ in range(2):
-                if self._session_id is None:
-                    initialized = await self._initialize(deadline=deadline)
-                    last = initialized
-                    if _session_not_found(initialized):
-                        self._clear_session()
-                        continue
-                    if initialized.error or initialized.status != 200 or self._session_id is None:
-                        return await self._as_search_response(initialized)
-                listed = await self._list_tools(deadline=deadline)
-                if listed is not None:
-                    last = listed
-                    if _session_not_found(listed):
-                        self._clear_session()
-                        continue
-                    return await self._as_search_response(listed)
-                tool = (self._tools or {}).get(tool_name)
-                properties = _tool_properties(
+        async def admit_once() -> None:
+            nonlocal sent_callback_called
+            if sent_callback_called or on_sent is None:
+                return
+            admission = on_sent()
+            if inspect.isawaitable(admission):
+                await admission
+            sent_callback_called = True
+
+        for _ in range(2):
+            setup_failure = await self._ensure_ready(deadline=deadline)
+            if setup_failure is not None:
+                last = setup_failure
+                if _session_not_found(setup_failure):
+                    await self._clear_if_stale(self._session_id)
+                    continue
+                return await self._as_search_response(setup_failure)
+            tool = (self._tools or {}).get(tool_name)
+            properties = (
+                _tool_properties(
                     tool,
                     require_search_controls=tool_name == KEYLESS_EXA_SEARCH_TOOL,
                     require_fetch_controls=tool_name == KEYLESS_EXA_FETCH_TOOL,
-                ) if isinstance(tool, Mapping) else None
-                if properties is None:
-                    return SearchResponse(None, {}, None, "invalid_endpoint")
-                adapted = self._adapt_arguments(properties, arguments)
-                if adapted is None:
-                    return SearchResponse(None, {}, None, "invalid_endpoint")
-                if tool_name == KEYLESS_EXA_FETCH_TOOL:
-                    required = tool["inputSchema"].get("required", [])
-                    if (
-                        not isinstance(required, list)
-                        or not all(isinstance(name, str) and name in adapted for name in required)
-                        or not _REQUIRED_FETCH_FIELDS.issubset(adapted)
-                    ):
-                        return SearchResponse(None, {}, None, "invalid_endpoint")
-                called = await self._request(
-                    "tools/call",
-                    {"name": tool_name, "arguments": adapted},
-                    deadline=deadline,
-                    on_sent=admit_once,
                 )
-                last = called
-                self._observe_notifications(called.messages)
-                if _session_not_found(called):
-                    self._clear_session()
-                    continue
-                return await self._as_search_response(called)
-            return await self._as_search_response(last or _Exchange(None, {}, None, "connection"))
+                if isinstance(tool, Mapping) else None
+            )
+            if properties is None:
+                return SearchResponse(None, {"x-avibe-mcp-phase": "tools_list"}, None, "invalid_endpoint")
+            adapted = self._adapt_arguments(properties, arguments)
+            if adapted is None:
+                return SearchResponse(None, {"x-avibe-mcp-phase": "tools_list"}, None, "invalid_endpoint")
+            if tool_name == KEYLESS_EXA_FETCH_TOOL:
+                required = tool["inputSchema"].get("required", [])
+                if (
+                    not isinstance(required, list)
+                    or not all(isinstance(name, str) and name in adapted for name in required)
+                    or not _REQUIRED_FETCH_FIELDS.issubset(adapted)
+                ):
+                    return SearchResponse(None, {"x-avibe-mcp-phase": "tools_list"}, None, "invalid_endpoint")
+            request_session = self._session_id
+            called = await self._request(
+                "tools/call",
+                {"name": tool_name, "arguments": adapted},
+                deadline=deadline,
+                on_sent=admit_once,
+            )
+            last = called
+            self._observe_notifications(called.messages)
+            if _session_not_found(called):
+                await self._clear_if_stale(request_session)
+                continue
+            if self._schema_changed(called):
+                self._tools = None
+            return await self._as_search_response(called)
+        return await self._as_search_response(last or _Exchange(None, {}, None, "connection", phase="tools_call"))
 
     async def search(
         self,
@@ -428,9 +482,12 @@ class KeylessExaMcpClient:
             )
         if not error and exchange.status is not None and 300 <= exchange.status < 400:
             error = "redirect"
+        headers = dict(exchange.headers)
+        if exchange.phase is not None:
+            headers["x-avibe-mcp-phase"] = exchange.phase
         return SearchResponse(
             exchange.status,
-            exchange.headers,
+            headers,
             body,
             error,
             on_sent_fired=exchange.sent,

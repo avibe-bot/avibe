@@ -118,7 +118,12 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 292
+    assert len(endpoints) == 295
+    # Editors who use Vault read avault's authorization state; the handler admits only
+    # instance managers to raise the Keychain dialog on the host.
+    for method in ("GET", "POST"):
+        assert (method, "/api/vault/avault-authorization") in endpoints
+        assert http_authorization_policy(method, "/api/vault/avault-authorization").minimum_role == "editor"
     for tool in ("web_search", "web_fetch"):
         retry_route = f"/api/models/hosted-tools/{tool}/services/{{source_id}}/retry"
         assert ("POST", retry_route) in endpoints
@@ -171,6 +176,19 @@ def test_complete_registered_api_management_inventory():
                 if role is None:
                     assert not context.has_role(minimum), (method, raw)
     assert actual_read_roles == baseline_read_roles
+
+
+@pytest.mark.parametrize("role, status", [("editor", 403), ("member", 200), ("owner", 200)])
+def test_authorize_avault_http_needs_instance_management(management_http, monkeypatch, role, status):
+    started = []
+    monkeypatch.setattr(api, "start_avault_authorization", lambda: started.append(True) or {"ok": True})
+    request_http = management_http(role)
+
+    assert request_http("GET", "/api/vault/avault-authorization").status_code == 200
+    response = request_http("POST", "/api/vault/avault-authorization", payload={})
+
+    assert response.status_code == status, response.get_json()
+    assert started == ([True] if status == 200 else [])
 
 
 @pytest.mark.parametrize("role, status", [("editor", 403), ("member", 200), ("owner", 200)])

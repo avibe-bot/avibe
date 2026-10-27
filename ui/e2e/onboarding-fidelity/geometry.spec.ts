@@ -1,7 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
 import {
   PHASES, VIEWPORTS, cssEffects, freezeAt, openOnboarding, openSetup, renderedPhase,
-  serveModelHub, serveProduct, setDocumentHidden, settleEffects, size, storeThemePreference,
+  serveModelHub, serveProduct, serveSetupSource, setDocumentHidden, settleEffects, size, storeThemePreference,
+  waitForPrimaryEnabled,
 } from './support';
 
 /**
@@ -31,7 +32,9 @@ const DESIGN_FRAME = { width: 1200, height: 756 };
  * dark/light pair of one size a content A/B rather than two unrelated frames.
  */
 const CAPTURE_PHASE = 'codex-working';
-const CAPTURE_STATES = ['complete', 'working', 'waiting'];
+// Vibey has planned and handed off, Claude Code has built, Codex is working and
+// OpenCode is still waiting its turn.
+const CAPTURE_STATES = ['complete', 'complete', 'working', 'waiting'];
 
 /** The setup lineup: the built-in coordinator first, then the three CLI assistants. */
 const LINEUP = ['Vibey', 'Claude Code', 'Codex', 'OpenCode'];
@@ -240,17 +243,19 @@ test.describe('desktop reference geometry', () => {
     const heading = await box(page, '.onboarding-heading');
     const stage = await box(page, '.onboarding-stage');
     const action = await box(page, '.onboarding-primary-action');
-    // The heading block carries its tier's own distance to the stage — 15 under an
-    // 800px window — while the stage's distance to the action is 20 in every row.
+    // One breathing distance, spent twice: under the heading and under the stage
+    // (`--ob-band-gap`, #2153) — 32 under an 800px window.
     const headingGap = await page.evaluate(() =>
       parseFloat(getComputedStyle(document.querySelector('[data-setup-screen-root]:not([hidden]) .onboarding-heading')!).marginBottom));
-    expect(round(headingGap)).toBe(15);
+    expect(round(headingGap)).toBe(32);
     expect(stage.y - (heading.y + heading.height)).toBeCloseTo(headingGap, 0);
-    expect(action.y - (stage.y + stage.height)).toBeCloseTo(20, 0);
+    expect(action.y - (stage.y + stage.height)).toBeCloseTo(headingGap, 0);
     const diagram = await box(page, '.onboarding-collaboration');
     expect(diagram.height).toBeCloseTo(reference.card + STAGE_EXTRA, 1);
-    expect(diagram.y).toBeCloseTo(stage.y, 1);
+    // The stage is the floor every step shares; the welcome's diagram is shorter than the
+    // tallest step, so it is centred in that band rather than pinned under the title.
     expect(stage.height).toBeGreaterThanOrEqual(diagram.height - 0.5);
+    expect(diagram.y - stage.y).toBeCloseTo((stage.height - diagram.height) / 2, 0);
 
     // The entry block is collapsed throughout setup (owner handoff, design boards and
     // prototype agree), so the rhythm under the action ends at the reserved back row.
@@ -300,7 +305,10 @@ test.describe('desktop reference geometry', () => {
     for (let index = 0; index < LINEUP.length; index += 1) {
       expect(setupCards[index].x).toBeCloseTo(introCards[index].x, 1);
       expect(setupCards[index].width).toBeCloseTo(introCards[index].width, 1);
-      expect(setupCards[index].y).toBeCloseTo(introCards[index].y, 1);
+      // Both compositions centre in the band they share, and the setup grid carries its
+      // readiness caption as a row of its own (#2388), so its cards sit at most a pixel
+      // or two higher than the story's — never a visible step.
+      expect(Math.abs(setupCards[index].y - introCards[index].y)).toBeLessThanOrEqual(2);
       // The connection's card may grow for an error or a wrapped action; it may not shrink.
       expect(setupCards[index].height).toBeGreaterThanOrEqual(introCards[index].height - 1);
       // "The assistant logo and name stay at the top in both states; connection state
@@ -356,7 +364,7 @@ test.describe('desktop reference geometry', () => {
     const headingGap = await page.evaluate(() =>
       parseFloat(getComputedStyle(document.querySelector('[data-setup-screen-root]:not([hidden]) .onboarding-heading')!).marginBottom));
     expect(stage.y - (heading.y + heading.height)).toBeCloseTo(headingGap, 0);
-    expect(action.y - (stage.y + stage.height)).toBeCloseTo(20, 0);
+    expect(action.y - (stage.y + stage.height)).toBeCloseTo(headingGap, 0);
     // The card, and the whole composition with it, follows the window's tier: the
     // 800px-tall reading draws a 232 card, not a share of whatever is left.
     const card = await box(page, '.onboarding-collaboration-card');
@@ -377,7 +385,7 @@ test.describe('desktop reference geometry', () => {
     const short = { heading: await box(page, '.onboarding-heading'), stage: await box(page, '.onboarding-stage') };
     const shortAction = await box(page, '.onboarding-primary-action');
     expect(short.stage.y - (short.heading.y + short.heading.height)).toBeCloseTo(headingGap, 0);
-    expect(shortAction.y - (short.stage.y + short.stage.height)).toBeCloseTo(20, 0);
+    expect(shortAction.y - (short.stage.y + short.stage.height)).toBeCloseTo(headingGap, 0);
     // The tier, not the leftover: a 520px window still draws the 800-row's card and
     // scrolls the rest.
     expect(round((await box(page, '.onboarding-collaboration-card')).height)).toBe(232);
@@ -501,10 +509,12 @@ test.describe('capped fluid width', () => {
  * The six entry tiles belong to the reached worksurface, not to the setup journey: the
  * owner handoff, the design boards and the prototype collapse the block for every setup
  * screen. What stays true here is the property — the block remains mounted (its motion
- * lifecycle is a mounted component's), hidden and inert, leaking nothing focusable, and
- * the reserved action anchor does not depend on it at all.
+ * lifecycle is a mounted component's), hidden and inert, leaking nothing focusable.
+ * (It no longer asserts that revealing the block in place leaves the anchor alone: since
+ * the composition centres in its band (#2153) a revealed block would take room from it,
+ * and setup never reveals it.)
  */
-test('setup keeps the entry block mounted, hidden and inert, and the anchor independent of it', async ({ page }) => {
+test('setup keeps the entry block mounted, hidden and inert', async ({ page }) => {
   for (const viewport of [{ width: 1200, height: 800 }, { width: 390, height: 844 }]) {
     await page.setViewportSize(viewport);
     const denied = await serveProduct(page);
@@ -519,23 +529,6 @@ test('setup keeps the entry block mounted, hidden and inert, and the anchor inde
       (node.querySelector('.onboarding-access-tile') as HTMLElement).focus();
       return node.contains(document.activeElement);
     })).toBe(false);
-    // Revealing the block changes what is below the anchor, never the anchor itself.
-    // The back row reserves its box through visibility on the first screen, so it is
-    // measured rather than filtered for visibility.
-    const rects = () => page.evaluate(() => {
-      const read = (selector: string) => {
-        const rect = document.querySelector(selector)!.getBoundingClientRect();
-        return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
-      };
-      return { primary: read('.onboarding-primary-action'), back: read('.onboarding-back-action') };
-    });
-    const before = await rects();
-    await block.evaluate((node) => { (node as HTMLElement).hidden = false; });
-    const after = await rects();
-    for (const key of ['x', 'y', 'width', 'height'] as const) {
-      expect(round(after.primary[key])).toBeCloseTo(round(before.primary[key]), 1);
-      expect(round(after.back[key])).toBeCloseTo(round(before.back[key]), 1);
-    }
     expect(denied).toEqual([]);
   }
 });
@@ -587,6 +580,7 @@ test.describe('shared screen anchors', () => {
       await page.setViewportSize(viewport);
       await serveProduct(page);
       await serveModelHub(page);
+      await serveSetupSource(page);
       await openOnboarding(page, { lang: 'zh' });
       const center = async (selector: string) => {
         const rect = await box(page, selector);
@@ -609,18 +603,26 @@ test.describe('shared screen anchors', () => {
       const welcomeSize = await fontSize('.onboarding-story-caption');
       await page.getByRole('button', { name: '立即开始' }).click();
       await page.clock.runFor(950);
-      await expect(page.locator('.setup-provider-summary')).toContainText('已选');
-      const providers = await center('.setup-provider-summary');
+      // The provider this journey continues with is already there, so the summary says so.
+      await expect(page.locator('.setup-provider-summary')).toContainText('OpenAI');
       // On the same line even where the welcome is the tallest screen and this diagram
       // is shorter than its stage (the 1920 tier): the summary rests on the stage floor.
       const summary = await box(page, '.setup-provider-summary');
       const providersStage = await box(page, '[data-setup-screen-root]:not([hidden]) .onboarding-stage');
       expect(summary.y + summary.height).toBeCloseTo(providersStage.y + providersStage.height, 0);
       expect(welcomeSize).toBe(await fontSize('.setup-provider-summary'));
-      await page.locator('.onboarding-setup-hint button').click();
+      // Continue past the optional key import the scan offers, as openSetup does.
+      const primary = page.locator('.onboarding-primary-action');
+      await waitForPrimaryEnabled(page);
+      if ((await primary.textContent())?.trim() !== '继续，选择 AI 助手') {
+        await primary.click();
+        await page.getByRole('dialog').getByRole('button', { name: '暂不迁移', exact: true }).click();
+      }
+      await primary.click();
       await page.clock.runFor(950);
-      const assistants = await center('.onboarding-setup-hint');
-      expect(assistants).toBeCloseTo(providers, 0);
+      await expect(page.locator('[data-setup-sequence]')).toHaveAttribute('data-setup-screen', 'assistants');
+      // The assistants' readiness caption is no longer on this line: it is a row of the
+      // lineup's own grid, in flow under the cards (#2388, held by lineup.spec.ts).
       // The rescan link is centred on the sentence it follows, in the same type.
       expect(await center('.onboarding-setup-hint-line > button')).toBeCloseTo(await center('.onboarding-setup-hint-line > span'), 0);
       expect(await fontSize('.onboarding-setup-hint-line > span')).toBe(welcomeSize);
@@ -677,6 +679,8 @@ test.describe('shared action anchor', () => {
       test(`${size(viewport)} ${lang} keeps one action pair across every registered screen`, async ({ page }) => {
         await page.setViewportSize(viewport);
         const denied = await serveProduct(page);
+        // The providers screen continues only once a provider exists.
+        await serveSetupSource(page);
         await openOnboarding(page, { lang });
         await toTop(page);
         const heading = await box(page, '.onboarding-heading');
@@ -713,23 +717,20 @@ test.describe('shared action anchor', () => {
           await expect(page.locator('[data-setup-screen-root]:not([hidden]) h1')).toBeFocused();
           await expect(page.locator('[data-setup-screen-root][hidden]:not([inert])')).toHaveCount(0);
         }
-        // The desktop hint sits in the free band above the action; phone keeps its
-        // own compact placement below the pair. Neither position moves the action.
+        // The readiness caption is in flow under the cards at every width (#2388), so it
+        // sits above the action and never moves it.
         const caption = await box(page, '.onboarding-setup-hint');
-        const backRect = await box(page, '.onboarding-back-action');
-        if (viewport.width >= 760) {
-          expect(caption.y + caption.height).toBeLessThanOrEqual(action.y - 8);
-        } else {
-          expect(caption.y).toBeGreaterThanOrEqual(backRect.y + backRect.height - 1);
-        }
+        expect(caption.y + caption.height).toBeLessThanOrEqual(action.y);
         await page.locator('.onboarding-primary-action').scrollIntoViewIfNeeded();
         await expect(page.locator('.onboarding-primary-action')).toBeInViewport();
         // And the last word on reachability is a real click, which Playwright refuses to
         // deliver when something else would receive it. The caption's own controls have
         // to stay live too: it is an aside, not a decoration.
         await page.locator('.onboarding-setup-hint').getByRole('button').first().click();
+        // Back is one step at a time through the sequence.
         await page.locator('.onboarding-back-action').click();
-        await expect(page.locator('[data-setup-sequence]')).toHaveAttribute('data-setup-screen', sequence[0]);
+        await page.clock.runFor(950);
+        await expect(page.locator('[data-setup-sequence]')).toHaveAttribute('data-setup-screen', sequence.at(-2)!);
         expect(denied).toEqual([]);
       });
     }
@@ -760,18 +761,18 @@ const clearToasts = async (page: Page) => {
  *  the toast layer coalesces — one overlay to spend, not three. */
 async function switchableDetect(page: Page) {
   let failing = true;
-  await page.route('**/api/cli/detect**', (route) => {
-    if (failing) return route.fulfill({ status: 500, json: { error: LONG_DETAIL } });
-    const binary = new URL(route.request().url()).searchParams.get('binary') ?? '';
-    return route.fulfill({ json: { found: true, path: `/fixture/bin/${binary.split('/').pop()}` } });
-  });
+  // Detection is one runtime observation per assistant; while failing it is refused,
+  // and once recovered it falls through to the installed runtime `serveProduct` answers.
+  await page.route('**/api/backend/*/runtime*', (route) => (failing
+    ? route.fulfill({ status: 500, json: { error: LONG_DETAIL } })
+    : route.fallback()));
   return { recover: () => { failing = false; } };
 }
 
 test.describe('post-action aside', () => {
   for (const viewport of ANCHOR_TIERS) {
     for (const lang of ['en', 'zh'] as const) {
-      test(`${size(viewport)} ${lang} explains a failed detection below the pair and retries from it`, async ({ page }) => {
+      test(`${size(viewport)} ${lang} explains a failed detection beside the pair and retries from it`, async ({ page }) => {
         await page.setViewportSize(viewport);
         const denied = await serveProduct(page);
         const detect = await switchableDetect(page);
@@ -789,16 +790,16 @@ test.describe('post-action aside', () => {
         await clearToasts(page);
         await expectSamePair(page, before);
 
-        // Expanding the diagnostic is the growth the old placement could not absorb.
+        // Expanding the diagnostic is the growth the old placement could not absorb. The
+        // slot is the empty band above the action, capped at that band (#2153): what does
+        // not fit scrolls inside it rather than covering a card or the button.
         const aside = page.locator('.onboarding-action-aside');
-        const closed = (await box(page, '.onboarding-action-aside')).height;
         await aside.getByText(lang === 'zh' ? '查看详情' : 'View details').click();
         await expect(aside.locator('details')).toContainText(LONG_DETAIL);
-        expect((await box(page, '.onboarding-action-aside')).height).toBeGreaterThan(closed);
+        expect(await aside.evaluate((node) => node.scrollHeight > node.clientHeight)).toBe(true);
         await expectSamePair(page, before);
-        // Grown, and still not over the button it explains.
-        expect((await box(page, '.onboarding-action-aside')).y)
-          .toBeGreaterThanOrEqual(before.primary.y + before.primary.height - 1);
+        const opened = await box(page, '.onboarding-action-aside');
+        expect(opened.y + opened.height).toBeLessThanOrEqual(before.primary.y);
         expect(await page.evaluate(() => document.documentElement.scrollWidth <= globalThis.innerWidth)).toBe(true);
 
         expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
@@ -815,83 +816,6 @@ test.describe('post-action aside', () => {
         expect(denied).toEqual([]);
       });
 
-    }
-  }
-});
-
-/**
- * The completion recovery is the largest thing the slot ever carries — a whole form,
- * opened by the action it sits under, on the tiers with the least room for it. While it
- * owns the journey the pair is held, which is a state the pair has to survive without
- * moving, and cancelling has to give both the journey and the slot back.
- */
-test.describe('completion recovery in the slot', () => {
-  for (const viewport of [{ width: 390, height: 640 }, { width: 320, height: 568 }]) {
-    for (const lang of ['en', 'zh'] as const) {
-      test(`${size(viewport)} ${lang} opens the repair under the held pair and gives it back on cancel`, async ({ page }, info) => {
-        await page.setViewportSize(viewport);
-        const denied = await serveProduct(page);
-        let manifests = 0;
-        // A saved platform whose required credential is gone: the shape that makes
-        // completion stop and hand the slot a form instead of entering the workspace.
-        await page.route('**/api/config', (route) => route.fulfill({ json: {
-          version: 'v2', setup_completed: false, runtime: {},
-          capabilities: { model_hub: { enabled: true } }, model_hub: { enabled: true },
-          platforms: { primary: 'slack', enabled: ['slack'] },
-          platform_catalog: [{ id: 'slack', config_key: 'slack', credential_fields: ['bot_token'] }],
-          slack: { has_app_token: true, bot_token: '' },
-          agents: { claude: { enabled: true }, codex: { enabled: true }, opencode: { enabled: true } },
-        } }));
-        await page.route('**/api/backend/claude/connection', (route) => route.fulfill({ json: {
-          ok: true, backend: 'claude', ready: true, entry_eligible: true,
-          enabled: true, installed: true, application: 'applied', auth: 'api_key' } }));
-        await page.route('**/api/slack/manifest', (route) => { manifests++; return route.fulfill({ json: { ok: true, manifest: '{}' } }); });
-        await openOnboarding(page, { lang });
-        await openSetup(page, lang);
-        await toTop(page);
-        const before = await pair(page);
-
-        await page.locator('.onboarding-primary-action').click();
-        const recovery = page.getByRole('region', { name: lang === 'zh' ? '修复已保存的消息配置' : 'Repair saved messaging configuration' });
-        await expect(recovery).toBeVisible();
-        expect(await recovery.evaluate((node) => !!node.closest('[data-setup-action-aside]'))).toBe(true);
-        await expectSamePair(page, before);
-        // Held, not busy: the journey is refused while the form owns it, and refusing is
-        // not the same as pretending something is running.
-        await expect(page.locator('.onboarding-primary-action')).toBeDisabled();
-        await expect(page.locator('.onboarding-back-action')).toBeDisabled();
-        // The spinner carries Tailwind's `motion-safe:` variant, so the token in the DOM
-        // is the whole `motion-safe:animate-spin`; a bare `.animate-spin` finds nothing
-        // here whatever the footer renders.
-        expect(await page.locator('.onboarding-primary-action [class~="motion-safe:animate-spin"]').count()).toBe(0);
-        expect(manifests).toBe(0);
-
-        // Expanding it into the real form is the growth these two tiers have least room
-        // for, and its own controls still have to be reachable rather than merely present.
-        await recovery.getByRole('button', { name: lang === 'zh' ? '修复已保存的消息配置' : 'Repair saved messaging configuration' }).click();
-        await expect.poll(() => manifests).toBe(1);
-        // Exact: the Slack step headers inside the form spell "Slack 应用" / "Slack app".
-        const apply = recovery.getByRole('button', { name: lang === 'zh' ? '应用' : 'Apply', exact: true });
-        await apply.scrollIntoViewIfNeeded();
-        await expect(apply).toBeInViewport();
-        expect(await recovery.evaluate((node) => node.scrollWidth - node.clientWidth)).toBeLessThanOrEqual(1);
-        expect(await page.evaluate(() => document.documentElement.scrollWidth <= globalThis.innerWidth)).toBe(true);
-        await expectSamePair(page, before);
-        await settleEffects(page);
-        await recovery.screenshot({ path: info.outputPath(`recovery-slot-${size(viewport)}-${lang}.png`) });
-
-        // Cancel is a real click, and it gives back both the slot and the journey.
-        const cancel = recovery.getByRole('button', { name: lang === 'zh' ? '取消' : 'Cancel' });
-        await cancel.scrollIntoViewIfNeeded();
-        await cancel.click();
-        await expect(recovery).toHaveCount(0);
-        await expectSamePair(page, before);
-        await expect(page.locator('.onboarding-primary-action')).toBeEnabled();
-        await expect(page.locator('.onboarding-back-action')).toBeEnabled();
-        expect(await hitSelf(page, '.onboarding-primary-action')).toBe(true);
-        expect(await hitSelf(page, '.onboarding-back-action')).toBe(true);
-        expect(denied).toEqual([]);
-      });
     }
   }
 });

@@ -444,8 +444,30 @@ vibe doctor repair tmux --yes
 - Stable `vibe` launchers that select different installed versions (fails with both paths and versions; `stable-launchers` points them all at the newest one, and changes nothing when two installs tie as the last activation)
 - A running service older than the last activated install (warns)
 - askill, avault, Git Runtime, Model Hub engine (CPA), Show Runtime, tmux, and Node.js readiness through one dependency diagnostic group
+- avault's one-time macOS Keychain authorization (warns; Doctor never authorizes, see `vibe vault key authorize`)
 - `vibe doctor --deep` also probes missing dependencies without downloading their bodies
 - managed downloads retry transient HTTP, DNS, timeout, and connection failures with bounded backoff
+
+### `vibe vault key authorize`
+
+Authorize avault, once, to read the Vault key in this Mac's Keychain.
+
+```bash
+vibe vault key authorize
+```
+
+avault 0.1.8 and later are Developer ID signed, and macOS asks once before a newly
+signed avault may read a Vault key that an earlier avault created. Until then every
+Vault use fails with `avault_authorization_required`, and the Vault page, Settings →
+Dependencies, and `vibe doctor` say so. Authorize with **Authorize avault** on the
+Vault page, or run this command in Terminal on the Mac's desktop. Either way the macOS
+dialog appears on the Mac running Avibe, not in a browser: enter that Mac's login
+password and choose **Always Allow**. Later signed avault updates read the key without
+asking again.
+
+- A denied or cancelled dialog is not shown again for about 2 minutes.
+- Over SSH no dialog can appear; use the Vault page instead.
+- Agents never run it: a Vault command that hits this error tells the Agent to ask you.
 
 ### `vibe remote`
 
@@ -890,6 +912,26 @@ vibe restart --delay-seconds 60
 ```
 
 The Model Hub engine process is named `cli-proxy-api` (hyphenated); `pgrep cliproxyapi` therefore always returns no match.
+
+#### Responses streams and overload recovery
+
+With automatic Model Hub recovery enabled, the first OpenAI Responses stream is
+buffered before delivery, including compatible custom Sources. You may therefore
+see no incremental text, reasoning, or tool calls until that response ends.
+If it ends with the exact `server_error` message
+`Our servers are currently overloaded. Please try again later.`, Model Hub
+discards that partial response and retries once through your configured route,
+within the same recovery window. Only the final attempt reaches the Agent.
+Other streamed errors and other protocols do not gain post-output retries.
+
+The retry itself streams normally and is not replayed again after output.
+Both upstream attempts are counted in usage and may be billed; provider-hosted
+tools can also have run on the discarded attempt. This prevents duplicate
+**downstream** text/tool calls, not duplicate provider-side execution. No Source
+order, credentials, or backend settings are changed by recovery. The initial
+response buffer uses at most 256 KiB of RAM before spilling to temporary disk,
+with a 128 MiB total cap. A disk error or an oversized response ends locally
+without another replay.
 
 ## Web UI Controls
 

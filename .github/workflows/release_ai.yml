@@ -77,8 +77,9 @@ jobs:
       release_tag: ${{ needs.resolve-desktop-release.outputs.tag }}
       updater_enabled: ${{ needs.resolve-desktop-release.outputs.updater_enabled == 'true' }}
     # A called job's Environment secrets resolve empty unless the caller inherits
-    # (actions/runner#4453). On this path the callee reads only the updater pair from
-    # desktop-updater; Apple identities stay gated to manual dispatch.
+    # (actions/runner#4453). The callee reads the updater pair and, on macOS, the
+    # Apple set from desktop-updater: every tag build is Developer ID signed and
+    # notarized, and fails without the complete set.
     secrets: inherit
 
   resolve-show-runtime-ref:
@@ -218,7 +219,7 @@ jobs:
             --router-output vibe/show_router.tsx
 
       - name: Setup Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 

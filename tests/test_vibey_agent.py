@@ -4502,6 +4502,22 @@ def test_a_hop_with_an_invalid_hosted_tool_entry_is_refused(hosted_tools) -> Non
         selection_from_hop(hop)
 
 
+@pytest.mark.parametrize("cache_ttl", ["30m", "12h"])
+def test_a_route_cache_ttl_reaches_vibey_selection_endpoint(cache_ttl: str) -> None:
+    from modules.agents.vibey.models import selection_from_hop
+
+    hop = ModelHubLaunch(
+        backend="vibey", channel="hub", requested_model="gpt-6-astra", target_model="gpt-6-astra",
+        runtime_model="gpt-6-astra", source_id="src_openai001", source_identity="sha256:openai-identity",
+        gateway_base_url="http://hub.invalid/vibey", gateway_token="hub-token",
+        protocol="openai_responses", provider="openai", cache_ttl=cache_ttl, cache_ttl_wire=True,
+    ).to_hop_resolution()
+
+    endpoint = selection_from_hop(hop).endpoint
+    assert endpoint.cache_ttl == cache_ttl
+    assert endpoint.cache_ttl_wire is True
+
+
 @pytest.mark.parametrize("refused", [True, False], ids=["refused-by-its-source", "never-offered-natively"])
 async def test_a_proxied_search_names_the_source_that_refused_it(refused) -> None:
     """MH-HOSTED-VIBEY-004 (vibey-hosted-tools.md §3.5): a search call runs as its function either because the turn's

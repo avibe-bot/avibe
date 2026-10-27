@@ -294,10 +294,10 @@ change in implementation.
 - Bot/platform setup surfaces: `vibe/templates/slack_manifest.json`, README
   examples such as `@Vibe Remote /start`, and platform setup docs should become
   on-brand. Actual platform-side app renames remain external.
-- Sentry and HTTP user agents: `vibe/sentry_integration.py`,
-  `vibe/api.py`, and `vibe/remote_access.py` still use `vibe-remote` /
-  `Vibe Remote` release or user-agent labels. Decide whether to move these to
-  `avibe-os@<version>` / `avibe` while preserving search compatibility.
+- HTTP user agents: `vibe/api.py` and `vibe/remote_access.py` still use
+  `vibe-remote` / `Vibe Remote` release or user-agent labels. Decide whether
+  to move these to `avibe-os@<version>` / `avibe` while preserving search
+  compatibility.
 - `avibe-bot-backend/next.config.ts`: public `/install.sh` remains
   `https://avibe.bot/install.sh`, but the backend redirect target must be
   changed from `cyhhao/vibe-remote` raw to `avibe-bot/avibe` raw at transfer.
@@ -413,7 +413,7 @@ Do first:
   old `~/.vibe_remote` adoption,
   back-symlink, conflict rules, and old-user simulation tests.
 - P3 main-repo product copy: README/README_ZH, VISION/VISION_ZH, backend i18n,
-  frontend i18n, UI metadata, Slack manifest, Sentry/user-agent labels where
+  frontend i18n, UI metadata, Slack manifest, user-agent labels where
   appropriate.
 
 Do not spend first-pass effort rewriting historical `docs/plans/` files,
@@ -471,7 +471,7 @@ Updated surfaces:
   settings, Slack install, update notifications, and related user-visible
   strings. EN/ZH keys remain in lockstep.
 - UI metadata, PWA manifest, web-push defaults, Slack manifest, remote-access
-  pairing defaults, system prompt injection, Sentry release labels, and
+  pairing defaults, system prompt injection, release labels, and
   non-protocol user agents now use `avibe`.
 
 Intentionally retained:

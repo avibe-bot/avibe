@@ -449,6 +449,58 @@ def _retyped_placement_refusal(
     return exc
 
 
+STALE_LOGIN_SESSION_CODE = "stale_login_session"
+AVAULT_AUTHORIZATION_REQUIRED_CODE = "avault_authorization_required"
+
+
+def _is_stale_login_session(exc: Exception) -> bool:
+    return getattr(exc, "code", None) == STALE_LOGIN_SESSION_CODE
+
+
+def _stale_login_session_cli_error(help_command: str | None) -> TaskCliError:
+    return TaskCliError(
+        "Avibe is still running in a macOS login session that has ended",
+        code=STALE_LOGIN_SESSION_CODE,
+        hint=(
+            "Do not retry. Ask the user to open Terminal on the Mac's current desktop, run `vibe restart`, "
+            "then try again from Avibe."
+        ),
+        help_command=help_command,
+    )
+
+
+def _is_avault_authorization_required(exc: Exception) -> bool:
+    return getattr(exc, "code", None) == AVAULT_AUTHORIZATION_REQUIRED_CODE
+
+
+def _avault_authorization_required_cli_error(help_command: str | None) -> TaskCliError:
+    """The one Agent-facing report of avault's one-time Keychain authorization.
+
+    Typed at the printer so every Vault command that reaches avault reports it
+    the same way. avault's own text tells a person to run ``avault key
+    authorize``; an Agent must instead hand the step to the user and stop.
+    """
+    return TaskCliError(
+        "avault needs a one-time macOS Keychain authorization on the Mac running Avibe",
+        code=AVAULT_AUTHORIZATION_REQUIRED_CODE,
+        hint=(
+            "Do not retry and do not run avault yourself. Ask the user to choose Authorize avault on "
+            "the Vault page in Avibe (or to run `vibe vault key authorize` themselves on the Mac running "
+            "Avibe), then answer the macOS dialog on that Mac with its login password and Always Allow. "
+            "Run this command once after they confirm."
+        ),
+        help_command=help_command,
+    )
+
+
+def _avault_cli_error(exc: Exception, message: str, *, code: str = "avault_failed", help_command: str | None = None) -> TaskCliError:
+    if _is_stale_login_session(exc):
+        code = STALE_LOGIN_SESSION_CODE
+    elif _is_avault_authorization_required(exc):
+        code = AVAULT_AUTHORIZATION_REQUIRED_CODE
+    return TaskCliError(message, code=code, help_command=help_command)
+
+
 def _print_task_error(exc: Exception, *, help_command: str | None = None) -> None:
     # Re-typed BEFORE the ``TaskCliError`` branch, and here rather than in each command's
     # own ``except``, because this is the one printer every CLI admission door funnels its
@@ -460,6 +512,10 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
     # payload builder below.
     if isinstance(exc, UnresolvableSessionTarget) and exc.reason == "reserved":
         exc = _reserved_session_cli_error(exc)
+    if _is_stale_login_session(exc):
+        exc = _stale_login_session_cli_error(getattr(exc, "help_command", None) or help_command)
+    elif _is_avault_authorization_required(exc):
+        exc = _avault_authorization_required_cli_error(getattr(exc, "help_command", None) or help_command)
     from storage.resource_access_service import (
         HARNESS_ACCESS_FORBIDDEN_CODE,
         ResourceAccessError,
@@ -9693,7 +9749,7 @@ def cmd_vault_run(args):
             _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
             return 1
         _finish_one_shot_after_avault_error(engine, one_shot_grants, exc, reason="vault-run-one-shot")
-        _print_task_error(TaskCliError(f"avault deliver failed: {exc}", code="avault_failed", help_command=help_command))
+        _print_task_error(_avault_cli_error(exc, f"avault deliver failed: {exc}", help_command=help_command))
         return 1
     except Exception as exc:
         if handoff_started:
@@ -10200,7 +10256,7 @@ def cmd_vault_await(args):
         _print_task_error(TaskCliError(str(exc), code="invalid_request", help_command=help_command))
         return 1
     except api.AvaultError as exc:
-        _print_task_error(TaskCliError(f"avault sign failed: {exc}", code="avault_failed", help_command=help_command))
+        _print_task_error(_avault_cli_error(exc, f"avault sign failed: {exc}", help_command=help_command))
         return 1
     except TaskCliError as exc:
         _print_task_error(exc)
@@ -10612,7 +10668,7 @@ def cmd_vault_fetch(args):
                 )
                 _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
                 return 1
-        _print_task_error(TaskCliError(f"request failed: {exc}", code="request_failed", help_command=help_command))
+        _print_task_error(_avault_cli_error(exc, f"request failed: {exc}", code="request_failed", help_command=help_command))
         return 1
     except Exception as exc:
         if handoff_started:
@@ -10800,7 +10856,7 @@ def cmd_vault_inject(args):
             )
             _print_task_error(TaskCliError("protected grant expired; approve the request again", code="approval_required", help_command=help_command))
             return 1
-        _print_task_error(TaskCliError(f"avault inject failed: {exc}", code="avault_failed", help_command=help_command))
+        _print_task_error(_avault_cli_error(exc, f"avault inject failed: {exc}", help_command=help_command))
         return 1
     except Exception as exc:
         if handoff_started:
@@ -10809,6 +10865,75 @@ def cmd_vault_inject(args):
             _release_one_shot_reservations(engine, one_shot_grants)
         _print_task_error(exc, help_command=help_command)
         return 1
+
+
+# (code, message, hint) for each ``api.avault_key_authorize`` failure reason.
+_AVAULT_AUTHORIZE_FAILURES = {
+    "stale_login_session": (
+        "stale_login_session",
+        "Avibe is still running in a macOS login session that has ended",
+        "Do not retry. Open Terminal on the Mac's current desktop, run `vibe restart`, then try again from Avibe.",
+    ),
+    "not_completed": (
+        "avault_authorization_not_completed",
+        "avault authorization did not complete",
+        "If you chose Deny or closed the dialog, macOS will not show it again for about 2 minutes; "
+        "run this again after that.",
+    ),
+    "no_gui_session": (
+        "avault_authorization_no_gui_session",
+        "this session cannot show the macOS Keychain dialog",
+        "Run this in Terminal on the Mac's desktop rather than over SSH, or choose Authorize avault on "
+        "the Vault page in Avibe; the dialog then appears on that Mac's screen.",
+    ),
+    "timed_out": (
+        "avault_authorization_timed_out",
+        "nobody answered the macOS Keychain dialog within 10 minutes",
+        "Run this again when you can answer the dialog on this Mac.",
+    ),
+    "avault_missing": ("avault_missing", "avault is not installed", "Run: vibe doctor repair avault --yes"),
+    "avault_upgrade_required": (
+        "avault_upgrade_required",
+        f"authorizing avault requires avault >= {api.AVAULT_KEYCHAIN_AUTHORIZATION_MIN_VERSION}",
+        "Run: vibe doctor repair avault --yes",
+    ),
+}
+
+
+def cmd_vault_key_authorize(args):
+    """Run avault's one Keychain dialog for the person at this Mac."""
+    help_command = "vibe vault key authorize --help"
+    if caller_context_from_env() is not None:
+        # Only an explicit user action may raise the dialog; an Agent hands the step back.
+        _print_task_error(
+            TaskCliError(
+                "vibe vault key authorize must be run by the user, not by an Agent",
+                code="user_action_required",
+                hint=(
+                    "Ask the user to choose Authorize avault on the Vault page in Avibe, or to run "
+                    "`vibe vault key authorize` themselves on the Mac running Avibe."
+                ),
+                help_command=help_command,
+            )
+        )
+        return 1
+    if platform.system() == "Darwin":
+        print(
+            "Waiting for the macOS Keychain dialog on this Mac: enter this Mac's login password "
+            "and choose Always Allow.",
+            file=sys.stderr,
+            flush=True,
+        )
+    result = api.avault_key_authorize()
+    if result.get("ok"):
+        _print_cli_payload("vault_key_authorize", status=result.get("reason"))
+        return 0
+    code, message, hint = _AVAULT_AUTHORIZE_FAILURES.get(
+        str(result.get("reason")), _AVAULT_AUTHORIZE_FAILURES["not_completed"]
+    )
+    details = {"avault_error": result["detail"]} if result.get("detail") else None
+    _print_task_error(TaskCliError(message, code=code, hint=hint, help_command=help_command, details=details))
+    return 1
 
 
 def _read_passphrase_stdin(help_command: str) -> str:
@@ -10859,7 +10984,7 @@ def cmd_vault_key_export(args):
             pass
         return 0
     except api.AvaultError as exc:
-        _print_task_error(TaskCliError(f"avault key export failed: {exc}", code="vault_key_export_failed", help_command=help_command))
+        _print_task_error(_avault_cli_error(exc, f"avault key export failed: {exc}", code="vault_key_export_failed", help_command=help_command))
         return 1
     except TaskCliError as exc:
         _print_task_error(exc)
@@ -10894,7 +11019,7 @@ def cmd_vault_key_import(args):
         _print_cli_payload("vault_key_import", imported=True)
         return 0
     except api.AvaultError as exc:
-        _print_task_error(TaskCliError(f"avault key import failed: {exc}", code="vault_key_import_failed", help_command=help_command))
+        _print_task_error(_avault_cli_error(exc, f"avault key import failed: {exc}", code="vault_key_import_failed", help_command=help_command))
         return 1
     except TaskCliError as exc:
         _print_task_error(exc)
@@ -11701,6 +11826,15 @@ def _managed_dependencies_doctor_items(*, language: str = "en", deep: bool = Fal
                     code=f"dependencies.{dependency_id}.ready",
                     dependency_status=None,
                 )
+            if dependency_id == "avault" and dependency.get("authorization_required"):
+                # No repair target: only the user may raise the macOS dialog.
+                _add_doctor_item(
+                    items,
+                    "warn",
+                    i18n_t("doctor.item.avaultAuthorizationRequired", language),
+                    i18n_t("doctor.action.avaultAuthorizationRequired", language),
+                    code="dependencies.avault.authorization_required",
+                )
             continue
 
         required = bool(dependency.get("required"))
@@ -12164,6 +12298,44 @@ def _show_runtime_doctor_items(*, language: str = "en", deep: bool = False) -> l
     return items
 
 
+def _macos_login_session_doctor_items(*, language: str = "en") -> list[dict]:
+    if platform.system() != "Darwin":
+        return []
+    owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
+    if owner_pid:
+        state = api.macos_login_session_state(service_pid=owner_pid)
+    else:
+        return [{
+            "status": "pass",
+            "code": "login_session_local_fallback",
+            "message": i18n_t("doctor.item.loginSessionLocalFallback", language),
+        }]
+    if state == "stale_login_session":
+        return [{
+            "status": "fail",
+            "code": "stale_login_session",
+            "message": i18n_t("doctor.item.staleLoginSession", language),
+            "action": i18n_t("doctor.action.staleLoginSession", language),
+        }]
+    if state == "no_gui_session":
+        return [{
+            "status": "pass",
+            "code": "no_gui_session",
+            "message": i18n_t("doctor.item.noGuiSession", language),
+        }]
+    if state == "unknown":
+        return [{
+            "status": "warn",
+            "code": "login_session_unknown",
+            "message": i18n_t("doctor.item.loginSessionUnknown", language),
+        }]
+    return [{
+        "status": "pass",
+        "code": "login_session_healthy",
+        "message": i18n_t("doctor.item.loginSessionHealthy", language),
+    }]
+
+
 def _doctor(*, deep: bool = False, language: str = "en"):
     """Run diagnostic checks and return results in UI-compatible format.
 
@@ -12540,6 +12712,7 @@ def _doctor(*, deep: bool = False, language: str = "en"):
         *_service_generation_items(language=language),
         *_restart_state_items(language=language),
         *_runtime_architecture_items(language=language),
+        *_macos_login_session_doctor_items(language=language),
         *_show_git_checkpoint_items(language=language),
         *_scheduled_task_weekday_items(language=language),
     ]:
@@ -17715,9 +17888,9 @@ def build_parser():
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe vault key --help",
-        error_hint="Run: vibe vault key export  |  vibe vault key import <file>",
+        error_hint="Run: vibe vault key export  |  vibe vault key import <file>  |  vibe vault key authorize",
     )
-    vault_key_sub = vault_key_parser.add_subparsers(dest="vault_key_command", metavar="{export,import}")
+    vault_key_sub = vault_key_parser.add_subparsers(dest="vault_key_command", metavar="{export,import,authorize}")
     vault_key_sub.required = True
     vault_key_export_parser = vault_key_sub.add_parser(
         "export",
@@ -17738,6 +17911,20 @@ def build_parser():
     vault_key_import_parser.add_argument("file", help="Export blob file produced by 'vibe vault key export'")
     vault_key_import_parser.add_argument("--force", action="store_true", help="Overwrite an existing machine key")
     _add_json_noop(vault_key_import_parser)
+    vault_key_authorize_parser = vault_key_sub.add_parser(
+        "authorize",
+        help="Let avault read the machine key after macOS asks (one macOS dialog)",
+        description=(
+            "Run once when Vault reports avault_authorization_required, usually right after the first "
+            "Developer ID signed avault replaced an older one. macOS shows one Keychain dialog on this "
+            "Mac's screen: enter this Mac's login password and choose Always Allow. Run it yourself in a "
+            "logged-in desktop session; over SSH, use Authorize avault on the Vault page in Avibe "
+            "instead. Agents must ask the user rather than run it."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        error_help_command="vibe vault key authorize --help",
+    )
+    _add_json_noop(vault_key_authorize_parser)
 
     vault_request_parser = vault_subparsers.add_parser(
         "request",
@@ -18729,6 +18916,8 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("vault", "remove"): "editor",
     ("vault", "key", "export"): "owner",
     ("vault", "key", "import"): "owner",
+    # Lets this machine's avault read its key; the Web action is instance-level too.
+    ("vault", "key", "authorize"): "owner",
     # Show: reading a page is Viewer work and writing to one is Editor work; the
     # page's own ACL still decides which page, on both sides.
     ("show", "list"): "viewer",
@@ -19021,6 +19210,8 @@ def _dispatch_parsed_command(parser: argparse.ArgumentParser, args) -> None:
                 sys.exit(cmd_vault_key_export(args))
             if args.vault_key_command == "import":
                 sys.exit(cmd_vault_key_import(args))
+            if args.vault_key_command == "authorize":
+                sys.exit(cmd_vault_key_authorize(args))
             parser.error("vault key command is required")
         parser.error("vault command is required")
     if args.command == "data":

@@ -1553,7 +1553,7 @@ def test_model_hub_config_round_trip_and_serializer_completeness(monkeypatch, tm
         assert serialized_source["models"][0].get("retired", False) is False, label
         assert agent_fields == set(serialized_hub["agents"]["claude"]), label
         assert agent_sources_fields == set(serialized_hub["agents"]["claude"]["sources"]), label
-        assert route_fields == set(ModelHubRouteConfig().to_payload()), label
+        assert route_fields - {"cache_ttl"} == set(ModelHubRouteConfig().to_payload()), label
         assert menu_fields == set(serialized_hub["agents"]["opencode"]["menu"]), label
 
     stale_hub_payload = json.loads(json.dumps(api_payload["model_hub"]))
@@ -2975,6 +2975,34 @@ def test_agent_source_orders_validate_existence_eligibility_and_uniqueness():
     }
     with pytest.raises(ValueError):
         ModelHubConfig.from_payload(ineligible)
+
+
+def test_route_cache_ttl_is_optional_and_closed():
+    route = ModelHubRouteConfig.from_payload(
+        {
+            "hops": [{"source_id": "src_same0001", "model_id": "model-a"}],
+            "cache_ttl": "1h",
+        }
+    )
+    assert route.cache_ttl == "1h"
+    route_12h = ModelHubRouteConfig.from_payload(
+        {
+            "hops": [{"source_id": "src_same0001", "model_id": "model-a"}],
+            "cache_ttl": "12h",
+        }
+    )
+    assert route_12h.cache_ttl == "12h"
+    assert "cache_ttl" not in ModelHubRouteConfig.from_payload(
+        {"hops": [{"source_id": "src_same0001", "model_id": "model-a"}]}
+    ).to_payload()
+    for value in ("", "24h", 3600, True):
+        with pytest.raises(ValueError, match="cache_ttl"):
+            ModelHubRouteConfig.from_payload(
+                {
+                    "hops": [{"source_id": "src_same0001", "model_id": "model-a"}],
+                    "cache_ttl": value,
+                }
+            )
 
 
 def test_route_hops_allow_one_source_to_supply_distinct_models():

@@ -36,6 +36,8 @@ capability:
     - tests/test_model_hub_retry_advice.py
     - tests/test_model_hub_retry_policy.py
     - tests/test_model_hub_retry_lifecycle.py
+    - tests/test_model_hub_streamed_overload.py
+    - tests/test_model_hub_streamed_overload_lifecycle.py
     - tests/test_model_hub_recovery_evidence.py
     - tests/test_model_hub_progress.py
     - tests/test_model_hub_failure_presentation.py
@@ -671,7 +673,7 @@ scenarios:
     related_tests:
       - tests/test_model_hub_vibey_consumer.py::test_opaque_history_uses_launch_snapshot_without_requiring_turn_attribution
       - tests/test_model_hub_vibey_consumer.py::test_opaque_history_origin_survives_recovery_walks
-      - tests/test_model_hub_vibey_consumer.py::test_native_history_is_not_scrubbed_by_vibey_origin_policy
+      - tests/test_model_hub_vibey_consumer.py::test_native_history_is_filtered_without_opaque_provenance
   - id: MH-VIBEY-006
     name: Sequential Vibey retries replace a completed route without losing turn provenance
     status: covered
@@ -737,6 +739,31 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_retry_policy.py::test_one_window_covers_all_fallback_passes_without_replaying_after_output
+  - id: MH-RETRY-OVERLOAD-001
+    name: Exact Responses overload discards the first body and replays once with independent accounting
+    status: covered
+    kind: recovery
+    layer: unit
+    test:
+      - tests/test_model_hub_streamed_overload.py::test_buffered_overload_commits_only_final_attempt
+      - tests/test_model_hub_streamed_overload.py::test_other_response_endings_are_lossless_and_never_replayed
+      - tests/test_model_hub_streamed_overload_lifecycle.py::test_vibey_overload_uses_backup_without_leaking_origin_or_pinned_content
+      - tests/test_model_hub_streamed_overload_lifecycle.py::test_other_protocols_still_stream_before_terminal_and_never_replay
+  - id: MH-RETRY-OVERLOAD-002
+    name: Buffered Responses withhold output and retain spool and upstream ownership through cancellation
+    status: covered
+    kind: recovery
+    layer: unit
+    test:
+      - tests/test_model_hub_streamed_overload_lifecycle.py::test_initial_response_waits_for_terminal_and_owns_spool_until_cleanup
+      - tests/test_model_hub_streamed_overload_lifecycle.py::test_spool_io_failure_is_local_metered_and_never_replayed
+      - tests/test_model_hub_streamed_overload_lifecycle.py::test_cancellation_during_replay_wait_keeps_only_the_metered_failed_attempt
+  - id: MH-RETRY-OVERLOAD-003
+    name: Buffered overload replay shares the original preoutput recovery admission window
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_streamed_overload_lifecycle.py::test_replay_keeps_preoutput_recovery_window
   - id: MH-RETRY-RECOVERY-001
     name: Real protocol output or empty completion proves recovery while unknown success does not
     status: covered
@@ -843,6 +870,14 @@ scenarios:
     kind: recovery
     layer: unit
     test: tests/test_model_hub_retry_lifecycle.py::test_a_plan_or_billing_429_settles_its_source_by_the_code_that_names_it
+  - id: MH-RETRY-ADVICE-004
+    name: Shared Claude cap resets persist as quota cooldowns without early probes or raw header disclosure
+    status: covered
+    kind: recovery
+    layer: unit
+    test: tests/test_model_hub_retry_lifecycle.py::test_claude_cap_headers_drive_persisted_recovery_without_early_probes
+    related_tests:
+      - tests/test_model_hub_claude_caps.py
   - id: MH-RETRY-EVIDENCE-001
     name: Unknown buffered success passes through without proving recovery
     status: covered

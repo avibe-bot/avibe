@@ -36,7 +36,7 @@ jobs:
       - name: Classify the complete change
         id: scope
         run: python3 scripts/ci_docs_only.py
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         if: steps.scope.outputs.docs_only == 'true'
         with:
           python-version: "3.12"
@@ -64,13 +64,13 @@ jobs:
         run: |
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       - name: Install pinned uv
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
-      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/uv
           key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
@@ -98,7 +98,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: '3.12'
           cache: "pip"
@@ -133,7 +133,7 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: ${{ matrix.python }}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8
@@ -201,11 +201,13 @@ jobs:
           npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
           npm run test:project-order
           npm run test:inbox-return
+          npm run test:home-media
           npm run test:badge-triggers
-          npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts skills-dialog.spec.ts
+          npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts
           npm run test:voice-shortcut
           npm run test:chat-interactions
           npm run test:chat-selection
+          npm run test:pdf-preview
 
   show-router-integration:
     needs: changes
@@ -225,13 +227,13 @@ jobs:
           node-version: "22.23.4"
           cache: npm
           cache-dependency-path: .show-runtime-test/package-lock.json
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
       - name: Install pinned uv
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
-      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/uv
           key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
@@ -269,7 +271,7 @@ jobs:
           npm ci
           npm run build
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
           cache: "pip"
@@ -340,7 +342,7 @@ jobs:
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -349,7 +351,7 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
 
-      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/uv
           key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
@@ -415,7 +417,7 @@ jobs:
         run: |
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         if: steps.manifest.outputs.changed == 'true'
         with:
           python-version: "3.12"
@@ -423,7 +425,7 @@ jobs:
         if: steps.manifest.outputs.changed == 'true'
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
-      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         if: steps.manifest.outputs.changed == 'true'
         with:
           path: ~/.cache/uv
@@ -510,7 +512,7 @@ jobs:
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -518,7 +520,7 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
 
-      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/uv
           key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
@@ -557,7 +559,7 @@ jobs:
           mkdir -p ui/dist
           printf '%s\n' '<!doctype html><html><body></body></html>' > ui/dist/index.html
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -565,7 +567,7 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
 
-      - uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25  # v5
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: ~/.cache/uv
           key: ${{ runner.os }}-${{ runner.arch }}-ci-uv-0.12.10-py3.12-${{ hashFiles('pyproject.toml', 'uv.lock') }}
@@ -646,7 +648,7 @@ jobs:
           name: vibe-package-contracts-linux
           path: dist
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
 
@@ -967,7 +969,7 @@ jobs:
           name: vibe-wheel-linux
           path: dist
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
           architecture: x64
@@ -1021,7 +1023,7 @@ jobs:
           name: vibe-wheel-linux
           path: dist
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
           cache: "pip"
@@ -1142,7 +1144,7 @@ jobs:
           New-Item -ItemType Directory -Force ui/dist | Out-Null
           Set-Content -Path ui/dist/index.html -Value '<!doctype html><html><body></body></html>'
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
         with:
           python-version: "3.12"
           architecture: x64

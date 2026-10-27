@@ -609,6 +609,7 @@ export type ApiContextType = {
   detectCli: (binary: string, backend?: string) => Promise<CliDetectionResult>;
   installAgent: (name: string) => Promise<InstallResult>;
   listDependencies: (options?: DependencyReadOptions) => Promise<DependenciesResult>;
+  getMacOSLoginSessionStatus: () => Promise<MacOSLoginSessionStatus>;
   installDependency: (dep: string) => Promise<InstallResult>;
   getBackendConnection: (name: AgentBackendId) => Promise<BackendConnectionState>;
   getBackendRuntime: (name: string, cliPath?: string) => Promise<BackendRuntimeInfo>;
@@ -835,6 +836,9 @@ export type ApiContextType = {
   getVaultVmk: () => Promise<VaultVmkResult>;
   getVaultPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
   getVaultAgentPubkey: () => Promise<{ ok: boolean; public_key: string; fingerprint: string }>;
+  getAvaultAuthorization: () => Promise<AvaultAuthorizationStatus>;
+  /** Starts the one-time macOS Keychain authorization, or joins the one already running. */
+  authorizeAvault: () => Promise<AvaultAuthorizationStatus>;
   getVaultSandboxRootMetadata: () => Promise<VaultSandboxRootMetadataResult>;
   /** One batch of signed agent-delivery contexts for every protected member of a request (§7.1). */
   createVaultAgentBindingsBatch: (payload: {
@@ -1973,11 +1977,37 @@ export type DependencyItem = {
   release_state?: 'published' | 'unavailable' | null;
   download_error?: DependencyDownloadError | null;
   inspection_error?: { kind: string; message: string } | null;
+  /** avault only: the binary cannot read the Vault key until the user authorizes it once. */
+  authorization_required?: boolean;
+};
+
+/** avault's one-time macOS Keychain authorization (see vibe/avault_authorization.py). */
+export type AvaultAuthorizationAttempt = {
+  id: string;
+  state: 'running' | 'succeeded' | 'failed';
+  reason?: string | null;
+  detail?: string;
+  started_at: string;
+  finished_at?: string;
+};
+
+export type AvaultAuthorizationStatus = {
+  ok: boolean;
+  required: boolean;
+  detected_at: string | null;
+  attempt: AvaultAuthorizationAttempt | null;
+  login_session_state?: MacOSLoginSessionStatus['state'];
+};
+
+export type MacOSLoginSessionStatus = {
+  ok: boolean;
+  state: 'healthy' | 'stale_login_session' | 'no_gui_session' | 'unknown' | 'not_applicable';
 };
 
 export type DependenciesResult = {
   ok: boolean;
   deps: DependencyItem[];
+  login_session_state?: MacOSLoginSessionStatus['state'];
   reconciling?: boolean;
   reconciling_dependencies?: string[];
 };
@@ -3600,6 +3630,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       const path = `/api/dependencies${query ? `?${query}` : ''}`;
       return withApiDeadline(15_000, signal, (requestSignal) => getJson(path, { signal: requestSignal }));
     },
+    getMacOSLoginSessionStatus: () => getJson('/api/macos/login-session'),
     installDependency: (dep) => startAndPollDependencyInstall(dep),
     getBackendConnection: (name) => getJson(`/api/backend/${encodeURIComponent(name)}/connection`),
     getBackendRuntime: (name, cliPath) => getJson(`/api/backend/${encodeURIComponent(name)}/runtime${cliPath === undefined ? '' : `?cli_path=${encodeURIComponent(cliPath)}`}`),
@@ -4048,6 +4079,15 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     listVaultSecrets: (opts) => getCachedJson('/api/vault/secrets', 1500, opts),
     getVaultPubkey: () => getCachedJson('/api/vault/pubkey', 1500),
     getVaultAgentPubkey: () => getCachedJson('/api/vault/agent/pubkey', 1500),
+    getAvaultAuthorization: async () => {
+      // Polled while an attempt runs: a failed read rejects quietly, so the caller keeps
+      // its last status and keeps polling instead of taking an error body for a status.
+      const path = '/api/vault/avault-authorization';
+      const res = await apiFetch(path);
+      if (!res.ok) throw new ApiError(`Request failed: ${path} (${res.status})`, res.status, null);
+      return res.json();
+    },
+    authorizeAvault: () => postJson('/api/vault/avault-authorization', {}),
     getVaultSandboxRootMetadata: () => getCachedJson('/api/vault/sandbox/root-metadata', 1500, { handleError: false }),
     createVaultAgentBindingsBatch: (payload) =>
       postJson('/api/vault/agent-bindings:batch', payload, { handleError: false }),

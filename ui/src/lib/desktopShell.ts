@@ -9,6 +9,8 @@ declare global {
     readonly __AVIBE_DESKTOP_PET__?: true;
     /** The macOS shell answers the Computer Use guide's actions. */
     readonly __AVIBE_DESKTOP_COMPUTER_USE__?: true;
+    /** The current Workbench handled the shell's update-popover request. */
+    __AVIBE_DESKTOP_UPDATES_HANDLED__?: boolean;
   }
 }
 
@@ -48,12 +50,106 @@ export function canShowInDesktopPet(): boolean {
 }
 
 type ShellInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;
+type ShellTransformCallback = (callback: (event: unknown) => void, once?: boolean) => number;
 
 const computerUseInvoke = (): ShellInvoke | null => {
   if (!isDesktopShell() || window.__AVIBE_DESKTOP_COMPUTER_USE__ !== true) return null;
   const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: ShellInvoke } }).__TAURI_INTERNALS__;
   return internals?.invoke ? internals.invoke.bind(internals) : null;
 };
+
+export type DesktopUpdatePhase =
+  | 'idle'
+  | 'checking'
+  | 'current'
+  | 'available'
+  | 'downloading'
+  | 'installing'
+  | 'installed'
+  | 'disabled'
+  | 'error';
+
+export type DesktopUpdateState = {
+  phase: DesktopUpdatePhase;
+  latest: string | null;
+  channel: 'stable' | 'test';
+  skippedVersion: string | null;
+  interactive: boolean;
+};
+
+const desktopUpdateInvoke = (): ShellInvoke | null => {
+  if (!isDesktopShell()) return null;
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: ShellInvoke } }).__TAURI_INTERNALS__;
+  return internals?.invoke ? internals.invoke.bind(internals) : null;
+};
+
+export const DESKTOP_OPEN_UPDATES_EVENT = 'avibe:desktop-open-updates';
+export const DESKTOP_UPDATE_STATE_EVENT = 'avibe:desktop-update-state';
+
+type DesktopUpdateStateEvent = {
+  payload: unknown;
+};
+
+type DesktopUpdateStateListener = (state: DesktopUpdateState) => void;
+
+/** The desktop updater controls available to the Workbench's version popover. */
+export type DesktopUpdateShellActions = {
+  getState: () => Promise<DesktopUpdateState>;
+  check: () => Promise<void>;
+  install: () => Promise<void>;
+  skip: () => Promise<void>;
+};
+
+export function desktopUpdateShellActions(): DesktopUpdateShellActions | null {
+  const invoke = desktopUpdateInvoke();
+  if (!invoke) return null;
+  return {
+    getState: async () => (await invoke('desktop_update_state')) as DesktopUpdateState,
+    check: async () => { await invoke('desktop_update_check'); },
+    install: async () => { await invoke('desktop_update_install'); },
+    skip: async () => { await invoke('desktop_update_skip'); },
+  };
+}
+
+/**
+ * Listen to native updater state changes without making the Web UI depend on
+ * the desktop package. The desktop shell grants the core event permission to
+ * the Workbench capability; a browser or an older shell simply has no
+ * listener bridge and keeps using snapshot reads.
+ */
+export async function listenDesktopUpdateState(
+  handler: DesktopUpdateStateListener,
+): Promise<(() => Promise<void>) | null> {
+  const invoke = desktopUpdateInvoke();
+  const internals = (window as unknown as {
+    __TAURI_INTERNALS__?: {
+      transformCallback?: ShellTransformCallback;
+    };
+  }).__TAURI_INTERNALS__;
+  if (!invoke || !internals?.transformCallback) return null;
+
+  const eventId = await invoke('plugin:event|listen', {
+    event: DESKTOP_UPDATE_STATE_EVENT,
+    target: { kind: 'Any' },
+    handler: internals.transformCallback((event: unknown) => {
+      const payload = (event as DesktopUpdateStateEvent).payload as DesktopUpdateState;
+      handler(payload);
+    }),
+  }) as number;
+
+  return async () => {
+    const eventPlugin = (window as unknown as {
+      __TAURI_EVENT_PLUGIN_INTERNALS__?: {
+        unregisterListener?: (event: string, eventId: number) => void;
+      };
+    }).__TAURI_EVENT_PLUGIN_INTERNALS__;
+    eventPlugin?.unregisterListener?.(DESKTOP_UPDATE_STATE_EVENT, eventId);
+    await invoke('plugin:event|unlisten', {
+      event: DESKTOP_UPDATE_STATE_EVENT,
+      eventId,
+    });
+  };
+}
 
 /** A System Settings privacy pane the Computer Use guide can open. */
 export type ComputerUsePermissionPane = 'accessibility' | 'screen_recording';

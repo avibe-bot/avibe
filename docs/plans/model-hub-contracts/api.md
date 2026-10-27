@@ -63,9 +63,9 @@ runtime open. Once models are configured it participates in the runtime Stop gua
 | GET `/api/models/catalog/models-dev?query=<text>` | → `{matches: ModelsDevMatch[]}` | Read-only metadata lookup through the server-owned conditional cache. Results keep the shipped provider fields, deduplicate aggregator copies by model id, rank first-party matches first, add `first_party`, derive `native_protocol` from the model id's last path segment through the vendor map, cap results at 8, and never persist automatically. |
 | GET `/api/models/agents/<backend>/chains` | → `{chains: AgentChain[]}` | Hub only. Returns the complete Overview model set in menu order, followed by a selected model or configured Route not already present. All members share one config snapshot and observation time. Direct returns the documented `direct_mode` error. |
 | GET `/api/models/agents/<backend>/chain?model=<id>` | → `{chain: AgentChain}` | Hub only. Direct returns the documented `direct_mode` error. |
-| PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | Nonempty hops save an exact manual override, including equal-to-automatic arrays. Empty hops remain accepted and use DELETE Restore semantics with identical exact effective-removal/supply guards. New pairs validate canonical ids, Source eligibility/existence and retirement; API-key pairs do not require inventory membership, while subscriptions retain existing membership admission/stale-hop retention. Only nonempty replacement uses the protected-supply-only `mutation.route_replace` guard. |
+| PUT `/api/models/agents/<backend>/chain?model=<id>` | `{hops: RouteHop[], cache_ttl?: "5m" | "30m" | "1h" | "12h" | null, force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409`, `422 cache_ttl_unsupported`, or `{chain, removed_hops, interrupted}` | Nonempty hops save an exact manual override, including equal-to-automatic arrays. On Vibey routes, `cache_ttl` is a route-wide C-9 clearing override; omitted/null uses the built-in estimate. It is rejected on non-Vibey routes. Confirmed official OpenAI Responses GPT-5.6+ routes may explicitly request the 30m default or opt into 12h; both are wired as `prompt_cache_options.ttl` and usage accounting keeps their write lifetimes separate. Custom relays never receive OpenAI-specific cache options. Empty hops remain accepted and use DELETE Restore semantics with identical exact effective-removal/supply guards. New pairs validate canonical ids, Source eligibility/existence and retirement; API-key pairs do not require inventory membership, while subscriptions retain existing membership admission/stale-hop retention. Only nonempty replacement uses the protected-supply-only `mutation.route_replace` guard. |
 | DELETE `/api/models/agents/<backend>/chain?model=<id>` | optional `{force?: boolean, would_remove_hops?: RouteHopRef[], would_interrupt?: SupplyGap[]}` → guarded `409` or `{chain, removed_hops, interrupted}` | `mutation.route_restore` removes the key and recomputes defaults; absent key is idempotent. Guard actual effective removals and supply loss. |
-| POST `/api/models/agents/<backend>/chain/preview?model=<id>` | `{manual_override: null \| {hops: RouteHop[]}}` → `{chain: AgentChain}` | Accepts empty hops and normalizes them to null before the shared planner evaluates isolated draft config. Output manual_override is nonempty or null; effective chain/origin follows inheritance. No persistence, events, engine startup/sync, credentials or egress, including when runtime is stopped. |
+| POST `/api/models/agents/<backend>/chain/preview?model=<id>` | `{manual_override: null \| {hops: RouteHop[], cache_ttl?: "5m" | "30m" | "1h" | "12h" | null}}` → `{chain: AgentChain}` | Accepts empty hops and normalizes them to null before the shared planner evaluates isolated draft config. On Vibey routes, the optional route-wide cache override is validated with the same provider/route rules as PUT; official OpenAI Responses GPT-5.6+ accepts explicit 30m or 12h, while relays never receive OpenAI-specific cache options. Other backends reject the field. Output manual_override is nonempty or null; effective chain/origin follows inheritance. No persistence, events, engine startup/sync, credentials or egress, including when runtime is stopped. |
 | POST `/api/models/agents/<backend>/probe` | `{model?}` → `{probe: ProbeResult}` | Hub only. Direct returns the same `direct_mode` error. |
 | GET `/api/models/agents/<backend>/provenance?model=<id>` | → `{provenance: TurnProvenance \| null}` | On-demand read of the most recently persisted retained record for this exact backend and canonical catalog model, regardless of outcome. Validates backend/model; absent history is null. Uses only the existing bounded store and never starts or syncs the engine. No history field is added to AgentChain. |
 | GET `/api/models/events?limit=<n>&before=<id>` | → `{events: ResolutionEvent[]}` | Bounded source-resolution feed. |
@@ -1732,12 +1732,16 @@ so one model is one row rather than one row per spelling.
 Cache writes are metered separately from input served from cache.
 `cache_write_input_tokens` is the subset of `input_tokens` written to the prompt
 cache (Anthropic `cache_creation_input_tokens`), disjoint from
-`cached_input_tokens`, and `cache_write_1h_input_tokens` is the part of it written
-with the one-hour lifetime (`cache_creation.ephemeral_1h_input_tokens`). OpenAI
-protocols report no cache writes, so both are zero there. The fields are additive:
-a ledger row written before they existed reads them as zero and counts its token
-reports in `cache_write_uncaptured_reports`, so a consumer can tell "no cache
-writes" from "cache writes not captured". No stored row is rewritten.
+`cached_input_tokens`. Anthropic's `cache_write_1h_input_tokens` is the part
+written with the one-hour lifetime (`cache_creation.ephemeral_1h_input_tokens`).
+Official OpenAI Responses reports disjoint `cache_write_30m_input_tokens` and
+`cache_write_12h_input_tokens`; those sum to its documented
+`cache_write_tokens` total when the evidence is complete. Missing or invalid
+OpenAI totals/breakdowns remain visible in `cache_write_ttl_uncaptured_reports`
+and keep the valuation a lower bound; no TTL is inferred from the configured
+request default. The fields are additive: released rows read missing new fields
+as zero while preserving their existing truthful Anthropic counters, and an
+untouched released row is not rewritten in place.
 
 ### API-price valuation
 

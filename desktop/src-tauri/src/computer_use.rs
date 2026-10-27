@@ -628,8 +628,13 @@ impl RuntimeState {
             return;
         }
         if self.lifecycle.phase() == ComputerUsePhase::NeedsRuntime {
-            if let Some(directive) =
-                runtime_reprobe_directive(&mut self.lifecycle, &mut self.capabilities, self.origin.as_ref()).await
+            if let Some(directive) = runtime_reprobe_directive(
+                &mut self.lifecycle,
+                &mut self.capabilities,
+                self.origin.as_ref(),
+                silent_grants,
+            )
+            .await
             {
                 self.apply(directive).await;
             }
@@ -1041,14 +1046,16 @@ async fn runtime_reprobe_directive(
     lifecycle: &mut ComputerUseLifecycle,
     capabilities: &mut CapabilityCache,
     origin: Option<&LoopbackOrigin>,
+    read_grants: impl FnOnce() -> Grants,
 ) -> Option<LifecycleDirective> {
     if !lifecycle.enabled() || lifecycle.phase() != ComputerUsePhase::NeedsRuntime {
         return None;
     }
     let origin = origin?;
     let support = capabilities.observe(probe_capabilities(origin).await);
+    // Permissions must reflect the state after the awaited Runtime probe.
     let grants = if support == RuntimeSupport::Supported {
-        silent_grants()
+        read_grants()
     } else {
         Grants {
             accessibility: false,
@@ -3090,46 +3097,156 @@ done
             proxy_executable: None,
             host_bundle_id: None,
         };
-        let mut lifecycle = ComputerUseLifecycle::from_record(&record);
-        let mut capabilities = CapabilityCache::default();
-        capabilities.begin_adoption();
+        // This owner boundary must use fresh permissions after HTTP completes,
+        // not the host's TCC state or a snapshot taken before the await.
+        for (status, schema, grants, support, phase, reason) in [
+            (
+                200,
+                COMPUTER_USE_SCHEMA,
+                Grants::all(),
+                RuntimeSupport::Supported,
+                ComputerUsePhase::Starting,
+                None,
+            ),
+            (
+                200,
+                COMPUTER_USE_SCHEMA,
+                Grants {
+                    accessibility: false,
+                    screen_recording: true,
+                },
+                RuntimeSupport::Supported,
+                ComputerUsePhase::NeedsPermission,
+                Some("accessibility"),
+            ),
+            (
+                200,
+                COMPUTER_USE_SCHEMA,
+                Grants {
+                    accessibility: true,
+                    screen_recording: false,
+                },
+                RuntimeSupport::Supported,
+                ComputerUsePhase::NeedsPermission,
+                Some("screen_recording"),
+            ),
+            (
+                200,
+                COMPUTER_USE_SCHEMA,
+                Grants {
+                    accessibility: false,
+                    screen_recording: false,
+                },
+                RuntimeSupport::Supported,
+                ComputerUsePhase::NeedsPermission,
+                Some("accessibility"),
+            ),
+            (
+                200,
+                0,
+                Grants::all(),
+                RuntimeSupport::Unsupported,
+                ComputerUsePhase::NeedsRuntime,
+                Some("runtime_too_old"),
+            ),
+            (
+                503,
+                COMPUTER_USE_SCHEMA,
+                Grants::all(),
+                RuntimeSupport::Unknown,
+                ComputerUsePhase::NeedsRuntime,
+                Some("runtime_unavailable"),
+            ),
+        ] {
+            let mut lifecycle = ComputerUseLifecycle::from_record(&record);
+            let mut capabilities = CapabilityCache::default();
+            capabilities.begin_adoption();
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("capability listener");
-        let address = listener.local_addr().expect("capability listener address");
-        let origin = LoopbackOrigin::parse(&format!("http://{address}")).expect("loopback origin");
-        let server = tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-            let (mut stream, _) = listener.accept().await.expect("capability request");
-            let mut request = [0_u8; 1024];
-            let read = stream.read(&mut request).await.expect("capability request bytes");
-            assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /api/desktop/capabilities "));
-            let body =
-                format!(r#"{{"controller_id":"restarted-runtime","computer_use_schema":{COMPUTER_USE_SCHEMA}}}"#);
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            stream
-                .write_all(response.as_bytes())
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
                 .await
-                .expect("capability response");
-        });
-        let directive = runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin))
-            .await
-            .expect("normal tick reprobe");
-        server.await.expect("capability server");
+                .expect("capability listener");
+            let address = listener.local_addr().expect("capability listener address");
+            let origin = LoopbackOrigin::parse(&format!("http://{address}")).expect("loopback origin");
+            for (mut skipped, origin) in [(ComputerUseLifecycle::off(), Some(&origin)), (lifecycle.clone(), None)] {
+                assert_eq!(
+                    runtime_reprobe_directive(&mut skipped, &mut capabilities, origin, || panic!(
+                        "ineligible reprobe queried permissions"
+                    ))
+                    .await,
+                    None
+                );
+                assert_eq!(capabilities, CapabilityCache::default());
+            }
 
-        assert!(directive.spawn_daemon);
-        assert!(directive.write_state);
-        assert_eq!(capabilities.controller_id(), Some("restarted-runtime"));
-        assert_eq!(lifecycle.phase(), ComputerUsePhase::Starting);
-        assert_eq!(
-            runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin)).await,
-            None
-        );
+            let (request_seen, request_pending) = oneshot::channel();
+            let (release_response, response_released) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+                let (mut stream, _) = listener.accept().await.expect("capability request");
+                let mut request = [0_u8; 1024];
+                let read = stream.read(&mut request).await.expect("capability request bytes");
+                assert!(String::from_utf8_lossy(&request[..read]).starts_with("GET /api/desktop/capabilities "));
+                request_seen.send(()).expect("pending probe");
+                response_released.await.expect("release capability response");
+                let body = format!(r#"{{"controller_id":"restarted-runtime","computer_use_schema":{schema}}}"#);
+                let response = format!(
+                    "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("capability response");
+            });
+            let current_grants = std::cell::Cell::new(Grants {
+                accessibility: !grants.accessibility,
+                screen_recording: !grants.screen_recording,
+            });
+            let grant_reads = std::cell::Cell::new(0);
+            let reprobe = runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin), || {
+                grant_reads.set(grant_reads.get() + 1);
+                current_grants.get()
+            });
+            let change_permissions = async {
+                request_pending.await.expect("capability request in flight");
+                assert_eq!(grant_reads.get(), 0, "permissions read before the probe completed");
+                current_grants.set(grants);
+                release_response.send(()).expect("release pending response");
+            };
+            let (directive, ()) = timeout(Duration::from_secs(5), async {
+                tokio::join!(reprobe, change_permissions)
+            })
+            .await
+            .expect("bounded reprobe");
+            server.await.expect("capability server");
+
+            let supported = support == RuntimeSupport::Supported;
+            assert_eq!(grant_reads.get(), usize::from(supported));
+            assert_eq!(
+                directive,
+                Some(LifecycleDirective {
+                    spawn_daemon: phase == ComputerUsePhase::Starting,
+                    write_state: support != RuntimeSupport::Unknown,
+                    stop_permission_probe: !supported,
+                    ..LifecycleDirective::default()
+                }),
+                "{status}, {grants:?}"
+            );
+            assert_eq!(capabilities.controller_id(), Some("restarted-runtime"));
+            assert_eq!(capabilities.current(), support);
+            assert_eq!(lifecycle.phase(), phase);
+            assert_eq!(lifecycle.reason(), reason);
+            if supported {
+                assert_eq!(
+                    runtime_reprobe_directive(&mut lifecycle, &mut capabilities, Some(&origin), || panic!(
+                        "repeat reprobe queried permissions"
+                    ))
+                    .await,
+                    None
+                );
+            }
+        }
     }
 
     #[tokio::test]
