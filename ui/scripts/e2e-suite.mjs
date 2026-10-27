@@ -9,11 +9,16 @@
 // together and the suite fails when either one fails, so the same two checks run
 // in the time of the longer one.
 //
+// The type checker runs at a lower scheduling priority. On a four-vCPU runner it
+// otherwise slowed the first browser cases by 10 to 13 seconds per suite. Those
+// cases compile the app in the dev server at the same time.
+//
 // Playwright's output streams as it runs. The type checker's is held and printed
 // once both have finished, so the two never interleave. Arguments after the config
 // go to Playwright, as `npm run test:<suite> -- <spec files>` did before.
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
+import os from 'node:os';
 
 const require = createRequire(import.meta.url);
 const [tsconfig, config, ...forwarded] = process.argv.slice(2);
@@ -29,12 +34,19 @@ for (const signal of ['SIGINT', 'SIGTERM']) {
   });
 }
 
-function run(script, args, { capture }) {
+function run(script, args, { capture, background = false }) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [script, ...args], {
       stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
     });
     children.add(child);
+    if (background && child.pid !== undefined) {
+      try {
+        os.setPriority(child.pid, 10);
+      } catch {
+        // Only scheduling is lost; the check itself still runs.
+      }
+    }
     let output = '';
     if (capture) {
       child.stdout.on('data', (chunk) => (output += chunk));
@@ -52,7 +64,7 @@ function run(script, args, { capture }) {
 }
 
 const [typecheck, suite] = await Promise.all([
-  run(require.resolve('typescript/bin/tsc'), ['-p', tsconfig, '--noEmit'], { capture: true }),
+  run(require.resolve('typescript/bin/tsc'), ['-p', tsconfig, '--noEmit'], { capture: true, background: true }),
   run(require.resolve('@playwright/test/cli'), ['test', '--config', config, ...forwarded], { capture: false }),
 ]);
 
