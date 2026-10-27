@@ -49,6 +49,7 @@ from __future__ import annotations
 import ast
 import errno
 import importlib
+import importlib.abc
 import inspect
 import os
 import re
@@ -71,7 +72,6 @@ from pathlib import Path
 
 import psutil
 import pytest
-from sqlalchemy.exc import SAWarning
 
 from tests import network_guard, process_reaper
 from tests.fake_pid_helpers import PID_LIMIT
@@ -328,6 +328,8 @@ def _sqlite_state_template_factory(tmp_path_factory):
         if template_path is not None:
             return template_path
 
+        from sqlalchemy.exc import SAWarning
+
         from storage.importer import ensure_sqlite_state
 
         template_root = tmp_path_factory.mktemp("sqlite-state-template")
@@ -436,29 +438,87 @@ def _reset_latest_version_cache():
     next test's lookup, and which test that is depends on the shuffle order.
     """
 
-    from core import latest_version_cache
+    def _reset() -> None:
+        # A module that has never been imported holds no answers. Re-read at
+        # teardown to include one the test itself imported.
+        latest_version_cache = sys.modules.get("core.latest_version_cache")
+        if latest_version_cache is not None:
+            latest_version_cache._MEMORY.clear()  # noqa: SLF001
 
-    latest_version_cache._MEMORY.clear()  # noqa: SLF001
+    _reset()
     yield
-    latest_version_cache._MEMORY.clear()  # noqa: SLF001
+    _reset()
 
 
-def _module_this_test_can_import(name: str):
-    """``name``, or None where this file's own ``sys.modules`` stubs keep it from importing.
+class _StubOnImport(importlib.abc.MetaPathFinder):
+    """Give a module the running test's stubs as soon as the test first imports it.
 
-    Several test files replace packages such as ``modules.agents`` with partial
-    stubs at import time; a module that cannot import under them cannot start a
-    background worker in that file either, so there is nothing to stub.
+    The autouse stubs below replace product functions that start background
+    work. Importing their modules up front just to stub them cost every test file
+    about a second locally and about three on a CI runner, because one of them
+    imports all of ``core.handlers``. Most files never import any of them. A
+    module that is not imported yet can start nothing, so its stubs wait here and
+    are applied when its import finishes. This works however the module is
+    reached, including from inside a test or from a thread.
     """
 
+    def __init__(self) -> None:
+        self.waiting: dict[str, list] = {}
+
+    def find_spec(self, fullname, path, target=None):
+        stubs = self.waiting.get(fullname)
+        if not stubs:
+            return None
+        for finder in sys.meta_path:
+            find_spec = getattr(finder, "find_spec", None)
+            spec = None if finder is self or find_spec is None else find_spec(fullname, path, target)
+            if spec is not None:
+                break
+        else:
+            return None
+        execute = getattr(spec.loader, "exec_module", None)
+        if execute is None:
+            return spec
+
+        def execute_then_stub(module) -> None:
+            execute(module)
+            for stub in list(self.waiting.get(fullname, ())):
+                stub(module)
+
+        # Each find returns a fresh loader, so this changes only this import.
+        spec.loader.exec_module = execute_then_stub
+        return spec
+
+
+_STUB_ON_IMPORT = _StubOnImport()
+sys.meta_path.insert(0, _STUB_ON_IMPORT)
+
+
+@contextmanager
+def _stubbed_for_this_test(name: str, stub):
+    """Apply ``stub`` to module ``name`` now if it is imported, else when this test first imports it.
+
+    ``stub`` patches through the test's ``monkeypatch``, so its undo is the
+    test's own. The fixtures using this are set up after ``monkeypatch`` and torn
+    down before it, so an import that finishes while the test is being torn down
+    cannot apply a stub that nothing will undo.
+    """
+
+    module = sys.modules.get(name)
+    if module is not None:
+        stub(module)
+        yield
+        return
+    waiting = _STUB_ON_IMPORT.waiting.setdefault(name, [])
+    waiting.append(stub)
     try:
-        return importlib.import_module(name)
-    except ImportError:
-        return None
+        yield
+    finally:
+        waiting.remove(stub)
 
 
 @pytest.fixture(autouse=True)
-def _no_background_web_push(request: pytest.FixtureRequest, monkeypatch) -> list[dict] | None:
+def _no_background_web_push(request: pytest.FixtureRequest, monkeypatch):
     """Keep the delayed Web Push sender off a thread that outlives its test.
 
     Persisting a notifiable Workbench message schedules
@@ -473,13 +533,15 @@ def _no_background_web_push(request: pytest.FixtureRequest, monkeypatch) -> list
     """
 
     if request.node.get_closest_marker("real_web_push_sender"):
-        return None
-    web_push_notifications = _module_this_test_can_import("core.web_push_notifications")
-    if web_push_notifications is None:
-        return None
+        yield None
+        return
     pushed: list[dict] = []
-    monkeypatch.setattr(web_push_notifications, "_send_to_enabled_subscriptions", pushed.append)
-    return pushed
+
+    def stub(web_push_notifications) -> None:
+        monkeypatch.setattr(web_push_notifications, "_send_to_enabled_subscriptions", pushed.append)
+
+    with _stubbed_for_this_test("core.web_push_notifications", stub):
+        yield pushed
 
 
 def _models_dev_unreachable(_previous: dict) -> dict:
@@ -487,7 +549,7 @@ def _models_dev_unreachable(_previous: dict) -> dict:
 
 
 @pytest.fixture(autouse=True)
-def _no_catalog_fetch(request: pytest.FixtureRequest, monkeypatch) -> None:
+def _no_catalog_fetch(request: pytest.FixtureRequest, monkeypatch):
     """Keep the remote catalog fetches off the network and off threads that outlive their test.
 
     Reading the backend model catalog or the models.dev catalog from a fresh home
@@ -506,17 +568,21 @@ def _no_catalog_fetch(request: pytest.FixtureRequest, monkeypatch) -> None:
     """
 
     if request.node.get_closest_marker("real_catalog_refresh"):
+        yield
         return
-    for name, scheduler in (
-        ("vibe.backend_model_catalog", "schedule_remote_catalog_refresh"),
-        ("vibe.models_dev_catalog", "_refresh_in_background"),
-    ):
-        module = _module_this_test_can_import(name)
-        if module is not None:
-            monkeypatch.setattr(module, scheduler, lambda: False)
-    models_dev = _module_this_test_can_import("vibe.models_dev_catalog")
-    if models_dev is not None:
+
+    def stub_backend_catalog(backend_model_catalog) -> None:
+        monkeypatch.setattr(backend_model_catalog, "schedule_remote_catalog_refresh", lambda: False)
+
+    def stub_models_dev(models_dev) -> None:
+        monkeypatch.setattr(models_dev, "_refresh_in_background", lambda: False)
         monkeypatch.setattr(models_dev, "_fetch_catalog", _models_dev_unreachable)
+
+    with (
+        _stubbed_for_this_test("vibe.backend_model_catalog", stub_backend_catalog),
+        _stubbed_for_this_test("vibe.models_dev_catalog", stub_models_dev),
+    ):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -1249,98 +1315,9 @@ def _reset_show_runtime_manager():
     of the machine. Reset after every test so no real subprocess can outlive it.
     """
     yield
-    try:
-        from core import show_runtime
-    except Exception:
-        return
-    try:
-        show_runtime.set_show_runtime_manager_for_tests(None)
-    except Exception:
-        pass
-
-
-def _async_items_missing_plugin(items) -> list:
-    """Return selected native coroutine items that need pytest-asyncio."""
-    offenders = []
-    for item in items:
-        if item.get_closest_marker("anyio") is not None:
-            continue
-        if item.get_closest_marker("skip") is not None:
-            continue
-        cls = getattr(item, "cls", None)
-        if isinstance(cls, type) and issubclass(cls, unittest.TestCase):
-            continue
-        try:
-            func = item.obj
-        except Exception:
-            continue
-        if inspect.iscoroutinefunction(func):
-            offenders.append(item)
-    return offenders
-
-
-@pytest.hookimpl(trylast=True)
-def pytest_collection_modifyitems(config, items):
-    """Report missing pytest-asyncio without aborting legitimate selections."""
-    if config.pluginmanager.hasplugin("asyncio"):
-        return
-    offenders = _async_items_missing_plugin(items)
-    if not offenders:
-        return
-    message = (
-        'pytest-asyncio is not installed, so asyncio_mode="auto" is inactive. '
-        f"{len(offenders)} selected tests are native 'async def' tests and will "
-        'fail as "async def functions are not natively supported" -- that is the '
-        "missing dev dependency, not a product regression. Install it with "
-        "`uv sync --group dev`."
-    )
-    reporter = config.pluginmanager.get_plugin("terminalreporter")
-    if reporter is not None:
-        reporter.write_line(f"\n{message}", yellow=True, bold=True)
-    else:
-        print(f"\n{message}", file=sys.stderr)
-
-@pytest.fixture(autouse=True)
-def _reset_oauth_runtime_state():
-    """Reset module-level in-memory OAuth caches between tests.
-
-    The handshake store, diagnostic-log throttles, and the unauthenticated /auth
-    rate limiter live in process memory (not under the isolated Avibe home),
-    so without this they would leak across tests sharing a pytest process — e.g. the
-    rate limiter accumulating across files and spuriously 429-ing an unrelated test.
-    """
-    def _reset() -> None:
-        remote_access = sys.modules.get("vibe.remote_access")
-        if remote_access is not None:
-            remote_access._clear_active_hostnames_cache()
-            remote_access._oauth_handshakes.clear()
-        ui_server = sys.modules.get("vibe.ui_server")
-        if ui_server is not None:
-            ui_server._oauth_diag_log_state.clear()
-            ui_server._auth_ratelimit.clear()
-
-    _reset()
-    yield
-    _reset()
-
-
-@pytest.fixture(autouse=True)
-def _reset_show_runtime_manager():
-    """Stop and clear any global Show Runtime manager spawned during a test.
-
-    The Show Runtime manager is a process-global singleton. Serving-path tests
-    that do not install a fake manager cause ``get_show_runtime_manager()`` to
-    lazily create the real manager, which spawns a Node ``cli.js`` + ``esbuild``
-    subprocess tree whenever a runtime is installed on the machine. Without an
-    explicit teardown the reference can be overwritten by a later test's
-    ``set_show_runtime_manager_for_tests`` swap; the ``atexit`` cleanup at pytest
-    exit then no longer sees it, and the Node/esbuild tree leaks for the lifetime
-    of the machine. Reset after every test so no real subprocess can outlive it.
-    """
-    yield
-    try:
-        from core import show_runtime
-    except Exception:
+    # A module that was never imported never created a manager.
+    show_runtime = sys.modules.get("core.show_runtime")
+    if show_runtime is None:
         return
     try:
         show_runtime.set_show_runtime_manager_for_tests(None)
