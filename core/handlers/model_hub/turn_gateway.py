@@ -695,8 +695,10 @@ class ModelHubTurnGateway:
                 client_max_size += 1
             app = web.Application(client_max_size=client_max_size)
             app.router.add_get("/{backend}/v1/models", self._handle_models)
-            # Before the catch-all model route, which would otherwise take it.
-            app.router.add_post("/vibey/v1/hosted-tools/{tool}", self._handle_hosted_tool)
+            # Before the catch-all model route, which would otherwise take it. A hop calls its hosted tools under
+            # its own base URL (``vibey-hosted-tools.md`` §6): ``/v1``, or ``/v1beta`` on a ``google`` hop.
+            for surface in ("v1", "v1beta"):
+                app.router.add_post(f"/vibey/{surface}/hosted-tools/{{tool}}", self._handle_hosted_tool)
             app.router.add_post("/{backend}/v1/{endpoint:.*}", self._handle_request)
             app.router.add_post("/{backend}/v1beta/models/{google_action:.*}", self._handle_google_request)
             runner = web.AppRunner(

@@ -149,16 +149,18 @@ def _bind(service, tool, executor):
     _EXECUTOR_MODELS[source.vendor] = (executor[1],)
 
 
-async def _call(service, tool, body, *, token=None, after_launch=None, language="en"):
+async def _call(service, tool, body, *, token=None, after_launch=None, language="en", surface=None):
     gateway = ModelHubTurnGateway(service, language_provider=lambda: language)
     router = ModelHubRuntimeRouter(service=service, turn_gateway=gateway)
     try:
         hop = await router.resolve_hop("menu-alias", process_scope="vibey:proxy", turn_id="turn-proxy")
         if after_launch is not None:
             after_launch(hop)
+        # ``surface`` stands the hop's base URL on another gateway surface, as a hop of that protocol has it.
+        base = hop["base_url"] if surface is None else f'{hop["base_url"].rsplit("/", 1)[0]}/{surface}'
         async with aiohttp.ClientSession() as client:
             async with client.post(
-                f'{hop["base_url"]}/hosted-tools/{tool}',
+                f'{base}/hosted-tools/{tool}',
                 headers={"Authorization": f'Bearer {token or hop["token"]}', **hop["request_headers"]},
                 data=body if isinstance(body, bytes) else json.dumps(body),
             ) as response:
@@ -257,6 +259,24 @@ async def test_a_proxied_search_runs_one_native_request_and_answers_its_canonica
     # Metered on the executor Source, like any gateway call.
     assert _usage_of(service, executor[0])
     assert latest_ok(service, tool) == (executor[0], executor[1], "executor")
+
+
+@pytest.mark.asyncio
+async def test_a_google_hop_calls_its_hosted_tools_under_its_own_base_url(tmp_path):
+    """MH-HOSTED-GATEWAY-004: a ``google`` hop's base URL is the gateway's ``/v1beta`` surface
+    (``vibey-gemini-native.md``), and Vibey calls the hop's hosted tools under it (§6)."""
+
+    served = replace(_outcome(RawOutcomeKind.SUCCESS, source_id=XAI), hosted_tools=frozenset({"web_search"}))
+    service = _vibey_service(tmp_path, _sources(), handles=[LiveInvokeHandle(served, _responses(WEB_CALL, WEB_ANSWER))])
+    _bind(service, "web_search", (XAI, "grok-4.6"))
+
+    status, answer = await _call(
+        service, "web_search", {"arguments": {"query": "CLIProxyAPI latest release"}}, surface="v1beta",
+    )
+
+    assert status == 200, answer
+    assert answer["record"]["status"] == "completed"
+    assert answer["execution"]["executor_source_id"] == XAI
 
 
 @pytest.mark.asyncio
