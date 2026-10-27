@@ -4224,6 +4224,16 @@ def test_show_event_cli_timeout_replaces_blank_id_before_local_retry(
         raise TimeoutError()
 
     monkeypatch.setattr(cli.urllib.request, "urlopen", timeout_after_receiving)
+    # Nothing accepts the reservation here, so the real 15 s wait for acceptance
+    # would only run out. Its expiry is
+    # test_show_event_cli_pending_timeout_allows_same_reservation_retry's subject;
+    # this test reads the stored reservation once and moves on to the replay.
+    wait_for_acceptance = cli._resolve_show_event_after_ambiguous_live_timeout
+    monkeypatch.setattr(
+        cli,
+        "_resolve_show_event_after_ambiguous_live_timeout",
+        lambda session_id, payload: wait_for_acceptance(session_id, payload, wait_seconds=0),
+    )
     replayed = []
 
     def record_local(session_id, payload):
