@@ -2280,6 +2280,57 @@ async def test_chat_completions_reassembles_parallel_calls() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_deltas",
+    [
+        pytest.param(
+            [{"index": 0, "id": "call_a", "function": {"name": "read", "arguments": "{}"},
+              "extra_content": {"google": {"thought_signature": "sig-a"}}}],
+            id="with-call",
+        ),
+        pytest.param(
+            [{"index": 0, "id": "call_a", "function": {"name": "read", "arguments": "{}"}},
+             {"index": 0, "extra_content": {"google": {"thought_signature": "sig-a"}}}],
+            id="own-delta",
+        ),
+    ],
+)
+async def test_chat_replays_gemini_tool_call_thought_signature(tool_deltas: list[dict[str, Any]]) -> None:
+    """Gemini answers the request after a tool call with 400 unless that call's thought signature comes back."""
+
+    frames = [{"choices": [{"delta": {"tool_calls": [delta]}}]} for delta in tool_deltas]
+    frames.append({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]})
+    served = "".join(f"data: {json.dumps(frame)}\n\n" for frame in frames) + "data: [DONE]\n\n"
+    answered = 'data: {"choices":[{"delta":{"content":"done"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.content))
+        text = served if len(bodies) == 1 else answered
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=text)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        adapter = OpenAIChatAdapter(client)
+        first = await _events(adapter, _request("openai_chat"))
+        assert isinstance(first[-1], Done)
+        history = (
+            UserMessage((TextBlock(text="hello"),)),
+            first[-1].message,
+            ToolResultMessage("call_a", "read", (TextBlock(text="ok"),)),
+        )
+        second = await _events(adapter, _request("openai_chat", messages=history))
+
+    assert isinstance(second[-1], Done)
+    assistant = next(message for message in bodies[1]["messages"] if message["role"] == "assistant")
+    assert assistant["tool_calls"] == [{
+        "id": "call_a",
+        "type": "function",
+        "function": {"name": "read", "arguments": "{}"},
+        "extra_content": {"google": {"thought_signature": "sig-a"}},
+    }]
+
+
+@pytest.mark.asyncio
 async def test_chat_reuses_indexless_tool_slot_for_argument_only_delta() -> None:
     body = (
         'data: {"choices":[{"delta":{"tool_calls":[{"id":"call_a","function":{"name":"read"}}]}}]}\n\n'
