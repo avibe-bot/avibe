@@ -189,6 +189,10 @@
     "zoomIn": "放大",
     "zoomOut": "缩小",
     "resetZoom": "重置缩放",
+    "pdfPage": "第 {{page}} 页",
+    "pdfPosition": "第 {{page}} 页，共 {{total}} 页",
+    "pdfCounter": "{{page}} / {{total}}",
+    "zoomPercent": "{{percent}}%",
     "download": "下载"
   },
   "common": {

@@ -189,6 +189,10 @@
     "zoomIn": "Zoom in",
     "zoomOut": "Zoom out",
     "resetZoom": "Reset zoom",
+    "pdfPage": "Page {{page}}",
+    "pdfPosition": "Page {{page}} of {{total}}",
+    "pdfCounter": "{{page}} / {{total}}",
+    "zoomPercent": "{{percent}}%",
     "download": "Download"
   },
   "common": {

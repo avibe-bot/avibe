@@ -207,6 +207,7 @@ jobs:
           npm run test:voice-shortcut
           npm run test:chat-interactions
           npm run test:chat-selection
+          npm run test:pdf-preview
 
   show-router-integration:
     needs: changes
