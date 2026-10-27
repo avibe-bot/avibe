@@ -366,7 +366,7 @@ jobs:
           if [ "$UPGRADE_DIRECTION" = forward ]; then
             mkdir -p "$RUNNER_TEMP/retired-updater-junit"
             pytest_status=0
-            (cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py -v \
+            (cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py --rootdir=. -v \
               --junitxml="$RUNNER_TEMP/retired-updater-junit/retired-updater-bridge.xml") || pytest_status=$?
             evidence_status=0
             (cd release-automation && python scripts/ci_scenario_evidence.py --release \

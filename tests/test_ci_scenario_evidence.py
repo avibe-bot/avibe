@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -185,6 +187,48 @@ def test_a_report_names_each_case_by_its_node_id(tmp_path: Path) -> None:
     assert reports.outcomes["windows-agent"] == {}
 
 
+def test_publish_release_evidence_from_its_nested_automation_checkout(tmp_path: Path) -> None:
+    """publish.yml runs its release case from ``release-automation/`` inside the release checkout.
+
+    Pytest finds the outer checkout's configuration from there and takes it as the root, so unless
+    the command roots itself every node id and JUnit class name carries ``release-automation/``
+    and the gate sees no covered case (the v3.2.3 publication failed this way). Runs publish.yml's
+    own selecting arguments in that layout, then the gate as the workflow does.
+    """
+
+    release_args = [arg for arg in release_pytest_commands(WORKFLOWS / "publish.yml")[1]
+                    if arg != "tests/e2e/test_retired_updater_bridge.py"]
+    command = ["tests/test_x.py", *release_args]
+    outer = tmp_path / "release"
+    outer.mkdir()
+    outer.joinpath("pyproject.toml").write_text("[tool.pytest.ini_options]\nmarkers = []\n", encoding="utf-8")
+    root = outer / "release-automation"
+    test = root / "tests" / "test_x.py"
+    test.parent.mkdir(parents=True)
+    test.write_text("def test_case():\n    pass\n", encoding="utf-8")
+    scenarios = root / "tests" / "scenarios" / "capability"
+    scenarios.mkdir(parents=True)
+    scenarios.joinpath("catalog.yaml").write_text(
+        "scenarios:\n  - id: ROW-1\n    status: covered\n    test: tests/test_x.py::test_case\n",
+        encoding="utf-8",
+    )
+    workflow = tmp_path / "publish.yml"
+    workflow.write_text(
+        "jobs:\n  build:\n    steps:\n      - run: (cd release-automation && python -m pytest "
+        + " ".join(command) + " -v --junitxml=report.xml)\n",
+        encoding="utf-8",
+    )
+    junit = tmp_path / "junit"
+    junit.mkdir()
+    run = subprocess.run(
+        [sys.executable, "-m", "pytest", *command, "-q", "-p", "no:cacheprovider", f"--junitxml={junit / 'release.xml'}"],
+        cwd=root, capture_output=True, text=True, check=False,
+    )
+    assert run.returncode == 0, run.stdout + run.stderr
+
+    assert check_release_evidence(junit, workflow, root, scenario_root=scenarios.parent) == {CASE: [CASE]}
+
+
 def test_release_evidence_uses_the_explicit_release_checkout_root(tmp_path: Path) -> None:
     root, scenarios, workflow, junit = _release_fixture(tmp_path)
     wrong_root = tmp_path / "primary-checkout"
@@ -214,14 +258,14 @@ def test_release_evidence_uses_the_explicit_release_checkout_root(tmp_path: Path
     assert "scripts/pytest_collection.py" in publish_workflow
     assert ".github/workflows/publish.yml" in publish_workflow
     assert "tests/scenarios/**/catalog.yaml" in publish_workflow
-    assert "cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py" in publish_workflow
+    assert "cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py --rootdir=." in publish_workflow
     assert '--junitxml="$RUNNER_TEMP/retired-updater-junit/retired-updater-bridge.xml"' in publish_workflow
 
     assert release_pytest_commands(WORKFLOWS / "model-hub-e2e.yml") == [
         ("-m", "e2e_model_hub", "tests/e2e", "-p", "no:cacheprovider")
     ]
     publish_commands = release_pytest_commands(WORKFLOWS / "publish.yml")
-    assert publish_commands[1] == ("tests/e2e/test_retired_updater_bridge.py",)
+    assert publish_commands[1] == ("tests/e2e/test_retired_updater_bridge.py", "--rootdir=.")
     assert covered_test_evidence()[
         "tests/e2e/test_retired_updater_bridge.py::test_released_updater_replaces_companion_without_touching_user_data"
     ].rows == ["MUC-004"]

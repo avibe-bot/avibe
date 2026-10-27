@@ -394,7 +394,7 @@ def test_muc_004_official_publish_gates_real_retired_updater_before_assets_and_p
     ):
         assert contract in commands
     assert "dist/avibe_memory-*-py3-none-any.whl" in upload["run"]
-    assert "cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py -v" in commands
+    assert "cd release-automation && python -m pytest tests/e2e/test_retired_updater_bridge.py --rootdir=. -v" in commands
     assert "TARGET_VERSION=\"$(python release-automation/scripts/release_package_version.py \"$RELEASE_TAG\")\"" in commands
     assert 'realpath "$VIBE_INSTALL_TEST_WHEEL"' in commands
     assert "realpath old-release/avibe_memory-3.1.0-py3-none-any.whl" in commands
