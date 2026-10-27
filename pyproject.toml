@@ -98,7 +98,7 @@ dependencies = [
     # The Intel Mac Runtime is binary-only, and 48.0.1 is the newest release with
     # an x86_64 macOS wheel (universal2); 49+ ships none. Elsewhere, 50.0.2
     # bundles OpenSSL 4.0.3 and the X.509/PKCS#7 fixes that 48.x lacks.
-    "cryptography==48.0.1; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    "cryptography==50.0.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
     "cryptography>=50.0.2; sys_platform != 'darwin' or platform_machine != 'x86_64'",
     # keccak256 + ripemd160 for vault signing-key address derivation
     # (storage/vault_addresses.py); cryptography ships neither.
