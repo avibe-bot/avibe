@@ -54,7 +54,7 @@ jobs:
         run: |
           (cd dist && shasum -a 256 "tmux-${{ inputs.tmux_version }}-linux-${{ matrix.arch }}.tar.gz" > "tmux-${{ inputs.tmux_version }}-linux-${{ matrix.arch }}.sha256")
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: tmux-linux-${{ matrix.arch }}
           path: dist/tmux-${{ inputs.tmux_version }}-linux-${{ matrix.arch }}.*
@@ -92,7 +92,7 @@ jobs:
         run: |
           (cd dist && shasum -a 256 "tmux-${{ inputs.tmux_version }}-darwin-${{ matrix.arch }}.tar.gz" > "tmux-${{ inputs.tmux_version }}-darwin-${{ matrix.arch }}.sha256")
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: tmux-darwin-${{ matrix.arch }}
           path: dist/tmux-${{ inputs.tmux_version }}-darwin-${{ matrix.arch }}.*
@@ -145,7 +145,7 @@ jobs:
         env:
           TMUX_VERSION: ${{ inputs.tmux_version }}
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: tmux-runtime-manifest
           path: dist/tmux-runtime-manifest.json

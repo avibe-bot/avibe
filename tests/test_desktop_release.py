@@ -573,7 +573,16 @@ def test_workflow_signs_every_macos_layer_before_recording():
     for command in ("sign-dmg", "notarize", "verify-release"):
         assert f"macos_signing.py {command}" in dmg["run"]
     assert "NotSigned" in step("Verify unsigned Windows installer")["run"]
-    assert steps[-2]["uses"] == "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+    # The desktop upload stays on the repository's one maintained, full-SHA upload-artifact pin.
+    upload_pins = {
+        item["uses"]
+        for path in (ROOT / ".github/workflows").glob("*.yml")
+        for job in workflow(path.name)["jobs"].values()
+        for item in job.get("steps", [])
+        if str(item.get("uses", "")).startswith("actions/upload-artifact@")
+    }
+    assert re.fullmatch(r"actions/upload-artifact@[0-9a-f]{40}", steps[-2]["uses"])
+    assert upload_pins == {steps[-2]["uses"]}
     assert steps[-2]["if"] == "env.DESKTOP_CACHE_WARMUP != 'true'"
     assert steps[-1]["name"] == "Remove Apple signing material"
     assert steps[-1]["if"] == "always() && runner.os == 'macOS'"

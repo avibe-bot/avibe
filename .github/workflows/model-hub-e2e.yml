@@ -103,7 +103,7 @@ jobs:
 
       - name: Upload the run log
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: model-hub-e2e-${{ github.run_id }}-${{ github.run_attempt }}
           path: model-hub-e2e.log

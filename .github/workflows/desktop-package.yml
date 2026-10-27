@@ -448,7 +448,7 @@ jobs:
             --directory desktop-package --tag "$RELEASE_TAG" --source-sha "$SOURCE_SHA" \
             --target "$TARGET" --app desktop/target/release/bundle/macos/Avibe.app
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         if: env.DESKTOP_CACHE_WARMUP != 'true'
         with:
           name: avibe-desktop-${{ env.DESKTOP_VERSION }}-${{ matrix.target }}

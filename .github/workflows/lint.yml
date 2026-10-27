@@ -85,7 +85,7 @@ jobs:
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/
@@ -332,14 +332,14 @@ jobs:
           python scripts/prepare_local_show_runtime_manifest.py
           python -m build
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: ui-dist-linux
           path: ui/dist
           if-no-files-found: error
           retention-days: 1
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: vibe-wheel-linux
           path: dist/*.whl
@@ -348,7 +348,7 @@ jobs:
 
       # Keep the existing core-only wheel artifact stable for all consumers.
       # companion artifact, consumed only by the distribution contracts.
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: vibe-package-contracts-linux
           path: |
@@ -414,7 +414,7 @@ jobs:
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/
@@ -484,7 +484,7 @@ jobs:
         run: >-
           python scripts/model_hub_hosted_wire_gate.py --base "$BASE_SHA"
           --pull-request "$PR_NUMBER" --work-dir "$RUNNER_TEMP/hosted-wire" --loopback-only
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         if: always() && steps.manifest.outputs.changed == 'true'
         with:
           name: model-hub-hosted-wire-${{ github.sha }}-${{ github.run_attempt }}
@@ -635,7 +635,7 @@ jobs:
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/
@@ -744,7 +744,7 @@ jobs:
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/
@@ -1044,7 +1044,7 @@ jobs:
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/
@@ -1160,7 +1160,7 @@ jobs:
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/
@@ -1259,7 +1259,7 @@ jobs:
       # evidence ran (scripts/ci_scenario_evidence.py).
       - name: Upload junit reports
         if: always()
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: junit-${{ github.job }}-${{ strategy.job-index }}
           path: ci-junit/
