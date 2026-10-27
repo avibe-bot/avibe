@@ -32,7 +32,10 @@ product logic.
    Homebrew resolve exactly as they do in a terminal. The shell runs `$SHELL -l
    -i -c` once per start, reads only `PATH`, and keeps its own `PATH` when that
    shell fails or takes longer than 10 seconds. A private Runtime still puts its
-   own `bin` and Node directories first. Discovery and the lifecycle verbs do
+   own `bin` directory first, but does not put bundled Node on the shared PATH:
+   external npm must use the user's Node, not derive a global install prefix
+   inside the immutable Runtime. Avibe-owned Node consumers use explicit private
+   toolchain paths. Discovery and the lifecycle verbs do
    not consult the login shell, so adopting a running Runtime never waits on it.
    The lookup runs on a blocking thread before the launch-state lock is taken, so
    a concurrent Stop is not held for that budget. A successful lookup lets the
@@ -97,8 +100,12 @@ Agents inherit a PATH led by the Runtime's dedicated `bin` directory. It provide
 `vibe` (`vibe.cmd` on Windows), which runs the bundled Python with `-I -B -m vibe`.
 The entry point is generated when building the bundle, covered by its manifest,
 and works after relocation, including installation paths containing spaces.
-The private Python directory is not added to PATH, so the user's `python3` and
-`pip` remain available. Build-machine Python console scripts are removed.
+The private Python and Node directories are not added to the shared PATH, so
+external tools keep the user's interpreter selection. Avibe's backend installer,
+Show Runtime, and computer-use helpers select bundled Node explicitly; the backend
+installer uses an isolated mutable prefix. This keeps an external npm global
+install from adding packages to the immutable Runtime and triggering a repair on
+the next launch. Build-machine Python console scripts are removed.
 
 **Login-shell limitation:** a user profile that prepends a new global CLI
 directory or replaces PATH can override the bundled `vibe`. Profiles that

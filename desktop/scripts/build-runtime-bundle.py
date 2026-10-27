@@ -623,7 +623,6 @@ def private_probe_environment(probe_home: Path, node: Path, npm_cli: Path, paylo
             part
             for part in (
                 str(payload / CLI_BIN_DIR),
-                str(node.parent),
                 inherited_path,
             )
             if part
