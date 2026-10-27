@@ -430,7 +430,7 @@ jobs:
           set -euo pipefail
           tar -czf git-source-patched.tar.gz -C source "git-$GIT_VERSION"
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: git-source-patched
           path: git-source-patched.tar.gz
@@ -564,7 +564,7 @@ jobs:
               (cd /work/dist && sha256sum "$(basename "$archive")" > "$(basename "$archive").sha256")
             '
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: git-runtime-linux-${{ matrix.arch }}
           path: dist/git-*.tar.gz*
@@ -699,7 +699,7 @@ jobs:
           COPYFILE_DISABLE=1 tar -czf "$archive" -C ../package bin/git
           (cd ../dist && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: git-runtime-darwin-${{ matrix.arch }}
           path: dist/git-*.tar.gz*
@@ -775,7 +775,7 @@ jobs:
           )
           PY
 
-      - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: git-runtime-manifest
           path: dist/git-runtime-manifest.json
