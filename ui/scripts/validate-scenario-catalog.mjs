@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import yaml from 'js-yaml';
+import { load } from 'js-yaml';
 
 import { collectCases, resolveUiEvidence, uiEvidenceRows } from './scenarioCatalog.mjs';
 
@@ -59,7 +59,7 @@ const catalogPaths = () => {
  */
 export const checkCatalogs = () => {
   const catalogs = catalogPaths().map((file) => {
-    const catalog = yaml.load(fs.readFileSync(file, 'utf8'));
+    const catalog = load(fs.readFileSync(file, 'utf8'));
     const name = path.relative(REPO_ROOT, file);
     return {
       // The whole ID set, not just the UI rows': a UI row may borrow the ID of a

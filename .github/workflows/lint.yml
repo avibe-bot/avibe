@@ -180,7 +180,29 @@ jobs:
     # Browser interactions do not depend on lint, Vitest, or the production
     # bundle. Run alongside UI validation; the required unit-tests gate waits
     # for both lanes, including failure/cancellation of either one.
+    name: ui-browser-checks (${{ matrix.lane }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each suite runs serially with one worker and its own dev server; the
+        # serial job had become the workflow's longest. Two lanes balanced from
+        # measured suite times (about 7.5 minutes each) run every suite once.
+        include:
+          - lane: 1
+            suites: |
+              npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
+              npm run test:home-media
+              npm run test:voice-shortcut
+              npm run test:chat-selection
+          - lane: 2
+            suites: |
+              npm run test:project-order
+              npm run test:inbox-return
+              npm run test:badge-triggers
+              npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts
+              npm run test:chat-interactions
+              npm run test:pdf-preview
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
@@ -192,22 +214,41 @@ jobs:
         working-directory: ui
         run: npm ci
 
+      # `--with-deps` fetches about 120 MB of WebKit system packages from the
+      # runner's Ubuntu mirror, which has taken 13 to 44 minutes when the
+      # mirror is slow. apt keeps the packages it downloads in this directory,
+      # restored and saved per runner image and Playwright version; apt still
+      # resolves, verifies and installs every package, and fetches any it lacks.
+      - name: Keep Playwright system packages restorable
+        id: browser-packages
+        working-directory: ui
+        run: |
+          mkdir -p "$HOME/.cache/playwright-apt/partial"
+          echo "Dir::Cache::Archives \"$HOME/.cache/playwright-apt/\";" | sudo tee /etc/apt/apt.conf.d/99playwright-archives
+          prefix="playwright-apt-$ImageOS-"
+          echo "prefix=$prefix" >> "$GITHUB_OUTPUT"
+          echo "key=$prefix$ImageVersion-$(node -p "require('playwright-core/package.json').version")" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ~/.cache/playwright-apt
+          key: ${{ runner.os }}-${{ runner.arch }}-${{ steps.browser-packages.outputs.key }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-${{ steps.browser-packages.outputs.prefix }}
+      - name: Install browsers
+        working-directory: ui
+        run: |
+          npx playwright install --with-deps chromium webkit
+          # Drop superseded packages, then hand apt's root-owned files to the
+          # runner user so the cache can save them.
+          sudo apt-get autoclean
+          sudo rm -rf "$HOME/.cache/playwright-apt/partial" "$HOME/.cache/playwright-apt/lock"
+          sudo chown -R "$(id -u):$(id -g)" "$HOME/.cache/playwright-apt"
+
       - name: Test browser interactions
         # Model Hub catalog/provider regression runs on the scheduled/manual
         # model-hub-ui-regression workflow instead of blocking every PR.
         working-directory: ui
         run: |
-          npx playwright install --with-deps chromium webkit
-          npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
-          npm run test:project-order
-          npm run test:inbox-return
-          npm run test:home-media
-          npm run test:badge-triggers
-          npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts
-          npm run test:voice-shortcut
-          npm run test:chat-interactions
-          npm run test:chat-selection
-          npm run test:pdf-preview
+          ${{ matrix.suites }}
 
   show-router-integration:
     needs: changes
@@ -324,9 +365,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Refreshed complete-run timings balance eight lanes below nine minutes
-        # of file work, reducing the initial hosted-runner burst by one.
-        # Preserve discovery, watchdogs and one-process-per-file isolation.
+        # Eight runners with two planned lanes each: the refreshed complete-run
+        # timings give each lane about five minutes of file work. Preserve
+        # discovery, watchdogs and one-process-per-file isolation.
         shard: [0, 1, 2, 3, 4, 5, 6, 7]
         shard-total: [8]
     # Every pytest run in this job writes its junit report here (tests/conftest.py).
@@ -364,8 +405,10 @@ jobs:
 
       # Only the tests run with loopback alone, so no process a test starts can
       # reach past it; installing dependencies above still needs the network.
+      # The single-threaded per-file suite left three of the runner's four vCPUs
+      # idle; two planned lanes keep two file processes in flight per runner.
       - name: Run unit tests shard ${{ matrix.shard }}/${{ matrix.shard-total }}
-        run: bash scripts/ci_loopback_only.sh bash scripts/ci_unit_tests.sh "${{ matrix.shard }}" "${{ matrix.shard-total }}"
+        run: bash scripts/ci_loopback_only.sh python scripts/ci_unit_test_lanes.py "${{ matrix.shard }}" "${{ matrix.shard-total }}" 2
 
       # Read by scenario-evidence, which proves each covered scenario row's
       # evidence ran (scripts/ci_scenario_evidence.py).

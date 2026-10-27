@@ -1,11 +1,16 @@
 version: 2
+# Each ecosystem gets its own weekday, before working hours. A lint run asks for
+# 33-39 hosted jobs and the organization has 20 concurrent slots, so five
+# ecosystems opening their weekly PRs at the same minute queued every PR (human
+# ones included) for over an hour. Security updates are not bound to this
+# schedule.
 updates:
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
       day: monday
-      time: "09:00"
+      time: "06:00"
       timezone: Asia/Shanghai
     open-pull-requests-limit: 3
     groups:
@@ -20,8 +25,8 @@ updates:
     directory: /ui
     schedule:
       interval: weekly
-      day: monday
-      time: "09:00"
+      day: wednesday
+      time: "06:00"
       timezone: Asia/Shanghai
     open-pull-requests-limit: 3
     groups:
@@ -36,8 +41,8 @@ updates:
     directory: /desktop
     schedule:
       interval: weekly
-      day: monday
-      time: "09:00"
+      day: thursday
+      time: "06:00"
       timezone: Asia/Shanghai
     open-pull-requests-limit: 3
     groups:
@@ -52,8 +57,8 @@ updates:
     directory: /desktop
     schedule:
       interval: weekly
-      day: monday
-      time: "09:00"
+      day: friday
+      time: "06:00"
       timezone: Asia/Shanghai
     open-pull-requests-limit: 3
     groups:
@@ -72,8 +77,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
-      day: monday
-      time: "09:00"
+      day: tuesday
+      time: "06:00"
       timezone: Asia/Shanghai
     open-pull-requests-limit: 3
     versioning-strategy: increase

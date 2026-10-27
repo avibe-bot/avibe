@@ -25,6 +25,7 @@ def _run_isolated_unit_files(
     *,
     timeout: str = "15",
     timings: dict[str, float] | None = None,
+    lanes: int | None = None,
 ):
     (tmp_path / "tests").mkdir()
     (tmp_path / "scripts").mkdir()
@@ -36,8 +37,11 @@ def _run_isolated_unit_files(
         (tmp_path / "scripts" / "ci_unit_test_timings.json").write_text(
             json.dumps({"durations_seconds": timings}), encoding="utf-8",
         )
+    command = ["bash", str(ROOT / "scripts/ci_unit_tests.sh")]
+    if lanes is not None:
+        command = [sys.executable, str(ROOT / "scripts/ci_unit_test_lanes.py"), "0", "1", str(lanes)]
     return subprocess.run(
-        ["bash", str(ROOT / "scripts/ci_unit_tests.sh")], cwd=tmp_path,
+        command, cwd=tmp_path,
         env={**os.environ, "PYTHON": sys.executable, "CI_TEST_FILE_TIMEOUT_SECONDS": timeout,
              "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1", "PYTEST_ADDOPTS": ""},
         capture_output=True, text=True, timeout=40,
@@ -133,6 +137,55 @@ def test_unit_file_runner_preserves_assertions_and_integration_selection(tmp_pat
     assert [(row["file"], row["exit_code"]) for row in records] == [
         ("tests/test_assertion.py", int(failed)), ("tests/test_integration.py", 5),
     ]
+
+
+def test_unit_shard_lanes_run_planned_files_concurrently_and_fail_closed(tmp_path: Path) -> None:
+    """Lanes keep one process per file and every failure, and run files at the same time.
+
+    Each barrier file waits for the other's marker: run one after the other, the
+    first would time out. The signal file guards the inherited SIGINT disposition
+    that shell background jobs would silently turn into "ignored".
+    """
+    barrier = (
+        "import pathlib, time\n"
+        f"ROOT = pathlib.Path({str(tmp_path / 'barrier')!r})\n"
+        "def test_meets_the_other_lane():\n"
+        "    ROOT.mkdir(exist_ok=True)\n"
+        "    (ROOT / '{me}').touch()\n"
+        "    deadline = time.monotonic() + 10\n"
+        "    while not (ROOT / '{other}').exists():\n"
+        "        assert time.monotonic() < deadline, 'the other lane never ran alongside'\n"
+        "        time.sleep(0.05)\n"
+    )
+    result = _run_isolated_unit_files(
+        tmp_path,
+        {
+            "test_barrier_a.py": barrier.format(me="a", other="b"),
+            "test_barrier_b.py": barrier.format(me="b", other="a"),
+            "test_fails.py": "def test_fails():\n    assert False\n",
+            "test_signal.py": (
+                "import signal\n"
+                "def test_sigint_keeps_python_default():\n"
+                "    assert signal.getsignal(signal.SIGINT) is signal.default_int_handler\n"
+            ),
+        },
+        timings={
+            "tests/test_barrier_a.py": 10.0, "tests/test_barrier_b.py": 10.0,
+            "tests/test_fails.py": 1.0, "tests/test_signal.py": 1.0,
+        },
+        lanes=2,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    finished = [line for line in result.stdout.splitlines() if " Finished tests/" in line]
+    assert sorted(line.split()[3] for line in finished) == [
+        "tests/test_barrier_a.py", "tests/test_barrier_b.py", "tests/test_fails.py", "tests/test_signal.py",
+    ]
+    assert {line.split()[1] for line in finished} == {"0]", "1]"}
+    assert result.stdout.count("test_meets_the_other_lane PASSED") == 2
+    assert "test_sigint_keeps_python_default PASSED" in result.stdout
+    assert "FAILED files:\n[lane 0]   tests/test_fails.py" in result.stdout
+    assert "Failed lane(s): [0]." in result.stdout
 
 
 def _metrics(result) -> list[dict]:
