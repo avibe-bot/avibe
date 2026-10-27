@@ -50,11 +50,11 @@ Saving never runs or connects to the server.
 
 Env and header values are stored as given in the backend config file, exactly as each coding agent stores them. The Web UI and API never return these values; when you edit a server, leaving a value blank keeps the stored one. URLs with `user:pass@` are rejected; put credentials in an `Authorization` header instead.
 
-## Generate and regenerate
+## Generate and refresh
 
-**Generate** (`vibe mcp generate <name>`) connects once, lists every tool, and publishes a static package. The first generation also enables the server. **Regenerate** (`vibe mcp regenerate <name>`) publishes a fresh package and keeps the enabled state.
+**Generate** (`vibe mcp generate <name>`) connects once, lists every tool, and publishes a static package. The first generation also enables the server. The Hub page labels a later publish **Refresh**; the CLI verb stays `vibe mcp regenerate <name>` and keeps the enabled state.
 
-Edits to a server's definition take effect only after you regenerate. Until then the page shows **Pending changes**. If a tool's schema changed on the server, calls report an error that suggests regenerating.
+Edits to a server's definition take effect only after you refresh. Until then the page shows **Pending changes**. If a tool's schema changed on the server, calls report an error that suggests refreshing.
 
 Enable, disable or delete a server from the page, or with `vibe mcp enable|disable|remove <name>`. Only the instance Owner can add, generate, enable, disable or remove servers.
 

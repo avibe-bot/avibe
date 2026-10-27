@@ -144,9 +144,6 @@ export const McpHubSection: React.FC = () => {
               ) : server.nativeDeleted ? (
                 <Badge variant="secondary">{t('mcpHub.sourceDeleted.unknown')}</Badge>
               ) : null}
-              {server.nativeEnabled === false && server.source ? (
-                <Badge variant="warning">{t(`mcpHub.disabledIn.${server.source}`)}</Badge>
-              ) : null}
               {server.pendingChanges ? <Badge variant="secondary">{t('mcpHub.pendingChanges')}</Badge> : null}
               <span className="min-w-0 flex-1 truncate text-[12px] text-muted">
                 {server.error?.message || generateBlocked(server) || server.description || ''}
@@ -183,7 +180,7 @@ export const McpHubSection: React.FC = () => {
                     )}
                   >
                     {busy === `generate:${server.name}` ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-                    {server.revision ? t('mcpHub.regenerate') : t('mcpHub.generate')}
+                    {server.revision ? t('mcpHub.refresh') : t('mcpHub.generate')}
                   </Button>
                   </span>
                   <Switch

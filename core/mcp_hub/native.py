@@ -257,7 +257,6 @@ class NativeServer:
     path: Path
     definition: Optional[dict[str, Any]]
     error: Optional[McpHubError]
-    native_enabled: bool = True
     has_cwd: bool = False
 
 
@@ -281,8 +280,8 @@ def read_all(descriptions: Optional[dict[str, str]] = None) -> dict[str, NativeS
     """The union of native servers; the first source holding a name is canonical.
 
     A file that cannot be parsed is skipped; one bad entry only marks that server.
-    The native ``enabled`` switch only governs the backend's own loading; Hub
-    records it as ``native_enabled`` and otherwise treats the entry normally.
+    Native ``enabled=false`` entries are omitted from Hub lists, matching the
+    backend's own off switch. Spawn isolation still disables remaining names.
     """
 
     descriptions = descriptions or {}
@@ -300,22 +299,40 @@ def read_all(descriptions: Optional[dict[str, str]] = None) -> dict[str, NativeS
             try:
                 if not isinstance(entry, dict):
                     raise McpHubError("invalid_definition", f"{source} entry {name!r} is not an object.")
-                enabled = _native_enabled(source, entry)
+                if not _native_enabled(source, entry):
+                    continue
                 definition = _from_native(source, str(name), entry, path, descriptions.get(str(name)))
                 servers[str(name)] = NativeServer(
-                    str(name), source, path, definition, None, native_enabled=enabled, has_cwd="cwd" in entry
+                    str(name), source, path, definition, None, has_cwd="cwd" in entry
                 )
-            except McpHubError as exc:
+            except McpHubError as cop:
+                if isinstance(entry, dict) and not _native_enabled(source, entry):
+                    continue
                 servers[str(name)] = NativeServer(
                     str(name),
                     source,
                     path,
                     None,
-                    exc,
-                    native_enabled=isinstance(entry, dict) and _native_enabled(source, entry),
+                    cop,
                     has_cwd=isinstance(entry, dict) and "cwd" in entry,
                 )
     return servers
+
+
+def disabled_names() -> set[str]:
+    """Names whose native entry is ``enabled=false``. Hub lists omit these."""
+
+    names: set[str] = set()
+    for source in SOURCES:
+        try:
+            _path, data = _load(source)
+        except McpHubError:
+            continue
+
+        for name, entry in _servers(source, data).items():
+            if isinstance(entry, dict) and not _native_enabled(source, entry):
+                names.add(str(name))
+    return names
 
 
 def write(definition: dict[str, Any]) -> str:

@@ -125,8 +125,6 @@ def _root_list(argv: list[str]) -> int:
             extras.append(f"deleted in {item.get('source') or 'native config'}")
         elif item.get("source"):
             extras.append(f"from {item['source']}")
-        if item.get("nativeEnabled") is False:
-            extras.append("natively disabled")
         state = "" if "--all" not in argv else f"  [{', '.join(extras)}]"
         print(f"{item['name']}  {escape(item.get('description') or '')}{state}".rstrip())
     print("\nNext: vibe mcp <server> --list")

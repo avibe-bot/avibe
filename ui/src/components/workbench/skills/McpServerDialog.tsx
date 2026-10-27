@@ -202,9 +202,6 @@ export const McpServerDialog: React.FC<McpServerDialogProps> = ({ name, canManag
               {summary.nativeDeleted ? t(`mcpHub.sourceDeleted.${summary.source}`) : t(`mcpHub.source.${summary.source}`)}
             </Badge>
           ) : null}
-          {summary?.nativeEnabled === false && summary.source ? (
-            <Badge variant="warning">{t(`mcpHub.disabledIn.${summary.source}`)}</Badge>
-          ) : null}
           {summary?.pendingChanges ? <Badge variant="secondary">{t('mcpHub.pendingChanges')}</Badge> : null}
         </div>
         <DialogDescription className="text-[12px] text-muted">
@@ -264,7 +261,7 @@ export const McpServerDialog: React.FC<McpServerDialogProps> = ({ name, canManag
             {summary?.pendingChanges ? (
               <Button type="button" variant="outline" disabled={busy !== null} onClick={() => void onRegenerate()}>
                 {busy === 'generate' ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-                {t('mcpHub.regenerate')}
+                {t('mcpHub.refresh')}
               </Button>
             ) : null}
             <Button type="button" disabled={busy !== null} onClick={() => void onSave()}>

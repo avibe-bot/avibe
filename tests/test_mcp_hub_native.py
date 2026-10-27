@@ -129,10 +129,9 @@ enabled = false
     summaries = {item["name"]: item for item in repository.list_packages()}
     assert summaries["iphone_use"]["status"] == "draft"
     assert "error" not in summaries["iphone_use"]
-    # Native enabled=false is informational; the relative cwd anchors at the file's directory.
-    assert summaries["computer-use"]["nativeEnabled"] is False
-    assert summaries["computer-use"]["status"] == "draft" and "error" not in summaries["computer-use"]
-    assert repository.read_definition("computer-use")["transport"]["cwd"] == str(codex.parent)
+    # Native enabled=false is omitted from Hub lists; spawn isolation still disables it.
+    assert "computer-use" not in summaries
+    assert "computer-use" in native.disabled_names()
 
 
 def test_codex_backend_extras_are_ignored_not_errors(native_files, monkeypatch):
@@ -195,20 +194,16 @@ def test_opencode_local_cwd_is_resolved_from_native_file(native_files):
     assert definition["transport"]["command"] == "./server"
 
 
-def test_natively_disabled_entry_generates_like_any_draft(native_files, runtime):
+def test_natively_disabled_entry_is_omitted_from_hub_lists(native_files):
     import sys
     from pathlib import Path
 
     _claude, codex, _opencode = native_files
     fixture = str(Path(__file__).parent / "fixtures" / "mcp_echo_server.py")
     codex.write_text(CODEX + f'\n[mcp_servers.off]\ncommand = {json.dumps(sys.executable)}\nargs = [{json.dumps(fixture)}]\nenabled = false\n')
-    before = codex.read_bytes()
-    draft = {item["name"]: item for item in repository.list_packages()}["off"]
-    assert draft["status"] == "draft" and draft["nativeEnabled"] is False and "error" not in draft
-    assert _run(runtime, "generate", {"name": "off"})["ok"]
-    call = _run(runtime, "call", {"name": "off", "tool": "echo", "arguments": {"text": "hi"}})
-    assert call["status"] == "ok", call
-    assert codex.read_bytes() == before  # generate and call never rewrite the native file
+    names = {item["name"] for item in repository.list_packages()}
+    assert "off" not in names
+    assert "off" in native.disabled_names()
 
 
 def test_relative_native_cwd_resolves_against_its_file_and_generates(native_files, runtime):

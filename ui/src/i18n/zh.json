@@ -6295,7 +6295,7 @@
     "exists": "已存在",
     "saved": "已保存。生成后即可发布其工具。",
     "generate": "生成",
-    "regenerate": "重新生成",
+    "refresh": "刷新",
     "generated": "已生成 {{name}}",
     "enabled": "启用",
     "remove": "删除",
@@ -6345,13 +6345,8 @@
     "generatedAt": "生成于 {{time}}",
     "revisionId": "版本 {{revision}}",
     "configError": "配置错误",
-    "deletedHint": "已从原生配置中删除；在原配置中重新添加后才能重新生成。",
-    "disabledIn": {
-      "claude": "已在 Claude 中禁用",
-      "codex": "已在 Codex 中禁用",
-      "opencode": "已在 OpenCode 中禁用"
-    },
-    "savedEdit": "已保存 {{name}}。重新生成后生效。",
+    "deletedHint": "已从原生配置中删除；在原配置中重新添加后才能刷新。",
+    "savedEdit": "已保存 {{name}}。刷新后生效。",
     "edit": {
       "open": "打开配置",
       "hint": "编辑连接配置。",

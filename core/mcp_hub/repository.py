@@ -316,8 +316,6 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
         if native_server is not None:
             summary["sourcePath"] = str(native_server.path)
             summary["hasCwd"] = native_server.has_cwd or native_server.source == native.CODEX
-            if not native_server.native_enabled:
-                summary["nativeEnabled"] = False
         if source in native.SOURCES:
             summary["source"] = source
         published = read_published(name)
@@ -365,8 +363,9 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
 
 def list_packages() -> list[dict[str, Any]]:
     servers = _native_servers()
+    hidden = native.disabled_names()
     names = set(servers)
-    names.update(_generated_names())
+    names.update(name for name in _generated_names() if name not in hidden)
     return [summarize(name, servers) for name in sorted(names)]
 
 

@@ -6295,7 +6295,7 @@
     "exists": "exists",
     "saved": "Saved. Generate it to publish its tools.",
     "generate": "Generate",
-    "regenerate": "Regenerate",
+    "refresh": "Refresh",
     "generated": "Generated {{name}}",
     "enabled": "Enabled",
     "remove": "Delete",
@@ -6345,13 +6345,8 @@
     "generatedAt": "generated {{time}}",
     "revisionId": "Revision {{revision}}",
     "configError": "Config error",
-    "deletedHint": "Deleted from its native config; re-add it there to regenerate.",
-    "disabledIn": {
-      "claude": "Disabled in Claude",
-      "codex": "Disabled in Codex",
-      "opencode": "Disabled in OpenCode"
-    },
-    "savedEdit": "Saved {{name}}. Regenerate to apply the changes.",
+    "deletedHint": "Deleted from its native config; re-add it there to refresh.",
+    "savedEdit": "Saved {{name}}. Refresh to apply the changes.",
     "edit": {
       "open": "Open definition",
       "hint": "Edit the connection definition.",
