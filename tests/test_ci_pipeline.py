@@ -11,6 +11,8 @@ import sys
 import pytest
 import yaml
 
+from scripts.ci_scenario_evidence import pytest_commands
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -665,6 +667,77 @@ def test_required_gates_accept_skips_only_for_proven_docs_and_fail_closed(tmp_pa
             env={**os.environ, **results}, capture_output=True, text=True, check=False,
         )
         assert (result.returncode == 0) == passes, (results, result.stdout, result.stderr)
+
+
+WEB_FETCH_TESTS = (
+    "-m pytest -q tests/test_model_hub_fetch_policy.py tests/test_model_hub_fetch_transport.py "
+    "tests/test_model_hub_fetch_tls.py tests/test_model_hub_local_fetch.py "
+    "tests/test_desktop_runtime_bundle_builder.py -k not packaged_cli_survives"
+)
+
+
+@pytest.mark.parametrize("failing", [(), ("3.11", "3.13")])
+def test_web_fetch_runtime_verifies_every_python_in_its_own_interpreter(tmp_path: Path, failing: tuple) -> None:
+    """One ubuntu job covers all five Pythons; every version runs, and each failure names its version."""
+    job = _jobs()["web-fetch-runtime"]
+    legs = job["strategy"]["matrix"]["include"]
+    assert job["strategy"]["fail-fast"] is False
+    assert [leg["os"] for leg in legs].count("ubuntu-latest") == 1
+    assert {(leg["os"], version) for leg in legs for version in leg["python"].split()} == {
+        *(("ubuntu-latest", version) for version in ("3.10", "3.11", "3.12", "3.13", "3.14")),
+        *((runner, "3.12") for runner in ("ubuntu-24.04-arm", "macos-15-intel", "macos-15", "windows-latest")),
+    }
+    step, = [step for step in job["steps"] if "PYTHON_VERSIONS" in step.get("env", {})]
+    assert step["env"]["PYTHON_VERSIONS"] == "${{ matrix.python }}"
+    # The evidence gate reads what this job selects from the workflow text.
+    assert pytest_commands(ROOT / ".github/workflows/lint.yml")["web-fetch-runtime"] == [(
+        "tests/test_model_hub_fetch_policy.py", "tests/test_model_hub_fetch_transport.py",
+        "tests/test_model_hub_fetch_tls.py", "tests/test_model_hub_local_fetch.py",
+        "tests/test_desktop_runtime_bundle_builder.py", "-k", "not packaged_cli_survives",
+    )]
+
+    # Stub uv and one interpreter per version; record every call they receive.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    calls = tmp_path / "calls.log"
+    (bin_dir / "uv").write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2" = "python find" ]; then for last; do :; done; echo "$STUB_BIN/python$last"; exit 0; fi\n'
+        f'echo "uv $*" >> {calls}\n'
+    )
+    for version in ("3.10", "3.11", "3.12", "3.13", "3.14"):
+        (bin_dir / f"python{version}").write_text(
+            "#!/bin/sh\n"
+            f'echo "python{version} $*" >> {calls}\n'
+            f'if [ "$2" = pytest ] && [ "{version in failing}" = True ]; then exit 1; fi\n'
+        )
+    for path in bin_dir.iterdir():
+        path.chmod(0o755)
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "avibe_os-1-py3-none-any.whl").touch()
+
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]], cwd=tmp_path,
+        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "STUB_BIN": str(bin_dir),
+             "PYTHON_VERSIONS": legs[0]["python"]},
+        capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode == (1 if failing else 0), result.stdout + result.stderr
+    log = calls.read_text().splitlines()
+    for version in ("3.10", "3.11", "3.12", "3.13", "3.14"):
+        interpreter = f"{bin_dir}/python{version}"
+        assert log.count(f"python{version} {WEB_FETCH_TESTS}") == 1
+        assert log.count(
+            f"uv pip install --system --python {interpreter} --require-hashes --only-binary=:all: "
+            "--no-binary claude-agent-sdk --no-binary http-ece -r fetch-requirements.txt"
+        ) == 1
+        assert log.count(f"uv pip install --system --python {interpreter} --no-deps dist/avibe_os-1-py3-none-any.whl") == 1
+        assert log.count(f"uv pip install --system --python {interpreter} pytest pytest-asyncio jsonschema") == 1
+        named = f"::error::web-fetch-runtime failed on Python {version}" in result.stdout
+        assert named == (version in failing)
+    if failing:
+        assert "web-fetch-runtime failed on Python: 3.11 3.13" in result.stdout
 
 
 def test_lint_replaces_only_the_same_pr_or_branch_and_runs_no_release_listener() -> None:
