@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-update-state"
+description = "Enables the desktop_update_state command without any pre-configured scope."
+commands.allow = ["desktop_update_state"]
+
+[[permission]]
+identifier = "deny-desktop-update-state"
+description = "Denies the desktop_update_state command without any pre-configured scope."
+commands.deny = ["desktop_update_state"]

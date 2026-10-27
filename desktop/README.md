@@ -551,17 +551,35 @@ Security → Microphone. `tests/notarization_preflight.rs` pins both facts.
 sign. `.github/workflows/desktop-package.yml` builds architecture-specific,
 self-contained DMG and NSIS artifacts, both manually and as the reusable TEST
 build unit for `.github/workflows/release_ai.yml`. Its signing policy is
-described above. Native packaging and a real
+described above. Release builds restore the Rust dependency cache and the
+prepared Cua Driver but never save caches, because only reruns of the same tag
+could read them. The workflow's unsigned cache warm-up on `master` (daily, and on
+pushes that change a Rust cache input) is the writer they read from; it signs and
+uploads nothing. A restored Cua Driver is kept only when its provenance names the
+pinned inputs and it passes the checks a fresh build passes; otherwise it is
+rebuilt. Native packaging and a real
 installation on each supported architecture remain separate acceptance gates
 from unit/contract tests.
 
 ## Signed desktop updates (G2)
 
-The native **Check for Desktop Updates…** entry is the sole update owner. The
-Workbench version badge in a desktop window opens that same entry and shows the
-build-injected desktop version. Startup only checks; a native **Download and
-Install** confirmation authorizes download and replacement. The tray/menu shows
-checking, current, available, downloading, installing, disabled, and error states.
+The native updater remains the sole update owner, while the Workbench version
+badge is its user interface. In a desktop window the badge turns yellow when a
+signed release is available and opens the Workbench popover. The native
+**Check for Desktop Updates…** menu item and `avibe://updates` deep link open the
+same popover and start an explicit check. The popover asks for confirmation
+before download and replacement, and offers **Skip this version**. Startup
+checks silently and lets the badge provide the prompt. A native dialog is used
+only when there is no reachable Workbench window or the fixed popover event
+cannot be dispatched, such as a check that finishes before the webview loads.
+Native state changes are pushed to the Workbench, including checks started by
+the **Use TEST Updates** menu item. The state marks whether an available release
+came from an explicit check, so an automatic check honors **Skip this version**
+while an explicit check can offer the same release again. If a newer Workbench
+runs under an older shell that rejects `desktop_update_state`, the Workbench
+uses Runtime version reads and the legacy `avibe://updates` native path until
+the shell is upgraded. The tray/menu shows checking, current, available,
+downloading, installing, disabled, and error states.
 The **Use TEST Updates** toggle persists beside the private Runtime, defaults on
 for prerelease app versions and off for stable versions, and never downgrades.
 Browsers and Python installations retain their existing update behavior.

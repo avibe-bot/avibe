@@ -206,8 +206,8 @@ scope per instance behind them.
   unchanged saved ciphertext is exempt. Status uses decrypt-validate-and-discard and never retains
   or returns plaintext. This status-only read-path exception supersedes the earlier proxy-only wording.
   All read APIs return `has_api_key: true/false`, never the value. Keys and ciphertext never enter
-  API responses, logs, Sentry, or usage events. Missing or invalid key-secret material for a
-  committed saved slot is reported as a high-priority Sentry event tagged by scope, capability,
+  API responses, logs, or usage events. Missing or invalid key-secret material for a
+  committed saved slot is reported as a high-priority structured log tagged by scope, capability,
   instance, and config revision, using only scrubbed metadata. Emission is transition-deduplicated
   by scope, config revision, and capability so status polling cannot create one event per instance
   per minute; the first observing instance remains a context tag but is not part of the
@@ -219,7 +219,7 @@ scope per instance behind them.
   to emit the outage event. A successful managed decrypt of committed saved ciphertext attempts
   the `available` transition on every call; candidate save round trips never read or write alert
   state. If that recovery write fails, the usable call still proceeds, the write is retried on the
-  next successful decrypt, and the persistence failure itself is reported directly to Sentry
+  next successful decrypt, and the persistence failure itself is reported to local diagnostics
   without relying on the unavailable transition table. Concurrent and cold-started Vercel
   isolates therefore observe the same edges without making alert infrastructure part of service
   availability.
@@ -491,7 +491,7 @@ when no slot is degraded.
 `status: "error"` events carry upstream-reported token usage whenever the failure response includes
 it (induced failures — `finish_reason: length`/`content_filter`, malformed payloads — cannot bypass
 metering or quota). A metering-write failure never breaks the served call: the response/transcript
-is still delivered, the failure is reported loudly (Sentry + structured log), and connections close
+is still delivered, the failure is reported loudly (structured log), and connections close
 in a controlled way. A worker crash between upstream completion and the event insert loses only
 that telemetry row — the reservation reaper keeps enforcement truthful — and falls under the same
 accepted, monitored v1 gap. Fail-closed metering is deliberately deferred to M3, when enforcement
@@ -515,7 +515,7 @@ turns on.
   row and emits no ops alert because the request response and admin UI are its presentation surface.
   For unrecovered saved-slot failures, status marks the affected capability false with the same
   reason. Every saved-key decryption-failure transition, including one masked by approved platform
-  recovery, emits one scrubbed high-priority Sentry event per scope/config revision/capability;
+  recovery, emits one scrubbed high-priority structured log per scope/config revision/capability;
   repeated failures at the same active edge emit none, and successful decryption of the committed
   saved ciphertext rearms a later failure through the persisted `available` state. Candidate
   round trips never rearm that state. Failure to persist the committed recovery state never changes
@@ -544,7 +544,7 @@ turns on.
    quota, for any capability; a missing or disabled organization slot yields
    `model_service_not_configured`, while an enabled slot with unavailable key custody yields
    `model_service_key_unavailable`, never a silent fallback.
-3. No API response, log line, Sentry event, usage event, or error message ever contains a slot API
+3. No API response, log line, usage event, or error message ever contains a slot API
    key or its ciphertext; a `mak_` key appears exactly once — in the body of its own mint/rotate
    response (shown once by design) — and nowhere else; config reads expose only `has_api_key`.
    Every newly submitted or legacy-materialized key is decrypt-valid before persistence, including

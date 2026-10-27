@@ -395,7 +395,6 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
     import core.controller
     import core.process_diagnostics
     import main as service_main
-    import vibe.sentry_integration
     from vibe import runtime
     from vibe import desktop_runtime
 
@@ -465,7 +464,6 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
         "start_macos_session_diagnostics",
         lambda logger: calls.append("diagnostics.start") or FakeMonitor(),
     )
-    monkeypatch.setattr(vibe.sentry_integration, "init_sentry", lambda *args, **kwargs: None)
     monkeypatch.setattr(core.process_diagnostics, "log_process_snapshot", lambda *args, **kwargs: None)
     monkeypatch.setattr(core.controller, "Controller", FakeController)
     monkeypatch.setattr(config.v2_compat, "to_app_config", lambda loaded: loaded)

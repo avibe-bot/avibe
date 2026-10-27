@@ -1,12 +1,12 @@
-//! Native-only desktop updater. Remote WebViews never receive updater commands.
+//! Desktop updater owned by the native shell and controlled by its Workbench popover.
 use avibe_runtime_host::{
     download::{self, Length},
     update::{self, Channel, Manifest, Release, REPOSITORY},
     update_status::{UpdateStatusPhase, UpdateStatusRecord, UpdateStatusStore, UPDATE_STATUS_FILE},
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Mutex,
@@ -15,13 +15,14 @@ use std::{
 };
 use tauri::{
     menu::{CheckMenuItem, MenuItem},
-    AppHandle, Manager,
+    AppHandle, Emitter, Manager, WebviewWindow,
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind, MessageDialogResult};
 
 pub const MENU_ID: &str = "desktop-update";
 pub const CHANNEL_ID: &str = "desktop-update-test";
 pub const OPEN_URL: &str = "avibe://updates";
+pub const STATE_EVENT: &str = "avibe:desktop-update-state";
 const KEY: &str = match option_env!("AVIBE_DESKTOP_UPDATER_PUBLIC_KEY") {
     Some(key) => key,
     None => "",
@@ -64,7 +65,8 @@ fn catalog() -> Catalog {
     super::native_catalog_for_locales(sys_locale::get_locales()).updater
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 enum Phase {
     Idle,
     Checking,
@@ -80,6 +82,18 @@ struct State {
     phase: Phase,
     latest: Option<String>,
     channel: Channel,
+    manifest: Option<Manifest>,
+    availability_interactive: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopUpdateState {
+    phase: Phase,
+    latest: Option<String>,
+    channel: Channel,
+    skipped_version: Option<String>,
+    interactive: bool,
 }
 pub struct Updater {
     state: Mutex<State>,
@@ -142,6 +156,8 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
             phase: Phase::Idle,
             latest: None,
             channel,
+            manifest: None,
+            availability_interactive: false,
         }),
         busy: AtomicBool::new(false),
         source: AtomicUsize::new(0),
@@ -162,15 +178,63 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
 }
 fn set_state(app: &AppHandle, phase: Phase, latest: Option<String>) {
     let updater = app.state::<Updater>();
-    let mut state = updater.state.lock().expect("updater state");
-    state.phase = phase;
-    if latest.is_some() || phase == Phase::Checking {
-        state.latest = latest;
+    {
+        let mut state = updater.state.lock().expect("updater state");
+        state.phase = phase;
+        if matches!(phase, Phase::Checking | Phase::Current | Phase::Disabled | Phase::Error) {
+            state.manifest = None;
+        }
+        if !matches!(
+            phase,
+            Phase::Available | Phase::Checking | Phase::Downloading | Phase::Installing
+        ) {
+            state.availability_interactive = false;
+        }
+        if latest.is_some() || phase == Phase::Checking {
+            state.latest = latest;
+        }
     }
     let _ = updater
         .menu
         .set_text(format!("{} — {}", label(phase, &catalog()), app.package_info().version));
     let _ = updater.channel_menu.set_enabled(!updater.busy.load(Ordering::SeqCst));
+    emit_state(app);
+}
+
+fn state_snapshot(app: &AppHandle) -> DesktopUpdateState {
+    let updater = app.state::<Updater>();
+    let state = updater.state.lock().expect("updater state");
+    DesktopUpdateState {
+        phase: state.phase,
+        latest: state.latest.clone(),
+        channel: state.channel,
+        skipped_version: skipped_version(&updater),
+        interactive: state.availability_interactive,
+    }
+}
+
+fn emit_state(app: &AppHandle) {
+    let _ = app.emit_to(super::MAIN_WINDOW, STATE_EVENT, state_snapshot(app));
+}
+
+fn ensure_workbench(window: &WebviewWindow) -> Result<(), String> {
+    if super::pet::is_workbench(window) {
+        Ok(())
+    } else {
+        Err("This command is only available to the Avibe Workbench.".to_owned())
+    }
+}
+
+fn workbench_ready(app: &AppHandle) -> bool {
+    app.get_webview_window("main")
+        .is_some_and(|window| super::pet::is_workbench(&window))
+}
+
+fn set_available(app: &AppHandle, manifest: Manifest) {
+    let latest = manifest.version.clone();
+    set_state(app, Phase::Available, Some(latest));
+    app.state::<Updater>().state.lock().expect("updater state").manifest = Some(manifest);
+    emit_state(app);
 }
 pub fn toggle_channel(app: &AppHandle) {
     let updater = app.state::<Updater>();
@@ -195,6 +259,7 @@ pub fn toggle_channel(app: &AppHandle) {
         show(app, &catalog().check_failed, None);
         return;
     }
+    emit_state(app);
     check(app.clone(), true);
 }
 fn show(app: &AppHandle, message: &str, latest: Option<&str>) {
@@ -232,14 +297,17 @@ fn skipped_version(updater: &Updater) -> Option<String> {
 }
 fn skip_version(app: &AppHandle, version: &str) {
     let path = &app.state::<Updater>().skipped_path;
-    let result = path
-        .parent()
-        .ok_or_else(|| std::io::Error::other("missing config directory"))
-        .and_then(std::fs::create_dir_all)
-        .and_then(|()| std::fs::write(path, serde_json::to_vec(version).expect("version JSON")));
+    let result = persist_skipped_version(path, version);
     if let Err(error) = result {
         eprintln!("desktop update skip: {error}");
     }
+}
+
+fn persist_skipped_version(path: &Path, version: &str) -> std::io::Result<()> {
+    path.parent()
+        .ok_or_else(|| std::io::Error::other("missing config directory"))
+        .and_then(std::fs::create_dir_all)
+        .and_then(|()| std::fs::write(path, serde_json::to_vec(version).expect("version JSON")))
 }
 
 #[derive(Deserialize)]
@@ -410,14 +478,22 @@ pub fn check(app: AppHandle, interactive: bool) {
         return;
     }
     let channel = updater.state.lock().expect("updater state").channel;
+    updater.state.lock().expect("updater state").availability_interactive = interactive;
     set_state(&app, Phase::Checking, None);
     tauri::async_runtime::spawn(async move {
         match find_update(&app, channel).await {
             Ok(Some(manifest)) => {
-                set_state(&app, Phase::Available, Some(manifest.version.clone()));
+                set_available(&app, manifest.clone());
                 publish(&app);
                 let skipped = skipped_version(&app.state::<Updater>());
                 if !should_prompt(interactive, skipped.as_deref(), &manifest.version) {
+                    finish(&app);
+                    return;
+                }
+                if workbench_ready(&app) {
+                    // The Workbench owns the confirmation UI. Keep the signed
+                    // manifest in native state, but release the check lock so
+                    // closing the popover cannot strand the updater as busy.
                     finish(&app);
                     return;
                 }
@@ -476,10 +552,70 @@ pub fn check(app: AppHandle, interactive: bool) {
         }
     });
 }
+
+#[tauri::command]
+pub fn desktop_update_state(window: WebviewWindow, app: AppHandle) -> Result<DesktopUpdateState, String> {
+    ensure_workbench(&window)?;
+    Ok(state_snapshot(&app))
+}
+
+#[tauri::command]
+pub fn desktop_update_check(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    ensure_workbench(&window)?;
+    check(app, true);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn desktop_update_install(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    ensure_workbench(&window)?;
+    let updater = app.state::<Updater>();
+    let manifest = {
+        let state = updater
+            .state
+            .lock()
+            .map_err(|_| "Desktop updater state is unavailable.".to_owned())?;
+        if state.phase != Phase::Available {
+            return Err("No desktop update is ready to install.".to_owned());
+        }
+        state
+            .manifest
+            .clone()
+            .ok_or_else(|| "No desktop update is ready to install.".to_owned())?
+    };
+    if updater.busy.swap(true, Ordering::SeqCst) {
+        return Err("A desktop update is already in progress.".to_owned());
+    }
+    install(app, manifest);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn desktop_update_skip(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
+    ensure_workbench(&window)?;
+    let version = {
+        let updater = app.state::<Updater>();
+        let state = updater
+            .state
+            .lock()
+            .map_err(|_| "Desktop updater state is unavailable.".to_owned())?;
+        if state.phase != Phase::Available {
+            return Err("No desktop update is available to skip.".to_owned());
+        }
+        state
+            .latest
+            .clone()
+            .ok_or_else(|| "The available desktop update has no version.".to_owned())?
+    };
+    skip_version(&app, &version);
+    finish(&app);
+    Ok(())
+}
 fn finish(app: &AppHandle) {
     let updater = app.state::<Updater>();
     updater.busy.store(false, Ordering::SeqCst);
     let _ = updater.channel_menu.set_enabled(true);
+    emit_state(app);
 }
 fn install(app: AppHandle, manifest: Manifest) {
     set_state(&app, Phase::Downloading, None);
@@ -516,11 +652,13 @@ fn install(app: AppHandle, manifest: Manifest) {
             Err(error) => {
                 eprintln!("desktop update install: {error}");
                 set_state(&app, Phase::Error, None);
-                app.dialog()
-                    .message(catalog().install_failed)
-                    .title(catalog().title)
-                    .kind(MessageDialogKind::Error)
-                    .show(|_| {});
+                if !workbench_ready(&app) {
+                    app.dialog()
+                        .message(catalog().install_failed)
+                        .title(catalog().title)
+                        .kind(MessageDialogKind::Error)
+                        .show(|_| {});
+                }
             }
         }
     });
@@ -568,6 +706,38 @@ mod tests {
     }
 
     #[test]
+    fn skipped_version_is_persisted_as_the_release_string() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("update-skipped.json");
+        persist_skipped_version(&path, "3.2.3").unwrap();
+        assert_eq!(
+            serde_json::from_slice::<String>(&std::fs::read(path).unwrap()).unwrap(),
+            "3.2.3"
+        );
+    }
+
+    #[test]
+    fn desktop_update_state_serializes_the_interactive_check_contract() {
+        let state = DesktopUpdateState {
+            phase: Phase::Available,
+            latest: Some("3.2.3".to_owned()),
+            channel: Channel::Test,
+            skipped_version: Some("3.2.3".to_owned()),
+            interactive: true,
+        };
+        assert_eq!(
+            serde_json::to_value(state).unwrap(),
+            serde_json::json!({
+                "phase": "available",
+                "latest": "3.2.3",
+                "channel": "test",
+                "skippedVersion": "3.2.3",
+                "interactive": true,
+            })
+        );
+    }
+
+    #[test]
     fn check_results_produce_their_record_and_other_phases_publish_nothing() {
         for phase in [
             Phase::Idle,
@@ -584,6 +754,8 @@ mod tests {
                 phase,
                 latest: Some("3.2.3".to_owned()),
                 channel: Channel::Test,
+                manifest: None,
+                availability_interactive: false,
             };
             let expected = match phase {
                 Phase::Current => Some(UpdateStatusPhase::Current),

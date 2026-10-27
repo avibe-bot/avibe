@@ -513,8 +513,10 @@ def test_manual_record_names_the_layers_it_produced(tmp_path, profile, layers):
 def test_workflow_signs_every_macos_layer_before_recording():
     package = workflow("desktop-package.yml")
     triggers = package.get("on", package.get(True))
-    assert set(triggers) == {"workflow_dispatch", "workflow_call"}
+    assert set(triggers) == {"workflow_dispatch", "workflow_call", "push", "schedule"}
     assert "secrets" not in triggers["workflow_call"]
+    # Only the default branch warms caches; tag pushes reach this build only through release_ai.
+    assert triggers["push"]["branches"] == ["master"] and "tags" not in triggers["push"]
     jobs = workflow("release_ai.yml")["jobs"]
     caller = jobs["desktop-packages"]
     assert caller["uses"] == "./.github/workflows/desktop-package.yml"
@@ -540,9 +542,18 @@ def test_workflow_signs_every_macos_layer_before_recording():
         "Sign and verify final updater artifacts",
     ]
     assert [steps.index(step(name)) for name in order] == sorted(steps.index(step(name)) for name in order)
-    # Every macOS build imports: a tag build fails there without the complete set.
+    # Every macOS build but the unsigned cache warm-up imports: a tag build fails
+    # there without the complete set, and a build carrying a tag is never a warm-up.
+    warmup = build["env"]["DESKTOP_CACHE_WARMUP"]
+    assert warmup.startswith("${{ !inputs.release_tag && (")
     identity = step("Import Apple signing identity")
-    assert identity["if"] == "runner.os == 'macOS'"
+    assert identity["if"] == "runner.os == 'macOS' && env.DESKTOP_CACHE_WARMUP != 'true'"
+    # Only reruns of the same tag could read a cache a release build saved.
+    caches = [item for item in steps if str(item.get("uses", "")).startswith("actions/cache")]
+    assert {item["uses"].split("@")[0] for item in caches} == {"actions/cache/restore", "actions/cache/save"}
+    for item in caches:
+        if item["uses"].startswith("actions/cache/save@"):
+            assert "!inputs.release_tag" in item["if"], item["name"]
     assert identity["env"]["RELEASE_TAG"] == "${{ inputs.release_tag }}"
     assert "import-identity" in identity["run"]
     prepared_driver = step("Verify prepared Cua Driver provenance")
@@ -563,6 +574,7 @@ def test_workflow_signs_every_macos_layer_before_recording():
         assert f"macos_signing.py {command}" in dmg["run"]
     assert "NotSigned" in step("Verify unsigned Windows installer")["run"]
     assert steps[-2]["uses"] == "actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f"
+    assert steps[-2]["if"] == "env.DESKTOP_CACHE_WARMUP != 'true'"
     assert steps[-1]["name"] == "Remove Apple signing material"
     assert steps[-1]["if"] == "always() && runner.os == 'macOS'"
     workflow_text = (ROOT / ".github/workflows/desktop-package.yml").read_text(encoding="utf-8")
