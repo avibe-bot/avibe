@@ -1095,6 +1095,15 @@ def _usage_from_scalar_paths(
     return report
 
 
+# A Google RPC error envelope's integer ``code`` is the HTTP status it answered
+# with; this is the machine code each one projects to.
+GOOGLE_ERROR_STATUS_MACHINE_CODES: Final[Mapping[int, str]] = {
+    400: "invalid_request_error", 401: "authentication_error",
+    403: "permission_error", 404: "not_found_error",
+    429: "rate_limit_error", 500: "server_error",
+    502: "server_error", 503: "server_error", 504: "server_error",
+}
+
 # Container markers for a hosted item's fields; scalars keep their value.
 _ARRAY: Final = object()
 _MAP: Final = object()
@@ -1465,12 +1474,7 @@ class ProtocolFactProjector:
                 # Gemini error.code carries an HTTP status even inside SSE.
                 # Normalize only shaped native errors; classification retains
                 # sole ownership of retry/health policy.
-                value = {
-                    400: "invalid_request_error", 401: "authentication_error",
-                    403: "permission_error", 404: "not_found_error",
-                    429: "rate_limit_error", 500: "server_error",
-                    502: "server_error", 503: "server_error", 504: "server_error",
-                }.get(value)
+                value = GOOGLE_ERROR_STATUS_MACHINE_CODES.get(value)
             if not isinstance(value, str):
                 continue
             if self.machine_error_codes and value not in self.machine_error_codes:
