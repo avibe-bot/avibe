@@ -69,8 +69,8 @@ dependencies = [
     "starlette>=1.3.1",
     "lark-oapi>=1.4.0",
     "requests>=2.31.0",
-    # eMudhra distrust: releases through 2026.07.22 still trust emSign ECC Root CA - G3.
-    "certifi>=2026.10.19",
+    # eMudhra distrust: 2026.10.23 drops emSign ECC Root CA - G3 and the C1/C3 roots.
+    "certifi>=2026.10.23",
     # The fail-closed redacting transport is audited against this exact SDK.
     # Upgrade only with vibe/sentry_integration.py and its real-SDK tests.
     "sentry-sdk==2.56.0",
