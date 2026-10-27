@@ -100,6 +100,8 @@ def test_private_probe_environment_does_not_inherit_credentials(monkeypatch, tmp
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "must-not-cross-boundary")
     monkeypatch.setenv("CODEX_HOME", "/real/codex-home")
     monkeypatch.setenv("HOME", "/real/home")
+    user_bin = tmp_path / "user-bin"
+    monkeypatch.setenv("PATH", str(user_bin))
 
     probe_home = tmp_path / "probe"
     node = tmp_path / "payload" / "tools" / "bin" / "node"
@@ -111,7 +113,10 @@ def test_private_probe_environment_does_not_inherit_credentials(monkeypatch, tmp
     assert "ANTHROPIC_AUTH_TOKEN" not in environment
     assert environment["HOME"] == str(probe_home)
     assert environment["CODEX_HOME"] == str(probe_home / "codex")
-    assert environment["PATH"].split(builder.os.pathsep)[:2] == [str(payload / "bin"), str(node.parent)]
+    # Match the real Desktop launcher: only vibe is global; private Node/npm
+    # remain explicit so package probes cannot hide a shared-PATH dependency.
+    assert environment["PATH"].split(builder.os.pathsep) == [str(payload / "bin"), str(user_bin)]
+    assert environment["VIBE_SHOW_RUNTIME_NODE_BIN"] == str(node)
     assert str(payload / "python" / "bin") not in environment["PATH"].split(builder.os.pathsep)
     assert environment["ZDOTDIR"] == str(probe_home)
     assert environment["AVIBE_DESKTOP_NPM_CLI"] == str(npm_cli)
