@@ -21,6 +21,7 @@ import {
   JSON_TREE_MAX_NODES,
   PREVIEW_MAX_BYTES,
   codeLanguage,
+  isSafeDocumentLink,
   previewRenderKind,
 } from '@/lib/filePreview';
 import { FIT_VIEW, type ImageView, clampPan, maxScale, oneToOneScale, toggleScale, zoomPercent, zoomToPoint } from '@/lib/imageZoom';
@@ -394,17 +395,9 @@ const HtmlView: React.FC<{ html: string; className?: string }> = ({ html, classN
 // target straight into <a href>, so a crafted `javascript:` link would run in the app origin on
 // click). Anything that isn't a plain web/mail link has its href stripped (inert text); safe links
 // open in a new tab so a click can't navigate the workbench away.
-const SAFE_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
 function sanitizeRenderedLinks(root: HTMLElement) {
   root.querySelectorAll('a[href]').forEach((a) => {
-    let safe = false;
-    try {
-      // new URL() normalizes obfuscated schemes (e.g. `java\tscript:`), so the check can't be fooled.
-      safe = SAFE_LINK_PROTOCOLS.has(new URL(a.getAttribute('href') || '', window.location.href).protocol);
-    } catch {
-      safe = false;
-    }
-    if (safe) {
+    if (isSafeDocumentLink(a.getAttribute('href') || '', window.location.href)) {
       a.setAttribute('target', '_blank');
       a.setAttribute('rel', 'noopener noreferrer');
     } else {

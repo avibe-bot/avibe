@@ -1,3 +1,4 @@
+import { isSafeDocumentLink } from '@/lib/filePreview';
 import { isIosDevice } from '@/lib/platform';
 
 // Pure decisions behind the PDF preview (components/ui/pdf-pages.tsx), kept free of pdf.js so they
@@ -80,4 +81,84 @@ export function pageIndexAt(tops: readonly number[], y: number): number {
     }
   }
   return found;
+}
+
+// ── Links ─────────────────────────────────────────────────────────────────────
+// The fields of a pdf.js link annotation the reader uses (``page.getAnnotations()`` data).
+export type PdfLinkAnnotation = {
+  subtype?: string;
+  annotationFlags?: number;
+  rect?: ArrayLike<number> | null;
+  quadPoints?: ArrayLike<number> | null;
+  /** A link pdf.js validated as absolute (http, https, ftp, mailto, tel). */
+  url?: string;
+  /** A named destination (string) or an explicit one ([page, {name}, ...args]). */
+  dest?: unknown;
+};
+
+export type PdfLinkTarget = { kind: 'url'; href: string } | { kind: 'dest'; dest: string | readonly unknown[] };
+export type PdfRect = [number, number, number, number];
+
+const HIDDEN_FLAG = 0x2;
+
+/**
+ * Where a link annotation goes: a web or mail link to open in a new tab, or a destination inside
+ * the document. Anything else — scripts, launch and file actions, non-web schemes, hidden links —
+ * is not offered at all.
+ */
+export function pdfLinkTarget(link: PdfLinkAnnotation, base: string): PdfLinkTarget | null {
+  if (link.subtype !== 'Link' || ((link.annotationFlags ?? 0) & HIDDEN_FLAG) !== 0) return null;
+  if (typeof link.url === 'string' && link.url) return isSafeDocumentLink(link.url, base) ? { kind: 'url', href: link.url } : null;
+  if (typeof link.dest === 'string' && link.dest) return { kind: 'dest', dest: link.dest };
+  if (Array.isArray(link.dest) && link.dest.length > 0) return { kind: 'dest', dest: link.dest };
+  return null;
+}
+
+/** The clickable areas of a link, in PDF user space: one per quadrilateral, or else its rectangle. */
+export function pdfLinkAreas(link: PdfLinkAnnotation): PdfRect[] {
+  const quads = link.quadPoints;
+  if (quads && quads.length >= 8 && quads.length % 8 === 0) {
+    const areas: PdfRect[] = [];
+    for (let i = 0; i < quads.length; i += 8) {
+      const xs = [quads[i], quads[i + 2], quads[i + 4], quads[i + 6]];
+      const ys = [quads[i + 1], quads[i + 3], quads[i + 5], quads[i + 7]];
+      areas.push([Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)]);
+    }
+    return areas;
+  }
+  const r = link.rect;
+  if (!r || r.length !== 4) return [];
+  return [[Math.min(r[0], r[2]), Math.min(r[1], r[3]), Math.max(r[0], r[2]), Math.max(r[1], r[3])]];
+}
+
+/**
+ * The point an explicit destination asks to show, in PDF user space; ``null`` where the destination
+ * leaves that coordinate unchanged (or names no point at all, as Fit does).
+ */
+export function pdfDestPoint(dest: readonly unknown[]): { x: number | null; y: number | null } {
+  const kind = (dest[1] as { name?: unknown } | null | undefined)?.name;
+  const num = (value: unknown) => (typeof value === 'number' && Number.isFinite(value) ? value : null);
+  switch (kind) {
+    case 'XYZ':
+      return { x: num(dest[2]), y: num(dest[3]) };
+    case 'FitH':
+    case 'FitBH':
+      return { x: null, y: num(dest[2]) };
+    case 'FitV':
+    case 'FitBV':
+      return { x: num(dest[2]), y: null };
+    case 'FitR':
+      return { x: num(dest[2]), y: num(dest[5]) };
+    default:
+      return { x: null, y: null };
+  }
+}
+
+/**
+ * Which scroll axes a destination point fixes once the page is on screen: a page turned by a
+ * quarter (/Rotate 90 or 270) shows its x along the vertical and its y along the horizontal.
+ */
+export function pdfDestAxes(point: { x: number | null; y: number | null }, rotation: number): { left: boolean; top: boolean } {
+  const quarterTurn = (((rotation % 360) + 360) % 360) % 180 !== 0;
+  return quarterTurn ? { left: point.y !== null, top: point.x !== null } : { left: point.x !== null, top: point.y !== null };
 }

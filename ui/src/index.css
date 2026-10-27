@@ -1090,6 +1090,28 @@ pre,
 }
 .vr-pdf-text.selecting .vr-pdf-text-end { top: 0; }
 
+/* PDF links (components/ui/pdf-pages.tsx): transparent anchors over each link's area, above the
+   text layer. Only the anchors take pointer events, so text outside a link stays selectable; a tint
+   on hover / press / keyboard focus shows what a tap will follow. */
+.vr-pdf-links {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+.vr-pdf-links > a {
+  position: absolute;
+  border-radius: 2px;
+  pointer-events: auto;
+  -webkit-tap-highlight-color: transparent;
+}
+.vr-pdf-links > a:hover,
+.vr-pdf-links > a:active,
+.vr-pdf-links > a:focus-visible {
+  background: color-mix(in srgb, var(--mint) 22%, transparent);
+}
+.vr-pdf-links > a:focus-visible { outline: 2px solid var(--mint); outline-offset: 1px; }
+
 /* The project header remains a scroll/tap target until a touch hold activates. */
 .project-drag-header {
   cursor: pointer;

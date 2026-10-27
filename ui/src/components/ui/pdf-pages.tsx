@@ -6,7 +6,20 @@ import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFWorker, RenderTask, T
 import PdfjsWorker from 'pdfjs-dist/legacy/build/pdf.worker.mjs?worker';
 
 import { Button } from '@/components/ui/button';
-import { PDF_MAX_ZOOM, PDF_MIN_ZOOM, clampPdfZoom, pageIndexAt, pdfOutputScale, stepPdfZoom } from '@/lib/pdfPreview';
+import {
+  PDF_MAX_ZOOM,
+  PDF_MIN_ZOOM,
+  type PdfLinkAnnotation,
+  type PdfLinkTarget,
+  clampPdfZoom,
+  pageIndexAt,
+  pdfDestAxes,
+  pdfDestPoint,
+  pdfLinkAreas,
+  pdfLinkTarget,
+  pdfOutputScale,
+  stepPdfZoom,
+} from '@/lib/pdfPreview';
 import { unifyCjkRadicals } from '@/lib/cjkRadicals';
 import { PDF_TEXT_LAYER_CLASS, trackPdfTextLayer } from '@/lib/pdfTextSelection';
 
@@ -23,6 +36,8 @@ import { PDF_TEXT_LAYER_CLASS, trackPdfTextLayer } from '@/lib/pdfTextSelection'
 // - Each drawn page carries pdf.js's text layer: transparent text laid exactly over the drawing, so
 //   the text can be long-pressed or dragged to select and copied (styles: ``.vr-pdf-text`` in
 //   index.css; selection behaviour: lib/pdfTextSelection.ts).
+// - Link annotations become anchors over their areas: web and mail links open in a new tab, links
+//   to a place in the document scroll the reader there. Other actions are not offered.
 // - The legacy build is used on purpose: the modern one relies on JavaScript features newer than the
 //   mobile Safari versions people still run.
 
@@ -315,6 +330,35 @@ function PdfReader({ doc, ratio, TextLayer, className }: { doc: PDFDocumentProxy
     };
   }, [scroller, applyZoom]);
 
+  // Follow a link to a place in the document: scroll its page in, at the point the destination
+  // names when it names one, a little below the top edge so that line is not flush with it.
+  const goTo = React.useCallback(
+    async (dest: string | readonly unknown[]) => {
+      try {
+        const explicit = typeof dest === 'string' ? await doc.getDestination(dest) : dest;
+        if (!scroller || !Array.isArray(explicit) || explicit.length === 0) return;
+        const ref: unknown = explicit[0];
+        const index =
+          typeof ref === 'number' ? ref : ref && typeof ref === 'object' ? await doc.getPageIndex(ref as Parameters<PDFDocumentProxy['getPageIndex']>[0]) : -1;
+        const pageEl = pageElements(contentRef.current)[index];
+        if (!pageEl) return;
+        const page = await doc.getPage(index + 1);
+        const viewport = page.getViewport({ scale: pageEl.offsetWidth / page.getViewport({ scale: 1 }).width });
+        const point = pdfDestPoint(explicit);
+        // On a page with /Rotate 90 or 270 the destination's x and y land on the other screen axes.
+        const axes = pdfDestAxes(point, viewport.rotation);
+        const [vx, vy] = viewport.convertToViewportPoint(point.x ?? 0, point.y ?? 0) as [number, number];
+        scroller.scrollTo({
+          top: pageEl.offsetTop + (axes.top ? Math.max(0, vy - 8) : 0),
+          left: axes.left ? Math.max(0, pageEl.offsetLeft + vx - 8) : scroller.scrollLeft,
+        });
+      } catch {
+        // A destination that does not resolve leaves the reader where it is.
+      }
+    },
+    [doc, scroller],
+  );
+
   const pages = React.useMemo(() => Array.from({ length: total }, (_, i) => i + 1), [total]);
   const atFit = zoom <= PDF_MIN_ZOOM + 0.001;
   const atMax = zoom >= PDF_MAX_ZOOM - 0.001;
@@ -326,7 +370,18 @@ function PdfReader({ doc, ratio, TextLayer, className }: { doc: PDFDocumentProxy
         <div ref={contentRef} className="relative flex w-max min-w-full flex-col items-center gap-3 px-3 pb-16 pt-3">
           {pageWidth > 0 &&
             pages.map((n) => (
-              <PdfPage key={n} doc={doc} TextLayer={TextLayer} pageNumber={n} width={pageWidth} fallbackRatio={ratio} watch={watch} label={t('preview.pdfPage', { page: n })} />
+              <PdfPage
+                key={n}
+                doc={doc}
+                TextLayer={TextLayer}
+                pageNumber={n}
+                width={pageWidth}
+                fallbackRatio={ratio}
+                watch={watch}
+                onLink={goTo}
+                label={t('preview.pdfPage', { page: n })}
+                linkLabel={t('preview.pdfInternalLink')}
+              />
             ))}
         </div>
       </div>
@@ -357,15 +412,61 @@ function PdfReader({ doc, ratio, TextLayer, className }: { doc: PDFDocumentProxy
   );
 }
 
-// What a page box shows: its canvas and text layer, swapped in together. The previous text layer
-// stops being tracked for selection when it leaves the document.
+// What a page box shows: its canvas, text layer and link layer, swapped in together. The previous
+// text layer stops being tracked for selection when it leaves the document.
 const trackedLayers = new WeakMap<HTMLElement, () => void>();
 
-function showPage(box: HTMLElement, canvas: HTMLCanvasElement | null, layer: HTMLElement | null) {
+function showPage(box: HTMLElement, canvas: HTMLCanvasElement | null, layer: HTMLElement | null, links: HTMLElement | null = null) {
   trackedLayers.get(box)?.();
   trackedLayers.delete(box);
-  box.replaceChildren(...[canvas, layer].filter((node): node is HTMLCanvasElement | HTMLElement => node !== null));
+  box.replaceChildren(...[canvas, layer, links].filter((node): node is HTMLCanvasElement | HTMLElement => node !== null));
   if (layer) trackedLayers.set(box, trackPdfTextLayer(layer));
+}
+
+// One anchor per link area, positioned in percent of the page so it stays on its words while the
+// box is resized ahead of the next render.
+function linkLayer(
+  annotations: readonly PdfLinkAnnotation[],
+  viewport: { width: number; height: number; convertToViewportPoint: (x: number, y: number) => number[] },
+  onLink: (dest: string | readonly unknown[]) => void,
+  base: string,
+  internalLabel: string,
+): HTMLElement | null {
+  const anchors: HTMLAnchorElement[] = [];
+  for (const annotation of annotations) {
+    const target: PdfLinkTarget | null = pdfLinkTarget(annotation, base);
+    if (!target) continue;
+    for (const area of pdfLinkAreas(annotation)) {
+      const [x1, y1] = viewport.convertToViewportPoint(area[0], area[1]);
+      const [x2, y2] = viewport.convertToViewportPoint(area[2], area[3]);
+      const a = document.createElement('a');
+      a.style.left = `${(100 * Math.min(x1, x2)) / viewport.width}%`;
+      a.style.top = `${(100 * Math.min(y1, y2)) / viewport.height}%`;
+      a.style.width = `${(100 * Math.abs(x2 - x1)) / viewport.width}%`;
+      a.style.height = `${(100 * Math.abs(y2 - y1)) / viewport.height}%`;
+      if (target.kind === 'url') {
+        a.href = target.href;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer nofollow';
+        a.title = target.href;
+      } else {
+        const { dest } = target;
+        a.href = '#';
+        a.dataset.pdfDest = 'true';
+        a.setAttribute('aria-label', internalLabel);
+        a.addEventListener('click', (event) => {
+          event.preventDefault();
+          onLink(dest);
+        });
+      }
+      anchors.push(a);
+    }
+  }
+  if (anchors.length === 0) return null;
+  const layer = document.createElement('div');
+  layer.className = 'vr-pdf-links';
+  layer.append(...anchors);
+  return layer;
 }
 
 const PdfPage = React.memo(function PdfPage({
@@ -375,7 +476,9 @@ const PdfPage = React.memo(function PdfPage({
   width,
   fallbackRatio,
   watch,
+  onLink,
   label,
+  linkLabel,
 }: {
   doc: PDFDocumentProxy;
   TextLayer: TextLayerClass;
@@ -383,7 +486,9 @@ const PdfPage = React.memo(function PdfPage({
   width: number;
   fallbackRatio: number;
   watch: PageWatch;
+  onLink: (dest: string | readonly unknown[]) => void;
   label: string;
+  linkLabel: string;
 }) {
   const boxRef = React.useRef<HTMLDivElement>(null);
   const [near, setNear] = React.useState(false);
@@ -446,10 +551,15 @@ const PdfPage = React.memo(function PdfPage({
           return text.render().then(() => true);
         })
         .catch(() => false);
+      const links = page.getAnnotations({ intent: 'display' }).then(
+        (annotations: PdfLinkAnnotation[]) => linkLayer(annotations, page.getViewport({ scale: cssScale }), onLink, window.location.href, linkLabel),
+        () => null,
+      );
       await task.promise;
       const hasText = await textReady;
+      const linkLayerEl = await links;
       if (cancelled) return;
-      showPage(box, canvas, hasText ? layer : null);
+      showPage(box, canvas, hasText ? layer : null, linkLayerEl);
       box.dataset.pdfRendered = 'true';
       if (hasText) box.dataset.pdfText = 'true';
       else delete box.dataset.pdfText;
@@ -459,7 +569,7 @@ const PdfPage = React.memo(function PdfPage({
       task?.cancel();
       text?.cancel();
     };
-  }, [doc, TextLayer, pageNumber, width, near]);
+  }, [doc, TextLayer, pageNumber, width, near, onLink, linkLabel]);
 
   // A group, not an image: the page's text is readable by assistive technology through its layer.
   return (

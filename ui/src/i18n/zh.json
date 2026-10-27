@@ -192,6 +192,7 @@
     "pdfPage": "第 {{page}} 页",
     "pdfPosition": "第 {{page}} 页，共 {{total}} 页",
     "pdfCounter": "{{page}} / {{total}}",
+    "pdfInternalLink": "跳转到文档中的链接位置",
     "zoomPercent": "{{percent}}%",
     "download": "下载"
   },

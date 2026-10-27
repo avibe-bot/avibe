@@ -7,6 +7,10 @@ import {
   PDF_ZOOM_STEPS,
   clampPdfZoom,
   pageIndexAt,
+  pdfDestAxes,
+  pdfDestPoint,
+  pdfLinkAreas,
+  pdfLinkTarget,
   pdfOutputScale,
   shouldRenderPdfPages,
   stepPdfZoom,
@@ -94,5 +98,83 @@ describe('pageIndexAt', () => {
 
   it('is 0 for an empty document', () => {
     expect(pageIndexAt([], 100)).toBe(0);
+  });
+});
+
+describe('pdfLinkTarget', () => {
+  const base = 'https://avibe.example/chat/s1';
+  const link = (over: Record<string, unknown>) => ({ subtype: 'Link', rect: [0, 0, 10, 10], ...over });
+
+  it('opens web and mail links', () => {
+    expect(pdfLinkTarget(link({ url: 'https://example.com/a' }), base)).toEqual({ kind: 'url', href: 'https://example.com/a' });
+    expect(pdfLinkTarget(link({ url: 'mailto:team@example.com' }), base)).toEqual({ kind: 'url', href: 'mailto:team@example.com' });
+  });
+
+  it('offers no link for other schemes pdf.js still accepts', () => {
+    expect(pdfLinkTarget(link({ url: 'tel:+15550100' }), base)).toBeNull();
+    expect(pdfLinkTarget(link({ url: 'ftp://files.example.com/x' }), base)).toBeNull();
+    // pdf.js puts a rejected URI in ``unsafeUrl`` and leaves ``url`` unset.
+    expect(pdfLinkTarget(link({ unsafeUrl: 'javascript:alert(1)' }), base)).toBeNull();
+  });
+
+  it('follows named and explicit destinations inside the document', () => {
+    expect(pdfLinkTarget(link({ dest: 'chapter-2' }), base)).toEqual({ kind: 'dest', dest: 'chapter-2' });
+    const explicit = [{ num: 9, gen: 0 }, { name: 'XYZ' }, 0, 400, null];
+    expect(pdfLinkTarget(link({ dest: explicit }), base)).toEqual({ kind: 'dest', dest: explicit });
+  });
+
+  it('ignores hidden links, other annotation types, and links without a target', () => {
+    expect(pdfLinkTarget(link({ url: 'https://example.com', annotationFlags: 0x2 }), base)).toBeNull();
+    expect(pdfLinkTarget({ subtype: 'Text', url: 'https://example.com' }, base)).toBeNull();
+    expect(pdfLinkTarget(link({ dest: [] }), base)).toBeNull();
+    expect(pdfLinkTarget(link({}), base)).toBeNull();
+  });
+});
+
+describe('pdfLinkAreas', () => {
+  it('uses the rectangle, normalized, when there are no quadrilaterals', () => {
+    expect(pdfLinkAreas({ rect: [212, 204, 70, 172] })).toEqual([[70, 172, 212, 204]]);
+  });
+
+  it('gives a link that wraps onto a second line one area per line', () => {
+    const quadPoints = new Float32Array([400, 220, 560, 220, 400, 200, 560, 200, 72, 190, 180, 190, 72, 170, 180, 170]);
+    expect(pdfLinkAreas({ rect: [72, 170, 560, 220], quadPoints })).toEqual([
+      [400, 200, 560, 220],
+      [72, 170, 180, 190],
+    ]);
+  });
+
+  it('has no area without geometry', () => {
+    expect(pdfLinkAreas({ rect: null })).toEqual([]);
+  });
+});
+
+describe('pdfDestPoint', () => {
+  const page = { num: 3, gen: 0 };
+  it.each([
+    [[page, { name: 'XYZ' }, 36, 400, null], { x: 36, y: 400 }],
+    [[page, { name: 'XYZ' }, null, 400, 0], { x: null, y: 400 }],
+    [[page, { name: 'FitH' }, 500], { x: null, y: 500 }],
+    [[page, { name: 'FitBH' }, 500], { x: null, y: 500 }],
+    [[page, { name: 'FitV' }, 20], { x: 20, y: null }],
+    [[page, { name: 'FitR' }, 10, 20, 300, 400], { x: 10, y: 400 }],
+    [[page, { name: 'Fit' }], { x: null, y: null }],
+    [[page], { x: null, y: null }],
+  ])('reads %j', (dest, point) => {
+    expect(pdfDestPoint(dest)).toEqual(point);
+  });
+});
+
+describe('pdfDestAxes', () => {
+  it('fixes the axes the destination names on an upright or upside-down page', () => {
+    expect(pdfDestAxes({ x: null, y: 400 }, 0)).toEqual({ left: false, top: true });
+    expect(pdfDestAxes({ x: 36, y: null }, 180)).toEqual({ left: true, top: false });
+  });
+
+  it('swaps them on a page turned a quarter either way', () => {
+    // FitH names only y, which a 90° page shows across the screen.
+    expect(pdfDestAxes({ x: null, y: 400 }, 90)).toEqual({ left: true, top: false });
+    expect(pdfDestAxes({ x: 36, y: null }, 270)).toEqual({ left: false, top: true });
+    expect(pdfDestAxes({ x: 36, y: 400 }, -90)).toEqual({ left: true, top: true });
   });
 });
