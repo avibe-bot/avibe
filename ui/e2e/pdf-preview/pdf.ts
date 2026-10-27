@@ -5,6 +5,9 @@
 // rendered canvas to prove *which* page was drawn) and a "Page N" label. ``cjk`` adds a line set in
 // a non-embedded Adobe-GB1 font through the predefined ``UniGB-UCS2-H`` CMap — the shape of PDFs
 // many generators emit for Chinese text, and one pdf.js can only decode with its bundled CMaps.
+// ``radicals`` adds a "月份" line whose ToUnicode maps 月 to the Kangxi radical ⽉ (U+2F49), as the
+// fonts Chrome embeds do: it looks right, and copies as a different character unless unified.
+// ``rotate`` sets every page's /Rotate, as scanners and some exporters do for landscape pages.
 
 export type Rgb = readonly [number, number, number];
 
@@ -27,7 +30,7 @@ export function pageColor(index: number): Rgb {
 
 const unit = (v: number) => (v / 255).toFixed(3);
 
-export function buildPdf({ pages, cjk = false }: { pages: number; cjk?: boolean }): Buffer {
+export function buildPdf({ pages, cjk = false, radicals = false, rotate = 0 }: { pages: number; cjk?: boolean; radicals?: boolean; rotate?: 0 | 90 | 180 | 270 }): Buffer {
   const objects: string[] = [];
   const add = (body: string) => {
     objects.push(body);
@@ -45,7 +48,19 @@ export function buildPdf({ pages, cjk = false }: { pages: number; cjk?: boolean 
     const cidFont = add(
       `<< /Type /Font /Subtype /CIDFontType0 /BaseFont /STSong-Light /CIDSystemInfo << /Registry (Adobe) /Ordering (GB1) /Supplement 4 >> /FontDescriptor ${descriptor} 0 R /DW 1000 >>`,
     );
-    song = add(`<< /Type /Font /Subtype /Type0 /BaseFont /STSong-Light-UniGB-UCS2-H /Encoding /UniGB-UCS2-H /DescendantFonts [${cidFont} 0 R] >>`);
+    let toUnicode = '';
+    if (radicals) {
+      const cmap = [
+        '/CIDInit /ProcSet findresource begin 12 dict begin begincmap',
+        '/CIDSystemInfo << /Registry (Adobe) /Ordering (UCS) /Supplement 0 >> def',
+        '/CMapName /Adobe-Identity-UCS def /CMapType 2 def',
+        '1 begincodespacerange <0000> <FFFF> endcodespacerange',
+        '6 beginbfchar <4E2D> <4E2D> <6587> <6587> <9884> <9884> <89C8> <89C8> <6708> <2F49> <4EFD> <4EFD> endbfchar',
+        'endcmap CMapName currentdict /CMap defineresource pop end end',
+      ].join('\n');
+      toUnicode = ` /ToUnicode ${add(`<< /Length ${Buffer.byteLength(cmap)} >>\nstream\n${cmap}\nendstream`)} 0 R`;
+    }
+    song = add(`<< /Type /Font /Subtype /Type0 /BaseFont /STSong-Light-UniGB-UCS2-H /Encoding /UniGB-UCS2-H /DescendantFonts [${cidFont} 0 R]${toUnicode} >>`);
   }
 
   const kids: number[] = [];
@@ -56,12 +71,14 @@ export function buildPdf({ pages, cjk = false }: { pages: number; cjk?: boolean 
       `0 0 0 rg BT /F1 48 Tf 72 680 Td (Page ${i + 1}) Tj ET`,
     ];
     // "中文预览" as UCS-2 code units.
-    if (cjk) ops.push('0 0 0 rg BT /F2 40 Tf 72 620 Td <4E2D6587987889C8> Tj ET');
+    if (cjk) ops.push('0 0 0 rg BT /F2 40 Tf 72 620 Td <4E2D6587988489C8> Tj ET');
+    // "月份", in the band's upper edge.
+    if (radicals) ops.push('0 0 0 rg BT /F2 32 Tf 72 575 Td <67084EFD> Tj ET');
     const stream = ops.join('\n');
     const content = add(`<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`);
     const fonts = `/F1 ${helvetica} 0 R${cjk ? ` /F2 ${song} 0 R` : ''}`;
     kids.push(
-      add(`<< /Type /Page /Parent ${pagesNode} 0 R /MediaBox [0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}] /Contents ${content} 0 R /Resources << /Font << ${fonts} >> >> >>`),
+      add(`<< /Type /Page /Parent ${pagesNode} 0 R /MediaBox [0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}]${rotate ? ` /Rotate ${rotate}` : ''} /Contents ${content} 0 R /Resources << /Font << ${fonts} >> >> >>`),
     );
   }
   objects[catalog - 1] = `<< /Type /Catalog /Pages ${pagesNode} 0 R >>`;

@@ -2,11 +2,13 @@ import * as React from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2, Maximize2, ZoomIn, ZoomOut } from 'lucide-react';
 import clsx from 'clsx';
-import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFWorker, RenderTask } from 'pdfjs-dist/legacy/build/pdf.mjs';
+import type { PDFDocumentLoadingTask, PDFDocumentProxy, PDFWorker, RenderTask, TextLayer } from 'pdfjs-dist/legacy/build/pdf.mjs';
 import PdfjsWorker from 'pdfjs-dist/legacy/build/pdf.worker.mjs?worker';
 
 import { Button } from '@/components/ui/button';
 import { PDF_MAX_ZOOM, PDF_MIN_ZOOM, clampPdfZoom, pageIndexAt, pdfOutputScale, stepPdfZoom } from '@/lib/pdfPreview';
+import { unifyCjkRadicals } from '@/lib/cjkRadicals';
+import { PDF_TEXT_LAYER_CLASS, trackPdfTextLayer } from '@/lib/pdfTextSelection';
 
 // ── PDF pages ────────────────────────────────────────────────────────────────
 // Every page of a PDF drawn to its own canvas by pdf.js, stacked in one scroller: the reader used
@@ -18,6 +20,9 @@ import { PDF_MAX_ZOOM, PDF_MIN_ZOOM, clampPdfZoom, pageIndexAt, pdfOutputScale, 
 //   keeps the point under the fingers / centre in place.
 // - Only pages within a screen and a half of the viewport hold a canvas. Others are released, which
 //   is what keeps a long document inside iOS's canvas memory budget.
+// - Each drawn page carries pdf.js's text layer: transparent text laid exactly over the drawing, so
+//   the text can be long-pressed or dragged to select and copied (styles: ``.vr-pdf-text`` in
+//   index.css; selection behaviour: lib/pdfTextSelection.ts).
 // - The legacy build is used on purpose: the modern one relies on JavaScript features newer than the
 //   mobile Safari versions people still run.
 
@@ -86,7 +91,9 @@ class PageWatch {
   }
 }
 
-type DocState = { status: 'loading' } | { status: 'error' } | { status: 'ready'; doc: PDFDocumentProxy; ratio: number };
+type TextLayerClass = typeof TextLayer;
+
+type DocState = { status: 'loading' } | { status: 'error' } | { status: 'ready'; doc: PDFDocumentProxy; ratio: number; TextLayer: TextLayerClass };
 
 type Anchor = { page: number; fx: number; fy: number; ax: number; ay: number };
 
@@ -103,9 +110,11 @@ export default function PdfPages({ url, className }: { url: string; className?: 
     let port: Worker | null = null;
     let worker: PDFWorker | null = null;
     let task: PDFDocumentLoadingTask | null = null;
+    let textLayers: TextLayerClass | null = null;
     (async () => {
       try {
         const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+        textLayers = pdfjs.TextLayer;
         if (!alive) return;
         // A worker per document, terminated with it, so closing the preview gives its memory back.
         // (pdf.js's generated typings declare ``port`` as null-only; it takes a Worker at runtime.)
@@ -122,7 +131,7 @@ export default function PdfPages({ url, className }: { url: string; className?: 
         const doc = await task.promise;
         const first = await doc.getPage(1);
         const viewport = first.getViewport({ scale: 1 });
-        if (alive) setState({ status: 'ready', doc, ratio: viewport.height / viewport.width });
+        if (alive) setState({ status: 'ready', doc, ratio: viewport.height / viewport.width, TextLayer: pdfjs.TextLayer });
       } catch {
         if (alive) setState({ status: 'error' });
       }
@@ -135,6 +144,8 @@ export default function PdfPages({ url, className }: { url: string; className?: 
         .finally(() => {
           worker?.destroy();
           port?.terminate();
+          // Drops the hidden measuring canvas pdf.js keeps in <body> once no text layer is pending.
+          textLayers?.cleanup();
         });
     };
   }, [url]);
@@ -149,10 +160,10 @@ export default function PdfPages({ url, className }: { url: string; className?: 
       </div>
     );
   }
-  return <PdfReader doc={state.doc} ratio={state.ratio} className={className} />;
+  return <PdfReader doc={state.doc} ratio={state.ratio} TextLayer={state.TextLayer} className={className} />;
 }
 
-function PdfReader({ doc, ratio, className }: { doc: PDFDocumentProxy; ratio: number; className?: string }) {
+function PdfReader({ doc, ratio, TextLayer, className }: { doc: PDFDocumentProxy; ratio: number; TextLayer: TextLayerClass; className?: string }) {
   const { t } = useTranslation();
   const [scroller, setScroller] = React.useState<HTMLDivElement | null>(null);
   const contentRef = React.useRef<HTMLDivElement>(null);
@@ -314,7 +325,9 @@ function PdfReader({ doc, ratio, className }: { doc: PDFDocumentProxy; ratio: nu
         {/* ``relative``: the pages' offsets are measured against this column, the scroller's content. */}
         <div ref={contentRef} className="relative flex w-max min-w-full flex-col items-center gap-3 px-3 pb-16 pt-3">
           {pageWidth > 0 &&
-            pages.map((n) => <PdfPage key={n} doc={doc} pageNumber={n} width={pageWidth} fallbackRatio={ratio} watch={watch} label={t('preview.pdfPage', { page: n })} />)}
+            pages.map((n) => (
+              <PdfPage key={n} doc={doc} TextLayer={TextLayer} pageNumber={n} width={pageWidth} fallbackRatio={ratio} watch={watch} label={t('preview.pdfPage', { page: n })} />
+            ))}
         </div>
       </div>
       {/* Control cluster, as in the image preview; the bottom padding of the column keeps the last
@@ -344,8 +357,20 @@ function PdfReader({ doc, ratio, className }: { doc: PDFDocumentProxy; ratio: nu
   );
 }
 
+// What a page box shows: its canvas and text layer, swapped in together. The previous text layer
+// stops being tracked for selection when it leaves the document.
+const trackedLayers = new WeakMap<HTMLElement, () => void>();
+
+function showPage(box: HTMLElement, canvas: HTMLCanvasElement | null, layer: HTMLElement | null) {
+  trackedLayers.get(box)?.();
+  trackedLayers.delete(box);
+  box.replaceChildren(...[canvas, layer].filter((node): node is HTMLCanvasElement | HTMLElement => node !== null));
+  if (layer) trackedLayers.set(box, trackPdfTextLayer(layer));
+}
+
 const PdfPage = React.memo(function PdfPage({
   doc,
+  TextLayer,
   pageNumber,
   width,
   fallbackRatio,
@@ -353,6 +378,7 @@ const PdfPage = React.memo(function PdfPage({
   label,
 }: {
   doc: PDFDocumentProxy;
+  TextLayer: TextLayerClass;
   pageNumber: number;
   width: number;
   fallbackRatio: number;
@@ -367,53 +393,83 @@ const PdfPage = React.memo(function PdfPage({
   React.useEffect(() => {
     const box = boxRef.current;
     if (!box) return;
-    return watch.observe(box, setNear);
+    const stop = watch.observe(box, setNear);
+    return () => {
+      stop();
+      showPage(box, null, null);
+    };
   }, [watch]);
 
-  // The canvas lives outside React's tree (the box has no React children), so a re-render at a new
-  // width keeps showing the previous bitmap, stretched, until the sharper one replaces it.
+  // The canvas and text layer live outside React's tree (the box has no React children), so a
+  // re-render at a new width keeps showing the previous ones, stretched, until the new pair replaces
+  // them together.
   React.useEffect(() => {
     const box = boxRef.current;
     if (!box) return;
     if (!near) {
-      box.replaceChildren();
+      showPage(box, null, null);
       delete box.dataset.pdfRendered;
+      delete box.dataset.pdfText;
       return;
     }
     let cancelled = false;
     let task: RenderTask | null = null;
+    let text: TextLayer | null = null;
     (async () => {
       const page = await doc.getPage(pageNumber);
       if (cancelled) return;
       const base = page.getViewport({ scale: 1 });
       const pageRatio = base.height / base.width;
       setRatio(pageRatio);
+      const cssScale = width / base.width;
+      // The text layer sizes itself and its text from this variable. Set before drawing, so a layer
+      // still showing from the previous width already follows the resized box.
+      box.style.setProperty('--total-scale-factor', String(cssScale));
       const outputScale = pdfOutputScale(width, width * pageRatio, window.devicePixelRatio);
-      const viewport = page.getViewport({ scale: (width / base.width) * outputScale });
+      const viewport = page.getViewport({ scale: cssScale * outputScale });
       const canvas = document.createElement('canvas');
       canvas.width = Math.max(1, Math.floor(viewport.width));
       canvas.height = Math.max(1, Math.floor(viewport.height));
       canvas.className = 'absolute inset-0 h-full w-full';
       task = page.render({ canvas, viewport });
+      // Text is laid out in CSS pixels, in parallel with the drawing. A page whose text cannot be
+      // extracted is still shown, just without selectable text. Radical look-alikes are unified
+      // first, so what is selected copies as the characters on screen.
+      const layer = document.createElement('div');
+      layer.className = PDF_TEXT_LAYER_CLASS;
+      const textReady = page
+        .getTextContent()
+        .then((content) => {
+          if (cancelled) return false;
+          for (const item of content.items) if ('str' in item) item.str = unifyCjkRadicals(item.str);
+          text = new TextLayer({ textContentSource: content, container: layer, viewport: page.getViewport({ scale: cssScale }) });
+          return text.render().then(() => true);
+        })
+        .catch(() => false);
       await task.promise;
+      const hasText = await textReady;
       if (cancelled) return;
-      box.replaceChildren(canvas);
+      showPage(box, canvas, hasText ? layer : null);
       box.dataset.pdfRendered = 'true';
+      if (hasText) box.dataset.pdfText = 'true';
+      else delete box.dataset.pdfText;
     })().catch(() => undefined); // cancelled renders reject; a page that fails to draw stays blank
     return () => {
       cancelled = true;
       task?.cancel();
+      text?.cancel();
     };
-  }, [doc, pageNumber, width, near]);
+  }, [doc, TextLayer, pageNumber, width, near]);
 
+  // A group, not an image: the page's text is readable by assistive technology through its layer.
   return (
     <div
       ref={boxRef}
-      role="img"
+      role="group"
       aria-label={label}
       data-pdf-page={pageNumber}
       className="relative shrink-0 bg-white shadow-[0_1px_4px_rgba(0,0,0,0.5)]"
-      style={{ width, height: Math.round(width * (ratio ?? fallbackRatio)) }}
+      style={{ width, height: Math.round(width * (ratio ?? fallbackRatio)), ['--scale-round-x' as string]: '1px', ['--scale-round-y' as string]: '1px' }}
     />
   );
 });
