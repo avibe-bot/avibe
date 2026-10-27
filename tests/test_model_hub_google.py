@@ -332,7 +332,9 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
                 {"text": "Visible answer"},
                 {"text": ""},
                 {"inlineData": {"mimeType": "image/png", "data": "synthetic-image-data"}},
-                {"functionCall": {"name": "verify", "args": {"signature": "user-data"}}},
+                # Gemini 3+ refuses a current-turn call without a signature: Google's stand-in replaces the Source's.
+                {"functionCall": {"name": "verify", "args": {"signature": "user-data"}},
+                 "thoughtSignature": "skip_thought_signature_validator"},
             ]},
             {"role": "user", "parts": [{"functionResponse": {"name": "verify", "response": {"signature": "user-data"}}}]},
         ],

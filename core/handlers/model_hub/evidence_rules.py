@@ -45,8 +45,12 @@ class LearnedEvidence:
 
 
 def wire_effort(request: Mapping[str, Any], protocol: str) -> Optional[str]:
-    """The reasoning effort this request sends, as the wire spells it."""
+    """The reasoning effort this request sends, as the wire spells it: the token ``registry.sent_effort`` names."""
 
+    if protocol == "google":
+        from core.agent_core.ai.google import wire_effort as google_wire_effort
+
+        return google_wire_effort(request)
     value: Any = request
     for key in _EFFORT_PATHS.get(protocol, ()):
         value = value.get(key) if isinstance(value, Mapping) else None

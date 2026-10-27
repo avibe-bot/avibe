@@ -22,8 +22,8 @@ ADAPTERS: dict[ProtocolName, type[ProviderAdapter]] = {
 def sent_effort(protocol: str, model_id: str, effort: str) -> str | None:
     """The effort token a request on ``protocol`` to ``model_id`` carries for ``effort``, exactly as the adapter sends
     it: at ``output_config.effort`` (Anthropic), ``reasoning.effort`` (Responses), ``reasoning_effort`` (Chat), or the
-    token a Gemini request's ``thinkingConfig`` is built from (``google``). None when the request carries no effort
-    token. Model Hub's effort menu reads the same answer, so the menu and the wire cannot drift."""
+    thinking level a Gemini request's ``thinkingConfig`` carries, a budget named by the effort it stands for
+    (``google``). None when the request carries no effort token. Model Hub's effort menu reads the same answer, so the menu and the wire cannot drift."""
 
     if protocol == "anthropic":
         return anthropic.sent_effort(model_id, effort)
@@ -32,7 +32,7 @@ def sent_effort(protocol: str, model_id: str, effort: str) -> str | None:
     if protocol == "openai_chat":
         return openai_chat.sent_effort(effort)
     if protocol == "google":
-        return google.sent_effort(effort)
+        return google.sent_effort(model_id, effort)
     raise ValueError(f"unsupported provider protocol: {protocol}")
 
 

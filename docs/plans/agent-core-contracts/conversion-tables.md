@@ -658,11 +658,11 @@ gateway's Gemini surface, which serves it to a Gemini Source untranslated.
 | `system` | `systemInstruction.parts[0].text`. |
 | User text/image | `role="user"` content; text parts and `inlineData {mimeType, data}`. |
 | Assistant text | `role="model"`, a `text` part per block. |
-| Thinking | Same origin: a signed or unsigned thought is `{text, thought: true}` with its `thoughtSignature`; an empty block that holds only a signature is `{text: "", thoughtSignature}`, the part Gemini streams it on. A signature that is not well-formed base64 (a Chat reasoning marker an older transcript holds) is not sent. |
+| Thinking | Same origin: a signed or unsigned thought is `{text, thought: true}` with its `thoughtSignature`. An empty block that holds only a signature goes back on the text part right before it (an answer's signature, which `TextBlock` cannot hold), else as `{text: "", thoughtSignature}`. A signature that is not well-formed base64 (a Chat reasoning marker an older transcript holds) is not sent. |
 | Tool call | `functionCall {name, args, id}` with the call's `thoughtSignature`. In the current turn (after the last user message), the first call of a step that carries no valid signature gets Google's documented stand-in `skip_thought_signature_validator`, so another origin's calls are accepted; earlier turns are not validated and get none. |
-| Tool result | `functionResponse {name, id, response: {output}}`, or `{error}` for an error result; image-only text is `(see attached image)`, empty text `(no tool output)`. A step's results share one `role="user"` content in call order. Images ride in `functionResponse.parts` on Gemini 3 and later and on non-Gemini ids, else in a following user content after `Tool result image:`. |
+| Tool result | `functionResponse {name, id, response: {output}}`, or `{error}` for an error result; image-only text is `(see attached image)`, empty text `(no tool output)`. A step's results share one `role="user"` content in call order. Images ride in `functionResponse.parts` on Gemini 3 and later and on non-Gemini ids, else in one user content after `Tool result image:` that follows the whole step's results. |
 | Tools | One `functionDeclarations` list with `name`, `description`, and the JSON Schema as `parametersJsonSchema`. |
-| Reasoning effort | `registry.sent_effort` keeps Chat's token. Gemini 3 and later and the `-latest` aliases get `thinkingConfig.thinkingLevel` (`xhigh`/`max` → `high`; `none` → `minimal`; `minimal` → `low` outside the Flash family, which alone takes it); Gemini 2.5 gets `thinkingBudget` (`minimal`/`low` 1024, `medium` 8192, `high` and above 24576, `none` 0 without thoughts). `includeThoughts` is set on every thinking model; other models get no `thinkingConfig`. |
+| Reasoning effort | Gemini 3 and later and the `-latest` aliases get `thinkingConfig.thinkingLevel` (`xhigh`/`max` → `high`; `none` → `minimal`; `minimal` → `low` outside the Flash family, which alone takes it); Gemini 2.5 gets `thinkingBudget` (`minimal`/`low` 1024, `medium` 8192, `high` and above 24576, `none` 0 without thoughts). `includeThoughts` is set on every thinking model; other models get no `thinkingConfig`. The effort token (`registry.sent_effort`, the key Model Hub holds effort evidence under, and what its gateway reads back from the request) is the thinking level sent, or the effort a budget stands for (`0` none, `1024` low, `8192` medium, `24576` high). |
 | Output bound | `generationConfig.maxOutputTokens`. |
 
 Gemini stream events (each `data:` frame is a `GenerateContentResponse` whose parts are deltas):
@@ -670,7 +670,7 @@ Gemini stream events (each `data:` frame is a `GenerateContentResponse` whose pa
 | Wire field | Outcome | Provider event / state |
 | --- | --- | --- |
 | `candidates[0].content.parts[].text` with `thought: true` | delta | `ThinkingDelta`; consecutive thought parts extend one block, and its `thoughtSignature` is the block's signature. |
-| `…parts[].text` | delta | `TextDelta`; consecutive text parts extend one block. A `thoughtSignature` on one becomes an empty signed `ThinkingBlock` after that text. |
+| `…parts[].text` | delta | `TextDelta`; consecutive text parts extend one block. A `thoughtSignature` on any of them, or on an empty part right after them, becomes an empty signed `ThinkingBlock` after that text once the text ends. |
 | `…parts[].functionCall` | delta | `ToolCallStart` and one `ToolCallDelta` of the JSON `args`; `id` is the native id, `thoughtSignature` the call's signature. An empty name is terminal `invalid_request`. |
 | any other part | ignored | Parts of a kind the request did not declare (inline data, code execution). |
 | `candidates[0].finishReason` | state | Stop reason (below). |

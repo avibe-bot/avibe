@@ -59,6 +59,8 @@ _MAJOR_VERSION = re.compile(r"^(?:models/)?gemini-(\d+)")
 _LEVELS = {"minimal": "minimal", "low": "low", "medium": "medium", "high": "high", "xhigh": "high", "max": "high"}
 # Google's own effort-to-budget table for Gemini 2.5 ("OpenAI compatibility", Thinking).
 _BUDGETS = {"none": 0, "minimal": 1024, "low": 1024, "medium": 8192, "high": 24576, "xhigh": 24576, "max": 24576}
+# The effort each budget stands for, so one wire budget is one evidence key.
+_BUDGET_EFFORTS = {0: "none", 1024: "low", 8192: "medium", 24576: "high"}
 _SAFETY_FINISH = frozenset({
     "SAFETY", "RECITATION", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
     "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION",
@@ -220,8 +222,9 @@ class _GoogleStream:
 
     Every chunk is a ``GenerateContentResponse`` whose parts are deltas. Consecutive parts of one kind (thought text,
     answer text) extend one block; a ``functionCall`` part is a whole call. A signature stays with the part it came
-    on: a call's on its ``ToolCallBlock``, a thought's on its ``ThinkingBlock``, and an answer part's on an empty
-    ``ThinkingBlock`` right after that text, which goes back as the empty signed part Gemini itself streams.
+    on: a call's on its ``ToolCallBlock``, a thought's on its ``ThinkingBlock``. ``TextBlock`` holds none, so an
+    answer's goes on an empty ``ThinkingBlock`` right after its text (or alone, for the empty signed part Gemini may
+    stream), and the request builder puts it back on that text part.
     """
 
     def __init__(self, assembler: StreamAssembler) -> None:
@@ -233,6 +236,7 @@ class _GoogleStream:
         self._kind: str | None = None
         self._block = 0
         self._tools = 0
+        self._text_signature: str | None = None
 
     def _fail(self, message: str, *, kind: str | None = "invalid_request") -> list[Any]:
         self.ended = True
@@ -241,9 +245,19 @@ class _GoogleStream:
 
     def _key(self, kind: str) -> tuple[str, int]:
         if self._kind != kind:
+            self._end_block()
             self._kind = kind
             self._block += 1
         return (f"google-{kind}", self._block)
+
+    def _end_block(self) -> None:
+        """Close the open block; an answer's signature lands right after its text, before whatever follows."""
+
+        self._kind = None
+        if self._text_signature is not None:
+            self._block += 1
+            self.assembler.ensure_thinking_slot(("google-signature", self._block), signature=self._text_signature)
+            self._text_signature = None
 
     def chunk(self, data: str) -> list[Any]:
         chunk = json_object(data)
@@ -285,7 +299,7 @@ class _GoogleStream:
             name = call.get("name")
             if not name:
                 return self._fail("Gemini function call name must not be empty")
-            self._kind = None
+            self._end_block()
             self._tools += 1
             key = ("google-tool", self._tools)
             start = self.assembler.tool_start(key, name=name, native_id=call.get("id") or None, signature=signature)
@@ -310,10 +324,12 @@ class _GoogleStream:
             if emitted is not None:
                 events.append(emitted)
         if signature:
-            # Its own slot, so the answer's signature is replayed as the empty signed part Gemini streams.
-            self._kind = None
-            self._block += 1
-            self.assembler.ensure_thinking_slot(("google-signature", self._block), signature=signature)
+            # A signature can come on any delta of the answer, or on an empty part after it: it belongs to the text.
+            if self._kind != "text":
+                self._end_block()
+            self._text_signature = signature
+            if self._kind != "text":
+                self._end_block()
         # Parts of a kind this adapter does not declare (inline data, code execution) carry nothing to the loop.
         return events
 
@@ -321,6 +337,7 @@ class _GoogleStream:
         if self._finish is None and self._blocked is None:
             terminal = self.assembler.terminal(self.assembler.incomplete())
             return [terminal] if terminal is not None else []
+        self._end_block()
         events: list[Any] = list(self.assembler.block_end_events())
         if self._finish is None:
             final = self.assembler.finalize("safety", error_message=f"Gemini blocked the prompt: {self._blocked}")
@@ -351,7 +368,7 @@ def build_google_payload(
             ],
         }]
     generation: dict[str, Any] = {"maxOutputTokens": request.max_tokens}
-    thinking = _thinking_config(model, sent_effort(request.reasoning_effort or ""))
+    thinking = _thinking_config(model, _effort(request.reasoning_effort or ""))
     if thinking is not None:
         generation["thinkingConfig"] = thinking
     payload["generationConfig"] = generation
@@ -386,7 +403,18 @@ def _contents(
     turn_start = max((index for index, message in enumerate(messages) if isinstance(message, UserMessage)), default=-1)
     multimodal_results = _major_version(model) is None or (_major_version(model) or 0) >= 3
     contents: list[dict[str, Any]] = []
+    # Gemini before 3 reads a result's images only from a user content of their own, which must follow the whole
+    # step's results: a content between two of them splits a parallel batch, and Gemini refuses that.
+    deferred_images: list[dict[str, Any]] = []
+
+    def flush_images() -> None:
+        if deferred_images:
+            contents.append({"role": "user", "parts": [{"text": "Tool result image:"}, *deferred_images]})
+            deferred_images.clear()
+
     for position, message in enumerate(messages):
+        if not isinstance(message, ToolResultMessage):
+            flush_images()
         if isinstance(message, UserMessage):
             contents.append({"role": "user", "parts": _user_parts(message.content, supports_images, loaded_images)})
         elif isinstance(message, AssistantMessage):
@@ -404,9 +432,10 @@ def _contents(
             else:
                 contents.append({"role": "user", "parts": [response]})
             if images and not multimodal_results:
-                contents.append({"role": "user", "parts": [{"text": "Tool result image:"}, *images]})
+                deferred_images.extend(images)
         else:
             raise TypeError(f"unsupported message {type(message).__name__}")
+    flush_images()
     return contents
 
 
@@ -434,10 +463,14 @@ def _model_parts(message: AssistantMessage, *, current_turn: bool) -> list[dict[
             signature = _signature(block.signature)
             if block.text:
                 part: dict[str, Any] = {"text": block.text, "thought": True}
-            elif signature is not None:
-                part = {"text": ""}
-            else:
+            elif signature is None:
                 continue
+            elif parts and set(parts[-1]) == {"text"}:
+                # An answer's signature, kept beside its text: back on the part it came on.
+                parts[-1]["thoughtSignature"] = signature
+                continue
+            else:
+                part = {"text": ""}
             if signature is not None:
                 part["thoughtSignature"] = signature
             parts.append(part)
@@ -543,12 +576,35 @@ def _google_usage(value: Mapping[str, Any]) -> Any:
     )
 
 
-def sent_effort(effort: str) -> str | None:
-    """The effort token a Gemini request is built from: Chat's, so the efforts Model Hub keeps for a ``google`` hop
-    keep their keys; ``_thinking_config`` maps it to the thinking level or budget the request carries."""
-
+def _effort(effort: str) -> str | None:
     value = effort.lower()
     return None if not value or value in {"off", "disabled"} else value
+
+
+def sent_effort(model_id: str, effort: str) -> str | None:
+    """The effort token a request to ``model_id`` carries for ``effort``: its thinking level, or the effort its thinking
+    budget stands for. Model Hub keys effort evidence by it, and the gateway reads it back from the request
+    (``wire_effort``), so a refusal governs every effort that sends the same thing."""
+
+    return _wire_effort((_thinking_config(model_id, _effort(effort)) or {}))
+
+
+def wire_effort(request: Mapping[str, Any]) -> str | None:
+    """The effort token a Gemini request body carries (``sent_effort``), or None without a thinking control."""
+
+    generation = request.get("generationConfig")
+    thinking = generation.get("thinkingConfig") if isinstance(generation, Mapping) else None
+    return _wire_effort(thinking) if isinstance(thinking, Mapping) else None
+
+
+def _wire_effort(thinking: Mapping[str, Any]) -> str | None:
+    level = thinking.get("thinkingLevel")
+    if isinstance(level, str) and level:
+        return level.lower()
+    budget = thinking.get("thinkingBudget")
+    if type(budget) is int:
+        return _BUDGET_EFFORTS.get(budget, str(budget))
+    return None
 
 
 def _count(value: Any) -> int:

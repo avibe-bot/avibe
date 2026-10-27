@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from core.agent_core.ai.google import DUMMY_THOUGHT_SIGNATURE, GoogleAdapter
+from core.agent_core.ai.registry import sent_effort
 from core.agent_core.ai.provider import Done, ModelEndpoint, ModelRequest, ProviderError
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
@@ -132,6 +133,11 @@ async def test_the_request_is_native_gemini_at_the_stream_endpoint() -> None:
 async def test_the_effort_becomes_the_models_thinking_control(model: str, effort: str | None, thinking: Any) -> None:
     body = await _body(_request(model=model, effort=effort))
     assert body["generationConfig"].get("thinkingConfig") == thinking
+    # Model Hub keys effort evidence by the token the registry names, and its gateway reads that same token back from
+    # the request, so a refusal governs every effort that sends it (`minimal` and `low` both send LOW to a Pro model).
+    from core.handlers.model_hub.evidence_rules import wire_effort
+
+    assert sent_effort("google", model, effort or "") == wire_effort(body, "google")
 
 
 async def test_signatures_go_back_on_the_parts_they_came_on_and_only_as_base64() -> None:
@@ -157,8 +163,9 @@ async def test_signatures_go_back_on_the_parts_they_came_on_and_only_as_base64()
     ))
 
     earlier, current, results = body["contents"][1], body["contents"][3], body["contents"][4]
+    # An answer's signature, kept beside its text, goes back on that text part.
     assert earlier == {"role": "model", "parts": [
-        {"text": "old", "thought": True}, {"text": "earlier"}, {"text": "", "thoughtSignature": SIG_A},
+        {"text": "old", "thought": True}, {"text": "earlier", "thoughtSignature": SIG_A},
     ]}
     assert current == {"role": "model", "parts": [
         {"text": "plan", "thought": True, "thoughtSignature": SIG_A},
@@ -203,20 +210,26 @@ async def test_a_tool_results_image_rides_where_the_model_reads_it(model: str, n
         async def load(self, media_token: str) -> tuple[bytes, str]:
             return loaded[media_token]
 
+    calls = _calls(
+        ToolCallBlock(id="call_1", name="bash", arguments={}, signature=SIG_A),
+        ToolCallBlock(id="call_2", name="bash", arguments={}),
+    )
     request = _request(
-        _user("look"), _calls(ToolCallBlock(id="call_1", name="bash", arguments={}, signature=SIG_A)),
-        _result("call_1", "", images=(image,)), model=model, supports_images=True,
+        _user("look"), calls, _result("call_1", "", images=(image,)), _result("call_2", "two"),
+        model=model, supports_images=True,
     )
     body = (await build_wire_request(request, gateway=False, media_loader=Loader())).body
 
-    response = body["contents"][2]["parts"][0]["functionResponse"]
-    assert response["response"] == {"output": "(see attached image)"}
+    # The parallel batch's results stay together, whichever of them carries the image.
+    first, second = body["contents"][2]["parts"]
+    assert first["functionResponse"]["response"] == {"output": "(see attached image)"}
+    assert second["functionResponse"]["response"] == {"output": "two"}
     inline = {"inlineData": {"mimeType": "image/png", "data": base64.b64encode(b"\x89PNG").decode()}}
     if nested:
-        assert response["parts"] == [inline] and len(body["contents"]) == 3
+        assert first["functionResponse"]["parts"] == [inline] and len(body["contents"]) == 3
     else:
-        assert "parts" not in response
-        assert body["contents"][3] == {"role": "user", "parts": [{"text": "Tool result image:"}, inline]}
+        assert "parts" not in first["functionResponse"]
+        assert body["contents"][3:] == [{"role": "user", "parts": [{"text": "Tool result image:"}, inline]}]
 
 
 async def test_a_stream_becomes_thinking_text_and_signed_calls() -> None:
@@ -245,13 +258,32 @@ async def test_a_stream_becomes_thinking_text_and_signed_calls() -> None:
     assert message.usage == Usage(input_tokens=60, output_tokens=27, cache_read_tokens=40, reasoning_tokens=7)
 
 
-async def test_an_answers_signature_survives_the_round_trip_as_the_part_gemini_streamed() -> None:
-    events = await _stream(_parts({"text": "done"}), _parts({"text": "", "thoughtSignature": SIG_A}, finish="STOP"))
+@pytest.mark.parametrize(
+    "answer",
+    [
+        # Gemini streams the signature on an empty part after the text...
+        ({"text": "all "}, {"text": "done"}, {"text": "", "thoughtSignature": SIG_A}),
+        # ...or on a delta of the text itself, which goes on.
+        ({"text": "all ", "thoughtSignature": SIG_A}, {"text": "done"}),
+    ],
+    ids=["empty-part", "on-text"],
+)
+async def test_an_answers_signature_goes_back_on_its_text(answer: tuple[dict[str, Any], ...]) -> None:
+    events = await _stream(*(_parts(part) for part in answer), _parts(finish="STOP"))
     message = _final(events)
-    assert message.content == (TextBlock(text="done"), ThinkingBlock(text="", signature=SIG_A))
+    assert message.content == (TextBlock(text="all done"), ThinkingBlock(text="", signature=SIG_A))
 
     body = await _body(_request(_user("go"), message, _user("again")))
-    assert body["contents"][1] == {"role": "model", "parts": [{"text": "done"}, {"text": "", "thoughtSignature": SIG_A}]}
+    assert body["contents"][1] == {"role": "model", "parts": [{"text": "all done", "thoughtSignature": SIG_A}]}
+
+
+async def test_a_signed_empty_part_after_a_call_goes_back_on_its_own() -> None:
+    events = await _stream(
+        _parts({"functionCall": {"name": "bash", "args": {}, "id": "fc_1"}, "thoughtSignature": SIG_B}),
+        _parts({"text": "", "thoughtSignature": SIG_A}, finish="STOP"),
+    )
+    body = await _body(_request(_user("go"), _final(events), _result("fc_1", "ok")))
+    assert body["contents"][1]["parts"][1] == {"text": "", "thoughtSignature": SIG_A}
 
 
 @pytest.mark.parametrize(

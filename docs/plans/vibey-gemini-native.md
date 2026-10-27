@@ -42,10 +42,11 @@ pinned engine (CLIProxyAPI v8.0.30, `5be2cdab`):
   they cite).
 - **Price** (Gemini 3 and later): per search query the model runs, 5,000 free a month across those models, then
   $14 per 1,000. One request may run several queries (two in the probe).
-- **The engine's Chat translation loses Gemini state**: the Chat→Gemini request translator writes
-  `skip_thought_signature_validator` on every function call, and the Gemini→Chat response translator drops every
-  `thoughtSignature`; it neither sets `includeServerSideToolInvocations` nor converts server-side tool parts or
-  grounding (`internal/translator/gemini/openai/chat-completions/`). A `gemini-api-key` entry serves the native
+- **The engine's Chat translation loses Gemini state**: the Gemini→Chat response translator drops every
+  `thoughtSignature`, so a Chat client never holds one to send back, and the Chat→Gemini request translator then
+  writes `skip_thought_signature_validator` on each call (the Antigravity translator writes it on every call
+  unconditionally); neither sets `includeServerSideToolInvocations` or converts server-side tool parts or grounding
+  (`internal/translator/{gemini,antigravity}/openai/chat-completions/`). A `gemini-api-key` entry serves the native
   frontend without translation.
 - **The engine's images endpoint** serves GPT Image, xAI, and image models registered on an
   `openai-compatibility` entry only (`sdk/api/handlers/openai/openai_images_handlers.go`), not a `gemini-api-key`
