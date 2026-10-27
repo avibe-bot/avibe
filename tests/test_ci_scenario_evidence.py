@@ -9,7 +9,9 @@ import yaml
 
 from scripts import pytest_collection
 from scripts.ci_scenario_evidence import (
+    LINT_WORKFLOW,
     RELEASE_WORKFLOWS,
+    UNIT_SHARD_ARGS,
     UNIT_SHARD_JOB,
     WORKFLOWS,
     Evidence,
@@ -223,6 +225,16 @@ def test_release_evidence_uses_the_explicit_release_checkout_root(tmp_path: Path
     assert covered_test_evidence()[
         "tests/e2e/test_retired_updater_bridge.py::test_released_updater_replaces_companion_without_touching_user_data"
     ].rows == ["MUC-004"]
+
+
+def test_the_lint_unit_shards_count_as_running_the_whole_unit_suite() -> None:
+    """Whichever launcher the shards use, the gate knows they select every unit file.
+
+    Missing this, every covered case that only the unit shards run would read
+    as never run, and the evidence gate would fail every pull request.
+    """
+
+    assert pytest_commands(WORKFLOWS / LINT_WORKFLOW)[UNIT_SHARD_JOB] == [UNIT_SHARD_ARGS]
 
 
 def test_release_gating_is_read_from_the_release_workflows() -> None:
