@@ -88,6 +88,12 @@ def _plain_history(value: Any) -> Any:
         ]
         return {"role": "assistant", "content": texts} if texts else None
     plain = {key: item for key, item in value.items() if key not in _OPAQUE_FIELDS}
+    if "functionCall" in value and "thoughtSignature" in value:
+        # Gemini 3+ refuses a current-turn call without a signature, and this account's cannot go to another:
+        # Google's documented stand-in takes its place, as the engine's Chat translation always wrote.
+        from core.agent_core.ai.google import DUMMY_THOUGHT_SIGNATURE
+
+        plain["thoughtSignature"] = DUMMY_THOUGHT_SIGNATURE
     if plain.get("thought") is True:
         # Gemini's readable thought text is ordinary history across origins.
         plain.pop("thought")

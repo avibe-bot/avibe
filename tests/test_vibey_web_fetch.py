@@ -29,12 +29,13 @@ SCHEMA = {"type": "object", "properties": {"url": {"type": "string"}}, "required
 
 def selection(protocol="anthropic", *, offered=True, token="turn-token"):
     return selection_from_hop({
-        "backend": "vibey", "protocol": protocol, "base_url": "http://hub.invalid/vibey/v1",
+        "backend": "vibey", "protocol": protocol,
+        "base_url": f"http://hub.invalid/vibey/{'v1beta' if protocol == 'google' else 'v1'}",
         "token": token, "runtime_model": "model", "provider": "anthropic" if protocol == "anthropic" else "openai",
         "source_id": "src_modeltest", "source_identity": "test-identity",
         "request_headers": {"x-avibe-turn-id": "turn-fetch"}, "capabilities": {},
         "hosted_tools": {"web_fetch": {"native": "unsupported", "replay": "unsupported"}} if offered else {},
-    }, gateway_base_url="http://hub.invalid/vibey")
+    })
 
 
 def router(first):
@@ -67,8 +68,10 @@ async def test_fetch_declaration_is_a_frozen_url_only_function(monkeypatch, prot
         entry = declared[0]
         if request.endpoint.protocol == "openai_chat":
             entry = entry["function"]
+        elif request.endpoint.protocol == "google":
+            (entry,) = entry["functionDeclarations"]
         assert entry["name"] == "web_fetch"
-        assert entry.get("input_schema", entry.get("parameters")) == SCHEMA
+        assert entry.get("input_schema", entry.get("parameters", entry.get("parametersJsonSchema"))) == SCHEMA
         assert entry.get("type") != "web_fetch_20260318"
         assert "untrusted quoted source" in entry["description"]
         assert "x-avibe-pin-source" not in wire.headers

@@ -172,11 +172,13 @@ def _evidence(tmp_path, *refused) -> HostedEvidence:
         (OPENAI, "x_search", (), "unsupported", "unsupported", False),
         (OPENAI, "x_search", ((OPENAI, "gpt-6-astra", "x_search", "call"),), "unsupported", "unsupported", False),
         (CLAUDE_SUB, "web_search", (), "unsupported", "unsupported", False),
-        (GEMINI, "web_search", (), "unsupported", "unsupported", False),
+        # Vibey speaks Gemini on a google hop (vibey-gemini-native.md), so the overlay's declaration runs there too;
+        # its native payload is not replayed until Gemini's hosted replay is (§4).
+        (GEMINI, "web_search", (), "assumed", "unsupported", False),
     ],
     ids=[
         "assumed", "replay-refused", "call-refused", "not-offered", "not-offered-refused",
-        "claude-subscription-never", "translated-never",
+        "claude-subscription-never", "google-native",
     ],
 )
 def test_a_hops_facts_come_from_priors_and_refusals(tmp_path, primary, tool, refused, native, replay, fallback):

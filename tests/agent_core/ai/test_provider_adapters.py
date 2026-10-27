@@ -32,6 +32,7 @@ from core.agent_core.ai.provider import (
     ToolCallStart,
 )
 from core.agent_core.ai.registry import ADAPTERS, adapter_class, sent_effort
+from core.agent_core.messages import PROTOCOLS
 from tests.agent_core.ai._wire import build_wire_request
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
@@ -96,10 +97,10 @@ def test_responses_prompt_cache_retention_is_wired_only_when_model_hub_confirms_
     assert payload.get("prompt_cache_options") == expected
 
 
-def test_registry_exposes_only_v1_protocols() -> None:
-    assert set(ADAPTERS) == {"anthropic", "openai_chat", "openai_responses"}
-    with pytest.raises(ValueError, match="unsupported provider protocol: google"):
-        adapter_class("google")
+def test_registry_has_an_adapter_for_every_protocol() -> None:
+    assert set(ADAPTERS) == set(PROTOCOLS)
+    with pytest.raises(ValueError, match="unsupported provider protocol: bedrock"):
+        adapter_class("bedrock")  # type: ignore[arg-type]
 
 
 def test_each_known_wire_event_has_a_declarative_shape_row() -> None:

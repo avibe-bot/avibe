@@ -226,6 +226,34 @@ def _signed_history(protocol):
     )
 
 
+def test_another_sources_gemini_history_keeps_its_calls_admissible() -> None:
+    """A Gemini history stripped for another Source keeps Google's stand-in where a call was signed: Gemini 3+
+    refuses a current-turn call without one, and this account's signature cannot go to another."""
+
+    from core.agent_core.ai.google import DUMMY_THOUGHT_SIGNATURE
+    from core.handlers.model_hub.request import without_opaque_history
+
+    first = {"functionCall": {"name": "verify", "args": {"thoughtSignature": "user-data"}, "id": "c1"}}
+    second = {"functionCall": {"name": "verify", "args": {}, "id": "c2"}}
+    result = {"role": "user", "parts": [{"functionResponse": {"name": "verify", "id": "c1", "response": {}}}]}
+    signed = {"contents": [
+        {"role": "model", "parts": [
+            {"text": "plan", "thought": True, "thoughtSignature": "opaque-thought"},
+            {"text": "Answer", "thoughtSignature": "opaque-text"},
+            {**first, "thoughtSignature": "opaque-call"},
+            second,
+        ]},
+        result,
+    ]}
+
+    assert without_opaque_history(signed) == {"contents": [
+        {"role": "model", "parts": [
+            {"text": "plan"}, {"text": "Answer"}, {**first, "thoughtSignature": DUMMY_THOUGHT_SIGNATURE}, second,
+        ]},
+        result,
+    ]}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protocol", PROTOCOL_ENDPOINTS)
 @pytest.mark.parametrize("change", ["source", "provider", "api", "model"])

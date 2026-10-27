@@ -833,7 +833,7 @@ class VibeyAgent(BaseAgent):
                 raise
             bind_launch(context, launch)
             # Every resolved hop, the first and each retry's, carries the output the Agent asks for on it.
-            return budgeted(selection_from_hop(launch.to_hop_resolution(), gateway_base_url=launch.gateway_base_url))
+            return budgeted(selection_from_hop(launch.to_hop_resolution()))
 
         return HubModelRouter(resolve, self._providers, first=await resolve())
 

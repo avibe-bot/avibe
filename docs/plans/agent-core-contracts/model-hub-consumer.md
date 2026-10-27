@@ -61,7 +61,9 @@ consumer's requirements, and the Model Hub lane lands the change in both places.
    the origin: a provider refuses another account's ciphertext. The serving identity is read on the final admission
    snapshot, so a key rotated mid-turn counts. A pinned request is never rewritten: one pinned to the primary hop
    whose identity has changed since the launch answers `pin_unavailable`, and the agent re-resolves and renders it
-   for the fresh hop, whose identity drops the old payloads.
+   for the fresh hop, whose identity drops the old payloads. A Gemini `functionCall` part whose signature is removed
+   gets Google's documented stand-in `skip_thought_signature_validator` instead, since Gemini 3+ refuses a
+   current-turn call without one (`../vibey-gemini-native.md`).
    The identity stays in memory: it is never in the served-hop report or persisted provenance. Known limit:
    the next request targets the primary origin again, so payloads returned by a fallback origin are not replayed if a
    later request fails over to that same fallback; a provider that then rejects the call surfaces as a provider error.

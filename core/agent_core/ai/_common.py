@@ -1622,6 +1622,8 @@ def auth_headers(endpoint: ModelEndpoint, *, provider: str, gateway: bool) -> di
         headers["Authorization"] = f"Bearer {endpoint.token}"
     elif provider == "anthropic":
         headers["x-api-key"] = endpoint.token
+    elif provider == "google":
+        headers["x-goog-api-key"] = endpoint.token
     else:
         headers["Authorization"] = f"Bearer {endpoint.token}"
     return headers
@@ -2395,4 +2397,5 @@ def _default_provider(protocol: str) -> str:
         "anthropic": "anthropic",
         "openai_chat": "openai",
         "openai_responses": "openai",
+        "google": "google",
     }.get(protocol, protocol)
