@@ -366,7 +366,9 @@ project declarations directly.
 
 Minor and patch updates are grouped per ecosystem. Major updates remain
 individual, reviewable PRs. Each lane has a small open-PR limit and no
-auto-merge. `claude-agent-sdk` is ignored by the generic `uv` lane because its
+auto-merge. Each ecosystem runs weekly on its own weekday at 06:00
+Asia/Shanghai, so the lanes do not open their PRs together and saturate the
+hosted CI runners. `claude-agent-sdk` is ignored by the generic `uv` lane because its
 bundled CLI and Windows marker require the runtime path above. Dependabot does
 not open sibling-repository PRs in this lane.
 
