@@ -257,6 +257,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   };
 
   const isDesktopManaged = inDesktopShell || versionInfo?.managed_by === 'desktop';
+  const nativeUpdateStateAvailable = Boolean(desktopActions && desktopUpdateState);
   // A desktop-managed Runtime relays the desktop app's own conclusion. The
   // shell also exposes its in-memory state so a fresh native check lights the
   // badge before the Runtime's status file has been reread.
@@ -439,7 +440,10 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                   <AlertCircle size={16} className="shrink-0" />
                   <span>{t('dashboard.checkFailed')}</span>
                 </div>
-              ) : isDesktopManaged && (desktopUpdateState?.phase === 'error' || versionInfo?.error) ? (
+              ) : isDesktopManaged && (
+                desktopUpdateState?.phase === 'error'
+                || (!nativeUpdateStateAvailable && versionInfo?.error)
+              ) ? (
                 <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
                   <AlertCircle size={16} className="shrink-0" />
                   <span>{t('dashboard.checkFailed')}</span>
@@ -465,12 +469,12 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                     })}
                   </span>
                 </div>
-              ) : versionInfo && !versionInfo.error ? (
+              ) : versionInfo && (!versionInfo.error || desktopUpdateState?.phase === 'current') ? (
                 <div className="flex items-center gap-2 rounded-md border border-mint/25 bg-mint/10 px-3 py-2 text-sm text-mint-ink">
                   <Check size={16} className="shrink-0" />
                   <span>{t('dashboard.upToDate')}</span>
                 </div>
-              ) : versionInfo?.error ? (
+              ) : versionInfo?.error && !nativeUpdateStateAvailable ? (
                 <div className="flex items-center gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
                   <AlertCircle size={16} className="shrink-0" />
                   <span>{t('dashboard.checkFailed')}</span>

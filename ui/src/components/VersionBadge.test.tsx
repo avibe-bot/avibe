@@ -101,6 +101,41 @@ describe('desktop version ownership', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
+  it('prefers native available state over a Runtime version error', async () => {
+    renderInShell('3.2.2-rc.13', '3.2.2rc13', null, true, {
+      current: '3.2.2rc13',
+      latest: null,
+      has_update: false,
+      error: 'PyPI unavailable',
+      managed_by: 'desktop',
+    });
+    fireEvent.click(await screen.findByTitle('v3.2.2-rc.13'));
+    expect(await screen.findByText(
+      i18n.t('dashboard.desktopManagedUpdateAvailable', { to: '10.0.0' }),
+    )).toBeTruthy();
+    expect(screen.queryByText(i18n.t('dashboard.checkFailed'))).toBeNull();
+  });
+
+  it('prefers native current state over a Runtime version error', async () => {
+    desktopInvoke.mockImplementation(async (command: string) => {
+      if (command === 'desktop_update_state') {
+        return { phase: 'current', latest: '3.2.2', channel: 'stable', skippedVersion: null, interactive: false };
+      }
+      if (command === 'plugin:event|listen') return 1;
+      return undefined;
+    });
+    renderInShell('3.2.2-rc.13', '3.2.2rc13', null, true, {
+      current: '3.2.2rc13',
+      latest: null,
+      has_update: false,
+      error: 'PyPI unavailable',
+      managed_by: 'desktop',
+    });
+    fireEvent.click(await screen.findByTitle('v3.2.2-rc.13'));
+    expect(await screen.findByText(i18n.t('dashboard.upToDate'))).toBeTruthy();
+    expect(screen.queryByText(i18n.t('dashboard.checkFailed'))).toBeNull();
+  });
+
   it('opens the Web popover in the desktop shell instead of navigating to the update deep link', async () => {
     renderInShell('3.2.2-rc.13', '3.2.2rc13', '3.2.3');
     const entry = await screen.findByTitle('v3.2.2-rc.13');
@@ -114,6 +149,14 @@ describe('desktop version ownership', () => {
     renderInShell('3.2.2-rc.13', '3.2.2rc13', '3.2.3', true);
     await screen.findByTitle('v3.2.2-rc.13');
     await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_state'));
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith(
+      'plugin:event|listen',
+      expect.objectContaining({
+        event: DESKTOP_UPDATE_STATE_EVENT,
+        target: { kind: 'Any' },
+        handler: 1,
+      }),
+    ));
     const event = new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true });
     expect(window.dispatchEvent(event)).toBe(false);
     expect(await screen.findByRole('dialog')).toBeTruthy();
