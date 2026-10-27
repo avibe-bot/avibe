@@ -1231,7 +1231,7 @@ async def test_a_failed_run_shows_localized_copy_and_a_refusal_shows_its_explana
 ) -> None:
     refusal = AssistantMessage((), ORIGIN, "refusal")
     harness = _Harness(
-        engine, tmp_path, "telegram", [[Done(assistant(""))], [Done(refusal)]], language=language
+        engine, tmp_path, "telegram", [[Done(assistant(""))], [Done(assistant(""))], [Done(refusal)]], language=language
     )
     reported: list[str] = []
 
@@ -1307,6 +1307,74 @@ async def test_a_transient_failure_continues_from_the_same_transcript_without_a_
     assert len(harness.provider.requests) == 6
     assert harness.rows("notify") == []
     assert harness.controller.im_client.sent == ["recovered"]
+    assert harness.controller.terminals[-1]["is_error"] is False
+
+
+async def test_a_silent_stop_resumes_the_same_transcript_without_a_notice(
+    engine, session, tmp_path, published, continuation_policy
+) -> None:
+    continuation_policy(initial_delay_s=0)
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "telegram",
+        [[Done(assistant(""))], [Done(assistant("recovered"))]],
+    )
+
+    await harness.agent.handle_message(harness.request("finish the task"))
+
+    assert len(harness.provider.requests) == 2
+    assert harness.provider.requests[0].messages == harness.provider.requests[1].messages
+    assert harness.rows("notify") == []
+    assert harness.controller.im_client.sent == ["recovered"]
+    assert harness.controller.terminals[-1]["is_error"] is False
+
+
+async def test_a_second_silent_stop_keeps_the_existing_empty_response_failure(
+    engine, session, tmp_path, published, continuation_policy
+) -> None:
+    continuation_policy(initial_delay_s=0)
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "telegram",
+        [[Done(assistant(""))], [Done(assistant(""))]],
+    )
+
+    await harness.agent.handle_message(harness.request("finish the task"))
+
+    empty_copy = i18n_t("vibeyAgent.error.emptyResponse", "en")
+    assert len(harness.provider.requests) == 2
+    assert harness.controller.im_client.sent == [empty_copy]
+    assert len(harness.rows("error")) == 1
+    assert harness.controller.terminals[-1]["is_error"] is True
+
+
+async def test_a_silent_stop_after_a_tool_reuses_the_committed_result_without_rerunning_it(
+    engine, session, tmp_path, published, continuation_policy
+) -> None:
+    continuation_policy(initial_delay_s=0)
+    call = ToolCallBlock(id="call_1", name="echo", arguments={})
+    tool = FakeTool("echo")
+    harness = _Harness(
+        engine,
+        tmp_path,
+        "telegram",
+        [
+            [Done(assistant("", calls=(call,)))],
+            [Done(assistant(""))],
+            [Done(assistant("recovered"))],
+        ],
+        tools=[tool],
+    )
+
+    await harness.agent.handle_message(harness.request("run the tool"))
+
+    assert len(tool.calls) == 1
+    assert len(harness.provider.requests) == 3
+    assert harness.provider.requests[1].messages == harness.provider.requests[2].messages
+    assert harness.rows("notify") == []
+    assert harness.controller.im_client.sent == ["🔧 echo {}", "recovered"]
     assert harness.controller.terminals[-1]["is_error"] is False
 
 
@@ -3148,7 +3216,7 @@ async def test_a_final_is_stored_with_its_outcome_semantics(
         "empty": assistant(""),
         "refusal": AssistantMessage((), ORIGIN, "refusal"),
     }[final]
-    harness = _Harness(engine, tmp_path, "avibe", [[Done(message)]])
+    harness = _Harness(engine, tmp_path, "avibe", [[Done(message)], [Done(assistant(""))]])
 
     await harness.agent.handle_message(harness.request("answer me"))
 
@@ -4350,11 +4418,14 @@ async def test_a_generated_image_reaches_the_user_with_the_turns_reply_even_when
     call = ToolCallBlock(id="call_img", name="image_generate", arguments={"model": "gpt-image-2", "prompt": "a lighthouse"})
     final = AssistantMessage((TextBlock(text=said),) if said else (), ORIGIN, stop)
     async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        scripts = [[Done(AssistantMessage((call,), ORIGIN, "tool_use"))], [Done(final)]]
+        if status == "failed" and stop == "stop":
+            scripts.append([Done(final)])
         harness = _Harness(
             engine,
             tmp_path,
             "telegram",
-            [[Done(AssistantMessage((call,), ORIGIN, "tool_use"))], [Done(final)]],
+            scripts,
             gateway_client=client,
         )
         harness.controller.hub_hosted_tools = {"image_generate": _image_entry("gpt-image-2", "gemini-3.1-flash-image")}
@@ -4374,10 +4445,12 @@ async def test_a_generated_image_reaches_the_user_with_the_turns_reply_even_when
             patch.setattr(AdapterTranscriptStore, "append_response", append_response)
             await harness.agent.handle_message(harness.request("draw a lighthouse"))
 
-    first, second = (
+    image_tools = [
         next(tool for tool in request.tools if tool.name == "image_generate") for request in harness.provider.requests
-    )
-    assert first == second
+    ]
+    assert all(tool == image_tools[0] for tool in image_tools)
+    assert len(image_tools) == (3 if status == "failed" and stop == "stop" else 2)
+    first = image_tools[0]
     assert first.input_schema["properties"]["model"]["enum"] == ["gpt-image-2", "gemini-3.1-flash-image"]
     assert harness.controller.terminals[-1]["is_error"] is not replied
     result = next(row.message for row in await harness.context_rows() if isinstance(row.message, ToolResultMessage))

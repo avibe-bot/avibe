@@ -160,7 +160,7 @@ async def test_primary_outcome_cross_cleanup_keeps_reason_rows_and_event_order(
     assert [event.seq for event in events] == list(range(len(events)))
     rows = await store.load("session")
     expected_rows = ["input"]
-    if primary not in {"abort", "provider_error", "overflow"}:
+    if primary not in {"abort", "provider_error", "overflow", "empty_response"}:
         expected_rows.append("response")
     if has_tools:
         expected_rows.extend(["tool_result", "response"])
@@ -171,7 +171,7 @@ async def test_primary_outcome_cross_cleanup_keeps_reason_rows_and_event_order(
     responses = [row for row in rows if row.kind == "response"]
     assert [event.message_id for event in committed] == [row.row_id for row in responses]
     assert [event.final for event in committed] == (
-        [False, True] if has_tools else [primary != "partial"] if responses else []
+        [False, True] if has_tools else [primary not in {"partial", "empty_response"}] if responses else []
     )
     assert len(tool.calls) == (1 if has_tools else 0)
     assert provider.calls == (2 if has_tools else 1)
