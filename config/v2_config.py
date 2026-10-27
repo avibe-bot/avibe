@@ -218,11 +218,14 @@ _GEMINI_OPENAI_COMPATIBLE_ENDPOINT = ("https", "generativelanguage.googleapis.co
 GEMINI_NATIVE_BASE_URL = "https://generativelanguage.googleapis.com"
 
 
-def _on_gemini_openai_compatible_endpoint(source: dict) -> bool:
-    """A saved Gemini API key on Google's official OpenAI-compatible endpoint, named or by default (a relay is not)."""
+def on_gemini_openai_compatible_endpoint(vendor: object, protocol: object, base_url: object) -> bool:
+    """A Gemini API key bound to Google's official OpenAI-compatible endpoint, named or by default (a relay is not).
 
-    base_url = source.get("base_url")
-    if source.get("vendor") != "gemini" or source.get("kind") != "api_key" or source.get("protocol") != "openai_chat":
+    Both the saved Source (``_migrate_gemini_native_sources``) and its engine credential binding
+    (``EngineStateStore.sync_sources``) move from it to the native root by this one test.
+    """
+
+    if vendor != "gemini" or protocol != "openai_chat":
         return False
     if base_url is None:
         # The vendor's official endpoint, which was the OpenAI-compatible one.
@@ -246,17 +249,19 @@ def _migrate_gemini_native_sources(payload: dict) -> dict:
     matches.
     """
 
+    def moves(source: object) -> bool:
+        return (
+            isinstance(source, dict) and source.get("kind") == "api_key"
+            and on_gemini_openai_compatible_endpoint(source.get("vendor"), source.get("protocol"), source.get("base_url"))
+        )
+
     hub = payload.get("model_hub")
     sources = hub.get("sources") if isinstance(hub, dict) else None
-    if not isinstance(sources, list) or not any(
-        isinstance(source, dict) and _on_gemini_openai_compatible_endpoint(source) for source in sources
-    ):
+    if not isinstance(sources, list) or not any(moves(source) for source in sources):
         return payload
     migrated_hub = dict(hub)
     migrated_hub["sources"] = [
-        {**source, "protocol": "google", "base_url": GEMINI_NATIVE_BASE_URL}
-        if isinstance(source, dict) and _on_gemini_openai_compatible_endpoint(source)
-        else source
+        {**source, "protocol": "google", "base_url": GEMINI_NATIVE_BASE_URL} if moves(source) else source
         for source in sources
     ]
     return {**payload, "model_hub": migrated_hub}
