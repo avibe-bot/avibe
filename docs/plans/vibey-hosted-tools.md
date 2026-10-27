@@ -550,7 +550,8 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
 
 ## 6. The search executor
 
-- **Endpoint:** `POST {base_url}/hosted-tools/{tool}` on the gateway, with the turn's Bearer token and its
+- **Endpoint:** `POST {base_url}/hosted-tools/{tool}` on the gateway (the hop's base URL: `/vibey/v1`, or
+  `/vibey/v1beta` on a `google` hop, amended 2026-10-27), with the turn's Bearer token and its
   `request_headers`, and the body `{"arguments": <canonical arguments>}`. There is no executor in the body: the
   gateway resolves the chain from the caller's live turn (`x-avibe-turn-id`). A call without a live turn, or from a
   turn that no longer admits work, is 409 `turn_not_live`; a tool outside the turn's frozen tool set (§3.4) is 409
