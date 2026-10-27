@@ -150,3 +150,32 @@ shard, and the shards are not on the critical path. Compiling repository
 sources adds 1.8 s. The only measurable gain came from pytest's own rewrite
 cache, about 1.4 s for the contract job, and compileall does not produce that
 cache.
+
+## October 2026: One Ubuntu Web-Fetch Job
+
+### Baseline
+
+`web-fetch-runtime` and the install regression become ready together, the moment
+the artifact build finishes. On the critical path, the install regression waited
+2.4 to 7.3 minutes for a runner in #3019's runs. Nine web-fetch legs were requested
+at that same moment. Five of them were `ubuntu-latest` legs, one per supported
+Python (3.10 to 3.14). Each leg took 45 to 63 seconds: 4 to 9 seconds to install
+and 31 to 41 seconds to test. The tests are mostly waits; locally, 40 seconds
+of wall time used 5.6 seconds of CPU.
+
+### Change and Invariants
+
+- One `ubuntu-latest` job verifies all five Pythons in turn. Each version uses
+  its own setup-python interpreter, found with `uv python find --system`, and
+  gets the same three `uv pip install --system` commands, the same wheel, and
+  the same pytest selection and flags. Every version runs even after one fails;
+  each failure is reported as an `::error::` naming its version, and the job
+  fails. The arm64, macOS, and Windows legs are unchanged.
+- At the build-finish moment, the workflow requests four fewer hosted jobs.
+  The scenario-evidence gate parses the same pytest arguments for this job.
+  The job uploads no junit report, so its matrix size changes no verdict.
+- `web-fetch-runtime` is not a required check, and no document or script
+  references its per-version job names.
+
+Measured durations and queue times for this pull request's runs are recorded
+in the PR.

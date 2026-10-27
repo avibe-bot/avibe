@@ -111,6 +111,7 @@ jobs:
           pre-commit run --all-files
 
   web-fetch-runtime:
+    name: web-fetch-runtime (${{ matrix.os }}, ${{ matrix.label }})
     needs: [changes, build-linux-artifacts]
     if: needs.changes.outputs.docs_only == 'false'
     runs-on: ${{ matrix.os }}
@@ -118,16 +119,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Every leg is requested the moment the artifact build finishes, beside
+        # the install regression that sits on the critical path. Five ubuntu
+        # legs held runners for under a minute of setup each, so one ubuntu job
+        # verifies all five Pythons in turn, each in its own interpreter.
         include:
-          - {os: ubuntu-latest, python: "3.10"}
-          - {os: ubuntu-latest, python: "3.11"}
-          - {os: ubuntu-latest, python: "3.12"}
-          - {os: ubuntu-latest, python: "3.13"}
-          - {os: ubuntu-latest, python: "3.14"}
-          - {os: ubuntu-24.04-arm, python: "3.12"}
-          - {os: macos-15-intel, python: "3.12"}
-          - {os: macos-15, python: "3.12"}
-          - {os: windows-latest, python: "3.12"}
+          - {os: ubuntu-latest, label: "3.10-3.14", python: "3.10\n3.11\n3.12\n3.13\n3.14"}
+          - {os: ubuntu-24.04-arm, label: "3.12", python: "3.12"}
+          - {os: macos-15-intel, label: "3.12", python: "3.12"}
+          - {os: macos-15, label: "3.12", python: "3.12"}
+          - {os: windows-latest, label: "3.12", python: "3.12"}
     defaults:
       run:
         shell: bash
@@ -140,17 +141,39 @@ jobs:
         with:
           name: vibe-wheel-linux
           path: dist
-      - name: Install frozen binary dependencies and wheel
+      - name: Prepare frozen requirements
         run: |
           python -m pip install --disable-pip-version-check --only-binary=:all: --no-deps uv==0.12.10
           uv export --frozen --no-dev --no-emit-project --output-file fetch-requirements.txt
-          uv pip install --system --require-hashes --only-binary=:all: --no-binary claude-agent-sdk --no-binary http-ece -r fetch-requirements.txt
-          uv pip install --system --no-deps dist/*.whl
-          uv pip install --system pytest pytest-asyncio jsonschema
           python -c "from pathlib import Path; p=Path('ui/dist'); p.mkdir(parents=True,exist_ok=True); (p/'index.html').touch()"
+      # Each listed Python gets the same frozen binary dependencies, wheel and
+      # pytest selection in its own interpreter. Every version runs even after
+      # one fails, and each failure names its version.
       - name: Verify native resources, pinned transports and disposable workers offline
+        env:
+          PYTHON_VERSIONS: ${{ matrix.python }}
         run: |
-          python -m pytest -q tests/test_model_hub_fetch_policy.py tests/test_model_hub_fetch_transport.py tests/test_model_hub_fetch_tls.py tests/test_model_hub_local_fetch.py tests/test_desktop_runtime_bundle_builder.py -k 'not packaged_cli_survives'
+          failed=""
+          for version in $PYTHON_VERSIONS; do
+            echo "::group::Python $version"
+            if python_bin="$(uv python find --system --no-project --python-preference only-system "$version")" \
+              && "$python_bin" -c "import sys; print(sys.executable, sys.version)" \
+              && uv pip install --system --python "$python_bin" --require-hashes --only-binary=:all: --no-binary claude-agent-sdk --no-binary http-ece -r fetch-requirements.txt \
+              && uv pip install --system --python "$python_bin" --no-deps dist/*.whl \
+              && uv pip install --system --python "$python_bin" pytest pytest-asyncio jsonschema \
+              && "$python_bin" -m pytest -q tests/test_model_hub_fetch_policy.py tests/test_model_hub_fetch_transport.py tests/test_model_hub_fetch_tls.py tests/test_model_hub_local_fetch.py tests/test_desktop_runtime_bundle_builder.py -k 'not packaged_cli_survives'
+            then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error::web-fetch-runtime failed on Python $version"
+              failed="$failed $version"
+            fi
+          done
+          if [ -n "$failed" ]; then
+            echo "web-fetch-runtime failed on Python:$failed"
+            exit 1
+          fi
 
   ui-checks:
     needs: changes
