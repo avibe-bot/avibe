@@ -164,7 +164,8 @@ The evidence store, its record and its owner are the capability model's §3. v2 
     current while file writes are throttled, and a Source that changes identity hands the line to the newest other
     success rather than to an older file copy. There is no separate per-tool projection to drift from the records.
   - Positive evidence never changes routing. It feeds the "最近一次 … 正常" lines (§8) and nothing else.
-  - A `google` hop has no native hosted tools, and the Chat route Vibey uses gives no hosted item to observe.
+  - A `google` hop has no native hosted tools yet; Vibey speaks Gemini natively there (amended 2026-10-27,
+    `vibey-gemini-native.md`), and Google Search joins as Gemini's native `web_search` in its §4.
 - **Negative (`unsupported`) is routing state.** When the file write fails, the narrow rule still updates the
   in-memory store and logs the loss, so the re-resolve that follows (§3.5) cannot declare the refused tool natively
   again. The narrow rules of #2551 fire on a real error before output, unchanged in form:
@@ -372,7 +373,8 @@ failover, and is refused unpinned (C-6 item 7). What changes is what happens aft
 | --- | --- | --- |
 | `openai_responses` (OpenAI, xAI) | `{"type": "web_search"}`, `{"type": "x_search"}`, plus the overlay entry's `include` values. OpenAI's web search requires `include: ["web_search_call.action.sources"]`, merged with Vibey's existing `reasoning.encrypted_content`. | `{"type": "function", "name": <tool>, "parameters": <canonical>}` |
 | `anthropic` | `{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}` | `{"name": <tool>, "input_schema": <canonical>}` |
-| `openai_chat`, `google` | none | a function with the canonical schema. Vibey reaches a `google` hop over Chat Completions at the gateway (C-1 conversion tables), and the engine translates it to Gemini `functionDeclarations`. |
+| `openai_chat` | none | `{"type": "function", "function": {"name": <tool>, "parameters": <canonical>}}` |
+| `google` | none yet (`vibey-gemini-native.md` §4) | a `functionDeclarations` entry with the canonical schema as `parametersJsonSchema`; Vibey speaks Gemini natively (amended 2026-10-27) |
 
 - Vibey declares a search tool natively exactly when it is enabled and `native` is `assumed`; otherwise it declares
   the same-named function. It never declares a hosted image tool.

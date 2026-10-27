@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.agent_core.ai import anthropic, openai_chat, openai_responses
+from core.agent_core.ai import anthropic, google, openai_chat, openai_responses
 from core.agent_core.ai.anthropic import AnthropicAdapter
+from core.agent_core.ai.google import GoogleAdapter
 from core.agent_core.ai.openai_chat import OpenAIChatAdapter
 from core.agent_core.ai.openai_responses import OpenAIResponsesAdapter
 from core.agent_core.ai.provider import ProviderAdapter
@@ -13,22 +14,25 @@ from core.agent_core.messages import ProtocolName
 
 ADAPTERS: dict[ProtocolName, type[ProviderAdapter]] = {
     "anthropic": AnthropicAdapter,
+    "google": GoogleAdapter,
     "openai_chat": OpenAIChatAdapter,
     "openai_responses": OpenAIResponsesAdapter,
 }
 
 def sent_effort(protocol: str, model_id: str, effort: str) -> str | None:
     """The effort token a request on ``protocol`` to ``model_id`` carries for ``effort``, exactly as the adapter sends
-    it: at ``output_config.effort`` (Anthropic), ``reasoning.effort`` (Responses) or ``reasoning_effort`` (Chat; a
-    ``google`` hop is reached over Chat). None when the request carries no effort token. Model Hub's effort menu reads
-    the same answer, so the menu and the wire cannot drift."""
+    it: at ``output_config.effort`` (Anthropic), ``reasoning.effort`` (Responses), ``reasoning_effort`` (Chat), or the
+    token a Gemini request's ``thinkingConfig`` is built from (``google``). None when the request carries no effort
+    token. Model Hub's effort menu reads the same answer, so the menu and the wire cannot drift."""
 
     if protocol == "anthropic":
         return anthropic.sent_effort(model_id, effort)
     if protocol == "openai_responses":
         return openai_responses.sent_effort(effort)
-    if protocol in ("openai_chat", "google"):
+    if protocol == "openai_chat":
         return openai_chat.sent_effort(effort)
+    if protocol == "google":
+        return google.sent_effort(effort)
     raise ValueError(f"unsupported provider protocol: {protocol}")
 
 

@@ -464,41 +464,6 @@ def test_a_stored_request_size_the_transcript_cannot_explain_hides_at_most_its_e
     assert _est(rows, grown(rows, 40_000)) == 12_000 + after + 40_000 - excess  # over it: all but the excess
 
 
-def test_a_converted_route_anchor_uses_the_served_api_without_widening_identity():
-    from modules.agents.vibey.models import selection_from_hop
-
-    endpoint = selection_from_hop(
-        {
-            "backend": "vibey",
-            "protocol": "google",
-            "base_url": "http://hub.invalid/v1beta",
-            "token": "token",
-            "runtime_model": "test-model",
-            "provider": "test-provider",
-            "source_id": "src_google2501",
-            "source_identity": "sha256:test-google",
-            "request_headers": {},
-            "capabilities": {},
-            "hosted_tools": {},
-        },
-        gateway_base_url="http://hub.invalid/vibey",
-    ).endpoint
-    assert (endpoint.protocol, endpoint.origin_api) == ("openai_chat", "google")
-    rows, _, result = _anchored_rows(
-        endpoint=endpoint,
-        origin=Origin("test-provider", "google", "test-model"),
-    )
-    request = make_request(context_view(rows.rows).messages, endpoint=endpoint)
-    after = message_tokens(result.message) + message_tokens(request.messages[-1])
-    assert _est(rows, request) == 5_000 + after
-    assert _est(rows, request) > _whole(rows, request)
-
-    # The same provider/model on an ordinary Chat route is not treated as the converted Google route.
-    plain_endpoint = replace(endpoint, origin_api=None)
-    plain_request = replace(request, endpoint=plain_endpoint)
-    assert _est(rows, plain_request) == _whole(rows, plain_request)
-
-
 def test_a_checkpoint_or_another_route_invalidates_the_anchor():
     rows, anchored, result = _anchored_rows()
     other_route = ModelEndpoint("anthropic", "http://model.invalid", "other-model", "", provider="test-provider")

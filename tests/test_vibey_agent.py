@@ -1185,7 +1185,7 @@ async def test_a_self_fork_keeps_the_live_turns_input_and_finished_steps(engine,
     await running
 
 
-async def test_a_google_hop_is_called_over_chat_at_the_gateway_prefix(engine, session, tmp_path, published) -> None:
+async def test_a_google_hop_is_called_natively_at_the_gateway_gemini_surface(engine, session, tmp_path, published) -> None:
     asked: list[str] = []
     harness = _Harness(
         engine, tmp_path, "avibe", [[Done(assistant("hi"))]],
@@ -1195,11 +1195,11 @@ async def test_a_google_hop_is_called_over_chat_at_the_gateway_prefix(engine, se
 
     await harness.agent.handle_message(harness.request("hello"))
 
-    # Model Hub's google hop is its /v1beta Gemini surface; the agent speaks Chat to /v1.
+    # Model Hub's google hop is its /v1beta Gemini surface, and the agent speaks Gemini to it.
     [request] = harness.provider.requests
-    assert asked == ["openai_chat"]
+    assert asked == ["google"]
     assert (request.endpoint.protocol, request.endpoint.base_url, request.endpoint.provider) == (
-        "openai_chat", "http://hub.invalid/vibey/v1", "test-provider"
+        "google", "http://hub.invalid/vibey/v1beta", "test-provider"
     )
     assert harness.controller.terminals[-1]["is_error"] is False
 
@@ -3329,6 +3329,11 @@ _TEXT_STREAMS = {
         'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
         "data: [DONE]\n\n",
     ),
+    "google": (
+        "/vibey/v1beta/models/{model}:streamGenerateContent",
+        'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]}}]}\n\n'
+        'data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}]}\n\n',
+    ),
 }
 
 
@@ -3338,10 +3343,10 @@ async def test_a_turn_runs_through_the_real_provider_registry(engine, session, t
 
     from modules.agents.vibey.models import registry_providers
 
-    wire = "openai_chat" if hub_protocol == "google" else hub_protocol
-    path, body = _TEXT_STREAMS[wire]
+    path, body = _TEXT_STREAMS[hub_protocol]
     served = json.dumps(
-        {"provider": "upstream", "api": wire, "model": "served-model", "source": "src_upstream01"}, separators=(",", ":")
+        {"provider": "upstream", "api": hub_protocol, "model": "served-model", "source": "src_upstream01"},
+        separators=(",", ":"),
     )
     seen: list[str] = []
 
@@ -3358,12 +3363,12 @@ async def test_a_turn_runs_through_the_real_provider_registry(engine, session, t
         harness.controller.hub_protocol = hub_protocol
         await harness.agent.handle_message(harness.request("hello"))
 
-    # Each protocol's adapter from the real registry speaks to its gateway path; a google hop is
-    # called over Chat at the gateway prefix; the served origin comes from x-avibe-served-hop.
-    assert seen == [path]
+    # Each protocol's adapter from the real registry speaks to its own gateway path; the served origin comes from
+    # x-avibe-served-hop.
+    assert seen == [path.format(model=harness.controller.hub_calls[-1])]
     final = (await harness.context_rows())[-1].message
     assert final.content == (TextBlock(text="hi"),)
-    assert (final.origin.provider, final.origin.api, final.origin.model) == ("upstream", wire, "served-model")
+    assert (final.origin.provider, final.origin.api, final.origin.model) == ("upstream", hub_protocol, "served-model")
     assert harness.controller.im_client.sent == ["hi"]
 
 

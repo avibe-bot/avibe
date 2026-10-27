@@ -89,12 +89,6 @@ def credential_eligible(source: ModelHubSourceConfig) -> bool:
     return not (source.vendor == "anthropic" and source.kind == "subscription")
 
 
-def untranslated(source: ModelHubSourceConfig) -> bool:
-    """Vibey speaks the Source's own protocol, except Chat Completions to a ``google`` Source."""
-
-    return source.protocol != "google"
-
-
 def _serves(source: ModelHubSourceConfig, model_id: str) -> bool:
     """Whether a hub Source serves this model by its admission rule.
 
@@ -139,12 +133,12 @@ def runs_on(source: ModelHubSourceConfig, model_id: str, tool: str, *, spec_for:
     """The declaration a search ``tool`` runs with natively on this (Source, model), or None where it cannot.
 
     One rule for every place that asks: a hop's facts, an executor candidate,
-    and admission. The Source is a hub Source with an eligible credential and an
-    untranslated path, it serves the model, and the overlay declares the tool
-    for it.
+    and admission. The Source is a hub Source with an eligible credential (Vibey
+    speaks every Source's own protocol, so its path is untranslated), it serves
+    the model, and the overlay declares the tool for it.
     """
 
-    if source.supply_channel != "hub" or not credential_eligible(source) or not untranslated(source):
+    if source.supply_channel != "hub" or not credential_eligible(source):
         return None
     if not _serves(source, model_id):
         return None
