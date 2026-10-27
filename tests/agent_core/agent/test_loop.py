@@ -1411,25 +1411,38 @@ async def test_tool_free_final_reply_is_committed_and_empty_success_is_an_error(
     events = await collect(agent)
     rows = await agent.store.load("session")
     responses = [row for row in rows if row.kind == "response"]
-    assert responses[0].message == message
+    retryable_empty = (
+        continuation == "final" and stop_reason == "stop" and shape in {"empty", "whitespace", "thinking"}
+    )
+    if retryable_empty:
+        assert responses == []
+    else:
+        assert responses[0].message == message
     committed = [event for event in events if isinstance(event, MessageCommitted)]
-    expected_finals = [True] if continuation == "final" else [False, True]
+    expected_finals = [] if retryable_empty else [True] if continuation == "final" else [False, True]
     assert [agent.store.final[row.row_id] for row in responses] == expected_finals
     assert [event.final for event in committed] == expected_finals
     assert [event.message_id for event in committed] == [row.row_id for row in responses]
-    assert len(provider.requests) == provider.closed_streams == len(expected_finals)
+    assert len(provider.requests) == provider.closed_streams == (1 if retryable_empty else len(expected_finals))
     assert [row.row_id for row in rows if row.kind == "input"] == (
         ["input"] if continuation == "final" else ["input", "pending"]
     )
     errors = [event for event in events if isinstance(event, AgentError)]
-    if continuation != "final" or (shape == "visible" and stop_reason != "length"):
+    if retryable_empty:
+        assert len(errors) == 1
+        assert errors[0].kind == "empty_response"
+        assert errors[0].continuable is True
+        assert committed == []
+        assert events[-1].reason == "error"
+    elif continuation != "final" or (shape == "visible" and stop_reason != "length"):
         assert errors == []
         assert events[-1].reason == "completed"
     else:
         assert len(errors) == 1
         assert errors[0].kind == (stop_reason if stop_reason in {"length", "refusal", "safety"} else "empty_response")
         assert errors[0].message
-        assert committed[0].seq < errors[0].seq < events[-1].seq
+        if committed:
+            assert committed[0].seq < errors[0].seq < events[-1].seq
         assert events[-1].reason == "error"
     project(rows)
 

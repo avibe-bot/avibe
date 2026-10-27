@@ -134,6 +134,8 @@ BACKEND = "vibey"
 # Final responses whose empty text is explained by the stop itself (loop-control.md section 2).
 _EXPLAINED_STOPS = ("length", "refusal", "safety")
 _COMPLETED = ("completed", "ended_by_hook")
+# A transient source failure may use the existing bounded continuation policy; a silent normal stop gets one
+# transcript-only continuation before the ordinary empty-response failure is delivered.
 _MAX_AUTO_CONTINUATIONS = 5
 _JOB_PRUNE_INTERVAL_S = 3600.0
 
