@@ -458,3 +458,20 @@ async def test_the_answer_a_search_of_an_earlier_response_grounds_cites_it() -> 
         Citation(url=A, title="coindesk.com", start=9, end=30), Citation(url=B, title="coinbase.com", start=9, end=30),
         Citation(url=B, title="coinbase.com"),
     ))
+
+
+async def test_supports_of_a_repeated_sentence_cite_each_occurrence_in_order() -> None:
+    grounding = {
+        "groundingChunks": [{"web": {"uri": A, "title": "a.example"}}, {"web": {"uri": B, "title": "b.example"}}],
+        "groundingSupports": [
+            {"segment": {"text": "No change."}, "groundingChunkIndices": [0]},
+            {"segment": {"text": "No change."}, "groundingChunkIndices": [1]},
+        ],
+    }
+    finish = {"candidates": [{"content": {"role": "model", "parts": [{"text": "Alpha: No change. Beta: No change."}]},
+                              "finishReason": "STOP", "groundingMetadata": grounding}]}
+    [answer] = _final(await _stream(finish, request=_searching(_user("status?")))).content
+
+    assert answer.citations == (
+        Citation(url=A, title="a.example", start=7, end=17), Citation(url=B, title="b.example", start=24, end=34),
+    )

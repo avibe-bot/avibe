@@ -428,7 +428,8 @@ class _GoogleStream:
 
     def _cite(self) -> None:
         """Each grounding support as citations on the answer text it grounds: at its range where that text is found
-        (in order, after the last one found), else once per source on the last text block."""
+        (in order, after the end of the last one found, so a repeated sentence cites each occurrence), else once per
+        source on the last text block."""
 
         texts = [(key, "".join(parts)) for key, parts in self._texts.items()]
         if not texts:
@@ -438,8 +439,8 @@ class _GoogleStream:
         for segment, citations in google_grounding_citations(self._grounding):
             found = _find_segment([text for _, text in texts], segment, position) if segment else None
             if found is not None and segment:
-                position = found
                 index, start = found
+                position = (index, start + len(segment))
                 for item in citations:
                     self.assembler.add_text_citation(texts[index][0], replace(item, start=start, end=start + len(segment)))
                 continue

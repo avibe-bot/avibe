@@ -125,7 +125,7 @@ included (owner, 2026-10-27: "统一都走原生").
 - Gemini reports a search's sources once, in `groundingMetadata`, on the response whose answer they ground. After a
   search and a function call that is the turn's next response, which ran no search (measured 2026-10-27). So each
   `groundingSupports` entry cites the answer text it grounds (`TextBlock.citations`: its `segment.text` found in the
-  response's text gives the range; one not found cites each source once without one), on every surface through the
+  response's text, in order, gives the range; one not found cites each source once without one), on every surface through the
   shared citation builder. When the search and its answer are one response, the `groundingChunks` (each URL once)
   are also its last search record's sources. `searchEntryPoint` is not read.
 - Gateway: `hosted_admission` reads the keyed declaration through `request.declared_tool_types` and Gemini's
