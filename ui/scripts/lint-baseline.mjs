@@ -276,7 +276,10 @@ async function measureIntegrity(eslint, results) {
 
 async function main() {
   const update = process.argv.includes('--update');
-  const eslint = new ESLint();
+  // `auto` lints in worker threads when there are enough files to pay for them
+  // (ESLint's own heuristic: about one worker per 50 files, at most half the
+  // cores). The results are the same as a single-threaded run's.
+  const eslint = new ESLint({ concurrency: 'auto' });
   const results = await eslint.lintFiles(['.']);
 
   // Unconditional, and first: an incomplete or bypassed measurement can neither
