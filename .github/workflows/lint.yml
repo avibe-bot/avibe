@@ -155,7 +155,24 @@ jobs:
   ui-checks:
     needs: changes
     if: needs.changes.outputs.docs_only == 'false'
+    # Static validation and Vitest share no state, and run back to back they
+    # were the workflow's longest job. Each part runs once on its own runner;
+    # the required unit-tests gate needs this job, so it needs both parts.
+    name: ui-checks (${{ matrix.part }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: static
+            commands: |
+              npm run validate:theme
+              npm run lint
+              # Production tsc excludes test files, and vitest only strips types.
+              npm run typecheck:tests
+          - part: tests
+            commands: |
+              npm test
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
@@ -168,11 +185,7 @@ jobs:
         working-directory: ui
         run: |
           npm ci
-          npm run validate:theme
-          npm run lint
-          # Production tsc excludes test files, and vitest only strips types.
-          npm run typecheck:tests
-          npm test
+          ${{ matrix.commands }}
 
   ui-browser-checks:
     needs: changes
@@ -187,7 +200,9 @@ jobs:
       matrix:
         # Each suite runs serially with one worker and its own dev server; the
         # serial job had become the workflow's longest. Two lanes balanced from
-        # measured suite times (about 7.5 minutes each) run every suite once.
+        # measured suite times (about 6.5 minutes each) run every suite once.
+        # Rebalance from both lanes' times across several runs: one run's two
+        # lanes land on runners of different speeds.
         include:
           - lane: 1
             suites: |
@@ -195,11 +210,11 @@ jobs:
               npm run test:home-media
               npm run test:voice-shortcut
               npm run test:chat-selection
+              npm run test:badge-triggers
           - lane: 2
             suites: |
               npm run test:project-order
               npm run test:inbox-return
-              npm run test:badge-triggers
               npm run test:workbench-general -- sidebar-floating.spec.ts desktop-window-chrome.spec.ts composer-route-trigger.spec.ts skills-dialog.spec.ts
               npm run test:chat-interactions
               npm run test:pdf-preview
