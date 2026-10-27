@@ -187,16 +187,16 @@ jobs:
       matrix:
         # Each suite runs serially with one worker and its own dev server; the
         # serial job had become the workflow's longest. Two lanes balanced from
-        # measured suite times (about 7.5 minutes each) run every suite once.
+        # measured suite times (about seven minutes each) run every suite once.
         include:
           - lane: 1
             suites: |
               npm run test:onboarding-fidelity -- hub-ownership.spec.ts provider-gate.spec.ts lineup.spec.ts
               npm run test:home-media
               npm run test:voice-shortcut
-              npm run test:chat-selection
           - lane: 2
             suites: |
+              npm run test:chat-selection
               npm run test:project-order
               npm run test:inbox-return
               npm run test:badge-triggers
