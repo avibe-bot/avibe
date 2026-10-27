@@ -140,12 +140,6 @@ impl PrivateRuntimeBundle {
         }
     }
 
-    pub fn runtime_id(&self) -> Result<String, PrivateRuntimeError> {
-        let manifest = self.read_manifest()?;
-        validate_manifest(&manifest)?;
-        Ok(manifest.archive_sha256)
-    }
-
     pub fn prepare(&self) -> Result<InstalledPrivateRuntime, PrivateRuntimeError> {
         let manifest = self.read_manifest()?;
         validate_manifest(&manifest)?;
