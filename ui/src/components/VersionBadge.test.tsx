@@ -4,6 +4,7 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { VersionBadge } from './VersionBadge';
+import { DESKTOP_OPEN_UPDATES_EVENT } from '../lib/desktopShell';
 
 const api = vi.hoisted(() => ({
   getVersion: vi.fn(async () => ({ current: '9.9.9', latest: '10.0.0', has_update: true, managed_by: 'desktop' })),
@@ -24,6 +25,7 @@ afterEach(() => {
   vi.clearAllMocks();
   delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
   delete (window as { __AVIBE_DESKTOP_VERSION__?: string }).__AVIBE_DESKTOP_VERSION__;
+  delete (window as { __AVIBE_DESKTOP_UPDATES_HANDLED__?: boolean }).__AVIBE_DESKTOP_UPDATES_HANDLED__;
   delete (window as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__;
 });
 
@@ -99,6 +101,15 @@ describe('desktop version ownership', () => {
     expect(window.location.href).toBe(currentUrl);
   });
 
+  it('acknowledges the native open request when the desktop updater IPC is available', async () => {
+    renderInShell('3.2.2-rc.13', '3.2.2rc13', '3.2.3', true);
+    await screen.findByTitle('v3.2.2-rc.13');
+    const event = new Event(DESKTOP_OPEN_UPDATES_EVENT, { cancelable: true });
+    expect(window.dispatchEvent(event)).toBe(false);
+    expect(await screen.findByRole('dialog')).toBeTruthy();
+    expect(window.__AVIBE_DESKTOP_UPDATES_HANDLED__).toBe(true);
+  });
+
   it('uses the desktop updater IPC for install and never calls the Runtime upgrade API', async () => {
     renderInShell('3.2.2-rc.13', '3.2.2rc13', '3.2.3', true);
     fireEvent.click(await screen.findByTitle('v3.2.2-rc.13'));
@@ -112,6 +123,21 @@ describe('desktop version ownership', () => {
     fireEvent.click(await screen.findByTitle('v3.2.2-rc.13'));
     fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.skipUpdate') }));
     await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_skip'));
+    expect(api.doUpgrade).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+  });
+
+  it('uses shell updater ownership even when the adopted Runtime omits managed_by', async () => {
+    renderInShell('3.2.2-rc.13', '3.2.2rc13', null, true, {
+      current: '3.2.2rc13',
+      latest: null,
+      has_update: false,
+    });
+    const entry = await screen.findByTitle('v3.2.2-rc.13');
+    await vi.waitFor(() => expect(entry.className).toContain('text-gold-ink'));
+    fireEvent.click(entry);
+    fireEvent.click(await screen.findByRole('button', { name: i18n.t('dashboard.upgradeNow') }));
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_install'));
     expect(api.doUpgrade).not.toHaveBeenCalled();
   });
 

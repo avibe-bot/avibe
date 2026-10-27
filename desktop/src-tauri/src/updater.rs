@@ -541,7 +541,7 @@ pub fn desktop_update_state(window: WebviewWindow, app: AppHandle) -> Result<Des
 #[tauri::command]
 pub fn desktop_update_check(window: WebviewWindow, app: AppHandle) -> Result<(), String> {
     ensure_workbench(&window)?;
-    check(app, false);
+    check(app, true);
     Ok(())
 }
 

@@ -100,6 +100,9 @@ const OPEN_SETTINGS_EVENT: &str = "avibe:desktop-open-settings";
 /// `ui/src/lib/desktopShell.ts`. An uncancelled request falls back to the
 /// native updater dialog when the Workbench cannot receive it.
 const OPEN_UPDATES_EVENT: &str = "avibe:desktop-open-updates";
+/// Internal shell-only target used when an adopted Workbench has no listener
+/// for `OPEN_UPDATES_EVENT`. It is intercepted before any page can navigate.
+pub(crate) const OPEN_UPDATES_FALLBACK_URL: &str = "avibe://updates-fallback";
 /// Where a relaunch after a guide-driven Screen Recording grant returns.
 #[cfg(target_os = "macos")]
 const COMPUTER_USE_SETUP_DEEP_LINK: &str = "avibe://settings/computer-use";
@@ -598,7 +601,11 @@ fn open_settings_script() -> String {
 }
 
 fn open_updates_script() -> String {
-    format!("window.dispatchEvent(new Event('{OPEN_UPDATES_EVENT}', {{ cancelable: true }}));")
+    format!(
+        "window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = false; \
+         window.dispatchEvent(new Event('{OPEN_UPDATES_EVENT}', {{ cancelable: true }})); \
+         if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('{OPEN_UPDATES_FALLBACK_URL}');"
+    )
 }
 
 /// Ask the current Workbench to open its desktop update popover. Returning
@@ -2219,6 +2226,10 @@ pub fn run() {
                         }
                         return false;
                     }
+                    if webview.label() == MAIN_WINDOW && url.as_str() == OPEN_UPDATES_FALLBACK_URL {
+                        updater::check(webview.app_handle().clone(), true);
+                        return false;
+                    }
                     let active_origin = webview
                         .try_state::<Shell>()
                         .and_then(|shell| shell.active_origin.lock().ok().and_then(|active| active.clone()));
@@ -2401,7 +2412,9 @@ mod tests {
     fn the_updates_request_is_a_cancelable_workbench_event() {
         assert_eq!(
             open_updates_script(),
-            "window.dispatchEvent(new Event('avibe:desktop-open-updates', { cancelable: true }));"
+            "window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = false; \
+             window.dispatchEvent(new Event('avibe:desktop-open-updates', { cancelable: true })); \
+             if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('avibe://updates-fallback');"
         );
     }
 

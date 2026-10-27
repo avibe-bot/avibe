@@ -9,6 +9,8 @@ declare global {
     readonly __AVIBE_DESKTOP_PET__?: true;
     /** The macOS shell answers the Computer Use guide's actions. */
     readonly __AVIBE_DESKTOP_COMPUTER_USE__?: true;
+    /** The current Workbench handled the shell's update-popover request. */
+    __AVIBE_DESKTOP_UPDATES_HANDLED__?: boolean;
   }
 }
 

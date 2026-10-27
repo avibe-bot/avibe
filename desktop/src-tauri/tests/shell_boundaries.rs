@@ -268,6 +268,8 @@ fn deep_links_have_native_entry_points_and_the_updates_popover_route() {
     assert!(source.contains("request_desktop_updates(app)"));
     assert!(source.contains("take_desktop_update_request(webview.app_handle())"));
     assert!(source.contains("if !open_desktop_updates(webview.app_handle())"));
+    assert!(source.contains("avibe://updates-fallback"));
+    assert!(source.contains("OPEN_UPDATES_FALLBACK_URL"));
     assert!(shipping_source("src/pet.rs").contains("link != crate::updater::OPEN_URL"));
     assert!(!source.contains("RunEvent::Opened"));
     let receiver = source

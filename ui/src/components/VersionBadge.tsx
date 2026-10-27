@@ -112,7 +112,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
 
   const waitForDesktopUpdate = async (): Promise<DesktopUpdateState | null> => {
     if (!desktopActions) return null;
-    for (let attempt = 0; attempt < 120; attempt += 1) {
+    while (true) {
       const state = await readDesktopUpdateState();
       if (!state || !['checking', 'downloading', 'installing'].includes(state.phase)) {
         return state;
@@ -154,6 +154,8 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   React.useEffect(() => {
     if (!inDesktopShell) return;
     const handleOpenUpdates = (event: Event) => {
+      if (!desktopActions) return;
+      window.__AVIBE_DESKTOP_UPDATES_HANDLED__ = true;
       event.preventDefault();
       setIsPopupOpen(true);
       void checkVersion(true);
@@ -205,13 +207,14 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     }
   };
 
-  const isDesktopManaged = versionInfo?.managed_by === 'desktop';
+  const isDesktopManaged = inDesktopShell || versionInfo?.managed_by === 'desktop';
   // A desktop-managed Runtime relays the desktop app's own conclusion. The
   // shell also exposes its in-memory state so a fresh native check lights the
   // badge before the Runtime's status file has been reread.
-  const hasUpdate = versionInfo?.has_update === true || (
-    isDesktopManaged && desktopUpdateState?.phase === 'available'
-  );
+  const hasUpdate = desktopActions
+    ? desktopUpdateState?.phase === 'available'
+      && desktopUpdateState.skippedVersion !== desktopUpdateState.latest
+    : versionInfo?.has_update === true;
   // The desktop app reports SemVer; show it in the Runtime's PEP 440 form.
   const latestVersion = isDesktopManaged && desktopUpdateState?.latest
     ? normalizeVersion(desktopUpdateState.latest)
@@ -248,6 +251,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     try {
       await desktopActions.skip();
       await readDesktopUpdateState();
+      setIsPopupOpen(false);
     } catch (e) {
       console.error('Failed to skip desktop update:', e);
     }
