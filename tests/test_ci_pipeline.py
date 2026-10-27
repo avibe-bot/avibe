@@ -413,13 +413,19 @@ def test_ui_checks_run_once_without_fencing_artifact_consumers() -> None:
     check_steps = [step for step in checks["steps"] if "run" in step]
     build_steps = [step for step in build["steps"] if step.get("working-directory") == "ui"]
     assert all(step.get("working-directory") == "ui" for step in check_steps)
-    check_commands = "\n".join(step["run"] for step in check_steps).splitlines()
+    # The parts run on separate runners: each runs the shared steps with its own
+    # commands, and together they run every UI check exactly once.
+    shared = "\n".join(step["run"] for step in check_steps).splitlines()
+    parts = checks["strategy"]["matrix"]["include"]
+    assert checks["strategy"]["fail-fast"] is False
+    assert shared.count("${{ matrix.commands }}") == 1
+    assert "npm ci" in shared
+    check_commands = [line.strip() for part in parts for line in part["commands"].splitlines()]
     build_commands = "\n".join(step["run"] for step in build_steps).splitlines()
     for command in ("npm run validate:theme", "npm run lint", "npm run typecheck:tests", "npm test"):
         assert check_commands.count(command) == 1
         assert command not in build_commands
     assert build_commands.count("npm run build") == 1
-    assert "npm ci" in check_commands
     assert "npm ci" in build_commands
     for job in (checks, browsers, build):
         assert job["if"] == "needs.changes.outputs.docs_only == 'false'"

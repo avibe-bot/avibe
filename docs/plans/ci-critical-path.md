@@ -101,3 +101,52 @@ seconds and every dependency cache hit.
 
 No tests, required checks, watchdogs, or runner labels are removed.
 Measured results for the pull request's own runs are recorded in the PR.
+
+## October 2026: UI Check Parts and Bytecode Measurement
+
+### Baseline
+
+Master run 40481392503 (`317377ee8`, after #3026 and #3029) and PR runs since
+#3019 show two chains of roughly the same length. `ui-checks` took 5.5 to
+8.8 minutes, depending on the runner. It ran validate:theme (5 to 9 s), lint
+(49 to 81 s), and typecheck:tests (24 to 48 s), then Vitest (206 to 351 s).
+The longer browser lane took 7.6 to 9.4 minutes. pdf-preview has grown from
+50 s to 139 s, and lane 2's suites took 50 to 60 s longer than lane 1's in each
+of four runs. The install chain took about 7.6 minutes. Unit shards were 4 to
+6 minutes.
+
+### Changes and Invariants
+
+- `ui-checks` is a two-part matrix. The `static` part runs theme validation,
+  lint and the test type-check. The `tests` part runs Vitest. Each check runs
+  exactly once. The required `unit-tests` gate still needs `ui-checks`, which
+  succeeds only when both parts succeed. Lint and Vitest no longer share a
+  checkout, so the lint-integrity test's temporary invalid source cannot reach
+  the linter.
+- badge-triggers moves to browser lane 1. Every suite still runs exactly once
+  with the same arguments.
+- Peak demand: the run requests one more hosted job when it starts, 19 instead
+  of 18. The static part usually finishes before the artifact build does, so it
+  is not competing for runners when the build's consumers are requested.
+
+### Bytecode Compilation Was Measured and Not Adopted
+
+These probes ran on scratch-branch runs 40481504100 and 40483710679. Each probe
+compared install methods on a single runner, so runner speed was not a factor.
+
+| Measurement | Lazy (current) | `--compile-bytecode` |
+| --- | ---: | ---: |
+| `uv pip install -e . --group dev` (14,114 files) | 1.5–1.8 s | 4.4–7.5 s |
+| Shard 5, two lanes | 241 s | 232 s |
+| Shard 0, two lanes | 310 s | 312 s |
+| Full test collection, one process (two runners) | 79.8 s / 78.0 s | 78.7 s / 79.8 s |
+| memory-insight contract pytest | 4.7 s | 4.7 s |
+
+Each runner compiles a dependency once, on the first import. Precompiling
+everything costs as much as it saves, and the differences are within run noise.
+lark_oapi is the exception. Its first import takes about 8 s cold and about
+2.7 s compiled. It is imported only by the Feishu files, which all run on one
+shard, and the shards are not on the critical path. Compiling repository
+sources adds 1.8 s. The only measurable gain came from pytest's own rewrite
+cache, about 1.4 s for the contract job, and compileall does not produce that
+cache.
