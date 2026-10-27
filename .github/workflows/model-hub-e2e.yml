@@ -85,8 +85,11 @@ jobs:
         run: mkdir -p "$RUNNER_TEMP/model-hub-e2e-junit"
 
       # Every release E2E case selected below must be present and passing in this
-      # run's own report; collection or a green process is not enough.
+      # run's own report; collection or a green process is not enough. `shell: bash`
+      # runs with pipefail: without it the `| tee` pipeline reports tee's status and a
+      # failing pytest reads as green.
       - name: Run the Model Hub E2E and release evidence gate
+        shell: bash
         run: |
           bash scripts/ci_loopback_only.sh python -m pytest -m e2e_model_hub tests/e2e -p no:cacheprovider -ra \
             --basetemp="$RUNNER_TEMP/e2e" \
