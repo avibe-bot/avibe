@@ -199,7 +199,6 @@ def run_ui_server(host: str, port: int) -> None:
     paths.ensure_data_dirs()
     config = _load_config_safely()
     if config is not None:
-        init_sentry(config, component="ui", enable_fastapi=True)
         _start_remote_access_heartbeat_safely(config)
 
     uvicorn_config = uvicorn.Config(
@@ -218,7 +217,8 @@ def run_ui_server(host: str, port: int) -> None:
     server.run()  # blocks
 ```
 
-Use FastAPI's `lifespan` context to start / stop the OAuth service singleton (replacing the daemon-thread loop) and the Sentry FastAPI integration:
+Use FastAPI's `lifespan` context to start / stop the OAuth service singleton
+(replacing the daemon-thread loop):
 
 ```python
 from contextlib import asynccontextmanager
@@ -236,11 +236,12 @@ app = FastAPI(lifespan=lifespan)
 
 Port-bind retry loop (currently in `make_server` wrapper for EADDRINUSE handling) lives outside uvicorn — wrap `server.run()` in the same retry loop.
 
-### Sentry integration
+### Optional error telemetry
 
-`init_sentry(..., enable_flask=True)` currently activates the Flask integration. Switch to FastAPI:
-- `enable_flask=True` flag in `vibe/sentry_integration.py` becomes `enable_fastapi=True`.
-- Inside, swap `sentry_sdk.integrations.flask.FlaskIntegration()` for `sentry_sdk.integrations.fastapi.FastApiIntegration()` and `sentry_sdk.integrations.starlette.StarletteIntegration()`.
+The former external error-reporting integration is intentionally out of scope
+for this migration. The current product has no external telemetry dependency,
+initialization, or environment configuration; do not add one back while
+finishing the remaining FastAPI work.
 
 ### Tests
 
@@ -285,7 +286,7 @@ The chat feature will land in a follow-up PR using this same pattern. We just ne
 | 74 routes — long migration, easy to miss subtle response-shape differences | Migrate one router file at a time, run the existing test for that surface after each, smoke via curl. Don't merge until ALL test files pass and a manual smoke against the React UI is clean. |
 | Tests embedded in Flask test client semantics (cookies, sessions) | TestClient is largely API-compatible; deal with cookie domain quirks one test file at a time. Allocate ~25% of the migration budget for tests. |
 | CSRF / remote_access middleware: ordering bugs | Port one middleware at a time with focused FastAPI tests in `tests/test_ui_server_fastapi.py`. |
-| Sentry integration regression | Init in lifespan startup; verify Sentry breadcrumbs still appear via the regression env's dev key. |
+| Optional error telemetry | Out of scope; failures remain in local structured logs. |
 | WSGI-specific subprocess launching pattern in `run_ui_server` | Uvicorn handles this natively in-process; keep the EADDRINUSE retry loop. |
 | Frontend assumptions about specific status codes / response shapes | Don't refactor any payload shape during the migration. Same path, same method, same JSON. |
 | Streaming responses (logs tail, OAuth status long-poll) | All current "streaming" looks like polling, not SSE. Confirm during route porting; if any real SSE shows up, convert to `StreamingResponse`. |
@@ -304,7 +305,7 @@ Each phase ends with a green test run + a manual smoke. Commit between phases.
 6. **IM platform credentials.** Slack / Discord / Telegram / Feishu / WeChat routes. WeChat QR login long-poll is a candidate for `StreamingResponse` (or stays as poll — keep behavior identical).
 7. **Config / settings / sessions / logs / version / remote-access / browse.** The remaining bulk.
 8. **WebSocket smoke route** + frontend hello-world dialog (optional) to prove the substrate.
-9. **Cleanup.** Remove `VIBE_UI_FRAMEWORK` flag, delete `_legacy_flask_app`, drop `flask` from `pyproject.toml`, regenerate lockfile. Update `vibe/sentry_integration.py` to use `FastApiIntegration`/`StarletteIntegration`.
+9. **Cleanup.** Remove `VIBE_UI_FRAMEWORK` flag, delete `_legacy_flask_app`, drop `flask` from `pyproject.toml`, regenerate lockfile.
 10. **Tests.** Convert `app.test_client()` → `TestClient(app)`. The 5–6 test files using Flask testing patterns need a uniform pass.
 
 Codex review after each phase keeps the surface area manageable.
@@ -331,5 +332,4 @@ The migration is too large to be a single commit. Land it as a stacked PR series
 1. **Phase granularity** — single PR or stacked PRs? Single is simpler to verify; stacked is easier to review. Lean stacked if review burden looks heavy.
 2. **`request.remote_addr` proxy header logic** — the Flask path has bespoke handling for `X-Forwarded-For` / `X-Forwarded-Host` to support Cloudflare Tunnel. Verify Starlette's `request.client.host` honors `forwarded` properly; if not, port the bespoke logic into middleware that writes `request.state.client_host`.
 3. **Logging integration** — uvicorn has its own access log format. Decide whether to disable uvicorn's access log (current Flask doesn't have one anyway) or pipe it through `vibe/logging.py`.
-4. **Sentry** — confirm `FastApiIntegration` + `StarletteIntegration` is the right combination (not just one of them).
-5. **Test client async helpers** — if any test currently uses Flask's `with app.test_request_context()` pattern, port to `httpx.AsyncClient` for the async equivalent.
+4. **Test client async helpers** — if any test currently uses Flask's `with app.test_request_context()` pattern, port to `httpx.AsyncClient` for the async equivalent.

@@ -88,7 +88,6 @@ from modules.agents.catalog import (
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
 from vibe.runtime import get_ui_dist_path, get_working_dir
-from vibe.sentry_integration import init_sentry
 from vibe import ui_asset_archive
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
 
@@ -17752,10 +17751,9 @@ def run_ui_server(host: str, port: int) -> None:
     except FileNotFoundError:
         config = None
     except Exception as exc:
-        logger.warning("Skipping UI Sentry init because config load failed: %s", exc)
+        logger.warning("Skipping UI startup reconciliation because config load failed: %s", exc)
         config = None
     if config is not None:
-        init_sentry(config, component="ui", enable_fastapi=True)
         try:
             from vibe import remote_access
 

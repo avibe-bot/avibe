@@ -813,7 +813,7 @@ independently:
 - an unsupported future `schema_version` is ignored, not rejected; and
 - a supported sample more than five minutes ahead of backend time is discarded as
   unreasonable clock skew;
-- validation failures are rate-limited in logs/Sentry without echoing payloads.
+- validation failures are rate-limited in local logs without echoing payloads.
 
 V2 validation also preserves the producer's correlated semantics rather than
 accepting each field independently. A non-null request path contains at least

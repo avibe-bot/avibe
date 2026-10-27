@@ -422,7 +422,6 @@
     "tests/test_save_opencode_provider_auth.py": 9.5,
     "tests/test_scheduled_command_task_integration.py": 10.0,
     "tests/test_scheduled_tasks.py": 90.5,
-    "tests/test_sentry_integration.py": 7.0,
     "tests/test_service_lock_record.py": 10.5,
     "tests/test_service_logging_handlers.py": 3.0,
     "tests/test_service_readiness.py": 7.5,
