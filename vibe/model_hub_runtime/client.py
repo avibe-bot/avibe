@@ -2281,6 +2281,10 @@ _REJECTION_MESSAGE_SCAN_CHARS = 2000
 _INVALID_VALUE_MESSAGE = re.compile(r"Invalid value: '([A-Za-z0-9_.-]{1,64})'")
 _UNSUPPORTED_TOOL_TYPE_MESSAGE = re.compile(r"Unsupported tool type: ([A-Za-z0-9_.-]{1,64})")
 _INVALID_ENCRYPTED_CONTENT_MESSAGE = re.compile(r"Invalid encrypted_content in ([a-z_]{1,64}) block")
+# Gemini's refusal of Google Search on a model that cannot run it next to functions (measured 2026-10-27 on
+# gemini-2.5-flash and gemini-3-pro-image-preview: "Tool call context circulation is not enabled for models/…"),
+# named by the overlay's declaration type.
+_GOOGLE_SEARCH_REFUSAL_MESSAGE = re.compile(r"Tool call context circulation is not enabled")
 
 
 def _upstream_rejection(
@@ -2333,7 +2337,9 @@ def _upstream_rejection(
         error_type=token(error_type),
         param=token(fields.get("param")),
         invalid_value=named(_INVALID_VALUE_MESSAGE),
-        unsupported_tool_type=named(_UNSUPPORTED_TOOL_TYPE_MESSAGE),
+        unsupported_tool_type=named(_UNSUPPORTED_TOOL_TYPE_MESSAGE) or (
+            "google_search" if _GOOGLE_SEARCH_REFUSAL_MESSAGE.search(text) else None
+        ),
         invalid_encrypted_content_block=named(_INVALID_ENCRYPTED_CONTENT_MESSAGE),
     )
 

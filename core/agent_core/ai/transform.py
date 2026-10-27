@@ -363,7 +363,7 @@ def native_replay(
     # A native payload is opaque provider content too: it goes back only to the account that issued it.
     if not _opaque_admitted(message, endpoint, "hosted"):
         return False
-    if protocol not in ("anthropic", "openai_responses"):
+    if protocol not in ("anthropic", "openai_responses", "google"):
         return False
     if {block.native.source_id for block in blocks} != {endpoint.source_id}:
         return False

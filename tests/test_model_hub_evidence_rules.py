@@ -29,6 +29,11 @@ ULTRA_REFUSED = {
     }
 }
 TOOL_REFUSED = {"error": {"message": "Unsupported tool type: web_search", "type": "invalid_request_error"}}
+# Measured on gemini-2.5-flash, 2026-10-27.
+GOOGLE_SEARCH_REFUSED = {"error": {
+    "code": 400, "status": "INVALID_ARGUMENT",
+    "message": "Tool call context circulation is not enabled for models/gemini-2.5-flash",
+}}
 REPLAY_REFUSED = {
     "type": "error",
     "error": {"type": "invalid_request_error", "message": "Invalid encrypted_content in search_result block"},
@@ -73,15 +78,23 @@ CASES = [
      {"max_tokens": 64, "messages": [{"role": "user", "content": "hi"}]}, 400, REPLAY_REFUSED, None, None),
     ("server-error-names-the-effort", "codex", "openai", "openai_responses",
      {"input": "hi", "reasoning": {"effort": "ultra"}}, 500, ULTRA_REFUSED, None, None),
+    # Gemini refuses Google Search next to functions on a model that cannot circulate server-side calls.
+    (
+        "gemini-search-refused", "codex", "custom", "google",
+        {"contents": [{"role": "user", "parts": [{"text": "hi"}]}], "tools": [{"googleSearch": {}}]}, 400,
+        GOOGLE_SEARCH_REFUSED, EvidenceFeature.hosted("web_search", "call"), "400 invalid_request_error",
+    ),
+    ("gemini-search-not-declared", "codex", "custom", "google",
+     {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]}, 400, GOOGLE_SEARCH_REFUSED, None, None),
 ]
 
 
 def _web_search_only(vendor, protocol, model_id, tool):
     if tool != "web_search":
         return None
-    declaration = {"anthropic": {"type": "web_search_20250305", "name": "web_search"}}.get(
-        protocol, {"type": "web_search"}
-    )
+    declaration = {
+        "anthropic": {"type": "web_search_20250305", "name": "web_search"}, "google": {"type": "google_search"},
+    }.get(protocol, {"type": "web_search"})
     return HostedToolSpec(declaration_json=json.dumps(declaration), price=None, include=())
 
 
@@ -97,6 +110,8 @@ async def test_an_upstream_400_teaches_only_the_feature_it_names(
     """MH-HOSTED-006: a narrow rule learns exactly the named feature; anything else learns nothing."""
     monkeypatch.setattr(service_module, "hosted_tool_spec", _web_search_only)
     source = _source("src_evidence1", "Relay 中转", vendor=vendor, protocol=protocol)
+    if protocol == "google":
+        source.base_url = "https://gemini.invalid"  # a Google Source names its root
     service, _clock, models = configured_service(tmp_path, sources=[source])
 
     async def respond(_request):

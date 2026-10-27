@@ -109,15 +109,26 @@ included (owner, 2026-10-27: "统一都走原生").
 
 ## 4. Google Search as Gemini's native `web_search` (PR 3)
 
-- The overlay's `gemini` provider row declares `web_search` on `google` as `{"googleSearch": {}}` with the per-query
-  price; the adapter adds `toolConfig.includeServerSideToolInvocations` when it declares one.
-- A response's `toolCall`/`toolResponse` pair becomes one `HostedToolBlock` (`action: search` with the queries;
-  the record's sources from `groundingChunks`; the answer's citations from `groundingSupports`), with the parts
-  verbatim as its native payload for same-Source replay; any other target gets the synthetic call and result
-  (`vibey-hosted-tools.md` §5). The raw `search_suggestions` markup is not kept in the record.
-- Evidence (`evidence_rules.py`): a served response with a `GOOGLE_SEARCH_WEB` `toolCall` is positive; an error
-  naming the tool before output is the narrow negative rule. Cost: queries × list price, from
-  `groundingMetadata.webSearchQueries`.
+- The overlay's `gemini` provider rows (prefixes `gemini-3`, `gemini-4`; ids `gemini-flash-latest`,
+  `gemini-flash-lite-latest`, `gemini-pro-latest`) declare `web_search` on `google` as `{"type": "google_search"}`
+  with the per-query price ($14 per 1,000, as of 2026-10-27). Gemini 2.5 is not declared: it refuses a server-side
+  tool next to functions (measured). A Source keeps Google's `models/<id>` names, so the overlay matches the id
+  without that prefix.
+- The adapter sends that declaration as `{"googleSearch": {}}` after the `functionDeclarations`, with
+  `toolConfig.includeServerSideToolInvocations: true`, which Gemini requires to run it next to functions (measured).
+- A response's `toolCall`/`toolResponse` pair (`toolType: GOOGLE_SEARCH_WEB`) becomes one `HostedToolBlock`
+  (`action: search` with the call's `queries`; the record's sources are the response's `groundingChunks`, each
+  once), with both parts verbatim, signatures included, as its native payload. Same-Source replay sends them back
+  in place; any other target gets the synthetic call and result (`vibey-hosted-tools.md` §5). The
+  `search_suggestions` markup is never kept (§0). A server-side part of a tool the request did not declare stays
+  out of the transcript.
+- Gateway: `hosted_admission` reads the keyed declaration through `request.declared_tool_types` and Gemini's
+  server-side parts as replays (the in-flight response is the last `model` content followed only by function
+  responses). Gemini's refusal "Tool call context circulation is not enabled" before output is the narrow negative
+  rule for `web_search` `call`, so the hop falls back to the executor chain. Cost: the response's distinct `groundingMetadata.webSearchQueries` × list price, as
+  `hosted_summary.counts.web_search_requests`.
+- Not in this step: a positive evidence rule (the Tools tab shows no "最近一次 … 正常" for Google Search) and
+  answer citations from `groundingSupports` (the record lists the sources; the text carries no links).
 - Public docs (`avibe-docs`, en and zh): Gemini searches with Google, queries go to Google, and the price.
 
 ## 5. Delivery
@@ -135,5 +146,9 @@ of each other once PR 1 is merged.
 
 - A Gemini subscription (Antigravity) is served by the engine over Chat only; it keeps Exa/Tavily search.
 - Source links in Google's grounding are redirect URLs; the card shows the domain as title.
+- Google Search has no positive evidence yet and Gemini answers carry no inline citations (§4).
+- Gemini is not a search executor for other hops: the executor speaks Anthropic and Responses only, so Gemini runs
+  Google Search on its own hop and names no `executor_models` (a follow-up would add a `google` executor request
+  and result).
 - The OpenAI-compatible Chat path keeps no dummy for another origin's current-turn call: after PR 2 no official
   Gemini Source uses it, and a Chat relay that serves Gemini is the relay's to translate.

@@ -843,11 +843,15 @@ def bundled_provider_vendors() -> Mapping[str, ProviderVendorOverlay]:
 
 
 def provider_overlay_entry(vendor: str, model_id: str) -> ProviderModelOverlay | None:
-    """Return the first model family of ``vendor`` that matches ``model_id``."""
+    """Return the first model family of ``vendor`` that matches ``model_id``.
+
+    Google names a model inside its ``models/`` collection (``models/gemini-4-argon``), the name a Gemini Source keeps;
+    a family matches the model's own id.
+    """
 
     from core.handlers.model_hub.identifiers import normalized_model_id
 
-    model = normalized_model_id(model_id)
+    model = normalized_model_id(model_id).removeprefix("models/")
     vendor_entry = bundled_provider_vendors().get(vendor.strip().lower())
     for entry in vendor_entry.models if vendor_entry is not None else ():
         if (entry.match_kind == "id" and model == entry.match_value) or (

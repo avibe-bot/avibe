@@ -94,7 +94,93 @@
       ]
     },
     "gemini": {
-      "models": [],
+      "models": [
+        {
+          "match": { "prefix": "gemini-3" },
+          "wire_efforts": null,
+          "hosted_tools": {
+            "google": {
+              "web_search": {
+                "declaration": { "type": "google_search" },
+                "price": {
+                  "unit": "search",
+                  "usd_per_1k": 14,
+                  "as_of": "2026-10-27",
+                  "url": "https://ai.google.dev/gemini-api/docs/google-search#pricing"
+                }
+              }
+            }
+          }
+        },
+        {
+          "match": { "prefix": "gemini-4" },
+          "wire_efforts": null,
+          "hosted_tools": {
+            "google": {
+              "web_search": {
+                "declaration": { "type": "google_search" },
+                "price": {
+                  "unit": "search",
+                  "usd_per_1k": 14,
+                  "as_of": "2026-10-27",
+                  "url": "https://ai.google.dev/gemini-api/docs/google-search#pricing"
+                }
+              }
+            }
+          }
+        },
+        {
+          "match": { "id": "gemini-flash-latest" },
+          "wire_efforts": null,
+          "hosted_tools": {
+            "google": {
+              "web_search": {
+                "declaration": { "type": "google_search" },
+                "price": {
+                  "unit": "search",
+                  "usd_per_1k": 14,
+                  "as_of": "2026-10-27",
+                  "url": "https://ai.google.dev/gemini-api/docs/google-search#pricing"
+                }
+              }
+            }
+          }
+        },
+        {
+          "match": { "id": "gemini-flash-lite-latest" },
+          "wire_efforts": null,
+          "hosted_tools": {
+            "google": {
+              "web_search": {
+                "declaration": { "type": "google_search" },
+                "price": {
+                  "unit": "search",
+                  "usd_per_1k": 14,
+                  "as_of": "2026-10-27",
+                  "url": "https://ai.google.dev/gemini-api/docs/google-search#pricing"
+                }
+              }
+            }
+          }
+        },
+        {
+          "match": { "id": "gemini-pro-latest" },
+          "wire_efforts": null,
+          "hosted_tools": {
+            "google": {
+              "web_search": {
+                "declaration": { "type": "google_search" },
+                "price": {
+                  "unit": "search",
+                  "usd_per_1k": 14,
+                  "as_of": "2026-10-27",
+                  "url": "https://ai.google.dev/gemini-api/docs/google-search#pricing"
+                }
+              }
+            }
+          }
+        }
+      ],
       "image_models": [
         {
           "id": "gemini-2.5-flash-image",
