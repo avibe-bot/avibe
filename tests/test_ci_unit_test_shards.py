@@ -65,7 +65,7 @@ def test_plan_shards_rejects_invalid_shard_total(tmp_path: Path, shard_total: in
         plan_shards([_test_file(tmp_path, "test_one.py")], shard_total)
 
 
-@pytest.mark.parametrize("shard_total", [1, 8])
+@pytest.mark.parametrize("shard_total", [1, 8, 16])
 def test_measured_plan_runs_every_discovered_file_exactly_once(shard_total: int) -> None:
     files = discover_unit_test_files()
     shards = plan_shards(files, shard_total, load_timings())
