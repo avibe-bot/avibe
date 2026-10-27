@@ -55,6 +55,49 @@ const computerUseInvoke = (): ShellInvoke | null => {
   return internals?.invoke ? internals.invoke.bind(internals) : null;
 };
 
+export type DesktopUpdatePhase =
+  | 'idle'
+  | 'checking'
+  | 'current'
+  | 'available'
+  | 'downloading'
+  | 'installing'
+  | 'installed'
+  | 'disabled'
+  | 'error';
+
+export type DesktopUpdateState = {
+  phase: DesktopUpdatePhase;
+  latest: string | null;
+  channel: 'stable' | 'test';
+  skippedVersion: string | null;
+};
+
+const desktopUpdateInvoke = (): ShellInvoke | null => {
+  if (!isDesktopShell()) return null;
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: ShellInvoke } }).__TAURI_INTERNALS__;
+  return internals?.invoke ? internals.invoke.bind(internals) : null;
+};
+
+export const DESKTOP_OPEN_UPDATES_EVENT = 'avibe:desktop-open-updates';
+
+/** The desktop updater controls available to the Workbench's version popover. */
+export function desktopUpdateShellActions(): {
+  getState: () => Promise<DesktopUpdateState>;
+  check: () => Promise<void>;
+  install: () => Promise<void>;
+  skip: () => Promise<void>;
+} | null {
+  const invoke = desktopUpdateInvoke();
+  if (!invoke) return null;
+  return {
+    getState: async () => (await invoke('desktop_update_state')) as DesktopUpdateState,
+    check: async () => { await invoke('desktop_update_check'); },
+    install: async () => { await invoke('desktop_update_install'); },
+    skip: async () => { await invoke('desktop_update_skip'); },
+  };
+}
+
 /** A System Settings privacy pane the Computer Use guide can open. */
 export type ComputerUsePermissionPane = 'accessibility' | 'screen_recording';
 

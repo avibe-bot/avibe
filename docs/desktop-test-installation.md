@@ -45,13 +45,18 @@ Agent backends are detected or installed when selected in Avibe.
 
 To upgrade, use the desktop updater when your installed release published signed
 update metadata (`desktop-update-<target>.json` assets; the first was
-`gh-v3.1.2rc2`). The app checks at startup, and **Check for Desktop Updates…** in
-the tray menu or the Workbench version badge checks on demand. A newer signed
-release asks before doing anything: choose **Download and Install**, **Skip This
-Version**, or **Later**. Prerelease builds follow TEST releases while **Use TEST
-Updates** is on, and updates never downgrade. Releases without that metadata,
-including builds that report **Desktop updates disabled**, upgrade manually: quit
-the shell and replace the app (macOS) or run the replacement installer (Windows).
+`gh-v3.1.2rc2`). The app checks at startup and turns the Workbench version badge
+yellow when a newer release is available. **Check for Desktop Updates…** in the
+tray menu, the Workbench version badge, and the `avibe://updates` deep link all
+open the same popover and run a check. A newer signed release asks before doing
+anything: choose **Download and Install**, **Skip This Version**, or **Later**.
+Startup checks do not show a native dialog after the Workbench is reachable. A
+native fallback is reserved for the period before the webview is ready or when
+the fixed popover event cannot be dispatched. Prerelease builds follow TEST
+releases while **Use TEST Updates** is on, and updates never downgrade. Releases
+without that metadata, including builds that report **Desktop updates disabled**,
+upgrade manually: quit the shell and replace the app (macOS) or run the
+replacement installer (Windows).
 Either path keeps user data under `~/.avibe`; the replacement app verifies and
 activates its private Runtime when it opens.
 

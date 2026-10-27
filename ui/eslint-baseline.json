@@ -47,10 +47,6 @@
     "src/components/ThemeToggle.tsx": {
       "avibe/localized-user-text": 1
     },
-    "src/components/VersionBadge.tsx": {
-      "avibe/localized-user-text": 4,
-      "react-hooks/immutability": 2
-    },
     "src/components/Wizard.tsx": {
       "@typescript-eslint/no-explicit-any": 1,
       "react-hooks/set-state-in-effect": 1
@@ -594,6 +590,9 @@
   "suppressions": {
     "src/App.tsx": {
       "react-hooks/refs": 1
+    },
+    "src/components/VersionBadge.tsx": {
+      "react-hooks/exhaustive-deps": 2
     },
     "src/components/apps/AppWindow.tsx": {
       "react-hooks/exhaustive-deps": 2

@@ -3,8 +3,10 @@
 ## Outcome and boundaries
 
 From baseline `2a8ce221283f81cdd37cf375c92a977669a3b540`, add one native desktop
-update owner. Startup checks only; installation requires a native confirmation.
-The Web version entry routes to that owner without receiving updater IPC powers.
+update owner. Startup checks only; installation requires confirmation in the
+Workbench popover once it is reachable, with a native fallback during startup
+or when the popover event cannot be dispatched. The Web version entry routes to
+that owner without receiving updater IPC powers.
 Current version comes from Tauri package metadata stamped by the release build.
 Stable builds default to stable; prerelease builds default to TEST. Channel choice
 is local to the shell. No downgrade, Python in-place upgrade, backend update, or
@@ -15,8 +17,8 @@ mutation of `~/.avibe` / private Runtime slots is part of application replacemen
 The update prompt offers Install, Skip This Version, and Later. Skip records only
 that exact version in the shell's local data directory; the automatic startup
 check stays silent for it, while an explicit menu check and any newer release
-prompt again. Dismissing the dialog (Esc or close) always means Later. There is
-no silent auto-install option: installation keeps its native confirmation.
+prompt again. Closing the popover without choosing an action means Later. There
+is no silent auto-install option: installation keeps its confirmation step.
 
 ## Distribution contract
 

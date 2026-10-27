@@ -557,11 +557,17 @@ from unit/contract tests.
 
 ## Signed desktop updates (G2)
 
-The native **Check for Desktop Updates…** entry is the sole update owner. The
-Workbench version badge in a desktop window opens that same entry and shows the
-build-injected desktop version. Startup only checks; a native **Download and
-Install** confirmation authorizes download and replacement. The tray/menu shows
-checking, current, available, downloading, installing, disabled, and error states.
+The native updater remains the sole update owner, while the Workbench version
+badge is its user interface. In a desktop window the badge turns yellow when a
+signed release is available and opens the Workbench popover. The native
+**Check for Desktop Updates…** menu item and `avibe://updates` deep link open the
+same popover and start an explicit check. The popover asks for confirmation
+before download and replacement, and offers **Skip this version**. Startup
+checks silently and lets the badge provide the prompt. A native dialog is used
+only when there is no reachable Workbench window or the fixed popover event
+cannot be dispatched, such as a check that finishes before the webview loads.
+The tray/menu shows checking, current, available, downloading, installing,
+disabled, and error states.
 The **Use TEST Updates** toggle persists beside the private Runtime, defaults on
 for prerelease app versions and off for stable versions, and never downgrades.
 Browsers and Python installations retain their existing update behavior.

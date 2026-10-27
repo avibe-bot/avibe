@@ -96,6 +96,10 @@ const SETTINGS_DEEP_LINK: &str = "avibe://settings";
 /// A Workbench that handles it cancels it; an uncancelled one falls back to
 /// loading the deep link's destination.
 const OPEN_SETTINGS_EVENT: &str = "avibe:desktop-open-settings";
+/// The in-page request to open the Version popover, read by
+/// `ui/src/lib/desktopShell.ts`. An uncancelled request falls back to the
+/// native updater dialog when the Workbench cannot receive it.
+const OPEN_UPDATES_EVENT: &str = "avibe:desktop-open-updates";
 /// Where a relaunch after a guide-driven Screen Recording grant returns.
 #[cfg(target_os = "macos")]
 const COMPUTER_USE_SETUP_DEEP_LINK: &str = "avibe://settings/computer-use";
@@ -107,6 +111,9 @@ const UNINSTALL_MENU_ID: &str = "uninstall-private-runtime";
 
 const EN_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/en.json");
 const ZH_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/zh.json");
+
+#[derive(Default)]
+struct PendingDesktopUpdateOpen(AtomicBool);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -588,6 +595,32 @@ fn open_settings_script() -> String {
     format!(
         "if (window.dispatchEvent(new Event('{OPEN_SETTINGS_EVENT}', {{ cancelable: true }}))) window.location.assign('{path}');"
     )
+}
+
+fn open_updates_script() -> String {
+    format!("window.dispatchEvent(new Event('{OPEN_UPDATES_EVENT}', {{ cancelable: true }}));")
+}
+
+/// Ask the current Workbench to open its desktop update popover. Returning
+/// `false` is the documented fallback boundary: the shell has no reachable
+/// Workbench window, or the page rejected the script.
+fn open_desktop_updates(app: &AppHandle) -> bool {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        return false;
+    };
+    if !pet::is_workbench(&window) {
+        return false;
+    }
+    focus_or_restore_main_window(app);
+    window.eval(open_updates_script()).is_ok()
+}
+
+fn request_desktop_updates(app: &AppHandle) {
+    app.state::<PendingDesktopUpdateOpen>().0.store(true, Ordering::SeqCst);
+}
+
+fn take_desktop_update_request(app: &AppHandle) -> bool {
+    app.state::<PendingDesktopUpdateOpen>().0.swap(false, Ordering::SeqCst)
 }
 
 fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
@@ -1717,13 +1750,29 @@ fn focus_or_restore_main_window(app: &AppHandle) {
 }
 
 fn receive_native_deep_link(app: &AppHandle, arguments: impl IntoIterator<Item = impl AsRef<str>>) {
+    let mut updates_requested = false;
+    let mut workbench_arguments = Vec::new();
+    for argument in arguments {
+        let argument = argument.as_ref();
+        if argument == updater::OPEN_URL {
+            updates_requested = true;
+        } else {
+            workbench_arguments.push(argument.to_owned());
+        }
+    }
+    if updates_requested {
+        request_desktop_updates(app);
+    }
     if let Ok(mut links) = app.state::<Mutex<DeepLinks>>().lock() {
-        links.receive(arguments);
+        links.receive(workbench_arguments);
     }
     if app.try_state::<Shell>().is_none() {
         return;
     }
     focus_or_restore_main_window(app);
+    if updates_requested && open_desktop_updates(app) {
+        let _ = take_desktop_update_request(app);
+    }
     apply_pending_deep_link(app);
 }
 
@@ -2069,6 +2118,7 @@ fn request_private_runtime_removal(app: AppHandle) {
 pub fn run() {
     let builder = tauri::Builder::default()
         .manage(Mutex::new(DeepLinks::default()))
+        .manage(PendingDesktopUpdateOpen::default())
         // Registered first, as the plugin documents: a second launch is handed to
         // the running shell instead of starting a competing Runtime.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
@@ -2109,7 +2159,11 @@ pub fn run() {
             match event.id().as_ref() {
                 OPEN_MENU_ID => focus_or_restore_main_window(app),
                 SETTINGS_MENU_ID => open_workbench_settings(app),
-                updater::MENU_ID => updater::check(app.clone(), true),
+                updater::MENU_ID => {
+                    if !open_desktop_updates(app) {
+                        updater::check(app.clone(), true);
+                    }
+                }
                 updater::CHANNEL_ID => updater::toggle_channel(app),
                 LOGIN_MENU_ID => toggle_start_at_login(app),
                 notifications::MENU_ID => {
@@ -2144,6 +2198,11 @@ pub fn run() {
                         #[cfg(target_os = "macos")]
                         macos_title_bar::sync(webview);
                         apply_pending_deep_link(webview.app_handle());
+                        if take_desktop_update_request(webview.app_handle())
+                            && !open_desktop_updates(webview.app_handle())
+                        {
+                            updater::check(webview.app_handle().clone(), true);
+                        }
                         // Settings become available the moment a Workbench is on
                         // screen, not at the monitor's first tick. The shared
                         // rule still decides, so a bootstrap page enables nothing.
@@ -2155,7 +2214,9 @@ pub fn run() {
                         return pet::navigation_allowed(webview.app_handle(), url);
                     }
                     if webview.label() == MAIN_WINDOW && url.as_str() == updater::OPEN_URL {
-                        updater::check(webview.app_handle().clone(), true);
+                        if !open_desktop_updates(webview.app_handle()) {
+                            updater::check(webview.app_handle().clone(), true);
+                        }
                         return false;
                     }
                     let active_origin = webview
@@ -2228,6 +2289,10 @@ pub fn run() {
             open_install_docs,
             computer_use_enable,
             computer_use_open_permission,
+            updater::desktop_update_state,
+            updater::desktop_update_check,
+            updater::desktop_update_install,
+            updater::desktop_update_skip,
             pet::pet_ready,
             pet::pet_set_expanded,
             pet::pet_drag,
@@ -2282,11 +2347,14 @@ pub fn run() {
                 if computer_use::take_setup_resume(app.handle()) {
                     links.receive([COMPUTER_USE_SETUP_DEEP_LINK]);
                 }
-                links.receive(
-                    std::env::args_os()
-                        .skip(1)
-                        .filter_map(|argument| argument.into_string().ok()),
-                );
+                let arguments: Vec<String> = std::env::args_os()
+                    .skip(1)
+                    .filter_map(|argument| argument.into_string().ok())
+                    .collect();
+                if arguments.iter().any(|argument| argument == updater::OPEN_URL) {
+                    request_desktop_updates(app.handle());
+                }
+                links.receive(arguments.into_iter().filter(|argument| argument != updater::OPEN_URL));
             }
             updater::init(app.handle())?;
             install_native_tray(app.handle())?;
@@ -2326,6 +2394,14 @@ mod tests {
             open_settings_script(),
             "if (window.dispatchEvent(new Event('avibe:desktop-open-settings', { cancelable: true }))) \
              window.location.assign('/settings/general');"
+        );
+    }
+
+    #[test]
+    fn the_updates_request_is_a_cancelable_workbench_event() {
+        assert_eq!(
+            open_updates_script(),
+            "window.dispatchEvent(new Event('avibe:desktop-open-updates', { cancelable: true }));"
         );
     }
 

@@ -1110,7 +1110,7 @@ pub fn pet_unbind(window: WebviewWindow, session_id: String) -> Result<PetBindin
 #[tauri::command]
 pub fn pet_open(window: WebviewWindow, link: String) -> Result<(), String> {
     ensure_pet_page(&window)?;
-    if parse_deep_link(&link).is_none() {
+    if link != crate::updater::OPEN_URL && parse_deep_link(&link).is_none() {
         return Err("Not an Avibe link.".to_owned());
     }
     let app = window.app_handle().clone();
