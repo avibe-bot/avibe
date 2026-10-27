@@ -551,7 +551,13 @@ Security → Microphone. `tests/notarization_preflight.rs` pins both facts.
 sign. `.github/workflows/desktop-package.yml` builds architecture-specific,
 self-contained DMG and NSIS artifacts, both manually and as the reusable TEST
 build unit for `.github/workflows/release_ai.yml`. Its signing policy is
-described above. Native packaging and a real
+described above. Release builds restore the Rust dependency cache and the
+prepared Cua Driver but never save caches, because only reruns of the same tag
+could read them. The workflow's unsigned cache warm-up on `master` (daily, and on
+pushes that change a Rust cache input) is the writer they read from; it signs and
+uploads nothing. A restored Cua Driver is kept only when its provenance names the
+pinned inputs and it passes the checks a fresh build passes; otherwise it is
+rebuilt. Native packaging and a real
 installation on each supported architecture remain separate acceptance gates
 from unit/contract tests.
 

@@ -161,6 +161,91 @@ def test_prepared_helper_is_a_signed_code_object(
     )
 
 
+@pytest.mark.parametrize(
+    "case",
+    ["match", "binary-changed", "other-target", "other-patch", "contract-fails", "missing-provenance"],
+)
+def test_restored_helper_is_reused_only_when_it_passes_a_fresh_builds_checks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case: str
+) -> None:
+    """A cached helper ships only as the exact pinned build; anything else is rebuilt."""
+
+    target = "x86_64-apple-darwin"
+    manifest = _SCRIPT["load_manifest"]()
+    patch = Path("desktop/cua-driver") / manifest["driver"]["patch"]["file"]
+    binaries = tmp_path / "binaries"
+    binaries.mkdir()
+    restored = binaries / f"cua-driver-{target}"
+    restored.write_bytes(b"restored helper")
+    provenance = _SCRIPT["provenance_record"](
+        manifest,
+        "aarch64-apple-darwin" if case == "other-target" else target,
+        patch_sha256="0" * 64 if case == "other-patch" else _SCRIPT["digest"](patch),
+        binary_sha256=_SCRIPT["digest"](restored),
+    )
+    if case != "missing-provenance":
+        restored.with_name(f"{restored.name}.provenance.json").write_text(
+            json.dumps(provenance, indent=2, sort_keys=True) + "\n"
+        )
+    if case == "binary-changed":
+        restored.write_bytes(b"tampered helper")
+
+    built = tmp_path / "build" / "cua-driver"
+    built.parent.mkdir()
+    built.write_bytes(b"rebuilt helper")
+    checked: list[tuple[str, bytes]] = []
+    builds: list[str] = []
+
+    def check(name: str):
+        def run(binary: Path, *_args: object) -> None:
+            checked.append((name, binary.read_bytes()))
+            if case == "contract-fails" and name == "contract" and binary == restored:
+                raise ValueError("patched Cua Driver reports an unexpected version")
+
+        return run
+
+    script = _SCRIPT["prepare"].__globals__
+    monkeypatch.setitem(script, "verify_architecture", check("architecture"))
+    monkeypatch.setitem(script, "verify_code_signature", check("signature"))
+    monkeypatch.setitem(script, "verify_built_contract", check("contract"))
+    monkeypatch.setitem(script, "sign_adhoc", check("sign"))
+    monkeypatch.setitem(script, "extract_driver_source", lambda *_args: tmp_path / "source")
+    monkeypatch.setitem(script, "apply_driver_patch", lambda *_args: patch.resolve())
+
+    def build(*_args: object) -> Path:
+        builds.append(target)
+        return built
+
+    monkeypatch.setitem(script, "build_driver", build)
+
+    output = _SCRIPT["prepare"](
+        target,
+        source_archive=tmp_path / "source.tar.gz",
+        output_dir=binaries,
+        reuse=True,
+    )
+
+    assert output == restored.resolve()
+    if case == "match":
+        assert builds == []
+        assert output.read_bytes() == b"restored helper"
+        assert checked == [
+            ("architecture", b"restored helper"),
+            ("signature", b"restored helper"),
+            ("contract", b"restored helper"),
+        ]
+    else:
+        assert builds == [target]
+        assert output.read_bytes() == b"rebuilt helper"
+        assert ("contract", b"rebuilt helper") in checked
+    # The release verifier accepts whichever helper was kept.
+    desktop_release.driver_provenance(
+        target,
+        output,
+        output.with_name(f"{output.name}.provenance.json"),
+    )
+
+
 def test_source_extraction_is_scoped_to_the_driver_subtree(tmp_path: Path) -> None:
     archive = tmp_path / "source.tar.gz"
     root = "cua-fixture"
