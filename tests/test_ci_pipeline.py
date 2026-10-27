@@ -634,6 +634,78 @@ def test_every_linux_engine_e2e_runner_has_only_loopback() -> None:
     assert "--loopback-only" in gate["run"].split()
 
 
+# How GitHub runs a step's script on Linux: the default shell has no pipefail;
+# `shell: bash` adds it (docs: "Defaults: bash -e {0}" vs "bash --noprofile --norc -eo pipefail {0}").
+_GITHUB_LINUX_SHELLS = {
+    None: ["bash", "-e"],
+    "bash": ["bash", "--noprofile", "--norc", "-eo", "pipefail"],
+}
+
+
+def _workflow_steps():
+    for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
+        data = yaml.safe_load(workflow.read_text())
+        default = ((data.get("defaults") or {}).get("run") or {}).get("shell")
+        for job_id, job in (data.get("jobs") or {}).items():
+            job_default = ((job.get("defaults") or {}).get("run") or {}).get("shell") or default
+            for step in job.get("steps") or []:
+                yield workflow.name, job_id, step, step.get("shell") or job_default
+
+
+def test_steps_that_tee_a_command_keep_its_exit_status() -> None:
+    """A `cmd | tee log` pipeline exits with tee's status unless pipefail is on, hiding cmd's failure."""
+
+    unguarded = [
+        f"{workflow} {job_id}: {step.get('name')}"
+        for workflow, job_id, step, shell in _workflow_steps()
+        if "| tee" in (step.get("run") or "")
+        and shell != "bash"
+        and "pipefail" not in (step.get("run") or "")
+    ]
+    assert unguarded == []
+
+
+@pytest.mark.parametrize(
+    ("pytest_exit", "evidence_exit", "expected"),
+    [(0, 0, 0), (1, 0, 1), (0, 1, 1), (2, 1, 2)],
+    ids=["green", "pytest-failed", "evidence-failed", "both-failed"],
+)
+def test_release_e2e_gate_fails_when_its_tests_or_evidence_fail(
+    tmp_path: Path, pytest_exit: int, evidence_exit: int, expected: int,
+) -> None:
+    """The release E2E step, run as GitHub runs it, exits with pytest's failure, else the gate's.
+
+    Its pytest output goes through `| tee`; before the step ran with pipefail every
+    failing release E2E run (three cases from 2026-10-27) still concluded success.
+    """
+
+    release = yaml.safe_load((ROOT / ".github/workflows/model-hub-e2e.yml").read_text())
+    step, = [step for job in release["jobs"].values() for step in job["steps"]
+             if "e2e_model_hub" in step.get("run", "")]
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "ci_loopback_only.sh").write_text(
+        f'echo "pytest ran: $*"\nexit {pytest_exit}\n', encoding="utf-8",
+    )
+    (tmp_path / "scripts" / "ci_scenario_evidence.py").write_text(
+        f"raise SystemExit({evidence_exit})\n", encoding="utf-8",
+    )
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python").symlink_to(sys.executable)
+    script = tmp_path / "step.sh"
+    script.write_text(step["run"], encoding="utf-8")
+
+    result = subprocess.run(
+        [*_GITHUB_LINUX_SHELLS[step.get("shell")], str(script)],
+        cwd=tmp_path,
+        env={**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}", "RUNNER_TEMP": str(tmp_path)},
+        capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode == expected, result.stdout + result.stderr
+    assert "pytest ran: python -m pytest -m e2e_model_hub" in (tmp_path / "model-hub-e2e.log").read_text()
+
+
 @pytest.mark.parametrize("gate_name", ["unit-tests", "install-upgrade-regression", "windows-install-smoke"])
 def test_required_gates_accept_skips_only_for_proven_docs_and_fail_closed(tmp_path: Path, gate_name: str) -> None:
     gate = _jobs()[gate_name]
