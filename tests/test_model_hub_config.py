@@ -5,7 +5,7 @@ import inspect
 import json
 import re
 import stat
-from dataclasses import fields
+from dataclasses import fields, replace
 from itertools import product
 from pathlib import Path
 
@@ -97,7 +97,7 @@ def test_auto_detect_asks_for_responses_before_chat():
 
 def test_unsaved_observation_schema_closes_all_terminal_shapes():
     schema = _schema("observation-result.schema.json")
-    assert schema["properties"]["contract_version"]["const"] == 21
+    assert schema["properties"]["contract_version"]["const"] == 22
     assert tuple(schema["properties"]["outcome"]["enum"]) == tuple(
         member.value for member in ObservationOutcome
     )
@@ -121,7 +121,7 @@ def test_observation_terminal_authority_and_schema_accept_the_same_products():
 
     def payload(observation: SourceObservation) -> dict:
         return {
-            "contract_version": 21,
+            "contract_version": 22,
             "outcome": observation.outcome.value,
             "reachable": observation.reachable,
             "authenticated": (
@@ -737,7 +737,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
 
     route_refusal = {
         "ok": False,
-        "contract_version": 21,
+        "contract_version": 22,
         "error": "source_in_route_chain",
         "detail": "modelHub.errors.source_in_route_chain",
         "would_remove_hops": [hop],
@@ -753,7 +753,7 @@ def test_guard_refusal_error_requires_its_corresponding_nonempty_plan_array():
     }
     candidate_refusal = {
         "ok": False,
-        "contract_version": 21,
+        "contract_version": 22,
         "error": "candidate_suppliers_changed",
         "detail": "modelHub.errors.candidate_suppliers_changed",
         "changed": {
@@ -837,7 +837,7 @@ def test_v8_mirror_registry_is_executable_and_complete():
     registry = json.loads((CONTRACTS / "mirror-registry.json").read_text(encoding="utf-8"))
     schemas = _mirror_schemas(registry)
 
-    assert registry["contract_version"] == 21
+    assert registry["contract_version"] == 22
     ids = [entry["id"] for entry in registry["entries"]]
     assert ids
     assert len(ids) == len(set(ids))
@@ -974,8 +974,8 @@ def test_model_hub_authority_closure_anchors_the_persisted_version_floor(monkeyp
         "kind": "contract_version_schema_drift",
         "domain": "V1",
         "file": "docs/plans/model-hub-contracts/turn-provenance.schema.json",
-        "values": [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
-        "expected": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21],
+        "values": [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22],
+        "expected": [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22],
     } in result["findings"]
 
 
@@ -993,11 +993,11 @@ def _versioned_nodes(node):
             yield from _versioned_nodes(item)
 
 
-def test_turn_provenance_keeps_released_v20_and_current_v21_read_shapes():
-    """KEX-1: the v21 mirror still accepts the released v20 provenance version."""
+def test_turn_provenance_keeps_released_v21_and_current_v22_read_shapes():
+    """The v22 mirror still accepts the released v21 provenance version."""
     schema = _schema("turn-provenance.schema.json")
     validator = Draft7Validator(schema)
-    for version in (20, 21):
+    for version in (21, 22):
         example = copy.deepcopy(schema["examples"][0])
         example["contract_version"] = version
         validator.validate(example)
@@ -1354,7 +1354,7 @@ def test_v5_shape_amendments_reject_the_false_states_they_replace():
         with pytest.raises(ValidationError):
             chain_validator.validate(interrupted)
     exact_hop = {
-        "contract_version": 21,
+        "contract_version": 22,
         "backend": "claude",
         "model_id": "claude-opus-4-6",
         "manual_override": None,
@@ -2396,6 +2396,81 @@ def test_config_reload_does_not_overwrite_config_changed_during_migration(
     assert persisted["model_hub"]["enabled"] is True
     assert persisted["model_hub"]["runtime_default_applied"] is True
     assert loaded.load_warnings and "changed during load" in loaded.load_warnings[0]
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    ["https://generativelanguage.googleapis.com/v1beta/openai", "https://GenerativeLanguage.googleapis.com:443/v1beta/openai/", None],
+    ids=["named", "spelled", "default"],
+)
+def test_a_gemini_key_on_the_openai_compatible_endpoint_moves_to_gemini_on_load(monkeypatch, tmp_path, base_url):
+    """vibey-gemini-native.md §3: a Gemini API key speaks Gemini natively. One saved on Google's official
+    OpenAI-compatible endpoint changes only its protocol and endpoint: every model, route and session names the same
+    `models/<id>` as before, and the engine credential it holds follows it the first time the engine syncs. A relay
+    under the Gemini vendor keeps what it speaks."""
+
+    from core.handlers.model_hub.adapter import SourceBinding
+    from vibe.model_hub_runtime.state import EngineStateError, EngineStateStore
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    # The engine credentials an earlier release stored with these Sources.
+    engine = EngineStateStore(tmp_path / "engine-state")
+    refs = {
+        "src_gemini0001": engine.store_api_key("gemini-key", vendor="gemini", protocol="openai_chat", base_url=base_url),
+        "src_gemrelay01": engine.store_api_key(
+            "relay-key", vendor="gemini", protocol="openai_chat", base_url="https://relay.example/v1beta/openai",
+        ),
+    }
+
+    def gemini(source_id: str, url: str | None) -> dict:
+        return ModelHubSourceConfig(
+            id=source_id, kind="api_key", vendor="gemini", display_name="Gemini", protocol="openai_chat",
+            supply_channel="hub", billing="metered", state=ModelHubSourceStateConfig(status="standby"),
+            models=[ModelHubModelConfig(id="models/gemini-4-argon", provenance="discovered")],
+            base_url=url, credential_ref=refs[source_id],
+        ).to_payload()
+
+    payload = api.config_to_payload(default_config(), include_secrets=True, include_internal=True)
+    official = gemini("src_gemini0001", base_url)
+    relay = gemini("src_gemrelay01", "https://relay.example/v1beta/openai")
+    payload["model_hub"]["sources"] = [official, relay]
+    config_path = tmp_path / "config.json"
+    original = json.dumps(payload)
+    config_path.write_text(original, encoding="utf-8")
+
+    projected = {source.id: source for source in V2Config.load(config_path=config_path).model_hub.sources}
+    # An ordinary load projects the move without writing it.
+    assert config_path.read_text(encoding="utf-8") == original
+    moved = projected["src_gemini0001"]
+    assert (moved.protocol, moved.base_url) == ("google", "https://generativelanguage.googleapis.com")
+    assert [model.id for model in moved.models] == ["models/gemini-4-argon"]
+    assert (moved.credential_ref, moved.vendor) == (refs["src_gemini0001"], "gemini")
+    assert projected["src_gemrelay01"].to_payload() == relay
+
+    def binding(source) -> SourceBinding:
+        return SourceBinding(
+            source_id=source.id, vendor=source.vendor, protocol=source.protocol, base_url=source.base_url,
+            credential_ref=source.credential_ref, allowed_origins=(), model_ids=tuple(m.id for m in source.models),
+        )
+
+    records = engine.sync_sources([binding(source) for source in projected.values()])
+    assert {record.source_id: record.protocol for record in records} == {
+        "src_gemini0001": "google", "src_gemrelay01": "openai_chat",
+    }
+    moved_key = engine.credential_metadata(refs["src_gemini0001"])
+    assert (moved_key["protocol"], moved_key["base_url"]) == ("google", "https://generativelanguage.googleapis.com")
+    assert engine.read_api_key(refs["src_gemini0001"]) == "gemini-key"
+    # Only the official endpoint's key follows: a relay's cannot be claimed by a native binding.
+    with pytest.raises(EngineStateError, match="does not match"):
+        engine.sync_sources([replace(binding(moved), credential_ref=refs["src_gemrelay01"])])
+
+    V2Config.load(config_path=config_path, persist_migrations=True)
+    persisted = {source["id"]: source for source in json.loads(config_path.read_text(encoding="utf-8"))["model_hub"]["sources"]}
+    assert persisted["src_gemini0001"] == {
+        **official, "protocol": "google", "base_url": "https://generativelanguage.googleapis.com",
+    }
+    assert persisted["src_gemrelay01"] == relay
+    _assert_valid("source.schema.json", persisted["src_gemini0001"])
 
 
 def test_config_reload_does_not_overwrite_config_changed_before_replace(

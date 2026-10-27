@@ -208,8 +208,63 @@ def normalize_model_hub_vendor_id(value: object) -> str:
 
 def validate_model_hub_protocol_vendor(vendor: str, protocol: str) -> None:
     """Validate protocol/vendor combinations that are intrinsic to persisted shapes."""
-    if protocol == "google" and vendor != "custom":
-        raise ValueError("Google Sources require the custom vendor")
+    if protocol == "google" and vendor not in {"custom", "gemini"}:
+        raise ValueError("Google Sources require the custom or gemini vendor")
+
+
+# Google's OpenAI-compatible endpoint, the Gemini preset's endpoint before Gemini API keys spoke Gemini natively,
+# and its native root (``vibe/data/api_key_vendors.json``; ``docs/plans/vibey-gemini-native.md`` §3).
+_GEMINI_OPENAI_COMPATIBLE_ENDPOINT = ("https", "generativelanguage.googleapis.com", "/v1beta/openai")
+GEMINI_NATIVE_BASE_URL = "https://generativelanguage.googleapis.com"
+
+
+def on_gemini_openai_compatible_endpoint(vendor: object, protocol: object, base_url: object) -> bool:
+    """A Gemini API key bound to Google's official OpenAI-compatible endpoint, named or by default (a relay is not).
+
+    Both the saved Source (``_migrate_gemini_native_sources``) and its engine credential binding
+    (``EngineStateStore.sync_sources``) move from it to the native root by this one test.
+    """
+
+    if vendor != "gemini" or protocol != "openai_chat":
+        return False
+    if base_url is None:
+        # The vendor's official endpoint, which was the OpenAI-compatible one.
+        return True
+    if not isinstance(base_url, str):
+        return False
+    try:
+        parsed = urlsplit(base_url.strip())
+        port = parsed.port
+    except ValueError:
+        return False
+    endpoint = (parsed.scheme.lower(), (parsed.hostname or "").lower(), parsed.path.rstrip("/"))
+    return endpoint == _GEMINI_OPENAI_COMPATIBLE_ENDPOINT and not parsed.query and port in (None, 443)
+
+
+def _migrate_gemini_native_sources(payload: dict) -> dict:
+    """Move every Gemini API key saved on Google's OpenAI-compatible endpoint to the native protocol it now speaks.
+
+    Only the protocol and the endpoint change. The Source keeps its id, credential, models and routes: a Gemini Source
+    names its models as Google lists them on either surface (``models/<id>``). Idempotent: a moved Source no longer
+    matches.
+    """
+
+    def moves(source: object) -> bool:
+        return (
+            isinstance(source, dict) and source.get("kind") == "api_key"
+            and on_gemini_openai_compatible_endpoint(source.get("vendor"), source.get("protocol"), source.get("base_url"))
+        )
+
+    hub = payload.get("model_hub")
+    sources = hub.get("sources") if isinstance(hub, dict) else None
+    if not isinstance(sources, list) or not any(moves(source) for source in sources):
+        return payload
+    migrated_hub = dict(hub)
+    migrated_hub["sources"] = [
+        {**source, "protocol": "google", "base_url": GEMINI_NATIVE_BASE_URL} if moves(source) else source
+        for source in sources
+    ]
+    return {**payload, "model_hub": migrated_hub}
 
 
 def model_hub_fixed_menu_ids(backend: str) -> tuple[str, ...]:
@@ -780,6 +835,7 @@ def _migrate_opencode_active_turn_timeout_on_load(payload: dict) -> dict:
 def _migrate_config_payload_on_load(payload: dict) -> tuple[dict, bool, tuple[str, ...]]:
     migrated, changed, warnings = _migrate_legacy_model_hub_payload(payload)
     migrated, catalog_changed, catalog_warnings = _migrate_legacy_opencode_catalog(migrated)
+    migrated = _migrate_gemini_native_sources(migrated)
     model_hub_changed = changed or catalog_changed or migrated.get("model_hub") != payload.get("model_hub")
     migrated = _migrate_opencode_active_turn_timeout_on_load(migrated)
     return migrated, model_hub_changed, (*warnings, *catalog_warnings)

@@ -139,10 +139,12 @@ E64_SETTLEMENT_BOUNDARIES = json.loads(
     (MODEL_HUB_FIXTURES / "e64_settlement_boundaries.json").read_text(encoding="utf-8")
 )
 NOW = datetime(2026, 7, 29, 12, 0, tzinfo=timezone.utc)
+# A pin on a model-free Auto probe's interface; Gemini's native pin has only its model-list witness
+# (covered by test_model_hub_google and the AUTH-SETUP-112 scenario).
 CATALOG_API_KEY_VENDOR_PROTOCOL_CASES = tuple(
     pytest.param(entry.id, entry.protocol, id=entry.id)
     for entry in api_key_vendor_catalog()
-    if entry.protocol in MODEL_PROTOCOLS
+    if entry.protocol in MODEL_PROTOCOLS and entry.protocol != "google"
 )
 
 
@@ -5580,7 +5582,7 @@ def test_backend_failure_keeps_the_gateway_terminal_error_no_later_request_super
 def test_released_backend_rejection_records_read_unchanged(tmp_path: Path) -> None:
     """Records the earlier bridge wrote stay as written: no reason or phase is re-derived on read."""
     released = {
-        "contract_version": 21,
+        "contract_version": 22,
         "turn_id": "turn_released_rejection",
         "ts": NOW.isoformat(),
         "agent": "vibey",
@@ -7056,7 +7058,7 @@ def test_source_observation_reduces_the_order_at_the_first_authenticated_proof(
     _assert_valid(
         "observation-result.schema.json",
         {
-            "contract_version": 21,
+            "contract_version": 22,
             "outcome": "adapter_error",
             "reachable": True,
             "authenticated": "unknown",
@@ -9590,7 +9592,7 @@ def test_native_chain_visibility_and_probe_readiness(tmp_path: Path) -> None:
 
     probe = asyncio.run(service.probe_agent("codex", "shared-model"))
     assert probe == {
-        "contract_version": 21,
+        "contract_version": 22,
         "backend": "codex",
         "channel": "native_cli",
         "reachable": True,
