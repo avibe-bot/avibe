@@ -21,7 +21,17 @@ export function AvaultAuthorizationNotice({ forceVisible = false, className }: {
   const attempt = status?.attempt ?? null;
   const running = attempt?.state === 'running';
   const outcome = requested && !running ? attempt : null;
-  if (!forceVisible && !status?.required && !running && !outcome) return null;
+  const staleLoginSession = status?.login_session_state === 'stale_login_session';
+  if (!forceVisible && !status?.required && !running && !outcome && !staleLoginSession) return null;
+
+  if (staleLoginSession) {
+    return (
+      <div role="alert" className={cn('flex items-start gap-2.5 rounded-xl border border-destructive/35 bg-destructive/8 px-4 py-3 text-sm', className)}>
+        <KeyRound className="mt-0.5 size-4 shrink-0 text-destructive-ink" />
+        <span className="leading-snug text-destructive-ink">{t('errors.stale_login_session')}</span>
+      </div>
+    );
+  }
 
   const onAuthorize = () => {
     setRequested(true);

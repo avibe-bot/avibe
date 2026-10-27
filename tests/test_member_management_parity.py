@@ -118,7 +118,7 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 294
+    assert len(endpoints) == 295
     # Editors who use Vault read avault's authorization state; the handler admits only
     # instance managers to raise the Keychain dialog on the host.
     for method in ("GET", "POST"):

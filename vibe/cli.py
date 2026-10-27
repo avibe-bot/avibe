@@ -449,7 +449,24 @@ def _retyped_placement_refusal(
     return exc
 
 
+STALE_LOGIN_SESSION_CODE = "stale_login_session"
 AVAULT_AUTHORIZATION_REQUIRED_CODE = "avault_authorization_required"
+
+
+def _is_stale_login_session(exc: Exception) -> bool:
+    return getattr(exc, "code", None) == STALE_LOGIN_SESSION_CODE
+
+
+def _stale_login_session_cli_error(help_command: str | None) -> TaskCliError:
+    return TaskCliError(
+        "Avibe is still running in a macOS login session that has ended",
+        code=STALE_LOGIN_SESSION_CODE,
+        hint=(
+            "Do not retry. Ask the user to open Terminal on the Mac's current desktop, run `vibe restart`, "
+            "then try again from Avibe."
+        ),
+        help_command=help_command,
+    )
 
 
 def _is_avault_authorization_required(exc: Exception) -> bool:
@@ -477,7 +494,9 @@ def _avault_authorization_required_cli_error(help_command: str | None) -> TaskCl
 
 
 def _avault_cli_error(exc: Exception, message: str, *, code: str = "avault_failed", help_command: str | None = None) -> TaskCliError:
-    if _is_avault_authorization_required(exc):
+    if _is_stale_login_session(exc):
+        code = STALE_LOGIN_SESSION_CODE
+    elif _is_avault_authorization_required(exc):
         code = AVAULT_AUTHORIZATION_REQUIRED_CODE
     return TaskCliError(message, code=code, help_command=help_command)
 
@@ -493,7 +512,9 @@ def _print_task_error(exc: Exception, *, help_command: str | None = None) -> Non
     # payload builder below.
     if isinstance(exc, UnresolvableSessionTarget) and exc.reason == "reserved":
         exc = _reserved_session_cli_error(exc)
-    if _is_avault_authorization_required(exc):
+    if _is_stale_login_session(exc):
+        exc = _stale_login_session_cli_error(getattr(exc, "help_command", None) or help_command)
+    elif _is_avault_authorization_required(exc):
         exc = _avault_authorization_required_cli_error(getattr(exc, "help_command", None) or help_command)
     from storage.resource_access_service import (
         HARNESS_ACCESS_FORBIDDEN_CODE,
@@ -10848,6 +10869,11 @@ def cmd_vault_inject(args):
 
 # (code, message, hint) for each ``api.avault_key_authorize`` failure reason.
 _AVAULT_AUTHORIZE_FAILURES = {
+    "stale_login_session": (
+        "stale_login_session",
+        "Avibe is still running in a macOS login session that has ended",
+        "Do not retry. Open Terminal on the Mac's current desktop, run `vibe restart`, then try again from Avibe.",
+    ),
     "not_completed": (
         "avault_authorization_not_completed",
         "avault authorization did not complete",
@@ -12272,6 +12298,44 @@ def _show_runtime_doctor_items(*, language: str = "en", deep: bool = False) -> l
     return items
 
 
+def _macos_login_session_doctor_items(*, language: str = "en") -> list[dict]:
+    if platform.system() != "Darwin":
+        return []
+    owner_pid = runtime.resolve_service_owner_pid(include_starting=False)
+    if owner_pid:
+        state = api.macos_login_session_state(service_pid=owner_pid)
+    else:
+        return [{
+            "status": "pass",
+            "code": "login_session_local_fallback",
+            "message": i18n_t("doctor.item.loginSessionLocalFallback", language),
+        }]
+    if state == "stale_login_session":
+        return [{
+            "status": "fail",
+            "code": "stale_login_session",
+            "message": i18n_t("doctor.item.staleLoginSession", language),
+            "action": i18n_t("doctor.action.staleLoginSession", language),
+        }]
+    if state == "no_gui_session":
+        return [{
+            "status": "pass",
+            "code": "no_gui_session",
+            "message": i18n_t("doctor.item.noGuiSession", language),
+        }]
+    if state == "unknown":
+        return [{
+            "status": "warn",
+            "code": "login_session_unknown",
+            "message": i18n_t("doctor.item.loginSessionUnknown", language),
+        }]
+    return [{
+        "status": "pass",
+        "code": "login_session_healthy",
+        "message": i18n_t("doctor.item.loginSessionHealthy", language),
+    }]
+
+
 def _doctor(*, deep: bool = False, language: str = "en"):
     """Run diagnostic checks and return results in UI-compatible format.
 
@@ -12648,6 +12712,7 @@ def _doctor(*, deep: bool = False, language: str = "en"):
         *_service_generation_items(language=language),
         *_restart_state_items(language=language),
         *_runtime_architecture_items(language=language),
+        *_macos_login_session_doctor_items(language=language),
         *_show_git_checkpoint_items(language=language),
         *_scheduled_task_weekday_items(language=language),
     ]:

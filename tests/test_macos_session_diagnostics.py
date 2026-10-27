@@ -11,6 +11,7 @@ from vibe.macos_session_diagnostics import (
     MacOSSessionMonitor,
     MacOSSessionProbe,
     SessionContext,
+    login_session_state,
     parse_gui_domain_asid,
     parse_launchctl_asid,
 )
@@ -95,6 +96,7 @@ def context(
     gui_asid: int | None = 120001,
     gui_available: bool | None = True,
     gui_error: str | None = None,
+    service_error: str | None = None,
 ) -> SessionContext:
     return SessionContext(
         service_pid=4242,
@@ -103,6 +105,7 @@ def context(
         service_asid=service_asid,
         gui_asid=gui_asid,
         gui_domain_available=gui_available,
+        service_error_class=service_error,
         gui_error_class=gui_error,
     )
 
@@ -133,6 +136,52 @@ def make_monitor(logger: logging.Logger, probe, *, dns_interval: float = 300.0):
         thread_factory=thread_factory,
     )
     return monitor, threads
+
+
+def test_monitor_exposes_cached_service_state() -> None:
+    logger = logging.getLogger("macos-session-state-test")
+    monitor, _threads = make_monitor(
+        logger,
+        FakeProbe(
+            [context(service_error="user_lookup_failed")],
+            [DnsProbeState("healthy")],
+        ),
+    )
+
+    assert monitor.current_state == "unknown"
+    monitor.poll_once(now=0.0)
+    assert monitor.current_state == "stale_login_session"
+
+
+def test_stale_login_session_uses_directory_services_failure_from_recorded_case() -> None:
+    probe = MacOSSessionProbe(
+        service_pid=4242,
+        service_uid=501,
+        command_runner=lambda command, timeout: CommandResult(1, "Reentrancy avoided"),
+        console_user_reader=lambda: ("cyh", None),
+        service_user_reader=lambda uid: (None, "user_lookup_failed"),
+    )
+
+    captured = probe.capture_context()
+
+    assert captured.gui_domain_available is None
+    assert captured.asid_match is None
+    assert captured.service_error_class == "user_lookup_failed"
+    assert login_session_state(captured) == "stale_login_session"
+
+
+def test_login_session_classifier_does_not_flag_normal_session_shapes() -> None:
+    # Fast User Switching, lock/unlock, VNC, and sleep/wake can change the
+    # foreground user or GUI ASID without invalidating this process's login.
+    normal = [
+        context(console_user="other-user"),  # Fast User Switching
+        context(),  # lock/unlock
+        context(),  # VNC
+        context(gui_asid=120002),  # sleep/wake recreation
+    ]
+    assert [login_session_state(item) for item in normal] == ["healthy"] * 4
+    assert login_session_state(context(gui_available=False, gui_error="absent")) == "no_gui_session"
+    assert login_session_state(context(gui_asid=120002)) == "healthy"
 
 
 def test_launchctl_snapshot_parsing_uses_security_context_fixture() -> None:
@@ -189,6 +238,7 @@ def test_initial_snapshot_is_single_compact_event_and_unchanged_poll_is_silent(c
         "event": "macos_session_snapshot",
         "gui_asid": 120001,
         "gui_domain_available": True,
+        "login_session_state": "healthy",
         "reason": ["service_start"],
         "service_asid": 120001,
         "service_pid": 4242,
@@ -213,6 +263,7 @@ def test_fast_user_switch_logs_only_console_user_transition(caplog) -> None:
     assert payloads[-1]["reason"] == ["console_user_change"]
     assert payloads[-1]["gui_domain_available"] is True
     assert payloads[-1]["asid_match"] is True
+    assert payloads[-1]["login_session_state"] == "healthy"
     assert probe.dns_calls == 2
 
 
@@ -259,6 +310,7 @@ def test_asid_mismatch_transition_is_logged(caplog) -> None:
     transition = event_payloads(caplog)[-1]
     assert transition["reason"] == ["gui_domain_change", "asid_match_change"]
     assert transition["asid_match"] is False
+    assert transition["login_session_state"] == "healthy"
 
 
 def test_dns_failure_is_deduplicated_until_recovery(caplog) -> None:

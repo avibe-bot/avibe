@@ -2849,6 +2849,7 @@
   },
   "errors": {
     "avault_authorization_required": "avault needs a one-time macOS Keychain authorization on the Mac running Avibe. Choose Authorize avault, then answer the dialog on that Mac.",
+    "stale_login_session": "Avibe is still running in a macOS login session that has ended. Open Terminal on the Mac's current desktop, run `vibe restart`, then try again. Do not retry this operation.",
     "invalid_field_name": "Use 1–64 lowercase letters, digits or underscores for field names, starting with a letter.",
     "cache_ttl_unsupported": "That cache lifetime is not supported by this route. Use the built-in estimate or a provider-compatible value.",
     "field_exists": "A field with this name already exists. Choose a different name.",

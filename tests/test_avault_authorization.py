@@ -43,6 +43,36 @@ def test_exit_77_reports_authorization_required_until_the_key_reads_again(mac_av
     assert api.get_avault_authorization_status()["required"] is False
 
 
+def test_stale_login_session_replaces_raw_avault_failure(mac_avault, monkeypatch):
+    mac_avault()
+    monkeypatch.setattr(api, "macos_login_session_state", lambda: "stale_login_session")
+
+    with pytest.raises(api.AvaultStaleLoginSessionError) as exc:
+        api.avault_pubkey()
+
+    assert exc.value.code == "stale_login_session"
+    assert isinstance(exc.value, api.AvaultStaleLoginSessionBeforeHandoffError)
+    with pytest.raises(api.AvaultStaleLoginSessionError) as exc:
+        api.avault_deliver_run(_secret(), ["sh", "-c", "exit 0"])
+    assert isinstance(exc.value, api.AvaultPreHandoffError)
+    status = api.get_avault_authorization_status()
+    assert status["login_session_state"] == "stale_login_session"
+
+
+def test_target_service_state_comes_from_the_running_service(monkeypatch):
+    from vibe import internal_client
+
+    monkeypatch.setattr(api.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(internal_client, "health_identity_sync", lambda: {
+        "ok": True,
+        "service": "vibe-remote-internal",
+        "version": 1,
+        "macos_login_session_state": "stale_login_session",
+    })
+
+    assert api.macos_login_session_state(service_pid=4242) == "stale_login_session"
+
+
 def test_avault_without_the_contract_keeps_todays_failures(mac_avault):
     avault = mac_avault(version="0.1.7", unauthorized_status=70)
 
@@ -91,6 +121,23 @@ def test_agent_authorization_frame_becomes_the_same_pre_handoff_error(mac_avault
     assert api.get_avault_authorization_status()["required"] is True
 
 
+def test_stale_agent_authorization_frame_preserves_pre_handoff(monkeypatch):
+    from vibe.avault_agent import AvaultAgentAuthorizationRequiredError
+
+    class Client:
+        def deliver_inject(self, **_kwargs):
+            raise AvaultAgentAuthorizationRequiredError("macOS Keychain needs a one-time authorization")
+
+    monkeypatch.setattr(api, "_avault_agent_client", Client)
+    monkeypatch.setattr(api, "_require_avault_grant_delivery_surface", lambda _feature: None)
+    monkeypatch.setattr(api, "macos_login_session_state", lambda: "stale_login_session")
+
+    with pytest.raises(api.AvaultStaleLoginSessionBeforeHandoffError) as exc:
+        api.avault_agent_deliver_inject(grant_id="vgr_1", path="/tmp/out.env", fmt="dotenv", secrets=[])
+
+    assert isinstance(exc.value, api.AvaultPreHandoffError)
+
+
 def _wait_for_attempt() -> dict:
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
@@ -127,6 +174,14 @@ def test_concurrent_authorize_requests_share_one_avault_dialog(mac_avault):
 @pytest.mark.parametrize(
     ("setup", "reason", "runs_avault"),
     [
+        (
+            lambda avault, monkeypatch: (
+                avault.flag("deny"),
+                monkeypatch.setattr(api, "macos_login_session_state", lambda: "stale_login_session"),
+            ),
+            "stale_login_session",
+            True,
+        ),
         (lambda avault, monkeypatch: avault.flag("deny"), "not_completed", True),
         (
             lambda avault, monkeypatch: (
@@ -148,7 +203,10 @@ def test_authorize_failures_are_classified_without_parsing_avault_text(mac_avaul
     assert result["ok"] is False and result["reason"] == reason
     assert ("key authorize" in avault.calls()) is runs_avault
     if runs_avault:
-        assert result["detail"].startswith("avault:")
+        if reason == "stale_login_session":
+            assert "detail" not in result
+        else:
+            assert result["detail"].startswith("avault:")
 
 
 def test_authorize_needs_an_avault_with_the_contract(mac_avault):
@@ -187,6 +245,25 @@ def test_status_readers_and_failed_calls_never_authorize(mac_avault, monkeypatch
     assert doctor["status"] == "warn" and "repair" not in doctor
 
 
+def test_doctor_reports_stale_login_session_with_restart_action(monkeypatch):
+    monkeypatch.setattr(api.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli.runtime, "resolve_service_owner_pid", lambda include_starting=False: 4242)
+    calls = []
+
+    def probe(**kwargs):
+        calls.append(kwargs)
+        return "stale_login_session"
+
+    monkeypatch.setattr(api, "macos_login_session_state", probe)
+
+    item = cli._macos_login_session_doctor_items(language="en")[0]
+
+    assert item["status"] == "fail"
+    assert item["code"] == "stale_login_session"
+    assert calls == [{"service_pid": 4242}]
+    assert "vibe restart" in item["action"]
+
+
 def test_cli_authorize_is_for_the_user_not_an_agent(mac_avault, monkeypatch, capsys):
     avault = mac_avault()
     monkeypatch.setenv("AVIBE_SESSION_ID", "ses_agent")
@@ -196,6 +273,19 @@ def test_cli_authorize_is_for_the_user_not_an_agent(mac_avault, monkeypatch, cap
     error = capsys.readouterr().err
     assert '"code": "user_action_required"' in error
     assert avault.calls() == []
+
+
+def test_cli_authorize_reports_stale_login_session_without_raw_detail(mac_avault, monkeypatch, capsys):
+    avault = mac_avault()
+    avault.flag("deny")
+    monkeypatch.delenv("AVIBE_SESSION_ID", raising=False)
+    monkeypatch.setattr(api, "macos_login_session_state", lambda: "stale_login_session")
+
+    assert cli.cmd_vault_key_authorize(None) == 1
+    error = capsys.readouterr().err
+    assert '"code": "stale_login_session"' in error
+    assert "errSecParam" not in error
+    assert "vibe restart" in error
 
 
 def test_cli_authorize_reports_success_and_failures(mac_avault, monkeypatch, capsys):
