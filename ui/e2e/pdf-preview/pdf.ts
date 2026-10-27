@@ -9,7 +9,7 @@
 // fonts Chrome embeds do: it looks right, and copies as a different character unless unified.
 // ``rotate`` sets every page's /Rotate, as scanners and some exporters do for landscape pages.
 // ``links`` (needs four pages) puts four labelled link annotations on page 1: a web link, an explicit
-// destination on page 3 (XYZ, y = LINK_DEST_Y), a named destination resolving to page 4 (Fit), and a
+// destination on page 3 (XYZ with only y = LINK_DEST_Y), a named destination resolving to page 4 (Fit), and a
 // ``javascript:`` link that must never become clickable.
 
 export type Rgb = readonly [number, number, number];
@@ -113,7 +113,7 @@ export function buildPdf({
     const box = (rect: readonly number[]) => `/Rect [${rect.join(' ')}] /Border [0 0 0]`;
     const annots = [
       add(`<< /Type /Annot /Subtype /Link ${box(LINKS.web.rect)} /A << /S /URI /URI (${LINK_URL}) >> >>`),
-      add(`<< /Type /Annot /Subtype /Link ${box(LINKS.page3.rect)} /Dest [${kids[2]} 0 R /XYZ 0 ${LINK_DEST_Y} null] >>`),
+      add(`<< /Type /Annot /Subtype /Link ${box(LINKS.page3.rect)} /Dest [${kids[2]} 0 R /XYZ null ${LINK_DEST_Y} null] >>`),
       add(`<< /Type /Annot /Subtype /Link ${box(LINKS.page4.rect)} /Dest (page-four) >>`),
       add(`<< /Type /Annot /Subtype /Link ${box(LINKS.script.rect)} /A << /S /URI /URI (javascript:alert\\(1\\)) >> >>`),
     ];

@@ -13,6 +13,7 @@ import {
   type PdfLinkTarget,
   clampPdfZoom,
   pageIndexAt,
+  pdfDestAxes,
   pdfDestPoint,
   pdfLinkAreas,
   pdfLinkTarget,
@@ -344,10 +345,12 @@ function PdfReader({ doc, ratio, TextLayer, className }: { doc: PDFDocumentProxy
         const page = await doc.getPage(index + 1);
         const viewport = page.getViewport({ scale: pageEl.offsetWidth / page.getViewport({ scale: 1 }).width });
         const point = pdfDestPoint(explicit);
+        // On a page with /Rotate 90 or 270 the destination's x and y land on the other screen axes.
+        const axes = pdfDestAxes(point, viewport.rotation);
         const [vx, vy] = viewport.convertToViewportPoint(point.x ?? 0, point.y ?? 0) as [number, number];
         scroller.scrollTo({
-          top: pageEl.offsetTop + (point.y === null ? 0 : Math.max(0, vy - 8)),
-          left: point.x === null ? scroller.scrollLeft : Math.max(0, pageEl.offsetLeft + vx - 8),
+          top: pageEl.offsetTop + (axes.top ? Math.max(0, vy - 8) : 0),
+          left: axes.left ? Math.max(0, pageEl.offsetLeft + vx - 8) : scroller.scrollLeft,
         });
       } catch {
         // A destination that does not resolve leaves the reader where it is.

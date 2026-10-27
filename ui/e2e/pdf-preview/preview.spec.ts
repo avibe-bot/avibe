@@ -20,6 +20,7 @@ const DOCS: Record<string, Buffer> = {
   doc_cjk: buildPdf({ pages: 2, cjk: true }),
   doc_radicals: buildPdf({ pages: 1, cjk: true, radicals: true }),
   doc_links: buildPdf({ pages: 5, links: true }),
+  doc_links_rot90: buildPdf({ pages: 5, links: true, rotate: 90 }),
   doc_rot90: buildPdf({ pages: 1, rotate: 90 }),
   doc_rot180: buildPdf({ pages: 1, rotate: 180 }),
   doc_rot270: buildPdf({ pages: 1, rotate: 270 }),
@@ -311,6 +312,31 @@ test.describe('phones and tablets', () => {
     await expect.poll(async () => Math.abs((await scroller(dialog).evaluate((el) => el.scrollTop)) - expected4)).toBeLessThan(3);
     await expect(position(dialog)).toHaveText('4 / 5');
     await expect(dialog).toBeVisible();
+  });
+
+  test('on a page turned by /Rotate 90, a link lands on its target across the screen', async ({ page }) => {
+    const dialog = await openPreview(page, 'doc_links_rot90');
+    await expect(pageBox(dialog, 1).locator('.vr-pdf-links > a')).toHaveCount(3);
+    // Zoomed in, so the pages also scroll sideways.
+    for (let i = 0; i < 3; i += 1) await dialog.getByRole('button', { name: 'Zoom in' }).click();
+    await expect(dialog.getByText('200%')).toBeVisible();
+    await pageBox(dialog, 1).locator('.vr-pdf-links > a[data-pdf-dest]').first().tap();
+
+    // The destination names only y, which a 90° page shows across the screen (PDF y = 0 at its
+    // left edge): the reader scrolls sideways to it and shows the target page from its top.
+    const expected = await scroller(dialog).evaluate(
+      (el, { y, h }) => {
+        const box = el.querySelector<HTMLElement>('[data-pdf-page="3"]')!;
+        return { top: box.offsetTop, left: Math.min(box.offsetLeft + (y / h) * box.offsetWidth - 8, el.scrollWidth - el.clientWidth) };
+      },
+      { y: LINK_DEST_Y, h: PAGE_HEIGHT },
+    );
+    await expect
+      .poll(() =>
+        scroller(dialog).evaluate((el, want) => Math.max(Math.abs(el.scrollTop - want.top), Math.abs(el.scrollLeft - want.left)), expected),
+      )
+      .toBeLessThan(2);
+    await expect(position(dialog)).toHaveText('3 / 5');
   });
 
   test('on a page with /Rotate the text is turned with the drawing', async ({ page }) => {

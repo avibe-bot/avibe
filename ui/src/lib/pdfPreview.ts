@@ -153,3 +153,12 @@ export function pdfDestPoint(dest: readonly unknown[]): { x: number | null; y: n
       return { x: null, y: null };
   }
 }
+
+/**
+ * Which scroll axes a destination point fixes once the page is on screen: a page turned by a
+ * quarter (/Rotate 90 or 270) shows its x along the vertical and its y along the horizontal.
+ */
+export function pdfDestAxes(point: { x: number | null; y: number | null }, rotation: number): { left: boolean; top: boolean } {
+  const quarterTurn = (((rotation % 360) + 360) % 360) % 180 !== 0;
+  return quarterTurn ? { left: point.y !== null, top: point.x !== null } : { left: point.x !== null, top: point.y !== null };
+}

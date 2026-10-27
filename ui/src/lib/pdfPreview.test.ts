@@ -7,6 +7,7 @@ import {
   PDF_ZOOM_STEPS,
   clampPdfZoom,
   pageIndexAt,
+  pdfDestAxes,
   pdfDestPoint,
   pdfLinkAreas,
   pdfLinkTarget,
@@ -161,5 +162,19 @@ describe('pdfDestPoint', () => {
     [[page], { x: null, y: null }],
   ])('reads %j', (dest, point) => {
     expect(pdfDestPoint(dest)).toEqual(point);
+  });
+});
+
+describe('pdfDestAxes', () => {
+  it('fixes the axes the destination names on an upright or upside-down page', () => {
+    expect(pdfDestAxes({ x: null, y: 400 }, 0)).toEqual({ left: false, top: true });
+    expect(pdfDestAxes({ x: 36, y: null }, 180)).toEqual({ left: true, top: false });
+  });
+
+  it('swaps them on a page turned a quarter either way', () => {
+    // FitH names only y, which a 90° page shows across the screen.
+    expect(pdfDestAxes({ x: null, y: 400 }, 90)).toEqual({ left: true, top: false });
+    expect(pdfDestAxes({ x: 36, y: null }, 270)).toEqual({ left: false, top: true });
+    expect(pdfDestAxes({ x: 36, y: 400 }, -90)).toEqual({ left: true, top: true });
   });
 });
