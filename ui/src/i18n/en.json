@@ -192,6 +192,7 @@
     "pdfPage": "Page {{page}}",
     "pdfPosition": "Page {{page}} of {{total}}",
     "pdfCounter": "{{page}} / {{total}}",
+    "pdfInternalLink": "Go to the linked place in this document",
     "zoomPercent": "{{percent}}%",
     "download": "Download"
   },

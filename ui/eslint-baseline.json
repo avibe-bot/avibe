@@ -298,7 +298,6 @@
     },
     "src/components/ui/file-preview.tsx": {
       "avibe/localized-user-text": 4,
-      "no-useless-assignment": 1,
       "react-hooks/set-state-in-effect": 6
     },
     "src/components/ui/file-viewer-modal.tsx": {

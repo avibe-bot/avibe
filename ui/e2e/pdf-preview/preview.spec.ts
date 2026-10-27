@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
 
-import { BAND, PAGE_HEIGHT, PAGE_WIDTH, buildPdf, pageColor, type Rgb } from './pdf';
+import { BAND, LINKS, LINK_DEST_Y, LINK_URL, PAGE_HEIGHT, PAGE_WIDTH, buildPdf, pageColor, type Rgb } from './pdf';
 
 /**
  * The chat file viewer's PDF preview, in real engines.
@@ -19,6 +19,7 @@ const DOCS: Record<string, Buffer> = {
   doc_long: buildPdf({ pages: 14 }),
   doc_cjk: buildPdf({ pages: 2, cjk: true }),
   doc_radicals: buildPdf({ pages: 1, cjk: true, radicals: true }),
+  doc_links: buildPdf({ pages: 5, links: true }),
   doc_rot90: buildPdf({ pages: 1, rotate: 90 }),
   doc_rot180: buildPdf({ pages: 1, rotate: 180 }),
   doc_rot270: buildPdf({ pages: 1, rotate: 270 }),
@@ -252,6 +253,64 @@ test.describe('phones and tablets', () => {
     const dialog = await openPreview(page, 'doc_radicals');
     await expectTextOverInk(dialog, 1, '月份');
     await expect(pageBox(dialog, 1).locator('.vr-pdf-text')).not.toContainText('\u2F49');
+  });
+
+  test('links sit over their labels, and a script link is not clickable', async ({ page }) => {
+    const dialog = await openPreview(page, 'doc_links');
+    await expectTextOverInk(dialog, 1, LINKS.script.label);
+    const anchors = pageBox(dialog, 1).locator('.vr-pdf-links > a');
+    await expect(anchors).toHaveCount(3);
+    await expect(pageBox(dialog, 1).locator('a[href^="javascript"]')).toHaveCount(0);
+    for (const { label } of [LINKS.web, LINKS.page3, LINKS.page4]) {
+      const word = await spanBox(dialog, 1, label);
+      const reached = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.closest('a')?.getAttribute('href') ?? null, {
+        x: word.x + word.width / 2,
+        y: word.y + word.height / 2,
+      });
+      expect(reached, `a tap on "${label}" reaches a link`).not.toBeNull();
+    }
+    // The script link's words are plain, selectable text.
+    const script = await spanBox(dialog, 1, LINKS.script.label);
+    const under = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.textContent, { x: script.x + script.width / 2, y: script.y + script.height / 2 });
+    expect(under).toBe(LINKS.script.label);
+  });
+
+  test('a web link opens in a new tab and leaves the preview open', async ({ page, context }) => {
+    await context.route('https://example.com/**', (route) => route.fulfill({ contentType: 'text/html', body: '<title>linked</title>' }));
+    const dialog = await openPreview(page, 'doc_links');
+    const link = pageBox(dialog, 1).locator(`.vr-pdf-links > a[href="${LINK_URL}"]`);
+    await expect(link).toHaveAttribute('target', '_blank');
+    const popup = page.waitForEvent('popup');
+    await link.tap();
+    expect((await popup).url()).toBe(LINK_URL);
+    await expect(dialog).toBeVisible();
+  });
+
+  test('a link to a place in the document scrolls the reader there', async ({ page }) => {
+    const dialog = await openPreview(page, 'doc_links');
+    await expect(pageBox(dialog, 1).locator('.vr-pdf-links > a')).toHaveCount(3);
+    const tapLabel = async (label: string) => {
+      const word = await spanBox(dialog, 1, label);
+      await page.touchscreen.tap(word.x + word.width / 2, word.y + word.height / 2);
+    };
+
+    // Explicit destination: page 3 at y = LINK_DEST_Y, shown just below the top edge.
+    await tapLabel(LINKS.page3.label);
+    const expected3 = await pageBox(dialog, 3).evaluate(
+      (box: HTMLElement, { y, h }) => box.offsetTop + ((h - y) / h) * box.offsetHeight - 8,
+      { y: LINK_DEST_Y, h: PAGE_HEIGHT },
+    );
+    await expect.poll(async () => Math.abs((await scroller(dialog).evaluate((el) => el.scrollTop)) - expected3)).toBeLessThan(3);
+    await expect(position(dialog)).toHaveText('3 / 5');
+
+    // Named destination: resolved through the document's name tree, to the top of page 4.
+    await scroller(dialog).evaluate((el) => el.scrollTo({ top: 0 }));
+    await expect(position(dialog)).toHaveText('1 / 5');
+    await tapLabel(LINKS.page4.label);
+    const expected4 = await pageBox(dialog, 4).evaluate((box: HTMLElement) => box.offsetTop);
+    await expect.poll(async () => Math.abs((await scroller(dialog).evaluate((el) => el.scrollTop)) - expected4)).toBeLessThan(3);
+    await expect(position(dialog)).toHaveText('4 / 5');
+    await expect(dialog).toBeVisible();
   });
 
   test('on a page with /Rotate the text is turned with the drawing', async ({ page }) => {

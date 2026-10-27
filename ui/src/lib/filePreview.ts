@@ -149,6 +149,21 @@ const DOC_EXT: Record<string, DocPreviewKind> = {
 };
 export const DOC_PREVIEW_MAX_BYTES = IMAGE_PREVIEW_MAX_BYTES; // 25 MB, matches the backend content cap
 
+// Links that come from inside a previewed document (DOCX hyperlinks, PDF link annotations) are
+// followed only when they are plain web or mail links, and then in a new tab, so a crafted
+// ``javascript:`` target can't run in the app origin and a click can't navigate the workbench away.
+const SAFE_LINK_PROTOCOLS = new Set(['http:', 'https:', 'mailto:']);
+
+/** Whether ``href`` (resolved against ``base``) is a web or mail link safe to open from a document. */
+export function isSafeDocumentLink(href: string, base: string): boolean {
+  try {
+    // new URL() normalizes obfuscated schemes (e.g. `java\tscript:`), so the check can't be fooled.
+    return SAFE_LINK_PROTOCOLS.has(new URL(href, base).protocol);
+  } catch {
+    return false;
+  }
+}
+
 // Office/PDF content types → kind, so a descriptive-label chat link (whose name carries no real
 // suffix) still classifies via the server-supplied content-type. Limited to formats our renderers
 // actually read: the OOXML types + PDF, plus legacy .xls (SheetJS reads BIFF). Legacy binary .doc

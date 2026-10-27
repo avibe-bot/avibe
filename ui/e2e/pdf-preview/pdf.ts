@@ -8,6 +8,9 @@
 // ``radicals`` adds a "月份" line whose ToUnicode maps 月 to the Kangxi radical ⽉ (U+2F49), as the
 // fonts Chrome embeds do: it looks right, and copies as a different character unless unified.
 // ``rotate`` sets every page's /Rotate, as scanners and some exporters do for landscape pages.
+// ``links`` (needs four pages) puts four labelled link annotations on page 1: a web link, an explicit
+// destination on page 3 (XYZ, y = LINK_DEST_Y), a named destination resolving to page 4 (Fit), and a
+// ``javascript:`` link that must never become clickable.
 
 export type Rgb = readonly [number, number, number];
 
@@ -15,6 +18,15 @@ export const PAGE_WIDTH = 612;
 export const PAGE_HEIGHT = 792;
 // The coloured band, in PDF user space (origin bottom-left).
 export const BAND = { x: 56, y: 240, width: 500, height: 320 } as const;
+export const LINK_URL = 'https://example.com/pdf-link';
+export const LINK_DEST_Y = 400;
+// Link areas on page 1, in PDF user space, each over its label.
+export const LINKS = {
+  web: { label: 'example.com', rect: [70, 172, 212, 204] },
+  page3: { label: 'To page 3', rect: [248, 172, 362, 204] },
+  page4: { label: 'To page 4', rect: [398, 172, 512, 204] },
+  script: { label: 'Script', rect: [70, 112, 146, 144] },
+} as const;
 
 export function pageColor(index: number): Rgb {
   const palette: Rgb[] = [
@@ -30,7 +42,19 @@ export function pageColor(index: number): Rgb {
 
 const unit = (v: number) => (v / 255).toFixed(3);
 
-export function buildPdf({ pages, cjk = false, radicals = false, rotate = 0 }: { pages: number; cjk?: boolean; radicals?: boolean; rotate?: 0 | 90 | 180 | 270 }): Buffer {
+export function buildPdf({
+  pages,
+  cjk = false,
+  radicals = false,
+  rotate = 0,
+  links = false,
+}: {
+  pages: number;
+  cjk?: boolean;
+  radicals?: boolean;
+  rotate?: 0 | 90 | 180 | 270;
+  links?: boolean;
+}): Buffer {
   const objects: string[] = [];
   const add = (body: string) => {
     objects.push(body);
@@ -74,6 +98,9 @@ export function buildPdf({ pages, cjk = false, radicals = false, rotate = 0 }: {
     if (cjk) ops.push('0 0 0 rg BT /F2 40 Tf 72 620 Td <4E2D6587988489C8> Tj ET');
     // "月份", in the band's upper edge.
     if (radicals) ops.push('0 0 0 rg BT /F2 32 Tf 72 575 Td <67084EFD> Tj ET');
+    if (links && i === 0) {
+      for (const { label, rect } of Object.values(LINKS)) ops.push(`0 0 0 rg BT /F1 24 Tf ${rect[0] + 2} ${rect[1] + 8} Td (${label}) Tj ET`);
+    }
     const stream = ops.join('\n');
     const content = add(`<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`);
     const fonts = `/F1 ${helvetica} 0 R${cjk ? ` /F2 ${song} 0 R` : ''}`;
@@ -81,7 +108,19 @@ export function buildPdf({ pages, cjk = false, radicals = false, rotate = 0 }: {
       add(`<< /Type /Page /Parent ${pagesNode} 0 R /MediaBox [0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}]${rotate ? ` /Rotate ${rotate}` : ''} /Contents ${content} 0 R /Resources << /Font << ${fonts} >> >> >>`),
     );
   }
-  objects[catalog - 1] = `<< /Type /Catalog /Pages ${pagesNode} 0 R >>`;
+  let names = '';
+  if (links) {
+    const box = (rect: readonly number[]) => `/Rect [${rect.join(' ')}] /Border [0 0 0]`;
+    const annots = [
+      add(`<< /Type /Annot /Subtype /Link ${box(LINKS.web.rect)} /A << /S /URI /URI (${LINK_URL}) >> >>`),
+      add(`<< /Type /Annot /Subtype /Link ${box(LINKS.page3.rect)} /Dest [${kids[2]} 0 R /XYZ 0 ${LINK_DEST_Y} null] >>`),
+      add(`<< /Type /Annot /Subtype /Link ${box(LINKS.page4.rect)} /Dest (page-four) >>`),
+      add(`<< /Type /Annot /Subtype /Link ${box(LINKS.script.rect)} /A << /S /URI /URI (javascript:alert\\(1\\)) >> >>`),
+    ];
+    objects[kids[0] - 1] = objects[kids[0] - 1].replace(' /Contents', ` /Annots [${annots.map((a) => `${a} 0 R`).join(' ')}] /Contents`);
+    names = ` /Names << /Dests << /Names [(page-four) [${kids[3]} 0 R /Fit]] >> >>`;
+  }
+  objects[catalog - 1] = `<< /Type /Catalog /Pages ${pagesNode} 0 R${names} >>`;
   objects[pagesNode - 1] = `<< /Type /Pages /Kids [${kids.map((k) => `${k} 0 R`).join(' ')}] /Count ${kids.length} >>`;
 
   let out = '%PDF-1.4\n';
