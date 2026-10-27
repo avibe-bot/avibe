@@ -93,9 +93,12 @@ TIMESTAMP_UNAVAILABLE = "timestamp service is not available"
 TIMESTAMP_ATTEMPTS = 3
 # stapler fetches and checks tickets through Apple's CloudKit service; a dropped
 # connection there fails the action with an NSURLErrorDomain error and Error 68.
+# Such drops can last longer than a few seconds: in gh-v3.2.3rc12 an Accepted DMG
+# failed all three of the former 15 s-spaced attempts within 52 s. Back off over
+# about five minutes before giving up; only the network error is retried.
 STAPLER_NETWORK_ERROR = "NSURLErrorDomain"
-STAPLER_ATTEMPTS = 3
-STAPLER_RETRY_SECONDS = 15
+STAPLER_RETRY_DELAYS_SECONDS = (15, 30, 60, 90, 120)
+STAPLER_ATTEMPTS = len(STAPLER_RETRY_DELAYS_SECONDS) + 1
 
 
 class SigningError(RuntimeError):
@@ -430,8 +433,13 @@ def stapler(action: str, path: Path) -> None:
         except SigningError as error:
             if STAPLER_NETWORK_ERROR not in str(error) or attempt == STAPLER_ATTEMPTS:
                 raise
-            print(f"stapler {action} {path.name} lost its connection to Apple; retrying ({attempt}/{STAPLER_ATTEMPTS})", flush=True)
-            time.sleep(STAPLER_RETRY_SECONDS)
+            delay = STAPLER_RETRY_DELAYS_SECONDS[attempt - 1]
+            print(
+                f"stapler {action} {path.name} lost its connection to Apple; "
+                f"retrying in {delay} s ({attempt}/{STAPLER_ATTEMPTS})",
+                flush=True,
+            )
+            time.sleep(delay)
 
 
 def assess(path: Path, *, kind: str) -> None:

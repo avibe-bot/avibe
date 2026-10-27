@@ -191,3 +191,54 @@ def test_an_unreviewed_runtime_executable_stops_signing_before_any_codesign(tmp_
             node_executable=tmp_path / "tools/bin/node",
             identity=COMPLETE["APPLE_SIGNING_IDENTITY"],
         )
+
+
+def _stapler_run(outcomes, calls):
+    def fake_run(command, *, redacted=None, capture=False):
+        calls.append(command)
+        outcome = outcomes.pop(0)
+        if outcome is not None:
+            raise signing.SigningError(f"{redacted} exited 68\n{outcome}")
+    return fake_run
+
+
+NETWORK_LOST = 'error is Error Domain=NSURLErrorDomain Code=-1005 "The network connection was lost."'
+
+
+def test_stapler_rides_out_a_lasting_cloudkit_connection_drop(tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+    # Three drops in a row, as gh-v3.2.3rc12 hit, then the ticket arrives.
+    monkeypatch.setattr(signing, "run", _stapler_run([NETWORK_LOST, NETWORK_LOST, NETWORK_LOST, None], calls))
+    monkeypatch.setattr(signing.time, "sleep", sleeps.append)
+
+    signing.stapler("staple", tmp_path / "Avibe.dmg")
+
+    assert len(calls) == 4
+    assert all(command[:3] == ["xcrun", "stapler", "staple"] for command in calls)
+    assert sleeps == list(signing.STAPLER_RETRY_DELAYS_SECONDS[:3])
+
+
+def test_stapler_gives_up_after_its_backoff_and_reports_the_last_error(tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+    sleeps: list[float] = []
+    monkeypatch.setattr(signing, "run", _stapler_run([NETWORK_LOST] * signing.STAPLER_ATTEMPTS, calls))
+    monkeypatch.setattr(signing.time, "sleep", sleeps.append)
+
+    with pytest.raises(signing.SigningError, match="NSURLErrorDomain"):
+        signing.stapler("validate", tmp_path / "Avibe.app")
+
+    assert len(calls) == signing.STAPLER_ATTEMPTS
+    assert sleeps == list(signing.STAPLER_RETRY_DELAYS_SECONDS)
+    assert sum(sleeps) >= 300
+
+
+def test_stapler_does_not_retry_a_failure_that_is_not_a_network_drop(tmp_path, monkeypatch):
+    calls: list[list[str]] = []
+    monkeypatch.setattr(signing, "run", _stapler_run(["Could not validate ticket"], calls))
+    monkeypatch.setattr(signing.time, "sleep", lambda _seconds: pytest.fail("a non-network failure must not wait"))
+
+    with pytest.raises(signing.SigningError, match="Could not validate ticket"):
+        signing.stapler("staple", tmp_path / "Avibe.dmg")
+
+    assert len(calls) == 1
