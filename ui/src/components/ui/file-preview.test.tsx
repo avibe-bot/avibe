@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { act, cleanup, render } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   EDITOR_FONT_DEFAULT,
@@ -9,6 +9,11 @@ import {
   resetEditorFontSize,
 } from '@/lib/editorFontSize';
 import { FilePreview } from './file-preview';
+
+// The page reader pulls in pdf.js; these tests only decide which reader a PDF gets.
+vi.mock('@/components/ui/pdf-pages', () => ({
+  default: ({ url }: { url: string }) => <div data-testid="pdf-pages" data-url={url} />,
+}));
 
 beforeEach(resetEditorFontSize);
 
@@ -50,5 +55,27 @@ describe('FilePreview font size', () => {
     act(() => adjustEditorFontSize(3));
 
     expect(preview?.style.getPropertyValue('--vr-fileview-font-size')).toBe(`${EDITOR_FONT_DEFAULT + 3}px`);
+  });
+});
+
+describe('FilePreview PDF', () => {
+  const setViewer = (value: boolean | undefined) =>
+    Object.defineProperty(window.navigator, 'pdfViewerEnabled', { configurable: true, get: () => value });
+
+  afterEach(() => {
+    Reflect.deleteProperty(window.navigator, 'pdfViewerEnabled');
+  });
+
+  it('frames the browser viewer where it is a real reader', () => {
+    setViewer(true);
+    const { container } = render(<FilePreview source={{ name: 'report.pdf', url: '/api/media/tok' }} />);
+    expect(container.querySelector('iframe')?.getAttribute('src')).toBe('/api/media/tok');
+  });
+
+  it('draws the pages itself where the browser has no viewer', async () => {
+    setViewer(false);
+    const { container, findByTestId } = render(<FilePreview source={{ name: 'report.pdf', url: '/api/media/tok' }} />);
+    expect((await findByTestId('pdf-pages')).getAttribute('data-url')).toBe('/api/media/tok');
+    expect(container.querySelector('iframe')).toBeNull();
   });
 });
