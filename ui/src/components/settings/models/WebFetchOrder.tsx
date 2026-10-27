@@ -47,7 +47,7 @@ export const FetchServiceSettings: React.FC<{
     <div className="flex flex-wrap items-center gap-2"><FetchStatus candidate={candidate} tool={tool} />{candidate.kind !== 'local' && candidate.cooldown_until && <Button variant="outline" size="xs" disabled={pending} onClick={() => onRetry(sourceId)}>{t('settings.models.searchServices.retry')}</Button>}</div>
     {candidate.kind !== 'local' && <p className="model-hub-tool-note break-all">{t('settings.models.webFetch.endpoint')}: {t(`settings.models.webFetch.endpoints.${vendor.id}`, { defaultValue: candidate.model_id })}</p>}
     <FetchPrice candidate={candidate} />
-    {candidate.kind !== 'local' && <a href={candidate.price.url} target="_blank" rel="noopener noreferrer" className="model-hub-tool-note underline">{t('settings.models.searchServices.priceDate', { date: candidate.price.as_of })}</a>}
+    {candidate.kind !== 'local' && candidate.price.usd_per_1k !== 0 && <a href={candidate.price.url} target="_blank" rel="noopener noreferrer" className="model-hub-tool-note underline">{t('settings.models.searchServices.priceDate', { date: candidate.price.as_of })}</a>}
     {vendor.id === 'local' && <><p className="model-hub-tool-note">{t('settings.models.webFetch.localDetail')}</p><p className="model-hub-tool-note">{t('settings.models.webFetch.limits')}</p></>}
     {vendor.id === 'exa-mcp' && <p className="model-hub-tool-note">{t('settings.models.webFetch.exaDetail')}</p>}
     {vendor.id === 'jina-reader' && <><p className="model-hub-tool-note">{t('settings.models.webFetch.jinaDetail')}</p><a href="https://jina.ai/legal/" target="_blank" rel="noopener noreferrer" className="model-hub-tool-note underline">{t('settings.models.webFetch.terms')}</a></>}

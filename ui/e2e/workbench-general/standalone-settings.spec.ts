@@ -116,7 +116,10 @@ test('C-SETTINGS-02: preserves picked Agent/workspace, Unicode draft and history
   await workspace.click();
   const agent = page.getByRole('button', { name: /codex|claude/ }).first();
   await agent.click();
-  await page.locator('[data-radix-popper-content-wrapper]').getByRole('button', { name: 'claude', exact: true }).click();
+  // The composer's picker keeps Agents one level below its model page.
+  const menu = page.locator('[data-radix-popper-content-wrapper]');
+  await menu.getByRole('button', { name: /^Agent/ }).click();
+  await menu.getByRole('button', { name: /^claude/ }).click();
   await expect(agent).toContainText('claude');
   await textarea(page).evaluate((node) => { node.setAttribute('data-origin-instance', 'preserved'); });
   const index = await page.evaluate(() => window.history.state.idx);
@@ -312,7 +315,10 @@ test('C-SETTINGS-06: retained image viewer releases keys while Settings is foreg
   // Click the image body away from its hover download affordance so this is the
   // same pointer path a user takes on the media itself.
   await inlineImage.click({ position: { x: 8, y: 8 } });
-  const viewer = page.locator('[role="dialog"][aria-modal="true"]');
+  // The viewer is a modal Radix Dialog. Found by what it shows rather than by role
+  // and name: it stays mounted while Settings hides it, and a role query skips
+  // hidden nodes, which would lose the very image this case follows.
+  const viewer = page.locator('[role="dialog"]:has(img[src^="/api/media/"])');
   await expect(viewer).toBeVisible();
   const viewerImage = viewer.locator('img');
   const originalSrc = await viewerImage.getAttribute('src');
@@ -357,7 +363,7 @@ test('C-SETTINGS-06: retained image viewer releases keys while Settings is foreg
   await expect(viewerImage).toHaveAttribute('src', originalSrc!);
   await expect(viewerImage).toHaveJSProperty('naturalWidth', 64);
   await expect.poll(async () => settledScale(await originalTransform.getAttribute('style'))).toBeCloseTo(originalScale);
-  expect(await page.evaluate((node) => node === document.querySelector('[role="dialog"][aria-modal="true"] img'), originalImageHandle)).toBe(true);
+  expect(await viewerImage.evaluate((node, original) => node === original, originalImageHandle)).toBe(true);
 
   await page.evaluate(() => {
     (window as Window & { __viewerLowerEscape?: number }).__viewerLowerEscape = 0;

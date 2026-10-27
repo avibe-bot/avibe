@@ -29,6 +29,7 @@ from .hosted_executor import Failure, failed_record
 from .retry import retry_after_deadline, source_identity
 
 ATTEMPT_SECONDS = 30.0
+KEYLESS_EXA_SEARCH_ATTEMPT_SECONDS = 15.0
 ZERO = HostedCost(basis="list", usd=0)
 BLOCKERS = {
     "service_key_invalid": "models.source.needs_action.credential_revoked",
@@ -324,9 +325,11 @@ def map_response(
 @dataclass
 class _Cooldown:
     identity: tuple
-    generation: int
+    generation: tuple[int, int, int]
+    epoch: int
     failures: int = 0
     until: datetime | None = None
+    failure_version: int = 0
 
 
 class ServiceCooldowns:
@@ -338,6 +341,7 @@ class ServiceCooldowns:
 
     def __init__(self) -> None:
         self._serial = 0
+        self._failure_version = 0
         self._states: dict[tuple[str, str], _Cooldown] = {}
 
     def reconcile(self, config: ModelHubConfig) -> None:
@@ -345,23 +349,38 @@ class ServiceCooldowns:
         live.update({source.id: source_identity(source) for source in model_hub_builtin_sources()})
         self._states = {key: state for key, state in self._states.items() if live.get(key[0]) == state.identity}
 
-    def advance(self, source: ModelHubSourceConfig, service_id: str, *, clear: bool = False) -> int:
+    def advance(self, source: ModelHubSourceConfig, service_id: str, *, clear: bool = False) -> tuple[int, int, int]:
         key = (source.id, service_id)
         previous = self._states.get(key)
-        self._serial += 1
         same = previous is not None and previous.identity == source_identity(source) and not clear
+        epoch = previous.epoch if same else (previous.epoch + 1 if previous is not None else 1)
+        self._serial += 1
+        generation = (epoch, self._serial, self._failure_version)
         self._states[key] = _Cooldown(
-            source_identity(source), self._serial,
-            previous.failures if same else 0, previous.until if same else None,
+            source_identity(source), generation, epoch,
+            previous.failures if same else 0,
+            previous.until if same else None,
+            self._failure_version,
         )
-        return self._serial
+        return generation
 
-    def generation(self, source: ModelHubSourceConfig, service_id: str) -> int | None:
+    def generation(self, source: ModelHubSourceConfig, service_id: str) -> tuple[int, int, int] | None:
         state = self._states.get((source.id, service_id))
         return state.generation if state is not None and state.identity == source_identity(source) else None
 
-    def current(self, source: ModelHubSourceConfig, service_id: str, generation: int | None) -> bool:
+    def current(self, source: ModelHubSourceConfig, service_id: str, generation: tuple[int, int, int] | None) -> bool:
         return generation is not None and self.generation(source, service_id) == generation
+
+    def same_epoch(self, source: ModelHubSourceConfig, service_id: str, generation: tuple[int, int, int] | None) -> bool:
+        """Allow concurrent in-flight calls to settle, but not a cleared epoch."""
+
+        state = self._states.get((source.id, service_id))
+        return (
+            generation is not None
+            and state is not None
+            and state.identity == source_identity(source)
+            and state.epoch == generation[0]
+        )
 
     def until(self, source: ModelHubSourceConfig, service_id: str, now: datetime) -> datetime | None:
         state = self._states.get((source.id, service_id))
@@ -370,16 +389,16 @@ class ServiceCooldowns:
         return None
 
     def settle(
-        self, source: ModelHubSourceConfig, service_id: str, generation: int,
+        self, source: ModelHubSourceConfig, service_id: str, generation: tuple[int, int, int],
         result: ServiceResult, response: SearchResponse, now: datetime,
     ) -> bool:
-        if not self.current(source, service_id, generation):
+        if not self.same_epoch(source, service_id, generation):
             return False
         state = self._states[(source.id, service_id)]
         if result.cooling:
             state.failures = min(state.failures + 1, 5)
-            advice = None
             received_at = response.response_received_at or now
+            advice = None
             value = next((v for k, v in response.headers.items() if k.lower() == "retry-after"), None)
             advice = retry_after_deadline(value, received_at)
             reset = next((v for k, v in response.headers.items() if k.lower() == "x-ratelimit-reset"), None)
@@ -387,8 +406,18 @@ class ServiceCooldowns:
             if reset_deadline is not None and (advice is None or reset_deadline > advice):
                 advice = reset_deadline
             base_seconds = 60 if source.vendor == "jina-reader" else 30
-            state.until = advice if advice is not None else now + timedelta(seconds=min(base_seconds * 2 ** (state.failures - 1), 300))
+            candidate_until = advice if advice is not None else now + timedelta(seconds=min(base_seconds * 2 ** (state.failures - 1), 300))
+            if state.until is None or state.until <= now or candidate_until > state.until:
+                state.until = candidate_until
+            self._failure_version += 1
+            state.failure_version = self._failure_version
         elif result.record["status"] == "completed":
-            state.failures = 0
-            state.until = None
+            active = state.until is not None and state.until > now
+            # A call admitted before a concurrent failure must not clear the
+            # shared cooldown that the failure published after its admission.
+            published_after_admission = state.failure_version != generation[2]
+            if not active or not published_after_admission:
+                state.failures = 0
+                state.until = None
+                state.failure_version = self._failure_version
         return True

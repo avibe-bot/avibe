@@ -318,13 +318,25 @@ async def test_google_router_gateway_failover_preserves_visible_history_and_orig
     signed = {"contents": [
         {"role": "model", "parts": [
             {"text": "Visible thought", "thought": True, "thoughtSignature": "opaque-thought"},
+            {"text": "Visible answer", "thoughtSignature": "opaque-text"},
+            {"text": "", "thoughtSignature": "opaque-empty"},
+            {"inlineData": {"mimeType": "image/png", "data": "synthetic-image-data"}, "thoughtSignature": "opaque-image"},
             {"functionCall": {"name": "verify", "args": {"signature": "user-data"}}, "thoughtSignature": "opaque-call"},
         ]},
         {"role": "user", "parts": [{"functionResponse": {"name": "verify", "response": {"signature": "user-data"}}}]},
     ]}
-    plain = copy.deepcopy(signed)
-    plain["contents"][0]["parts"][0] = {"text": "Visible thought"}
-    plain["contents"][0]["parts"][1].pop("thoughtSignature")
+    plain = {
+        "contents": [
+            {"role": "model", "parts": [
+                {"text": "Visible thought"},
+                {"text": "Visible answer"},
+                {"text": ""},
+                {"inlineData": {"mimeType": "image/png", "data": "synthetic-image-data"}},
+                {"functionCall": {"name": "verify", "args": {"signature": "user-data"}}},
+            ]},
+            {"role": "user", "parts": [{"functionResponse": {"name": "verify", "response": {"signature": "user-data"}}}]},
+        ],
+    }
     try:
         hop = await router.resolve_hop("menu-alias", process_scope="vibey:google", turn_id="turn-google")
         _validate("hop-resolution.schema.json", hop)

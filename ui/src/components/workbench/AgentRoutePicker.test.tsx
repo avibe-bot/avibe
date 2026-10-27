@@ -642,6 +642,28 @@ describe('AgentRoutePicker compact presentation', () => {
     expect(screen.queryByRole('button', { name: 'chat.picker.newAgent' })).toBeNull();
   });
 
+  it('names an inherited route by its Agent on the trigger and says Default only in the menu', async () => {
+    const user = userEvent.setup();
+    render(
+      <OptimisticOwner
+        presentation="compact"
+        initial={{}}
+        isDefaultRoute
+        defaultRoute={CLAUDE_ROUTE}
+        defaultLabel="Default · claude"
+        onWrite={vi.fn()}
+      />,
+    );
+
+    const trigger = screen.getByRole('button', { name: /claude/ });
+    expect(trigger.textContent).not.toContain('Default');
+    expect(trigger.textContent).toContain('claude');
+
+    await user.click(trigger);
+    await screen.findByText('chat.picker.model');
+    expect(screen.getByRole('button', { name: /chat\.picker\.agent/ }).textContent).toContain('Default · claude');
+  });
+
   it('still names refusing Sources and a refused saved effort, as the cascade does', async () => {
     hubMode = 'hub';
     catalogReasoning = { sonnet: [{ value: 'medium', label: 'medium' }, { value: 'high', label: 'high' }] };

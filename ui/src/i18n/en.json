@@ -189,6 +189,10 @@
     "zoomIn": "Zoom in",
     "zoomOut": "Zoom out",
     "resetZoom": "Reset zoom",
+    "pdfPage": "Page {{page}}",
+    "pdfPosition": "Page {{page}} of {{total}}",
+    "pdfCounter": "{{page}} / {{total}}",
+    "zoomPercent": "{{percent}}%",
     "download": "Download"
   },
   "common": {
@@ -1375,6 +1379,15 @@
         },
         "follows": "Follows {{backend}} default routing. Changes to default routing apply here automatically.",
         "manualHint": "Only this model. Changes to default routing do not overwrite these route entries.",
+        "cacheTtl": {
+          "label": "Conversation cache lifetime",
+          "default": "Use built-in estimate",
+          "5m": "5 minutes",
+          "30m": "30 minutes",
+          "1h": "1 hour",
+          "12h": "12 hours",
+          "help": "This route-wide estimate controls when old tool results are cleared. Official OpenAI Responses GPT-5.6+ uses a 30-minute cache by default; selecting 30 minutes or 12 hours explicitly sends that provider option. The 12-hour mode costs 2.5x the model input rate for writes versus 1.25x for 30 minutes; cached reads keep the model-specific read price. Earlier OpenAI models' policy-dependent prompt_cache_retention is not inferred. Relays do not receive OpenAI-specific cache options."
+        },
         "undoDone": "Previous manual draft restored.",
         "restorePending": "Not saved yet. The saved route is still in use.",
         "preview": {
@@ -2570,6 +2583,7 @@
         "keylessEmpty": "Exa (free) is built in, needs no key, and searches before model executors. Added search services precede it. List prices: {{prices}}. Plans and actual bills may differ.",
         "vendorPrice": "{{vendor}} ${{usd}} / 1k searches",
         "priceDate": "API list price · {{date}}",
+        "builtInPrice": "Built in · no key or setup",
         "priceNote": "Prices are the catalog's dated API list prices. Free allowances, plans and actual bills may differ.",
         "custody": "Search service keys stay with the gateway, like other provider keys. They are never passed to the model or Agent.",
         "keylessQueryDestination": "Queries go directly from this Avibe runtime to Exa (mcp.exa.ai); Exa can see the connection's IP.",
@@ -2838,7 +2852,10 @@
     "retry": "Retry"
   },
   "errors": {
+    "avault_authorization_required": "avault needs a one-time macOS Keychain authorization on the Mac running Avibe. Choose Authorize avault, then answer the dialog on that Mac.",
+    "stale_login_session": "Avibe is still running in a macOS login session that has ended. Open Terminal on the Mac's current desktop, run `vibe restart`, then try again. Do not retry this operation.",
     "invalid_field_name": "Use 1–64 lowercase letters, digits or underscores for field names, starting with a letter.",
+    "cache_ttl_unsupported": "That cache lifetime is not supported by this route. Use the built-in estimate or a provider-compatible value.",
     "field_exists": "A field with this name already exists. Choose a different name.",
     "field_not_found": "This field no longer exists. Refresh the secret and choose one of its current fields.",
     "too_many_fields": "A secret can have at most 32 fields, including the default field.",
@@ -4115,8 +4132,14 @@
     "versionAndUpdate": "Version & Update",
     "buildAndVersion": "Build & Version",
     "currentVersion": "Current Version",
+    "versionPrefix": "v",
+    "versionTitle": "v{{version}}",
+    "versionValue": "{{version}}",
     "packageVersion": "Package Version",
     "sourceRevision": "Source Revision",
+    "sourceRevisionTitle": "Source Revision: {{revision}}",
+    "sourceRevisionTitleDirty": "Source Revision: {{revision}} (dirty)",
+    "sourceRevisionDirty": "{{revision}} (dirty)",
     "refreshBuildInfo": "Refresh Build Information",
     "unknownRevision": "unknown",
     "dirtySource": "dirty",
@@ -4126,6 +4149,7 @@
     "updateAvailable": "Update Available",
     "upgradeNow": "Upgrade Now",
     "upgrading": "Upgrading...",
+    "skipUpdate": "Skip this version",
     "upToDate": "You're up to date",
     "checkFailed": "Check failed",
     "upgradeSuccess": "Upgrade successful!",
@@ -5385,6 +5409,23 @@
     }
   },
   "vaults": {
+    "avaultAuthorization": {
+      "title": "Authorize avault once",
+      "body": "avault keeps the Vault key in this Mac's Keychain. After the update to the signed avault, macOS must approve it once before Vault can use the key again.",
+      "steps": "Choose Authorize avault. A macOS dialog then appears on the Mac running Avibe, not in this browser: enter that Mac's login password and choose Always Allow.",
+      "action": "Authorize avault",
+      "askAdmin": "Ask an admin of this Avibe to authorize avault.",
+      "waiting": "Waiting for an answer on the Mac running Avibe…",
+      "succeeded": "avault is authorized. Retry what you were doing.",
+      "failed": {
+        "not_completed": "Authorization did not complete. If you chose Deny or closed the dialog, macOS will not show it again for about 2 minutes; try again after that.",
+        "no_gui_session": "The Mac running Avibe cannot show the dialog: Avibe is not running in a logged-in desktop session (for example, it was started over SSH). Log in to that Mac's desktop, start Avibe there, and try again.",
+        "timed_out": "Nobody answered the dialog within 10 minutes. Try again when you can reach the Mac running Avibe.",
+        "avault_missing": "avault is not installed. Install it under Settings → Dependencies first.",
+        "avault_upgrade_required": "This avault version cannot be authorized. Update it under Settings → Dependencies first.",
+        "failed": "Authorization failed. Try again."
+      }
+    },
     "remoteReadOnly": "Read-only",
     "remoteReadOnlyHint": "Vaults are read-only in remote mode.",
     "title": "Vaults",

@@ -22,7 +22,7 @@ async function serveProduct(page: Page, lang: Lang = 'en') {
   const inheritedReads = new Set([
     '/api/session', '/api/config', '/api/csrf-token', '/api/projects',
     '/api/workbench/projects-bootstrap', '/api/sessions', '/api/agents',
-    '/api/inbox', '/api/version', '/api/events',
+    '/api/inbox', '/api/version', '/api/events', '/api/macos/login-session',
     '/api/desktop/computer-use/status',
   ]);
   await page.route('**/api/**', (route) => {
@@ -38,6 +38,7 @@ async function serveProduct(page: Page, lang: Lang = 'en') {
     if (path === '/api/dock') return route.fulfill({ json: {
       dock: { order: ['files', 'terminal', 'editor', 'library'], pins: [] },
     } });
+    if (path === '/api/macos/login-session') return route.fulfill({ json: { ok: true, state: 'healthy' } });
     if (inheritedReads.has(path)) return route.fallback();
     audit.unknown.push(`${request.method()} ${request.url()}`);
     return route.abort();

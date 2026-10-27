@@ -229,11 +229,15 @@ def build_driver(manifest: dict, source_root: Path, target: str) -> Path:
     built = target_dir / target / "release" / "cua-driver"
     if not built.is_file():
         raise ValueError("patched Cua Driver build did not produce the expected binary")
-    info = run(["lipo", "-info", str(built)])
+    verify_architecture(built, target)
+    return built
+
+
+def verify_architecture(binary: Path, target: str) -> None:
+    info = run(["lipo", "-info", str(binary)])
     arch = TARGET_ARCH[target]
     if arch not in info or "Non-fat file" not in info:
         raise ValueError(f"patched Cua Driver has the wrong architecture: {info}")
-    return built
 
 
 def verify_built_contract(binary: Path) -> None:
@@ -259,7 +263,68 @@ def sign_adhoc(binary: Path) -> None:
     unsigned. The packaging workflow still re-signs the helper from the inside out.
     """
     subprocess.run(["codesign", "--force", "--sign", "-", str(binary)], check=True)
+    verify_code_signature(binary)
+
+
+def verify_code_signature(binary: Path) -> None:
     subprocess.run(["codesign", "--verify", "--strict", str(binary)], check=True)
+
+
+def provenance_record(
+    manifest: dict, target: str, *, patch_sha256: str, binary_sha256: str
+) -> dict:
+    driver = manifest["driver"]
+    return {
+        "schema_version": 2,
+        "version": driver["version"],
+        "tag": driver["tag"],
+        "source_commit": driver["source_commit"],
+        "target": target,
+        "arch": TARGET_ARCH[target],
+        "source_archive": driver["source"]["archive"],
+        "source_archive_sha256": driver["source"]["sha256"],
+        "patch_variant": driver["patch"]["variant"],
+        "patch_file": driver["patch"]["file"],
+        "patch_sha256": patch_sha256,
+        "tool_snapshot_sha256": digest(TOOL_SNAPSHOT),
+        "prepared_binary_sha256": binary_sha256,
+        "build_origin": "repository_patch_built",
+    }
+
+
+def reuse_verified(manifest: dict, target: str, output: Path) -> bool:
+    """Accept an already prepared helper only when it passes a fresh build's checks.
+
+    The helper and its provenance must describe exactly the pinned source, patch,
+    snapshot, and target, and the binary must hash to the recorded value. It then
+    passes the same architecture, code-signature, and tool-contract checks as a
+    helper built here. Anything else is rebuilt from source.
+    """
+    provenance_path = output.with_name(f"{output.name}.provenance.json")
+    if any(path.is_symlink() or not path.is_file() for path in (output, provenance_path)):
+        return False
+    try:
+        recorded = json.loads(provenance_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    patch = ROOT / "cua-driver" / manifest["driver"]["patch"]["file"]
+    expected = provenance_record(
+        manifest,
+        target,
+        patch_sha256=digest(patch),
+        binary_sha256=digest(output),
+    )
+    if recorded != expected:
+        return False
+    try:
+        verify_architecture(output, target)
+        verify_code_signature(output)
+        verify_built_contract(output)
+    except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+        print(f"::warning::Rebuilding the Cua Driver; the prepared helper failed verification: {exc}")
+        return False
+    print(f"Reusing the verified prepared Cua Driver {expected['prepared_binary_sha256']}")
+    return True
 
 
 def prepare(
@@ -267,13 +332,15 @@ def prepare(
     *,
     source_archive: Path | None = None,
     output_dir: Path | None = None,
+    reuse: bool = False,
 ) -> Path:
     manifest = load_manifest()
-    arch = TARGET_ARCH[target]
     driver = manifest["driver"]
     destination = (output_dir or ROOT / "src-tauri" / "binaries").resolve()
     destination.mkdir(parents=True, exist_ok=True)
     output = destination / f"cua-driver-{target}"
+    if reuse and reuse_verified(manifest, target, output):
+        return output
 
     with tempfile.TemporaryDirectory(prefix="avibe-cua-driver-") as temporary:
         work = Path(temporary)
@@ -289,22 +356,12 @@ def prepare(
         shutil.copyfile(prepared, temporary_output)
         temporary_output.chmod(0o755)
         os.replace(temporary_output, output)
-        provenance = {
-            "schema_version": 2,
-            "version": driver["version"],
-            "tag": driver["tag"],
-            "source_commit": driver["source_commit"],
-            "target": target,
-            "arch": arch,
-            "source_archive": driver["source"]["archive"],
-            "source_archive_sha256": driver["source"]["sha256"],
-            "patch_variant": driver["patch"]["variant"],
-            "patch_file": driver["patch"]["file"],
-            "patch_sha256": digest(patch),
-            "tool_snapshot_sha256": digest(TOOL_SNAPSHOT),
-            "prepared_binary_sha256": digest(output),
-            "build_origin": "repository_patch_built",
-        }
+        provenance = provenance_record(
+            manifest,
+            target,
+            patch_sha256=digest(patch),
+            binary_sha256=digest(output),
+        )
         provenance_output = output.with_name(f"{output.name}.provenance.json")
         temporary_provenance = destination / f".{provenance_output.name}.{os.getpid()}.tmp"
         temporary_provenance.write_text(
@@ -321,6 +378,11 @@ def main() -> None:
     parser.add_argument("--target", choices=TARGET_ARCH)
     parser.add_argument("--source-archive", type=Path)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--reuse-verified",
+        action="store_true",
+        help="keep an existing helper whose provenance and checks match the pinned inputs",
+    )
     args = parser.parse_args()
     if args.check_manifest:
         load_manifest()
@@ -332,6 +394,7 @@ def main() -> None:
         args.target,
         source_archive=args.source_archive,
         output_dir=args.output_dir,
+        reuse=args.reuse_verified,
     )
     print(output)
 

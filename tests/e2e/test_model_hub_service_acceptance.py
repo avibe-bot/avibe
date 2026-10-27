@@ -139,7 +139,6 @@ class _Service:
             # the engine still installs from the packaged manifest. The catalogs
             # it reads are this checkout's backend catalog and a models.dev copy
             # that describes nothing; neither is needed by the turns below.
-            "VIBE_SENTRY_DSN": "",
             "AVIBE_BACKEND_MODEL_CATALOG_URL": _BACKEND_CATALOG.as_uri(),
             "AVIBE_MODELS_DEV_URL": models_dev.as_uri(),
             "VIBE_INSTALL_SKIP_ASKILL": "1",

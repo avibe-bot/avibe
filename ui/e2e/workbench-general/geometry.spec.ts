@@ -96,6 +96,13 @@ async function serveModelHub(page: import('@playwright/test').Page) {
       return getOnly(route, { agents: [MODEL_HUB_AGENT] });
     }
     if (path === '/api/models/agents/codex/chains' && !query) return getOnly(route, { chains: [] });
+    // The Tools tab, Sources activation and Source detail share this read.
+    if (path === '/api/models/hosted-tools' && !query) return getOnly(route, { ok: true, hosted_tools: { tools: [] } });
+    // The page scans for importable credentials on mount; a scan is a POST that
+    // changes nothing, so it is answered rather than counted as a write.
+    if (path === '/api/models/migration/scan' && !query && route.request().method() === 'POST') {
+      return route.fulfill({ json: { ok: true, scan: { items: [] } } });
+    }
     unexpectedModelReads.push(`${route.request().method()} ${path}${query}`);
     return route.abort();
   });
@@ -261,6 +268,8 @@ test.describe('workbench home geometry', () => {
         '/api/session', '/api/config', '/api/csrf-token', '/api/projects',
         '/api/workbench/projects-bootstrap', '/api/sessions', '/api/agents',
         '/api/inbox', '/api/version', '/api/events',
+        // The home's Computer Use status line reads this on every mount.
+        '/api/desktop/computer-use/status',
       ]);
       await page.route('**/api/**', (route) => {
         const request = route.request();

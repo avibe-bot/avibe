@@ -747,8 +747,12 @@ def create_app(
     @app.get("/internal/health")
     async def _health() -> dict[str, Any]:
         from vibe.desktop_runtime import desktop_runtime_id
+        from vibe.macos_session_diagnostics import current_macos_session_state
 
         payload = {"ok": True, "service": "vibe-remote-internal", "version": 1}
+        session_state = current_macos_session_state()
+        if session_state is not None:
+            payload["macos_login_session_state"] = session_state
         runtime_id = desktop_runtime_id()
         if runtime_id is not None:
             payload["desktop_runtime_id"] = runtime_id

@@ -22,10 +22,11 @@ A Tauri v2 thin shell (window + bootstrap screen) that adopts or starts one
 local Avibe Runtime, hands the window to the Workbench, and verifies integrity
 of the installed private Runtime on every launch. Self-contained packages
 embed CPython, the Avibe wheel, locked Python dependencies, Node, and npm.
-CI produces unsigned acceptance artifacts for macOS arm/x64 and Windows x64.
+Release builds produce Developer ID signed and notarized macOS arm/x64 DMGs and
+an unsigned Windows x64 acceptance installer.
 
-What the baseline deliberately does **not** have: production distribution
-signing (G1 remaining layers), auto-update, notifications, deep links,
+What the baseline deliberately does **not** have: Windows Authenticode signing
+(the remaining G1 layer), auto-update, notifications, deep links,
 native multi-window, or persisted window state. Tray / Runtime lifecycle
 visibility and launch-at-login **shipped** in #1975.
 
@@ -33,6 +34,13 @@ visibility and launch-at-login **shipped** in #1975.
 
 ### G1. Code signing and notarization
 
+- Status: macOS is done. Every tag build Developer ID signs the private
+  Runtime's Mach-O files before archiving, the Cua Driver helper, the app, and
+  the DMG; it notarizes and staples the app and the DMG, pins each code identity
+  to its designated requirement, and fails without the complete Apple
+  credential set. See "macOS signing and notarization" in the desktop README.
+  Windows Authenticode remains open in
+  [#1976](https://github.com/avibe-bot/avibe/issues/1976).
 - Problem: unsigned artifacts are stopped by Gatekeeper (macOS) and flagged by
   SmartScreen (Windows). There is currently no way to ship to a real user.
 - Work: introduce a `desktop-package-sign.yml`-style manual workflow or extend
@@ -197,7 +205,7 @@ visibility and launch-at-login **shipped** in #1975.
 
 ## Suggested sequencing
 
-1. G1 remaining signing layers + certificate procurement (longest lead)
+1. G1 Windows Authenticode + certificate procurement (macOS layers done)
 2. G2 auto-update (needs G1; ship with the first signed release)
 3. G6 window state + G5 deep links (in flight; no G1 dependency)
 4. G4 notifications (depends on shipped tray)

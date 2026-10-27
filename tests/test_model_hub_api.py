@@ -500,6 +500,45 @@ def _set_claude_route_fixture(
     return hops
 
 
+def test_vibey_route_cache_ttl_persists_30m_and_12h(tmp_path):
+    service, store, _ = _service(tmp_path)
+    model_id = "gpt-6-astra"
+    source = ModelHubSourceConfig(
+        id="src_openai001",
+        kind="api_key",
+        vendor="openai",
+        display_name="OpenAI",
+        protocol="openai_responses",
+        supply_channel="hub",
+        billing="metered",
+        state=ModelHubSourceStateConfig(status="standby"),
+        models=[ModelHubModelConfig(id=model_id, provenance="discovered")],
+        credential_ref="cred_openai001",
+    )
+    store.config.sources = [source]
+    agent = store.config.agents["vibey"]
+    agent.mode = "hub"
+    agent.models = [ModelHubBackendModelConfig(id=model_id)]
+    agent.sources.order = [source.id]
+    service._engine_synced = True
+
+    saved = asyncio.run(service.set_agent_chain(
+        "vibey",
+        model_id,
+        {"hops": [{"source_id": source.id, "model_id": model_id}], "cache_ttl": "30m"},
+    ))
+    assert saved["chain"]["manual_override"]["cache_ttl"] == "30m"
+    assert store.config.agents["vibey"].routes[model_id].cache_ttl == "30m"
+
+    saved = asyncio.run(service.set_agent_chain(
+        "vibey",
+        model_id,
+        {"hops": [{"source_id": source.id, "model_id": model_id}], "cache_ttl": "12h"},
+    ))
+    assert saved["chain"]["manual_override"]["cache_ttl"] == "12h"
+    assert store.config.agents["vibey"].routes[model_id].cache_ttl == "12h"
+
+
 async def _create_source(service: ModelHubService, payload: dict) -> dict:
     return (await service.create_source(payload))["source"]
 

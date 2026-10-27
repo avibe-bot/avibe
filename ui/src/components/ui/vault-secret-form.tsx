@@ -44,6 +44,8 @@ import { vaultErrorMessage } from '@/lib/vaultErrors';
 import { useProtectedVault } from '@/lib/useProtectedVault';
 import { MAX_VAULT_FIELDS, VAULT_FIELD_PATTERN, vaultFieldNameIssue, vaultRecordName } from '@/lib/vaultFields';
 import { openVaultsInBrowser, vaultPasskeyNeedsBrowser } from '@/lib/vaultBrowserHandoff';
+import { isAvaultAuthorizationRequired } from '@/lib/useAvaultAuthorization';
+import { AvaultAuthorizationNotice } from './avault-authorization-notice';
 import { Badge } from './badge';
 import { Button } from './button';
 import { Input } from './input';
@@ -229,6 +231,8 @@ export const VaultSecretForm: React.FC<{
   const [checkingAvault, setCheckingAvault] = useState(true);
   const [avaultDep, setAvaultDep] = useState<DependencyItem | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Saving failed because avault needs its one-time Keychain authorization.
+  const [needsAvaultAuthorization, setNeedsAvaultAuthorization] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -580,6 +584,7 @@ export const VaultSecretForm: React.FC<{
     }
     setSubmitting(true);
     setError(null);
+    setNeedsAvaultAuthorization(false);
     try {
       if (isEdit && editSecret) {
         // Value-free metadata edit: the shared validation above already ran; PATCH
@@ -748,7 +753,7 @@ export const VaultSecretForm: React.FC<{
           setError(t('vaults.protectedUnlock.errors.alreadyInitialized'));
           return;
         }
-        throw new Error(vaultErrorMessage(t, created, t('vaults.request.saveFailed')));
+        throw Object.assign(new Error(vaultErrorMessage(t, created, t('vaults.request.saveFailed'))), { code: created.code });
       }
       if (protection === 'protected') protectedVault.afterCreated();
       clearStaticValue();
@@ -761,7 +766,9 @@ export const VaultSecretForm: React.FC<{
       setFetchAuthName('');
       onCreated(secretName, 'created');
     } catch (err: unknown) {
-      if (err instanceof Error && err.message.includes('fingerprint mismatch')) {
+      if (isAvaultAuthorizationRequired(err)) {
+        setNeedsAvaultAuthorization(true);
+      } else if (err instanceof Error && err.message.includes('fingerprint mismatch')) {
         setError(t('vaults.dialog.errors.fingerprintMismatch'));
       } else if (err instanceof Error && err.message.includes('AAD field is too large')) {
         setError(t('vaults.dialog.errors.aadFieldTooLarge'));
@@ -1137,6 +1144,7 @@ export const VaultSecretForm: React.FC<{
           })}
         </div>
       )}
+      {needsAvaultAuthorization && <AvaultAuthorizationNotice forceVisible />}
       {error && (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
           {error}

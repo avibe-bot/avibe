@@ -189,6 +189,10 @@
     "zoomIn": "放大",
     "zoomOut": "缩小",
     "resetZoom": "重置缩放",
+    "pdfPage": "第 {{page}} 页",
+    "pdfPosition": "第 {{page}} 页，共 {{total}} 页",
+    "pdfCounter": "{{page}} / {{total}}",
+    "zoomPercent": "{{percent}}%",
     "download": "下载"
   },
   "common": {
@@ -1375,6 +1379,15 @@
         },
         "follows": "跟随 {{backend}} 的默认路由，默认路由调整后自动生效。",
         "manualHint": "仅此模型。默认路由的调整不会覆盖这些路由项。",
+        "cacheTtl": {
+          "label": "对话缓存时长",
+          "default": "使用内置估计",
+          "5m": "5 分钟",
+          "30m": "30 分钟",
+          "1h": "1 小时",
+          "12h": "12 小时",
+          "help": "这个路由级估计决定何时清理旧工具结果。官方 OpenAI Responses GPT-5.6+ 默认使用 30 分钟缓存；选择 30 分钟或 12 小时会显式发送对应的提供商选项。12 小时写入按模型输入价格的 2.5 倍计费，30 分钟写入为 1.25 倍；缓存读取仍使用模型专属读取价格。较早 OpenAI 模型依赖组织策略的 prompt_cache_retention 不会被自动推断。中继不会收到 OpenAI 专用缓存参数。"
+        },
         "undoDone": "已恢复之前的手动草稿。",
         "restorePending": "尚未保存，当前仍使用已保存的路由。",
         "preview": {
@@ -2570,6 +2583,7 @@
         "keylessEmpty": "Exa（免费）已内置，无需密钥，在模型代搜之前搜索。添加的搜索服务会排在它前面。标价：{{prices}}。套餐和实际账单可能不同。",
         "vendorPrice": "{{vendor}} ${{usd}} / 千次",
         "priceDate": "API 标价 · {{date}}",
+        "builtInPrice": "内置 · 无需密钥或设置",
         "priceNote": "价格为目录标注日期的 API 标价，免费额度、套餐与实际账单可能不同。",
         "custody": "搜索服务的密钥和其他供应商一样由网关保管，不会交给模型或 Agent。",
         "keylessQueryDestination": "查询会从此 Avibe 运行时直接发送到 Exa（mcp.exa.ai）；Exa 可看到该连接的 IP。",
@@ -2838,7 +2852,10 @@
     "retry": "重试"
   },
   "errors": {
+    "avault_authorization_required": "avault 需要在运行 Avibe 的 Mac 上完成一次性的 macOS 钥匙串授权。请选择「授权 avault」，然后在那台 Mac 上回应对话框。",
+    "stale_login_session": "Avibe 仍运行在一个已经结束的 macOS 登录会话中。请在 Mac 当前桌面的终端运行 `vibe restart`，然后重试。请不要重复重试此操作。",
     "invalid_field_name": "字段名须为 1–64 个小写字母、数字或下划线，且以字母开头。",
+    "cache_ttl_unsupported": "此路由不支持该缓存时长。请使用内置估计或符合供应商能力的值。",
     "field_exists": "此字段名已存在，请使用其他名称。",
     "field_not_found": "此字段已不存在。请刷新密钥并选择当前字段。",
     "too_many_fields": "每个密钥最多可包含 32 个字段（含默认字段）。",
@@ -4115,8 +4132,14 @@
     "versionAndUpdate": "版本与更新",
     "buildAndVersion": "构建与版本",
     "currentVersion": "当前版本",
+    "versionPrefix": "v",
+    "versionTitle": "v{{version}}",
+    "versionValue": "{{version}}",
     "packageVersion": "包版本",
     "sourceRevision": "源码修订",
+    "sourceRevisionTitle": "源码修订: {{revision}}",
+    "sourceRevisionTitleDirty": "源码修订: {{revision}} (有未提交改动)",
+    "sourceRevisionDirty": "{{revision}} (有未提交改动)",
     "refreshBuildInfo": "刷新构建信息",
     "unknownRevision": "未知",
     "dirtySource": "有未提交改动",
@@ -4126,6 +4149,7 @@
     "updateAvailable": "有新版本",
     "upgradeNow": "立即更新",
     "upgrading": "更新中...",
+    "skipUpdate": "跳过此版本",
     "upToDate": "已是最新版本",
     "checkFailed": "检查失败",
     "upgradeSuccess": "更新成功！",
@@ -5385,6 +5409,23 @@
     }
   },
   "vaults": {
+    "avaultAuthorization": {
+      "title": "授权 avault 一次",
+      "body": "avault 把 Vault 密钥保存在这台 Mac 的钥匙串中。更新到已签名的 avault 后，macOS 需要先批准一次，Vault 才能重新使用该密钥。",
+      "steps": "选择「授权 avault」后，macOS 对话框会出现在运行 Avibe 的 Mac 上，而不是这个浏览器里：输入那台 Mac 的登录密码，并选择「始终允许」。",
+      "action": "授权 avault",
+      "askAdmin": "请让这个 Avibe 的管理员授权 avault。",
+      "waiting": "正在等待运行 Avibe 的 Mac 上的回应…",
+      "succeeded": "avault 已授权。请重试刚才的操作。",
+      "failed": {
+        "not_completed": "授权未完成。如果你选择了「拒绝」或关闭了对话框，macOS 约 2 分钟内不会再次显示它，请稍后再试。",
+        "no_gui_session": "运行 Avibe 的 Mac 无法显示对话框：Avibe 没有运行在已登录的桌面会话中（例如通过 SSH 启动）。请登录那台 Mac 的桌面，在那里启动 Avibe 后再试。",
+        "timed_out": "10 分钟内没有人回应对话框。请在能操作运行 Avibe 的 Mac 时再试。",
+        "avault_missing": "avault 尚未安装。请先在「设置 → 依赖」中安装。",
+        "avault_upgrade_required": "当前 avault 版本无法授权。请先在「设置 → 依赖」中更新。",
+        "failed": "授权失败，请重试。"
+      }
+    },
     "remoteReadOnly": "只读",
     "remoteReadOnlyHint": "远程模式下 Vaults 为只读。",
     "title": "保险库",

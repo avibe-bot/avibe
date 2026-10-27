@@ -117,6 +117,8 @@ const makeReport = (windowKey: UsageWindowKey): UsageReport => {
           .map((model_id) => ({ model_id, label: null, ...counters(cost(1.5)) })),
       })) : []),
     ],
+    // No search service ran in this window; the report still says so explicitly.
+    services: [],
     days: [],
     window_key: windowKey,
     granularity,

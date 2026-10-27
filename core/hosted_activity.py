@@ -480,6 +480,8 @@ def _attempts_cost(attempts: tuple[HostedAttemptView, ...]) -> tuple[Optional[Ho
     reported = bool(nonzero) and all(cost.basis == "reported" for cost in nonzero)
     estimate = reported and any(cost.estimate for cost in nonzero)
     usd = round(sum(cost.usd or 0.0 for cost in priced), 6)
+    if usd == 0 and unpriced:
+        return None, False
     return HostedCost(basis="reported" if reported else "list", usd=usd, estimate=True if estimate else None), unpriced
 
 
@@ -601,8 +603,11 @@ def _chain_cost(execution: Optional[ProxyExecution]) -> tuple[Optional[HostedCos
     priced = [cost for cost in known if cost.basis != "included"]
     if not priced:
         return (HostedCost(basis="included"), False) if known and not unpriced else (None, False)
+    total = round(sum(cost.usd or 0.0 for cost in priced), 6)
+    if total == 0 and unpriced:
+        return None, False
     basis = "reported" if all(cost.basis == "reported" for cost in priced) else "list"
-    return HostedCost(basis=basis, usd=round(sum(cost.usd or 0.0 for cost in priced), 6)), unpriced
+    return HostedCost(basis=basis, usd=total), unpriced
 
 
 def _runner_label(activity: HostedActivity, lang: str, escape: Callable[[str], str]) -> Optional[str]:

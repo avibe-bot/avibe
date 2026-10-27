@@ -19,6 +19,10 @@
           "required": ["hops"],
           "additionalProperties": false,
           "properties": {
+            "cache_ttl": {
+              "enum": ["5m", "30m", "1h", "12h", null],
+              "description": "Optional route-wide C-9 cache lifetime override; unset uses the built-in estimate. Confirmed official OpenAI Responses GPT-5.6+ routes may request 30m or 12h."
+            },
             "hops": {
               "type": "array",
               "minItems": 1,

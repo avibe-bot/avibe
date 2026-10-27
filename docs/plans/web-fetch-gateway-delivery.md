@@ -45,14 +45,14 @@ response → settlement lifecycle. Boundary tests now own these invariants:
 | --- | --- |
 | Activation boundary | Global flag rejects stale turns before local or configured transport admission. Configured providers became eligible only with #2976; WF-3 exercises defaults without flag-on test patches. |
 | Admission | Every service submission re-gates only the original URL; a refusal stops forwarding but retains usage for earlier sent attempts. |
-| Attempt ownership | One capped deadline starts before the shared Exa lock, includes subsequent transport work, and allows Jina fallback on expiry. |
+| Attempt ownership | One capped deadline starts before keyless Exa admission, includes bounded setup/semaphore wait and subsequent transport work, and allows Jina fallback on expiry. |
 | No-send | Disabled/unavailable/contended/over-budget candidates have only skipped facts, no usage, no capability success and no cooldown write. |
 | Shared health | The actual sent callback carries the cooldown generation into settlement; stale generations cannot overwrite newer search/fetch state. Built-ins never reserve or write credential health. |
 | Scope | Catalog MCP refusals precede generic errors; target failures/refusals never cool the service. Service failures and 429 do, honoring server advice. Jina's no-advice backoff starts at 60 seconds. |
 | Protocol vs document | Top-level JSON-RPC errors, tool errors and missing/wrong-shaped result payloads are service faults unless a recognized target/refusal/rate signal overrides them. Valid JSON alone is not a successful envelope. Successful text documents (including JSON/scalars/error-looking prose) remain literal content. Search and fetch reuse the error-shaped MCP rate-limit classifier. |
 | Truncation | An extractor's `content_overflow` survives normalization into the stored budget-truncation fact and model-facing marker, even when sanitization leaves fewer than 48,000 bytes. |
 | Accounting | Every sent local/keyless attempt, including cancellation and failure, has exactly one zero-cost fetch usage row; mapping/settlement survive cancellation. |
-| MCP transport | Search and fetch reuse one session; fetch sends `urls` and the explicit character bound, rejects missing controls/unknown required inputs before `tools/call`, and handles JSON/SSE. |
+| MCP transport | Search and fetch reuse one session; setup is single-flight, concurrent tool calls use independent JSON-RPC ids under the small keyless-call cap, fetch sends `urls` and the explicit character bound, rejects missing controls/unknown required inputs before `tools/call`, and handles JSON/SSE. |
 
 Primary tests: `tests/test_model_hub_fetch_chain.py` and the real loopback MCP
 fixture in `tests/test_model_hub_keyless_exa.py`. Existing search-chain and fetch

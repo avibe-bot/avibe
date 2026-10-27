@@ -233,6 +233,7 @@ from .provenance import (
     no_candidate_decision,
     produce_turn_outcome,
 )
+from .opaque_provenance import OpaqueProvenanceRegistry, filter_opaque_history
 from .request import ModelHubRequest, without_opaque_history
 from .reasoning_tiers import catalog_wire_efforts, rederive_persisted_tiers, resolve_reasoning_tiers
 from .stream_wire import ProtocolSSEState, ProtocolUsageReport
@@ -251,6 +252,7 @@ from .resolver import (
     source_model_retired,
     source_supports_passthrough,
     source_runnable,
+    validate_cache_ttl_override,
 )
 from .revocations import CredentialRevocationJournal, PendingCredentialRevocation, RevocationOperation
 from .retry import (
@@ -1022,6 +1024,9 @@ class ResolvedInvocation:
     settlement_generation: Optional[int] = None
     verification_pending: Optional[str] = None
     origin: HopOrigin | None = None
+    # The credential-free Source identity used by native opaque-history admission.
+    # It never participates in wire or persisted origin projections.
+    source_identity: str | None = None
     # Vibey: the catalog tools the request declared natively, which a served
     # response may prove ran (``vibey-hosted-tools.md`` §3.2).
     hosted_calls: frozenset[str] = frozenset()
@@ -1034,7 +1039,7 @@ class HandleSettlement:
     turn_outcome: TurnOutcomeProjectionInput | None
 
 
-HandleTerminationOrigin = Literal["downstream_cancel", "upstream_terminal"]
+HandleTerminationOrigin = Literal["downstream_cancel", "upstream_terminal", "local_delivery_failure"]
 
 
 AttemptObserver = Callable[
@@ -1529,6 +1534,7 @@ class ModelHubService:
         price_table: Callable[[], PriceTable] | None = None,
         models_dev_catalog: Callable[[], Mapping[str, Any]] | None = None,
         capability_evidence: CapabilityEvidenceStore | None = None,
+        opaque_provenance: OpaqueProvenanceRegistry | None = None,
     ):
         self.store = store
         self.adapter = adapter
@@ -1566,6 +1572,9 @@ class ModelHubService:
         self.capability_evidence = capability_evidence or CapabilityEvidenceStore(
             events.path.parent / "model_hub_capability_evidence.json"
         )
+        # Opaque provider continuations are process-local by design. Unlike turn
+        # provenance and capability evidence, this registry never touches disk.
+        self.opaque_provenance = opaque_provenance or OpaqueProvenanceRegistry()
         # Bundled state that never changes while this process runs, resolved once
         # here at startup so that no request path reads a file on the loop.
         self.engine_stamp = engine_stamp()
@@ -1608,7 +1617,9 @@ class ModelHubService:
         self._search_trial_identities: dict[str, tuple] = {}
         self._search_reenable_checks: dict[str, asyncio.Task] = {}
         self._service_cooldowns = ServiceCooldowns()
-        self._keyless_exa_attempt_lock = asyncio.Lock()
+        # Exa's anonymous endpoint is per-IP limited; cap active MCP calls
+        # without serializing a turn or the session's independent JSON-RPC ids.
+        self._keyless_exa_call_semaphore = asyncio.Semaphore(3)
         self._jina_fetch_sent_at: deque[datetime] = deque()
         self._local_fetch_engine = None
         self._next_settlement_generation = PRE_ATTEMPT_SETTLEMENT_GENERATION
@@ -5946,16 +5957,25 @@ class ModelHubService:
             or normalized_model_id(model_id) != model_id
             or not isinstance(payload, dict)
             or set(payload)
-            - {"hops", "force", "would_remove_hops", "would_interrupt"}
+            - {"hops", "cache_ttl", "force", "would_remove_hops", "would_interrupt"}
             or "hops" not in payload
             or ("force" in payload and not isinstance(payload["force"], bool))
         ):
             raise ModelHubError("mapping_target_unavailable", status=409)
         try:
-            route = ModelHubRouteConfig.from_payload({"hops": payload["hops"]})
+            route = ModelHubRouteConfig.from_payload({
+                "hops": payload["hops"],
+                "cache_ttl": payload.get("cache_ttl"),
+            })
             if any(normalized_model_id(hop["model_id"]) != hop["model_id"] for hop in payload["hops"]):
                 raise ValueError("noncanonical model")
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as error:
+            if payload.get("cache_ttl") is not None:
+                raise ModelHubError(
+                    "cache_ttl_unsupported",
+                    status=422,
+                    data={"reason": str(error)},
+                ) from None
             raise ModelHubError("mapping_target_unavailable", status=409) from None
         return await self._write_agent_chain(backend, model_id, route, payload)
 
@@ -5973,6 +5993,15 @@ class ModelHubService:
             model_id not in self._agent_menu_model_ids(agent)
         ):
             raise ModelHubError("mapping_target_unavailable", status=409)
+        if route is not None:
+            try:
+                validate_cache_ttl_override(config, cast(BackendName, backend), route)
+            except ValueError as error:
+                raise ModelHubError(
+                    "cache_ttl_unsupported",
+                    status=422,
+                    data={"reason": str(error)},
+                ) from None
         by_id = {source.id: source for source in config.sources}
         old_pairs = {
             (hop.source_id, hop.model_id)
@@ -6007,7 +6036,13 @@ class ModelHubService:
             route = ModelHubRouteConfig.from_payload(raw) if raw is not None else None
             if raw is not None and any(normalized_model_id(hop["model_id"]) != hop["model_id"] for hop in raw["hops"]):
                 raise ValueError("noncanonical model")
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as error:
+            if isinstance(raw, dict) and raw.get("cache_ttl") is not None:
+                raise ModelHubError(
+                    "cache_ttl_unsupported",
+                    status=422,
+                    data={"reason": str(error)},
+                ) from None
             raise ModelHubError("mapping_target_unavailable", status=409) from None
         config = self._clone_config(self.store.load())
         agent = self._validate_route_override(config, backend, model_id, route)
@@ -10350,6 +10385,7 @@ class ModelHubService:
                         retry_after=outcome.retry_after if outcome is not None else None,
                         retry_after_ms=getattr(outcome, "retry_after_ms", None) if outcome is not None else None,
                         response_received_at=outcome.response_received_at if outcome is not None else None,
+                        upstream_retry_at=decision.retry_at,
                     )
                 if not changed:
                     return event_reason, False
@@ -10592,12 +10628,14 @@ class ModelHubService:
         *,
         termination_origin: HandleTerminationOrigin,
         record_attempt: Callable[[RawCallOutcome, ResolutionDecision], None],
+        retry_buffered_overload: bool = False,
     ) -> HandleSettlement:
         """Settle every consumed hub handle before its terminal facts are exposed."""
 
         try:
             return await self._settle_handle_outcome(
                 resolved, outcome, termination_origin=termination_origin, record_attempt=record_attempt,
+                retry_buffered_overload=retry_buffered_overload,
             )
         finally:
             if resolved is not None:
@@ -10610,21 +10648,27 @@ class ModelHubService:
         *,
         termination_origin: HandleTerminationOrigin,
         record_attempt: Callable[[RawCallOutcome, ResolutionDecision], None],
+        retry_buffered_overload: bool,
     ) -> HandleSettlement:
-        if resolved is not None and resolved.handle is not None:
+        if resolved is not None and resolved.handle is not None and not retry_buffered_overload:
             await self._observe_handle_recovery(
                 resolved.source_id, resolved.settlement_generation, resolved.handle,
                 backend=resolved.backend, model_id=resolved.requested_model_id,
             )
-        if termination_origin == "downstream_cancel" and outcome is None:
+        if termination_origin in {"downstream_cancel", "local_delivery_failure"} and outcome is None:
+            # Closing a still-live producer does not manufacture its terminal.
+            # Metering already retained every observed token; release admission
+            # without classifying a local disk failure as an upstream refusal.
             return HandleSettlement(
-                outcome=outcome,
+                outcome=None,
                 decision=None,
-                turn_outcome=produce_turn_outcome("turn.canceled"),
+                turn_outcome=produce_turn_outcome(
+                    "turn.canceled" if termination_origin == "downstream_cancel" else "turn.engine_down",
+                ),
             )
-        if termination_origin == "downstream_cancel":
-            # The gateway selects this origin only after closing the producer.
-            # A committed outcome at that barrier owns history over cancellation.
+        if termination_origin in {"downstream_cancel", "local_delivery_failure"}:
+            # A producer result committed during close still owns its Source
+            # settlement; a local delivery failure projects separately afterwards.
             termination_origin = "upstream_terminal"
         if termination_origin != "upstream_terminal":
             raise AssertionError("unknown handle termination origin")
@@ -10636,6 +10680,25 @@ class ModelHubService:
             resolved.credential_ref,
             outcome,
         )
+        # Only the gateway can grant this after matching the exact overload
+        # in a fully buffered, uncommitted Responses body. Keep the upstream
+        # stream_started fact intact for usage and provenance.
+        retry_overload = (
+            retry_buffered_overload
+            and outcome.kind is RawOutcomeKind.HTTP_ERROR and outcome.http_status == 200
+            and outcome.stream_started
+            and decision.action == "surface" and decision.reason == "server_error"
+        )
+        if retry_overload:
+            decision = replace(decision, action="fallback", error_code=None)
+        elif retry_buffered_overload and resolved.handle is not None:
+            # Preserve ordinary first-output recovery evidence, but not for the
+            # discarded overload: it must extend the existing failure streak,
+            # not briefly announce recovery and reset its own backoff.
+            await self._observe_handle_recovery(
+                resolved.source_id, resolved.settlement_generation, resolved.handle,
+                backend=resolved.backend, model_id=resolved.requested_model_id,
+            )
         record_attempt(outcome, decision)
         if decision.action == "return":
             if self._verified_recovery_outcome(outcome):
@@ -10659,7 +10722,7 @@ class ModelHubService:
                     decision=decision,
                 ),
             )
-        if decision.action != "surface":
+        if decision.action != "surface" and not retry_overload:
             raise AssertionError("consumed streams cannot retry or fall through")
         source_transition_persisted: bool | None = None
         if decision.reason is not None:
@@ -10678,6 +10741,10 @@ class ModelHubService:
                     settlement_generation=resolved.settlement_generation,
                     outcome=outcome,
                 )
+        if retry_overload:
+            # An attempt failed, not the Turn. The resolver still owns its
+            # original recovery window, routing, and the eventual terminal.
+            return HandleSettlement(outcome=outcome, decision=decision, turn_outcome=None)
         return HandleSettlement(
             outcome=outcome,
             decision=decision,
@@ -10824,6 +10891,7 @@ class ModelHubService:
                 ):
                     raise _InvocationPlanChanged
                 attempt_request = request
+                identity = identity_digest(source)
                 if backend == "vibey":
                     reason = _google_admission_skip_reason(
                         getattr(request, "protocol", None), source.protocol, model_id, stream,
@@ -10834,7 +10902,7 @@ class ModelHubService:
                     # hop, including fallback/refresh. Persisted ids stay intact;
                     # refusal must precede a transport, attempt, or recovery slot.
                     try:
-                        origin = HopOrigin(source.vendor, source.protocol, model_id, source.id)
+                        origin = HopOrigin(source.vendor, source.protocol, model_id, source.id, identity)
                         origin.response_headers()
                     except ServedHopHeaderTooLarge:
                         raise ModelHubError("served_hop_too_large", status=422) from None
@@ -10844,7 +10912,6 @@ class ModelHubService:
                     # serving one is read on this final snapshot, so a key rotated
                     # while the engine was prepared counts.
                     primary = getattr(request, "primary_origin", None)
-                    identity = identity_digest(source)
                     other_account = (
                         primary != origin or primary.source != origin.source or primary.identity != identity
                     )
@@ -10870,6 +10937,17 @@ class ModelHubService:
                     claim = getattr(request, "pin_identity_claim", None)
                     if hosted and (claim is None or not claim(identity, bool(hosted.in_flight))):
                         raise _pin_unavailable()
+                else:
+                    # Native Codex, Claude, and OpenCode callers do not have a
+                    # portable provenance record. Keep only opaque values observed
+                    # under this exact Source identity; unknown, evicted, and
+                    # ambiguous values fail safe.
+                    attempt_request = filter_opaque_history(
+                        request,
+                        protocol=getattr(request, "protocol", ""),
+                        identity=identity,
+                        registry=self.opaque_provenance,
+                    )
                 if self._engine_synced:
                     if recovery_request is not None and recovery_request.expired:
                         raise _RecoveryWindowClosed
@@ -11028,7 +11106,8 @@ class ModelHubService:
                 decision,
                 (),
                 (),
-                HopOrigin(source.vendor, source.protocol, source_model_id, source.id) if backend == "vibey" else None,
+                HopOrigin(source.vendor, source.protocol, source_model_id, source.id, identity_digest(source))
+                if backend == "vibey" else None,
             )
         if decision.action == "fallback" or (
             decision.action == "surface"
@@ -11270,8 +11349,9 @@ class ModelHubService:
             if source is None or target_model is None:
                 raise AssertionError("runnable hop must have an exact identity")
             verification_pending = source.verification_pending
+            identity = identity_digest(source)
             origin = (
-                HopOrigin(source.vendor, source.protocol, target_model, source.id, identity_digest(source))
+                HopOrigin(source.vendor, source.protocol, target_model, source.id, identity)
                 if backend == "vibey" else None
             )
             if source.supply_channel == "native_cli":
@@ -11383,6 +11463,7 @@ class ModelHubService:
                     settlement_generation=settlement_generation,
                     verification_pending=verification_pending,
                     origin=origin,
+                    source_identity=identity,
                     hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                 )
             decision = await self._classify_source_outcome(source, outcome)
@@ -11449,6 +11530,7 @@ class ModelHubService:
                         settlement_generation=settlement_generation,
                         verification_pending=verification_pending,
                         origin=origin,
+                        source_identity=identity,
                         hosted_calls=frozenset(tool for tool, _type in hosted.calls),
                     )
                 decision = classify_outcome(outcome, refresh_attempted=True)
@@ -11505,6 +11587,7 @@ class ModelHubService:
                     settlement_generation=settlement_generation,
                     verification_pending=verification_pending,
                     origin=origin,
+                    source_identity=identity,
                 )
             if (
                 pinned_hop is not None
@@ -11670,9 +11753,16 @@ class ModelHubService:
             )
 
     async def resolve_with_recovery(
-        self, *, recovery_observer: Callable[[dict | None], None] | None = None, **kwargs,
+        self, *, recovery_observer: Callable[[dict | None], None] | None = None,
+        prepare_response: Callable[[ResolvedInvocation], Awaitable[RawCallOutcome | None]] | None = None,
+        **kwargs,
     ) -> ResolvedInvocation:
-        """One pending model request, including all fallback passes and waits."""
+        """One pending model request, including all fallback passes and waits.
+
+        A gateway may buffer and settle a response before committing it. It
+        returns only a settled retryable outcome, never an unconsumed handle;
+        that replay shares this pending request rather than opening a new window.
+        """
 
         if self.recovery.window_seconds == 0:
             # Explicit opt-out for single-walk probes and characterization tests.
@@ -11682,7 +11772,17 @@ class ModelHubService:
         try:
             while True:
                 try:
-                    return await self.resolve(**kwargs, recovery_request=pending)
+                    resolved = await self.resolve(**kwargs, recovery_request=pending)
+                    retry_outcome = await prepare_response(resolved) if prepare_response is not None else None
+                    if retry_outcome is None:
+                        return resolved
+                    pending.start()
+                    pending.reason = "server_error"
+                    pending.last_upstream_failure = self._upstream_failure(resolved.source_label, retry_outcome)
+                    if getattr(kwargs.get("request"), "pinned_hop", None) is not None:
+                        # Never replay opaque continuation content on a different
+                        # hop. Its caller owns re-rendering the portable request.
+                        raise _pin_unavailable()
                 except ModelHubError as exc:
                     projection = exc.turn_outcome
                     if (

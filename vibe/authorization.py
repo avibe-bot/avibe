@@ -573,6 +573,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("PUT", r"^/api/projects/[^/]+/agents-md$"),
         # General instance settings; mixed writes retain access-administration guards.
         ("GET", r"^/api/doctor$"),
+        ("GET", r"^/api/macos/login-session$"),
         ("PUT", r"^/api/workbench/prefs$"),
         ("GET", r"^/api/cli/detect$"),
         ("GET", r"^/api/slack/manifest$"),

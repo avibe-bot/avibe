@@ -22,6 +22,8 @@ import { openVaultAuthorizationWindow } from '@/lib/vaultSandboxClient';
 import { SigningAddressList } from './signing-address-list';
 import { type BlindBox, type SignatureResult, type SignatureScheme } from '@/lib/vaultCrypto';
 import { cn, copyTextToClipboard } from '@/lib/utils';
+import { isAvaultAuthorizationRequired } from '@/lib/useAvaultAuthorization';
+import { AvaultAuthorizationNotice } from './avault-authorization-notice';
 import { Badge } from './badge';
 import { Button } from './button';
 import { ConfirmDialog } from './confirm-dialog';
@@ -205,6 +207,8 @@ export const VaultApprovalCard: React.FC<{
   const effectiveGrantDuration: GrantDurationChoice = isOneShot ? 'one-time' : grantDuration;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The last approval failed because avault needs its one-time Keychain authorization.
+  const [needsAvaultAuthorization, setNeedsAvaultAuthorization] = useState(false);
   const [signAddresses, setSignAddresses] = useState<SigningAddresses | null>(null);
   const [copiedDigest, setCopiedDigest] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
@@ -282,8 +286,12 @@ export const VaultApprovalCard: React.FC<{
     (run: () => Promise<void>) => {
       setBusy(true);
       setError(null);
+      setNeedsAvaultAuthorization(false);
       run()
-        .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)))
+        .catch((err: unknown) => {
+          setError(err instanceof Error ? err.message : String(err));
+          setNeedsAvaultAuthorization(isAvaultAuthorizationRequired(err));
+        })
         .finally(() => setBusy(false));
     },
     [],
@@ -299,7 +307,9 @@ export const VaultApprovalCard: React.FC<{
   const sessionBound = needsProtectedApproval && hasRequestSession ? true : thisSessionOnly;
 
   const failIfNotOk = (res: { ok: boolean; code?: string; message?: string }) => {
-    if (!res.ok) throw new Error(res.message || res.code || t('vaults.approval.errors.failed'));
+    if (!res.ok) {
+      throw Object.assign(new Error(res.message || res.code || t('vaults.approval.errors.failed')), res.code ? { code: res.code } : {});
+    }
   };
 
   const approveAccess = () =>
@@ -659,7 +669,9 @@ export const VaultApprovalCard: React.FC<{
         </div>
       ) : null}
 
-      {error ? (
+      {needsAvaultAuthorization ? (
+        <AvaultAuthorizationNotice forceVisible />
+      ) : error ? (
         <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive-ink">
           {error}
         </div>

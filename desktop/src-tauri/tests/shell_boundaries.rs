@@ -100,11 +100,45 @@ fn the_bootstrap_capability_grants_only_the_three_shell_commands() {
 }
 
 #[test]
-fn the_shell_enables_only_its_five_capabilities() {
+fn the_shell_enables_only_its_declared_capabilities() {
     assert_eq!(
         config()["app"]["security"]["capabilities"],
-        serde_json::json!(["bootstrap", "window-drag", "pet", "main-pet-bind", "main-computer-use"])
+        serde_json::json!([
+            "bootstrap",
+            "window-drag",
+            "pet",
+            "main-pet-bind",
+            "main-computer-use",
+            "main-desktop-update"
+        ])
     );
+}
+
+#[test]
+fn desktop_update_commands_are_workbench_scoped() {
+    let capability = read_json(crate_dir().join("capabilities/main-desktop-update.json"));
+    assert_eq!(capability["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert_eq!(capability["local"], Value::Bool(false));
+    assert_eq!(
+        capability["permissions"],
+        serde_json::json!([
+            "core:event:default",
+            "allow-desktop-update-state",
+            "allow-desktop-update-check",
+            "allow-desktop-update-install",
+            "allow-desktop-update-skip"
+        ])
+    );
+    let source = shipping_source("src/lib.rs");
+    for command in [
+        "updater::desktop_update_state",
+        "updater::desktop_update_check",
+        "updater::desktop_update_install",
+        "updater::desktop_update_skip",
+    ] {
+        assert!(source.contains(command), "missing Workbench updater command {command}");
+    }
+    assert!(shipping_source("src/updater.rs").contains("This command is only available to the Avibe Workbench."));
 }
 
 #[test]
@@ -209,7 +243,7 @@ fn notification_lifecycle_follows_runtime_ownership_not_webview_visibility_or_ss
 }
 
 #[test]
-fn deep_links_have_native_entry_points_without_a_workbench_callable_command() {
+fn deep_links_have_native_entry_points_and_the_updates_popover_route() {
     let source = shipping_source("src/lib.rs");
     let build = shipping_source("build.rs");
     for required in [
@@ -226,10 +260,18 @@ fn deep_links_have_native_entry_points_without_a_workbench_callable_command() {
     }
     assert!(!build.contains("deep_link") && !build.contains("window_state"));
     assert!(!source.contains("on_open_url"));
-    // The one script the shell runs in the Workbench is its constant Settings
-    // request; nothing page-supplied is ever evaluated.
-    assert_eq!(source.matches(".eval(").count(), 1);
+    // The shell evaluates only its fixed Settings and Updates event scripts;
+    // nothing page-supplied is ever evaluated.
+    assert_eq!(source.matches(".eval(").count(), 2);
     assert!(source.contains("window.eval(open_settings_script())"));
+    assert!(source.contains("window.eval(open_updates_script())"));
+    assert!(source.contains("avibe:desktop-open-updates"));
+    assert!(source.contains("request_desktop_updates(app)"));
+    assert!(source.contains("take_desktop_update_request(webview.app_handle())"));
+    assert!(source.contains("if !open_desktop_updates(webview.app_handle())"));
+    assert!(source.contains("avibe://updates-fallback"));
+    assert!(source.contains("OPEN_UPDATES_FALLBACK_URL"));
+    assert!(shipping_source("src/pet.rs").contains("link != crate::updater::OPEN_URL"));
     assert!(!source.contains("RunEvent::Opened"));
     let receiver = source
         .split("fn receive_native_deep_link(")
@@ -402,6 +444,10 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "open_install_docs",
         "computer_use_enable",
         "computer_use_open_permission",
+        "desktop_update_state",
+        "desktop_update_check",
+        "desktop_update_install",
+        "desktop_update_skip",
         "pet_ready",
         "pet_set_expanded",
         "pet_drag",
@@ -1052,19 +1098,19 @@ fn explicit_stop_does_not_schedule_automatic_recovery() {
 }
 
 #[test]
-fn updates_have_one_native_owner_and_no_remote_install_permission() {
+fn updates_have_one_native_owner_and_one_scoped_workbench_control_path() {
     let source = include_str!("../src/lib.rs");
     let updater = include_str!("../src/updater.rs");
-    // The shell downloads and verifies updates itself; no plugin exposes a
-    // second update path.
+    // The shell downloads and verifies updates itself; the Workbench only
+    // invokes the shell's existing state machine.
     assert!(!source.contains("tauri_plugin_updater"));
     assert!(source.contains("updater::check(app.handle().clone(), false)"));
-    assert!(source.contains("updater::MENU_ID => updater::check(app.clone(), true)"));
+    assert!(source.contains("updater::MENU_ID =>"));
     assert!(source.contains("url.as_str() == updater::OPEN_URL"));
     assert!(updater.contains("MessageDialogButtons::YesNoCancelCustom"));
     assert!(updater.contains("update::install_verified(download, &artifact, KEY"));
     assert!(!include_str!("../capabilities/bootstrap.json").contains("updater:"));
-    assert!(!include_str!("../build.rs").contains("update_install"));
+    assert!(include_str!("../build.rs").contains("desktop_update_install"));
 }
 
 #[test]

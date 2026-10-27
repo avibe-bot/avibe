@@ -826,7 +826,9 @@ class GatewayTurnTerminalizer:
             request_metadata=self._request_metadata,
         )
         self._prepared_turn_id = self.turn_id
-        self.primary_origin = registry.gateway_primary_origin(backend=backend, token=token)
+        self.primary_origin = registry.gateway_primary_origin(
+            backend=backend, token=token, request_metadata=self._request_metadata,
+        )
         self._stream_started = False
         self._attempt_started = False
         self._downstream_canceled = False
@@ -1272,7 +1274,7 @@ class TurnCorrelationRegistry:
                 self._scopes[key] = scope
                 self._credentials[scope.token] = GatewayCredential(scope_key=key)
 
-            if backend == "codex" and request_scoped and not scope.request_scoped:
+            if backend in {"codex", "opencode"} and request_scoped and not scope.request_scoped:
                 for active_turn_id in scope.active_turns:
                     trace = self._traces.get(active_turn_id)
                     if trace is not None and scope.untracked_use:
@@ -1282,10 +1284,10 @@ class TurnCorrelationRegistry:
                 for route_token in scope.route_tokens.values():
                     self._credentials.pop(route_token, None)
 
-            # Explicit Codex scopes never infer ownership from a sole active
-            # turn. Trusted dispatcher calls still register their own turn;
-            # HTTP requests must carry the route and turn metadata.
-            if backend == "codex" and scope.request_scoped:
+            # Explicit native scopes never infer ownership from a sole active
+            # turn. HTTP requests carry the route metadata when the process
+            # multiplexes more than one Source.
+            if backend in {"codex", "opencode"} and scope.request_scoped:
                 self._register_explicit_turn(
                     key=key,
                     scope=scope,
@@ -1409,12 +1411,25 @@ class TurnCorrelationRegistry:
             trace = self._traces.get(owner[0])
             return owner[0], trace.hosted_tools if trace is not None else None
 
-    def gateway_primary_origin(self, *, backend: str, token: str) -> HopOrigin | None:
-        """Read the immutable launch origin, independent of live turn ownership."""
+    def gateway_primary_origin(
+        self,
+        *,
+        backend: str,
+        token: str,
+        request_metadata: Mapping[str, str] | None = None,
+    ) -> HopOrigin | None:
+        """Read the immutable launch origin, including an explicit route handle."""
 
         with self._lock:
             credential = self._credential(backend, token)
-            return credential.route.primary_origin if credential and credential.route else None
+            if credential is None:
+                return None
+            if credential.route is not None:
+                return credential.route.primary_origin
+            explicit = self._explicit_route(
+                backend=backend, token=token, request_metadata=request_metadata,
+            )
+            return explicit[2].primary_origin if explicit is not None else None
 
     def _explicit_route(
         self,
@@ -1702,6 +1717,7 @@ class TurnCorrelationRegistry:
         via_mapping: bool,
         gateway_request_model_id: str | None = None,
         primary_origin: HopOrigin | None = None,
+        primary_identity: str | None = None,
         hosted_tools: TurnHostedTools | None = None,
     ) -> str:
         """Register a route and return its legacy credential or explicit handle.
@@ -1726,7 +1742,11 @@ class TurnCorrelationRegistry:
                 source_id=source_id,
                 gateway_request_model_id=request_model_id,
                 primary_origin=primary_origin,
-                primary_identity=primary_origin.identity if primary_origin is not None else "",
+                primary_identity=(
+                    primary_identity
+                    if isinstance(primary_identity, str)
+                    else primary_origin.identity if primary_origin is not None else ""
+                ),
             )
 
             if scope.request_scoped:

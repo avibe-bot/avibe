@@ -408,9 +408,16 @@ class ProtocolUsageReport:
     cached_input_tokens: int = 0
     output_tokens: int = 0
     # Input written to the prompt cache: a subset of input disjoint from cached
-    # input, and the part of it written with the one-hour lifetime.
+    # input. The lifetime-specific fields are disjoint subsets of this total;
+    # Anthropic uses the one-hour field and official OpenAI Responses uses the
+    # separate 30-minute and 12-hour fields.
     cache_write_input_tokens: int = 0
     cache_write_1h_input_tokens: int = 0
+    cache_write_30m_input_tokens: int = 0
+    cache_write_12h_input_tokens: int = 0
+    # Count of reports whose cache-write lifetime evidence was absent or
+    # invalid. This is per protocol report and is summed when calls fold.
+    cache_write_ttl_uncaptured_reports: int = 0
 
     @classmethod
     def of(
@@ -421,6 +428,9 @@ class ProtocolUsageReport:
         output_tokens: int,
         cache_write_input_tokens: int = 0,
         cache_write_1h_input_tokens: int = 0,
+        cache_write_30m_input_tokens: int = 0,
+        cache_write_12h_input_tokens: int = 0,
+        cache_write_ttl_uncaptured_reports: int = 0,
     ) -> "ProtocolUsageReport":
         """Build one report with the cached-input subset invariant enforced.
 
@@ -433,14 +443,44 @@ class ProtocolUsageReport:
         the input left after cache reads, and one-hour writes are part of them.
         """
 
+        raw_values = (
+            input_tokens,
+            cached_input_tokens,
+            cache_write_input_tokens,
+            cache_write_1h_input_tokens,
+            cache_write_30m_input_tokens,
+            cache_write_12h_input_tokens,
+        )
+        invalid_ttl = any(value < 0 for value in raw_values[2:]) or (
+            cache_write_input_tokens > max(0, input_tokens - max(0, cached_input_tokens))
+        ) or (
+            cache_write_1h_input_tokens + cache_write_30m_input_tokens + cache_write_12h_input_tokens
+            > cache_write_input_tokens
+        )
+        input_tokens = max(0, input_tokens)
+        cached_input_tokens = max(0, cached_input_tokens)
+        output_tokens = max(0, output_tokens)
+        cache_write_input_tokens = max(0, cache_write_input_tokens)
+        cache_write_1h_input_tokens = max(0, cache_write_1h_input_tokens)
+        cache_write_30m_input_tokens = max(0, cache_write_30m_input_tokens)
+        cache_write_12h_input_tokens = max(0, cache_write_12h_input_tokens)
         cached = min(cached_input_tokens, input_tokens)
         cache_write = min(cache_write_input_tokens, input_tokens - cached)
+        cache_write_1h = min(cache_write_1h_input_tokens, cache_write)
+        cache_write_30m = min(cache_write_30m_input_tokens, max(0, cache_write - cache_write_1h))
+        cache_write_12h = min(
+            cache_write_12h_input_tokens, max(0, cache_write - cache_write_1h - cache_write_30m)
+        )
+        ttl_uncaptured = max(max(0, cache_write_ttl_uncaptured_reports), int(invalid_ttl))
         return cls(
             input_tokens=input_tokens,
             cached_input_tokens=cached,
             output_tokens=output_tokens,
             cache_write_input_tokens=cache_write,
-            cache_write_1h_input_tokens=min(cache_write_1h_input_tokens, cache_write),
+            cache_write_1h_input_tokens=cache_write_1h,
+            cache_write_30m_input_tokens=cache_write_30m,
+            cache_write_12h_input_tokens=cache_write_12h,
+            cache_write_ttl_uncaptured_reports=ttl_uncaptured,
         )
 
     def merge(self, other: "ProtocolUsageReport") -> "ProtocolUsageReport":
@@ -458,6 +498,16 @@ class ProtocolUsageReport:
             cache_write_input_tokens=max(self.cache_write_input_tokens, other.cache_write_input_tokens),
             cache_write_1h_input_tokens=max(
                 self.cache_write_1h_input_tokens, other.cache_write_1h_input_tokens
+            ),
+            cache_write_30m_input_tokens=max(
+                self.cache_write_30m_input_tokens, other.cache_write_30m_input_tokens
+            ),
+            cache_write_12h_input_tokens=max(
+                self.cache_write_12h_input_tokens, other.cache_write_12h_input_tokens
+            ),
+            cache_write_ttl_uncaptured_reports=max(
+                self.cache_write_ttl_uncaptured_reports,
+                other.cache_write_ttl_uncaptured_reports,
             ),
         )
 
@@ -534,6 +584,11 @@ class ProtocolUsageTaxonomy:
     # Protocols that report no cache writes leave these empty.
     cache_write_paths: tuple[tuple[str, ...], ...] = ()
     cache_write_1h_paths: tuple[tuple[str, ...], ...] = ()
+    # Lifetime-specific OpenAI Responses write breakdowns. When these are
+    # declared, both must be present and sum to cache_write_tokens; otherwise
+    # the known total remains usable but is marked incomplete for pricing.
+    cache_write_30m_paths: tuple[tuple[str, ...], ...] = ()
+    cache_write_12h_paths: tuple[tuple[str, ...], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -767,6 +822,9 @@ PROTOCOL_STREAM_TAXONOMY: Final[Mapping[str, ProtocolStreamTaxonomy]] = {
             input_paths=(("input_tokens",),),
             cached_input_paths=(("input_tokens_details", "cached_tokens"),),
             output_paths=(("output_tokens",),),
+            cache_write_paths=(("input_tokens_details", "cache_write_tokens"),),
+            cache_write_30m_paths=(("input_tokens_details", "cache_write_tokens_details", "ttl_30m_tokens"),),
+            cache_write_12h_paths=(("input_tokens_details", "cache_write_tokens_details", "ttl_12h_tokens"),),
         ),
     ),
     "openai_chat": ProtocolStreamTaxonomy(
@@ -949,12 +1007,38 @@ def extract_protocol_usage(
             output_tokens = _usage_sum(container, taxonomy.output_paths)
             if input_tokens is None and cached_input_tokens is None and output_tokens is None:
                 continue
+            reported_cache_write_total = _usage_sum(container, taxonomy.cache_write_paths)
+            cache_write_30m = _usage_sum(container, taxonomy.cache_write_30m_paths)
+            cache_write_12h = _usage_sum(container, taxonomy.cache_write_12h_paths)
+            cache_write_total = reported_cache_write_total
+            ttl_uncaptured = 0
+            if taxonomy.cache_write_30m_paths or taxonomy.cache_write_12h_paths:
+                has_cache_write_evidence = (
+                    reported_cache_write_total is not None
+                    or cache_write_30m is not None
+                    or cache_write_12h is not None
+                )
+                if has_cache_write_evidence and cache_write_total is None and cache_write_30m is not None and cache_write_12h is not None:
+                    # The documented OpenAI breakdowns are disjoint and sum to
+                    # cache_write_tokens; retain that evidence, but keep the
+                    # missing total visible as an incomplete report.
+                    cache_write_total = cache_write_30m + cache_write_12h
+                if has_cache_write_evidence and (
+                    reported_cache_write_total is None
+                    or cache_write_30m is None
+                    or cache_write_12h is None
+                    or cache_write_30m + cache_write_12h != cache_write_total
+                ):
+                    ttl_uncaptured = 1
             candidate = ProtocolUsageReport.of(
                 input_tokens=input_tokens or 0,
                 cached_input_tokens=cached_input_tokens or 0,
                 output_tokens=output_tokens or 0,
-                cache_write_input_tokens=_usage_sum(container, taxonomy.cache_write_paths) or 0,
+                cache_write_input_tokens=cache_write_total or 0,
                 cache_write_1h_input_tokens=_usage_sum(container, taxonomy.cache_write_1h_paths) or 0,
+                cache_write_30m_input_tokens=cache_write_30m or 0,
+                cache_write_12h_input_tokens=cache_write_12h or 0,
+                cache_write_ttl_uncaptured_reports=ttl_uncaptured,
             )
             report = candidate if report is None else report.merge(candidate)
     return report
@@ -977,12 +1061,35 @@ def _usage_from_scalar_paths(
         output_tokens = usage_sum(taxonomy.output_paths)
         if input_tokens is None and cached_input_tokens is None and output_tokens is None:
             continue
+        reported_cache_write_total = usage_sum(taxonomy.cache_write_paths)
+        cache_write_30m = usage_sum(taxonomy.cache_write_30m_paths)
+        cache_write_12h = usage_sum(taxonomy.cache_write_12h_paths)
+        cache_write_total = reported_cache_write_total
+        ttl_uncaptured = 0
+        if taxonomy.cache_write_30m_paths or taxonomy.cache_write_12h_paths:
+            has_cache_write_evidence = (
+                reported_cache_write_total is not None
+                or cache_write_30m is not None
+                or cache_write_12h is not None
+            )
+            if has_cache_write_evidence and cache_write_total is None and cache_write_30m is not None and cache_write_12h is not None:
+                cache_write_total = cache_write_30m + cache_write_12h
+            if has_cache_write_evidence and (
+                reported_cache_write_total is None
+                or cache_write_30m is None
+                or cache_write_12h is None
+                or cache_write_30m + cache_write_12h != cache_write_total
+            ):
+                ttl_uncaptured = 1
         candidate = ProtocolUsageReport.of(
             input_tokens=input_tokens or 0,
             cached_input_tokens=cached_input_tokens or 0,
             output_tokens=output_tokens or 0,
-            cache_write_input_tokens=usage_sum(taxonomy.cache_write_paths) or 0,
+            cache_write_input_tokens=cache_write_total or 0,
             cache_write_1h_input_tokens=usage_sum(taxonomy.cache_write_1h_paths) or 0,
+            cache_write_30m_input_tokens=cache_write_30m or 0,
+            cache_write_12h_input_tokens=cache_write_12h or 0,
+            cache_write_ttl_uncaptured_reports=ttl_uncaptured,
         )
         report = candidate if report is None else report.merge(candidate)
     return report
@@ -1043,6 +1150,8 @@ def _protocol_projection_paths(protocol: str) -> frozenset[JSONPath]:
             taxonomy.usage.output_paths,
             taxonomy.usage.cache_write_paths,
             taxonomy.usage.cache_write_1h_paths,
+            taxonomy.usage.cache_write_30m_paths,
+            taxonomy.usage.cache_write_12h_paths,
         ):
             paths.update((*container_path, *leaf_path) for leaf_path in leaf_paths)
     return frozenset(paths)

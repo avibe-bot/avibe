@@ -266,7 +266,7 @@ The degraded HTTP/2 path sends `User-Agent: Avibe/<version>`, negotiated
 or `Sec-Fetch-*` fingerprint headers. It decodes only gzip/deflate (plus identity)
 with bounded standard-library decoders. Native br/zstd decoding stays inside
 libcurl; do not install Python `brotli` or `zstandard` for this feature, because
-importable codecs change unrelated Sentry/HTTP/Discord defaults. It cannot
+importable codecs change unrelated HTTP/Discord defaults. It cannot
 impersonate Chrome TLS; its
 `transport_degraded` marker explicitly states that exception and it must not
 silently choose another browser profile.
@@ -280,7 +280,7 @@ Repository packaging facts checked at #2924's merge:
 | Linux x86_64 / aarch64, including WSL | `cp310-abi3` wheels for glibc 2.17+ and musl 1.2+. No system curl/browser/Homebrew prerequisite. |
 | Windows x86_64 / arm64 | Both wheel families exist; `install.ps1` currently chooses x64 CPython 3.12 on Windows Arm for other dependency constraints. Do not claim full native-Arm support. |
 | `install.sh`, `install.ps1`, `vibe/upgrade.py` | Normal wheel metadata resolves dependencies in the new install generation before launcher activation. Direct `uv tool install`/pip follows the same metadata; no fetch-time package install. |
-| `desktop/scripts/build-runtime-bundle.py`, `desktop/runtime-sources.json` | Existing macOS arm64/x64 and Windows x64 bundles use CPython 3.12.15, frozen hash-checked exports and binary-only dependency install. The `required_binary_wheels` gate requires `curl-cffi` and `lxml` native wheels; these must never enter the separate sdist-exception allowlist. After relocation, verify native imports, the offline `chrome150` preset and built-in br/zstd features, CA resources and extraction before hashing/signing. No new Linux desktop bundle is implied. |
+| `desktop/scripts/build-runtime-bundle.py`, `desktop/runtime-sources.json` | Existing macOS arm64/x64 and Windows x64 bundles use CPython 3.12.16, frozen hash-checked exports and binary-only dependency install. The `required_binary_wheels` gate requires `curl-cffi` and `lxml` native wheels; these must never enter the separate sdist-exception allowlist. After relocation, verify native imports, the offline `chrome150` preset and built-in br/zstd features, CA resources and extraction before hashing/signing. No new Linux desktop bundle is implied. |
 
 Use dependency markers for the supported CPython/OS/architecture wheel families;
 other combinations keep base HTTP/2 without trying to compile libcurl. Within
@@ -494,11 +494,14 @@ fetch transient cooldown is not model-routing health.
 
 ### 5.4 Keyless Exa and Jina
 
-**Exa:** reuse #2924 §§3/5/6/9 for identity, session lock, schema refresh,
-SSE/JSON-RPC parsing, deadlines, admission and shared cooldown. Fetch-specific
-failure scope in §6 explicitly overrides #2924 §5.3/§6's generic `isError` /
-cooldown classification, not the shared identity or cooldown used for genuine
-service failures.
+**Exa:** reuse #2924 §§3/5/6/9 for identity, session setup, schema cache,
+SSE/JSON-RPC parsing, deadlines, admission and shared cooldown. Session
+establishment (`initialize`, `notifications/initialized`, and `tools/list`) is
+single-flight, while `tools/call` requests run concurrently by JSON-RPC id
+under the small per-runtime keyless-call cap. Fetch-specific failure scope in
+§6 explicitly overrides #2924 §5.3/§6's generic `isError` / cooldown
+classification, not the shared identity or cooldown used for genuine service
+failures.
 Endpoint
 is `https://mcp.exa.ai/mcp?tools=web_search_advanced_exa,web_fetch_exa`; do not
 create another session keyed by tool or revert search to `web_search_exa`.

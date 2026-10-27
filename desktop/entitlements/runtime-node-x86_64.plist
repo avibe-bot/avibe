@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The private Runtime's Node.js on Intel. Every entitlement here must
+	     carry evidence that this process needs it.
+
+	     allow-unsigned-executable-memory: on x86_64, V8 does not allocate its
+	     code space with MAP_JIT; it flips ordinary pages to executable. Under
+	     the hardened runtime that mprotect fails and Node aborts in
+	     v8::base::OS::SetPermissions on its first compiled function, with
+	     allow-jit alone too. This entitlement is the minimum that runs
+	     JavaScript, WebAssembly, and npm. Apple silicon needs only allow-jit
+	     (see runtime-node-aarch64.plist).
+
+	     disable-library-validation: Node loads native addons that npm installs
+	     after release, which this Team did not sign. The Show Runtime that
+	     renders Show Pages requires rollup, lightningcss, and
+	     @tailwindcss/oxide addons that their publishers ship unsigned or
+	     ad-hoc signed; with library validation on, each require() fails with
+	     "mapping process and mapped file (non-platform) have different Team
+	     IDs". Agent backends and their dependencies are installed by npm into
+	     the mutable backend root the same way.
+
+	     Deliberately absent: disable-executable-page-protection,
+	     allow-dyld-environment-variables, and get-task-allow, which upstream
+	     Node's own signature carries. -->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+</dict>
+</plist>

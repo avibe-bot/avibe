@@ -34,6 +34,7 @@ from core.agent_core.messages import (
     HostedToolBlock,
     ImageBlock,
     Message,
+    Origin,
     TextBlock,
     ThinkingBlock,
     ToolCallBlock,
@@ -89,8 +90,12 @@ CLEARABLE_TOOLS = frozenset({"read"}) | COMMAND_TOOLS
 #: How long a route's provider prompt cache stays warm after its last use, in seconds, by cache family (section 3):
 #: the documented lifetime of the cache mode Vibey requests for the conversation, where clearable results live.
 #: ``anthropic``: the message breakpoints' ``cache_control`` is ephemeral with no ``ttl``, 5 minutes, refreshed on use.
-#: ``openai-gpt-5.6``: OpenAI models from GPT-5.6 keep a prefix 30 minutes after its last write or reuse, the default
-#: and only ``prompt_cache_options.ttl``; Vibey sends none.
+#: ``openai-gpt-5.6``: OpenAI Responses GPT-5.6+ defaults to a 30-minute prefix cache; a validated official route may opt into ``12h`` via ``prompt_cache_options.ttl``. The latter has a 2.5x cache-write rate versus 1.25x for 30m, while reads use the same cached-input rate.
+#: Route overrides are intentionally closed: they are persisted as operator-visible
+#: duration labels, not arbitrary provider claims. ``12h`` is admitted only for
+#: official OpenAI Responses GPT-5.6+ routes by Model Hub validation.
+CACHE_TTL_OVERRIDES: Mapping[str, float] = {"5m": 300.0, "30m": 1_800.0, "1h": 3_600.0, "12h": 43_200.0}
+#: Earlier supported OpenAI models may expose the separate Chat Completions ``prompt_cache_retention`` modes ``in_memory`` or ``24h`` depending on model and organization policy; Avibe does not infer or send that policy-dependent option, so those routes stay on the conservative built-in estimate unless explicitly supported later.
 CACHE_TTLS: Mapping[str, float] = {"anthropic": 300.0, "openai-gpt-5.6": 1_800.0}
 #: Any other route, or one not identified unambiguously: clearing a warm cache costs a full-price re-read of the
 #: context, while leaving a cold one only keeps some old output, so an unknown lifetime counts as an hour.
@@ -524,6 +529,14 @@ def checkpoint_max_tokens(capabilities: ModelCapabilities, configured: int) -> i
     return min(CHECKPOINT_MAX_TOKENS, output_tokens(capabilities, configured))
 
 
+def _anchor_origin(endpoint: ModelEndpoint) -> Origin:
+    """The served origin that anchors C-9 usage for this request, including converted routes."""
+    target = endpoint_origin(endpoint)
+    if endpoint.origin_api is None:
+        return target
+    return Origin(provider=target.provider, api=endpoint.origin_api, model=target.model)
+
+
 def _estimate(request: ModelRequest, transcript: Sequence[Message], anchor: Optional[Anchor]) -> int:
     """The anchored usage while it holds, grown by the ``tokens()`` of what changed since; else ``tokens()`` of the
     request (section 2).
@@ -536,7 +549,7 @@ def _estimate(request: ModelRequest, transcript: Sequence[Message], anchor: Opti
     removed is a local estimate taken from a provider count.
     """
     whole = sent_tokens(request)
-    if anchor is None or anchor.response.origin != endpoint_origin(request.endpoint):
+    if anchor is None or anchor.response.origin != _anchor_origin(request.endpoint):
         return whole
     sent = len(anchor.transcript)
     if len(transcript) <= sent or transcript[sent] != anchor.response:
@@ -643,8 +656,14 @@ _GPT_MODEL = re.compile(r"gpt-(\d+)(?:\.(\d+))?(?:-[a-z0-9]+(?:[.-][a-z0-9]+)*)?
 
 
 def cache_ttl_s(endpoint: ModelEndpoint) -> float:
-    """How long the provider cache of a request's route stays warm (section 3): its family's documented lifetime in
-    ``CACHE_TTLS``, else ``CACHE_TTL_UNKNOWN_S``."""
+    """How long the provider cache of a request's route stays warm (section 3).
+
+    A validated Model Hub route override wins. Otherwise use the documented
+    family lifetime, with OpenAI GPT-5.6+ recognized only on Responses; unknown
+    routes keep the conservative one-hour estimate.
+    """
+    if endpoint.cache_ttl is not None:
+        return CACHE_TTL_OVERRIDES.get(endpoint.cache_ttl, CACHE_TTL_UNKNOWN_S)
     family = _cache_family(endpoint)
     return CACHE_TTL_UNKNOWN_S if family is None else CACHE_TTLS[family]
 
@@ -653,7 +672,11 @@ def _cache_family(endpoint: ModelEndpoint) -> Optional[str]:
     """The route's cache family from its provider, protocol, and whole model id; None unless unambiguous."""
     if endpoint.provider == "anthropic" and endpoint.protocol == "anthropic":
         return "anthropic"
-    gpt = _GPT_MODEL.fullmatch(endpoint.model_id) if endpoint.provider == "openai" else None
+    gpt = (
+        _GPT_MODEL.fullmatch(endpoint.model_id)
+        if endpoint.provider == "openai" and endpoint.protocol == "openai_responses"
+        else None
+    )
     if gpt is not None and (int(gpt[1]), int(gpt[2] or 0)) >= (5, 6):
         return "openai-gpt-5.6"
     return None

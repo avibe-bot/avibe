@@ -185,10 +185,25 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
         context_price_steps=tuple(sorted(steps)),
     )
     base_url = hop["base_url"]
+    original_protocol = protocol
     if protocol == "google":
         if not gateway_base_url:
             raise HopResolutionError("a google hop needs the gateway prefix to call Chat Completions")
         protocol, base_url = "openai_chat", f"{gateway_base_url.rstrip('/')}/v1"
+    origin_api = original_protocol if original_protocol != protocol else None
+    raw_cache_ttl = hop.get("cache_ttl")
+    if raw_cache_ttl is not None and (
+        not isinstance(raw_cache_ttl, str)
+        or raw_cache_ttl not in {"5m", "30m", "1h", "12h"}
+    ):
+        raise HopResolutionError("hop cache_ttl is invalid")
+    cache_ttl = raw_cache_ttl
+    raw_cache_ttl_wire = hop.get("cache_ttl_wire", False)
+    if not isinstance(raw_cache_ttl_wire, bool):
+        raise HopResolutionError("hop cache_ttl_wire is invalid")
+    cache_ttl_wire = raw_cache_ttl_wire
+    if cache_ttl_wire and cache_ttl not in {"30m", "12h"}:
+        raise HopResolutionError("hop cache_ttl_wire requires 30m or 12h")
     endpoint = ModelEndpoint(
         protocol=protocol,
         base_url=base_url,
@@ -196,10 +211,13 @@ def selection_from_hop(hop: Mapping[str, Any], *, gateway_base_url: Optional[str
         token=hop["token"],
         request_headers=dict(headers),
         provider=hop["provider"],
+        cache_ttl=cache_ttl,
+        cache_ttl_wire=cache_ttl_wire,
         source_id=hop["source_id"],
         source_identity=hop["source_identity"],
         hosted_tools=hosted_tools,
         image_models=image_models,
+        origin_api=origin_api,
     )
     return ModelSelection(endpoint=endpoint, capabilities=capabilities)
 

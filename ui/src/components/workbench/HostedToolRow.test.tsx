@@ -309,6 +309,20 @@ describe('search service cards', () => {
     expect(document.body.textContent).not.toMatch(/\/search/);
   });
 
+  it('does not render an exact zero lower bound as a price', () => {
+    const card = {
+      ...services.service_completed.payload,
+      call_id: 'call_unknown_zero',
+      source_id: 'src_exakeyless',
+      source_name: 'Exa',
+      provider: 'exa-mcp',
+      executor_kind: 'service',
+      cost: { basis: 'list', calls: 1, usd: 0, at_least: true },
+    };
+    renderGroup([card], 'en');
+    expect(row('call_unknown_zero').textContent).not.toMatch(/at least|\$0/);
+  });
+
   it('says who ran it, and reads a reason this client does not know yet as a failure', () => {
     renderGroup([
       services.service_completed.payload,

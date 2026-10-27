@@ -72,9 +72,12 @@ startup initialization cannot be opened. Avibe reports the failure in the
 control and continues starting the rest of the desktop app; it does not make
 the optional feature failure prevent Avibe from launching.
 
-An ad-hoc app update can change the app's code identity, so macOS may no longer
-apply the old grants. Turn on the updated installed app in the same two Privacy
-& Security panes. On some macOS 26 ad-hoc builds, ScreenCaptureKit can be
+Release builds are Developer ID signed with a fixed code identity, so macOS
+keeps both grants across updates. An ad-hoc build (a manual build without
+signing credentials, or a release from before signing) has a different identity
+each time, so macOS may no longer apply the old grants; the first signed build
+after one also needs them once more. Turn on the updated installed app in the
+same two Privacy & Security panes. On some macOS 26 ad-hoc builds, ScreenCaptureKit can be
 denied while macOS refuses to create the Screen Recording row. Avibe opens the
 pane and guides you to click **+** or drag the exact Avibe app into the list,
 then enable it. This manual addition is the accepted Phase 1 workaround; it

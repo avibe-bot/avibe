@@ -5,6 +5,7 @@ import type { TFunction } from 'i18next';
 import { useTranslation } from 'react-i18next';
 import { CapabilityTabs } from './CapabilityTabs';
 import { WorkbenchPageHeader } from './WorkbenchPageHeader';
+import { AvaultAuthorizationNotice } from '../ui/avault-authorization-notice';
 import { Badge } from '../ui/badge';
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
@@ -973,6 +974,7 @@ export const VaultsPage: React.FC = () => {
       {error && (
         <div className="rounded-xl border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive-ink">{error}</div>
       )}
+      {canReadVaultState ? <AvaultAuthorizationNotice /> : null}
       {canUseVaultSecrets ? (
         <PendingRequestsSection
           onResolved={refresh}

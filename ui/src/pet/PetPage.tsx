@@ -35,6 +35,7 @@ import { FencedSource } from './fencedSource';
 import './pet-mini.css';
 
 const HOLD_MS = 320;
+const DOUBLE_CLICK_MS = 450;
 const DISMISS_EXIT_MS = 500;
 const STOP_CONFIRM_MS = 3000;
 const STOP_LINGER_MS = 2500;
@@ -281,25 +282,6 @@ const PetSurface: React.FC = () => {
     if (!binding || resolvingMain || (data.messages.length === 0 && !optimisticTitle)) return;
     openHistory();
   };
-  // A double-click (§5.1) opens Vibey's conversation in the main window. Its
-  // first click already acted, so the second puts the history and the cards
-  // back as they were before it.
-  const vibeyBefore = useRef<{ detailOpen: boolean; expanded: boolean } | null>(null);
-  const clickVibey = () => {
-    vibeyBefore.current = { detailOpen, expanded: petPanel.want() };
-    toggleVibey();
-  };
-  const doubleClickVibey = () => {
-    const before = vibeyBefore.current;
-    vibeyBefore.current = null;
-    if (before?.detailOpen) {
-      if (!detailOpen) openHistory();
-    } else if (before) {
-      setDetailOpen(false);
-      if (petPanel.want() !== before.expanded) void setPanel(before.expanded);
-    }
-    if (binding) void petBridge.open(sessionLink(binding)).catch(() => undefined);
-  };
   const [composing, setComposing] = useState(false);
   const [presentations, setPresentations] = useState<Record<string, CardPresentation>>({});
   const presentationNow = useRef<Record<string, CardPresentation>>({});
@@ -317,9 +299,13 @@ const PetSurface: React.FC = () => {
   const [orderedIds, setOrderedIds] = useState<string[]>([]);
   const stopTimers = useRef<Record<string, number>>({});
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  // `clicks` is the platform's click count for this press (its mousedown
-  // `detail`): 2 is the second press of a double-click.
-  const pressRef = useRef<{ held: boolean; dragged: boolean; clicks: number; x: number; y: number; timer: number } | null>(null);
+  const avatarRef = useRef<HTMLButtonElement>(null);
+  // Pair native mousedown click counts with time for webviews that always report 1.
+  // No history/card side effects occur until a pointer single click is confirmed.
+  const pressRef = useRef<{ held: boolean; dragged: boolean; clicks: number; double: boolean; x: number; y: number; timer: number } | null>(null);
+  const pendingClickRef = useRef<{ at: number; timer: number } | null>(null);
+  const doubleOpenedRef = useRef(false);
+  const allowDoubleEventRef = useRef(false);
   const dismissTimers = useRef<Record<string, number>>({});
   const updatePresentation = useCallback((key: string, patch: CardPresentation | null) => {
     const next = { ...presentationNow.current };
@@ -364,9 +350,13 @@ const PetSurface: React.FC = () => {
       Object.values(stopTimers.current).forEach(window.clearTimeout);
       Object.values(dismissTimers.current).forEach(window.clearTimeout);
       if (pressRef.current) window.clearTimeout(pressRef.current.timer);
+      if (pendingClickRef.current) window.clearTimeout(pendingClickRef.current.timer);
       stopTimers.current = {};
       dismissTimers.current = {};
       pressRef.current = null;
+      pendingClickRef.current = null;
+      doubleOpenedRef.current = false;
+      allowDoubleEventRef.current = false;
     };
   }, [binding, epoch]);
   useEffect(() => {
@@ -376,7 +366,27 @@ const PetSurface: React.FC = () => {
   // The shell reports hover over Vibey and the dock: macOS gives a webview no
   // hover while its window is not key, and the pet never takes focus itself.
   const [hovered, setHovered] = useState(false);
-  useEffect(() => onPetHover(setHovered), []);
+  const [hoverSuppressed, setHoverSuppressed] = useState(false);
+  const shellHoveredRef = useRef(false);
+  const hoverSuppressedRef = useRef(false);
+  const handlePetHover = useCallback((next: boolean) => {
+    shellHoveredRef.current = next;
+    if (next && hoverSuppressedRef.current) {
+      setHovered(false);
+      return;
+    }
+    if (!next) hoverSuppressedRef.current = false;
+    // Keep CSS hover suppressed until a fresh enter, even if WebKit's :hover is stale.
+    if (next) setHoverSuppressed(false);
+    setHovered(next);
+  }, []);
+  useEffect(() => onPetHover(handlePetHover), [handlePetHover]);
+  const cancelPendingClick = useCallback(() => {
+    const pending = pendingClickRef.current;
+    if (!pending) return;
+    window.clearTimeout(pending.timer);
+    pendingClickRef.current = null;
+  }, []);
 
   useEffect(() => {
     if (exchange.user?.text?.trim() === optimisticTitle) setOptimisticTitle('');
@@ -615,11 +625,31 @@ const PetSurface: React.FC = () => {
     if (hotkeyHeld.current && voice.available) voice.start();
     else openComposer(draft);
   }, [listenPending, binding, canChat, expanded, voice.available, voice.start, openComposer, draft, uncertain]);
+  const dockActiveRef = useRef(false);
+  useLayoutEffect(() => { dockActiveRef.current = voice.busy || composing; }, [voice.busy, composing]);
+  const suppressDock = useCallback(() => {
+    if (dockActiveRef.current) return;
+    // The shell emits transitions only; an already-outside pointer can enter next.
+    hoverSuppressedRef.current = shellHoveredRef.current;
+    setHoverSuppressed(true);
+    setHovered(false);
+    avatarRef.current?.blur();
+  }, []);
   useEffect(() => {
-    const onBlur = () => { if (!voice.busy && !draft.trim()) void setPanel(false); };
+    const onBlur = () => {
+      cancelPendingClick();
+      suppressDock();
+      // Opening Avibe must preserve the history/card list through its key change.
+      if (!doubleOpenedRef.current && !voice.busy && !draft.trim()) void setPanel(false);
+    };
+    const onFocus = () => { doubleOpenedRef.current = false; };
     window.addEventListener('blur', onBlur);
-    return () => window.removeEventListener('blur', onBlur);
-  }, [voice.busy, draft, setPanel]);
+    window.addEventListener('focus', onFocus);
+    return () => {
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('focus', onFocus);
+    };
+  }, [cancelPendingClick, draft, setPanel, suppressDock, voice.busy]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       // Escape also dismisses an IME candidate list; that one is not ours.
@@ -745,7 +775,6 @@ const PetSurface: React.FC = () => {
   const documentVisible = useDocumentVisible();
   const [pointerOverBubble, setPointerOverBubble] = useState(false);
   const bubbleRef = useRef<HTMLDivElement | null>(null);
-  const avatarRef = useRef<HTMLButtonElement>(null);
   // Focus inside a bubble that is replaced (by the input, the dictation
   // marquee, or a loading notice) moves to Vibey rather than to nowhere, or to
   // the input when the bubble closes above it. The node is checked as it
@@ -784,6 +813,35 @@ const PetSurface: React.FC = () => {
   const toggleHistory = () => {
     if (detailOpen) { setDetailOpen(false); void setPanel(false); } else openHistory();
   };
+  const openDoubleClick = () => {
+    if (doubleOpenedRef.current) return;
+    doubleOpenedRef.current = true;
+    cancelPendingClick();
+    if (!binding) return;
+    void petBridge.open(sessionLink(binding)).then(() => {
+      if (epoch.isCurrent()) suppressDock();
+    }, () => undefined);
+  };
+  const beginDoubleClick = (clicks: number) => {
+    const pending = pendingClickRef.current;
+    // A native count alone cannot pair a click with a previous hold or drag.
+    if (!pending || (clicks !== 2 && performance.now() - pending.at > DOUBLE_CLICK_MS)) return false;
+    cancelPendingClick();
+    return true;
+  };
+  const toggleVibeyRef = useRef(toggleVibey);
+  useLayoutEffect(() => { toggleVibeyRef.current = toggleVibey; });
+  const scheduleSingleClick = () => {
+    cancelPendingClick();
+    const at = performance.now();
+    const timer = window.setTimeout(() => {
+      if (pendingClickRef.current?.timer !== timer || !epoch.isCurrent()) return;
+      pendingClickRef.current = null;
+      allowDoubleEventRef.current = false;
+      toggleVibeyRef.current();
+    }, DOUBLE_CLICK_MS);
+    pendingClickRef.current = { at, timer };
+  };
   useLayoutEffect(() => {
     // Focus inside a bubble that folds away (still mounted) moves to Vibey too.
     if (showReplyBubble) return;
@@ -792,7 +850,12 @@ const PetSurface: React.FC = () => {
   }, [showReplyBubble]);
 
   const avatar = (
-    <div className={clsx('pet-mini-avatar-wrap', voice.listening && 'is-listening', hovered && 'is-hovered')} data-pet-hover>
+    <div className={clsx(
+      'pet-mini-avatar-wrap',
+      voice.listening && 'is-listening',
+      hovered && 'is-hovered',
+      hoverSuppressed && 'is-hover-suppressed',
+    )} data-pet-hover>
       {voice.listening && <span className="pet-mini-listen-ring" aria-hidden />}
       <button
         ref={avatarRef}
@@ -802,25 +865,51 @@ const PetSurface: React.FC = () => {
         aria-label={t('pet.recentTurns')}
         aria-expanded={historyOpen}
         data-pet-hit
-        onClick={(event) => { if (event.detail === 0) toggleVibey(); }}
+        onClick={(event) => {
+          if (event.detail !== 0) return;
+          cancelPendingClick();
+          doubleOpenedRef.current = false;
+          allowDoubleEventRef.current = false;
+          toggleVibey();
+        }}
+        onDoubleClick={() => {
+          if (allowDoubleEventRef.current) openDoubleClick();
+        }}
         onPointerDown={(event) => {
           if (event.button !== 0) return;
           const target = event.currentTarget;
           const pointerId = event.pointerId;
-          pressRef.current = { held: false, dragged: false, clicks: 1, x: event.clientX, y: event.clientY, timer: window.setTimeout(() => {
-            if (!epoch.isCurrent()) return;
-            const press = pressRef.current;
-            if (!press) return;
-            press.held = true;
-            target.setPointerCapture?.(pointerId);
-            if (!canChat || !binding) { void setPanel(true); return; }
-            if (uncertain) { void setPanel(true); setDetailOpen(true); return; }
-            if (voice.available) voice.start();
-            else openComposer(draft);
-          }, HOLD_MS) };
+          doubleOpenedRef.current = false;
+          allowDoubleEventRef.current = false;
+          pressRef.current = {
+            held: false,
+            dragged: false,
+            clicks: event.detail || 1,
+            double: beginDoubleClick(event.detail),
+            x: event.clientX,
+            y: event.clientY,
+            timer: window.setTimeout(() => {
+              if (!epoch.isCurrent()) return;
+              const press = pressRef.current;
+              if (!press) return;
+              press.held = true;
+              cancelPendingClick();
+              doubleOpenedRef.current = false;
+              allowDoubleEventRef.current = false;
+              target.setPointerCapture?.(pointerId);
+              if (!canChat || !binding) { void setPanel(true); return; }
+              if (uncertain) { void setPanel(true); setDetailOpen(true); return; }
+              if (voice.available) voice.start();
+              else openComposer(draft);
+            }, HOLD_MS),
+          };
         }}
         onMouseDown={(event) => {
-          if (pressRef.current) pressRef.current.clicks = event.detail;
+          const press = pressRef.current;
+          if (press) {
+            press.clicks = event.detail;
+            if (!press.double && beginDoubleClick(event.detail)) press.double = true;
+          }
           // The input keeps its focus and caret: a Vibey click is not leaving it.
           if (inputRef.current && document.activeElement === inputRef.current) event.preventDefault();
         }}
@@ -830,14 +919,19 @@ const PetSurface: React.FC = () => {
           if (Math.hypot(event.clientX - press.x, event.clientY - press.y) < 4) return;
           press.dragged = true;
           window.clearTimeout(press.timer);
+          cancelPendingClick();
+          doubleOpenedRef.current = false;
+          allowDoubleEventRef.current = false;
           // The drop's layout arrives as the shell's snapshot (petShell).
           void petBridge.drag().catch(() => undefined);
         }}
         onPointerCancel={() => {
           const press = pressRef.current;
           pressRef.current = null;
-          vibeyBefore.current = null;
           if (press) window.clearTimeout(press.timer);
+          cancelPendingClick();
+          doubleOpenedRef.current = false;
+          allowDoubleEventRef.current = false;
           if (press?.held) voice.stop(true);
         }}
         onPointerUp={() => {
@@ -845,20 +939,29 @@ const PetSurface: React.FC = () => {
           pressRef.current = null;
           if (!press) return;
           window.clearTimeout(press.timer);
-          // Only a click right after a click on Vibey is its double-click; a
-          // hold, a drag or a cancelled press in between starts over.
-          if (press.held || press.dragged || press.clicks > 2) vibeyBefore.current = null;
-          if (press.held) voice.stop(true);
-          else if (press.dragged || press.clicks > 2) return;
-          else if (press.clicks === 2 && vibeyBefore.current) doubleClickVibey();
-          else clickVibey();
+          if (press.held) {
+            voice.stop(true);
+            doubleOpenedRef.current = false;
+            allowDoubleEventRef.current = false;
+          } else if (press.dragged || press.clicks > 2) {
+            cancelPendingClick();
+            doubleOpenedRef.current = false;
+            allowDoubleEventRef.current = false;
+          } else if (press.double) {
+            allowDoubleEventRef.current = true;
+            openDoubleClick();
+          } else {
+            scheduleSingleClick();
+          }
         }}
         onPointerLeave={() => {
           const press = pressRef.current;
           if (press && !press.held) {
             window.clearTimeout(press.timer);
             pressRef.current = null;
-            vibeyBefore.current = null;
+            cancelPendingClick();
+            doubleOpenedRef.current = false;
+            allowDoubleEventRef.current = false;
           }
         }}
         onContextMenu={(event) => event.preventDefault()}

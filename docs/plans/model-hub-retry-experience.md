@@ -98,6 +98,12 @@ Retries stop once the first user-visible model-output byte is committed,
 including recognized reasoning and tool-call output. Headers, SSE comments,
 and protocol metadata are not output. Preserve lossless prelude handling.
 
+The narrow exception in `openai-streamed-overload-retry.md` buffers the initial
+Responses stream before downstream commit. Only an exact `server_error` overload
+may discard that body and replay once through this same recovery window. It
+includes compatible custom Sources; it does not broaden other error/protocol
+retry rules or promise exactly-once upstream execution.
+
 Pre-output inference retry does not guarantee exactly-once upstream billing:
 a dropped connection may hide completed inference. Keep every observed usage
 report exactly once locally. Do not extend this policy to replaying upstream
@@ -191,6 +197,17 @@ response time. The effective deadline is the later of local backoff and valid
 upstream advice. A Source deadline must not move earlier due to another failure.
 Invalid, overflowing, or past values cannot cause a tight loop; fall back to
 the local policy and record only a sanitized diagnostic.
+
+For Claude HTTP 429s, the existing bounded unified-header projection can refine
+an ordinary rate limit to `quota_exhausted` when a shared 5h/7d rejection has a
+valid active reset. Ignore inactive windows and overage/model-only rejections;
+accept future resets no more than seven days plus one hour after header receipt.
+The latest valid shared reset joins `Retry-After`, `Retry-After-Ms`, local backoff,
+and the existing deadline in the same later-deadline policy. Invalid or ambiguous
+unified evidence preserves ordinary rate-limit handling and valid retry advice.
+Only the existing quota reason and derived deadline reach Source state, never
+raw unified headers. See `claude-subscription-cap-cooldown.md` for the evidence
+rules and validation contract.
 
 Do not clamp a valid long upstream delay down to the local cap and retry early.
 If it is outside this request's window, terminate this request truthfully while
@@ -371,7 +388,7 @@ in `tests/scenarios/model_hub/catalog.yaml` during implementation.
 | Concurrent waiting Turns/backends | One recovery admission per affected Source; backups proceed; waiters do not each increment the streak or allocate a separate probe. |
 | Recovery owner canceled or slow | No lock/transport leaks; canceled owner releases only its own admission; another waiter can proceed; slow connected inference is not killed. |
 | Delayed headers / first output / buffered completion | Success beyond the former transport timeout and beyond the admission window; no health penalty, retry, or duplicate usage caused by elapsed inference time. |
-| Stream boundary | Heartbeats/headers alone do not prove recovery; reasoning and tool output do. No Hub replay after output, including engine/transport failure and cancellation races. Valid empty completion also releases recovery admission. |
+| Stream boundary | Heartbeats/headers alone do not prove recovery; reasoning and tool output do. Generic Hub replay stops after output. The exact OpenAI Responses overload exception buffers before downstream commit and permits one post-output replay in the same recovery window. Other streamed failures remain terminal. Valid empty completion also releases recovery admission. |
 | Advice and clocks | Missing/malformed/past/large Retry-After, differing UTC offsets, clock shifts, and deterministic jitter; no stale serialized deadline or busy loop. |
 | Stronger blockers and fault scope | Bad credentials, quota requiring action, local engine failure, mixed blockers, and explicit model errors retain correct remedies; waiting cannot hide them or corrupt unrelated Source/model state. |
 | Source replacement / stale settlement | Old success/failure/cleanup cannot mutate the replacement or release its recovery admission; backup success cannot clear primary failure history. |

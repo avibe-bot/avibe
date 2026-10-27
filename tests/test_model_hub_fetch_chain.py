@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from dataclasses import replace
 from datetime import timedelta
@@ -129,6 +130,39 @@ async def test_flag_off_rejects_configured_fetch_from_a_previously_frozen_turn(t
 
 
 @pytest.mark.asyncio
+async def test_failed_fetch_service_attempt_logs_redacted_transport_facts(tmp_path, caplog):
+    service, config = _service(
+        tmp_path, enabled={LOCAL: False, EXA: False, FREE_EXA: True, JINA: False}, order=(FREE_EXA,),
+    )
+    caplog.set_level(logging.WARNING, logger="core.handlers.model_hub.service_diagnostics")
+
+    async def fetch(*args, on_sent):
+        await on_sent()
+        return SearchResponse(
+            200,
+            {"x-avibe-mcp-phase": "tools_call"},
+            json.dumps({"result": {"isError": True, "content": [{"type": "text", "text": "secret page body"}]}}).encode(),
+        )
+
+    service.adapter.fetch = fetch
+    await service.run_hosted_tool(
+        "web_fetch", {"arguments": {"url": "https://secret.example/"}},
+        turn=service.freeze_turn_hosted_tools(config),
+    )
+    records = [record for record in caplog.records if record.name == "core.handlers.model_hub.service_diagnostics"]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert "tool=web_fetch" in message
+    assert "source_id=src_exakeyless" in message
+    assert "service_id=exa/mcp" in message
+    assert "outcome=failed" in message
+    assert "error_code=service_unavailable" in message
+    assert "transport_cause=mcp_isError=true" in message
+    assert "phase=tools_call" in message
+    assert "secret.example" not in message and "secret page body" not in message
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("sid,status,body,expected,delay", [
     (FREE_EXA, 429, {}, "service_rate_limited", 600),
     (FREE_EXA, 500, {}, "service_unavailable", 30),
@@ -206,13 +240,15 @@ async def test_stale_keyless_fetch_cannot_overwrite_a_newer_shared_generation(tm
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("release_lock", [False, True])
-async def test_keyless_attempt_deadline_includes_lock_wait_and_allows_jina_fallback(tmp_path, monkeypatch, release_lock):
-    """The original chain consumed 180s in the lock; resetting 30s after admission is also wrong."""
+async def test_keyless_attempt_deadline_includes_semaphore_wait_and_allows_jina_fallback(tmp_path, monkeypatch, release_lock):
+    """The capped semaphore wait consumes the fetch attempt budget without serializing all calls."""
     monkeypatch.setattr(fetch_chain_module, "ATTEMPT_SECONDS", 0.3, raising=False)
     service, config = _service(
         tmp_path, enabled={LOCAL: False, EXA: False, FREE_EXA: True, JINA: True}, order=(FREE_EXA, JINA),
     )
-    await service._keyless_exa_attempt_lock.acquire()
+    semaphore = service._keyless_exa_call_semaphore
+    for _ in range(3):
+        await semaphore.acquire()
     sent = []
 
     async def fetch(source_id, *args, on_sent):
@@ -226,7 +262,10 @@ async def test_keyless_attempt_deadline_includes_lock_wait_and_allows_jina_fallb
         return SearchResponse(200, {}, json.dumps(body).encode())
 
     service.adapter.fetch = fetch
-    release_handle = asyncio.get_running_loop().call_later(0.12, service._keyless_exa_attempt_lock.release) if release_lock else None
+    def release_one():
+        semaphore.release()
+
+    release_handle = asyncio.get_running_loop().call_later(0.12, release_one) if release_lock else None
     try:
         result = await asyncio.wait_for(service.run_hosted_tool(
             "web_fetch", {"arguments": {"url": "https://example.com/"}}, turn=service.freeze_turn_hosted_tools(config),
@@ -234,8 +273,8 @@ async def test_keyless_attempt_deadline_includes_lock_wait_and_allows_jina_fallb
     finally:
         if release_handle:
             release_handle.cancel()
-        if service._keyless_exa_attempt_lock.locked():
-            service._keyless_exa_attempt_lock.release()
+        for _ in range(3):
+            semaphore.release()
     assert result["record"]["content"] == "Jina fallback"
     first = result["record"]["attempts"][0]
     assert first["outcome"] == ("failed" if release_lock else "skipped")

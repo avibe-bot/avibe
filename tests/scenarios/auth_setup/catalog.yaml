@@ -623,4 +623,22 @@ scenarios:
       - ui/src/components/onboarding/WizardCompletion.test.tsx
       - ui/src/components/onboarding/entryGate.test.ts
       - ui/src/components/settings/shared/useBackendRuntime.test.tsx
+  - id: AUTH-SETUP-134
+    name: A Vault call blocked by avault's one-time macOS Keychain authorization recovers through Authorize avault
+    status: covered
+    kind: recovery_path
+    layer: scenario
+    backend: shared
+    test: tests/scenarios/auth_setup/test_auth_setup_scenarios.py::test_avault_keychain_authorization_recovers_a_failed_vault_call
+    # Real HTTP boundary: the failed Vault call, the shared authorization record, the
+    # explicit Web action (single-flight attempt), and the successful retry. avault is a
+    # fake honoring the 0.1.8 contract (exit 77, only key authorize may prompt), answered
+    # in process under the suite's no-process guard; the fake's real-process form backs
+    # the supporting tests. The real Keychain dialog and its 120 s denial cooldown are the
+    # owner's manual acceptance on a Mac.
+    supporting_tests:
+      - tests/test_avault_authorization.py
+      - tests/test_avault_agent.py
+      - tests/test_local_deps.py
+      - ui/src/components/ui/avault-authorization-notice.test.tsx
 next_priority: []

@@ -228,7 +228,7 @@ class FullRuntimeTrial:
         env.update({
             "AVIBE_HOME": str(self.avibe_home), _OWNER: self.marker,
             "AVIBE_WEB_UI_SUPERVISOR": "terminal-bench-no-ui",
-            "VIBE_SENTRY_DSN": "", "VIBE_STARTUP_DEPENDENCY_RECONCILE": "0",
+            "VIBE_STARTUP_DEPENDENCY_RECONCILE": "0",
             "VIBE_INSTALL_SKIP_ASKILL": "1", "VIBE_ASKILL_AUTO_UPDATE": "0",
             "VIBE_SHOW_RUNTIME_OFFLINE": "1" if self.profile.offline else "0",
             "VIBE_TMUX_OFFLINE": "1" if self.profile.offline else "0",

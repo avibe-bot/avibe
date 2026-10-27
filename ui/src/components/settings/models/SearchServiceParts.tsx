@@ -21,11 +21,15 @@ export const SearchVendorGlyph: React.FC<{ vendor: string }> = ({ vendor }) => (
   </span>
 );
 
+/** A zero price is a built-in free service, not a list price: it names no API list price or date. */
 export const SearchServicePrice: React.FC<{ price: HostedServiceListPrice }> = ({ price }) => {
   const { t } = useTranslation();
+  const free = price.usd_per_1k === 0;
   return <span className="flex flex-col gap-0.5">
-    <span className="font-semibold text-foreground">{price.usd_per_1k === 0 ? t('settings.models.searchServices.free') : t('settings.models.searchServices.price', { usd: formatSmallUsd(price.usd_per_1k) })}</span>
-    <a href={price.url} target="_blank" rel="noopener noreferrer" className="model-hub-tool-cost-note underline underline-offset-2">{t('settings.models.searchServices.priceDate', { date: price.as_of })}</a>
+    <span className="font-semibold text-foreground">{free ? t('settings.models.searchServices.free') : t('settings.models.searchServices.price', { usd: formatSmallUsd(price.usd_per_1k) })}</span>
+    {free
+      ? <span className="model-hub-tool-cost-note">{t('settings.models.searchServices.builtInPrice')}</span>
+      : <a href={price.url} target="_blank" rel="noopener noreferrer" className="model-hub-tool-cost-note underline underline-offset-2">{t('settings.models.searchServices.priceDate', { date: price.as_of })}</a>}
   </span>;
 };
 

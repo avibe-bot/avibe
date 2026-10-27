@@ -703,7 +703,7 @@ describe('SettingsLayout', () => {
     const user = userEvent.setup();
     renderLayout('/settings');
 
-    const version = await screen.findByTitle('v3.1.4');
+    const version = await screen.findByTitle('dashboard.versionTitle');
     expect(version.parentElement?.parentElement?.className).toContain('md:hidden');
 
     await user.click(version);

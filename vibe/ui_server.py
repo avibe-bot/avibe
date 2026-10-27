@@ -88,7 +88,6 @@ from modules.agents.catalog import (
 from vibe.i18n import get_supported_languages, t
 from vibe.logging_config import application_log_paths
 from vibe.runtime import get_ui_dist_path, get_working_dir
-from vibe.sentry_integration import init_sentry
 from vibe import ui_asset_archive
 from storage.delivery_states import ADMITTED_DELIVERY_STATES
 
@@ -5846,6 +5845,31 @@ def vault_agent_pubkey_get():
         return jsonify(api.get_vault_agent_pubkey())
     except ValueError as exc:
         return _vault_error_response(exc)
+
+
+@app.route("/api/macos/login-session", methods=["GET"])
+def macos_login_session_get():
+    from vibe import api
+
+    return jsonify(api.get_macos_login_session_status())
+
+
+@app.route("/api/vault/avault-authorization", methods=["GET"])
+def vault_avault_authorization_get():
+    from vibe import api
+
+    return jsonify(api.get_avault_authorization_status())
+
+
+@app.route("/api/vault/avault-authorization", methods=["POST"])
+def vault_avault_authorization_post():
+    from vibe import api
+
+    # Machine-level, like dependency repair: the Keychain dialog appears on the host's screen.
+    authorization_context = getattr(g, "authorization_context", None)
+    if authorization_context is None or not authorization_context.can_manage_instance:
+        return jsonify({"ok": False, "error": "instance_access_forbidden"}), 403
+    return jsonify(api.start_avault_authorization())
 
 
 @app.route("/api/vault/sandbox/root-metadata", methods=["GET"])
@@ -17727,10 +17751,9 @@ def run_ui_server(host: str, port: int) -> None:
     except FileNotFoundError:
         config = None
     except Exception as exc:
-        logger.warning("Skipping UI Sentry init because config load failed: %s", exc)
+        logger.warning("Skipping UI startup reconciliation because config load failed: %s", exc)
         config = None
     if config is not None:
-        init_sentry(config, component="ui", enable_fastapi=True)
         try:
             from vibe import remote_access
 
