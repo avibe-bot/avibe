@@ -7,14 +7,22 @@ assembler; ``agent-core-contracts/conversion-tables.md`` ("Google Gemini") is th
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
+from core.agent_core.ai.hosted import (
+    GOOGLE_SEARCH_TOOL_TYPE,
+    google_grounding_sources,
+    google_hosted_block,
+    google_search_count,
+)
 from core.agent_core.ai.image_limits import LoadedImage
 from core.agent_core.ai._common import (
     PinUnavailable,
@@ -29,6 +37,7 @@ from core.agent_core.ai._common import (
     hosted_pin,
     join_endpoint_url,
     json_object,
+    native_hosted_tools,
     pin_refusal,
     prepare_messages,
     request_credential_values,
@@ -39,6 +48,7 @@ from core.agent_core.ai.provider import Done, MediaLoader, ModelRequest, Provide
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedToolBlock,
     ImageBlock,
     TextBlock,
     ThinkingBlock,
@@ -47,6 +57,9 @@ from core.agent_core.messages import (
     UserMessage,
 )
 
+#: The generateContent tool each overlay declaration type names (``vibey-gemini-native.md`` §4): the overlay spells
+#: Google Search as Google's typed tools do, and this API takes it as a keyed tool object.
+_NATIVE_TOOLS = {"google_search": {"googleSearch": {}}}
 #: Google's documented stand-in for the signature of a function call Gemini did not produce ("Thought signatures",
 #: FAQ 1): another origin's call in the current turn, which Gemini 3 and later validate.
 DUMMY_THOUGHT_SIGNATURE = "skip_thought_signature_validator"
@@ -79,6 +92,10 @@ _GOOGLE_PART_FIELDS = (
         Mapping,
         children=(WireField("name", str), WireField("id", str), WireField("args", Mapping)),
     ),
+    WireField("toolCall", Mapping, children=(WireField("toolType", str), WireField("id", str), WireField("args", Mapping))),
+    WireField(
+        "toolResponse", Mapping, children=(WireField("toolType", str), WireField("id", str), WireField("response", Mapping)),
+    ),
 )
 _GOOGLE_WIRE_SHAPES = {
     "chunk": (
@@ -91,6 +108,11 @@ _GOOGLE_WIRE_SHAPES = {
             item_children=(
                 WireField("finishReason", str),
                 WireField("finishMessage", str),
+                WireField(
+                    "groundingMetadata",
+                    Mapping,
+                    children=(WireField("webSearchQueries", list), WireField("groundingChunks", list)),
+                ),
                 WireField(
                     "content",
                     Mapping,
@@ -163,7 +185,7 @@ class GoogleAdapter(ProviderAdapter):
             if terminal is not None:
                 yield terminal
             return
-        stream = _GoogleStream(assembler)
+        stream = _GoogleStream(assembler, frozenset(native_hosted_tools(request)))
         try:
             wire = wire_request(request, transformed_messages, gateway=self._gateway, loaded_images=loaded_images)
 
@@ -227,8 +249,13 @@ class _GoogleStream:
     stream), and the request builder puts it back on that text part.
     """
 
-    def __init__(self, assembler: StreamAssembler) -> None:
+    def __init__(self, assembler: StreamAssembler, hosted: frozenset[str] = frozenset()) -> None:
         self.assembler = assembler
+        # The tools this request declared natively: a server-side call of any other stays out of the transcript.
+        self.hosted = hosted
+        # Each Google Search by its call id: its slot and its toolCall part, until its toolResponse arrives.
+        self._searches: dict[str, tuple[tuple[str, str], dict[str, Any]]] = {}
+        self._grounding: Mapping[str, Any] | None = None
         self.ended = False
         self._finish: str | None = None
         self._finish_message: str | None = None
@@ -286,6 +313,8 @@ class _GoogleStream:
         content = candidate.get("content")
         for part in (content.get("parts") or []) if isinstance(content, Mapping) else []:
             events.extend(self._part(part))
+        if isinstance(candidate.get("groundingMetadata"), Mapping):
+            self._grounding = candidate["groundingMetadata"]
         if candidate.get("finishReason"):
             self._finish = candidate["finishReason"]
             self._finish_message = candidate.get("finishMessage")
@@ -294,6 +323,9 @@ class _GoogleStream:
     def _part(self, part: Mapping[str, Any]) -> list[Any]:
         events: list[Any] = []
         signature = part.get("thoughtSignature") or None
+        if isinstance(part.get("toolCall"), Mapping) or isinstance(part.get("toolResponse"), Mapping):
+            self._server_part(part)
+            return events
         call = part.get("functionCall")
         if isinstance(call, Mapping):
             name = call.get("name")
@@ -333,11 +365,61 @@ class _GoogleStream:
         # Parts of a kind this adapter does not declare (inline data, code execution) carry nothing to the loop.
         return events
 
+    def _server_part(self, part: Mapping[str, Any]) -> None:
+        """A Google Search Gemini ran inside the response: one hosted call, its two parts kept verbatim (§4)."""
+
+        source_id = self.assembler.source_id
+        call = part.get("toolCall")
+        response = part.get("toolResponse")
+        item = call if isinstance(call, Mapping) else response
+        if (
+            "web_search" not in self.hosted or source_id is None or not isinstance(item, Mapping)
+            or item.get("toolType") != GOOGLE_SEARCH_TOOL_TYPE
+        ):
+            return
+        self._end_block()
+        if isinstance(call, Mapping):
+            call_id = call.get("id") or f"google_search_{len(self._searches) + 1}"
+            key = ("hosted", call_id)
+            self._searches[call_id] = (key, dict(part))
+            self.assembler.hosted_block(key, google_hosted_block(part, None, source_id=source_id, call_id=call_id))
+            return
+        # A response names its call; one that names none answers the latest call still waiting.
+        call_id = response.get("id") or next(
+            (pending for pending, (key, _) in reversed(self._searches.items())
+             if (block := self.assembler.hosted_block_at(key)) is not None and block.record.status == "pending"),
+            None,
+        )
+        if call_id not in self._searches:
+            return
+        key, call_part = self._searches[call_id]
+        self.assembler.hosted_block(
+            key, google_hosted_block(call_part, part, source_id=source_id, call_id=call_id),
+        )
+
+    def _ground(self) -> None:
+        """Gemini reports a response's searches and sources once: they count its calls and fill its last record."""
+
+        if not self._searches or self._grounding is None:
+            return
+        searches = google_search_count(self._grounding)
+        if searches:
+            self.assembler.set_hosted_facts(counts={"web_search_requests": searches})
+        sources = google_grounding_sources(self._grounding)
+        completed = [
+            (key, block) for key, _ in self._searches.values()
+            if (block := self.assembler.hosted_block_at(key)) is not None and block.record.status == "completed"
+        ]
+        if sources and completed:
+            key, block = completed[-1]
+            self.assembler.hosted_block(key, replace(block, record=replace(block.record, sources=sources)))
+
     def finish(self) -> list[Any]:
         if self._finish is None and self._blocked is None:
             terminal = self.assembler.terminal(self.assembler.incomplete())
             return [terminal] if terminal is not None else []
         self._end_block()
+        self._ground()
         events: list[Any] = list(self.assembler.block_end_events())
         if self._finish is None:
             final = self.assembler.finalize("safety", error_message=f"Gemini blocked the prompt: {self._blocked}")
@@ -360,13 +442,24 @@ def build_google_payload(
     payload: dict[str, Any] = {"contents": _contents(messages, model, request.supports_images, loaded_images)}
     if request.system:
         payload["systemInstruction"] = {"parts": [{"text": request.system}]}
-    if request.tools:
-        payload["tools"] = [{
-            "functionDeclarations": [
-                {"name": tool.name, "description": tool.description, "parametersJsonSchema": dict(tool.input_schema)}
-                for tool in request.tools
-            ],
-        }]
+    # A hosted tool this hop runs natively is sent as Gemini's own tool in its spec's place (§4.1), and Gemini runs a
+    # server-side tool next to functions only when the request says it will circulate their calls.
+    native = native_hosted_tools(request)
+    functions = [
+        {"name": tool.name, "description": tool.description, "parametersJsonSchema": dict(tool.input_schema)}
+        for tool in request.tools
+        if tool.name not in native
+    ]
+    tools: list[dict[str, Any]] = [{"functionDeclarations": functions}] if functions else []
+    for route in native.values():
+        kind = (route.declaration or {}).get("type")
+        if kind not in _NATIVE_TOOLS:
+            raise ValueError(f"unsupported Gemini hosted declaration: {kind!r}")
+        tools.append(copy.deepcopy(_NATIVE_TOOLS[kind]))
+    if tools:
+        payload["tools"] = tools
+    if native:
+        payload["toolConfig"] = {"includeServerSideToolInvocations": True}
     generation: dict[str, Any] = {"maxOutputTokens": request.max_tokens}
     thinking = _thinking_config(model, _effort(request.reasoning_effort or ""))
     if thinking is not None:
@@ -485,6 +578,10 @@ def _model_parts(message: AssistantMessage, *, current_turn: bool) -> list[dict[
                 call["thoughtSignature"] = signature
             first_call = False
             parts.append(call)
+        elif isinstance(block, HostedToolBlock):
+            # Its toolCall and toolResponse parts, verbatim with their signatures (transform allowed it for this
+            # Source); Gemini circulates them as its own.
+            parts.extend(copy.deepcopy(list(block.native.payload)))
     return parts
 
 

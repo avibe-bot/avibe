@@ -29,6 +29,7 @@ from vibe.backend_model_catalog import HostedToolSpec, bundled_provider_overlay
 from .capability_evidence import HOSTED_TOOL_ASPECTS
 from .hosted_items import responses_item_tool
 from .hosted_tools import HostedEvidence, hosted_tool_facts
+from .request import declared_tool_types
 
 PIN_SOURCE_HEADER: Final = "x-avibe-pin-source"
 # The served-hop model a continuation was rendered for; without it a pin is the launch's primary hop.
@@ -47,6 +48,8 @@ _RESPONSES_MODEL_OUTPUTS: Final = frozenset({
 # Output items identified by the tool they name; one without a textual name is malformed.
 _RESPONSES_NAMED_CALLS: Final = frozenset({"function_call", "custom_tool_call", "mcp_call"})
 _ANTHROPIC_SERVER_RESULTS: Final = {"web_search_tool_result": "web_search"}
+# Gemini's server-side tool parts, by the catalog tool their ``toolType`` ran.
+_GOOGLE_SERVER_TOOLS: Final = {"GOOGLE_SEARCH_WEB": "web_search"}
 
 
 SpecLookup = Callable[[str, str, str, str], Optional[HostedToolSpec]]
@@ -90,16 +93,13 @@ def hosted_content(request: Mapping[str, Any], protocol: str, *, pinned: bool) -
     """The hosted declarations and replayed native items in a request body, by tool."""
 
     declared = _declaration_tools().get(protocol, {})
-    tools = request.get("tools")
-    calls = frozenset(
-        (declared[tool["type"]], tool["type"])
-        for tool in (tools if isinstance(tools, list) else ())
-        if isinstance(tool, Mapping) and isinstance(tool.get("type"), str) and tool["type"] in declared
-    )
+    calls = frozenset((declared[kind], kind) for kind in declared_tool_types(request) if kind in declared)
     if protocol == "openai_responses":
         replays, in_flight = _responses_replays(request.get("input"), pinned=pinned)
     elif protocol == "anthropic":
         replays, in_flight = _anthropic_replays(request.get("messages"), pinned=pinned)
+    elif protocol == "google":
+        replays, in_flight = _google_replays(request.get("contents"), pinned=pinned)
     else:
         replays, in_flight = frozenset(), frozenset()
     return HostedContent(calls, replays, in_flight)
@@ -193,6 +193,49 @@ def _anthropic_replays(messages: Any, *, pinned: bool) -> tuple[frozenset[str], 
         content = message.get("content")
         for block in content if isinstance(content, list) else ():
             if (tool := _anthropic_hosted_tool(block)) is not None:
+                (carried if index == in_flight else tools).add(tool)
+    return frozenset(tools), frozenset(carried)
+
+
+def _google_server_tool(part: Any) -> str | None:
+    for key in ("toolCall", "toolResponse"):
+        item = part.get(key) if isinstance(part, Mapping) else None
+        if isinstance(item, Mapping):
+            return _GOOGLE_SERVER_TOOLS.get(item.get("toolType"))
+    return None
+
+
+def _only_function_responses(content: Any) -> bool:
+    parts = content.get("parts") if isinstance(content, Mapping) else None
+    return (
+        content.get("role") == "user" and isinstance(parts, list) and bool(parts)
+        and all(isinstance(part, Mapping) and "functionResponse" in part for part in parts)
+    )
+
+
+def _google_replays(contents: Any, *, pinned: bool) -> tuple[frozenset[str], frozenset[str]]:
+    """The tools of Gemini server-side parts to replay, and of those in the in-flight response.
+
+    The in-flight response is the last ``model`` content when only the client's function responses follow it.
+    """
+
+    if not isinstance(contents, list):
+        return frozenset(), frozenset()
+    in_flight: int | None = None
+    if pinned:
+        index = len(contents)
+        while index and _only_function_responses(contents[index - 1]):
+            index -= 1
+        if index and isinstance(contents[index - 1], Mapping) and contents[index - 1].get("role") == "model":
+            in_flight = index - 1
+    tools: set[str] = set()
+    carried: set[str] = set()
+    for index, content in enumerate(contents):
+        if not isinstance(content, Mapping) or content.get("role") != "model":
+            continue
+        parts = content.get("parts")
+        for part in parts if isinstance(parts, list) else ():
+            if (tool := _google_server_tool(part)) is not None:
                 (carried if index == in_flight else tools).add(tool)
     return frozenset(tools), frozenset(carried)
 

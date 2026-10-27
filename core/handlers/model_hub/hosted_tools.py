@@ -71,7 +71,7 @@ SpecLookup = Callable[[str, str, str, str], Optional[HostedToolSpec]]
 # The engine release when the engine manifest cannot be read. It names no release, so a refusal learned under it
 # never matches a real one.
 UNKNOWN_ENGINE_RELEASE = "unknown-engine"
-NATIVE_REPLAY_PROTOCOLS: frozenset[str] = frozenset({"anthropic", "openai_responses"})
+NATIVE_REPLAY_PROTOCOLS: frozenset[str] = frozenset({"anthropic", "openai_responses", "google"})
 
 # S2b-2 activates the read and chain together; release with S6 disclosure. Not a user toggle.
 SEARCH_SERVICES_ACTIVE: Final = True

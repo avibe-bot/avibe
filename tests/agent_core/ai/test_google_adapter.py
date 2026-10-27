@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -11,10 +12,12 @@ import pytest
 
 from core.agent_core.ai.google import DUMMY_THOUGHT_SIGNATURE, GoogleAdapter
 from core.agent_core.ai.registry import sent_effort
-from core.agent_core.ai.provider import Done, ModelEndpoint, ModelRequest, ProviderError
+from core.agent_core.ai.provider import Done, HostedToolRoute, ModelEndpoint, ModelRequest, ProviderError
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
+    HostedSource,
+    HostedToolBlock,
     ImageBlock,
     Origin,
     TextBlock,
@@ -313,3 +316,103 @@ async def test_an_error_frame_is_classified_from_its_google_status() -> None:
     error = (await _stream({"error": {"code": 429, "message": "Resource exhausted", "status": "RESOURCE_EXHAUSTED"}}))[-1]
     assert isinstance(error, ProviderError)
     assert error.kind == "rate_limit" and error.retryable
+
+
+# --- Google Search, Gemini's native web_search (vibey-gemini-native.md §4) ----------------------------------------
+
+SOURCE = "src_gemini0001"
+SEARCH = ToolSpec("web_search", "Search the web", {"type": "object", "properties": {"query": {"type": "string"}}})
+NATIVE_SEARCH = HostedToolRoute(mode="native", replay=True, declaration={"type": "google_search"})
+SERVED = json.dumps({"provider": "google", "api": "google", "model": MODEL, "source": SOURCE}, separators=(",", ":"))
+CALL_PART = {
+    "toolCall": {"toolType": "GOOGLE_SEARCH_WEB", "args": {"queries": ["btc price today", "btc close"]}, "id": "srch_1"},
+    "thoughtSignature": SIG_A,
+}
+RESPONSE_PART = {
+    "toolResponse": {"toolType": "GOOGLE_SEARCH_WEB", "response": {"search_suggestions": "<div>chips</div>"}, "id": "srch_1"},
+    "thoughtSignature": SIG_B,
+}
+GROUNDING = {
+    "webSearchQueries": ["btc price today", "btc close", "btc price today"],
+    "groundingChunks": [
+        {"web": {"uri": "https://grounding.invalid/a", "title": "coindesk.com"}},
+        {"web": {"uri": "https://grounding.invalid/b", "title": "coinbase.com"}},
+        {"web": {"uri": "https://grounding.invalid/a", "title": "coindesk.com"}},
+    ],
+}
+
+
+def _searching(*messages: Any) -> ModelRequest:
+    request = _request(*messages, base_url="http://hub.invalid/vibey/v1beta", tools=(BASH, SEARCH))
+    return replace(request, endpoint=replace(
+        request.endpoint, source_id=SOURCE, source_identity="sha256:gemini", hosted_tools={"web_search": NATIVE_SEARCH},
+    ))
+
+
+async def test_a_native_search_is_googles_own_tool_with_server_side_calls_enabled() -> None:
+    wire = await build_wire_request(_searching(_user("btc?")), gateway=True)
+
+    # Gemini runs Google Search next to functions only when the request says it will circulate their calls.
+    assert wire.body["tools"] == [
+        {"functionDeclarations": [
+            {"name": "bash", "description": "Run a command", "parametersJsonSchema": dict(BASH.input_schema)},
+        ]},
+        {"googleSearch": {}},
+    ]
+    assert wire.body["toolConfig"] == {"includeServerSideToolInvocations": True}
+    # A native declaration only ever goes to the hop's own Source.
+    assert wire.headers["x-avibe-pin-source"] == SOURCE
+
+
+async def test_a_google_search_is_one_hosted_call_whose_parts_go_back_verbatim() -> None:
+    chunks = (
+        _parts(CALL_PART),
+        _parts(RESPONSE_PART),
+        _parts({"text": "BTC closed at $79,6xx."}),
+        # Gemini reports the response's searches and sources once, with its finish.
+        {"candidates": [{"content": {"role": "model", "parts": [{"text": "", "thoughtSignature": SIG_A}]},
+                         "finishReason": "STOP", "groundingMetadata": GROUNDING}]},
+    )
+
+    def gateway(sent: httpx.Request) -> httpx.Response:
+        body = "".join(f"data: {json.dumps(chunk)}\r\n\r\n" for chunk in chunks)
+        return httpx.Response(
+            200, headers={"content-type": "text/event-stream", "x-avibe-served-hop": SERVED}, text=body,
+        )
+
+    request = _searching(_user("btc?"))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(gateway)) as client:
+        events = [event async for event in GoogleAdapter(client, gateway=True).stream(request, CancelToken())]
+    message = _final(events)
+
+    [search] = [block for block in message.content if isinstance(block, HostedToolBlock)]
+    assert (search.id, search.tool, search.action.type, search.action.queries) == (
+        "srch_1", "web_search", "search", ("btc price today", "btc close"),
+    )
+    assert search.record.status == "completed"
+    # The grounding chunks, each once; Google's Search Suggestions markup is not part of the record.
+    assert search.record.sources == (
+        HostedSource(url="https://grounding.invalid/a", title="coindesk.com"),
+        HostedSource(url="https://grounding.invalid/b", title="coinbase.com"),
+    )
+    assert search.native.source_id == SOURCE and search.native.payload == (CALL_PART, RESPONSE_PART)
+    # Google bills each distinct query the model ran.
+    assert message.hosted_summary is not None and message.hosted_summary.counts == {"web_search_requests": 2}
+
+    # Back to the same Source, the call's parts go verbatim, signatures included, before the answer.
+    body = await _body(_searching(_user("btc?"), message, _user("and eth?")), gateway=True)
+    assert body["contents"][1]["parts"] == [
+        CALL_PART, RESPONSE_PART, {"text": "BTC closed at $79,6xx.", "thoughtSignature": SIG_A},
+    ]
+
+    # Any other Source gets the portable form: a synthetic web_search call and result, no Google parts.
+    other = _searching(_user("btc?"), message, _user("and eth?"))
+    other = replace(other, endpoint=replace(other.endpoint, source_id="src_other0001"))
+    wire = json.dumps((await _body(other, gateway=True))["contents"])
+    assert "toolCall" not in wire and "toolResponse" not in wire and SIG_B not in wire
+    assert '"name": "web_search"' in wire
+
+
+async def test_a_server_side_call_the_request_did_not_declare_stays_out_of_the_transcript() -> None:
+    message = _final(await _stream(_parts(CALL_PART), _parts(RESPONSE_PART), _parts({"text": "ok"}, finish="STOP")))
+    assert message.content == (TextBlock(text="ok"),) and message.hosted_summary is None

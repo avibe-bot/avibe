@@ -533,6 +533,14 @@ def _tool_result(call_id):
     return {"role": "user", "content": [{"type": "tool_result", "tool_use_id": call_id, "content": "ok"}]}
 
 
+GEMINI_USER = {"role": "user", "parts": [{"text": "search"}]}
+GEMINI_SEARCH_CALL = {"toolCall": {"toolType": "GOOGLE_SEARCH_WEB", "args": {"queries": ["q"]}, "id": "s1"},
+                      "thoughtSignature": "sig"}
+GEMINI_SEARCH_RESULT = {"toolResponse": {"toolType": "GOOGLE_SEARCH_WEB", "response": {}, "id": "s1"},
+                        "thoughtSignature": "sig"}
+GEMINI_CALL = {"functionCall": {"name": "shell", "args": {}, "id": "f1"}}
+GEMINI_RESULT = {"role": "user", "parts": [{"functionResponse": {"name": "shell", "id": "f1", "response": {}}}]}
+
 IN_FLIGHT_CASES = [
     ("responses_cross_turn", "openai_responses", [USER, WEB_CALL, ASSISTANT_TEXT, USER], True, {"web_search"}),
     ("responses_in_flight", "openai_responses", [USER, WEB_CALL, X_CALL, LOCAL_CALL, LOCAL_OUTPUT], True, set()),
@@ -584,6 +592,20 @@ IN_FLIGHT_CASES = [
      [USER, WEB_CALL, LOCAL_CALL, {"type": ["function_call_output"], "call_id": "fc_1"}], True, {"web_search"}),
     ("anthropic_server_tool_name_not_text", "anthropic",
      [USER, {"role": "assistant", "content": [{**SERVER_USE, "name": ["web_search"]}]}, USER], True, set()),
+    # Gemini: the in-flight response is the last model content, followed only by function responses.
+    ("google_in_flight", "google",
+     [GEMINI_USER, {"role": "model", "parts": [GEMINI_SEARCH_CALL, GEMINI_SEARCH_RESULT, GEMINI_CALL]},
+      GEMINI_RESULT], True, set()),
+    ("google_cross_turn", "google",
+     [GEMINI_USER, {"role": "model", "parts": [GEMINI_SEARCH_CALL, GEMINI_SEARCH_RESULT]}, GEMINI_USER], True,
+     {"web_search"}),
+    ("google_unpinned", "google",
+     [GEMINI_USER, {"role": "model", "parts": [GEMINI_SEARCH_CALL, GEMINI_SEARCH_RESULT, GEMINI_CALL]},
+      GEMINI_RESULT], False, {"web_search"}),
+    # A server-side tool Gemini ran for anything but a search is not a hosted call of the catalog's.
+    ("google_other_server_tool", "google",
+     [GEMINI_USER, {"role": "model", "parts": [{"toolCall": {"toolType": "URL_CONTEXT", "id": "u1"}}]}, GEMINI_USER],
+     True, set()),
 ]
 
 
@@ -592,7 +614,7 @@ IN_FLIGHT_CASES = [
 def test_only_items_outside_the_in_flight_response_need_replay_evidence(protocol, history, pinned, replays):
     """MH-HOSTED-GATEWAY-003: the structural in-flight rule agreed with the Vibey request builder."""
 
-    field = "input" if protocol == "openai_responses" else "messages"
+    field = {"openai_responses": "input", "google": "contents"}.get(protocol, "messages")
     content = hosted_content({field: history, "tools": [SHELL]}, protocol, pinned=pinned)
     assert content.replays == frozenset(replays)
     assert content.calls == frozenset()
@@ -658,3 +680,8 @@ def test_declarations_are_recognized_by_every_vendors_type():
         {("web_search", "web_search_20250305")}
     )
     assert not hosted_content({"tools": tools}, "openai_chat", pinned=True)
+    # Gemini declares Google Search as a keyed tool object, named by the overlay's type.
+    gemini_tools = [{"functionDeclarations": [{"name": "web_search"}]}, {"googleSearch": {}}]
+    assert hosted_content({"tools": gemini_tools}, "google", pinned=True).calls == frozenset(
+        {("web_search", "google_search")}
+    )

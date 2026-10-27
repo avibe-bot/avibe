@@ -29,7 +29,7 @@ rules on top of those mappings.
 | Partial and abort | The shared `partial_message` policy is used by all three adapters. Usage captured before the first visible delta is retained, and errors/abort carry an assembled `AssistantMessage` whenever visible content or usage exists; empty placeholder slots alone do not count as streamed output, while non-empty terminal snapshots do. Consumer/task cancellation is preserved even if response cleanup fails. |
 | Retry admission | `RetryPolicy.delay` in `core/agent_core/agent/models.py` applies only the bounded retry count/time budget and obeys `ProviderError.retryable`; it does not reject a usage-only partial or infer a second streamed-output boundary. It admits at most one `after_thinking` retry per request; that attempt's thinking partial is never context, like any retried attempt's. A retry-admitted usage-only partial is never context: the retry resends the original request, and the attempt's usage is one non-context `ModelAttempt` audit row, in every mode (C-9 `context.md` §10, invariant 4), so per-attempt usage is kept without adding prompt attempts together in one response. `test_retry_obeys_provider_flag_and_allows_usage_only_partial` and `test_retry_keeps_a_usage_only_partial_out_of_the_context` are the loop proofs. |
 | Tool-call stop normalization | `StreamAssembler.finalize` changes only `stop` with one or more tool calls to canonical `tool_use`, following Pi. The loop admits execution only for `stop_reason="tool_use"`; calls attached to `length`, `safety`, `refusal`, or `error` are settled as `is_error` results explaining the stop reason. |
-| Parallel tool calls | No request turns them off, so a response may carry several calls: Anthropic Messages sends no `tool_choice`, so `disable_parallel_tool_use` keeps its default `false`; Chat Completions and Responses send no `parallel_tool_calls`, which defaults to `true`; a Gemini request sends no `toolConfig`, and Gemini has no switch for it. No Chat request may send `parallel_tool_calls: false`: a Chat relay serving Gemini has no switch to map it to, and the gateway's engine (CLIProxyAPI `c404af96`, `internal/translator/gemini/openai/chat-completions/gemini_openai_request.go`) then turns every tool off. The loop runs neighbouring concurrent calls at the same time and every `edit` or `write` alone (C-3 `loop-control.md` §2), a deviation from Pi, which runs a response's calls at once and serializes mutations only per file path. |
+| Parallel tool calls | No request turns them off, so a response may carry several calls: Anthropic Messages sends no `tool_choice`, so `disable_parallel_tool_use` keeps its default `false`; Chat Completions and Responses send no `parallel_tool_calls`, which defaults to `true`; a Gemini request sends no `toolConfig` beyond the one Google Search needs (`includeServerSideToolInvocations`), and Gemini has no switch for it. No Chat request may send `parallel_tool_calls: false`: a Chat relay serving Gemini has no switch to map it to, and the gateway's engine (CLIProxyAPI `c404af96`, `internal/translator/gemini/openai/chat-completions/gemini_openai_request.go`) then turns every tool off. The loop runs neighbouring concurrent calls at the same time and every `edit` or `write` alone (C-3 `loop-control.md` §2), a deviation from Pi, which runs a response's calls at once and serializes mutations only per file path. |
 
 ## Shared stream assembler and dispatch ledger
 
@@ -661,7 +661,7 @@ gateway's Gemini surface, which serves it to a Gemini Source untranslated.
 | Thinking | Same origin: a signed or unsigned thought is `{text, thought: true}` with its `thoughtSignature`. An empty block that holds only a signature goes back on the text part right before it (an answer's signature, which `TextBlock` cannot hold), else as `{text: "", thoughtSignature}`. A signature that is not well-formed base64 (a Chat reasoning marker an older transcript holds) is not sent. |
 | Tool call | `functionCall {name, args, id}` with the call's `thoughtSignature`. In the current turn (after the last user message), the first call of a step that carries no valid signature gets Google's documented stand-in `skip_thought_signature_validator`, so another origin's calls are accepted; earlier turns are not validated and get none. |
 | Tool result | `functionResponse {name, id, response: {output}}`, or `{error}` for an error result; image-only text is `(see attached image)`, empty text `(no tool output)`. A step's results share one `role="user"` content in call order. Images ride in `functionResponse.parts` on Gemini 3 and later and on non-Gemini ids, else in one user content after `Tool result image:` that follows the whole step's results. |
-| Tools | One `functionDeclarations` list with `name`, `description`, and the JSON Schema as `parametersJsonSchema`. |
+| Tools | One `functionDeclarations` list with `name`, `description`, and the JSON Schema as `parametersJsonSchema`; a natively declared `web_search` is `{"googleSearch": {}}` after it instead, with `toolConfig.includeServerSideToolInvocations: true` (Hosted tools, below). |
 | Reasoning effort | Gemini 3 and later and the `-latest` aliases get `thinkingConfig.thinkingLevel` (`xhigh`/`max` → `high`; `none` → `minimal`; `minimal` → `low` outside the Flash family, which alone takes it); Gemini 2.5 gets `thinkingBudget` (`minimal`/`low` 1024, `medium` 8192, `high` and above 24576, `none` 0 without thoughts). `includeThoughts` is set on every thinking model; other models get no `thinkingConfig`. The effort token (`registry.sent_effort`, the key Model Hub holds effort evidence under, and what its gateway reads back from the request) is the thinking level sent, or the effort a budget stands for (`0` none, `1024` low, `8192` medium, `24576` high). |
 | Output bound | `generationConfig.maxOutputTokens`. |
 
@@ -672,7 +672,9 @@ Gemini stream events (each `data:` frame is a `GenerateContentResponse` whose pa
 | `candidates[0].content.parts[].text` with `thought: true` | delta | `ThinkingDelta`; consecutive thought parts extend one block, and its `thoughtSignature` is the block's signature. |
 | `…parts[].text` | delta | `TextDelta`; consecutive text parts extend one block. A `thoughtSignature` on any of them, or on an empty part right after them, becomes an empty signed `ThinkingBlock` after that text once the text ends. |
 | `…parts[].functionCall` | delta | `ToolCallStart` and one `ToolCallDelta` of the JSON `args`; `id` is the native id, `thoughtSignature` the call's signature. An empty name is terminal `invalid_request`. |
-| any other part | ignored | Parts of a kind the request did not declare (inline data, code execution). |
+| `…parts[].toolCall` / `toolResponse` with `toolType: GOOGLE_SEARCH_WEB` | state | One `web_search` `HostedToolBlock` per call `id` (Hosted tools, below), only when the request declared it natively. |
+| any other part | ignored | Parts of a kind the request did not declare (inline data, code execution, another server-side tool). |
+| `candidates[0].groundingMetadata` | state | `webSearchQueries` and `groundingChunks` of the response, read at its finish (Hosted tools, below). |
 | `candidates[0].finishReason` | state | Stop reason (below). |
 | `usageMetadata` | state | `input = promptTokenCount - cachedContentTokenCount`; `output = candidatesTokenCount + thoughtsTokenCount`; `cache_read = cachedContentTokenCount`; `reasoning = thoughtsTokenCount`. The last frame's counts win. |
 | `promptFeedback.blockReason` without a finish | Done | `safety`, with the block reason as `error_message`. |
@@ -711,7 +713,7 @@ These rows describe the wire mapping the `ai` lane implements.
   that call from its result.
 - **Native replay and pins.** A response's hosted calls go back verbatim, their `native.payload` in place, only to
   the hop the request goes to, and only when that hop's Source served them on the same origin. The protocol must be
-  Anthropic or Responses, and the hop must still declare each tool they called natively. Such a request is pinned to
+  Anthropic, Responses or Gemini, and the hop must still declare each tool they called natively. Such a request is pinned to
   the hop's Source.
   - The response a request continues within its turn needs no replay evidence, and its request also names the
     model that served it (`x-avibe-pin-model`, when that id is ASCII). That response is the request's last assistant
@@ -740,6 +742,19 @@ These rows describe the wire mapping the `ai` lane implements.
   result everywhere, with `execution.mode: direct`; its images are files the record lists.
 
 An Anthropic citation covers its whole text block, so it carries no range.
+
+Gemini (`google`, plan `../vibey-gemini-native.md` §4) runs `web_search` as Google Search:
+
+| Concern | Gemini `generateContent` |
+| --- | --- |
+| Native declaration | `{"googleSearch": {}}` after the `functionDeclarations`, for the overlay's `{"type": "google_search"}`, plus `toolConfig.includeServerSideToolInvocations: true` |
+| Proxy declaration | a `functionDeclarations` entry with the canonical schema |
+| Native result → `HostedToolBlock` | a `toolCall` part (`toolType: GOOGLE_SEARCH_WEB`, `args.queries`) opens one `search` block by its `id`, `pending`; the `toolResponse` part with the same `id` completes it. Both parts, signatures included, are its `native.payload`. The `search_suggestions` markup in the response is never kept. |
+| Response-level facts | at the finish, the distinct `groundingMetadata.webSearchQueries` are `counts.web_search_requests`, and the `groundingChunks` (`web.uri`, `web.title`, each URL once) are the sources of the response's last completed search |
+| Citations | none yet: `groundingSupports` is not read |
+| Same-Source replay | `native.payload` parts verbatim, in place in the `model` content |
+| Other-origin replay | the portable synthetic call and result, as for the other protocols |
+| Pinning, in-flight replay | as for the other protocols; the in-flight response is the last `model` content followed only by function responses |
 
 | Concern | Anthropic Messages | OpenAI Responses (OpenAI, xAI) | OpenAI Chat Completions |
 | --- | --- | --- | --- |
