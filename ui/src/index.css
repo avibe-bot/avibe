@@ -1031,6 +1031,61 @@ pre,
 }
 .vr-fileview-text .vr-fileview-md pre code { font-size: 0.92em; }
 
+/* PDF text layer (components/ui/pdf-pages.tsx). pdf.js lays one transparent span per run of text
+   over the page canvas, sized from --total-scale-factor (CSS px per PDF point, set on the page box)
+   and the --font-height / --scale-x / --rotate it writes on each span, so the text can be selected
+   and copied where it is drawn. Adapted from pdf.js's viewer stylesheet (Apache-2.0); the end block
+   is what keeps a selection from jumping across the page (lib/pdfTextSelection.ts). */
+.vr-pdf-text {
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  overflow: clip;
+  line-height: 1;
+  text-align: initial;
+  letter-spacing: normal;
+  word-spacing: normal;
+  -webkit-text-size-adjust: none;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+}
+.vr-pdf-text :is(span, br) {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  -webkit-user-select: text;
+  user-select: text;
+}
+.vr-pdf-text > span {
+  --font-height: 0;
+  --scale-x: 1;
+  --rotate: 0deg;
+  z-index: 1;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.vr-pdf-text ::selection {
+  background: color-mix(in srgb, var(--mint) 35%, transparent);
+  color: transparent;
+}
+.vr-pdf-text br::selection { background: transparent; }
+.vr-pdf-text-end {
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  display: block;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+}
+.vr-pdf-text.selecting .vr-pdf-text-end { top: 0; }
+
 /* The project header remains a scroll/tap target until a touch hold activates. */
 .project-drag-header {
   cursor: pointer;

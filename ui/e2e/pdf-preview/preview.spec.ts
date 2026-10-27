@@ -18,6 +18,7 @@ const DOCS: Record<string, Buffer> = {
   doc_five: buildPdf({ pages: 5 }),
   doc_long: buildPdf({ pages: 14 }),
   doc_cjk: buildPdf({ pages: 2, cjk: true }),
+  doc_radicals: buildPdf({ pages: 1, cjk: true, radicals: true }),
   doc_broken: Buffer.from('%PDF-1.4\nthis is not a PDF document\n'),
 };
 
@@ -69,6 +70,52 @@ const expectDrawn = async (dialog: Locator, n: number) => {
   expect(close(r, er) && close(g, eg) && close(b, eb), `page ${n} band is rgb(${r}, ${g}, ${b}), expected rgb(${er}, ${eg}, ${eb})`).toBe(true);
 };
 
+// The text layer's span for ``text`` on page ``n``, measured against the page's own drawing: the
+// share of dark pixels under the span, and beside it on the same line (blank in every fixture). Text
+// that is selectable but not where it is drawn would highlight the wrong words.
+const textOverInk = (dialog: Locator, n: number, text: string) =>
+  pageBox(dialog, n).evaluate((box, wanted) => {
+    const span = Array.from(box.querySelectorAll('.vr-pdf-text > span')).find((el) => el.textContent === wanted);
+    const canvas = box.querySelector('canvas');
+    if (!span || !canvas) return null;
+    const page = box.getBoundingClientRect();
+    const rect = span.getBoundingClientRect();
+    const sx = canvas.width / page.width;
+    const sy = canvas.height / page.height;
+    const ctx = canvas.getContext('2d')!;
+    const ink = (x: number, y: number, w: number, h: number) => {
+      const data = ctx.getImageData(Math.round((x - page.left) * sx), Math.round((y - page.top) * sy), Math.max(1, Math.round(w * sx)), Math.max(1, Math.round(h * sy))).data;
+      let dark = 0;
+      for (let i = 0; i < data.length; i += 4) if (data[i] < 100 && data[i + 1] < 100 && data[i + 2] < 100) dark += 1;
+      return dark / (data.length / 4);
+    };
+    return { over: ink(rect.left, rect.top, rect.width, rect.height), beside: ink(rect.right + 4, rect.top, rect.width, rect.height) };
+  }, text);
+
+const expectTextOverInk = async (dialog: Locator, n: number, text: string) => {
+  await expect(pageBox(dialog, n)).toHaveAttribute('data-pdf-text', 'true');
+  const ink = await textOverInk(dialog, n, text);
+  expect(ink, `page ${n} has a text span "${text}"`).not.toBeNull();
+  expect(ink!.over, `ink under "${text}"`).toBeGreaterThan(0.08);
+  expect(ink!.beside, `ink beside "${text}"`).toBeLessThan(0.01);
+};
+
+const spanBox = async (dialog: Locator, n: number, text: string) =>
+  (await pageBox(dialog, n).locator('.vr-pdf-text > span').filter({ hasText: text }).first().boundingBox())!;
+
+const selectionText = (page: Page) => page.evaluate(() => document.getSelection()?.toString() ?? '');
+
+// Press on the start of the first line and drag to a point, as a mouse or a dragged selection handle
+// does; reports the selection while the pointer is still down.
+const dragSelect = async (page: Page, from: { x: number; y: number }, to: { x: number; y: number }) => {
+  await page.mouse.move(from.x, from.y);
+  await page.mouse.down();
+  for (let i = 1; i <= 12; i += 1) await page.mouse.move(from.x + ((to.x - from.x) * i) / 12, from.y + ((to.y - from.y) * i) / 12);
+  const selected = await selectionText(page);
+  await page.mouse.up();
+  return selected;
+};
+
 const scrollToPage = async (dialog: Locator, n: number) => {
   await scroller(dialog).evaluate((el, top) => el.scrollTo({ top }), await pageBox(dialog, n).evaluate((p) => (p as HTMLElement).offsetTop));
 };
@@ -116,6 +163,7 @@ test.describe('phones and tablets', () => {
     await scroller(dialog).evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
     await expectDrawn(dialog, 14);
     await expect(pageBox(dialog, 1).locator('canvas')).toHaveCount(0);
+    await expect(pageBox(dialog, 1).locator('.vr-pdf-text')).toHaveCount(0);
     expect(await dialog.locator('[data-pdf-page] canvas').count()).toBeLessThan(14);
   });
 
@@ -139,6 +187,16 @@ test.describe('phones and tablets', () => {
     expect(centreY).toBeLessThan(third.y + third.height);
     await expect(position(dialog)).toHaveText('3 / 5');
     await expectDrawn(dialog, 3);
+    // Once the page is redrawn at the new size, its selectable text is still over the drawing.
+    await expect
+      .poll(() =>
+        pageBox(dialog, 3).evaluate((box) => {
+          const canvas = box.querySelector('canvas');
+          return !!canvas && canvas.width >= Math.floor(box.getBoundingClientRect().width * window.devicePixelRatio) - 1;
+        }),
+      )
+      .toBe(true);
+    await expectTextOverInk(dialog, 3, 'Page 3');
 
     await dialog.getByRole('button', { name: 'Reset zoom' }).click();
     await expect(dialog.getByText('100%')).toBeVisible();
@@ -180,6 +238,50 @@ test.describe('phones and tablets', () => {
     const dialog = await openPreview(page, 'doc_cjk');
     await expectDrawn(dialog, 1);
     expect(cmapRequests.length).toBeGreaterThan(0);
+    // And it is selectable as the characters it shows, so a copy gives back real Chinese text.
+    await expect(pageBox(dialog, 1).locator('.vr-pdf-text')).toContainText('中文预览');
+    await expectTextOverInk(dialog, 1, '中文预览');
+  });
+
+  test('characters a font maps to look-alike radicals are selected as the characters shown', async ({ page }) => {
+    const dialog = await openPreview(page, 'doc_radicals');
+    await expectTextOverInk(dialog, 1, '月份');
+    await expect(pageBox(dialog, 1).locator('.vr-pdf-text')).not.toContainText('\u2F49');
+  });
+
+  test("each page's text lies over its drawing and is what a touch on it reaches", async ({ page }) => {
+    const dialog = await openPreview(page, 'doc_five');
+    await expectTextOverInk(dialog, 1, 'Page 1');
+    const box = await spanBox(dialog, 1, 'Page 1');
+    const reached = await page.evaluate(({ x, y }) => document.elementFromPoint(x, y)?.textContent, { x: box.x + box.width / 4, y: box.y + box.height / 2 });
+    expect(reached).toBe('Page 1');
+
+    await scrollToPage(dialog, 4);
+    await expectTextOverInk(dialog, 4, 'Page 4');
+  });
+
+  test('a long press selects the word under the finger', async ({ page, browserName }) => {
+    test.skip(browserName !== 'chromium', 'a native long press is driven through the Chromium DevTools protocol');
+    const dialog = await openPreview(page, 'doc_five');
+    await expectTextOverInk(dialog, 1, 'Page 1');
+    const box = await spanBox(dialog, 1, 'Page 1');
+    const cdp = await page.context().newCDPSession(page);
+    await cdp.send('Input.synthesizeTapGesture', { x: box.x + box.width / 5, y: box.y + box.height / 2, duration: 1200, tapCount: 1, gestureSourceType: 'touch' });
+    await expect.poll(() => selectionText(page)).toBe('Page');
+  });
+
+  test('extending a selection into blank space keeps it on the text', async ({ page }) => {
+    const dialog = await openPreview(page, 'doc_cjk');
+    await expectTextOverInk(dialog, 1, 'Page 1');
+    const first = await spanBox(dialog, 1, 'Page 1');
+    const sheet = (await pageBox(dialog, 1).boundingBox())!;
+    const start = { x: first.x + 1, y: first.y + first.height / 2 };
+    // Past the end of the line, in the margin: WebKit would otherwise snap the selection's end to the
+    // start of the page and select nothing.
+    expect(await dragSelect(page, start, { x: sheet.x + sheet.width - 20, y: start.y })).toMatch(/^Page/);
+    await page.evaluate(() => document.getSelection()?.removeAllRanges());
+    // Below both lines of text, above the coloured band.
+    expect(await dragSelect(page, start, { x: sheet.x + sheet.width / 2, y: sheet.y + sheet.height * 0.26 })).toMatch(/^Page 1/);
   });
 
   test('a file that is not a valid PDF says so instead of drawing blank pages', async ({ page }) => {
@@ -210,5 +312,17 @@ test.describe('desktop browsers', () => {
     await expect(dialog.locator('iframe')).toHaveCount(0);
     await expect(dialog.locator('[data-pdf-page]')).toHaveCount(5);
     await expectDrawn(dialog, 1);
+  });
+
+  test("the page reader's text can be selected with the mouse and copied", async ({ page, context }) => {
+    await reportViewer(page, false);
+    await context.grantPermissions(['clipboard-read', 'clipboard-write']);
+    const dialog = await openPreview(page, 'doc_five');
+    await expectTextOverInk(dialog, 1, 'Page 1');
+    const box = await spanBox(dialog, 1, 'Page 1');
+    const selected = await dragSelect(page, { x: box.x + 1, y: box.y + box.height / 2 }, { x: box.x + box.width - 1, y: box.y + box.height / 2 });
+    expect(selected).toBe('Page 1');
+    await page.keyboard.press('ControlOrMeta+C');
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe('Page 1');
   });
 });
