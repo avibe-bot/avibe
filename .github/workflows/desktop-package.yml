@@ -4,7 +4,22 @@ name: desktop-self-contained-package
 # without the complete Apple credential set; manual builds sign when the whole
 # set is configured and stay ad-hoc when none of it is. Apple and updater keys
 # come only from desktop-updater.
+#
+# Only reruns of the same tag can read a tag's caches, so release builds
+# restore caches but never save them. The unsigned cache warm-up (a master push
+# that changes a Rust cache input, and a daily run) builds every target without
+# signing or uploading anything; release builds restore its default-branch
+# caches.
 on:
+  push:
+    branches: [master]
+    paths:
+      - desktop/Cargo.lock
+      - desktop/cua-driver/**
+      - desktop/scripts/prepare-cua-driver.py
+      - .github/workflows/desktop-package.yml
+  schedule:
+    - cron: "41 18 * * *"
   workflow_dispatch:
     inputs:
       version:
@@ -41,6 +56,10 @@ jobs:
     name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     environment: desktop-updater
+    env:
+      # Never a release: a release build always carries its tag.
+      DESKTOP_CACHE_WARMUP: ${{ !inputs.release_tag && (github.event_name == 'push' || github.event_name == 'schedule') }}
+      DESKTOP_VERSION: ${{ inputs.version || '0.0.0' }}
     strategy:
       fail-fast: false
       matrix:
@@ -77,15 +96,37 @@ jobs:
           cache-dependency-glob: uv.lock
           prune-cache: true
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+      # Cargo artifacts and a prepared Cua Driver are reused only from the same
+      # compiler and Apple SDK; a toolchain change starts a new cache entry.
+      - name: Resolve build cache identity
+        id: toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          fingerprint() {
+            python -c 'import hashlib, sys; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest()[:16])'
+          }
+          echo "rustc=$(rustc -vV | fingerprint)" >> "$GITHUB_OUTPUT"
+          if [ "$RUNNER_OS" = macOS ]; then
+            echo "apple=$({ xcodebuild -version; xcrun --sdk macosx --show-sdk-build-version; } | fingerprint)" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Dependencies only: bundles and final binaries are rebuilt every time.
+      # The warm-up restores its exact key only, so each entry starts clean.
+      - name: Restore Rust build cache
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            desktop/target
-          key: ${{ runner.os }}-${{ matrix.target }}-desktop-package-${{ hashFiles('desktop/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-${{ matrix.target }}-desktop-package-
+            desktop/target/release/.fingerprint
+            desktop/target/release/build
+            desktop/target/release/deps
+            desktop/target/cua-driver-patched
+          key: ${{ runner.os }}-${{ matrix.target }}-desktop-package-${{ steps.toolchain.outputs.rustc }}-${{ hashFiles('desktop/Cargo.lock', 'desktop/cua-driver/sources.json') }}
+          restore-keys: ${{ env.DESKTOP_CACHE_WARMUP != 'true' && format('{0}-{1}-desktop-package-{2}-', runner.os, matrix.target, steps.toolchain.outputs.rustc) || '' }}
 
       - name: Build Workbench
         working-directory: ui
@@ -102,7 +143,7 @@ jobs:
       - name: Prepare package version
         shell: bash
         env:
-          AVIBE_DESKTOP_VERSION: ${{ inputs.version }}
+          AVIBE_DESKTOP_VERSION: ${{ env.DESKTOP_VERSION }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           SOURCE_SHA: ${{ inputs.source_sha }}
         run: |
@@ -128,8 +169,9 @@ jobs:
       # build fails here on a missing or partial credential set; a manual build
       # accepts the complete set or none of it. Only identity, keychain, and
       # notary key locations leave this step, under names Tauri never reads.
+      # The cache warm-up alone skips it and stays ad-hoc.
       - name: Import Apple signing identity
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && env.DESKTOP_CACHE_WARMUP != 'true'
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -156,11 +198,33 @@ jobs:
           python -m pip install --disable-pip-version-check
           --only-binary=:all: "PyYAML==6.0.3"
 
+      # The pinned helper's inputs never change between releases. A restored
+      # helper is kept only when its provenance names exactly these inputs and
+      # it passes the checks a fresh build passes; otherwise it is rebuilt.
+      - name: Restore prepared Cua Driver
+        id: cua-driver-cache
+        if: runner.os == 'macOS'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}
+            desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}.provenance.json
+          key: cua-driver-${{ matrix.target }}-${{ steps.toolchain.outputs.apple }}-${{ hashFiles('desktop/cua-driver/**', 'desktop/scripts/prepare-cua-driver.py') }}
+
       - name: Prepare pinned Cua Driver sidecar
         if: runner.os == 'macOS'
         run: >
           python desktop/scripts/prepare-cua-driver.py
-          --target "${{ matrix.target }}"
+          --target "${{ matrix.target }}" --reuse-verified
+
+      - name: Save prepared Cua Driver
+        if: runner.os == 'macOS' && !inputs.release_tag && steps.cua-driver-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}
+            desktop/src-tauri/binaries/cua-driver-${{ matrix.target }}.provenance.json
+          key: ${{ steps.cua-driver-cache.outputs.cache-primary-key }}
 
       - name: Clean prior bundle output
         shell: bash
@@ -182,6 +246,20 @@ jobs:
           --bundles "${{ matrix.bundle }}"
           --features bundled-runtime
           --config tauri.release.conf.json
+
+      - name: Save Rust build cache
+        if: ${{ !inputs.release_tag && steps.rust-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            desktop/target/release/.fingerprint
+            desktop/target/release/build
+            desktop/target/release/deps
+            desktop/target/cua-driver-patched
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
       # The .app inside the DMG. A signed build signs the Cua Driver helper and
       # then the app with the Team's Developer ID, pins both code identities,
@@ -298,7 +376,7 @@ jobs:
         run: >
           sh scripts/create-macos-dmg.sh
           target/release/bundle/macos/Avibe.app
-          "target/release/bundle/dmg/Avibe_${{ inputs.version }}_${{ matrix.target }}.dmg"
+          "target/release/bundle/dmg/Avibe_${{ env.DESKTOP_VERSION }}_${{ matrix.target }}.dmg"
 
       # The DMG carries the stapled app; it is signed, notarized, and stapled
       # itself, then the shipped shapes are checked the way Gatekeeper sees a
@@ -310,7 +388,7 @@ jobs:
         shell: bash
         run: |
           set -eu
-          dmg="target/release/bundle/dmg/Avibe_${{ inputs.version }}_${{ matrix.target }}.dmg"
+          dmg="target/release/bundle/dmg/Avibe_${{ env.DESKTOP_VERSION }}_${{ matrix.target }}.dmg"
           python scripts/macos_signing.py sign-dmg "$dmg"
           python scripts/macos_signing.py notarize "$dmg"
           python scripts/macos_signing.py verify-release \
@@ -328,7 +406,7 @@ jobs:
       - name: Record artifact hashes
         shell: bash
         env:
-          AVIBE_DESKTOP_VERSION: ${{ inputs.version }}
+          AVIBE_DESKTOP_VERSION: ${{ env.DESKTOP_VERSION }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           TARGET: ${{ matrix.target }}
           RUNNER_OS: ${{ runner.os }}
@@ -371,8 +449,9 @@ jobs:
             --target "$TARGET" --app desktop/target/release/bundle/macos/Avibe.app
 
       - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f  # v6
+        if: env.DESKTOP_CACHE_WARMUP != 'true'
         with:
-          name: avibe-desktop-${{ inputs.version }}-${{ matrix.target }}
+          name: avibe-desktop-${{ env.DESKTOP_VERSION }}-${{ matrix.target }}
           path: desktop-package/
           if-no-files-found: error
           retention-days: 14
