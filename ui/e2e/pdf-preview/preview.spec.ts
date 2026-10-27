@@ -19,6 +19,9 @@ const DOCS: Record<string, Buffer> = {
   doc_long: buildPdf({ pages: 14 }),
   doc_cjk: buildPdf({ pages: 2, cjk: true }),
   doc_radicals: buildPdf({ pages: 1, cjk: true, radicals: true }),
+  doc_rot90: buildPdf({ pages: 1, rotate: 90 }),
+  doc_rot180: buildPdf({ pages: 1, rotate: 180 }),
+  doc_rot270: buildPdf({ pages: 1, rotate: 270 }),
   doc_broken: Buffer.from('%PDF-1.4\nthis is not a PDF document\n'),
 };
 
@@ -71,8 +74,9 @@ const expectDrawn = async (dialog: Locator, n: number) => {
 };
 
 // The text layer's span for ``text`` on page ``n``, measured against the page's own drawing: the
-// share of dark pixels under the span, and beside it on the same line (blank in every fixture). Text
-// that is selectable but not where it is drawn would highlight the wrong words.
+// share of dark pixels under the span, and beside it on the same line, on whichever side has room
+// (blank in every fixture). Text that is selectable but not where it is drawn would highlight the
+// wrong words.
 const textOverInk = (dialog: Locator, n: number, text: string) =>
   pageBox(dialog, n).evaluate((box, wanted) => {
     const span = Array.from(box.querySelectorAll('.vr-pdf-text > span')).find((el) => el.textContent === wanted);
@@ -86,10 +90,11 @@ const textOverInk = (dialog: Locator, n: number, text: string) =>
     const ink = (x: number, y: number, w: number, h: number) => {
       const data = ctx.getImageData(Math.round((x - page.left) * sx), Math.round((y - page.top) * sy), Math.max(1, Math.round(w * sx)), Math.max(1, Math.round(h * sy))).data;
       let dark = 0;
-      for (let i = 0; i < data.length; i += 4) if (data[i] < 100 && data[i + 1] < 100 && data[i + 2] < 100) dark += 1;
+      for (let i = 0; i < data.length; i += 4) if (data[i] < 100 && data[i + 1] < 100 && data[i + 2] < 100 && data[i + 3] > 128) dark += 1;
       return dark / (data.length / 4);
     };
-    return { over: ink(rect.left, rect.top, rect.width, rect.height), beside: ink(rect.right + 4, rect.top, rect.width, rect.height) };
+    const besideX = rect.right + 4 + rect.width <= page.right ? rect.right + 4 : rect.left - 4 - rect.width;
+    return { over: ink(rect.left, rect.top, rect.width, rect.height), beside: ink(besideX, rect.top, rect.width, rect.height) };
   }, text);
 
 const expectTextOverInk = async (dialog: Locator, n: number, text: string) => {
@@ -247,6 +252,15 @@ test.describe('phones and tablets', () => {
     const dialog = await openPreview(page, 'doc_radicals');
     await expectTextOverInk(dialog, 1, '月份');
     await expect(pageBox(dialog, 1).locator('.vr-pdf-text')).not.toContainText('\u2F49');
+  });
+
+  test('on a page with /Rotate the text is turned with the drawing', async ({ page }) => {
+    for (const file of ['doc_rot90', 'doc_rot180', 'doc_rot270']) {
+      const dialog = await openPreview(page, file);
+      await expectTextOverInk(dialog, 1, 'Page 1');
+      await dialog.getByRole('button', { name: 'Close' }).click();
+      await expect(dialog).toHaveCount(0);
+    }
   });
 
   test("each page's text lies over its drawing and is what a touch on it reaches", async ({ page }) => {

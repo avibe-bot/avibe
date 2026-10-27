@@ -1034,7 +1034,8 @@ pre,
 /* PDF text layer (components/ui/pdf-pages.tsx). pdf.js lays one transparent span per run of text
    over the page canvas, sized from --total-scale-factor (CSS px per PDF point, set on the page box)
    and the --font-height / --scale-x / --rotate it writes on each span, so the text can be selected
-   and copied where it is drawn. Adapted from pdf.js's viewer stylesheet (Apache-2.0); the end block
+   and copied where it is drawn. The layer is laid out in unrotated page space; a page's /Rotate
+   arrives as data-main-rotation and turns the layer onto the drawing. Adapted from pdf.js's viewer stylesheet (Apache-2.0); the end block
    is what keeps a selection from jumping across the page (lib/pdfTextSelection.ts). */
 .vr-pdf-text {
   --min-font-size: 1;
@@ -1053,6 +1054,9 @@ pre,
   forced-color-adjust: none;
   transform-origin: 0 0;
 }
+.vr-pdf-text[data-main-rotation="90"] { transform: rotate(90deg) translateY(-100%); }
+.vr-pdf-text[data-main-rotation="180"] { transform: rotate(180deg) translate(-100%, -100%); }
+.vr-pdf-text[data-main-rotation="270"] { transform: rotate(270deg) translateX(-100%); }
 .vr-pdf-text :is(span, br) {
   position: absolute;
   color: transparent;

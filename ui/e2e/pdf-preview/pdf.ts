@@ -7,6 +7,7 @@
 // many generators emit for Chinese text, and one pdf.js can only decode with its bundled CMaps.
 // ``radicals`` adds a "月份" line whose ToUnicode maps 月 to the Kangxi radical ⽉ (U+2F49), as the
 // fonts Chrome embeds do: it looks right, and copies as a different character unless unified.
+// ``rotate`` sets every page's /Rotate, as scanners and some exporters do for landscape pages.
 
 export type Rgb = readonly [number, number, number];
 
@@ -29,7 +30,7 @@ export function pageColor(index: number): Rgb {
 
 const unit = (v: number) => (v / 255).toFixed(3);
 
-export function buildPdf({ pages, cjk = false, radicals = false }: { pages: number; cjk?: boolean; radicals?: boolean }): Buffer {
+export function buildPdf({ pages, cjk = false, radicals = false, rotate = 0 }: { pages: number; cjk?: boolean; radicals?: boolean; rotate?: 0 | 90 | 180 | 270 }): Buffer {
   const objects: string[] = [];
   const add = (body: string) => {
     objects.push(body);
@@ -77,7 +78,7 @@ export function buildPdf({ pages, cjk = false, radicals = false }: { pages: numb
     const content = add(`<< /Length ${Buffer.byteLength(stream)} >>\nstream\n${stream}\nendstream`);
     const fonts = `/F1 ${helvetica} 0 R${cjk ? ` /F2 ${song} 0 R` : ''}`;
     kids.push(
-      add(`<< /Type /Page /Parent ${pagesNode} 0 R /MediaBox [0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}] /Contents ${content} 0 R /Resources << /Font << ${fonts} >> >> >>`),
+      add(`<< /Type /Page /Parent ${pagesNode} 0 R /MediaBox [0 0 ${PAGE_WIDTH} ${PAGE_HEIGHT}]${rotate ? ` /Rotate ${rotate}` : ''} /Contents ${content} 0 R /Resources << /Font << ${fonts} >> >> >>`),
     );
   }
   objects[catalog - 1] = `<< /Type /Catalog /Pages ${pagesNode} 0 R >>`;

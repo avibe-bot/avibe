@@ -135,8 +135,3 @@ export function trackPdfTextLayer(layer: HTMLElement): () => void {
     }
   };
 }
-
-/** Layers currently tracked; for tests. */
-export function trackedPdfTextLayerCount(): number {
-  return layers.size;
-}

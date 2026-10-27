@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { PDF_TEXT_LAYER_CLASS, trackPdfTextLayer, trackedPdfTextLayerCount } from './pdfTextSelection';
+import { PDF_TEXT_LAYER_CLASS, trackPdfTextLayer } from './pdfTextSelection';
 
 const stops: Array<() => void> = [];
 
@@ -57,14 +57,27 @@ describe('trackPdfTextLayer', () => {
     expect(first.lastElementChild).toBe(end(first));
   });
 
-  it('stops tracking a layer and drops the document listeners with the last one', () => {
-    const layer = layerWith('Page');
-    layerWith('Other');
-    expect(trackedPdfTextLayerCount()).toBe(2);
-    stops.splice(0).forEach((stop) => stop());
-    expect(trackedPdfTextLayerCount()).toBe(0);
-    // Listeners are gone: a press no longer reaches the released layer.
-    layer.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-    expect(layer.classList.contains('selecting')).toBe(false);
+  it('leaves a released layer alone, and tracks layers again after every one was released', () => {
+    const released = layerWith('Page', 'one');
+    const kept = layerWith('Page', 'two');
+    stops.shift()!();
+    const selectFirstWord = (layer: HTMLElement) => {
+      const range = document.createRange();
+      range.selectNodeContents(layer.firstElementChild!);
+      document.getSelection()!.removeAllRanges();
+      document.getSelection()!.addRange(range);
+      document.dispatchEvent(new Event('selectionchange'));
+    };
+    selectFirstWord(released);
+    expect(released.classList.contains('selecting')).toBe(false);
+    selectFirstWord(kept);
+    expect(kept.classList.contains('selecting')).toBe(true);
+
+    // Releasing the last layer stops the shared listeners; the next layer must start them again
+    // (a reopened preview, or the first page drawn after scrolling back).
+    stops.shift()!();
+    const next = layerWith('Page', 'three');
+    selectFirstWord(next);
+    expect(next.classList.contains('selecting')).toBe(true);
   });
 });
