@@ -130,6 +130,7 @@ export async function listenDesktopUpdateState(
 
   const eventId = await invoke('plugin:event|listen', {
     event: DESKTOP_UPDATE_STATE_EVENT,
+    target: { kind: 'Any' },
     handler: internals.transformCallback((event: unknown) => {
       const payload = (event as DesktopUpdateStateEvent).payload as DesktopUpdateState;
       handler(payload);

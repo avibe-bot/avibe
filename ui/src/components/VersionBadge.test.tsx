@@ -4,7 +4,10 @@ import { I18nextProvider } from 'react-i18next';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import i18n from '@/i18n';
 import { VersionBadge } from './VersionBadge';
-import { DESKTOP_OPEN_UPDATES_EVENT } from '../lib/desktopShell';
+import {
+  DESKTOP_OPEN_UPDATES_EVENT,
+  DESKTOP_UPDATE_STATE_EVENT,
+} from '../lib/desktopShell';
 
 const api = vi.hoisted(() => ({
   getVersion: vi.fn(async () => ({ current: '9.9.9', latest: '10.0.0', has_update: true, managed_by: 'desktop' })),
@@ -15,6 +18,7 @@ const defaultDesktopInvoke = vi.hoisted(() => async (command: string) => {
   if (command === 'desktop_update_state') {
     return { phase: 'available', latest: '10.0.0', channel: 'stable', skippedVersion: null, interactive: true };
   }
+  if (command === 'plugin:event|listen') return 1;
   return undefined;
 });
 const desktopInvoke = vi.hoisted(() => vi.fn(defaultDesktopInvoke));
@@ -48,7 +52,10 @@ function renderInShell(
   Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', { value: appVersion, configurable: true });
   if (withUpdater) {
     Object.defineProperty(window, '__TAURI_INTERNALS__', {
-      value: { invoke: desktopInvoke },
+      value: {
+        invoke: desktopInvoke,
+        transformCallback: () => 1,
+      },
       configurable: true,
     });
   }
@@ -111,6 +118,18 @@ describe('desktop version ownership', () => {
     expect(window.dispatchEvent(event)).toBe(false);
     expect(await screen.findByRole('dialog')).toBeTruthy();
     expect(window.__AVIBE_DESKTOP_UPDATES_HANDLED__).toBe(true);
+  });
+
+  it('registers the native updater state listener for every event target', async () => {
+    renderInShell('3.2.2-rc.13', '3.2.2rc13', '3.2.3', true);
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith(
+      'plugin:event|listen',
+      expect.objectContaining({
+        event: DESKTOP_UPDATE_STATE_EVENT,
+        target: { kind: 'Any' },
+        handler: 1,
+      }),
+    ));
   });
 
   it('uses the desktop updater IPC for install and never calls the Runtime upgrade API', async () => {
