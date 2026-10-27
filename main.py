@@ -194,10 +194,7 @@ def main():
             logger.warning("Avibe built-in Skills are unavailable", exc_info=True)
 
         apply_claude_sdk_patches()
-        from vibe.sentry_integration import init_sentry
 
-        init_sentry(config, component="service")
-        
         logger.info("Starting vibe-remote service...")
         logger.info(f"Working directory: {config.runtime.default_cwd}")
         logger.info(

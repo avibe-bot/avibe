@@ -266,7 +266,7 @@ The degraded HTTP/2 path sends `User-Agent: Avibe/<version>`, negotiated
 or `Sec-Fetch-*` fingerprint headers. It decodes only gzip/deflate (plus identity)
 with bounded standard-library decoders. Native br/zstd decoding stays inside
 libcurl; do not install Python `brotli` or `zstandard` for this feature, because
-importable codecs change unrelated Sentry/HTTP/Discord defaults. It cannot
+importable codecs change unrelated HTTP/Discord defaults. It cannot
 impersonate Chrome TLS; its
 `transport_degraded` marker explicitly states that exception and it must not
 silently choose another browser profile.
