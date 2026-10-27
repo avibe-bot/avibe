@@ -9,12 +9,15 @@ to agent-core, change backend registration, or upgrade the engine.
 The complete protocol vocabulary includes `google`. New Google API-key Sources
 are admitted with `vendor: "custom"`, explicit `protocol: "google"`, an explicit
 Base URL and the usual transient `key` through the existing observe/create APIs.
+Since v22 the `gemini` catalog row pins `google` on Google's native root, so a
+Gemini API key is a `google` Source of vendor `gemini` (`../vibey-gemini-native.md`
+§3), and one saved on the OpenAI-compatible endpoint moves to it on load.
 Existing vendor pins, subscriptions, OAuth and native CLI configuration do not
 change. The UI protocol picker still contains only its three approved options.
 Existing Source details can label Google; its tier suggestions are empty.
-The custom-only Google vendor rule is validated before API credential work and
-at config/runtime Source admission; unverified save cannot bypass it. Source and
-SourceCreate schemas enforce the same conditional.
+The Google vendor rule (`custom`, or the `gemini` catalog pin) is validated before
+API credential work and at config/runtime Source admission; unverified save cannot
+bypass it. Source and SourceCreate schemas enforce the same conditional.
 
 The Base URL is the upstream origin or a proxy root, optionally ending in
 `/v1beta`; that suffix is removed only for CPA configuration because its Gemini
@@ -23,8 +26,10 @@ because this executor appends paths rather than preserving a Base URL query.
 Discovery calls `<root>/v1beta/models`, supplies the held key
 as `x-goog-api-key`, and follows `nextPageToken` on that same endpoint. Redirects,
 malformed pages and repeated continuation tokens fail the whole observation;
-partial inventory must never replace a saved list. Model names lose only their
-`models/` API resource prefix. Inventory does not invent limits, vision support
+partial inventory must never replace a saved list. A `custom` Source's model names
+lose only their `models/` API resource prefix; a `gemini` Source keeps Google's
+`models/<id>` names, as its OpenAI-compatible listing always named them, and its
+engine entry routes each by that alias while calling the bare id upstream. Inventory does not invent limits, vision support
 or reasoning tiers.
 
 Google is not added to custom Auto detection: its inference endpoints require a

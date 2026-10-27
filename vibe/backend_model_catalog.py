@@ -684,8 +684,9 @@ IMAGE_MODEL_KINDS: tuple[str, ...] = ("api_key", "subscription")
 # What a call names itself; an image model's fixed request fields may not set them.
 IMAGE_CALL_FIELDS: frozenset[str] = frozenset({"model", "prompt", "size", "aspect_ratio", "n", "images", "stream"})
 # The protocols whose engine entries serve the images endpoints (vibey-hosted-tools.md §7.4): an image model is
-# offered, registered and called on a Source of one of them only.
-IMAGE_PROTOCOLS: frozenset[str] = frozenset({"openai_responses", "openai_chat"})
+# offered, registered and called on a Source of one of them only. A Google Source registers its image models on an
+# internal OpenAI-compatible entry of the same key (vibey-gemini-native.md §3).
+IMAGE_PROTOCOLS: frozenset[str] = frozenset({"openai_responses", "openai_chat", "google"})
 IMAGE_MODEL_PARAMS: tuple[str, ...] = ("images", "n", "size")
 IMAGE_SIZE_FORMS: tuple[str, ...] = ("pixels", "ratio")
 # One line in every request's tool block: bounded so a catalog line cannot grow every prompt prefix.
@@ -871,6 +872,11 @@ def hosted_tool_spec(vendor: str, protocol: str, model_id: str, tool: str) -> Ho
 CUSTOM_VENDOR: Final = "custom"
 
 
+# Protocols besides its catalog one that a vendor's routes were verified on: Gemini's image route runs on Google's
+# OpenAI-compatible surface, which a Chat relay serving Gemini also speaks (vibey-gemini-native.md §3).
+_ALSO_VERIFIED_ON: Final[Mapping[str, tuple[str, ...]]] = {"gemini": ("openai_chat",)}
+
+
 def prior_vendors(vendor: str, protocol: str) -> tuple[str, ...]:
     """The overlay vendors whose priors a Source of ``vendor`` and ``protocol`` may take (vibey-hosted-tools.md §3.1).
 
@@ -884,7 +890,10 @@ def prior_vendors(vendor: str, protocol: str) -> tuple[str, ...]:
         return (vendor,)
     from vibe.model_hub_runtime.api_key_vendors import pinned_api_key_protocol
 
-    return tuple(name for name in bundled_provider_vendors() if pinned_api_key_protocol(name) == protocol)
+    return tuple(
+        name for name in bundled_provider_vendors()
+        if pinned_api_key_protocol(name) == protocol or protocol in _ALSO_VERIFIED_ON.get(name, ())
+    )
 
 
 def prior_vendor(vendor: str, protocol: str, model_id: str) -> str | None:

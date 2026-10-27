@@ -109,7 +109,7 @@ def test_google_source_roundtrips_and_uses_native_engine_registration(tmp_path, 
 @pytest.mark.parametrize("vendor", ["relay-x", "openai"])
 @pytest.mark.parametrize("boundary", ["config", "schema", "create-schema", "observe", "create", "save", "runtime"])
 async def test_google_vendor_refusal_is_shared_by_source_admission(tmp_path, vendor, boundary):
-    """Unpinned vendors must not bypass Google's custom-only provider identity."""
+    """Unpinned vendors must not bypass Google's vendor rule: `custom`, or the `gemini` catalog pin."""
     source = _source("src_google001", "Google", vendor=vendor, protocol="google")
     source.base_url = "https://upstream.invalid"
     draft = {
@@ -406,6 +406,10 @@ async def test_google_observation_uses_paginated_credential_witness_without_infe
             assert [model.id for model in observed.models] == ["gemini-first", "gemini-second"]
         models = await probe_models(vendor="custom", protocol="google", base_url=base, secret="synthetic-key")
         assert [model.id for model in models] == ["gemini-first", "gemini-second"]
+        # A Gemini Source keeps the names Google lists, as its OpenAI-compatible listing always named them, so a
+        # Source moved to this protocol keeps every saved route and session.
+        models = await probe_models(vendor="gemini", protocol="google", base_url=base, secret="synthetic-key")
+        assert [model.id for model in models] == ["models/gemini-first", "models/gemini-second"]
     assert all(method == "GET" for method, *_ in requests)
     assert all(query.keys() <= {"pageToken"} for _, _, query, _ in requests)
 

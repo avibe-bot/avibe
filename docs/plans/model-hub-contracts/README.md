@@ -1,6 +1,21 @@
 # Model Hub contracts
 
-Status: **contract_version 21**, 2026-10-26: keyless Exa activation (KEX-3)
+Status: **contract_version 22**, 2026-10-27: Gemini API keys on the native `google` protocol
+(`../vibey-gemini-native.md` §3). `gh-v3.2.3rc8` through `rc12` carry v21, so this opens v22.
+- The `gemini` catalog row pins `google` on `https://generativelanguage.googleapis.com`; a `google` Source's vendor is
+  `custom` or `gemini` (`source.schema.json`, `source-create.schema.json`, `google-protocol.md`).
+- On load, a Gemini API-key Source saved on Google's official OpenAI-compatible endpoint (named or by default) moves
+  to `google` on the native root: protocol and Base URL only. Its id, credential, models, routes and sessions are
+  unchanged, because a Gemini Source keeps Google's `models/<id>` names on both surfaces; its engine entry routes each
+  by that alias and calls the bare id upstream. Its Source identity changes, so stored opaque payloads stop replaying
+  once and capability evidence restarts.
+- A Gemini Source's image models register on an internal OpenAI-compatible entry of the same key and prefix, the
+  only entry the engine's images endpoints serve; `IMAGE_PROTOCOLS` gains `google`.
+- **Downgrade:** a release before v22 rejects a `google` Source whose vendor is `gemini`, so once a v22 build has
+  written the moved Source, an older build cannot load Model Hub's Sources (the boundary of
+  `../web-search-services.md` §12). Removing the Gemini Source before downgrading avoids it; release notes say so.
+
+It builds on v21 (2026-10-26): keyless Exa activation (KEX-3)
 and web fetch readers, producers and coordinated activation (WF-1/2/3).
 `gh-v3.2.3rc3` through `rc7` carry v20, so the unreleased v21 event now includes
 its coordinated readers, producer, and default-on Exa search activation. The versioned
@@ -392,7 +407,7 @@ comparison. A gate may not report success by comparing stale input with itself.
 
 ## Version closure
 
-`contract_version` 21 must coexist in all registered version locations on the same tested head:
+`contract_version` 22 must coexist in all registered version locations on the same tested head:
 
 - `mirror-registry.json`
 - `agent-chain.schema.json`

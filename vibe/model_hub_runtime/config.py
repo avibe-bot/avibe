@@ -169,7 +169,9 @@ def _append_source(
     # takes the first entry that matches, so models it cannot tell apart are
     # declared text-only together or not at all.
     images = image_model_ids(source)
-    routed = tuple(dict.fromkeys((*source.model_ids, *source.route_model_ids, *images)))
+    # A Google Source's image models live on the internal OpenAI-compatible entry below, not the Gemini one.
+    chat_images = () if source.protocol == "google" else images
+    routed = tuple(dict.fromkeys((*source.model_ids, *source.route_model_ids, *chat_images)))
     marked = set(source.text_only_model_ids) if source.protocol == "openai_chat" else set()
     unmarked_names = {_engine_model_name(model) for model in routed if model not in marked}
     text_only = {model for model in marked if _engine_model_name(model) not in unmarked_names}
@@ -191,18 +193,39 @@ def _append_source(
             entry["image"] = True
         models.append(entry)
     if source.protocol == "google":
-        if not source.base_url:
+        base_url = source.base_url or official_api_key_base_url(source.vendor)
+        if not base_url:
             raise EngineStateError("Google source requires a base URL")
+        root = google_api_base_url(base_url)
         # CPA (MIT), internal/config/config_types.go: GeminiKey/GeminiModel,
         # pinned c404af96. The executor, not Avibe, owns protocol conversion.
         entry = {
             "api-key": api_key,
             "prefix": source.prefix,
-            "base-url": google_api_base_url(source.base_url),
+            "base-url": root,
         }
         if models:
-            entry["models"] = models
+            # A Gemini Source names a model as Google lists it (``models/<id>``); the executor puts its name in the
+            # upstream path itself, so the name is the bare id and the listed one is the alias it is routed by.
+            entry["models"] = [{**model, "name": model["name"].removeprefix("models/")} for model in models]
         payload.setdefault("gemini-api-key", []).append(entry)
+        if images:
+            # The engine's images endpoints serve an image model only from an OpenAI-compatible entry that flags it
+            # (CPA openai_images_handlers.go), so the same key also registers its image models on Google's
+            # OpenAI-compatible root, under the Source's own prefix: still one Source and one credential.
+            payload.setdefault("openai-compatibility", []).append(
+                {
+                    "name": f"{source.prefix}-images",
+                    "prefix": source.prefix,
+                    "base-url": f"{root}/v1beta/openai",
+                    "api-key-entries": [{"api-key": api_key}],
+                    "models": [
+                        {"name": model, "alias": model, "display-name": reload_display_name(model, generation),
+                         "image": True}
+                        for model in images
+                    ],
+                }
+            )
         return
     if source.protocol == "anthropic":
         base_url = source.base_url

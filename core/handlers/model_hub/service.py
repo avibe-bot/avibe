@@ -273,7 +273,7 @@ from .usage import (
     local_usage_day,
 )
 
-CONTRACT_VERSION = 21
+CONTRACT_VERSION = 22
 
 
 def seeded_source_name(vendor: str) -> str:
@@ -396,8 +396,8 @@ def _described_as_unfit_for_agent_turns(match: Mapping[str, Any]) -> bool:
     )
 
 
-AGENT_CHAIN_CONTRACT_VERSION = 21
-PROBE_RESULT_CONTRACT_VERSION = 21
+AGENT_CHAIN_CONTRACT_VERSION = 22
+PROBE_RESULT_CONTRACT_VERSION = 22
 _SOURCE_DISCOVERY_TIMEOUT_SECONDS = 15
 _SOURCE_PROBE_TIMEOUT_SECONDS = 60
 # Background inventory refresh. The first tick doubles as the startup delay, so
@@ -1404,7 +1404,7 @@ def _runtime_payload(status: EngineStatus, *, enabled: bool) -> dict:
 
     manager = EngineRuntimeManager()
     return {
-        "contract_version": 21,
+        "contract_version": 22,
         "enabled": enabled,
         "host_platform": status.host_platform or manager.host_platform(),
         "manifest": manager.contract_manifest(),

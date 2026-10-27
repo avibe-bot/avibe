@@ -20,8 +20,8 @@
   {
     "id": "gemini",
     "label": "Gemini",
-    "official_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
-    "protocol": "openai_chat",
+    "official_base_url": "https://generativelanguage.googleapis.com",
+    "protocol": "google",
     "models_dev_provider": "google"
   },
   {

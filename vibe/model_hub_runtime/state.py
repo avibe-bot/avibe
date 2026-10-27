@@ -1687,7 +1687,7 @@ def _validate_source_target(
     if protocol == "google":
         try:
             validate_model_hub_protocol_vendor(vendor, protocol)
-            google_api_base_url(base_url)
+            google_api_base_url(base_url or official_api_key_base_url(vendor))
         except ValueError as exc:
             raise EngineStateError(str(exc)) from None
         return

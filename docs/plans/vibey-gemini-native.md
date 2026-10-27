@@ -86,14 +86,26 @@ conversion table is in `agent-core-contracts/conversion-tables.md` ("Google Gemi
 
 ## 3. Gemini API keys on the `google` protocol (PR 2)
 
-- `vibe/data/api_key_vendors.json`'s `gemini` row pins `google` on `https://generativelanguage.googleapis.com`.
-- An existing official-endpoint `gemini` Source on `openai_chat` moves to `google`: protocol and base URL change,
-  its models are listed again natively, and every hop that names a `models/<id>` model of it names `<id>`. The
-  Source keeps its id, credential and routes; its identity changes, so stored opaque payloads stop replaying once
-  (the documented safe degradation, `model-hub-consumer.md` item 3).
-- Gemini image models stay on the engine's images endpoint: the Source's engine registration adds an internal
-  OpenAI-compatible entry for its image models only. The user still sees one Source.
-- The Web UI's protocol picker gains `google` (design frame first, `../avibe-docs/design.pen`).
+Model Hub contract v22 (`model-hub-contracts/README.md`). Every Gemini API key speaks Gemini natively, existing ones
+included (owner, 2026-10-27: "统一都走原生").
+
+- `vibe/data/api_key_vendors.json`'s `gemini` row pins `google` on `https://generativelanguage.googleapis.com`, and a
+  `google` Source's vendor is `custom` or `gemini`.
+- **Names do not move.** A Gemini Source keeps Google's `models/<id>` names (its OpenAI-compatible listing always used
+  them), so no hop, route key, menu row or Session changes. Discovery keeps them for the `gemini` vendor only (a
+  `custom` Google Source keeps bare ids), and the engine's `gemini-api-key` entry routes each model by that alias while
+  calling the bare id upstream (measured on the pinned engine: `prefix/models/gemini-4-argon` is served).
+- **Existing keys move on load.** A Gemini API-key Source saved on Google's official OpenAI-compatible endpoint, named
+  or by default, changes only its protocol and endpoint, through the shared on-load migration (projected on every
+  load, persisted at service start, `model-hub-upgrade-config-compatibility.md`). A relay URL under the vendor keeps
+  what it speaks. The Source's identity changes, so stored opaque payloads stop replaying once and its capability
+  evidence restarts.
+- **Images stay one Source.** The engine's images endpoints serve only image models an OpenAI-compatible entry flags,
+  so a Gemini Source also registers its image models on an internal OpenAI-compatible entry of the same key and
+  prefix, on Google's `/v1beta/openai` root (measured: both entries register under one prefix). `IMAGE_PROTOCOLS`
+  gains `google`. A Chat relay serving Gemini keeps Gemini's image priors (`prior_vendors`).
+- **Downgrade:** a release before v22 refuses a `gemini` Source on `google`, so once a v22 build has saved the moved
+  Source an older build cannot load Model Hub's Sources; removing the Gemini Source first avoids it.
 
 ## 4. Google Search as Gemini's native `web_search` (PR 3)
 
@@ -113,7 +125,7 @@ conversion table is in `agent-core-contracts/conversion-tables.md` ("Google Gemi
 | PR | Scope | Visible result |
 | --- | --- | --- |
 | 1 | §2, this plan, the conversion table | A `google` Source (API-configured today) runs Vibey natively; no change for Chat Sources |
-| 2 | §3 | Gemini keys run natively; images unchanged |
+| 2 | §3 | Every Gemini key, existing ones included, runs natively; names, routes and images unchanged |
 | 3 | §4 | Gemini models search with Google |
 
 Each PR is verified against the real Gemini API on the local regression environment. PR 2 and PR 3 are independent

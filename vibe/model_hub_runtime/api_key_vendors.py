@@ -353,8 +353,13 @@ def openai_compatible_endpoint(base_url: str) -> str:
     return endpoint
 
 
-def _endpoint_identity(base_url: str) -> tuple[str, str, int | None, str, str] | None:
-    parts = urlsplit(openai_compatible_endpoint(base_url))
+def _endpoint_identity(base_url: str, protocol: str | None = None) -> tuple[str, str, int | None, str, str] | None:
+    try:
+        # The root a Google Source's engine entry calls, and the API root every other protocol's does.
+        root = google_api_base_url(base_url) if protocol == "google" else openai_compatible_endpoint(base_url)
+    except ValueError:
+        return None
+    parts = urlsplit(root)
     try:
         port = parts.port or {"http": 80, "https": 443}.get(parts.scheme)
     except ValueError:
@@ -365,7 +370,7 @@ def _endpoint_identity(base_url: str) -> tuple[str, str, int | None, str, str] |
 
 
 def official_models_dev_provider(vendor: str, base_url: str | None) -> str | None:
-    """The models.dev provider describing an ``openai_chat`` Source's upstream, or ``None``.
+    """The models.dev provider describing a Source's upstream, or ``None``.
 
     Only a Source on its vendor's official endpoint is described by that
     vendor's models.dev entries: a custom URL may front any deployment. The
@@ -376,8 +381,8 @@ def official_models_dev_provider(vendor: str, base_url: str | None) -> str | Non
     if entry is None or entry.models_dev_provider is None:
         return None
     if base_url is not None and (
-        _endpoint_identity(base_url) is None
-        or _endpoint_identity(base_url) != _endpoint_identity(entry.official_base_url)
+        _endpoint_identity(base_url, entry.protocol) is None
+        or _endpoint_identity(base_url, entry.protocol) != _endpoint_identity(entry.official_base_url, entry.protocol)
     ):
         return None
     return entry.models_dev_provider
@@ -392,8 +397,9 @@ def is_official_api_key_endpoint(vendor: str, base_url: str) -> bool:
     official = official_api_key_base_url(vendor)
     if official is None:
         return False
-    identity = _endpoint_identity(base_url)
-    return identity is not None and identity == _endpoint_identity(official)
+    protocol = pinned_api_key_protocol(vendor)
+    identity = _endpoint_identity(base_url, protocol)
+    return identity is not None and identity == _endpoint_identity(official, protocol)
 
 
 def official_api_key_base_urls() -> dict[str, str]:

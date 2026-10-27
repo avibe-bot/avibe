@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import functools
 import io
 import json
 import logging
@@ -1151,7 +1152,11 @@ async def probe_models(
     if not root:
         raise EngineClientError("source requires a base URL for model discovery")
     if protocol == "google":
-        return await _probe_google_models(root, secret=secret, timeout=timeout)
+        # A Gemini Source keeps the names Google lists (``models/<id>``), as it always has on the OpenAI-compatible
+        # endpoint, so its saved routes and sessions name the same models on either surface.
+        return await _probe_google_models(
+            root, secret=secret, timeout=timeout, full_names=normalized_vendor == "gemini",
+        )
     try:
         url = upstream_api_url(root, "/v1/models")
         credential = {} if secret is None else (
@@ -1204,8 +1209,14 @@ async def probe_models(
     return tuple(fallback_models)
 
 
-def _project_google_inventory(reader: BinaryIO) -> tuple[tuple[DiscoveredModel, ...], str | None]:
-    """Project routing identities and the continuation token, never model limits."""
+def _project_google_inventory(
+    reader: BinaryIO, *, full_names: bool = False,
+) -> tuple[tuple[DiscoveredModel, ...], str | None]:
+    """Project routing identities and the continuation token, never model limits.
+
+    A model's identity is its listed ``models/<id>`` name without the collection, or the whole name with
+    ``full_names``.
+    """
     names: dict[JSONScope, str] = {}
     objects: set[JSONScope] = set()
     valid_root = False
@@ -1233,7 +1244,7 @@ def _project_google_inventory(reader: BinaryIO) -> tuple[tuple[DiscoveredModel, 
             if event == "replace":
                 names.pop(scope, None)
             elif event == "scalar" and isinstance(value, str) and value.startswith("models/") and value[7:]:
-                names[scope] = value[7:]
+                names[scope] = value if full_names else value[7:]
         elif path == ("nextPageToken",):
             if event == "replace":
                 page_token, valid_token = None, True
@@ -1250,7 +1261,9 @@ def _project_google_inventory(reader: BinaryIO) -> tuple[tuple[DiscoveredModel, 
     return tuple(DiscoveredModel(id=name) for name in dict.fromkeys(names.values())), page_token
 
 
-async def _probe_google_models(root: str, *, secret: str | None, timeout: float) -> tuple[DiscoveredModel, ...]:
+async def _probe_google_models(
+    root: str, *, secret: str | None, timeout: float, full_names: bool = False,
+) -> tuple[DiscoveredModel, ...]:
     """Follow only page tokens on the same declared, credential-gated endpoint."""
     try:
         url = google_api_base_url(root) + "/v1beta/models"
@@ -1282,7 +1295,8 @@ async def _probe_google_models(root: str, *, secret: str | None, timeout: float)
                             await run_owned_in_thread(body.write, chunk)
                         await run_owned_in_thread(body.seek, 0)
                         page, page_token = await run_owned_in_thread(
-                            _project_before_deadline, body, _project_google_inventory, deadline=deadline,
+                            _project_before_deadline, body,
+                            functools.partial(_project_google_inventory, full_names=full_names), deadline=deadline,
                         )
                 models.update((model.id, model) for model in page)
                 if page_token is None:

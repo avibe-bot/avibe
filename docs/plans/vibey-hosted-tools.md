@@ -716,6 +716,8 @@ Unchanged from v1 §7.3 (owner decision, 2026-10-13 19:14), with the producer no
   - **A Gemini API key** (`gemini-2.5-flash-image`, `gemini-3-pro-image-preview`): the flagged entry reaches
     Google's OpenAI-compatible `images/generations`, the only image path Google documents on that layer (its chat
     route does not return images for these models). No reference images: Google documents generation only.
+    Since contract v22 the key speaks Gemini natively, and its image models stay on this path through an internal
+    OpenAI-compatible entry of the same key and prefix (`vibey-gemini-native.md` §3).
   - **xAI grok-imagine is not reachable**: the engine's images handler accepts an xAI image model only under an
     empty, `xai` or `grok` prefix and then routes the bare id, which `force-model-prefix` never registers (unchanged
     in v8.0.28). That 400 is the engine's own refusal, recognized as local, never learned. xAI ships with no image
