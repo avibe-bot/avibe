@@ -286,13 +286,48 @@ def google_grounding_sources(metadata: Any) -> tuple[HostedSource, ...]:
     return tuple(sources.values())
 
 
-def google_search_count(metadata: Any) -> int:
-    """The searches Google bills a Gemini response for: its distinct, non-empty ``webSearchQueries``."""
+def google_search_count(calls: Iterable[Mapping[str, Any]]) -> int:
+    """The searches Google bills a Gemini response for: the distinct queries each of its search ``toolCall`` parts
+    ran, at least one per call.
 
-    queries = metadata.get("webSearchQueries") if isinstance(metadata, Mapping) else None
-    return len({query.strip() for query in queries if isinstance(query, str) and query.strip()}) if isinstance(
-        queries, list
-    ) else 0
+    The response that ran them says so; ``groundingMetadata.webSearchQueries`` comes with the grounded answer, often
+    a later response of the turn, and lists only the queries that grounded it (measured 2026-10-27).
+    """
+
+    count = 0
+    for part in calls:
+        call = part.get("toolCall") if isinstance(part, Mapping) else None
+        raw = call.get("args", {}).get("queries") if isinstance(call, Mapping) and isinstance(call.get("args"), Mapping) else None
+        queries = {query.strip() for query in raw if isinstance(query, str) and query.strip()} if isinstance(raw, list) else set()
+        count += max(1, len(queries))
+    return count
+
+
+def google_grounding_citations(metadata: Any) -> list[tuple[Optional[str], tuple[Citation, ...]]]:
+    """Each ``groundingSupports`` entry of a Gemini answer: the text it grounds (``segment.text``, or None) and a
+    citation, without a range, for every web chunk it names."""
+
+    if not isinstance(metadata, Mapping):
+        return []
+    chunks = metadata.get("groundingChunks") if isinstance(metadata.get("groundingChunks"), list) else []
+    supports = metadata.get("groundingSupports") if isinstance(metadata.get("groundingSupports"), list) else []
+    cited = []
+    for support in supports:
+        if not isinstance(support, Mapping) or not isinstance(support.get("groundingChunkIndices"), list):
+            continue
+        segment = support.get("segment")
+        text = _text(segment.get("text")) if isinstance(segment, Mapping) else None
+        items = []
+        for number in support["groundingChunkIndices"]:
+            if isinstance(number, bool) or not isinstance(number, int) or not 0 <= number < len(chunks):
+                continue
+            web = chunks[number].get("web") if isinstance(chunks[number], Mapping) else None
+            url = _text(web.get("uri")) if isinstance(web, Mapping) else None
+            if url is not None:
+                items.append(Citation(url=url, title=_text(web.get("title"))))
+        if items:
+            cited.append((text, tuple(items)))
+    return cited
 
 
 def citation(raw: Mapping[str, Any], *, offset: int = 0) -> Optional[Citation]:
