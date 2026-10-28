@@ -5,11 +5,16 @@ import os
 import signal
 import sys
 import logging
-from logging.handlers import RotatingFileHandler
 from typing import Any
 
 from config.paths import ensure_data_dirs, get_logs_dir
 from vibe.logging_config import APPLICATION_LOG_BACKUP_COUNT, APPLICATION_LOG_MAX_BYTES
+from vibe.service_logging import (
+    ServiceFileHandler,
+    ServiceStreamHandler,
+    configure_service_logging,
+    shutdown_service_logging,
+)
 from vibe.macos_session_diagnostics import start_macos_session_diagnostics
 from vibe.runtime import (
     ServiceAlreadyRunningError,
@@ -22,32 +27,30 @@ from vibe.runtime import (
 
 def _build_logging_handlers(logs_dir: str) -> list[logging.Handler]:
     handlers: list[logging.Handler] = [
-        RotatingFileHandler(
+        ServiceFileHandler(
             f"{logs_dir}/vibe_remote.log",
             maxBytes=APPLICATION_LOG_MAX_BYTES,
             backupCount=APPLICATION_LOG_BACKUP_COUNT,
         )
     ]
-    if os.environ.get("VIBE_DISABLE_STDOUT_LOGGING", "").lower() not in {"1", "true", "yes"}:
-        handlers.insert(0, logging.StreamHandler(sys.stdout))
+    try:
+        if os.environ.get("VIBE_DISABLE_STDOUT_LOGGING", "").lower() not in {"1", "true", "yes"}:
+            handlers.insert(0, ServiceStreamHandler(sys.stdout))
+    except BaseException:
+        for handler in handlers:
+            handler.close()
+        raise
     return handlers
 
 
-def setup_logging(level: str = "INFO"):
-    """Setup logging configuration with file location and line numbers"""
-    # Create a custom formatter with file location
+def setup_logging(level: str = "INFO") -> None:
+    """Keep destination I/O on the service logging listener, not the controller."""
+    log_level = getattr(logging, level.upper())
     log_format = '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(funcName)s() - %(message)s'
-    
-    # For development, you can use this more detailed format:
-    # log_format = '%(asctime)s - %(name)s - %(levelname)s - [%(pathname)s:%(lineno)d] - %(funcName)s() - %(message)s'
-    
     ensure_data_dirs()
     logs_dir = str(get_logs_dir())
-
-    logging.basicConfig(
-        level=getattr(logging, level.upper()),
-        format=log_format,
-        handlers=_build_logging_handlers(logs_dir),
+    configure_service_logging(
+        lambda: _build_logging_handlers(logs_dir), log_level, logging.Formatter(log_format),
     )
 
 
@@ -261,13 +264,20 @@ def main():
         logging.error(f"Failed to start: {e}")
         sys.exit(1)
     finally:
-        lock_safe = bool(
-            controller is None
-            or getattr(controller, "service_lock_safe_to_release", True)
-        )
-        if lock_acquired and lock_safe:
-            release_service_instance_lock()
-        _stop_macos_session_diagnostics(macos_session_diagnostics)
+        try:
+            _stop_macos_session_diagnostics(macos_session_diagnostics)
+        finally:
+            try:
+                # Controller.run() has finished its census/watchdog cleanup.
+                # Finish rotating/writing before another service can own the log.
+                shutdown_service_logging()
+            finally:
+                lock_safe = bool(
+                    controller is None
+                    or getattr(controller, "service_lock_safe_to_release", True)
+                )
+                if lock_acquired and lock_safe:
+                    release_service_instance_lock()
 
 
 if __name__ == "__main__":

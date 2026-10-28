@@ -390,7 +390,7 @@ def test_monitor_stop_joins_its_worker() -> None:
     assert threads[0].joined is True
 
 
-def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
+def test_service_main_owns_monitor_shutdown(monkeypatch, tmp_path) -> None:
     import config.v2_compat
     import core.controller
     import core.process_diagnostics
@@ -404,6 +404,7 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
     class FakeMonitor:
         def stop(self) -> None:
             calls.append("diagnostics.stop")
+            logging.getLogger("test.service-cleanup").warning("final diagnostic record")
 
     class FakeRunningLoop:
         def is_closed(self) -> bool:
@@ -429,6 +430,7 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
             calls.append("controller.run")
             handlers[signal.SIGTERM](signal.SIGTERM, None)
             calls.append("controller.after-signal")
+            logging.getLogger("test.service-cleanup").warning("final census/watchdog record")
 
         def request_shutdown(self, reason: str) -> None:
             calls.append(f"controller.shutdown:{reason}")
@@ -452,7 +454,8 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
         lambda **kwargs: calls.append(f"desktop-ui.stop:{kwargs}") or True,
     )
     monkeypatch.setattr(service_main, "load_config", lambda: loaded_config)
-    monkeypatch.setattr(service_main, "setup_logging", lambda level: None)
+    monkeypatch.setattr(service_main, "get_logs_dir", lambda: tmp_path)
+    monkeypatch.setenv("VIBE_DISABLE_STDOUT_LOGGING", "1")
     monkeypatch.setattr(service_main, "apply_claude_sdk_patches", lambda: None)
     monkeypatch.setattr(
         service_main,
@@ -474,6 +477,15 @@ def test_service_main_owns_monitor_shutdown(monkeypatch) -> None:
     )
 
     service_main.main()
+
+    # Real queued logging must outlive signal handling and all service cleanup.
+    text = (tmp_path / "vibe_remote.log").read_text()
+    assert "Shutting down after signal" in text
+    assert "final census/watchdog record" in text
+    assert text.count("final diagnostic record") == 2
+    from vibe import service_logging
+
+    assert service_logging._runtime is None
 
     # The migration runs under the lock and before anything is constructed
     # against the schema it produces.
