@@ -51,6 +51,9 @@ const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 const PERMISSION_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const PERMISSION_CHILD_TIMEOUT: Duration = Duration::from_secs(10);
 const START_BACKOFF: Duration = Duration::from_secs(1);
+/// Temporary destination used to atomically move a claimed marker out of the
+/// active path. It is deliberately narrow: no directory-wide cleanup is used.
+const SETUP_RESUME_CONSUMED_FILE: &str = ".permission-setup-resume.consumed";
 /// Written when the Workbench guide opens Screen Recording, so a macOS
 /// "Quit & Reopen" brings the relaunched shell back to the guide.
 const SETUP_RESUME_FILE: &str = "permission-setup-resume";
@@ -750,12 +753,26 @@ impl RuntimeState {
         true
     }
 
-    /// Once this process has seen Screen Recording settle either way, no
-    /// relaunch is needed to finish the guide, so the marker goes.
+    /// Once Screen Recording has been confirmed or Computer Use has been
+    /// explicitly turned off, no relaunch is needed to finish the guide. A
+    /// transient Runtime or another unrelated lifecycle phase is not enough.
     fn settle_setup_resume(&mut self) {
-        if self.setup_resume_armed && !awaiting_screen_recording(self.lifecycle.phase(), self.lifecycle.reason()) {
-            let _ = std::fs::remove_file(self.paths.state_dir.join(SETUP_RESUME_FILE));
-            self.setup_resume_armed = false;
+        if !self.setup_resume_armed {
+            return;
+        }
+        let screen_recording_granted = silent_grants().screen_recording;
+        if !setup_resume_settled(
+            self.lifecycle.phase(),
+            self.lifecycle.enabled(),
+            screen_recording_granted,
+        ) {
+            return;
+        }
+        let path = self.paths.state_dir.join(SETUP_RESUME_FILE);
+        match std::fs::remove_file(path) {
+            Ok(()) => self.setup_resume_armed = false,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => self.setup_resume_armed = false,
+            Err(_) => {}
         }
     }
 
@@ -977,8 +994,11 @@ impl RuntimeState {
     }
 }
 
-fn awaiting_screen_recording(phase: ComputerUsePhase, reason: Option<&str>) -> bool {
-    phase == ComputerUsePhase::NeedsPermission && reason == Some("screen_recording")
+/// A marker is settled only by the Screen Recording preflight or the
+/// lifecycle's explicit off transition. The lifecycle phase alone is not
+/// sufficient because `NeedsRuntime` can be a transient observation.
+fn setup_resume_settled(phase: ComputerUsePhase, enabled: bool, screen_recording_granted: bool) -> bool {
+    (phase == ComputerUsePhase::Off && !enabled) || screen_recording_granted
 }
 
 fn unix_seconds(time: SystemTime) -> u64 {
@@ -999,15 +1019,21 @@ fn setup_resume_in_window(contents: &str, now: SystemTime) -> bool {
 }
 
 /// Consumes the marker a guide-driven Screen Recording request left, and says
-/// whether this launch is that request's relaunch. A marker is read once:
-/// stale or not, it never steers a second launch.
+/// whether this launch is that request's relaunch. Moving the marker out of
+/// the active path is the claim: if that atomic move fails, this launch did
+/// not consume it and the active marker remains available for a bounded retry.
 fn take_setup_resume_at(state_dir: &Path, now: SystemTime) -> bool {
     let path = state_dir.join(SETUP_RESUME_FILE);
     let Ok(contents) = std::fs::read_to_string(&path) else {
         return false;
     };
-    let _ = std::fs::remove_file(&path);
-    setup_resume_in_window(&contents, now)
+    let consumed_path = state_dir.join(SETUP_RESUME_CONSUMED_FILE);
+    if std::fs::rename(&path, &consumed_path).is_err() {
+        return false;
+    }
+    let in_window = setup_resume_in_window(&contents, now);
+    let _ = std::fs::remove_file(consumed_path);
+    in_window
 }
 
 /// Whether a guide-driven Screen Recording request is still waiting on its
@@ -2961,6 +2987,37 @@ done
     }
 
     #[test]
+    fn a_failed_setup_resume_consume_does_not_claim_the_active_marker() {
+        let temporary = tempfile::tempdir().expect("temporary directory");
+        let dir = temporary.path();
+        let armed = UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        let consumed_path = dir.join(SETUP_RESUME_CONSUMED_FILE);
+        std::fs::create_dir(&consumed_path).expect("consume destination fixture");
+        arm_setup_resume(dir, armed).unwrap();
+
+        assert!(
+            !take_setup_resume_at(dir, armed),
+            "a failed move cannot claim the marker"
+        );
+        assert!(
+            dir.join(SETUP_RESUME_FILE).exists(),
+            "the active marker remains pending"
+        );
+        assert!(setup_resume_pending_at(dir, armed));
+        assert!(!setup_resume_pending_at(
+            dir,
+            armed + SETUP_RESUME_WINDOW + Duration::from_secs(1)
+        ));
+
+        std::fs::remove_dir(&consumed_path).expect("remove consume destination fixture");
+        assert!(take_setup_resume_at(dir, armed + SETUP_RESUME_WINDOW));
+        assert!(
+            !dir.join(SETUP_RESUME_FILE).exists(),
+            "the successful claim is one-shot"
+        );
+    }
+
+    #[test]
     fn a_setup_resume_marker_steers_one_launch_inside_its_window() {
         let temporary = tempfile::tempdir().expect("temporary directory");
         let dir = temporary.path();
@@ -3026,25 +3083,14 @@ done
     }
 
     #[test]
-    fn only_a_pending_screen_recording_grant_keeps_the_resume_marker() {
-        assert!(awaiting_screen_recording(
-            ComputerUsePhase::NeedsPermission,
-            Some("screen_recording")
-        ));
-        assert!(!awaiting_screen_recording(
-            ComputerUsePhase::NeedsPermission,
-            Some("accessibility")
-        ));
-        for phase in [
-            ComputerUsePhase::Off,
-            ComputerUsePhase::Starting,
-            ComputerUsePhase::Ready,
-            ComputerUsePhase::Error,
-            ComputerUsePhase::Stopped,
-            ComputerUsePhase::NeedsRuntime,
-        ] {
-            assert!(!awaiting_screen_recording(phase, Some("screen_recording")), "{phase:?}");
-        }
+    fn setup_resume_stays_pending_until_screen_recording_settles_or_computer_use_is_off() {
+        assert!(!setup_resume_settled(ComputerUsePhase::NeedsRuntime, true, false));
+        assert!(!setup_resume_settled(ComputerUsePhase::NeedsPermission, true, false));
+        assert!(!setup_resume_settled(ComputerUsePhase::Error, true, false));
+        assert!(setup_resume_settled(ComputerUsePhase::NeedsRuntime, true, true));
+        assert!(setup_resume_settled(ComputerUsePhase::NeedsPermission, true, true));
+        assert!(setup_resume_settled(ComputerUsePhase::Ready, true, true));
+        assert!(setup_resume_settled(ComputerUsePhase::Off, false, false));
     }
 
     #[test]
