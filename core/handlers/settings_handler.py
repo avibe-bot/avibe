@@ -362,7 +362,7 @@ class SettingsHandler(BaseHandler):
             logger.error(f"Error toggling message type {msg_type}: {e}")
             await self._get_im_client(context).send_message(
                 context,
-                self._get_formatter(context).format_error(self._t("error.toggleSettingFailed", error=str(e))),
+                self._get_formatter(context).format_error(self._t("error.toggleSettingFailed", error=self._settings_error_text(e))),
             )
 
     async def handle_info_message_types(self, context: MessageContext):
@@ -799,7 +799,7 @@ class SettingsHandler(BaseHandler):
                 )
                 await self._get_im_client(context).send_message(
                     context,
-                    f"❌ {self._t('error.settingsUpdateFailed', error=str(e))}",
+                    f"❌ {self._t('error.settingsUpdateFailed', error=self._settings_error_text(e))}",
                 )
             else:
                 raise
@@ -959,7 +959,7 @@ class SettingsHandler(BaseHandler):
             if notify_user:
                 await self._get_im_client(context).send_message(
                     context,
-                    f"❌ {self._t('error.routingUpdateFailed', error=str(e))}",
+                    f"❌ {self._t('error.routingUpdateFailed', error=self._settings_error_text(e))}",
                 )
             else:
                 raise

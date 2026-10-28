@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import asdict, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import Connection, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -190,8 +191,20 @@ class SQLiteSettingsService:
         )
 
     def save_state(
-        self, state: SettingsState, *, user_context: Any = None, baseline: SettingsState | None = None
+        self,
+        state: SettingsState,
+        *,
+        user_context: Any = None,
+        baseline: SettingsState | None = None,
+        mutate: Callable[[SettingsState], None] | None = None,
     ) -> str:
+        """Persist ``state``, or apply ``mutate`` to the state held under the write lock.
+
+        With ``baseline``, only the scopes ``state`` changed since that load are
+        written. With ``mutate``, ``state`` only receives the committed snapshot:
+        the edit runs against the authoritative rows, so it cannot carry stale
+        copies of anything it did not change.
+        """
         from vibe.authorization import require_instance_role
 
         # General config still accepts Editor preferences and may round-trip
@@ -203,12 +216,15 @@ class SQLiteSettingsService:
         with self.engine.begin() as conn:
             reserve_write_lock(conn)
             current = self._load_state(conn)
-            if baseline is not None and not context.can_manage_access_members:
-                # A protected-field echo may equal the loaded value but no
-                # longer equal the authoritative value. Reject that stale
-                # snapshot before delta merging could silently drop the echo.
-                _require_preserved_access_policy(current, baseline)
-            if baseline is not None:
+            if mutate is not None:
+                state = copy.deepcopy(current)
+                mutate(state)
+            elif baseline is not None:
+                if not context.can_manage_access_members:
+                    # A protected-field echo may equal the loaded value but no
+                    # longer equal the authoritative value. Reject that stale
+                    # snapshot before delta merging could silently drop the echo.
+                    _require_preserved_access_policy(current, baseline)
                 state = _merge_settings_changes(current, draft, baseline)
             if not context.can_manage_access_members:
                 _require_preserved_access_policy(current, state)

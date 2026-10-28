@@ -6,13 +6,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ChannelList } from './ChannelList';
 import { UserList } from './UserList';
 
-// Each scope save carries expected_agent_name, the Agent binding the form last read.
-// The server refuses a binding change whose token is outdated, so after every save
-// attempt the page must hold the stored row, keeping routing and token read together.
+// Each settings edit sends only what it changed on one scope, with the Agent the
+// edited view was based on. Sending the page's whole copy back reverted other
+// writers' changes and deleted channels enabled since the page loaded.
 
 const api = vi.hoisted(() => ({
-  getConfig: vi.fn(), getSettings: vi.fn(), saveSettings: vi.fn(), slackChannels: vi.fn(),
-  getUsers: vi.fn(), saveUsers: vi.fn(), getBindCodes: vi.fn(),
+  getConfig: vi.fn(), getSettings: vi.fn(), slackChannels: vi.fn(), telegramChats: vi.fn(),
+  getUsers: vi.fn(), getBindCodes: vi.fn(), patchScopeSettings: vi.fn(),
 }));
 vi.mock('@/context/ApiContext', async (loadOriginal) => ({
   ...await loadOriginal<typeof import('@/context/ApiContext')>(), useApi: () => api,
@@ -35,23 +35,23 @@ vi.mock('../shared/RoutingConfigPanel', () => ({
 }));
 
 const agentCatalog = { default_agent_name: 'vibey', agents: [{ name: 'vibey', backend: 'vibey' }, { name: 'reviewer', backend: 'vibey' }] };
-const scope = (agent: string | null) => ({
+const row = (agent: string | null) => ({
   display_name: 'Liu', is_admin: true, bound_at: '', enabled: true, show_message_types: ['assistant'], custom_cwd: null,
-  require_mention: null, require_bind: null, routing: { agent_name: agent }, expected_agent_name: agent,
+  require_mention: null, require_bind: null, routing: { agent_name: agent, model: null }, expected_agent_name: agent,
 });
-/** The server stores the posted rows and reports each row's binding as its new token. */
-const stored = (rows: Record<string, { routing: { agent_name: string | null } }>) => Object.fromEntries(
-  Object.entries(rows).map(([id, row]) => [id, { ...row, expected_agent_name: row.routing.agent_name }]),
-);
+type Patch = { changes: { routing?: { agent_name?: string | null } }; expected_agent_name?: string | null };
+/** The server applies the routing change to the scope's row and reports the stored row. */
+const storedAfter = (request: Patch, before = row(null)) => {
+  const agent = request.changes.routing?.agent_name ?? before.routing.agent_name;
+  return { ok: true, settings: { ...before, ...row(agent) } };
+};
+const sent = (index: number) => api.patchScopeSettings.mock.calls[index][0];
 
 afterEach(cleanup);
 beforeEach(() => {
   vi.clearAllMocks();
   api.getBindCodes.mockResolvedValue({ ok: true, bind_codes: [] });
 });
-
-const savedToken = (call: unknown[], kind: 'users' | 'channels', id: string) =>
-  (call[0] as Record<string, Record<string, { expected_agent_name: string | null }>>)[kind][id].expected_agent_name;
 
 describe('users page', () => {
   beforeEach(() => {
@@ -62,7 +62,7 @@ describe('users page', () => {
 
   /** Lark is the only enabled platform; the page reads others before its config loads. */
   function serveUsers(agent: string | null) {
-    api.getUsers.mockImplementation(async (platform) => ({ ok: true, users: platform === 'lark' ? { ou_1: scope(agent) } : {} }));
+    api.getUsers.mockImplementation(async (platform) => ({ ok: true, users: platform === 'lark' ? { ou_1: row(agent) } : {} }));
   }
   const larkReads = () => api.getUsers.mock.calls.filter(([platform]) => platform === 'lark').length;
 
@@ -72,35 +72,42 @@ describe('users page', () => {
     await userEvent.click(await screen.findByText('Liu'));
   }
 
-  it('sends the stored token after its own save changed the binding', async () => {
-    api.saveUsers.mockImplementation(async (payload) => ({ ok: true, users: stored(payload.users) }));
+  it('sends only the changed routing, based on the Agent its own last save stored', async () => {
+    api.patchScopeSettings.mockImplementation(async (request) => storedAfter(request));
     await openUser();
     await userEvent.click(screen.getByText('route:vibey'));
-    await waitFor(() => expect(api.saveUsers).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.patchScopeSettings).toHaveBeenCalledTimes(1));
     await userEvent.click(screen.getByText('route:reviewer'));
-    await waitFor(() => expect(api.saveUsers).toHaveBeenCalledTimes(2));
-    expect(savedToken(api.saveUsers.mock.calls[0], 'users', 'ou_1')).toBeNull();
-    expect(savedToken(api.saveUsers.mock.calls[1], 'users', 'ou_1')).toBe('vibey');
+    await waitFor(() => expect(api.patchScopeSettings).toHaveBeenCalledTimes(2));
+
+    expect(sent(0)).toEqual({
+      platform: 'lark', scope: 'user', id: 'ou_1',
+      changes: { routing: { agent_name: 'vibey' } }, expected_agent_name: null,
+    });
+    expect(sent(1)).toMatchObject({ changes: { routing: { agent_name: 'reviewer' } }, expected_agent_name: 'vibey' });
   });
 
   it('reloads the stored rows after a refused save', async () => {
-    api.saveUsers.mockRejectedValueOnce(new Error('settings_conflict'))
-      .mockImplementation(async (payload) => ({ ok: true, users: stored(payload.users) }));
+    api.patchScopeSettings.mockRejectedValueOnce(new Error('settings_conflict'))
+      .mockImplementation(async (request) => storedAfter(request, row('vibey')));
     await openUser();
     serveUsers('vibey');
     await userEvent.click(screen.getByText('route:reviewer'));
     await waitFor(() => expect(larkReads()).toBe(2));
     await userEvent.click(screen.getByText('route:reviewer'));
-    await waitFor(() => expect(api.saveUsers).toHaveBeenCalledTimes(2));
-    expect(savedToken(api.saveUsers.mock.calls[1], 'users', 'ou_1')).toBe('vibey');
+    await waitFor(() => expect(api.patchScopeSettings).toHaveBeenCalledTimes(2));
+    expect(sent(1)).toMatchObject({ changes: { routing: { agent_name: 'reviewer' } }, expected_agent_name: 'vibey' });
   });
 });
 
 describe('channels page', () => {
   beforeEach(() => {
     api.getConfig.mockResolvedValue({ platform: 'slack', platforms: { enabled: ['slack'] }, slack: { bot_token: 'xoxb-test' } });
-    api.getSettings.mockResolvedValue({ agent_catalog: agentCatalog, channels: { C1: { ...scope(null), enabled: true } } });
-    api.slackChannels.mockResolvedValue({ ok: true, channels: [{ id: 'C1', name: 'general' }] });
+    api.getSettings.mockResolvedValue({
+      agent_catalog: agentCatalog,
+      channels: { C1: { ...row(null), enabled: true }, C2: { ...row(null), enabled: true, custom_cwd: '/c2' } },
+    });
+    api.slackChannels.mockResolvedValue({ ok: true, channels: [{ id: 'C1', name: 'general' }, { id: 'C2', name: 'random' }] });
   });
 
   async function openChannel() {
@@ -108,27 +115,64 @@ describe('channels page', () => {
     await userEvent.click(await screen.findByText('general'));
   }
 
-  it('sends the stored token after its own save changed the binding', async () => {
-    api.saveSettings.mockImplementation(async (payload) => ({ channels: stored(payload.channels) }));
+  it('sends only the edited channel and fields, based on the Agent its own last save stored', async () => {
+    api.patchScopeSettings.mockImplementation(async (request) => storedAfter(request, { ...row(null), enabled: true }));
     await openChannel();
     await userEvent.click(screen.getByText('route:vibey'));
-    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.patchScopeSettings).toHaveBeenCalledTimes(1));
     await userEvent.click(screen.getByText('route:reviewer'));
-    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledTimes(2));
-    expect(savedToken(api.saveSettings.mock.calls[0], 'channels', 'C1')).toBeNull();
-    expect(savedToken(api.saveSettings.mock.calls[1], 'channels', 'C1')).toBe('vibey');
+    await waitFor(() => expect(api.patchScopeSettings).toHaveBeenCalledTimes(2));
+
+    expect(sent(0)).toEqual({
+      platform: 'slack', scope: 'channel', id: 'C1',
+      changes: { routing: { agent_name: 'vibey' } }, expected_agent_name: null,
+    });
+    expect(sent(1)).toMatchObject({ id: 'C1', changes: { routing: { agent_name: 'reviewer' } }, expected_agent_name: 'vibey' });
   });
 
   it('reloads the stored rows after a refused save', async () => {
-    api.saveSettings.mockRejectedValueOnce(new Error('settings_conflict'))
-      .mockImplementation(async (payload) => ({ channels: stored(payload.channels) }));
+    api.patchScopeSettings.mockRejectedValueOnce(new Error('settings_conflict'))
+      .mockImplementation(async (request) => storedAfter(request, { ...row('vibey'), enabled: true }));
     await openChannel();
     const reads = api.getSettings.mock.calls.length;
-    api.getSettings.mockResolvedValue({ agent_catalog: agentCatalog, channels: { C1: { ...scope('vibey'), enabled: true } } });
+    api.getSettings.mockResolvedValue({ agent_catalog: agentCatalog, channels: { C1: { ...row('vibey'), enabled: true } } });
     await userEvent.click(screen.getByText('route:reviewer'));
     await waitFor(() => expect(api.getSettings.mock.calls.length).toBeGreaterThan(reads));
     await userEvent.click(screen.getByText('route:reviewer'));
-    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledTimes(2));
-    expect(savedToken(api.saveSettings.mock.calls[1], 'channels', 'C1')).toBe('vibey');
+    await waitFor(() => expect(api.patchScopeSettings).toHaveBeenCalledTimes(2));
+    expect(sent(1)).toMatchObject({ changes: { routing: { agent_name: 'reviewer' } }, expected_agent_name: 'vibey' });
+  });
+});
+
+describe('telegram topics', () => {
+  beforeEach(() => {
+    api.getConfig.mockResolvedValue({ platform: 'telegram', platforms: { enabled: ['telegram'] }, telegram: { bot_token: 'bot-test' } });
+    api.getSettings.mockResolvedValue({
+      agent_catalog: agentCatalog, channels: { '-1001': { ...row('vibey'), enabled: true } }, threads: {},
+    });
+    api.telegramChats.mockResolvedValue({
+      ok: true, channels: [{ id: '-1001', name: 'forum', supports_topics: true, topics: [{ id: '7', name: 'Releases' }] }],
+    });
+  });
+
+  it('creates an override from the stored channel, then edits only what changed', async () => {
+    api.patchScopeSettings.mockImplementation(async (request) => storedAfter(request, { ...row('vibey'), enabled: true }));
+    render(<MemoryRouter><ChannelList isPage /></MemoryRouter>);
+    await userEvent.click(await screen.findByText('forum'));
+    await userEvent.click(await screen.findByText('channelList.topicCustomize'));
+    await waitFor(() => expect(api.patchScopeSettings).toHaveBeenCalledTimes(1));
+    const topicEditor = await waitFor(() => {
+      const buttons = screen.getAllByText('route:reviewer');
+      expect(buttons).toHaveLength(2);
+      return buttons[1];
+    });
+    await userEvent.click(topicEditor);
+    await waitFor(() => expect(api.patchScopeSettings).toHaveBeenCalledTimes(2));
+
+    expect(sent(0)).toEqual({ platform: 'telegram', scope: 'thread', id: '-1001', thread_id: '7', changes: {} });
+    expect(sent(1)).toEqual({
+      platform: 'telegram', scope: 'thread', id: '-1001', thread_id: '7',
+      changes: { routing: { agent_name: 'reviewer' } }, expected_agent_name: 'vibey',
+    });
   });
 });

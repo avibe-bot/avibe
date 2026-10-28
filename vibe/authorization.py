@@ -582,6 +582,7 @@ _MEMBER_HTTP_RULES = tuple(
         ("POST", r"^/api/settings$"),
         ("POST", r"^/api/settings/thread$"),
         ("DELETE", r"^/api/settings/thread$"),
+        ("PATCH", r"^/api/settings/scope$"),
         ("POST", r"^/api/slack/auth_test$"),
         ("POST", r"^/api/slack/channels$"),
         ("POST", r"^/api/discord/auth_test$"),

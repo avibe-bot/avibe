@@ -715,7 +715,7 @@ class CommandHandlers(BaseHandler):
         except Exception as e:
             logger.error(f"Error setting cwd: {e}")
             channel_context = self._get_channel_context(context)
-            await im_client.send_message(channel_context, f"❌ {self._t('error.cwdSetFailed', error=str(e))}")
+            await im_client.send_message(channel_context, f"❌ {self._t('error.cwdSetFailed', error=self._settings_error_text(e))}")
 
     async def handle_change_cwd_submission(
         self,

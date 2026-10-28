@@ -27,6 +27,7 @@ import { hasUsableSecret } from '../../lib/secretFields';
 import { setConfigField } from '../../lib/configMutations';
 import { EyebrowBadge, PlatformIcon, WizardCard } from '../visual';
 import { RoutingConfigPanel } from '../shared/RoutingConfigPanel';
+import { CHANNEL_SCOPE_FIELDS, scopeSettingsChange } from '../../lib/scopeSettingsPatch';
 import { CompactSelect, SearchField, ToggleSwitch } from '../settings/SettingsPrimitives';
 import { Button } from '../ui/button';
 import { TelegramTopicList } from './TelegramTopicList';
@@ -147,7 +148,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   const refreshFollowupVersionRef = useRef(0);
   const channelRequestVersionRef = useRef(0);
   const allPlatformsRequestVersionRef = useRef(0);
-  const channelSaveVersionRef = useRef<Record<string, number>>({});
+  const scopeSaveVersionRef = useRef<Record<string, number>>({});
   const currentPlatformRef = useRef<string>('');
   // Directory browser state — tracks which channel's cwd picker is open
   const [browsingCwdFor, setBrowsingCwdFor] = useState<string | null>(null);
@@ -649,23 +650,8 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     return channel ? channel.enabled !== false : false;
   };
 
-  const persistConfigs = async (nextConfigs: Record<string, ChannelConfig>) => {
-    if (!isPage) {
-      setConfigs(nextConfigs);
-      return;
-    }
-
-    setLoading(true);
-    try {
-      await api.saveSettings({ channels: nextConfigs }, platform);
-      showToast(t('channelList.settingsSaved'));
-    } catch {
-      showToast(t('channelList.settingsSaveFailed'), 'error');
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  // Setup-wizard edits stay local until the wizard saves them; the settings
+  // page edits through updateConfigForPlatform.
   const updateConfig = (channelId: string, patch: Partial<ChannelConfig>) => {
     const base = configs[channelId] || defaultConfig();
     const next = { ...base, ...patch };
@@ -675,9 +661,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     if (!next.routing || typeof next.routing !== 'object') {
       next.routing = { agent_name: null };
     }
-    const nextConfigs = { ...configs, [channelId]: next };
-    setConfigs(nextConfigs);
-    void persistConfigs(nextConfigs);
+    setConfigs({ ...configs, [channelId]: next });
   };
 
   const defaultConfig = (): ChannelConfig => ({
@@ -720,6 +704,47 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   }, [currentRefreshMeta, t]);
 
   // ---- Page-mode all-platforms aggregation ----
+  const reloadChannelConfigs = async (platformId: string) => {
+    const settings = await api.getSettings(platformId).catch(() => null);
+    if (!settings) return;
+    const stored = (settings.channels || {}) as Record<string, ChannelConfig>;
+    setAllConfigsByPlatform((prev) => ({ ...prev, [platformId]: stored }));
+    if (currentPlatformRef.current === platformId) setConfigs(stored);
+    if (platformId === 'telegram') setThreadConfigs(settings.threads || {});
+  };
+
+  // Each edit sends only what it changed on one scope. Resolves to the stored
+  // row, or null when nothing was sent, the save failed (the page then reloads
+  // the platform), or a newer edit of the same scope owns the local row.
+  const persistScopeChange = async (
+    platformId: string,
+    scope: { kind: 'channel' | 'thread'; id: string; threadId?: string },
+    base: ChannelConfig,
+    next: ChannelConfig,
+    { create = false }: { create?: boolean } = {},
+  ): Promise<ChannelConfig | null> => {
+    const change = scopeSettingsChange(base, next, CHANNEL_SCOPE_FIELDS) || (create ? { changes: {} } : null);
+    if (!change) return null;
+    const rowKey = `${platformId}::${scope.id}::${scope.threadId || ''}`;
+    const version = (scopeSaveVersionRef.current[rowKey] || 0) + 1;
+    scopeSaveVersionRef.current[rowKey] = version;
+    try {
+      const result = await api.patchScopeSettings({
+        platform: platformId,
+        scope: scope.kind,
+        id: scope.id,
+        ...(scope.threadId ? { thread_id: scope.threadId } : {}),
+        ...change,
+      });
+      showToast(t('channelList.settingsSaved'));
+      return scopeSaveVersionRef.current[rowKey] === version ? (result.settings as ChannelConfig) : null;
+    } catch {
+      showToast(t('channelList.settingsSaveFailed'), 'error');
+      if (scopeSaveVersionRef.current[rowKey] === version) await reloadChannelConfigs(platformId);
+      return null;
+    }
+  };
+
   const updateConfigForPlatform = async (
     platformId: string,
     channelId: string,
@@ -737,53 +762,61 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     if (!next.routing || typeof next.routing !== 'object') {
       next.routing = { agent_name: null };
     }
-    const nextPlatformConfigs = { ...platformConfigs, [channelId]: next };
-    setAllConfigsByPlatform((prev) => ({ ...prev, [platformId]: nextPlatformConfigs }));
+    setAllConfigsByPlatform((prev) => ({
+      ...prev,
+      [platformId]: { ...(prev[platformId] || platformConfigs), [channelId]: next },
+    }));
     if (platformId === platform) {
-      setConfigs(nextPlatformConfigs);
+      setConfigs((prev) => ({ ...prev, [channelId]: next }));
     }
     if (!isPage) return;
-    const version = (channelSaveVersionRef.current[platformId] || 0) + 1;
-    channelSaveVersionRef.current[platformId] = version;
-    let stored: Record<string, ChannelConfig> | null;
-    try {
-      const result = await api.saveSettings({ channels: nextPlatformConfigs }, platformId);
-      stored = result?.channels || null;
-      showToast(t('channelList.settingsSaved'));
-    } catch {
-      showToast(t('channelList.settingsSaveFailed'), 'error');
-      const settings = await api.getSettings(platformId).catch(() => null);
-      stored = settings ? settings.channels || {} : null;
+    const stored = await persistScopeChange(platformId, { kind: 'channel', id: channelId }, base, next);
+    if (!stored) return;
+    // The stored row replaces the page's copy on whichever views hold that platform.
+    setAllConfigsByPlatform((prev) => ({
+      ...prev,
+      [platformId]: { ...(prev[platformId] || {}), [channelId]: stored },
+    }));
+    if (currentPlatformRef.current === platformId) {
+      setConfigs((prev) => ({ ...prev, [channelId]: stored }));
     }
-    // Adopt the stored rows so each routing keeps the expected_agent_name read
-    // with it; a newer save on this platform owns the state instead.
-    if (!stored || channelSaveVersionRef.current[platformId] !== version) return;
-    const latest = stored;
-    setAllConfigsByPlatform((prev) => ({ ...prev, [platformId]: latest }));
-    if (currentPlatformRef.current === platformId) setConfigs(latest);
   };
 
+  // A topic without an override shows its channel's settings; customizing it
+  // creates the override from the channel's stored settings.
   const saveTelegramTopicConfig = async (
     channelId: string,
     topicId: string,
-    next: ChannelConfig,
+    patch: Partial<ChannelConfig>,
+    inherited?: ChannelConfig,
   ) => {
-    setThreadConfigs((current) => ({
+    const existing = threadConfigs[channelId]?.[topicId];
+    const base = existing || inherited || defaultConfig();
+    const next = { ...base, ...patch };
+    const setTopic = (config: ChannelConfig) => setThreadConfigs((current) => ({
       ...current,
-      [channelId]: { ...(current[channelId] || {}), [topicId]: next },
+      [channelId]: { ...(current[channelId] || {}), [topicId]: config },
     }));
-    try {
-      const result = await api.saveThreadSettings('telegram', channelId, topicId, next);
-      const saved = (result.settings || next) as ChannelConfig;
-      setThreadConfigs((current) => ({
-        ...current,
-        [channelId]: { ...(current[channelId] || {}), [topicId]: saved },
-      }));
-      showToast(t('channelList.settingsSaved'));
-    } catch {
-      const settings = await api.getSettings('telegram').catch(() => null);
-      if (settings) setThreadConfigs(settings.threads || {});
-      showToast(t('channelList.settingsSaveFailed'), 'error');
+    setTopic(next);
+    const stored = await persistScopeChange(
+      'telegram',
+      { kind: 'thread', id: channelId, threadId: topicId },
+      base,
+      next,
+      { create: !existing },
+    );
+    if (stored) setTopic(stored);
+  };
+
+  // Page mode keys the open directory picker by `${platform}::${channelId}[::${topicId}]`.
+  const selectBrowsedDirectory = (path: string) => {
+    const [browsePlatform, browseChannelId, browseTopicId] = (browsingCwdFor || '').split('::');
+    setBrowsingCwdFor(null);
+    if (!browsePlatform || !browseChannelId) return;
+    if (browseTopicId && threadConfigs[browseChannelId]?.[browseTopicId]) {
+      void saveTelegramTopicConfig(browseChannelId, browseTopicId, { custom_cwd: path });
+    } else {
+      void updateConfigForPlatform(browsePlatform, browseChannelId, { custom_cwd: path });
     }
   };
 
@@ -1079,23 +1112,29 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         showToast(t('channelList.settingsSaveFailed'), 'error');
         return;
       }
-      let changed = false;
-      const nextPlatformConfigs = { ...platformConfigs };
-      for (const [cid, cfg] of Object.entries(platformConfigs)) {
-        if (cfg?.enabled === true && (cfg.require_mention === null || cfg.require_mention === undefined)) {
-          nextPlatformConfigs[cid] = { ...cfg, require_mention: current };
-          changed = true;
-        }
-      }
-      if (changed) {
+      const inheriting = Object.keys(platformConfigs).filter((cid) => {
+        const cfg = platformConfigs[cid];
+        return cfg?.enabled === true && (cfg.require_mention === null || cfg.require_mention === undefined);
+      });
+      if (inheriting.length) {
+        const nextPlatformConfigs = { ...platformConfigs };
         try {
-          await api.saveSettings({ channels: nextPlatformConfigs }, key);
+          const results = await Promise.all(inheriting.map((cid) => api.patchScopeSettings({
+            platform: key,
+            scope: 'channel',
+            id: cid,
+            changes: { require_mention: current },
+          })));
+          inheriting.forEach((cid, index) => {
+            nextPlatformConfigs[cid] = (results[index].settings as ChannelConfig) || nextPlatformConfigs[cid];
+          });
         } catch {
           showToast(t('channelList.settingsSaveFailed'), 'error');
+          await reloadChannelConfigs(key);
           return;
         }
         setAllConfigsByPlatform((prev) => ({ ...prev, [key]: nextPlatformConfigs }));
-        if (key === platform) setConfigs(nextPlatformConfigs);
+        if (currentPlatformRef.current === key) setConfigs(nextPlatformConfigs);
       }
     }
 
@@ -1632,19 +1671,19 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
                               show_message_types: [...channelConfig.show_message_types],
                               routing: { ...channelConfig.routing },
                             };
-                            void saveTelegramTopicConfig(channel.id, topicId, snapshot);
+                            void saveTelegramTopicConfig(channel.id, topicId, {}, snapshot);
                             setExpandedTopicKey(`${channel.id}::${topicId}`);
                           }}
                           onReset={(topicId) => void resetTelegramTopicConfig(channel.id, topicId)}
                           onSetEnabled={(topicId, enabled) => {
                             const topicConfig = threadConfigs[channel.id]?.[topicId];
-                            if (topicConfig) void saveTelegramTopicConfig(channel.id, topicId, { ...topicConfig, enabled });
+                            if (topicConfig) void saveTelegramTopicConfig(channel.id, topicId, { enabled });
                           }}
                           renderEditor={(topicId, topicConfig) => {
                             return (
                               <RoutingConfigPanel
                                 value={topicConfig}
-                                onChange={(patch) => void saveTelegramTopicConfig(channel.id, topicId, { ...topicConfig, ...patch })}
+                                onChange={(patch) => void saveTelegramTopicConfig(channel.id, topicId, patch)}
                                 onBrowseDirectory={() => setBrowsingCwdFor(`telegram::${channel.id}::${topicId}`)}
                                 globalConfig={config}
                                 vibeAgents={vibeAgents}
@@ -1677,14 +1716,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
           return (
             <FolderBrowser
               initialPath={selectedConfig?.custom_cwd || config.runtime?.default_cwd || '~/work'}
-              onSelect={(path) => {
-                if (browseTopicId && selectedConfig) {
-                  void saveTelegramTopicConfig(browseChannelId, browseTopicId, { ...selectedConfig, custom_cwd: path });
-                } else {
-                  void updateConfigForPlatform(browsePlatform, browseChannelId, { custom_cwd: path });
-                }
-                setBrowsingCwdFor(null);
-              }}
+              onSelect={selectBrowsedDirectory}
               onClose={() => setBrowsingCwdFor(null)}
             />
           );

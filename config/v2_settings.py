@@ -8,7 +8,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from config import paths
 from modules.agents.catalog import NATIVE_CLI_BACKENDS
@@ -565,6 +565,23 @@ class SettingsStore:
                 raise
             # Use the exact revision committed by this transaction. Reading the
             # current value here could absorb a later external write without loading it.
+            self._observed_revision = revision
+            self._loaded_state = copy.deepcopy(self.settings)
+            self._generation += 1
+
+    def apply(self, mutate: Callable[[SettingsState], None], *, user_context=None) -> None:
+        """Run ``mutate`` on the authoritative settings inside one write transaction.
+
+        Unlike ``save``, nothing this store loaded earlier is written back, so an
+        edit cannot revert what another writer changed in the meantime. The store
+        then holds the committed snapshot.
+        """
+        with self._reload_lock:
+            try:
+                revision = self._service.save_state(self.settings, user_context=user_context, mutate=mutate)
+            except Exception:
+                self._load_with_revision()
+                raise
             self._observed_revision = revision
             self._loaded_state = copy.deepcopy(self.settings)
             self._generation += 1

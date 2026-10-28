@@ -8092,6 +8092,31 @@ async def thread_settings_post(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+@app.patch("/api/settings/scope", include_in_schema=False)
+async def scope_settings_patch(starlette_request: FastAPIRequest):
+    async def handler():
+        from vibe import api
+        from storage.settings_service import ScopeAgentUnavailableError, StaleScopeAgentBindingError
+
+        body = await starlette_request.body()
+        payload = await starlette_request.json() if body else {}
+        user_context = _request_authorization_context()
+        try:
+            return await asyncio.to_thread(
+                api.patch_scope_settings,
+                payload if isinstance(payload, dict) else {},
+                user_context=user_context,
+            )
+        except api.ScopeSettingsRequestError as exc:
+            return _coded_error_response(exc.code, exc.message, exc.status)
+        except StaleScopeAgentBindingError as exc:
+            return _settings_conflict_response(exc)
+        except ScopeAgentUnavailableError as exc:
+            return _scope_agent_unavailable_response(exc)
+
+    return await _dispatch_native_ui_request(starlette_request, handler)
+
+
 @app.delete("/api/settings/thread", include_in_schema=False)
 async def thread_settings_delete(starlette_request: FastAPIRequest):
     async def handler():
