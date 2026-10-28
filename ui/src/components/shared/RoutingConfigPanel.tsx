@@ -24,14 +24,8 @@ export interface RoutingConfigValue {
     model?: string | null;
     reasoning_effort?: string | null;
     opencode_agent?: string | null;
-    opencode_model?: string | null;
-    opencode_reasoning_effort?: string | null;
     claude_agent?: string | null;
-    claude_model?: string | null;
-    claude_reasoning_effort?: string | null;
     codex_agent?: string | null;
-    codex_model?: string | null;
-    codex_reasoning_effort?: string | null;
   };
   show_message_types: string[];
   require_mention?: boolean | null;
@@ -100,18 +94,6 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
 
   const selectedVibeAgent = vibeAgents.find((agent) => agent.name === value.routing.agent_name) || null;
   const defaultVibeAgent = vibeAgents.find((agent) => agent.name === defaultAgentName) || null;
-
-  // Picking an agent re-seeds model/effort, so always clear the deprecated
-  // per-backend overrides on any route change (kept for back-compat on read).
-  const clearLegacyOverrides = (routing: RoutingConfigValue['routing']) => ({
-    ...routing,
-    opencode_model: null,
-    opencode_reasoning_effort: null,
-    claude_model: null,
-    claude_reasoning_effort: null,
-    codex_model: null,
-    codex_reasoning_effort: null,
-  });
 
   // Access row: working dir (+ optional require_mention / require_bind for
   // channels). The Agent route picker lives in the row below.
@@ -224,7 +206,7 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
               if ('agent_name' in patch) next.agent_name = patch.agent_name ?? null;
               if ('model' in patch) next.model = patch.model ?? null;
               if ('reasoning_effort' in patch) next.reasoning_effort = patch.reasoning_effort ?? null;
-              onChange({ routing: clearLegacyOverrides(next) });
+              onChange({ routing: next });
             }}
             defaultLabel={
               defaultVibeAgent ? `${t('common.default')} · ${defaultVibeAgent.name}` : t('common.default')

@@ -21,8 +21,10 @@ from config.v2_settings import (
     _make_scoped_key,
     _split_scoped_key,
     make_thread_native_id,
+    LEGACY_ROUTING_ALIASES,
     normalize_routing_settings,
     normalize_show_message_types,
+    routing_from_stored_payload,
     split_thread_native_id,
 )
 from storage.agent_session_rows import reserve_write_lock
@@ -693,19 +695,9 @@ def _active_routing_variant(routing: RoutingSettings) -> str | None:
 
 def _routing_from_row(row: dict[str, Any], payload: dict[str, Any]) -> RoutingSettings:
     routing_payload = payload.get("routing") or {}
-    routing = RoutingSettings(
-        agent_name=routing_payload.get("agent_name") or routing_payload.get("agent"),
-        model=routing_payload.get("model") or routing_payload.get("model_override"),
-        reasoning_effort=routing_payload.get("reasoning_effort") or routing_payload.get("reasoning_effort_override"),
-        opencode_agent=routing_payload.get("opencode_agent"),
-        opencode_model=routing_payload.get("opencode_model"),
-        opencode_reasoning_effort=routing_payload.get("opencode_reasoning_effort"),
-        claude_agent=routing_payload.get("claude_agent"),
-        claude_model=routing_payload.get("claude_model"),
-        claude_reasoning_effort=routing_payload.get("claude_reasoning_effort"),
-        codex_agent=routing_payload.get("codex_agent"),
-        codex_model=routing_payload.get("codex_model"),
-        codex_reasoning_effort=routing_payload.get("codex_reasoning_effort"),
+    aliases = {key: value for key, value in routing_payload.items() if key in LEGACY_ROUTING_ALIASES}
+    routing = routing_from_stored_payload(
+        {key: value for key, value in routing_payload.items() if key not in LEGACY_ROUTING_ALIASES}
     )
     stored_agent_name = row.get("agent_name")
     if stored_agent_name:
@@ -722,6 +714,11 @@ def _routing_from_row(row: dict[str, Any], payload: dict[str, Any]) -> RoutingSe
         routing.claude_agent = routing.claude_agent or variant
     elif routing.agent_name == "opencode":
         routing.opencode_agent = routing.opencode_agent or variant
+    # A row an older release wrote may carry its model or effort only in a
+    # retired per-backend alias; the payload and the columns come first.
+    lifted = routing_from_stored_payload({**aliases, "agent_name": routing.agent_name})
+    routing.model = routing.model or lifted.model
+    routing.reasoning_effort = routing.reasoning_effort or lifted.reasoning_effort
     return routing
 
 

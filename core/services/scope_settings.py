@@ -25,11 +25,11 @@ from config.v2_settings import (
     _UNSET_AGENT_BINDING,
     _make_scoped_key,
     _parse_routing,
-    _routing_to_dict,
+    lift_legacy_routing_aliases,
     make_thread_native_id,
     normalize_routing_settings,
     normalize_show_message_types,
-    routing_to_compat_dict,
+    routing_to_dict,
 )
 
 logger = logging.getLogger(__name__)
@@ -113,7 +113,7 @@ def normalize_scope_routing(routing_payload: dict) -> dict:
             routing.reasoning_effort,
             catalog_efforts,
         )
-    return _routing_to_dict(routing)
+    return routing_to_dict(routing)
 
 
 def _stored_agent_name(settings: ChannelSettings | UserSettings) -> Optional[str]:
@@ -181,7 +181,11 @@ def apply_scope_change(
     # Agent and model catalogs, which must not hold other writers up.
     routing_changes: Optional[dict] = None
     if routing_patch is not None:
-        stored_routing = routing_to_compat_dict(source_of(store.settings).routing)
+        stored_routing = routing_to_dict(source_of(store.settings).routing)
+        # A browser tab from an older release may still send retired aliases.
+        routing_patch = lift_legacy_routing_aliases(
+            routing_patch, routing_patch.get("agent_name", stored_routing["agent_name"])
+        )
         normalized = normalize_scope_routing({**stored_routing, **routing_patch})
         routing_changes = {
             name: value
@@ -216,7 +220,7 @@ def apply_scope_change(
                 value = normalize_scope_message_types(value, platform)
             setattr(updated, name, value)
         if routing_changes:
-            merged = {**_routing_to_dict(updated.routing), **routing_changes}
+            merged = {**routing_to_dict(updated.routing), **routing_changes}
             updated.routing = normalize_routing_settings(RoutingSettings(**merged))
         if kind == "thread" and existing is None and updated.require_mention is None:
             # An inheriting topic's first override keeps the gate it showed.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -983,69 +984,56 @@ def test_settings_save_preserves_observed_scope_metadata(tmp_path: Path) -> None
     assert json.loads(row["metadata_json"]) == {"username": "general"}
 
 
-def test_settings_save_does_not_migrate_legacy_model_fields_without_backend(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("agent_name", "payload", "columns", "expected"),
+    [
+        # Only the retired alias holds the selection: it fills the route.
+        ("claude", {"claude_model": "claude-opus-4-8", "claude_reasoning_effort": "max"}, (None, None),
+         ("claude-opus-4-8", "max")),
+        # The canonical payload value wins over a stale alias.
+        ("claude", {"model": "claude-sonnet-4-6", "claude_model": "claude-opus-4-8"}, (None, None),
+         ("claude-sonnet-4-6", None)),
+        # So do the columns, which every release since the aliases wrote.
+        ("claude", {"claude_model": "claude-opus-4-8"}, ("claude-sonnet-4-6", "high"),
+         ("claude-sonnet-4-6", "high")),
+        # Another backend's alias, or one on an inheriting route, applies to no Agent.
+        ("codex", {"claude_model": "claude-opus-4-8"}, (None, None), (None, None)),
+        (None, {"codex_model": "gpt-5.5", "codex_reasoning_effort": "high"}, (None, None), (None, None)),
+    ],
+)
+def test_settings_load_lifts_a_retired_alias_only_for_its_own_agent(
+    tmp_path: Path,
+    agent_name: str | None,
+    payload: dict,
+    columns: tuple[str | None, str | None],
+    expected: tuple[str | None, str | None],
+) -> None:
     db_path = tmp_path / "vibe.sqlite"
     run_migrations(db_path)
     service = SQLiteSettingsService(db_path)
     try:
         service.save_state(
             SettingsState(
-                channels={
-                    "slack::C123": ChannelSettings(
-                        enabled=True,
-                        routing=RoutingSettings(
-                            agent_name=None,
-                            codex_model="gpt-stale-codex",
-                            claude_model="claude-stale",
-                            opencode_model="openai/stale",
-                            codex_reasoning_effort="high",
-                            claude_reasoning_effort="medium",
-                            opencode_reasoning_effort="low",
-                        ),
-                    ),
-                }
+                channels={"slack::C123": ChannelSettings(enabled=True, routing=RoutingSettings(agent_name=agent_name))}
             )
         )
+        with service.engine.begin() as conn:
+            conn.execute(
+                scope_settings.update()
+                .where(scope_settings.c.scope_id == "slack::channel::C123")
+                .values(
+                    settings_json=json.dumps({"routing": {"agent_name": agent_name, **payload}}),
+                    model=columns[0],
+                    reasoning_effort=columns[1],
+                )
+            )
 
-        state = service.load_state()
+        routing = service.load_state().channels["slack::C123"].routing
     finally:
         service.close()
 
-    routing = state.channels["slack::C123"].routing
-    assert routing.model is None
-    assert routing.reasoning_effort is None
-    assert routing.codex_model == "gpt-stale-codex"
-    assert routing.claude_model == "claude-stale"
-    assert routing.opencode_model == "openai/stale"
-
-
-def test_settings_save_lifts_backend_aliases_for_builtin_agent_name(tmp_path: Path) -> None:
-    db_path = tmp_path / "vibe.sqlite"
-    run_migrations(db_path)
-    service = SQLiteSettingsService(db_path)
-    try:
-        service.save_state(
-            SettingsState(
-                channels={
-                    "slack::C123": ChannelSettings(
-                        enabled=True,
-                        routing=RoutingSettings(
-                            agent_name="claude",
-                            claude_model="claude-opus-4-8",
-                            claude_reasoning_effort="max",
-                        ),
-                    ),
-                }
-            )
-        )
-
-        state = service.load_state()
-    finally:
-        service.close()
-
-    routing = state.channels["slack::C123"].routing
-    assert routing.model == "claude-opus-4-8"
-    assert routing.reasoning_effort == "max"
+    assert (routing.model, routing.reasoning_effort) == expected
+    assert v2_settings.routing_to_dict(routing).keys() == {field.name for field in fields(RoutingSettings)}
 
 
 def test_settings_save_stores_only_active_builtin_agent_variant(tmp_path: Path) -> None:

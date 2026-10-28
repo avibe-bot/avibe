@@ -44,14 +44,8 @@ interface UserConfig {
     model?: string | null;
     reasoning_effort?: string | null;
     opencode_agent?: string | null;
-    opencode_model?: string | null;
-    opencode_reasoning_effort?: string | null;
     claude_agent?: string | null;
-    claude_model?: string | null;
-    claude_reasoning_effort?: string | null;
     codex_agent?: string | null;
-    codex_model?: string | null;
-    codex_reasoning_effort?: string | null;
   };
 }
 
@@ -617,14 +611,8 @@ export const UserList: React.FC = () => {
       model: null,
       reasoning_effort: null,
       opencode_agent: null,
-      opencode_model: null,
-      opencode_reasoning_effort: null,
       claude_agent: null,
-      claude_model: null,
-      claude_reasoning_effort: null,
       codex_agent: null,
-      codex_model: null,
-      codex_reasoning_effort: null,
     },
   });
 

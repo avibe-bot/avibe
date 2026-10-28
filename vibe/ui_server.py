@@ -13941,12 +13941,14 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                     ch.routing = RoutingSettings(
                         agent_name=_routing_name_for_backend(modal_values.get("backend", "opencode")),
                         model=(
-                            modal_values.get("opencode_model")
+                            modal_values.get("model")
+                            or modal_values.get("opencode_model")
                             or modal_values.get("claude_model")
                             or modal_values.get("codex_model")
                         ),
                         reasoning_effort=(
-                            modal_values.get("opencode_reasoning_effort")
+                            modal_values.get("reasoning_effort")
+                            or modal_values.get("opencode_reasoning_effort")
                             or modal_values.get("claude_reasoning_effort")
                             or modal_values.get("codex_reasoning_effort")
                         ),
@@ -13969,49 +13971,6 @@ if os.environ.get("E2E_TEST_MODE", "").lower() in ("true", "1", "yes"):
                     {"runtime": {"default_cwd": modal_values.get("cwd", "/tmp")}}
                 )
                 return jsonify({"ok": True, "action": action})
-
-            elif action == "routing_submit":
-                # Write routing config for a specific channel/user
-                channel_id = modal_values.get("channel_id") or modal_values.get("settings_key")
-                if not channel_id:
-                    return jsonify({"ok": False, "error": "channel_id required in modal_values"}), 400
-
-                from core.services import settings as settings_service
-
-                store = settings_service.reload_settings_store()
-                from vibe.api import _current_platform
-
-                platform = _current_platform()
-                ch = store.find_channel(channel_id, platform=platform)
-                if ch:
-                    from config.v2_settings import RoutingSettings
-
-                    ch.routing = RoutingSettings(
-                        agent_name=_routing_name_for_backend(modal_values.get("backend", "opencode")),
-                        model=(
-                            modal_values.get("opencode_model")
-                            or modal_values.get("claude_model")
-                            or modal_values.get("codex_model")
-                        ),
-                        reasoning_effort=(
-                            modal_values.get("opencode_reasoning_effort")
-                            or modal_values.get("claude_reasoning_effort")
-                            or modal_values.get("codex_reasoning_effort")
-                        ),
-                        opencode_agent=modal_values.get("opencode_agent"),
-                        claude_agent=modal_values.get("claude_agent"),
-                        codex_agent=modal_values.get("codex_agent"),
-                    )
-                    store.save()
-                    return jsonify({"ok": True, "action": action})
-                else:
-                    return jsonify({"ok": False, "error": f"channel {channel_id} not found in settings"}), 404
-
-            elif action == "cwd_submit":
-                # Update CWD via config API
-                new_cwd = modal_values.get("cwd", "/tmp")
-                result = vibe_api.save_config({"runtime": {"default_cwd": new_cwd}})
-                return jsonify({"ok": True, "action": action, "result": result})
 
             else:
                 return jsonify({"ok": False, "error": f"unknown action: {action}"}), 400
