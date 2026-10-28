@@ -454,6 +454,7 @@ export const UserList: React.FC = () => {
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const userSaveVersionRef = useRef<Record<string, number>>({});
+  const routeSaveVersionRef = useRef<Record<string, number>>({});
 
   const enabledPlatforms = useMemo(() => getEnabledPlatforms(config), [config]);
   const vibeAgents = config.agent_catalog?.agents || [];
@@ -530,16 +531,19 @@ export const UserList: React.FC = () => {
     const rowKey = `${platform}::${userId}`;
     const version = (userSaveVersionRef.current[rowKey] || 0) + 1;
     userSaveVersionRef.current[rowKey] = version;
+    // The session note answers the latest route change, whatever else saved since.
+    const routeVersion = 'routing' in change.changes ? (routeSaveVersionRef.current[rowKey] || 0) + 1 : null;
+    if (routeVersion !== null) routeSaveVersionRef.current[rowKey] = routeVersion;
     setSavingRows((prev) => ({ ...prev, [rowKey]: (prev[rowKey] || 0) + 1 }));
     try {
       const result = await api.patchScopeSettings({ platform, scope: 'user', id: userId, ...change });
+      if (routeVersion !== null && routeSaveVersionRef.current[rowKey] === routeVersion) {
+        setNewSessionRows((prev) => ({ ...prev, [rowKey]: result.needs_new_session === true }));
+      }
       const stored = result.settings as UserConfig | undefined;
       if (userSaveVersionRef.current[rowKey] !== version) return;
       if (stored) {
         setUsersByPlatform((prev) => ({ ...prev, [platform]: { ...(prev[platform] || {}), [userId]: stored } }));
-      }
-      if ('routing' in change.changes) {
-        setNewSessionRows((prev) => ({ ...prev, [rowKey]: result.needs_new_session === true }));
       }
     } catch {
       showToast(t('userList.settingsSaveFailed'), 'error');

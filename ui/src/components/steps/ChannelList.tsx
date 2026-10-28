@@ -154,6 +154,7 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   const channelRequestVersionRef = useRef(0);
   const allPlatformsRequestVersionRef = useRef(0);
   const scopeSaveVersionRef = useRef<Record<string, number>>({});
+  const routeSaveVersionRef = useRef<Record<string, number>>({});
   // Per scope row (see scopeRowKey): saves in flight, and whether the last route
   // change left a session that keeps its previous Agent.
   const [savingRows, setSavingRows] = useState<Record<string, number>>({});
@@ -738,6 +739,9 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
     const rowKey = scopeRowKey(platformId, scope.id, scope.threadId);
     const version = (scopeSaveVersionRef.current[rowKey] || 0) + 1;
     scopeSaveVersionRef.current[rowKey] = version;
+    // The session note answers the latest route change, whatever else saved since.
+    const routeVersion = 'routing' in change.changes ? (routeSaveVersionRef.current[rowKey] || 0) + 1 : null;
+    if (routeVersion !== null) routeSaveVersionRef.current[rowKey] = routeVersion;
     setSavingRows((prev) => ({ ...prev, [rowKey]: (prev[rowKey] || 0) + 1 }));
     try {
       const result = await api.patchScopeSettings({
@@ -747,10 +751,10 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
         ...(scope.threadId ? { thread_id: scope.threadId } : {}),
         ...change,
       });
-      if (scopeSaveVersionRef.current[rowKey] !== version) return null;
-      if ('routing' in change.changes) {
+      if (routeVersion !== null && routeSaveVersionRef.current[rowKey] === routeVersion) {
         setNewSessionRows((prev) => ({ ...prev, [rowKey]: result.needs_new_session === true }));
       }
+      if (scopeSaveVersionRef.current[rowKey] !== version) return null;
       return result.settings as ChannelConfig;
     } catch {
       showToast(t('channelList.settingsSaveFailed'), 'error');

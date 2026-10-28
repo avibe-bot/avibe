@@ -33,6 +33,7 @@ vi.mock('../shared/RoutingConfigPanel', () => ({
           {`route:${agent}`}
         </button>
       ))}
+      <button type="button" onClick={() => onChange({ show_message_types: ['assistant', 'toolcall'] })}>types</button>
       {routeNotice && <p>{routeNotice}</p>}
     </div>
   ),
@@ -101,6 +102,21 @@ describe('users page rows', () => {
     api.patchScopeSettings.mockRejectedValueOnce(new Error('settings_conflict'));
     await userEvent.click(screen.getByText('route:vibey'));
     await waitFor(() => expect(toast).toHaveBeenCalledWith('userList.settingsSaveFailed', 'error'));
+  });
+  it('keeps the session note of a route change answered after a later edit of the same row', async () => {
+    serveUsers({ ou_1: user({ agent_name: 'vibey', model: null, reasoning_effort: null }) });
+    const route = deferred<object>();
+    api.patchScopeSettings.mockReturnValueOnce(route.promise)
+      .mockResolvedValueOnce({ ok: true, settings: { ...user({ agent_name: 'reviewer' }), show_message_types: ['assistant', 'toolcall'] } });
+    render(<UserList />);
+    await userEvent.click(await screen.findByText('Liu'));
+
+    await userEvent.click(screen.getByText('route:reviewer'));
+    await userEvent.click(screen.getByText('types'));
+    await waitFor(() => expect(api.patchScopeSettings).toHaveBeenCalledTimes(2));
+    route.resolve({ ok: true, settings: user({ agent_name: 'reviewer' }), needs_new_session: true });
+
+    expect(await screen.findByText('channelList.newSessionHint')).toBeTruthy();
   });
 });
 
