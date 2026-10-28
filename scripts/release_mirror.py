@@ -3,7 +3,8 @@
 
 GitHub stays the source of truth. For each mirrored repository the bucket holds
 byte-identical copies under ``<root>releases/<tag>/<asset>`` and a release
-index at ``<root>index/releases.json``; see
+index at ``<root>index/releases.json``. Avibe's root also holds version-less
+``latest/`` copies of the newest stable desktop installers; see
 ``docs/plans/release-download-mirror.md`` for the contract.
 """
 
@@ -52,13 +53,21 @@ FULL_RELEASES_ONLY = frozenset({"tmux/tmux-builds"})
 RELEASE_PREFIX = "releases/"
 INDEX_KEY = "index/releases.json"
 IMMUTABLE_CACHE_CONTROL = "public, max-age=31536000, immutable"
-INDEX_CACHE_CONTROL = "public, max-age=60"
+# The index and the ``latest/`` installers change bytes under one URL.
+MUTABLE_CACHE_CONTROL = "public, max-age=60"
+# ``latest/Avibe_<target>.<ext>`` copies ``Avibe_<version>_<target>.<ext>`` from
+# the highest stable release that ships installers. Only Avibe's root has them.
+LATEST_REPOSITORY = "avibe-bot/avibe"
+LATEST_PREFIX = "latest/"
+INSTALLER_SUFFIXES = (".dmg", ".exe")
 DEFAULT_KEEP_PRERELEASES = 20
 INDEX_SCHEMA_VERSION = 1
 
 _NAME_RE = re.compile(r"[A-Za-z0-9._+-]+")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+# The desktop updater's stable channel: canonical ``vX.Y.Z`` full releases.
+_STABLE_TAG_RE = re.compile(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)")
 
 
 class MirrorError(RuntimeError):
@@ -98,6 +107,8 @@ class Release:
 @dataclass(frozen=True)
 class Plan:
     uploads: tuple[tuple[str, Asset], ...]
+    # ``(latest key, source key, asset)``, copied in the bucket after uploads.
+    aliases: tuple[tuple[str, str, Asset], ...]
     deletions: tuple[str, ...]
     # Keys whose published bytes changed upstream. Edge caches may still hold
     # the old copy for up to a year, so these fail the run after repair.
@@ -177,6 +188,28 @@ def select(releases: Sequence[Release], keep_prereleases: int) -> list[Release]:
     return [release for release in ordered if not release.prerelease or release in prereleases]
 
 
+def latest_installers(releases: Sequence[Release]) -> dict[str, tuple[str, Asset]]:
+    """Map each ``latest/`` key to its source in the highest stable release that ships installers.
+
+    SemVer orders the releases, as in the desktop updater; publication order never counts.
+    """
+    stable = [
+        (tuple(int(part) for part in match.groups()), release)
+        for release in releases
+        if not release.prerelease and (match := _STABLE_TAG_RE.fullmatch(release.tag))
+    ]
+    for _, release in sorted(stable, key=lambda item: item[0], reverse=True):
+        prefix = f"Avibe_{release.tag.removeprefix('v')}_"
+        installers = {
+            f"{LATEST_PREFIX}Avibe_{asset.name.removeprefix(prefix)}": (release.key(asset), asset)
+            for asset in release.assets
+            if asset.name.startswith(prefix) and asset.name.endswith(INSTALLER_SUFFIXES)
+        }
+        if installers:
+            return installers
+    return {}
+
+
 def render_index(repository: str, releases: Sequence[Release]) -> bytes:
     document = {
         "schema_version": INDEX_SCHEMA_VERSION,
@@ -252,11 +285,13 @@ def plan(
     releases: Sequence[Release],
     objects: Mapping[str, int],
     previous_index: bytes | None,
+    latest: Mapping[str, str | None] | None = None,
 ) -> Plan:
     """Compare the selected releases with the repository's ``releases/`` objects.
 
     A manifest-pinned repository's root only grows: its objects are the backup of
-    every release a published manifest pinned.
+    every release a published manifest pinned. ``latest`` maps each existing
+    ``latest/`` object to the sha256 it was copied with.
     """
     if not releases:
         raise MirrorError(f"GitHub returned no published releases for {repository}; refusing to reconcile")
@@ -279,8 +314,19 @@ def plan(
         if repository in PINNED_BY_MANIFEST
         else sorted(key for key in objects if key.startswith(prefix) and key not in expected)
     )
+    aliases = []
+    if repository == LATEST_REPOSITORY:
+        current = latest or {}
+        installers = latest_installers(releases)
+        aliases = [
+            (key, source, asset)
+            for key, (source, asset) in sorted(installers.items())
+            if current.get(key) != asset.sha256
+        ]
+        deletions += sorted(key for key in current if key not in installers)
     return Plan(
         uploads=tuple(uploads),
+        aliases=tuple(aliases),
         deletions=tuple(deletions),
         changed=tuple(changed),
         index=render_index(repository, releases),
@@ -365,6 +411,22 @@ class Bucket:
             "--metadata", f"sha256={sha256}",
         )
 
+    def copy(
+        self, source: str, key: str, *, content_type: str, cache_control: str, content_disposition: str, sha256: str
+    ) -> None:
+        # A server-side copy; REPLACE gives the copy its own headers.
+        self._s3api(
+            "copy-object", "--copy-source", f"{self.name}/{source}", "--key", key,
+            "--metadata-directive", "REPLACE", "--content-type", content_type,
+            "--cache-control", cache_control, "--content-disposition", content_disposition,
+            "--metadata", f"sha256={sha256}",
+        )
+
+    def sha256(self, key: str) -> str | None:
+        """Return the sha256 this job recorded on ``key``."""
+        head = json.loads(self._s3api("head-object", "--key", key, "--output", "json"))
+        return (head.get("Metadata") or {}).get("sha256")
+
     def delete(self, key: str) -> None:
         # DeleteObjects requires a request checksum that R2 may not implement.
         self._s3api("delete-object", "--key", key)
@@ -380,11 +442,16 @@ def reconcile(repository: str, bucket: Bucket, *, keep_prereleases: int, dry_run
     previous_index = bucket.read(key) if key in objects else None
     if repository in PINNED_BY_MANIFEST:
         releases = with_earlier_pins(repository, releases, previous_index)
-    result = plan(repository, releases, objects, previous_index)
+    latest = (
+        {name: bucket.sha256(name) for name in objects if name.startswith(LATEST_PREFIX)}
+        if repository == LATEST_REPOSITORY
+        else None
+    )
+    result = plan(repository, releases, objects, previous_index, latest)
     size = sum(asset.size for _, asset in result.uploads)
     print(
         f"{repository}: {len(releases)} releases mirrored; "
-        f"{len(result.uploads)} uploads ({size / 1e9:.2f} GB), "
+        f"{len(result.uploads)} uploads ({size / 1e9:.2f} GB), {len(result.aliases)} latest copies, "
         f"{len(result.deletions)} deletions, index {'unchanged' if result.index == previous_index else 'changed'}"
     )
     for changed in result.changed:
@@ -392,6 +459,8 @@ def reconcile(repository: str, bucket: Bucket, *, keep_prereleases: int, dry_run
     if dry_run:
         for upload, _ in result.uploads:
             print(f"would upload {upload}")
+        for alias, source, _ in result.aliases:
+            print(f"would copy {source} to {alias}")
         for deletion in result.deletions:
             print(f"would delete {deletion}")
     else:
@@ -404,11 +473,18 @@ def reconcile(repository: str, bucket: Bucket, *, keep_prereleases: int, dry_run
                     cache_control=IMMUTABLE_CACHE_CONTROL, sha256=asset.sha256,
                 )
                 print(f"uploaded {upload}")
+            # Sources exist now: each was verified earlier or uploaded above.
+            for alias, source, asset in result.aliases:
+                bucket.copy(
+                    source, alias, content_type=asset.content_type, cache_control=MUTABLE_CACHE_CONTROL,
+                    content_disposition=f'attachment; filename="{asset.name}"', sha256=asset.sha256,
+                )
+                print(f"copied {source} to {alias}")
             if result.index != previous_index:
                 path.write_bytes(result.index)
                 bucket.put(
                     key, path, content_type="application/json",
-                    cache_control=INDEX_CACHE_CONTROL, sha256=hashlib.sha256(result.index).hexdigest(),
+                    cache_control=MUTABLE_CACHE_CONTROL, sha256=hashlib.sha256(result.index).hexdigest(),
                 )
                 print(f"wrote {key}")
         # Delete only after the index stops listing these objects.

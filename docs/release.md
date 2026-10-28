@@ -50,5 +50,7 @@ that guard: the mirror holds the pinned release, verified against the manifest.
 `https://dl.avibe.bot/releases/<tag>/<asset>` and writes the release index at
 `https://dl.avibe.bot/index/releases.json`. It follows the publishing
 workflows, so a renamed publishing workflow must also be renamed in its
-trigger. The contract and retention rules are in
+trigger. It also keeps version-less links to the newest stable desktop
+installers, such as
+`https://dl.avibe.bot/latest/Avibe_aarch64-apple-darwin.dmg`. The contract and retention rules are in
 `docs/plans/release-download-mirror.md`.
