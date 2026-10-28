@@ -1,8 +1,6 @@
 import asyncio
 import base64
 import contextlib
-import copy
-import dataclasses
 import hashlib
 import json
 import logging
@@ -56,6 +54,7 @@ from config.platform_registry import get_platform_descriptor
 from core import latest_version_cache
 from core.backend_restart import NativeCredentialLease, NativeMigrationBlockedError, finish_native_operation
 from core.install_integrity import verify_python_environment
+from core.services import scope_settings
 from vibe.opencode_config import (
     get_opencode_config_paths,
     load_first_opencode_user_config,
@@ -5738,60 +5737,6 @@ def get_settings(platform: Optional[str] = None, *, user_context: Any = None) ->
     return payload
 
 
-def _normalize_backend_routing_payload(routing_payload: dict) -> dict:
-    from config.v2_config import is_model_hub_enabled
-    from core.handlers.model_hub.service import V2ModelHubConfigStore
-    from modules.agents.opencode.utils import normalize_claude_reasoning_effort
-
-    routing = _parse_routing(routing_payload or {})
-    backend, agent_model = _routing_agent_backend_and_model(routing.agent_name)
-    if backend == "claude" and routing.reasoning_effort:
-        model = routing.model or agent_model
-        catalog_efforts = None
-        agent_catalog = (
-            V2ModelHubConfigStore().load().agents["claude"] if is_model_hub_enabled() else None
-        )
-        if agent_catalog is not None and agent_catalog.mode == "hub":
-            row = next((row for row in agent_catalog.models if row.id == model), None)
-            if row is not None:
-                # Match the picker: a present empty list (or non-reasoning
-                # model) is authoritative, not a request for backend tiers.
-                catalog_efforts = [] if row.supports_reasoning is False else row.reasoning_efforts
-            # Unknown Hub rows retain the existing generic normalization;
-            # a same-named native model must not grant them Off support.
-        else:
-            catalog_efforts = backend_model_catalog.catalog_reasoning_efforts_for_model("claude", model)
-        routing.reasoning_effort = normalize_claude_reasoning_effort(
-            model,
-            routing.reasoning_effort,
-            catalog_efforts,
-        )
-    return _routing_to_dict(routing)
-
-
-def _routing_agent_backend_and_model(agent_name: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    name = str(agent_name or "").strip()
-    if not name:
-        return None, None
-    store = VibeAgentStore()
-    try:
-        agent = store.get(name)
-        if agent is not None:
-            return agent.backend, agent.model
-    except Exception:
-        logger.debug("Failed to resolve Agent backend while normalizing routing payload", exc_info=True)
-    finally:
-        store.close()
-    return (name, None) if is_agent_backend(name) else (None, None)
-
-
-def _normalize_show_message_types_for_platform(show_message_types: Optional[list], platform: str) -> list[str]:
-    normalized = normalize_show_message_types(show_message_types)
-    if not get_platform_descriptor(platform).capabilities.supports_toolcall_delivery:
-        return [msg_type for msg_type in normalized if msg_type != "toolcall"]
-    return normalized
-
-
 def save_settings(payload: dict, *, user_context: Any = None) -> dict:
     from vibe.authorization import require_instance_role
 
@@ -5806,11 +5751,11 @@ def save_settings(payload: dict, *, user_context: Any = None) -> dict:
                 existing = store.find_channel(channel_id, platform=platform)
                 channels[channel_id] = ChannelSettings(
                     enabled=channel_payload.get("enabled", True),
-                    show_message_types=_normalize_show_message_types_for_platform(
+                    show_message_types=scope_settings.normalize_scope_message_types(
                         channel_payload.get("show_message_types"), platform
                     ),
                     custom_cwd=channel_payload.get("custom_cwd"),
-                    routing=_parse_routing(_normalize_backend_routing_payload(channel_payload.get("routing") or {})),
+                    routing=_parse_routing(scope_settings.normalize_scope_routing(channel_payload.get("routing") or {})),
                     require_mention=channel_payload.get("require_mention"),
                     require_bind=channel_payload.get("require_bind", existing.require_bind if existing else None),
                     _agent_name_at_load=channel_payload.get(
@@ -5847,7 +5792,7 @@ def save_thread_settings(payload: dict, *, user_context: Any = None) -> dict:
             base = store.find_channel(channel_id, platform=platform) or ChannelSettings()
         routing_payload = settings_payload.get("routing")
         routing = (
-            _parse_routing(_normalize_backend_routing_payload(routing_payload))
+            _parse_routing(scope_settings.normalize_scope_routing(routing_payload))
             if isinstance(routing_payload, dict)
             else base.routing
         )
@@ -5857,7 +5802,7 @@ def save_thread_settings(payload: dict, *, user_context: Any = None) -> dict:
             require_mention = bool(getattr(platform_config, "require_mention", True))
         settings = ChannelSettings(
             enabled=bool(settings_payload.get("enabled", base.enabled)),
-            show_message_types=_normalize_show_message_types_for_platform(
+            show_message_types=scope_settings.normalize_scope_message_types(
                 settings_payload.get("show_message_types", base.show_message_types),
                 platform,
             ),
@@ -5888,18 +5833,6 @@ class ScopeSettingsRequestError(ValueError):
         self.status = status
 
 
-_CHANNEL_PATCH_FIELDS = frozenset(
-    {"enabled", "show_message_types", "custom_cwd", "require_mention", "require_bind", "routing"}
-)
-_SCOPE_PATCH_FIELDS = {
-    "channel": _CHANNEL_PATCH_FIELDS,
-    "thread": _CHANNEL_PATCH_FIELDS,
-    "user": frozenset({"display_name", "enabled", "show_message_types", "custom_cwd", "routing"}),
-}
-_ROUTING_PATCH_FIELDS = frozenset(field.name for field in dataclasses.fields(RoutingSettings))
-_MISSING = object()
-
-
 def _scope_patch_value_error(name: str, value: Any) -> Optional[str]:
     if name == "enabled":
         return None if isinstance(value, bool) else "must be a boolean"
@@ -5915,7 +5848,7 @@ def _scope_patch_value_error(name: str, value: Any) -> Optional[str]:
     if name == "routing":
         if not isinstance(value, dict):
             return "must be an object"
-        unknown = sorted(set(value) - _ROUTING_PATCH_FIELDS)
+        unknown = sorted(set(value) - scope_settings.ROUTING_FIELDS)
         if unknown:
             return f"has unknown fields: {', '.join(unknown)}"
         if any(item is not None and not isinstance(item, str) for item in value.values()):
@@ -5923,24 +5856,14 @@ def _scope_patch_value_error(name: str, value: Any) -> Optional[str]:
     return None
 
 
-def _stored_agent_name(settings: ChannelSettings | UserSettings) -> Optional[str]:
-    stored = settings._agent_name_at_load
-    return settings.routing.agent_name if stored is _UNSET_AGENT_BINDING else stored
-
-
 def patch_scope_settings(payload: dict, *, user_context: Any = None) -> dict:
     """Change only the named fields of one channel, Telegram topic, or bound DM user.
 
-    Fields a request does not name are never written, so a page holding an old
-    copy of a scope cannot revert or delete what another writer changed since.
-    A routing change names the Agent its caller's view of the scope was based on
-    (``expected_agent_name``). When the stored Agent differs, the chosen model or
-    effort may belong to another Agent, so the change is refused unless it sets
-    the stored Agent itself.
+    The request contract of ``core.services.scope_settings.apply_scope_change``,
+    which every settings surface writes through. A routing change must name the
+    Agent its view of the route was based on (``expected_agent_name``).
     """
     from vibe.authorization import require_instance_role
-    from storage.settings_service import StaleScopeAgentBindingError, make_scope_id
-    from config.v2_settings import _make_scoped_key, make_thread_native_id, normalize_routing_settings
 
     require_instance_role(user_context, "member")
     platform = str(payload.get("platform") or _current_platform())
@@ -5948,7 +5871,7 @@ def patch_scope_settings(payload: dict, *, user_context: Any = None) -> dict:
     native_id = str(payload.get("id") or "").strip()
     thread_id = str(payload.get("thread_id") or "").strip()
     changes = payload.get("changes")
-    if kind not in _SCOPE_PATCH_FIELDS:
+    if kind not in scope_settings.SCOPE_KINDS:
         raise ScopeSettingsRequestError("invalid_scope", "scope must be channel, thread, or user")
     if not native_id or (kind == "thread" and not thread_id):
         raise ScopeSettingsRequestError("invalid_scope", "id (and thread_id for a thread) is required")
@@ -5956,102 +5879,43 @@ def patch_scope_settings(payload: dict, *, user_context: Any = None) -> dict:
         raise ScopeSettingsRequestError("invalid_scope", "thread settings currently support Telegram only")
     if not isinstance(changes, dict):
         raise ScopeSettingsRequestError("invalid_changes", "changes must be an object")
-    unknown = sorted(set(changes) - _SCOPE_PATCH_FIELDS[kind])
+    unknown = sorted(set(changes) - scope_settings.SCOPE_FIELDS[kind])
     if unknown:
         raise ScopeSettingsRequestError("invalid_changes", f"unknown {kind} fields: {', '.join(unknown)}")
     for name, value in changes.items():
         problem = _scope_patch_value_error(name, value)
         if problem:
             raise ScopeSettingsRequestError("invalid_changes", f"{name} {problem}")
-    routing_patch = changes.get("routing")
-    expected_agent_name = payload.get("expected_agent_name", _MISSING)
-    if routing_patch is not None and (
-        expected_agent_name is _MISSING
+    expected_agent_name = payload.get("expected_agent_name", scope_settings.MISSING)
+    if "routing" in changes and (
+        expected_agent_name is scope_settings.MISSING
         or (expected_agent_name is not None and not isinstance(expected_agent_name, str))
     ):
         raise ScopeSettingsRequestError(
             "invalid_changes", "a routing change requires expected_agent_name (a string or null)"
         )
 
-    if kind == "user":
-        key = _make_scoped_key(platform, native_id)
-        scope_id = make_scope_id(platform, "user", native_id)
-    elif kind == "channel":
-        key = _make_scoped_key(platform, native_id)
-        scope_id = make_scope_id(platform, "channel", native_id)
-    else:
-        key = _make_scoped_key(platform, make_thread_native_id(native_id, thread_id))
-        scope_id = make_scope_id(platform, "thread", make_thread_native_id(native_id, thread_id))
-    parent_key = _make_scoped_key(platform, native_id)
-
-    def rows(state):
-        return {"user": state.users, "channel": state.channels, "thread": state.threads}[kind]
-
-    def source_of(state):
-        """The scope's stored settings, or what a new row starts from."""
-        existing = rows(state).get(key)
-        if existing is not None:
-            return existing
-        if kind == "user":
-            raise ScopeSettingsRequestError("user_not_found", "User not found", status=404)
-        if kind == "thread":
-            parent = state.channels.get(parent_key)
-            if parent is not None:
-                return parent
-        return ChannelSettings()
-
     # A new topic override keeps the mention gate it showed while inheriting.
     new_topic_require_mention = None
     if kind == "thread":
         platform_config = _stored_platform_config(platform)
         new_topic_require_mention = bool(getattr(platform_config, "require_mention", True))
-    # The routing a change stores is resolved before the write lock: normalizing
-    # an effort reads Agent and model catalogs, which must not hold writers up.
-    routing_changes: Optional[dict] = None
+    # Keep unvalidated request candidates out of the process-wide cache.
     with contextlib.closing(SettingsStore()) as store:
-        if routing_patch is not None:
-            stored_routing = routing_to_compat_dict(source_of(store.settings).routing)
-            normalized = _normalize_backend_routing_payload({**stored_routing, **routing_patch})
-            routing_changes = {
-                name: value
-                for name, value in normalized.items()
-                if name in routing_patch or value != stored_routing.get(name)
-            }
-
-        def mutate(state) -> None:
-            existing = rows(state).get(key)
-            source = source_of(state)
-            if routing_changes is not None and expected_agent_name != _stored_agent_name(source):
-                if routing_patch.get("agent_name", _MISSING) != _stored_agent_name(source):
-                    raise StaleScopeAgentBindingError(scope_id=scope_id)
-            if existing is not None:
-                updated = existing
-            else:
-                updated = ChannelSettings(
-                    enabled=source.enabled,
-                    show_message_types=list(source.show_message_types),
-                    custom_cwd=source.custom_cwd,
-                    routing=copy.deepcopy(source.routing),
-                    require_mention=source.require_mention,
-                    require_bind=source.require_bind,
-                    # A new row's Agent is a new binding: the save validates it.
-                    _agent_name_at_load=None,
-                )
-            for name, value in changes.items():
-                if name == "routing":
-                    continue
-                if name == "show_message_types":
-                    value = _normalize_show_message_types_for_platform(value, platform)
-                setattr(updated, name, value)
-            if routing_changes:
-                merged = {**_routing_to_dict(updated.routing), **routing_changes}
-                updated.routing = normalize_routing_settings(RoutingSettings(**merged))
-            if kind == "thread" and existing is None and updated.require_mention is None:
-                updated.require_mention = new_topic_require_mention
-            rows(state)[key] = updated
-
-        store.apply(mutate, user_context=user_context)
-        saved = rows(store.settings).get(key)
+        try:
+            saved = scope_settings.apply_scope_change(
+                store,
+                platform=platform,
+                kind=kind,
+                native_id=native_id,
+                thread_id=thread_id,
+                changes=changes,
+                expected_agent_name=expected_agent_name,
+                new_topic_require_mention=new_topic_require_mention,
+                user_context=user_context,
+            )
+        except scope_settings.ScopeNotFoundError as exc:
+            raise ScopeSettingsRequestError("user_not_found", "User not found", status=404) from exc
         if kind == "user":
             settings_payload = _user_settings_payload(saved, platform)
         else:
@@ -6939,7 +6803,7 @@ def _current_platform() -> str:
 def _scope_settings_payload(settings: ChannelSettings, platform: str) -> dict:
     return {
         "enabled": settings.enabled,
-        "show_message_types": _normalize_show_message_types_for_platform(settings.show_message_types, platform),
+        "show_message_types": scope_settings.normalize_scope_message_types(settings.show_message_types, platform),
         "custom_cwd": settings.custom_cwd,
         "require_mention": settings.require_mention,
         "require_bind": settings.require_bind,
@@ -6954,7 +6818,7 @@ def _user_settings_payload(settings: UserSettings, platform: str) -> dict:
         "is_admin": settings.is_admin,
         "bound_at": settings.bound_at,
         "enabled": settings.enabled,
-        "show_message_types": _normalize_show_message_types_for_platform(settings.show_message_types, platform),
+        "show_message_types": scope_settings.normalize_scope_message_types(settings.show_message_types, platform),
         "custom_cwd": settings.custom_cwd,
         "routing": routing_to_compat_dict(settings.routing),
         "expected_agent_name": _agent_binding_expectation(settings),
@@ -14708,9 +14572,9 @@ def save_users(payload: dict, *, user_context: Any = None) -> dict:
                 is_admin=up.get("is_admin", existing.is_admin if existing else False),
                 bound_at=up.get("bound_at", existing.bound_at if existing else ""),
                 enabled=up.get("enabled", existing.enabled if existing else True),
-                show_message_types=_normalize_show_message_types_for_platform(up.get("show_message_types"), platform),
+                show_message_types=scope_settings.normalize_scope_message_types(up.get("show_message_types"), platform),
                 custom_cwd=up.get("custom_cwd"),
-                routing=_parse_routing(_normalize_backend_routing_payload(up.get("routing") or {})),
+                routing=_parse_routing(scope_settings.normalize_scope_routing(up.get("routing") or {})),
                 dm_chat_id=existing.dm_chat_id if existing else "",
                 pending_bind_menu_hint=existing.pending_bind_menu_hint if existing else False,
                 _agent_name_at_load=up.get("expected_agent_name", _UNSET_AGENT_BINDING),

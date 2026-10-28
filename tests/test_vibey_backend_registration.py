@@ -450,7 +450,7 @@ def test_an_im_picker_routes_to_exactly_the_agent_it_lists(tmp_path, sqlite_db_f
         saved: dict[str, RoutingSettings] = {}
         settings_manager = SimpleNamespace(
             get_channel_routing=lambda key: saved.get(key),
-            set_channel_routing=lambda key, routing: saved.__setitem__(key, routing),
+            set_channel_routing=lambda key, routing: saved.__setitem__(key, routing) or routing,
         )
         config = V2Config.from_payload(_full_config_payload())
         controller = Controller.__new__(Controller)

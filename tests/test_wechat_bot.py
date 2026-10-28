@@ -502,6 +502,45 @@ class WeChatBotTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(context.is_original_human_attachment, True)
         self.assertEqual([file.mimetype for file in context.files or []], ["audio/silk", "video/mp4"])
 
+    async def test_clearing_the_bind_menu_hint_keeps_a_concurrent_admin_change(self):
+        """The hint is runtime bookkeeping: clearing it must not write back the bot's cached copy of the user."""
+        SettingsStore.reset_instance()
+        store = SettingsStore.get_instance()
+        store.set_users_for_platform(
+            "wechat",
+            {"user-1": UserSettings(display_name="WeChat User", is_admin=True, pending_bind_menu_hint=True)},
+        )
+        store.save()
+        bot = self._make_bot()
+        bot.set_settings_manager(SettingsManager(platform="wechat"))
+        bot.check_authorization = lambda **kwargs: AuthResult(allowed=True, is_dm=True)
+        bot.dispatch_text_command = AsyncMock(return_value=False)
+        bot._process_media_items = AsyncMock(return_value=None)
+        bot.on_message_callback = AsyncMock()
+        bot.send_message = AsyncMock(return_value="wc-hint")
+        # The Web settings process demotes the user after the bot loaded it.
+        web = SettingsStore()
+        try:
+            web.set_admin("user-1", False, platform="wechat")
+        finally:
+            web.close()
+
+        await bot._process_inbound_message({
+            "message_id": "mid-hint-admin",
+            "from_user_id": "user-1",
+            "context_token": "ctx-1",
+            "item_list": [{"type": 1, "text_item": {"text": "hi"}}],
+        })
+        await asyncio.gather(*tuple(bot._message_callback_tasks))
+
+        bot.send_message.assert_awaited_once()
+        reread = SettingsStore()
+        try:
+            user = reread.get_user("user-1", platform="wechat")
+        finally:
+            reread.close()
+        self.assertEqual((user.is_admin, user.pending_bind_menu_hint), (False, False))  # type: ignore[union-attr]
+
     async def test_process_inbound_message_sends_pending_bind_menu_hint_once(self):
         SettingsStore.reset_instance()
         store = SettingsStore.get_instance()

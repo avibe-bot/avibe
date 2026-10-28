@@ -809,8 +809,8 @@ class SlackDmMentionTests(unittest.IsolatedAsyncioTestCase):
                     return SimpleNamespace(dm_chat_id="")
                 return None
 
-            def update_user(self, user_id, settings, platform=None):
-                updates.append((user_id, getattr(settings, "dm_chat_id", ""), platform))
+            def update_user_fields(self, user_id, *, platform=None, **values):
+                updates.append((user_id, values.get("dm_chat_id", ""), platform))
 
             def is_bound_user(self, user_id, platform=None):
                 return user_id == "U123"
@@ -865,8 +865,8 @@ class SlackDmMentionTests(unittest.IsolatedAsyncioTestCase):
                     return SimpleNamespace(dm_chat_id="")
                 return None
 
-            def update_user(self, user_id, settings, platform=None):
-                return None
+            def update_user_fields(self, user_id, *, platform=None, **values):
+                return True
 
             def is_bound_user(self, user_id, platform=None):
                 return user_id == "U123"
@@ -1856,8 +1856,8 @@ class SlackReactionDmRecoveryTests(unittest.IsolatedAsyncioTestCase):
             def get_user(self, user_id, platform=None):
                 return record
 
-            def update_user(self, user_id, settings, platform=None):
-                updates.append((user_id, settings.dm_chat_id))
+            def update_user_fields(self, user_id, *, platform=None, **values):
+                updates.append((user_id, values["dm_chat_id"]))
 
         slack.settings_manager = SimpleNamespace(get_store=lambda: _Store(), reload_from_disk=lambda: None)
         return slack, record, updates

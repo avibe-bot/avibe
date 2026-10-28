@@ -24,7 +24,6 @@ from core.modals import (
     RoutingModalData,
     RoutingModalSelection,
 )
-from vibe import backend_model_catalog
 
 from .base import BaseHandler
 
@@ -316,7 +315,7 @@ class SettingsHandler(BaseHandler):
             message_types = settings_manager.get_available_message_types()
             if msg_type not in message_types:
                 return
-            is_shown = settings_manager.toggle_show_message_type(settings_key, msg_type)
+            is_shown = await asyncio.to_thread(settings_manager.toggle_show_message_type, settings_key, msg_type)
 
             # Update the keyboard
             user_settings = settings_manager.get_user_settings(settings_key)
@@ -756,12 +755,12 @@ class SettingsHandler(BaseHandler):
             im_client = self._get_im_client(context)
             settings_manager = self._get_settings_manager(context)
 
+            # One write: a DM has no mention gate, and a topic's first override
+            # materializes the gate it inherited.
+            changes = {"show_message_types": show_message_types}
             if not is_dm:
-                settings_manager.set_require_mention(settings_key, require_mention)
-
-            user_settings = settings_manager.get_user_settings(settings_key)
-            user_settings.show_message_types = show_message_types
-            settings_manager.update_user_settings(settings_key, user_settings)
+                changes["require_mention"] = require_mention
+            await asyncio.to_thread(settings_manager.change_scope_settings, settings_key, changes)
 
             language_saved = True
             if language is not None and language != self.config.language:
@@ -868,7 +867,6 @@ class SettingsHandler(BaseHandler):
         agents always stay, so switching back finds them.
         """
         from config.v2_settings import RoutingSettings
-        from modules.agents.opencode.utils import normalize_claude_reasoning_effort
 
         try:
             context = MessageContext(
@@ -902,32 +900,28 @@ class SettingsHandler(BaseHandler):
             }
             if backend in variants and variant is not _UNSET:
                 variants[backend] = variant
-            if backend == "claude":
-                # Claude Code rejects an effort its model does not support.
-                effective_model = model or agent.model
-                reasoning_effort = normalize_claude_reasoning_effort(
-                    effective_model,
-                    reasoning_effort,
-                    backend_model_catalog.catalog_reasoning_efforts_for_model("claude", effective_model),
-                )
 
-            routing = RoutingSettings(
-                agent_name=agent.name,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                **{f"{native}_agent": value for native, value in variants.items()},
+            # The settings write stores the route as the Web would: an effort
+            # the model cannot take is dropped there, for every surface.
+            routing = await asyncio.to_thread(
+                settings_manager.set_channel_routing,
+                settings_key,
+                RoutingSettings(
+                    agent_name=agent.name,
+                    model=model,
+                    reasoning_effort=reasoning_effort,
+                    **{f"{native}_agent": value for native, value in variants.items()},
+                ),
             )
-
-            settings_manager.set_channel_routing(settings_key, routing)
             needs_new_session_hint = self._routing_update_needs_new_session_hint(context, routing)
 
             backend_name = display_name_for_backend(backend)
             parts = []
             for label, value in (
                 (self._t("routing.label.agent"), f"{agent.name} · {backend_name}"),
-                (self._t("modal.routing.backendAgent", backend=backend_name), variants.get(backend)),
-                (self._t("routing.label.model"), model),
-                (self._t("routing.label.reasoningEffort"), reasoning_effort),
+                (self._t("modal.routing.backendAgent", backend=backend_name), getattr(routing, f"{backend}_agent", None)),
+                (self._t("routing.label.model"), routing.model),
+                (self._t("routing.label.reasoningEffort"), routing.reasoning_effort),
             ):
                 if value:
                     # Route values are opaque and unbounded; a confirmation must fit any platform's message.
@@ -944,8 +938,9 @@ class SettingsHandler(BaseHandler):
                 )
 
             logger.info(
-                f"Routing updated for {settings_key}: agent={agent.name}, variant={variants.get(backend)}, "
-                f"model={model}, reasoning_effort={reasoning_effort}"
+                f"Routing updated for {settings_key}: agent={routing.agent_name}, "
+                f"variant={getattr(routing, f'{backend}_agent', None)}, "
+                f"model={routing.model}, reasoning_effort={routing.reasoning_effort}"
             )
 
         except Exception as e:
