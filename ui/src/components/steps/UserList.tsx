@@ -9,6 +9,7 @@ import {
   ChevronUp,
   Copy,
   KeyRound,
+  Loader2,
   Plus,
   RefreshCw,
   Shield,
@@ -18,12 +19,12 @@ import { useTranslation } from 'react-i18next';
 import clsx from 'clsx';
 import { useApi } from '../../context/ApiContext';
 import { useToast } from '../../context/ToastContext';
-import { getBackendUiMeta } from '../../lib/agentBackends';
 import { getEnabledPlatforms, platformSupportsToolcallDelivery } from '../../lib/platforms';
 import { FolderBrowser } from '../ui/folder-browser';
 import { copyTextToClipboard } from '../../lib/utils';
 import { PlatformIcon } from '../visual';
 import { RoutingConfigPanel } from '../shared/RoutingConfigPanel';
+import { scopeRouteSummary } from '../../lib/scopeRouteSummary';
 import { scopeSettingsChange, USER_SCOPE_FIELDS } from '../../lib/scopeSettingsPatch';
 import { SearchField, ToggleSwitch } from '../settings/SettingsPrimitives';
 import { Button } from '../ui/button';
@@ -443,7 +444,8 @@ export const UserList: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
   const { showToast } = useToast();
-  const [, setLoading] = useState(false);
+  const [savingRows, setSavingRows] = useState<Record<string, number>>({});
+  const [newSessionRows, setNewSessionRows] = useState<Record<string, boolean>>({});
   const [usersByPlatform, setUsersByPlatform] = useState<Record<string, Record<string, UserConfig>>>({});
   const [config, setConfig] = useState<any>({});
   const [browsingCwdFor, setBrowsingCwdFor] = useState<string | null>(null);
@@ -452,6 +454,7 @@ export const UserList: React.FC = () => {
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const userSaveVersionRef = useRef<Record<string, number>>({});
+  const routeSaveVersionRef = useRef<Record<string, number>>({});
 
   const enabledPlatforms = useMemo(() => getEnabledPlatforms(config), [config]);
   const vibeAgents = config.agent_catalog?.agents || [];
@@ -521,18 +524,25 @@ export const UserList: React.FC = () => {
 
   // Each edit sends only what it changed on one user; the stored row it gets
   // back replaces the local one unless a newer edit of that user is in flight.
+  // The row shows the save in progress; only a failure is announced.
   const persistUser = async (platform: string, userId: string, base: UserConfig, next: UserConfig) => {
     const change = scopeSettingsChange(base, next, USER_SCOPE_FIELDS);
     if (!change) return;
     const rowKey = `${platform}::${userId}`;
     const version = (userSaveVersionRef.current[rowKey] || 0) + 1;
     userSaveVersionRef.current[rowKey] = version;
-    setLoading(true);
+    // The session note answers the latest route change, whatever else saved since.
+    const routeVersion = 'routing' in change.changes ? (routeSaveVersionRef.current[rowKey] || 0) + 1 : null;
+    if (routeVersion !== null) routeSaveVersionRef.current[rowKey] = routeVersion;
+    setSavingRows((prev) => ({ ...prev, [rowKey]: (prev[rowKey] || 0) + 1 }));
     try {
       const result = await api.patchScopeSettings({ platform, scope: 'user', id: userId, ...change });
-      showToast(t('userList.settingsSaved'));
+      if (routeVersion !== null && routeSaveVersionRef.current[rowKey] === routeVersion) {
+        setNewSessionRows((prev) => ({ ...prev, [rowKey]: result.needs_new_session === true }));
+      }
       const stored = result.settings as UserConfig | undefined;
-      if (stored && userSaveVersionRef.current[rowKey] === version) {
+      if (userSaveVersionRef.current[rowKey] !== version) return;
+      if (stored) {
         setUsersByPlatform((prev) => ({ ...prev, [platform]: { ...(prev[platform] || {}), [userId]: stored } }));
       }
     } catch {
@@ -542,7 +552,7 @@ export const UserList: React.FC = () => {
         setUsersByPlatform((prev) => ({ ...prev, [platform]: result.users || {} }));
       }
     } finally {
-      setLoading(false);
+      setSavingRows((prev) => ({ ...prev, [rowKey]: Math.max(0, (prev[rowKey] || 1) - 1) }));
     }
   };
 
@@ -687,25 +697,14 @@ export const UserList: React.FC = () => {
             visibleUsers.map((u) => {
               const expanded = expandedKey === u.key;
               const userConfig = u.config;
-              const defaultAgent = agentByName[defaultAgentName || ''] || null;
-              const selectedAgent = agentByName[userConfig.routing?.agent_name || ''] || agentByName[defaultAgentName || ''];
-              const effectiveBackend = selectedAgent?.backend || defaultAgent?.backend || 'opencode';
               const isBot = !userConfig.is_admin && (userConfig.display_name || u.userId).toLowerCase().includes('bot');
               const tone = AVATAR_TONES[hashCode(u.userId) % AVATAR_TONES.length];
               const initials = getInitials(userConfig.display_name, u.userId);
-              const backendModel = userConfig.routing.model || (
-                effectiveBackend === 'claude'
-                  ? userConfig.routing.claude_model
-                  : effectiveBackend === 'codex'
-                    ? userConfig.routing.codex_model
-                    : userConfig.routing.opencode_model
-              );
               const displayName = displayNameForUser(u);
               const metaPrefix = userConfig.enabled
-                ? selectedAgent
-                  ? `${selectedAgent.display_name || selectedAgent.name}${selectedAgent.model ? `/${selectedAgent.model}` : ''}`
-                  : `${getBackendUiMeta(effectiveBackend).label}${backendModel ? `/${backendModel}` : ''}`
+                ? scopeRouteSummary(userConfig.routing, agentByName, defaultAgentName, t)
                 : t('userList.disabled');
+              const saving = (savingRows[u.key] || 0) > 0;
 
               const updateRow = (patch: Partial<UserConfig>) => updateUser(u.platform, u.userId, patch);
               const toggleEnabled = () => updateRow({ enabled: !userConfig.enabled });
@@ -810,6 +809,10 @@ export const UserList: React.FC = () => {
                       </span>
                     )}
 
+                    {saving && (
+                      <Loader2 size={14} className="shrink-0 animate-spin text-muted" aria-label={t('common.saving')} />
+                    )}
+
                     {/* Chevron */}
                     {expanded ? (
                       <ChevronUp size={18} className="shrink-0 text-muted" />
@@ -829,6 +832,8 @@ export const UserList: React.FC = () => {
                       defaultAgentName={defaultAgentName}
                       availableMessageTypes={availableMessageTypes(u.platform)}
                       showRequireMention={false}
+                      saving={saving}
+                      routeNotice={newSessionRows[u.key] ? t('channelList.newSessionHint') : null}
                       footerActions={
                         <Button
                           type="button"

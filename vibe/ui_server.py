@@ -8092,6 +8092,22 @@ async def thread_settings_post(starlette_request: FastAPIRequest):
     return await _dispatch_native_ui_request(starlette_request, handler)
 
 
+async def _scope_needs_new_session(result: dict) -> bool | None:
+    """The controller's answer for the saved scope; None when it cannot answer now."""
+    from vibe import internal_client
+
+    try:
+        return await internal_client.scope_session_hint(
+            platform=str(result.get("platform") or ""),
+            scope=str(result.get("scope") or ""),
+            native_id=str(result.get("id") or ""),
+            thread_id=str(result.get("thread_id") or ""),
+        )
+    except Exception as exc:
+        logger.debug("Scope session hint unavailable: %s", exc)
+        return None
+
+
 @app.patch("/api/settings/scope", include_in_schema=False)
 async def scope_settings_patch(starlette_request: FastAPIRequest):
     async def handler():
@@ -8100,13 +8116,14 @@ async def scope_settings_patch(starlette_request: FastAPIRequest):
 
         body = await starlette_request.body()
         payload = await starlette_request.json() if body else {}
+        payload = payload if isinstance(payload, dict) else {}
         user_context = _request_authorization_context()
         try:
-            return await asyncio.to_thread(
-                api.patch_scope_settings,
-                payload if isinstance(payload, dict) else {},
-                user_context=user_context,
-            )
+            result = await asyncio.to_thread(api.patch_scope_settings, payload, user_context=user_context)
+            changes = payload.get("changes")
+            if isinstance(changes, dict) and "routing" in changes:
+                result["needs_new_session"] = await _scope_needs_new_session(result)
+            return result
         except api.ScopeSettingsRequestError as exc:
             return _coded_error_response(exc.code, exc.message, exc.status)
         except StaleScopeAgentBindingError as exc:

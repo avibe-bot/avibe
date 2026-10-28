@@ -1503,6 +1503,28 @@ def create_app(
             logger.exception("internal platform reconcile failed")
             return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
+    @app.post("/internal/scope-session-hint")
+    async def _scope_session_hint(request: Request) -> Any:
+        """Whether a scope's current session still runs another Agent than its route."""
+        payload = await _safe_json(request)
+        platform = str(payload.get("platform") or "").strip()
+        kind = str(payload.get("scope") or "").strip()
+        native_id = str(payload.get("id") or "").strip()
+        if not platform or kind not in {"channel", "thread", "user"} or not native_id:
+            return JSONResponse(status_code=400, content={"ok": False, "error": "platform, scope and id are required"})
+        try:
+            needed = await asyncio.to_thread(
+                controller.settings_handler.scope_needs_new_session,
+                platform=platform,
+                kind=kind,
+                native_id=native_id,
+                thread_id=str(payload.get("thread_id") or "").strip(),
+            )
+        except Exception as exc:
+            logger.warning("scope session hint failed: %s", exc)
+            return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
+        return JSONResponse(status_code=200, content={"ok": True, "needs_new_session": bool(needed)})
+
     @app.post("/internal/invalidate-activity-streaming")
     async def _invalidate_activity_streaming() -> Any:
         """Drop the controller process's cached Agent Activity display flag."""

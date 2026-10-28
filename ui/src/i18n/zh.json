@@ -3937,6 +3937,7 @@
     "topicIdLabel": "话题 ID：{{id}}",
     "topicCustomBadge": "单独设置",
     "topicInheritedBadge": "继承群组",
+    "newSessionHint": "该对话当前的会话仍使用原来的 Agent，在对话里发送 /new 开始新会话后，新设置才会生效。",
     "topicCustomize": "单独配置",
     "topicReset": "恢复群组设置",
     "topicExpand": "展开 Topic 设置",

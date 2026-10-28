@@ -62,11 +62,15 @@ export type ScopeSettingsPatchRequest = ScopeSettingsChange & {
 };
 export type ScopeSettingsPatchResult = {
   ok: boolean;
+  platform: string;
   scope: ScopeKind;
   id: string;
   thread_id?: string;
   /** The scope's stored row, in the shape the settings reads return it. */
   settings: unknown;
+  /** After a routing change: whether the scope's current session keeps another
+   *  Agent until a new session starts there; null when that is unknown. */
+  needs_new_session?: boolean | null;
 };
 
 // Global workbench toggles persisted server-side in state_meta. Currently just

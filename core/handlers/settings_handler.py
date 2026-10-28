@@ -704,6 +704,14 @@ class SettingsHandler(BaseHandler):
 
     def _routing_target_from_settings(self, routing) -> tuple[str, str, str, str, str]:
         agent_name = str(getattr(routing, "agent_name", None) or "").strip()
+        if not agent_name:
+            # A route that names no Agent runs the default one.
+            try:
+                default_agent = self.controller.vibe_agent_store.get_default_agent()
+            except Exception:
+                logger.debug("Failed to resolve the default Agent for a routing hint", exc_info=True)
+                default_agent = None
+            agent_name = str(getattr(default_agent, "name", None) or "").strip()
         backend = str(self._resolve_route_backend(agent_name) or agent_name).strip()
         variant = getattr(routing, f"{backend}_agent", None) if backend in NATIVE_CLI_BACKENDS else None
         variant = str(variant or "").strip()
@@ -728,6 +736,37 @@ class SettingsHandler(BaseHandler):
         # The scope's session keeps the Agent it started with, so another Agent, even on the same backend, takes
         # a new session to run.
         return bool(current_agent and next_agent and current_agent != next_agent)
+
+    def scope_needs_new_session(self, *, platform: str, kind: str, native_id: str, thread_id: str = "") -> bool:
+        """Whether this scope's current session runs another Agent than the route it stores.
+
+        Such a session keeps its Agent, so the stored route applies only once a new
+        session starts there. The IM routing form says so when it saves; the Web
+        settings pages ask this after an Agent change to say the same.
+        """
+        is_dm = kind == "user"
+        probe = MessageContext(
+            user_id=native_id if is_dm else "",
+            channel_id=native_id,
+            platform=platform,
+            platform_specific={"is_dm": is_dm, "platform": platform},
+        )
+        settings_manager = self._get_settings_manager(probe)
+        channel_id = native_id
+        if is_dm:
+            # A DM session is anchored on the platform's DM channel, which some
+            # platforms keep apart from the user id.
+            user = settings_manager.get_store().get_user(native_id, platform=platform)
+            channel_id = str(getattr(user, "dm_chat_id", "") or "") or native_id
+        context = MessageContext(
+            user_id=native_id if is_dm else "",
+            channel_id=channel_id,
+            thread_id=thread_id or None,
+            platform=platform,
+            platform_specific={"is_dm": is_dm, "platform": platform},
+        )
+        routing = settings_manager.get_channel_routing(self._get_settings_key(context))
+        return self._routing_update_needs_new_session_hint(context, routing)
 
     async def handle_settings_update(
         self,

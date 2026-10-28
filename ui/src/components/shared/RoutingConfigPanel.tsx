@@ -55,6 +55,10 @@ export interface RoutingConfigPanelProps {
   footerActions?: React.ReactNode;
   /** Wrapper class — controls outer padding/border. Default: 'border-t border-border/60 px-5 py-4'. */
   containerClass?: string;
+  /** A save of this scope is in flight — shown on the route picker. */
+  saving?: boolean;
+  /** Shown under the route picker, e.g. that the current session keeps its Agent. */
+  routeNotice?: string | null;
 }
 
 /** Input that only commits value on blur */
@@ -87,6 +91,8 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
   availableMessageTypes = ['assistant', 'toolcall'],
   footerActions,
   containerClass = 'border-t border-border/60 px-5 py-4',
+  saving = false,
+  routeNotice,
 }) => {
   const { capabilities } = useInstanceAuthorization();
   const canManageAccessMembers = capabilities.can_manage_access_members;
@@ -182,64 +188,72 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
       </div>
 
       {/* Routing: one unified Agent picker (agent → model → effort), shared with
-          the workbench chat/create surfaces. Empty = inherit the global default. */}
+          the workbench chat/create surfaces. Empty = inherit the global default.
+          Capped like the users page's working directory, instead of a picker
+          stretched across the row. */}
       <div className="space-y-1">
-        <label className="flex items-center gap-1.5 text-xs font-medium uppercase text-muted">
-          <Bot size={12} className="text-muted" />
-          {t('channelList.agent')}
-        </label>
-        <AgentRoutePicker
-          value={{
-            // Resolve the DISPLAYED route. An explicit agent with an empty
-            // model/effort means "inherit that agent's", so fall back to the
-            // selected agent's own model/effort — otherwise the effort column
-            // resolves options without the inherited Agent model (e.g. a Claude
-            // agent's xhigh/max would vanish).
-            // agent_backend also falls back to the default agent so the columns
-            // resolve while inheriting the global default.
-            agent_backend: selectedVibeAgent?.backend ?? defaultVibeAgent?.backend ?? null,
-            agent_name: value.routing.agent_name ?? null,
-            model: value.routing.model ?? selectedVibeAgent?.model ?? null,
-            reasoning_effort: value.routing.reasoning_effort ?? selectedVibeAgent?.reasoning_effort ?? null,
-          }}
-          agents={vibeAgents}
-          onChange={(patch) => {
-            // Concrete routes, matching the workbench picker + the other call
-            // sites: merge only the keys PRESENT in the (partial) patch. A
-            // present field wins (incl. an explicit null that clears it); an
-            // absent field keeps its stored value. We deliberately do NOT
-            // special-case agent picks to null model/effort — that discarded the
-            // first model pick on an inherited-default route, where the pick
-            // arrives as the materialized agent_name + the chosen model together.
-            const next = { ...value.routing };
-            if ('agent_name' in patch) next.agent_name = patch.agent_name ?? null;
-            if ('model' in patch) next.model = patch.model ?? null;
-            if ('reasoning_effort' in patch) next.reasoning_effort = patch.reasoning_effort ?? null;
-            onChange({ routing: clearLegacyOverrides(next) });
-          }}
-          defaultLabel={
-            defaultVibeAgent ? `${t('common.default')} · ${defaultVibeAgent.name}` : t('common.default')
-          }
-          defaultRoute={
-            defaultVibeAgent
-              ? {
-                  agent_backend: defaultVibeAgent.backend,
-                  agent_name: defaultVibeAgent.name,
-                  model: defaultVibeAgent.model,
-                  reasoning_effort: defaultVibeAgent.reasoning_effort,
-                }
-              : undefined
-          }
-          // Only a FULLY-inheriting scope (no overrides at all) displays the
-          // default route. A scope that inherits the agent but overrides
-          // model/effort must show its own values, not the default agent's,
-          // otherwise the override is masked and silently overwritten.
-          isDefaultRoute={
-            !value.routing.agent_name && !value.routing.model && !value.routing.reasoning_effort
-          }
-          align="start"
-          triggerClassName="w-full"
-        />
+        <div className="space-y-1 md:max-w-[40%]">
+          <label className="flex items-center gap-1.5 text-xs font-medium uppercase text-muted">
+            <Bot size={12} className="text-muted" />
+            {t('channelList.agent')}
+          </label>
+          <AgentRoutePicker
+            value={{
+              // Resolve the DISPLAYED route. An explicit agent with an empty
+              // model/effort means "inherit that agent's", so fall back to the
+              // selected agent's own model/effort — otherwise the effort column
+              // resolves options without the inherited Agent model (e.g. a Claude
+              // agent's xhigh/max would vanish).
+              // agent_backend also falls back to the default agent so the columns
+              // resolve while inheriting the global default.
+              agent_backend: selectedVibeAgent?.backend ?? defaultVibeAgent?.backend ?? null,
+              agent_name: value.routing.agent_name ?? null,
+              model: value.routing.model ?? selectedVibeAgent?.model ?? null,
+              reasoning_effort: value.routing.reasoning_effort ?? selectedVibeAgent?.reasoning_effort ?? null,
+            }}
+            agents={vibeAgents}
+            onChange={(patch) => {
+              // Concrete routes, matching the workbench picker + the other call
+              // sites: merge only the keys PRESENT in the (partial) patch. A
+              // present field wins (incl. an explicit null that clears it); an
+              // absent field keeps its stored value. We deliberately do NOT
+              // special-case agent picks to null model/effort — that discarded the
+              // first model pick on an inherited-default route, where the pick
+              // arrives as the materialized agent_name + the chosen model together.
+              const next = { ...value.routing };
+              if ('agent_name' in patch) next.agent_name = patch.agent_name ?? null;
+              if ('model' in patch) next.model = patch.model ?? null;
+              if ('reasoning_effort' in patch) next.reasoning_effort = patch.reasoning_effort ?? null;
+              onChange({ routing: clearLegacyOverrides(next) });
+            }}
+            defaultLabel={
+              defaultVibeAgent ? `${t('common.default')} · ${defaultVibeAgent.name}` : t('common.default')
+            }
+            defaultRoute={
+              defaultVibeAgent
+                ? {
+                    agent_backend: defaultVibeAgent.backend,
+                    agent_name: defaultVibeAgent.name,
+                    model: defaultVibeAgent.model,
+                    reasoning_effort: defaultVibeAgent.reasoning_effort,
+                  }
+                : undefined
+            }
+            // Only a FULLY-inheriting scope (no overrides at all) displays the
+            // default route. A scope that inherits the agent but overrides
+            // model/effort must show its own values, not the default agent's,
+            // otherwise the override is masked and silently overwritten.
+            isDefaultRoute={
+              !value.routing.agent_name && !value.routing.model && !value.routing.reasoning_effort
+            }
+            saving={saving}
+            align="start"
+            triggerClassName="w-full"
+          />
+        </div>
+        {routeNotice && (
+          <p role="status" className="pt-1 text-[11px] leading-snug text-gold-ink">{routeNotice}</p>
+        )}
       </div>
 
       {/* Show message types chips */}

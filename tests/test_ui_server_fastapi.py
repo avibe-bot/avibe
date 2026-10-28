@@ -570,6 +570,35 @@ def test_scope_settings_routes_report_localized_stale_agent_binding_conflicts(mo
         }
 
 
+def test_scope_patch_reports_whether_the_session_keeps_its_agent_after_a_route_change(monkeypatch):
+    from vibe import api, internal_client
+
+    saved = {"ok": True, "platform": "telegram", "scope": "user", "id": "U1", "settings": {}}
+    monkeypatch.setattr(api, "patch_scope_settings", lambda payload, user_context=None: dict(saved))
+    asked = []
+    answers = iter([True, internal_client.InternalServerUnavailable("controller down")])
+
+    async def scope_session_hint(**kwargs):
+        asked.append(kwargs)
+        answer = next(answers)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(internal_client, "scope_session_hint", scope_session_hint)
+    client = app.test_client()
+    headers = csrf_headers(client)
+
+    def patch(changes):
+        body = {"platform": "telegram", "scope": "user", "id": "U1", "changes": changes, "expected_agent_name": None}
+        return client.patch("/api/settings/scope", json=body, headers=headers).get_json()
+
+    assert patch({"routing": {"agent_name": "pm"}})["needs_new_session"] is True
+    assert patch({"routing": {"agent_name": "qa"}})["needs_new_session"] is None
+    assert "needs_new_session" not in patch({"custom_cwd": "/tmp"})
+    assert asked == [{"platform": "telegram", "scope": "user", "native_id": "U1", "thread_id": ""}] * 2
+
+
 def test_scope_settings_routes_localize_unavailable_agent_errors(monkeypatch):
     from core.services import settings as settings_service
     from storage.settings_service import ScopeAgentUnavailableError

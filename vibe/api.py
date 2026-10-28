@@ -5920,7 +5920,7 @@ def patch_scope_settings(payload: dict, *, user_context: Any = None) -> dict:
             settings_payload = _user_settings_payload(saved, platform)
         else:
             settings_payload = _scope_settings_payload(saved, platform)
-    result = {"ok": True, "scope": kind, "id": native_id, "settings": settings_payload}
+    result = {"ok": True, "platform": platform, "scope": kind, "id": native_id, "settings": settings_payload}
     if kind == "thread":
         result["thread_id"] = thread_id
     return result
