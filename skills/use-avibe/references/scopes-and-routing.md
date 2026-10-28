@@ -122,14 +122,14 @@ Agent resolution priority is:
 3. global default Vibe Agent from the Agent catalog
 4. registered backend compatibility fallback, only when no enabled default Agent is available
 
-If the user names a specific channel or DM and wants a specific Agent, use the scope API, not global `/config`. New routing is Agent-based.
+If the user names a specific channel or DM and wants a specific Agent, use the scope API, not global `/api/config`. New routing is Agent-based.
 
 ### Working directory
 
 Working directory resolution is:
 
 1. `custom_cwd` on the target channel or user scope
-2. `runtime.default_cwd` from `/config`
+2. `runtime.default_cwd` from `/api/config`
 
 ### Message visibility
 
@@ -141,7 +141,7 @@ If a user asks for "vault messages", "internal messages", or "tool execution mes
 
 `require_mention` works like this:
 
-- `null`: inherit platform default from `/config`
+- `null`: inherit platform default from `/api/config`
 - `true`: require mention in that channel
 - `false`: do not require mention in that channel
 

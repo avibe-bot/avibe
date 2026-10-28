@@ -2,7 +2,7 @@
 
 ### Remote access (Avibe Cloud)
 
-These endpoints drive the managed `avibe.bot` tunnel that exposes the local Web UI to other devices. They are paired with the `remote_access.vibe_cloud` block under `/config`.
+These endpoints drive the managed `avibe.bot` tunnel that exposes the local Web UI to other devices. They are paired with the `remote_access.vibe_cloud` block under `/api/config`.
 
 - `GET /api/remote-access/status`
   - returns `enabled`, `paired`, `public_url`, `running` (tunnel up), `pid`, `pid_state`, plus `binary_found` / `binary_path` / `binary_version` for the resolved `cloudflared` executable. Use `running: true` to assert the tunnel is up.
@@ -42,8 +42,8 @@ Treat `tunnel_token`, `instance_secret`, `session_secret`, and `client_id` from 
 Goal: connect the local Web UI to `avibe.bot` so it is reachable from another device.
 
 1. The user signs in at `https://avibe.bot`, creates a remote-access bot, and copies the one-time pairing key (format `vrp_...`).
-2. Call `POST /remote-access/vibe-cloud/pair` with `{"pairing_key": "vrp_..."}` from the local Web UI origin.
-3. Verify with `GET /remote-access/status` — `enabled: true`, `paired: true`, `public_url` populated, `running: true`.
+2. Call `POST /api/remote-access/vibe-cloud/pair` with `{"pairing_key": "vrp_..."}` from the local Web UI origin.
+3. Verify with `GET /api/remote-access/status` — `enabled: true`, `paired: true`, `public_url` populated, `running: true`.
 4. Have the user open `public_url` and sign in with the same avibe.bot account.
 
 Alternatively, drive the same flow from the CLI:

@@ -48,9 +48,9 @@ class VibeApiClient:
         method = method.upper()
         url = urllib.parse.urljoin(self.base_url + "/", path.lstrip("/"))
         data = None if payload is None else json.dumps(payload).encode("utf-8")
-        headers = {"Accept": "application/json"}
+        # Protected reads need the same-origin evidence mutations do.
+        headers = {"Accept": "application/json", "Origin": self.base_url}
         if method in MUTATING_METHODS:
-            headers["Origin"] = self.base_url
             headers["Content-Type"] = "application/json"
             headers["X-Vibe-CSRF-Token"] = self.get_csrf_token()
 
@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Call the local Avibe Web UI API with CSRF handling.",
     )
     parser.add_argument("method", help="HTTP method, for example GET, POST, DELETE")
-    parser.add_argument("path", help="API path, for example /settings?platform=slack")
+    parser.add_argument("path", help="API path, for example /api/settings?platform=slack")
     parser.add_argument(
         "payload",
         nargs="?",

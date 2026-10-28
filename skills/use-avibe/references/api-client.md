@@ -45,8 +45,8 @@ export VIBE_UI_BASE="http://127.0.0.1:5123"
 
 python3 skills/use-avibe/scripts/vibe_api.py GET /health
 python3 skills/use-avibe/scripts/vibe_api.py GET '/api/settings?platform=slack'
-python3 skills/use-avibe/scripts/vibe_api.py POST /doctor '{}'
-python3 skills/use-avibe/scripts/vibe_api.py POST /config '{"show_duration":true}'
+python3 skills/use-avibe/scripts/vibe_api.py POST /api/doctor '{}'
+python3 skills/use-avibe/scripts/vibe_api.py POST /api/config '{"show_duration":true}'
 python3 skills/use-avibe/scripts/vibe_api.py DELETE '/api/users/U123?platform=slack'
 ```
 
