@@ -704,6 +704,14 @@ class SettingsHandler(BaseHandler):
 
     def _routing_target_from_settings(self, routing) -> tuple[str, str, str, str, str]:
         agent_name = str(getattr(routing, "agent_name", None) or "").strip()
+        if not agent_name:
+            # A route that names no Agent runs the default one.
+            try:
+                default_agent = self.controller.vibe_agent_store.get_default_agent()
+            except Exception:
+                logger.debug("Failed to resolve the default Agent for a routing hint", exc_info=True)
+                default_agent = None
+            agent_name = str(getattr(default_agent, "name", None) or "").strip()
         backend = str(self._resolve_route_backend(agent_name) or agent_name).strip()
         variant = getattr(routing, f"{backend}_agent", None) if backend in NATIVE_CLI_BACKENDS else None
         variant = str(variant or "").strip()

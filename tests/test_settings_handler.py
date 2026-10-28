@@ -43,6 +43,9 @@ class _AgentStore:
     def get(self, name):
         return next((agent for agent in self.agents if agent.name == name), None)
 
+    def get_default_agent(self):
+        return self.get("vibey")
+
 
 class _StubSettingsManager:
     def __init__(self, routing: RoutingSettings | None):
@@ -977,6 +980,10 @@ def test_scope_needs_new_session_answers_for_the_scope_the_web_saved() -> None:
     assert handler_for(threaded=False, routing_agent="opencode").scope_needs_new_session(
         platform="discord", kind="user", native_id="U1"
     ) is False
+    # A route back to the default Agent is compared as that Agent, with or without overrides.
+    for inherited in (RoutingSettings(), RoutingSettings(model="m1", reasoning_effort="high")):
+        flat.controller.settings_manager.get_channel_routing = lambda key, routing=inherited: routing
+        assert flat.scope_needs_new_session(platform="discord", kind="user", native_id="U1") is True
     assert flat.scope_needs_new_session(platform="discord", kind="channel", native_id="C9") is False
     assert handler_for(threaded=True, routing_agent="vibey").scope_needs_new_session(
         platform="discord", kind="user", native_id="U1"
