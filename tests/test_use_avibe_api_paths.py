@@ -33,24 +33,33 @@ def _served_routes() -> list[tuple[frozenset[str], re.Pattern[str]]]:
     served = []
     for route in ui_server.app.routes:
         path = getattr(route, "path", None)
-        if not path:
+        # The SPA fallback (`/{path:path}`) answers any path with the app's HTML:
+        # exactly what a stale documented path gets back, so it serves no call.
+        if not path or ":path}" in path:
             continue
         pattern = re.sub(r"\\\{[^}]+\\\}", "[^/]+", re.escape(path))
         served.append((frozenset(getattr(route, "methods", None) or ()), re.compile(f"{pattern}$")))
     return served
 
 
+def _is_served(method: str, path: str) -> bool:
+    concrete = re.sub(r"<[^>]+>", "x", path)
+    return any(method in methods and pattern.match(concrete) for methods, pattern in _served_routes())
+
+
 def test_the_skill_documents_web_api_calls() -> None:
     assert len(_documented_calls()) > 40
 
 
+def test_a_path_only_the_spa_answers_is_not_served() -> None:
+    assert _is_served("GET", "/api/config") and _is_served("GET", "/status")
+    for method, path in (("GET", "/config"), ("GET", "/settings"), ("GET", "/version"), ("POST", "/config")):
+        assert not _is_served(method, path), f"{method} {path}"
+
+
 @pytest.mark.parametrize(("page", "method", "path"), _documented_calls())
 def test_every_documented_call_names_a_served_route(page: str, method: str, path: str) -> None:
-    concrete = re.sub(r"<[^>]+>", "x", path)
-
-    assert any(method in methods and pattern.match(concrete) for methods, pattern in _served_routes()), (
-        f"{page}: {method} {path} is not a Web UI route"
-    )
+    assert _is_served(method, path), f"{page}: {method} {path} is not a Web UI route"
 
 
 def _load_helper():
