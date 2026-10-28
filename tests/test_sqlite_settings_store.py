@@ -262,9 +262,7 @@ def test_settings_manager_runtime_save_preserves_require_bind(tmp_path: Path, mo
             ChannelSettings(enabled=True, require_mention=True, require_bind=True, custom_cwd="/old"),
             platform="slack",
         )
-        settings = manager.get_user_settings("C-bind")
-        settings.custom_cwd = "/new"
-        manager.update_user_settings("C-bind", settings)
+        manager.set_custom_cwd("C-bind", "/new")
 
         reloaded = manager.store.find_channel("C-bind", platform="slack")
         assert reloaded is not None
@@ -291,10 +289,8 @@ def test_settings_manager_topic_override_materializes_inherited_mention_default(
             platform="telegram",
         )
         settings_key = v2_settings.make_thread_settings_key("-1001", "42")
-        settings = manager.get_user_settings(settings_key)
-        settings.custom_cwd = "/topic"
 
-        manager.update_user_settings(settings_key, settings)
+        manager.set_custom_cwd(settings_key, "/topic")
 
         topic = manager.store.find_thread("-1001", "42", platform="telegram")
         assert topic is not None

@@ -27,6 +27,7 @@ from config import paths
 from config.v2_settings import ChannelSettings, SettingsStore
 from core.vibe_agents import VibeAgentStore
 from core import chat_discovery
+from core.services import scope_settings
 from modules.agents.catalog import AGENT_BACKENDS
 from vibe import api, backend_model_catalog, cli_paths
 from vibe.opencode_config import parse_jsonc_object
@@ -1436,8 +1437,8 @@ def test_opencode_provider_catalog_keeps_custom_provider_without_vibe_meta(
     assert provider["api_key_masked"] == "••••••elay"
 
 
-def test_normalize_backend_routing_payload_prefers_canonical_claude_overrides() -> None:
-    result = api._normalize_backend_routing_payload(
+def test_normalize_scope_routing_prefers_canonical_claude_overrides() -> None:
+    result = scope_settings.normalize_scope_routing(
         {
             "agent_backend": "claude",
             "model": "claude-opus-4-8",
@@ -1453,8 +1454,8 @@ def test_normalize_backend_routing_payload_prefers_canonical_claude_overrides() 
     assert result["claude_reasoning_effort"] is None
 
 
-def test_normalize_backend_routing_payload_prefers_canonical_over_round_trip_aliases() -> None:
-    result = api._normalize_backend_routing_payload(
+def test_normalize_scope_routing_prefers_canonical_over_round_trip_aliases() -> None:
+    result = scope_settings.normalize_scope_routing(
         {
             "agent_name": "claude",
             "model": "claude-sonnet-4-6",
@@ -1470,8 +1471,8 @@ def test_normalize_backend_routing_payload_prefers_canonical_over_round_trip_ali
     assert result["claude_reasoning_effort"] is None
 
 
-def test_normalize_backend_routing_payload_lifts_aliases_for_builtin_agent_name() -> None:
-    result = api._normalize_backend_routing_payload(
+def test_normalize_scope_routing_lifts_aliases_for_builtin_agent_name() -> None:
+    result = scope_settings.normalize_scope_routing(
         {
             "agent_name": "claude",
             "claude_model": "claude-opus-4-8",
@@ -1483,8 +1484,8 @@ def test_normalize_backend_routing_payload_lifts_aliases_for_builtin_agent_name(
     assert result["reasoning_effort"] == "max"
 
 
-def test_normalize_backend_routing_payload_preserves_explicit_canonical_clears() -> None:
-    result = api._normalize_backend_routing_payload(
+def test_normalize_scope_routing_preserves_explicit_canonical_clears() -> None:
+    result = scope_settings.normalize_scope_routing(
         {
             "agent_name": "claude",
             "model": None,
@@ -1500,8 +1501,8 @@ def test_normalize_backend_routing_payload_preserves_explicit_canonical_clears()
     assert result["claude_reasoning_effort"] is None
 
 
-def test_normalize_backend_routing_payload_ignores_deprecated_backend_for_alias_lifting() -> None:
-    result = api._normalize_backend_routing_payload(
+def test_normalize_scope_routing_ignores_deprecated_backend_for_alias_lifting() -> None:
+    result = scope_settings.normalize_scope_routing(
         {
             "agent_backend": "claude",
             "claude_model": "claude-opus-4-8",
@@ -1515,8 +1516,8 @@ def test_normalize_backend_routing_payload_ignores_deprecated_backend_for_alias_
     assert result["claude_reasoning_effort"] == "max"
 
 
-def test_normalize_backend_routing_payload_preserves_legacy_overrides_without_backend() -> None:
-    result = api._normalize_backend_routing_payload(
+def test_normalize_scope_routing_preserves_legacy_overrides_without_backend() -> None:
+    result = scope_settings.normalize_scope_routing(
         {
             "claude_model": "claude-opus-4-8",
             "claude_reasoning_effort": "max",
@@ -1529,7 +1530,7 @@ def test_normalize_backend_routing_payload_preserves_legacy_overrides_without_ba
     assert result["claude_reasoning_effort"] == "max"
 
 
-@pytest.mark.parametrize("surface", ["channel", "user", "thread"])
+@pytest.mark.parametrize("surface", ["channel", "user", "thread", "im"])
 @pytest.mark.parametrize("inherit_model", [False, True])
 @pytest.mark.parametrize(
     ("efforts", "supports_reasoning", "requested", "expected"),
@@ -1567,6 +1568,30 @@ def test_routing_save_roundtrips_exact_hub_model_effort(
         }
         if surface == "channel":
             api.save_settings({"platform": "telegram", "channels": {"-1001": {"routing": route}}})
+        elif surface == "im":
+            # The IM routing form saves through the same write as the Web pages.
+            from types import SimpleNamespace
+            from unittest.mock import AsyncMock, patch
+
+            from core.handlers.settings_handler import SettingsHandler
+            from modules.settings_manager import SettingsManager
+
+            api.save_settings({"platform": "telegram", "channels": {"-1001": {"enabled": True}}})
+            agent = agent_store.get("routing-claude")
+            handler = SettingsHandler(SimpleNamespace(
+                config=SimpleNamespace(platform="telegram", language="en"),
+                im_client=SimpleNamespace(send_message=AsyncMock()),
+                settings_manager=SettingsManager(platform="telegram"),
+                vibe_agent_store=agent_store,
+                _get_settings_key=lambda _context: "-1001",
+                _get_lang=lambda: "en",
+            ))
+            with patch.object(handler, "_routing_update_needs_new_session_hint", return_value=False):
+                asyncio.run(handler.handle_routing_update(
+                    user_id="42", channel_id="-1001", agent_id=agent.id, model=route["model"],
+                    reasoning_effort=requested, platform="telegram",
+                ))
+            assert handler.controller.im_client.send_message.await_args.args[1].startswith("✅")
         elif surface == "user":
             api.save_users({"platform": "telegram", "users": {"U123": {"routing": route}}})
         else:
@@ -1583,7 +1608,7 @@ def test_routing_save_roundtrips_exact_hub_model_effort(
             settings = api.get_settings("telegram")
             saved = (
                 settings["channels"]["-1001"]["routing"]
-                if surface == "channel"
+                if surface in {"channel", "im"}
                 else settings["threads"]["-1001"]["42"]["routing"]
             )
         assert saved["reasoning_effort"] == expected
@@ -1611,7 +1636,7 @@ def test_routing_normalization_retains_native_fallback_without_cross_model_leaks
     monkeypatch.setenv("VIBE_MODEL_HUB_ENABLED", "0" if mode == "disabled" else "1")
     monkeypatch.setattr(api.V2Config, "load", staticmethod(lambda: config))
     monkeypatch.setattr(backend_model_catalog, "catalog_reasoning_efforts_for_model", lambda *_args: efforts)
-    result = api._normalize_backend_routing_payload({
+    result = scope_settings.normalize_scope_routing({
         "agent_name": "claude", "model": "native-model", "reasoning_effort": requested,
     })
     allowed = (

@@ -885,6 +885,26 @@ class SettingsStore:
         self.settings.users[key] = settings
         self.save()
 
+    def update_user_fields(self, user_id: str, *, platform: Optional[str] = None, **values) -> bool:
+        """Set only these fields of a bound user; False when the user is not bound.
+
+        Runtime bookkeeping (a DM channel id, a one-shot hint) must not write
+        back a cached copy of the rest of the row, such as a revoked admin flag.
+        """
+        key = self._user_key(user_id, platform)
+        found = []
+
+        def mutate(state: SettingsState) -> None:
+            user = state.users.get(key)
+            if user is None:
+                return
+            for name, value in values.items():
+                setattr(user, name, value)
+            found.append(True)
+
+        self.apply(mutate)
+        return bool(found)
+
     @staticmethod
     def _carry_agent_binding_expectation(previous: object, current: object) -> None:
         current_expected = getattr(current, "_agent_name_at_load", _UNSET_AGENT_BINDING)

@@ -10,6 +10,7 @@ from config.v2_sessions import SessionsStore
 from config.v2_settings import SettingsStore, ChannelSettings, GuildSettings, RoutingSettings, SCOPED_KEY_SEP
 from config.v2_settings import normalize_routing_settings, split_thread_settings_key
 from config.v2_settings import UserSettings as BoundUserSettings
+from core.services import scope_settings
 from modules.sessions_facade import SessionsFacade
 
 
@@ -187,25 +188,6 @@ class SettingsManager:
             enabled=bound_user.enabled,
         )
 
-    def _to_channel_settings(self, settings: UserSettings) -> ChannelSettings:
-        routing = _clone_routing(settings.channel_routing)
-        return ChannelSettings(
-            enabled=settings.enabled,
-            show_message_types=self._normalize_show_message_types(settings.show_message_types),
-            custom_cwd=settings.custom_cwd,
-            routing=routing,
-        )
-
-    def _sync_to_bound_user(self, user_id: str, settings: UserSettings) -> None:
-        """Sync runtime UserSettings back to the bound-user record in store.settings.users."""
-        bound = self.store.get_user(user_id, platform=self.platform)
-        if not bound:
-            return
-        bound.enabled = settings.enabled
-        bound.show_message_types = self._normalize_show_message_types(settings.show_message_types)
-        bound.custom_cwd = settings.custom_cwd
-        bound.routing = _clone_routing(settings.channel_routing)
-
     def _load_settings(self):
         """Load runtime settings from the shared settings store."""
         self.store = SettingsStore.get_instance(self.settings_file)
@@ -282,41 +264,6 @@ class SettingsManager:
                 "dm_users": len(self.dm_user_settings),
             }
 
-    def _save_settings(self):
-        """Save settings to JSON file.
-
-        Writes channel-keyed entries from ``self.channel_settings`` back to
-        ``store.settings.channels``, and syncs DM user entries from
-        ``self.dm_user_settings`` back to ``store.settings.users``.
-        """
-        try:
-            channels: Dict[str, ChannelSettings] = {}
-            existing_platform_channels = self.store.get_channels_for_platform(self.platform)
-            for cid, s in self.channel_settings.items():
-                existing = existing_platform_channels.get(cid)
-                cs = self._to_channel_settings(s)
-                if existing is not None:
-                    cs.enabled = existing.enabled
-                    cs.require_mention = existing.require_mention
-                    cs.require_bind = existing.require_bind
-                channels[cid] = cs
-            self.store.set_channels_for_platform(self.platform, channels)
-            for uid, s in self.dm_user_settings.items():
-                self._sync_to_bound_user(uid, s)
-            self.store.save()
-            # Keep the local generation in sync so _reload_if_changed doesn't
-            # trigger an unnecessary rebuild right after our own save.
-            self._last_seen_store_generation = self.store.generation
-            logger.info("Settings saved successfully")
-        except Exception as e:
-            logger.error(f"Error saving settings: {e}")
-            # The store reloaded its committed rows; drop the unsaved edit from the
-            # runtime view too, and let the caller tell the user it failed.
-            with self._runtime_settings_lock:
-                self._rebuild_runtime_settings(reason="save_failed")
-                self._last_seen_store_generation = self.store.generation
-            raise
-
     def get_user_settings(self, user_id: Union[int, str]) -> UserSettings:
         """Get settings for a specific user/channel context.
 
@@ -360,59 +307,69 @@ class SettingsManager:
         # when someone enables it explicitly.
         return UserSettings()
 
-    def update_user_settings(self, user_id: Union[int, str], settings: UserSettings):
-        """Update settings for a specific user"""
-        normalized_id = self._normalize_user_id(user_id)
-
-        settings.show_message_types = self._normalize_show_message_types(settings.show_message_types)
-
-        thread_ref = split_thread_settings_key(normalized_id)
+    def _scope_of(self, settings_key: str) -> tuple[str, str, str]:
+        """The stored scope a runtime settings key names: (kind, id, thread id)."""
+        thread_ref = split_thread_settings_key(settings_key)
         if thread_ref is not None:
-            channel_id, thread_id = thread_ref
-            existing_thread = self.store.find_thread(channel_id, thread_id, platform=self.platform)
-            existing = existing_thread
-            if existing_thread is None:
-                existing = self.store.find_channel(channel_id, platform=self.platform)
-            updated = self._to_channel_settings(settings)
-            if existing is not None:
-                updated.require_mention = existing.require_mention
-                updated.require_bind = existing.require_bind
-            if existing_thread is None and updated.require_mention is None:
-                updated.require_mention = bool(self.require_mention_default())
-            self.store.update_thread(channel_id, thread_id, updated, platform=self.platform)
-            self._last_seen_store_generation = self.store.generation
-            return
+            return "thread", thread_ref[0], thread_ref[1]
+        if settings_key in self.store.get_users_for_platform(self.platform):
+            return "user", settings_key, ""
+        return "channel", settings_key, ""
 
-        if normalized_id in self.dm_user_settings:
-            self.dm_user_settings[normalized_id] = settings
-        elif normalized_id in self.channel_settings:
-            self.channel_settings[normalized_id] = settings
-        elif normalized_id in self.store.get_users_for_platform(self.platform):
-            self.dm_user_settings[normalized_id] = settings
-        else:
-            self.channel_settings[normalized_id] = settings
-        self._save_settings()
+    def change_scope_settings(
+        self,
+        user_id: Union[int, str],
+        changes: dict,
+        *,
+        expected_agent_name: Any = scope_settings.MISSING,
+    ):
+        """Write only ``changes`` to the scope this key names; return its stored row.
+
+        The one IM write path, shared with the Web settings pages. A refused
+        save raises, and the runtime view then holds the committed rows.
+        """
+        normalized_id = self._normalize_user_id(user_id)
+        self._reload_if_changed()
+        kind, native_id, thread_id = self._scope_of(normalized_id)
+        # A DM has no mention or binding gate; those settings belong to channels.
+        changes = {name: value for name, value in changes.items() if name in scope_settings.SCOPE_FIELDS[kind]}
+        try:
+            return scope_settings.apply_scope_change(
+                self.store,
+                platform=self.platform,
+                kind=kind,
+                native_id=native_id,
+                thread_id=thread_id,
+                changes=changes,
+                expected_agent_name=expected_agent_name,
+                new_topic_require_mention=bool(self.require_mention_default()) if kind == "thread" else None,
+            )
+        except Exception as e:
+            logger.error(f"Error saving settings: {e}")
+            raise
+        finally:
+            self._reload_if_changed()
+
+    def set_show_message_types(self, user_id: Union[int, str], show_message_types: List[str]) -> None:
+        self.change_scope_settings(
+            user_id, {"show_message_types": self._normalize_show_message_types(show_message_types)}
+        )
 
     def toggle_show_message_type(self, user_id: Union[int, str], message_type: str) -> bool:
         """Toggle a message type in show list, returns new state (True if now shown)"""
         message_type = self._canonicalize_message_type(message_type)
-        settings = self.get_user_settings(user_id)
-
-        if message_type in settings.show_message_types:
-            settings.show_message_types.remove(message_type)
-            is_shown = False
+        shown = list(self.get_user_settings(user_id).show_message_types)
+        is_shown = message_type not in shown
+        if is_shown:
+            shown.append(message_type)
         else:
-            settings.show_message_types.append(message_type)
-            is_shown = True
-
-        self.update_user_settings(user_id, settings)
+            shown.remove(message_type)
+        self.set_show_message_types(user_id, shown)
         return is_shown
 
     def set_custom_cwd(self, user_id: Union[int, str], cwd: str):
         """Set custom working directory for user"""
-        settings = self.get_user_settings(user_id)
-        settings.custom_cwd = cwd
-        self.update_user_settings(user_id, settings)
+        self.change_scope_settings(user_id, {"custom_cwd": cwd})
 
     def get_custom_cwd(self, user_id: Union[int, str]) -> Optional[str]:
         """Get custom working directory for user"""
@@ -466,10 +423,6 @@ class SettingsManager:
         message_type = self._canonicalize_message_type(message_type)
         settings = self.get_user_settings(user_id)
         return message_type not in settings.show_message_types
-
-    def save_user_settings(self, user_id: Union[int, str], settings: UserSettings):
-        """Save settings for a specific user (alias for update_user_settings)"""
-        self.update_user_settings(user_id, settings)
 
     def get_available_message_types(self) -> List[str]:
         """Get list of available message types that can be hidden.
@@ -526,25 +479,26 @@ class SettingsManager:
         settings = self.get_user_settings(settings_key)
         return settings.channel_routing
 
-    def set_channel_routing(self, settings_key: Union[int, str], routing: ChannelRouting):
-        """Set channel routing override."""
-        settings = self.get_user_settings(settings_key)
-        settings.channel_routing = routing
-        self.update_user_settings(settings_key, settings)
-        logger.info(
-            f"Updated channel routing for {settings_key}: "
-            f"agent={routing.agent_name}, "
-            f"opencode_agent={routing.opencode_agent}, "
-            f"opencode_model={routing.opencode_model}"
-        )
+    def set_channel_routing(self, settings_key: Union[int, str], routing: ChannelRouting) -> ChannelRouting:
+        """Store a complete route for this scope and return the stored route.
 
-    def clear_channel_routing(self, settings_key: Union[int, str]):
-        """Clear channel routing override (fall back to the default Agent)."""
-        settings = self.get_user_settings(settings_key)
-        if settings.channel_routing:
-            settings.channel_routing = None
-            self.update_user_settings(settings_key, settings)
-            logger.info(f"Cleared channel routing for {settings_key}")
+        The route is the caller's whole choice, so it is based on the Agent the
+        scope runs now.
+        """
+        current = self.get_channel_routing(settings_key)
+        saved = self.change_scope_settings(
+            settings_key,
+            {"routing": asdict(normalize_routing_settings(routing))},
+            expected_agent_name=current.agent_name if current else None,
+        )
+        logger.info(
+            "Updated channel routing for %s: agent=%s, model=%s, reasoning_effort=%s",
+            settings_key,
+            saved.routing.agent_name,
+            saved.routing.model,
+            saved.routing.reasoning_effort,
+        )
+        return _clone_routing(saved.routing)
 
     # ---------------------------------------------
     # Per-channel require_mention management
@@ -583,31 +537,11 @@ class SettingsManager:
 
         Args:
             channel_id: The channel to configure
-            value: True=require mention, False=don't require, None=use global default
+            value: True=require mention, False=don't require, None=use global default.
+                A topic's first override keeps the gate it inherited.
         """
-        key = str(channel_id)
-        thread_ref = split_thread_settings_key(key)
-        if thread_ref is not None:
-            parent_id, thread_id = thread_ref
-            channel_settings = self.store.find_thread(parent_id, thread_id, platform=self.platform)
-            if channel_settings is None:
-                parent = self.store.find_channel(parent_id, platform=self.platform)
-                channel_settings = ChannelSettings(**vars(parent)) if parent is not None else ChannelSettings()
-                if value is None:
-                    value = (
-                        parent.require_mention
-                        if parent is not None and parent.require_mention is not None
-                        else bool(self.require_mention_default())
-                    )
-            channel_settings.require_mention = value
-            self.store.update_thread(parent_id, thread_id, channel_settings, platform=self.platform)
-            self._last_seen_store_generation = self.store.generation
-            logger.info("Updated require_mention for thread %s/%s: %s", parent_id, thread_id, value)
-            return
-        channel_settings = self.store.get_channel(key, platform=self.platform)
-        channel_settings.require_mention = value
-        self.store.update_channel(key, channel_settings, platform=self.platform)
-        logger.info(f"Updated require_mention for channel {key}: {value}")
+        self.change_scope_settings(channel_id, {"require_mention": value})
+        logger.info("Updated require_mention for %s: %s", channel_id, value)
 
     def get_require_mention_override(self, channel_id: Union[int, str]) -> Optional[bool]:
         """Get the raw per-channel require_mention override (may be None)."""
@@ -730,9 +664,13 @@ class MultiSettingsManager:
         manager, raw = self._resolve(settings_key)
         return manager.get_user_settings(raw)
 
-    def update_user_settings(self, settings_key: Union[int, str], settings: UserSettings):
+    def change_scope_settings(self, settings_key: Union[int, str], changes: dict, **kwargs):
         manager, raw = self._resolve(settings_key)
-        return manager.update_user_settings(raw, settings)
+        return manager.change_scope_settings(raw, changes, **kwargs)
+
+    def set_show_message_types(self, settings_key: Union[int, str], show_message_types: List[str]) -> None:
+        manager, raw = self._resolve(settings_key)
+        return manager.set_show_message_types(raw, show_message_types)
 
     def toggle_show_message_type(self, settings_key: Union[int, str], message_type: str) -> bool:
         manager, raw = self._resolve(settings_key)
@@ -770,10 +708,6 @@ class MultiSettingsManager:
         manager, raw = self._resolve(settings_key)
         return manager.is_message_type_hidden(raw, message_type)
 
-    def save_user_settings(self, settings_key: Union[int, str], settings: UserSettings):
-        manager, raw = self._resolve(settings_key)
-        return manager.save_user_settings(raw, settings)
-
     def get_available_message_types(self) -> List[str]:
         return self.managers[self.primary_platform].get_available_message_types()
 
@@ -790,10 +724,6 @@ class MultiSettingsManager:
     def set_channel_routing(self, settings_key: Union[int, str], routing: ChannelRouting):
         manager, raw = self._resolve(settings_key)
         return manager.set_channel_routing(raw, routing)
-
-    def clear_channel_routing(self, settings_key: Union[int, str]):
-        manager, raw = self._resolve(settings_key)
-        return manager.clear_channel_routing(raw)
 
     def get_require_mention(self, settings_key: Union[int, str], global_default: bool = False) -> bool:
         manager, raw = self._resolve(settings_key)

@@ -53,9 +53,10 @@ class _StubSettingsManager:
         assert settings_key == "telegram::-100123"
         return self.routing
 
-    def set_channel_routing(self, settings_key: str, routing: RoutingSettings) -> None:
+    def set_channel_routing(self, settings_key: str, routing: RoutingSettings) -> RoutingSettings:
         assert settings_key == "telegram::-100123"
         self.saved_routing = routing
+        return routing
 
 
 def _make_handler(settings_manager: _StubSettingsManager) -> tuple[SettingsHandler, AsyncMock]:
@@ -71,51 +72,54 @@ def _make_handler(settings_manager: _StubSettingsManager) -> tuple[SettingsHandl
     return SettingsHandler(controller), send_message
 
 
-def test_settings_update_materializes_topic_mention_before_saving_other_fields() -> None:
-    calls: list[str] = []
-    user_settings = SimpleNamespace(show_message_types=[])
+def test_settings_update_saves_a_topic_override_in_one_write(tmp_path, monkeypatch) -> None:
+    """A topic's first settings form saves its types and the mention gate it inherited, together."""
+    from config import paths
+    from config.v2_settings import ChannelSettings, SettingsStore, make_thread_settings_key
+    from modules.settings_manager import SettingsManager
 
-    class TopicSettingsManager:
-        sessions = object()
-
-        def set_require_mention(self, settings_key: str, value: bool | None) -> None:
-            assert settings_key == "thread::-100123::1"
-            assert value is None
-            calls.append("mention")
-
-        def get_user_settings(self, settings_key: str):
-            assert settings_key == "thread::-100123::1"
-            calls.append("read")
-            return user_settings
-
-        def update_user_settings(self, settings_key: str, settings) -> None:
-            assert settings_key == "thread::-100123::1"
-            assert settings.show_message_types == ["assistant"]
-            calls.append("save")
-
-    manager = TopicSettingsManager()
-    controller = SimpleNamespace(
-        config=SimpleNamespace(platform="telegram", language="en"),
-        im_client=SimpleNamespace(send_message=AsyncMock()),
-        settings_manager=manager,
-        _get_settings_key=lambda _context: "thread::-100123::1",
-        _get_lang=lambda: "en",
-    )
-    handler = SettingsHandler(controller)
-
-    asyncio.run(
-        handler.handle_settings_update(
-            user_id="42",
-            channel_id="-100123",
-            thread_id="1",
-            show_message_types=["assistant"],
-            require_mention=None,
-            notify_user=False,
+    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
+    SettingsStore.reset_instance()
+    manager = SettingsManager(settings_file=str(tmp_path / "settings.json"), platform="telegram")
+    manager.require_mention_default = lambda: False
+    try:
+        manager.store.update_channel(
+            "-100123",
+            ChannelSettings(enabled=True, show_message_types=["assistant", "toolcall"], require_mention=True),
             platform="telegram",
         )
-    )
+        writes = []
+        save_state = manager.store._service.save_state
+        monkeypatch.setattr(
+            manager.store._service, "save_state", lambda *args, **kwargs: writes.append(1) or save_state(*args, **kwargs)
+        )
+        controller = SimpleNamespace(
+            config=SimpleNamespace(platform="telegram", language="en"),
+            im_client=SimpleNamespace(send_message=AsyncMock()),
+            settings_manager=manager,
+            _get_settings_key=lambda _context: make_thread_settings_key("-100123", "1"),
+            _get_lang=lambda: "en",
+        )
 
-    assert calls == ["mention", "read", "save"]
+        asyncio.run(
+            SettingsHandler(controller).handle_settings_update(
+                user_id="42",
+                channel_id="-100123",
+                thread_id="1",
+                show_message_types=["assistant"],
+                require_mention=None,
+                notify_user=False,
+                platform="telegram",
+            )
+        )
+
+        topic = manager.store.find_thread("-100123", "1", platform="telegram")
+        # The form's "default" gate on a new topic keeps the channel's explicit gate.
+        assert (topic.show_message_types, topic.require_mention, topic.enabled) == (["assistant"], True, True)
+        assert manager.store.find_channel("-100123", platform="telegram").show_message_types == ["assistant", "toolcall"]
+        assert len(writes) == 1
+    finally:
+        SettingsStore.reset_instance()
 
 
 class _FlatScopeSessions:
@@ -137,9 +141,10 @@ class _FlatScopeSettingsManager:
         assert settings_key == "58181121"
         return self.routing
 
-    def set_channel_routing(self, settings_key: str, routing: RoutingSettings) -> None:
+    def set_channel_routing(self, settings_key: str, routing: RoutingSettings) -> RoutingSettings:
         assert settings_key == "58181121"
         self.saved_routing = routing
+        return routing
 
 
 def _make_flat_scope_handler(
@@ -258,33 +263,6 @@ def test_handle_routing_update_handles_first_codex_save_without_existing_routing
     assert settings_manager.saved_routing.reasoning_effort == "high"
     assert settings_manager.saved_routing.codex_model is None
     assert settings_manager.saved_routing.codex_reasoning_effort is None
-    send_message.assert_not_awaited()
-
-
-def test_handle_routing_update_preserves_catalog_claude_effort() -> None:
-    settings_manager = _StubSettingsManager(None)
-    handler, send_message = _make_handler(settings_manager)
-
-    with patch(
-        "core.handlers.settings_handler.backend_model_catalog.catalog_reasoning_efforts_for_model",
-        return_value=["low", "ultra"],
-    ):
-        asyncio.run(
-            handler.handle_routing_update(
-                user_id="42",
-                channel_id="-100123",
-                agent_id="id-claude",
-                variant="reviewer",
-                model="claude-future-6",
-                reasoning_effort="ultra",
-                notify_user=False,
-                platform="telegram",
-            )
-        )
-
-    assert settings_manager.saved_routing is not None
-    assert settings_manager.saved_routing.model == "claude-future-6"
-    assert settings_manager.saved_routing.reasoning_effort == "ultra"
     send_message.assert_not_awaited()
 
 

@@ -61,15 +61,39 @@ and after it, with the routing view's Agent as `expected_agent_name`. The
 stored row in the response replaces the local one unless a newer edit of the
 same scope is in flight; a refused edit reloads that platform's rows.
 
-## IM
+## One write path
 
-A refused settings save propagates to the IM handler, which reports it with the
-same localized conflict or unavailable-Agent text as the Web pages, and the
-runtime view is rebuilt from the committed rows.
+`core.services.scope_settings.apply_scope_change` owns the change; the Web
+PATCH route validates the request and calls it, and every IM settings write
+reaches it through `SettingsManager.change_scope_settings`:
+
+| IM surface | Change |
+| --- | --- |
+| routing form (all platforms), resume | `routing`, as the form's complete route |
+| settings form | `show_message_types`, plus `require_mention` outside DMs, in one write |
+| message-type toggle | `show_message_types` |
+| set working directory | `custom_cwd` |
+
+- Routes go through one `normalize_scope_routing`, so a Claude effort is kept
+  or dropped by the Model Hub catalog when Claude runs through the Hub, whichever
+  surface saved it. IM previously checked only the native catalog.
+- An IM routing form submits a complete route; its `expected_agent_name` is the
+  Agent the scope runs when the form is saved, so only a concurrent change in
+  that window conflicts.
+- A topic's first override keeps the mention gate it showed while inheriting:
+  the parent channel's explicit gate, else the platform default.
+- A refused save raises to the IM handler, which reports it with the same
+  localized conflict or unavailable-Agent text as the Web pages; the runtime
+  view is rebuilt from the committed rows.
+- IM handlers run these writes on a worker thread, not the controller loop.
+- Runtime bookkeeping on bound users (Slack DM channel id, WeChat bind hint)
+  uses `SettingsStore.update_user_fields`, which sets only those fields under
+  the write lock instead of writing back a cached copy of the user.
 
 ## Out of scope
 
-- IM writes still go through `SettingsManager`'s platform save; moving them to
-  the single-scope path and unifying route normalization is the next step.
+- Removing the legacy per-backend `<backend>_model` / `<backend>_reasoning_effort`
+  routing fields from the API, the Web types, and the stored routing JSON. They
+  are read-only aliases today; removing them is a separate contract cleanup.
 - Display fixes on the settings pages (effective model, inherited vs override,
   new-session hint) and per-row save status.

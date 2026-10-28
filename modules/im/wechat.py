@@ -1334,7 +1334,7 @@ class WeChatBot(BaseIMClient):
         try:
             store = store_getter()
             user.pending_bind_menu_hint = False
-            store.update_user(user_id, user, platform="wechat")
+            store.update_user_fields(user_id, platform="wechat", pending_bind_menu_hint=False)
             manager_reload = getattr(manager, "_reload_if_changed", None)
             if callable(manager_reload):
                 manager_reload()

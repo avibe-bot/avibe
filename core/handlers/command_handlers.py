@@ -1,5 +1,6 @@
 """Command handlers for bot commands like /start, /new, /cwd, etc."""
 
+import asyncio
 import logging
 import os
 import time
@@ -701,7 +702,7 @@ class CommandHandlers(BaseHandler):
 
             # Save to user settings
             settings_key = self._get_settings_key(context)
-            settings_manager.set_custom_cwd(settings_key, absolute_path)
+            await asyncio.to_thread(settings_manager.set_custom_cwd, settings_key, absolute_path)
 
             logger.info(f"User {context.user_id} changed cwd to: {absolute_path}")
 
