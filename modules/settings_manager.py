@@ -310,6 +310,12 @@ class SettingsManager:
             logger.info("Settings saved successfully")
         except Exception as e:
             logger.error(f"Error saving settings: {e}")
+            # The store reloaded its committed rows; drop the unsaved edit from the
+            # runtime view too, and let the caller tell the user it failed.
+            with self._runtime_settings_lock:
+                self._rebuild_runtime_settings(reason="save_failed")
+                self._last_seen_store_generation = self.store.generation
+            raise
 
     def get_user_settings(self, user_id: Union[int, str]) -> UserSettings:
         """Get settings for a specific user/channel context.

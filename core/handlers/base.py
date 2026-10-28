@@ -58,6 +58,19 @@ class BaseHandler:
     def _t(self, key: str, **kwargs) -> str:
         return i18n_t(key, self._get_lang(), **kwargs)
 
+    def _settings_error_text(self, error: Exception) -> str:
+        """Describe a refused settings save the way the Web settings pages do."""
+        code = getattr(error, "code", None)
+        if code == "settings_conflict":
+            return f"{self._t('error.settingsConflict.message')} {self._t('error.settingsConflict.hint')}"
+        if code == "agent_unavailable":
+            agent = getattr(error, "agent_name", "")
+            return (
+                f"{self._t('error.scopeAgentUnavailable.message', agent=agent)} "
+                f"{self._t('error.scopeAgentUnavailable.hint')}"
+            )
+        return str(error)
+
     def _context_can_start_fresh_session_without_reset(self, context: MessageContext) -> bool:
         im_client = self._get_im_client(context)
         is_dm = bool((context.platform_specific or {}).get("is_dm", False))

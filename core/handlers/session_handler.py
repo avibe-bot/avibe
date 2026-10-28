@@ -2169,7 +2169,7 @@ class SessionHandler(BaseHandler):
             )
             await self._get_im_client(context).send_message(
                 context,
-                f"❌ {self._t('error.resumeSubmitFailed', error=str(e))}",
+                f"❌ {self._t('error.resumeSubmitFailed', error=self._settings_error_text(e))}",
             )
 
     def _routing_matches_backend(self, routing, backend: str) -> bool:

@@ -118,7 +118,7 @@ def test_complete_registered_api_management_inventory():
         for method in (getattr(route, "methods", None) or ())
         if method not in {"HEAD", "OPTIONS"}
     }
-    assert len(endpoints) == 295
+    assert len(endpoints) == 296
     # Editors who use Vault read avault's authorization state; the handler admits only
     # instance managers to raise the Keychain dialog on the host.
     for method in ("GET", "POST"):
@@ -438,6 +438,32 @@ def test_member_channel_and_dm_preferences_preserve_access_state(management_http
         assert request("POST", "/api/users", payload={"platform": "telegram", "users": patch}).status_code == 403
     assert set(store.get_users_for_platform("telegram")) == {"bound"}
     assert not store.get_user("bound", platform="telegram").enabled
+
+
+def test_member_scope_patch_preserves_access_state(management_http):
+    """PERMISSIONS-013: the single-scope settings PATCH keeps the same Member boundary."""
+
+    store = SettingsStore.get_instance()
+    store.set_channels_for_platform("telegram", {"chat": ChannelSettings(enabled=True, require_bind=True)})
+    store.set_users_for_platform("telegram", {"bound": UserSettings(is_admin=True, enabled=False, bound_at="old")})
+    store.save()
+    request = management_http()
+
+    def patch(scope, native_id, changes):
+        return request("PATCH", "/api/settings/scope", payload={
+            "platform": "telegram", "scope": scope, "id": native_id, "changes": changes,
+        })
+
+    assert patch("channel", "chat", {"custom_cwd": "/tmp/ordinary"}).status_code == 200
+    assert patch("user", "bound", {"display_name": "成员", "custom_cwd": "/tmp/dm"}).status_code == 200
+    assert patch("channel", "chat", {"require_bind": False}).status_code == 403
+    assert patch("user", "bound", {"enabled": True}).status_code == 403
+    refused = patch("user", "bound", {"is_admin": False})
+    assert refused.status_code == 400 and refused.get_json()["code"] == "invalid_changes"
+    store = SettingsStore.get_instance()
+    channel, user = store.find_channel("chat", platform="telegram"), store.get_user("bound", platform="telegram")
+    assert (channel.custom_cwd, channel.require_bind) == ("/tmp/ordinary", True)
+    assert (user.display_name, user.custom_cwd, user.is_admin, user.enabled) == ("成员", "/tmp/dm", True, False)
 
 
 @pytest.mark.parametrize(

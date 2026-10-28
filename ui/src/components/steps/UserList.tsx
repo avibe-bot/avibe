@@ -24,6 +24,7 @@ import { FolderBrowser } from '../ui/folder-browser';
 import { copyTextToClipboard } from '../../lib/utils';
 import { PlatformIcon } from '../visual';
 import { RoutingConfigPanel } from '../shared/RoutingConfigPanel';
+import { scopeSettingsChange, USER_SCOPE_FIELDS } from '../../lib/scopeSettingsPatch';
 import { SearchField, ToggleSwitch } from '../settings/SettingsPrimitives';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogTitle } from '../ui/dialog';
@@ -518,42 +519,41 @@ export const UserList: React.FC = () => {
     });
   }, [aggregated, searchQuery, showDisabled]);
 
-  const persistUsers = async (platform: string, next: Record<string, Partial<UserConfig>>) => {
-    const version = (userSaveVersionRef.current[platform] || 0) + 1;
-    userSaveVersionRef.current[platform] = version;
+  // Each edit sends only what it changed on one user; the stored row it gets
+  // back replaces the local one unless a newer edit of that user is in flight.
+  const persistUser = async (platform: string, userId: string, base: UserConfig, next: UserConfig) => {
+    const change = scopeSettingsChange(base, next, USER_SCOPE_FIELDS);
+    if (!change) return;
+    const rowKey = `${platform}::${userId}`;
+    const version = (userSaveVersionRef.current[rowKey] || 0) + 1;
+    userSaveVersionRef.current[rowKey] = version;
     setLoading(true);
-    let stored: Record<string, UserConfig> | null;
     try {
-      const result = await api.saveUsers({ users: next }, platform);
-      stored = result?.users || null;
+      const result = await api.patchScopeSettings({ platform, scope: 'user', id: userId, ...change });
       showToast(t('userList.settingsSaved'));
+      const stored = result.settings as UserConfig | undefined;
+      if (stored && userSaveVersionRef.current[rowKey] === version) {
+        setUsersByPlatform((prev) => ({ ...prev, [platform]: { ...(prev[platform] || {}), [userId]: stored } }));
+      }
     } catch {
       showToast(t('userList.settingsSaveFailed'), 'error');
       const result = await api.getUsers(platform).catch(() => null);
-      stored = result?.ok ? result.users || {} : null;
+      if (result?.ok && userSaveVersionRef.current[rowKey] === version) {
+        setUsersByPlatform((prev) => ({ ...prev, [platform]: result.users || {} }));
+      }
     } finally {
       setLoading(false);
     }
-    // Adopt the stored rows so each routing keeps the expected_agent_name read
-    // with it; a newer save on this platform owns the state instead.
-    if (!stored || userSaveVersionRef.current[platform] !== version) return;
-    const latest = stored;
-    setUsersByPlatform((prev) => ({ ...prev, [platform]: latest }));
   };
 
   const updateUser = (platform: string, userId: string, patch: Partial<UserConfig>) => {
-    const platformUsers = usersByPlatform[platform] || {};
-    const base = platformUsers[userId] || defaultUserConfig();
+    const base = (usersByPlatform[platform] || {})[userId] || defaultUserConfig();
     const next = { ...base, ...patch };
     if (!next.routing || typeof next.routing !== 'object') {
       next.routing = { agent_name: null };
     }
-    const nextPlatformUsers = { ...platformUsers, [userId]: next };
-    setUsersByPlatform((prev) => ({ ...prev, [platform]: nextPlatformUsers }));
-    void persistUsers(platform, { [userId]: canManageAccessMembers ? next : {
-      display_name: next.display_name, custom_cwd: next.custom_cwd,
-      routing: next.routing, show_message_types: next.show_message_types,
-    } });
+    setUsersByPlatform((prev) => ({ ...prev, [platform]: { ...(prev[platform] || {}), [userId]: next } }));
+    void persistUser(platform, userId, base, next);
   };
 
   const handleToggleAdmin = async (platform: string, userId: string, isAdmin: boolean) => {

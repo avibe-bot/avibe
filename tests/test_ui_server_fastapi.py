@@ -536,6 +536,7 @@ def test_scope_settings_routes_report_localized_stale_agent_binding_conflicts(mo
     monkeypatch.setattr(api, "save_settings", stale)
     monkeypatch.setattr(api, "save_thread_settings", stale)
     monkeypatch.setattr(api, "save_users", stale)
+    monkeypatch.setattr(api, "patch_scope_settings", stale)
 
     client = app.test_client()
     headers = csrf_headers(client)
@@ -547,6 +548,11 @@ def test_scope_settings_routes_report_localized_stale_agent_binding_conflicts(mo
             headers=headers,
         ),
         client.post("/api/users", json={"platform": "slack", "users": {}}, headers=headers),
+        client.patch(
+            "/api/settings/scope",
+            json={"platform": "slack", "scope": "channel", "id": "C1", "changes": {}},
+            headers=headers,
+        ),
     )
 
     for response in responses:
@@ -580,6 +586,7 @@ def test_scope_settings_routes_localize_unavailable_agent_errors(monkeypatch):
     monkeypatch.setattr(api, "save_settings", unavailable)
     monkeypatch.setattr(api, "save_thread_settings", unavailable)
     monkeypatch.setattr(api, "save_users", unavailable)
+    monkeypatch.setattr(api, "patch_scope_settings", unavailable)
 
     client = app.test_client()
     headers = csrf_headers(client)
@@ -591,6 +598,11 @@ def test_scope_settings_routes_localize_unavailable_agent_errors(monkeypatch):
             headers=headers,
         ),
         client.post("/api/users", json={"platform": "slack", "users": {}}, headers=headers),
+        client.patch(
+            "/api/settings/scope",
+            json={"platform": "slack", "scope": "channel", "id": "C1", "changes": {}},
+            headers=headers,
+        ),
     )
 
     for response in responses:

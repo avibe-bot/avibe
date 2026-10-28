@@ -8,6 +8,7 @@ import { isAuthorizationSensitiveReadPath } from '../lib/authorizationCache';
 import type { TurnActivityGroupWire } from '../lib/agentActivity';
 import type { AgentGraphParams, AgentGraphResult, AgentGraphVisibility } from '../lib/agentGraph';
 import { onPageReactivated, type PageReactivationListener } from '../lib/pageActivity';
+import type { ScopeKind, ScopeSettingsChange } from '../lib/scopeSettingsPatch';
 import type { ShowPagePayload } from '../lib/showPageLinks';
 import { visibilityActivityEvents } from '../lib/sessionVisibilityEvents';
 import { normalizeSessionInfo, type InstanceCapabilities, type SessionInfo } from '../lib/sessionInfo';
@@ -53,6 +54,20 @@ export type { ConfigMutation };
 // The workbench Dock API response shape ({ ok, dock }); the Dock document type
 // itself lives with the DockProvider that owns reconciliation.
 export type DockResponse = { ok: boolean; dock: DockDoc };
+export type ScopeSettingsPatchRequest = ScopeSettingsChange & {
+  platform: string;
+  scope: ScopeKind;
+  id: string;
+  thread_id?: string;
+};
+export type ScopeSettingsPatchResult = {
+  ok: boolean;
+  scope: ScopeKind;
+  id: string;
+  thread_id?: string;
+  /** The scope's stored row, in the shape the settings reads return it. */
+  settings: unknown;
+};
 
 // Global workbench toggles persisted server-side in state_meta. Currently just
 // the background-work banner switch (spec req 2); read by ChatPage (to gate the
@@ -549,6 +564,7 @@ export type ApiContextType = {
   getSettings: (platform?: string) => Promise<any>;
   saveSettings: (payload: any, platform?: string) => Promise<any>;
   saveThreadSettings: (platform: string, channelId: string, threadId: string, settings: any) => Promise<any>;
+  patchScopeSettings: (request: ScopeSettingsPatchRequest) => Promise<ScopeSettingsPatchResult>;
   deleteThreadSettings: (platform: string, channelId: string, threadId: string) => Promise<any>;
   getUsers: (platform?: string) => Promise<any>;
   saveUsers: (payload: any, platform?: string) => Promise<any>;
@@ -3507,6 +3523,7 @@ export const ApiProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       thread_id: threadId,
       settings,
     }),
+    patchScopeSettings: (request) => patchJson('/api/settings/scope', request),
     deleteThreadSettings: (platform, channelId, threadId) => deleteJson(
       `/api/settings/thread?platform=${encodeURIComponent(platform)}&channel_id=${encodeURIComponent(channelId)}&thread_id=${encodeURIComponent(threadId)}`,
     ),

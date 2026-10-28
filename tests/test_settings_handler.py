@@ -924,3 +924,37 @@ def test_handle_routing_modal_update_uses_the_visible_current_agent() -> None:
     assert len(update_calls) == 1
     assert update_calls[0]["routing"].current_agent == "id-opencode"
     assert update_calls[0]["selected_agent"] == "id-opencode"
+
+
+def test_a_routing_save_the_store_refuses_is_reported_not_confirmed(tmp_path, monkeypatch) -> None:
+    """IM forms used to confirm a routing change whose save had failed, because the save swallowed errors."""
+    from config import paths
+    from config.v2_settings import ChannelSettings, SettingsStore
+    from modules.settings_manager import SettingsManager
+
+    monkeypatch.setattr(paths, "ensure_data_dirs", lambda: None)
+    SettingsStore.reset_instance()
+    manager = SettingsManager(settings_file=str(tmp_path / "settings.json"), platform="telegram")
+    try:
+        manager.store.update_channel("-100123", ChannelSettings(enabled=True), platform="telegram")
+        handler, send_message = _make_handler(manager)
+        handler.controller._get_settings_key = lambda _context: "-100123"
+        # Listed by the form, but not an enabled Agent the store can bind.
+        handler.controller.vibe_agent_store.agents.append(
+            SimpleNamespace(id="id-gone", name="gone", backend="claude", model=None, enabled=True)
+        )
+
+        with patch.object(handler, "_routing_update_needs_new_session_hint", return_value=False):
+            asyncio.run(
+                handler.handle_routing_update(
+                    user_id="42", channel_id="-100123", agent_id="id-gone", platform="telegram"
+                )
+            )
+
+        text = send_message.await_args.args[1]
+        assert text.startswith("❌"), text
+        assert "Agent `gone` is unavailable for this route." in text
+        assert manager.get_channel_routing("-100123").agent_name is None
+        assert manager.store.find_channel("-100123", platform="telegram").routing.agent_name is None
+    finally:
+        SettingsStore.reset_instance()
