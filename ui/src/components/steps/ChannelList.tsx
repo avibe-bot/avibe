@@ -147,6 +147,8 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   const refreshFollowupVersionRef = useRef(0);
   const channelRequestVersionRef = useRef(0);
   const allPlatformsRequestVersionRef = useRef(0);
+  const channelSaveVersionRef = useRef<Record<string, number>>({});
+  const currentPlatformRef = useRef<string>('');
   // Directory browser state — tracks which channel's cwd picker is open
   const [browsingCwdFor, setBrowsingCwdFor] = useState<string | null>(null);
   // Page-mode tab/search/collapse state (only used when isPage is true)
@@ -285,6 +287,9 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
   const platform = isWizardMultiPlatform
     ? wizardActivePlatform
     : (forcedPlatform || pagePlatform || config.platform || data.platform || 'slack');
+  useEffect(() => {
+    currentPlatformRef.current = platform;
+  }, [platform]);
   const channelPlatforms = getEnabledPlatforms(config).filter((p) => platformSupportsChannels(config, p));
   const knownDiscordGuilds = [
     ...guilds,
@@ -738,12 +743,24 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       setConfigs(nextPlatformConfigs);
     }
     if (!isPage) return;
+    const version = (channelSaveVersionRef.current[platformId] || 0) + 1;
+    channelSaveVersionRef.current[platformId] = version;
+    let stored: Record<string, ChannelConfig> | null;
     try {
-      await api.saveSettings({ channels: nextPlatformConfigs }, platformId);
+      const result = await api.saveSettings({ channels: nextPlatformConfigs }, platformId);
+      stored = result?.channels || null;
       showToast(t('channelList.settingsSaved'));
     } catch {
       showToast(t('channelList.settingsSaveFailed'), 'error');
+      const settings = await api.getSettings(platformId).catch(() => null);
+      stored = settings ? settings.channels || {} : null;
     }
+    // Adopt the stored rows so each routing keeps the expected_agent_name read
+    // with it; a newer save on this platform owns the state instead.
+    if (!stored || channelSaveVersionRef.current[platformId] !== version) return;
+    const latest = stored;
+    setAllConfigsByPlatform((prev) => ({ ...prev, [platformId]: latest }));
+    if (currentPlatformRef.current === platformId) setConfigs(latest);
   };
 
   const saveTelegramTopicConfig = async (

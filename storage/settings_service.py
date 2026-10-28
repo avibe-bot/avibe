@@ -393,14 +393,17 @@ class SQLiteSettingsService:
         current = conn.execute(
             select(scope_settings.c.agent_name).where(scope_settings.c.scope_id == scope_id)
         ).scalar_one_or_none()
+        if item.routing.agent_name == current:
+            # Writing back the stored binding cannot overwrite another writer's
+            # change, so an outdated token alone is not a conflict.
+            return item.routing
         if current == expected:
-            if item.routing.agent_name != current:
-                canonical_agent_name = SQLiteSettingsService._require_enabled_agent_binding(
-                    conn,
-                    item.routing.agent_name,
-                )
-                if canonical_agent_name != item.routing.agent_name:
-                    return replace(item.routing, agent_name=canonical_agent_name)
+            canonical_agent_name = SQLiteSettingsService._require_enabled_agent_binding(
+                conn,
+                item.routing.agent_name,
+            )
+            if canonical_agent_name != item.routing.agent_name:
+                return replace(item.routing, agent_name=canonical_agent_name)
             return item.routing
         if item.routing.agent_name == expected:
             return replace(item.routing, agent_name=current)
