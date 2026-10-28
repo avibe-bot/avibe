@@ -271,7 +271,7 @@
     },
     "src/components/steps/UserList.tsx": {
       "@typescript-eslint/no-explicit-any": 2,
-      "avibe/localized-user-text": 5,
+      "avibe/localized-user-text": 4,
       "react-hooks/set-state-in-effect": 2
     },
     "src/components/steps/WeChatConfig.tsx": {

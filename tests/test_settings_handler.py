@@ -936,3 +936,48 @@ def test_a_routing_save_the_store_refuses_is_reported_not_confirmed(tmp_path, mo
         assert manager.store.find_channel("-100123", platform="telegram").routing.agent_name is None
     finally:
         SettingsStore.reset_instance()
+
+
+def test_scope_needs_new_session_answers_for_the_scope_the_web_saved() -> None:
+    """A DM session is anchored on the platform's DM channel; only a flat scope's live session keeps its Agent."""
+    rows = {"discord_D-chan": {"agent_name": "opencode", "agent_backend": "opencode"}}
+    anchors: list[str] = []
+
+    def find_session_for_anchor(session_key, anchor):
+        anchors.append(anchor)
+        return rows.get(anchor)
+
+    def handler_for(*, threaded: bool, routing_agent: str):
+        manager = SimpleNamespace(
+            get_channel_routing=lambda key: RoutingSettings(agent_name=routing_agent),
+            get_store=lambda: SimpleNamespace(
+                get_user=lambda user_id, platform=None: SimpleNamespace(dm_chat_id="D-chan") if user_id == "U1" else None
+            ),
+        )
+        controller = SimpleNamespace(
+            config=SimpleNamespace(platform="discord", language="en"),
+            im_client=SimpleNamespace(
+                should_use_thread_for_reply=lambda: threaded,
+                should_use_thread_for_dm_session=lambda: threaded,
+                should_use_message_id_for_channel_session=lambda context=None: threaded,
+            ),
+            settings_manager=manager,
+            sessions=SimpleNamespace(find_session_for_anchor=find_session_for_anchor),
+            session_handler=SimpleNamespace(get_base_session_id=lambda context: f"{context.platform}_{context.channel_id}"),
+            vibe_agent_store=_AgentStore(),
+            _get_settings_key=lambda context: context.user_id or context.channel_id,
+            _get_session_key=lambda context: f"{context.platform}::{context.channel_id}",
+            _get_lang=lambda: "en",
+        )
+        return SettingsHandler(controller)
+
+    flat = handler_for(threaded=False, routing_agent="vibey")
+    assert flat.scope_needs_new_session(platform="discord", kind="user", native_id="U1") is True
+    assert anchors[-1] == "discord_D-chan"
+    assert handler_for(threaded=False, routing_agent="opencode").scope_needs_new_session(
+        platform="discord", kind="user", native_id="U1"
+    ) is False
+    assert flat.scope_needs_new_session(platform="discord", kind="channel", native_id="C9") is False
+    assert handler_for(threaded=True, routing_agent="vibey").scope_needs_new_session(
+        platform="discord", kind="user", native_id="U1"
+    ) is False

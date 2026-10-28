@@ -763,3 +763,39 @@ def test_backend_application_uses_verified_socket_and_real_projection(socket_pat
                 await internal_client.backend_application("other", socket_path=socket_path)
 
     asyncio.run(run())
+
+
+def test_scope_session_hint_round_trip_through_the_controller_endpoint(socket_path):
+    """The Web settings write asks the controller, which owns session semantics, about one scope."""
+    from types import SimpleNamespace
+
+    from core import internal_server
+    from tests.test_internal_server import _build_controller_double
+
+    asked: list[dict] = []
+
+    def scope_needs_new_session(**kwargs):
+        asked.append(kwargs)
+        return kwargs["native_id"] == "flat-chat"
+
+    controller = _build_controller_double()
+    controller.settings_handler = SimpleNamespace(scope_needs_new_session=scope_needs_new_session)
+    app = internal_server.create_app(controller)
+
+    async def _go():
+        fake_transport = httpx.ASGITransport(app=app)
+        with patch("vibe.internal_client.httpx.AsyncHTTPTransport", return_value=fake_transport):
+            return (
+                await internal_client.scope_session_hint(
+                    platform="telegram", scope="thread", native_id="flat-chat", thread_id="7", socket_path=socket_path,
+                ),
+                await internal_client.scope_session_hint(
+                    platform="slack", scope="channel", native_id="C1", socket_path=socket_path,
+                ),
+            )
+
+    assert asyncio.run(_go()) == (True, False)
+    assert asked == [
+        {"platform": "telegram", "kind": "thread", "native_id": "flat-chat", "thread_id": "7"},
+        {"platform": "slack", "kind": "channel", "native_id": "C1", "thread_id": ""},
+    ]

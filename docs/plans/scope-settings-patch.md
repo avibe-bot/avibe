@@ -90,10 +90,21 @@ reaches it through `SettingsManager.change_scope_settings`:
   uses `SettingsStore.update_user_fields`, which sets only those fields under
   the write lock instead of writing back a cached copy of the user.
 
+## What a settings row shows
+
+- Each users/groups row summarizes the route the scope runs: its own model and
+  effort over its Agent's, marked as the default when it names none of them.
+- A save in flight shows on its row and on the route picker; only failures are
+  announced.
+- After a routing change, `PATCH /api/settings/scope` reports
+  `needs_new_session`, asked of the controller over the internal socket
+  (`/internal/scope-session-hint`), which owns session semantics: true when the
+  scope's current session runs another Agent and is not replaced by the next
+  message (a flat DM or chat), as the IM routing form says. `null` when the
+  controller cannot answer. The row then says to send `/new` there.
+
 ## Out of scope
 
 - Removing the legacy per-backend `<backend>_model` / `<backend>_reasoning_effort`
   routing fields from the API, the Web types, and the stored routing JSON. They
   are read-only aliases today; removing them is a separate contract cleanup.
-- Display fixes on the settings pages (effective model, inherited vs override,
-  new-session hint) and per-row save status.

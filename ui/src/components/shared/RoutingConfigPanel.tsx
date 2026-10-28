@@ -55,6 +55,10 @@ export interface RoutingConfigPanelProps {
   footerActions?: React.ReactNode;
   /** Wrapper class — controls outer padding/border. Default: 'border-t border-border/60 px-5 py-4'. */
   containerClass?: string;
+  /** A save of this scope is in flight — shown on the route picker. */
+  saving?: boolean;
+  /** Shown under the route picker, e.g. that the current session keeps its Agent. */
+  routeNotice?: string | null;
 }
 
 /** Input that only commits value on blur */
@@ -87,6 +91,8 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
   availableMessageTypes = ['assistant', 'toolcall'],
   footerActions,
   containerClass = 'border-t border-border/60 px-5 py-4',
+  saving = false,
+  routeNotice,
 }) => {
   const { capabilities } = useInstanceAuthorization();
   const canManageAccessMembers = capabilities.can_manage_access_members;
@@ -237,9 +243,13 @@ export const RoutingConfigPanel: React.FC<RoutingConfigPanelProps> = ({
           isDefaultRoute={
             !value.routing.agent_name && !value.routing.model && !value.routing.reasoning_effort
           }
+          saving={saving}
           align="start"
           triggerClassName="w-full"
         />
+        {routeNotice && (
+          <p role="status" className="pt-1 text-[11px] leading-snug text-gold-ink">{routeNotice}</p>
+        )}
       </div>
 
       {/* Show message types chips */}

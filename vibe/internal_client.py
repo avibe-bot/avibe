@@ -615,6 +615,38 @@ async def reconcile_platforms(
     return {"status_code": resp.status_code, "body": resp.json() if resp.content else {}}
 
 
+async def scope_session_hint(
+    *,
+    platform: str,
+    scope: str,
+    native_id: str,
+    thread_id: str = "",
+    socket_path: Optional[Path] = None,
+    timeout: float = 5.0,
+) -> bool:
+    """Ask the controller whether a scope's current session runs another Agent than its route."""
+
+    endpoint = await _resolve_endpoint_async(socket_path)
+    transport = _async_transport(endpoint)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url=endpoint.base_url,
+            headers=endpoint.headers,
+            timeout=httpx.Timeout(timeout, connect=2.0),
+        ) as client:
+            resp = await client.post(
+                "/internal/scope-session-hint",
+                json={"platform": platform, "scope": scope, "id": native_id, "thread_id": thread_id},
+            )
+            _validate_response(resp, endpoint)
+    except _SOCKET_ERRORS as exc:
+        raise InternalServerUnavailable(str(exc)) from exc
+    if resp.status_code != 200:
+        raise InternalServerUnavailable(f"scope session hint returned {resp.status_code}")
+    return bool((resp.json() or {}).get("needs_new_session"))
+
+
 async def invalidate_activity_streaming(
     *,
     socket_path: Optional[Path] = None,

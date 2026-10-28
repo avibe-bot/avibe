@@ -3937,6 +3937,7 @@
     "topicIdLabel": "Topic ID: {{id}}",
     "topicCustomBadge": "Custom",
     "topicInheritedBadge": "Inherits group",
+    "newSessionHint": "This conversation's current session keeps its previous Agent. Send /new there to start a new session with this route.",
     "topicCustomize": "Customize",
     "topicReset": "Use group settings",
     "topicExpand": "Expand topic settings",
