@@ -1,7 +1,7 @@
 import { platformText } from '@/lib/platforms';
 import type { TFunction } from 'i18next';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bot,
   Check,
@@ -450,6 +450,7 @@ export const UserList: React.FC = () => {
   const [showDisabled, setShowDisabled] = useState(false);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+  const userSaveVersionRef = useRef<Record<string, number>>({});
 
   const enabledPlatforms = useMemo(() => getEnabledPlatforms(config), [config]);
   const vibeAgents = config.agent_catalog?.agents || [];
@@ -518,15 +519,26 @@ export const UserList: React.FC = () => {
   }, [aggregated, searchQuery, showDisabled]);
 
   const persistUsers = async (platform: string, next: Record<string, Partial<UserConfig>>) => {
+    const version = (userSaveVersionRef.current[platform] || 0) + 1;
+    userSaveVersionRef.current[platform] = version;
     setLoading(true);
+    let stored: Record<string, UserConfig> | null;
     try {
-      await api.saveUsers({ users: next }, platform);
+      const result = await api.saveUsers({ users: next }, platform);
+      stored = result?.users || null;
       showToast(t('userList.settingsSaved'));
     } catch {
       showToast(t('userList.settingsSaveFailed'), 'error');
+      const result = await api.getUsers(platform).catch(() => null);
+      stored = result?.ok ? result.users || {} : null;
     } finally {
       setLoading(false);
     }
+    // Adopt the stored rows so each routing keeps the expected_agent_name read
+    // with it; a newer save on this platform owns the state instead.
+    if (!stored || userSaveVersionRef.current[platform] !== version) return;
+    const latest = stored;
+    setUsersByPlatform((prev) => ({ ...prev, [platform]: latest }));
   };
 
   const updateUser = (platform: string, userId: string, patch: Partial<UserConfig>) => {

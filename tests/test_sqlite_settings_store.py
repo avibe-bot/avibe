@@ -817,6 +817,52 @@ def test_client_binding_expectation_survives_server_reload_before_scope_save(tmp
         agent_store.close()
 
 
+def test_outdated_binding_token_conflicts_only_when_the_agent_would_change(tmp_path: Path) -> None:
+    # A settings form opened while the user was unbound keeps sending its load-time
+    # token after its own autosave bound an Agent; follow-up edits must still save.
+    settings_path = tmp_path / "settings.json"
+    store = SettingsStore(settings_path)
+    agent_store = VibeAgentStore(tmp_path / "vibe.sqlite")
+    try:
+        agent_store.create(name="pm", backend="claude")
+        agent_store.create(name="qa", backend="claude")
+        store.update_user("U1", UserSettings(display_name="Pat"), platform="lark")
+        store.update_user(
+            "U1",
+            UserSettings(display_name="Pat", routing=RoutingSettings(agent_name="pm"), _agent_name_at_load=None),
+            platform="lark",
+        )
+
+        same_agent = UserSettings(
+            display_name="Pat",
+            routing=RoutingSettings(agent_name="pm", model="follow-up-model"),
+            _agent_name_at_load=None,
+        )
+        store.set_users_for_platform("lark", {"U1": same_agent})
+        store.save()
+
+        other_agent = UserSettings(
+            display_name="Pat",
+            routing=RoutingSettings(agent_name="qa"),
+            _agent_name_at_load=None,
+        )
+        store.set_users_for_platform("lark", {"U1": other_agent})
+        with pytest.raises(StaleScopeAgentBindingError) as conflict:
+            store.save()
+        assert conflict.value.scope_id == "lark::user::U1"
+
+        with agent_store.engine.connect() as conn:
+            stored = conn.execute(
+                select(scope_settings.c.agent_name, scope_settings.c.model).where(
+                    scope_settings.c.scope_id == "lark::user::U1"
+                )
+            ).one()
+        assert tuple(stored) == ("pm", "follow-up-model")
+    finally:
+        store.close()
+        agent_store.close()
+
+
 def test_settings_save_rejects_new_archived_binding_but_preserves_existing(tmp_path: Path) -> None:
     settings_path = tmp_path / "settings.json"
     store = SettingsStore(settings_path)
