@@ -535,6 +535,7 @@ describe('remote desktop update contract', () => {
     api.getVersion.mockResolvedValue({ ...remoteReceipt('completed'), current: '10.0.0' });
     await act(() => vi.advanceTimersByTimeAsync(2000));
     expect(screen.getByText(i18n.t('dashboard.desktopRemoteUpdateCompleted', { target: '10.0.0' }))).toBeTruthy();
+    expect(screen.queryByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateTitle') })).toBeNull();
     const calls = api.getVersion.mock.calls.length;
     await act(() => vi.advanceTimersByTimeAsync(10_000));
     expect(api.getVersion).toHaveBeenCalledTimes(calls);
@@ -544,6 +545,11 @@ describe('remote desktop update contract', () => {
     const info = remoteReceipt(mode === 'wrong-version' ? 'completed' : 'restarting');
     api.getVersion.mockResolvedValue(info);
     await openTimingPopup();
+    if (mode === 'wrong-version') {
+      expect((screen.getByRole('button', {
+        name: i18n.t('dashboard.desktopRemoteUpdateTitle'),
+      }) as HTMLButtonElement).disabled).toBe(true);
+    }
     if (mode === 'unreachable') api.getVersion.mockRejectedValue(new Error('offline'));
     if (mode === 'hanging-read') api.getVersion.mockImplementation(() => new Promise(() => {}));
     await act(() => vi.advanceTimersByTimeAsync(125_000));

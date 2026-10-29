@@ -299,6 +299,10 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const canRequestRemoteUpdate = remoteDesktopWeb && capabilities.can_manage_instance;
   const remoteRequest = versionInfo?.remote_request ?? null;
   const remoteRequestActive = Boolean(remoteRequest && !TERMINAL_REMOTE_PHASES.includes(remoteRequest.phase));
+  const remoteCompleted = remoteRequest?.phase === 'completed'
+    && normalizeVersion(versionInfo?.current ?? '') === normalizeVersion(remoteRequest.target);
+  const completedTargetStillReportedAvailable = remoteCompleted
+    && normalizeVersion(versionInfo?.latest ?? '') === normalizeVersion(remoteRequest.target);
   const localRemoteRequest = desktopUpdateState?.remoteRequest?.phase === 'awaiting_host'
     ? desktopUpdateState.remoteRequest : null;
   const nativeUpdateStateAvailable = Boolean(desktopActions && desktopUpdateState);
@@ -308,7 +312,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const hasUpdate = desktopActions
     ? desktopUpdateState?.phase === 'available'
       && (desktopUpdateState.interactive || desktopUpdateState.skippedVersion !== desktopUpdateState.latest)
-    : versionInfo?.has_update === true;
+    : versionInfo?.has_update === true && !completedTargetStillReportedAvailable;
   // The desktop app reports SemVer; show it in the Runtime's PEP 440 form.
   const latestVersion = isDesktopManaged && desktopUpdateState?.latest
     ? normalizeVersion(desktopUpdateState.latest)
@@ -416,8 +420,6 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     }
   };
 
-  const remoteCompleted = remoteRequest?.phase === 'completed'
-    && normalizeVersion(versionInfo?.current ?? '') === normalizeVersion(remoteRequest.target);
   const remoteRequestSettled = remoteRequest && TERMINAL_REMOTE_PHASES.includes(remoteRequest.phase)
     && (remoteRequest.phase !== 'completed' || remoteCompleted);
   const remoteRequestId = remoteDesktopWeb && !remoteRequestSettled ? remoteRequest?.request_id : undefined;
@@ -757,7 +759,12 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                     </Button>
                   </div>
                 ) : remoteDesktopWeb && canRequestRemoteUpdate ? (
-                  <Button variant="brand" size="xs" onClick={handleUpgrade} disabled={upgrading || remoteRequesting || remoteRequestActive || remoteUpdateTimedOut}>
+                  <Button
+                    variant="brand"
+                    size="xs"
+                    onClick={handleUpgrade}
+                    disabled={upgrading || remoteRequesting || Boolean(remoteRequest && !remoteRequestSettled) || remoteUpdateTimedOut}
+                  >
                     <Download size={14} className={remoteRequesting ? 'animate-bounce' : ''} />
                     {remoteRequesting ? t('dashboard.desktopRemoteUpdateRequesting') : t('dashboard.desktopRemoteUpdateTitle')}
                   </Button>
