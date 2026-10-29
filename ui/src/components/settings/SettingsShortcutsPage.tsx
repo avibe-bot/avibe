@@ -186,9 +186,9 @@ export const SettingsShortcutsPage: React.FC = () => {
     const active = capturing === id;
     const message = error?.id === id ? error.message : null;
     const shortcut = id === 'desktopVoice' ? pet.state?.voice_shortcut : pet.state?.toggle_shortcut;
-    const nativeError = pet.state?.error?.target === (id === 'desktopVoice' ? 'voice' : 'toggle')
-      ? pet.state.error
-      : null;
+    const nativeError = pet.state?.errors.find(
+      (error) => error.target === (id === 'desktopVoice' ? 'voice' : 'toggle'),
+    );
     const label = shortcut
       ? formatDesktopPetShortcut(shortcut, t, isApplePlatform())
       : t('settings.shortcuts.loading');
@@ -246,7 +246,7 @@ export const SettingsShortcutsPage: React.FC = () => {
     }
     void pet.apply(async () => {
       const state = await pet.actions!.resetShortcuts();
-      if (state.error) return state;
+      if (state.errors.length) return state;
       if (!writeActionShortcuts(defaultActionShortcuts())) {
         setPersistError(t('settings.shortcuts.saveFailed'));
         return state;

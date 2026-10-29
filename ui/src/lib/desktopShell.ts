@@ -72,7 +72,7 @@ export type DesktopPetSettings = {
   voice_shortcut: string;
   toggle_shortcut: string;
   voice_mode: DesktopPetVoiceMode;
-  error: DesktopPetShortcutError | null;
+  errors: DesktopPetShortcutError[];
 };
 
 type DesktopPetSettingsListener = (state: DesktopPetSettings) => void;

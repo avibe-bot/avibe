@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { createInstance } from 'i18next';
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -29,7 +29,7 @@ const nativePetState = (): DesktopPetSettings => ({
   voice_shortcut: 'Control+Alt+Space',
   toggle_shortcut: 'Control+Alt+KeyM',
   voice_mode: 'hold',
-  error: null,
+  errors: [],
 });
 
 const installDesktopPet = (state = nativePetState()) => {
@@ -46,7 +46,7 @@ const installDesktopPet = (state = nativePetState()) => {
       return current;
     }
     if (command === 'pet_reset_shortcuts') {
-      current = { ...current, voice_shortcut: navigator.platform === 'MacIntel' ? 'Alt+Shift+Space' : 'Control+Alt+Space', toggle_shortcut: 'Control+Alt+KeyM', voice_mode: 'hold', error: null };
+      current = { ...current, voice_shortcut: navigator.platform === 'MacIntel' ? 'Alt+Shift+Space' : 'Control+Alt+Space', toggle_shortcut: 'Control+Alt+KeyM', voice_mode: 'hold', errors: [] };
       return current;
     }
     if (command === 'pet_set_voice_mode') {
@@ -220,7 +220,7 @@ describe('SettingsShortcutsPage', () => {
   it('keeps the old shortcut visible when native registration refuses a candidate', async () => {
     const native = installDesktopPet({
       ...nativePetState(),
-      error: { target: 'voice', shortcut: 'Control+Alt+KeyQ' },
+      errors: [{ target: 'voice', shortcut: 'Control+Alt+KeyQ' }],
     });
     renderPage();
     await screen.findByText('Desktop Mini');
@@ -228,8 +228,30 @@ describe('SettingsShortcutsPage', () => {
     const voice = screen.getByRole('button', { name: 'Change Voice conversation shortcut' });
     expect(voice.textContent).toContain('Ctrl+Alt+Space');
     expect(screen.getByRole('alert').textContent)
-      .toContain("Couldn't register Ctrl+Alt+Q. Your previous shortcut is still active.");
+      .toContain("Couldn't register Ctrl+Alt+Q. It may be used by another app.");
     expect(native.state().voice_shortcut).toBe('Control+Alt+Space');
+  });
+
+  it('displays both independently refused lifecycle shortcuts on their own rows', async () => {
+    installDesktopPet({
+      ...nativePetState(),
+      errors: [
+        { target: 'toggle', shortcut: 'Control+Alt+KeyM' },
+        { target: 'voice', shortcut: 'Control+Alt+Space' },
+      ],
+    });
+    renderPage();
+    await screen.findByText('Desktop Mini');
+    expect(screen.getAllByRole('alert').map((alert) => alert.textContent)).toEqual([
+      "Couldn't register Ctrl+Alt+Space. It may be used by another app.",
+      "Couldn't register Ctrl+Alt+M. It may be used by another app.",
+    ]);
+    // Lifecycle retry can recover just one action; the other stays visible.
+    act(() => window.dispatchEvent(new CustomEvent('avibe:desktop-pet-settings', {
+      detail: { ...nativePetState(), errors: [{ target: 'toggle', shortcut: 'Control+Alt+KeyM' }] },
+    })));
+    await waitFor(() => expect(screen.getAllByRole('alert')).toHaveLength(1));
+    expect(screen.getByRole('alert').textContent).toContain('Ctrl+Alt+M');
   });
 
   it('persists the voice mode and resets native and browser shortcuts together', async () => {
@@ -290,7 +312,7 @@ describe('SettingsShortcutsPage', () => {
     const native = installDesktopPet();
     renderPage();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Restore defaults' }).hasAttribute('disabled')).toBe(false));
-    native.invoke.mockResolvedValueOnce({ ...nativePetState(), error: { target: 'voice', shortcut: 'Control+Alt+KeyQ' } });
+    native.invoke.mockResolvedValueOnce({ ...nativePetState(), errors: [{ target: 'voice', shortcut: 'Control+Alt+KeyQ' }] });
     const voice = screen.getByRole('button', { name: 'Change Voice conversation shortcut' });
     fireEvent.click(voice);
     fireEvent.keyDown(voice, { code: 'KeyQ', key: 'q', ctrlKey: true, altKey: true });

@@ -27,6 +27,18 @@ pub const DEFAULT_SHORTCUT: &str = "Control+Alt+Space";
 /// `⌃⌥M` on macOS, `Ctrl+Alt+M` on Windows.
 pub const DEFAULT_TOGGLE_SHORTCUT: &str = "Control+Alt+KeyM";
 
+/// The former tray choices, ordered for collision migration. The platform
+/// default appears once; these are not a second user-facing settings list.
+const SHORTCUT_FALLBACKS: [&str; 3] = [
+    DEFAULT_SHORTCUT,
+    "Control+Shift+Space",
+    if cfg!(target_os = "macos") {
+        "Control+Alt+Space"
+    } else {
+        "Alt+Shift+Space"
+    },
+];
+
 /// The voice input behavior selected in Desktop Mini.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -228,8 +240,10 @@ pub struct PetStore {
 }
 
 impl PetStore {
-    pub fn load(path: PathBuf) -> Self {
-        let (preferences, trusted) = match load_preferences(&path) {
+    /// The shell supplies its accelerator equality so migration uses exactly
+    /// the same aliases and platform semantics as native registration.
+    pub fn load(path: PathBuf, shortcuts_equal: impl Fn(&str, &str) -> bool) -> Self {
+        let (mut preferences, trusted) = match load_preferences(&path) {
             PreferencesLoad::Absent => (PetPreferences::default(), true),
             PreferencesLoad::Loaded(preferences) => (preferences, true),
             PreferencesLoad::Unusable => {
@@ -240,6 +254,28 @@ impl PetStore {
                 (PetPreferences::default(), false)
             }
         };
+        let voice = preferences.shortcut.as_deref().unwrap_or(DEFAULT_SHORTCUT);
+        let toggle = preferences
+            .toggle_shortcut
+            .as_deref()
+            .unwrap_or(DEFAULT_TOGGLE_SHORTCUT);
+        if trusted && shortcuts_equal(voice, toggle) {
+            let fallback = SHORTCUT_FALLBACKS
+                .iter()
+                .find(|candidate| {
+                    !shortcuts_equal(voice, candidate)
+                        && !["Alt+KeyZ", "Alt+KeyX"]
+                            .iter()
+                            .any(|reserved| shortcuts_equal(candidate, reserved))
+                })
+                .expect("distinct fallback shortcuts cannot all collide with one voice shortcut");
+            preferences.toggle_shortcut = Some((*fallback).to_owned());
+            if let Err(error) = write_preferences(&path, &preferences) {
+                // Preserve the saved voice and use the deterministic safe pair
+                // this run even when the migration cannot be persisted.
+                eprintln!("The Desktop Mini toggle migration could not be saved: {error}");
+            }
+        }
         Self {
             path,
             preferences,
@@ -432,6 +468,14 @@ impl PetStore {
     pub fn window_gone(&mut self) {
         self.page_ready = false;
         self.pending_summon = None;
+    }
+
+    /// A recording belongs to the document that requested it. Cancellation
+    /// also prevents a queued Listen from starting in a replacement document.
+    pub fn cancel_pending_voice(&mut self) {
+        if self.pending_summon == Some(PetIntent::Listen) {
+            self.pending_summon = Some(PetIntent::Release);
+        }
     }
 
     pub fn page_is_ready(&self) -> bool {
@@ -1216,16 +1260,16 @@ mod tests {
         let directory = TestDirectory::new();
         // Released files without the optional field retain their binding.
         std::fs::write(directory.file(), r#"{"version":1,"enabled":true,"binding":"s1"}"#).unwrap();
-        let mut store = PetStore::load(directory.file());
+        let mut store = PetStore::load(directory.file(), str::eq);
         assert!(store.page_ready().dismissed_ids.is_empty());
         store
             .set_dismissed_ids("s1", vec!["watch:w1".into(), "task:t1".into()])
             .unwrap();
-        let mut restored = PetStore::load(directory.file());
+        let mut restored = PetStore::load(directory.file(), str::eq);
         assert_eq!(restored.page_ready().dismissed_ids, vec!["watch:w1", "task:t1"]);
         restored.bind("s2");
         restored.set_dismissed_ids("s1", vec!["stale".into()]).unwrap();
-        let mut next = PetStore::load(directory.file());
+        let mut next = PetStore::load(directory.file(), str::eq);
         assert_eq!(next.binding().binding.as_deref(), Some("s2"));
         assert!(next.page_ready().dismissed_ids.is_empty());
     }
@@ -1273,7 +1317,7 @@ mod tests {
     #[test]
     fn releasing_a_shortcut_during_page_load_never_replays_a_held_microphone() {
         let directory = TestDirectory::new();
-        let mut store = PetStore::load(directory.file());
+        let mut store = PetStore::load(directory.file(), str::eq);
         assert_eq!(store.summon(PetIntent::Listen), None);
         assert_eq!(store.summon(PetIntent::Release), None);
         assert_eq!(
@@ -1289,11 +1333,11 @@ mod tests {
     fn an_absent_file_or_absent_enabled_follows_the_build_default() {
         let directory = TestDirectory::new();
         assert_eq!(load_preferences(&directory.file()), PreferencesLoad::Absent);
-        assert_eq!(PetStore::load(directory.file()).enabled(), DEFAULT_ENABLED);
+        assert_eq!(PetStore::load(directory.file(), str::eq).enabled(), DEFAULT_ENABLED);
         assert!(!directory.file().exists(), "loading never writes");
 
         std::fs::write(directory.file(), r#"{"version":1,"binding":"s1"}"#).unwrap();
-        let store = PetStore::load(directory.file());
+        let store = PetStore::load(directory.file(), str::eq);
         assert_eq!(store.enabled(), DEFAULT_ENABLED);
         assert_eq!(store.binding().binding.as_deref(), Some("s1"));
     }
@@ -1302,7 +1346,7 @@ mod tests {
     fn an_explicit_choice_survives_the_default_and_other_writes() {
         let directory = TestDirectory::new();
         std::fs::write(directory.file(), r#"{"version":1,"enabled":false}"#).unwrap();
-        let mut store = PetStore::load(directory.file());
+        let mut store = PetStore::load(directory.file(), str::eq);
         assert!(!store.enabled());
         store.bind("s1");
         store.set_anchor(PetAnchor {
@@ -1330,7 +1374,7 @@ mod tests {
         // A user who never touched the switch carries no `enabled`, so the
         // build default decides for them.
         let fresh = TestDirectory::new();
-        let mut store = PetStore::load(fresh.file());
+        let mut store = PetStore::load(fresh.file(), str::eq);
         store.bind("s2");
         let written = std::fs::read_to_string(fresh.file()).unwrap();
         assert!(!written.contains("enabled"), "{written}");
@@ -1347,7 +1391,7 @@ mod tests {
         ] {
             let directory = TestDirectory::new();
             std::fs::write(directory.file(), content).unwrap();
-            let mut store = PetStore::load(directory.file());
+            let mut store = PetStore::load(directory.file(), str::eq);
             assert!(!store.enabled(), "{content}");
             store.bind("s1");
             store.set_shortcut("Alt+Shift+Space");
@@ -1375,7 +1419,7 @@ mod tests {
     #[test]
     fn a_failed_switch_write_changes_nothing() {
         let directory = TestDirectory::new();
-        let mut store = PetStore::load(directory.file());
+        let mut store = PetStore::load(directory.file(), str::eq);
         std::fs::create_dir(directory.file()).unwrap();
         assert!(store.set_enabled(true).is_err());
         assert_eq!(store.enabled(), DEFAULT_ENABLED);
@@ -1386,7 +1430,7 @@ mod tests {
     fn an_invalid_saved_binding_is_dropped() {
         let directory = TestDirectory::new();
         std::fs::write(directory.file(), r#"{"version":1,"binding":"../etc"}"#).unwrap();
-        assert_eq!(PetStore::load(directory.file()).binding().binding, None);
+        assert_eq!(PetStore::load(directory.file(), str::eq).binding().binding, None);
         assert!(valid_session_id("abc_123-x.y"));
         for invalid in ["", "..", "a/b", "a?b", &"x".repeat(129)] {
             assert!(!valid_session_id(invalid), "{invalid}");
@@ -1396,7 +1440,7 @@ mod tests {
     #[test]
     fn every_binding_change_raises_the_revision_by_one_and_unbind_compares() {
         let directory = TestDirectory::new();
-        let mut store = PetStore::load(directory.file());
+        let mut store = PetStore::load(directory.file(), str::eq);
         assert_eq!(
             store.binding(),
             PetBinding {
@@ -1431,14 +1475,14 @@ mod tests {
         assert_eq!(store.page_ready().binding.revision, 3);
         // The binding is the shell's, not the Runtime origin's: it survives a restart.
         store.bind("c");
-        let restarted = PetStore::load(directory.file());
+        let restarted = PetStore::load(directory.file(), str::eq);
         assert_eq!(restarted.binding().binding.as_deref(), Some("c"));
     }
 
     #[test]
     fn a_summon_before_the_page_is_ready_waits_and_keeps_its_intent() {
         let directory = TestDirectory::new();
-        let mut store = PetStore::load(directory.file());
+        let mut store = PetStore::load(directory.file(), str::eq);
         store.page_loading();
         assert_eq!(store.summon(PetIntent::Show), None);
         assert_eq!(
@@ -2354,7 +2398,7 @@ mod tests {
     #[test]
     fn a_hotkey_before_any_runtime_opens_text_without_replaying_capture() {
         let directory = TestDirectory::new();
-        let mut store = PetStore::load(directory.file());
+        let mut store = PetStore::load(directory.file(), str::eq);
         // The hotkey during Runtime startup: no window can exist yet.
         store.summon_before_window(PetIntent::Listen);
         // The Runtime becomes ready and the window's page loads.
@@ -2395,11 +2439,55 @@ mod tests {
         )
         .unwrap();
 
-        let store = PetStore::load(directory.file());
+        let store = PetStore::load(directory.file(), str::eq);
         assert!(store.enabled());
         assert_eq!(store.shortcut(), "Alt+Shift+Space");
         assert_eq!(store.toggle_shortcut(), DEFAULT_TOGGLE_SHORTCUT);
         assert_eq!(store.voice_mode(), VoiceMode::Hold);
+    }
+
+    #[test]
+    fn colliding_toggle_migration_is_persisted_without_changing_voice_or_other_preferences() {
+        for (voice, toggle) in [
+            (DEFAULT_TOGGLE_SHORTCUT, None),
+            (DEFAULT_SHORTCUT, Some(DEFAULT_SHORTCUT)),
+            ("Control+Shift+Space", Some("Control+Shift+Space")),
+        ] {
+            let directory = TestDirectory::new();
+            let original = serde_json::json!({
+                "version": 1, "enabled": true, "shortcut": voice, "toggle_shortcut": toggle,
+                "binding": "session-kept", "voice_mode": "toggle", "dismissed_ids": ["turn-kept"],
+            });
+            std::fs::write(directory.file(), original.to_string()).unwrap();
+            let store = PetStore::load(directory.file(), str::eq);
+            assert_eq!(store.shortcut(), voice);
+            assert_ne!(store.toggle_shortcut(), voice);
+            assert!(!["Alt+KeyZ", "Alt+KeyX"].contains(&store.toggle_shortcut()));
+            let mut expected = original;
+            expected["toggle_shortcut"] = serde_json::json!(store.toggle_shortcut());
+            let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(directory.file()).unwrap()).unwrap();
+            assert_eq!(saved, expected);
+            let restored = PetStore::load(directory.file(), str::eq);
+            assert_eq!(restored.toggle_shortcut(), store.toggle_shortcut());
+            assert_eq!(restored.shortcut(), voice);
+        }
+        let mut presets = SHORTCUT_FALLBACKS.to_vec();
+        presets.sort_unstable();
+        presets.dedup();
+        assert_eq!(presets.len(), SHORTCUT_FALLBACKS.len());
+    }
+
+    #[test]
+    fn failed_migration_write_keeps_the_saved_voice_and_a_safe_pair_in_memory() {
+        let directory = TestDirectory::new();
+        let original = r#"{"version":1,"enabled":true,"shortcut":"Control+Alt+KeyM"}"#;
+        std::fs::write(directory.file(), original).unwrap();
+        std::fs::create_dir(directory.file().with_extension("tmp")).unwrap();
+        let store = PetStore::load(directory.file(), str::eq);
+        assert!(store.enabled());
+        assert_eq!(store.shortcut(), DEFAULT_TOGGLE_SHORTCUT);
+        assert_ne!(store.shortcut(), store.toggle_shortcut());
+        assert_eq!(std::fs::read_to_string(directory.file()).unwrap(), original);
     }
 
     #[test]
@@ -2408,16 +2496,16 @@ mod tests {
         for explicit in ["Control+Alt+Space", "Alt+Shift+Space", "Control+Shift+KeyV"] {
             let original = format!(r#"{{"version":1,"enabled":true,"shortcut":"{explicit}"}}"#);
             std::fs::write(directory.file(), &original).unwrap();
-            assert_eq!(PetStore::load(directory.file()).shortcut(), explicit);
+            assert_eq!(PetStore::load(directory.file(), str::eq).shortcut(), explicit);
             assert_eq!(std::fs::read_to_string(directory.file()).unwrap(), original);
         }
         for unset in [r#"{"version":1,"enabled":true}"#, r#"{"version":1,"shortcut":null}"#] {
             std::fs::write(directory.file(), unset).unwrap();
-            assert_eq!(PetStore::load(directory.file()).shortcut(), DEFAULT_SHORTCUT);
+            assert_eq!(PetStore::load(directory.file(), str::eq).shortcut(), DEFAULT_SHORTCUT);
             assert_eq!(std::fs::read_to_string(directory.file()).unwrap(), unset);
         }
         let fresh = TestDirectory::new();
-        let mut store = PetStore::load(fresh.file());
+        let mut store = PetStore::load(fresh.file(), str::eq);
         assert_eq!(store.shortcut(), DEFAULT_SHORTCUT);
         // Explicitly choosing today's default must be recorded as a choice.
         store.try_set_shortcut(DEFAULT_SHORTCUT).unwrap();
@@ -2444,7 +2532,7 @@ mod tests {
     #[test]
     fn new_shortcut_preferences_round_trip_through_pet_json() {
         let directory = TestDirectory::new();
-        let mut store = PetStore::load(directory.file());
+        let mut store = PetStore::load(directory.file(), str::eq);
         store.set_enabled(true).unwrap();
         store.try_set_toggle_shortcut("Control+Alt+KeyK").unwrap();
         store.try_set_voice_mode(VoiceMode::Toggle).unwrap();

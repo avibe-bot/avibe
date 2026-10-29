@@ -513,7 +513,7 @@
       "saveFailed": "Couldn't save the shortcut in this browser.",
       "loading": "Loading…",
       "desktopSaveFailed": "Couldn't save the Desktop Mini settings. Your previous settings are unchanged.",
-      "registrationFailed": "Couldn't register {{shortcut}}. Your previous shortcut is still active.",
+      "registrationFailed": "Couldn't register {{shortcut}}. It may be used by another app.",
       "modifierLabels": {
         "control": "Control",
         "option": "Option",

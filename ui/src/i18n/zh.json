@@ -513,7 +513,7 @@
       "saveFailed": "无法在当前浏览器中保存快捷键。",
       "loading": "正在加载…",
       "desktopSaveFailed": "无法保存桌面迷你窗设置，已保留之前的设置。",
-      "registrationFailed": "无法注册{{shortcut}}，之前的快捷键仍在使用。",
+      "registrationFailed": "无法注册{{shortcut}}，它可能已被其他应用占用。",
       "modifierLabels": {
         "control": "Control",
         "option": "Option",

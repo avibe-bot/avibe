@@ -108,7 +108,7 @@ const installDesktopPet = (enabled = true) => {
     voice_shortcut: 'Control+Alt+Space',
     toggle_shortcut: 'Control+Alt+KeyM',
     voice_mode: 'hold',
-    error: null,
+    errors: [],
   };
   const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
     if (command === 'pet_settings') return state;
@@ -666,7 +666,7 @@ describe('General settings — Desktop Mini', () => {
           voice_shortcut: 'Control+Alt+Space',
           toggle_shortcut: 'Control+Alt+KeyM',
           voice_mode: 'hold',
-          error: null,
+          errors: [],
         },
       }));
     });
