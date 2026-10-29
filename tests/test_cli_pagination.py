@@ -657,14 +657,47 @@ def test_data_query_text_prints_records_with_values_verbatim_and_pages(monkeypat
     assert capsys.readouterr().out.splitlines() == ["-[ RECORD 3 ]", "body: third", "gone: x", "n: 9"]
 
 
+def test_data_query_cuts_long_values_and_says_how_to_read_them_whole(monkeypatch, tmp_path, capsys) -> None:
+    """One message body can be hundreds of thousands of characters; a page of them must not fill a context."""
+
+    monkeypatch.setenv("AVIBE_HOME", str(tmp_path))
+    paths.ensure_data_dirs()
+    SQLiteBackgroundTaskStore().close()
+    sql = "select 'short' as a, printf('%.3000c', 'x') as b union all select 'two', 'y'"
+
+    args = cli.build_parser().parse_args(["data", "query", "--sql", sql])
+    assert cli.cmd_data_query(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rows"][0] == {"a": "short", "b": "x" * 2000 + "…[+1000 chars]"}
+    assert payload["rows"][1] == {"a": "two", "b": "y"}
+    assert payload["truncated_values"] == 1
+    assert "--max-chars 0" in payload["truncation"]
+
+    args = cli.build_parser().parse_args(["data", "query", "--sql", sql, "--max-chars", "0"])
+    assert cli.cmd_data_query(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["rows"][0]["b"] == "x" * 3000
+    assert "truncated_values" not in payload
+
+    args = cli.build_parser().parse_args(
+        ["data", "query", "--sql", sql, "--max-chars", "10", "--limit", "1", "--format", "text"]
+    )
+    assert cli.cmd_data_query(args) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert "b: xxxxxxxxxx…[+2990 chars]" in lines
+    assert lines[-2].startswith("1 value(s) cut at 10 characters")
+    # The next page is read the same way.
+    assert lines[-1].endswith("--format text --max-chars 10 --page 2 --limit 1")
+
+
 @pytest.mark.parametrize(
     ("sql", "fragments"),
     [
-        ("select * from sessions", ["Did you mean agent_sessions", "Tables: ", "run_definitions"]),
+        ("select * from session", ["Did you mean sessions, agent_sessions", "Tables: ", "run_definitions"]),
         ("select * from watches", ["Did you mean run_definitions"]),
         (
             "select m.turn_id from messages m join agent_sessions s on s.id = m.session_id",
-            ["No column 'turn_id' on messages.", "is a column of agent_events", "messages columns: id,"],
+            ["No column 'turn_id' on messages.", "is a column of transcript, turns, agent_events", "messages columns: id,"],
         ),
         (
             "select content from agent_events",

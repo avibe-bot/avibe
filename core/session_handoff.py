@@ -154,7 +154,7 @@ def render_backend_handoff(
     query = _history_query(session_id)
     tail = ["[End of Avibe handoff]"]
     if query:
-        tail.insert(0, f"The full conversation is in Avibe's messages table. For example:\n{query}")
+        tail.insert(0, f"The full conversation is in Avibe's transcript. For example:\n{query}")
 
     remaining = budget - _size(head) - _size(tail)
     work_lines = _open_work_lines(open_work)
@@ -182,8 +182,8 @@ def _history_query(session_id: str) -> str | None:
     if _PLAIN_ID.fullmatch(session_id) is None:
         return None
     sql = (
-        "SELECT created_at, type, substr(content_text,1,2000) FROM messages"
-        f" WHERE session_id='{session_id}' ORDER BY created_at, id LIMIT 50 OFFSET 0"
+        "SELECT at, role, kind, text FROM transcript"
+        f" WHERE session_id='{session_id}' ORDER BY at, message_id LIMIT 50"
     )
     return f'vibe data query --sql "{sql}" --format text'
 

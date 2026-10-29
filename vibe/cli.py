@@ -7380,7 +7380,40 @@ def cmd_data_skill_usage(args):
         return 1
 
 
-def _query_records_text(result, page_fields: dict) -> str:
+DATA_QUERY_MAX_CHARS = 2000
+
+
+def _bounded_query_rows(rows: list[dict], max_chars: int) -> tuple[list[dict], int]:
+    """Rows with each text value cut to ``max_chars`` characters, and how many were cut.
+
+    One message body can run to hundreds of thousands of characters; a page of them
+    would fill an Agent's context. A cut value ends ``…[+N chars]``, so the Agent
+    knows what it did not see and can read it with ``--max-chars 0`` or ``excerpt()``.
+    """
+
+    if max_chars <= 0:
+        return rows, 0
+    cut = 0
+    bounded: list[dict] = []
+    for row in rows:
+        values = {}
+        for column, value in row.items():
+            if isinstance(value, str) and len(value) > max_chars:
+                value = f"{value[:max_chars]}…[+{len(value) - max_chars} chars]"
+                cut += 1
+            values[column] = value
+        bounded.append(values)
+    return bounded, cut
+
+
+def _non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return parsed
+
+
+def _query_records_text(result, page_fields: dict, *, rows: list[dict], cut_note: str | None) -> str:
     """``vibe data query --format text``: each row as an expanded record, values verbatim.
 
     JSON escapes every newline and quote of a transcript or message body, so
@@ -7390,7 +7423,7 @@ def _query_records_text(result, page_fields: dict) -> str:
 
     lines: list[str] = []
     offset = (result.pagination.page - 1) * result.pagination.limit
-    for number, row in enumerate(result.rows, start=offset + 1):
+    for number, row in enumerate(rows, start=offset + 1):
         lines.append(f"-[ RECORD {number} ]")
         for column, value in row.items():
             text = "(null)" if value is None else str(value)
@@ -7400,8 +7433,10 @@ def _query_records_text(result, page_fields: dict) -> str:
                 lines.extend(f"  {line}" if line else "" for line in value_lines)
             else:
                 lines.append(f"{column}: {text}" if text else f"{column}:")
-    if not result.rows:
+    if not rows:
         lines.append("(0 rows)")
+    if cut_note:
+        lines.append(cut_note)
     pagination = page_fields["pagination"]
     if pagination.get("next_command"):
         lines.append(f"next_command: {pagination['next_command']}")
@@ -7429,6 +7464,16 @@ def cmd_data_query(args):
         text_format = getattr(args, "format", "json") == "text"
         if text_format:
             command.extend(["--format", "text"])
+        max_chars = getattr(args, "max_chars", DATA_QUERY_MAX_CHARS)
+        if max_chars != DATA_QUERY_MAX_CHARS:
+            command.extend(["--max-chars", str(max_chars)])
+        rows, cut = _bounded_query_rows(result.rows, max_chars)
+        cut_note = (
+            f"{cut} value(s) cut at {max_chars} characters (marked …[+N chars]); "
+            "read them whole with --max-chars 0, or around a term with excerpt(column, 'term')."
+            if cut
+            else None
+        )
         omit_next_command = bool(sql_file == "-")
         page_fields = _paginated_fields(
             result.pagination,
@@ -7436,9 +7481,15 @@ def cmd_data_query(args):
             include_next_command=not omit_next_command,
         )
         if text_format:
-            print(_query_records_text(result, page_fields))
+            print(_query_records_text(result, page_fields, rows=rows, cut_note=cut_note))
             return 0
-        _print_cli_payload("data_query", columns=result.columns, rows=result.rows, **page_fields)
+        _print_cli_payload(
+            "data_query",
+            columns=result.columns,
+            rows=rows,
+            **({"truncated_values": cut, "truncation": cut_note} if cut else {}),
+            **page_fields,
+        )
         return 0
     except ReadOnlyQueryError as exc:
         _print_task_error(
@@ -18010,14 +18061,17 @@ def build_parser():
         help="Run one read-only SQL query",
         description="Run one guarded read-only SQL query against the local SQLite state database.",
         epilog=(
+            "Recall earlier work through three views (the raw tables stay queryable):\n"
+            "  sessions(session_id, title, agent_name, backend, model, status, workdir, created_at, last_active_at, parent_session_id)\n"
+            "  transcript(session_id, at, role, kind, text, turn_id, message_id)   role: user, agent, harness\n"
+            "  turns(session_id, turn_id, started_at, ended_at, outcome, input, reply)\n"
+            "excerpt(text, 'term'[, width]) shows the text around a match; REGEXP takes a Python pattern.\n"
+            "  vibe data query --sql \"select session_id, at, excerpt(text, 'watch list') from transcript where text like '%watch list%' order by at desc\" --format text\n"
+            "  vibe data query --sql \"select started_at, input, reply from turns where session_id = 'ses...' order by started_at\" --format text\n"
             "Discover the schema before guessing names:\n"
             "  vibe data query --sql \"select group_concat(name, ', ') as tables from pragma_table_list where schema = 'main'\"\n"
-            "  vibe data query --sql \"select group_concat(name, ', ') as columns from pragma_table_info('run_definitions')\"\n"
-            "  vibe data query --sql \"PRAGMA table_info(run_definitions)\" --limit 100   # with types and keys\n"
-            f"Only schema PRAGMAs run: {', '.join(sorted(SCHEMA_PRAGMAS))}.\n"
-            "Tasks and Watches are rows of run_definitions (definition_type is scheduled or watch).\n"
-            "Read long text such as a transcript as records with real newlines:\n"
-            "  vibe data query --sql \"select created_at, author, content_text from messages where session_id = 'ses...' order by created_at\" --format text"
+            f"Only schema PRAGMAs run: {', '.join(sorted(SCHEMA_PRAGMAS))}. "
+            "Tasks and Watches are rows of run_definitions."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         error_help_command="vibe data query --help",
@@ -18030,6 +18084,13 @@ def build_parser():
         choices=("json", "text"),
         default="json",
         help="json (default) prints the JSON envelope; text prints each row as a record with values verbatim.",
+    )
+    data_query_parser.add_argument(
+        "--max-chars",
+        type=_non_negative_int,
+        default=DATA_QUERY_MAX_CHARS,
+        metavar="N",
+        help=f"Cut each text value at N characters (default {DATA_QUERY_MAX_CHARS}); 0 keeps values whole.",
     )
     _add_pagination_args(data_query_parser, help_command="vibe data query --help")
     _add_json_noop(data_query_parser)

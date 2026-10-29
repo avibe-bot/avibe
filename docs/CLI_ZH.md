@@ -256,15 +256,32 @@ SQLite 数据库的 `agent_events` 与 `skill_usage_daily` 中，没有统计面
 ### `vibe data query`
 
 对本地 SQLite 状态数据库执行一条受保护的只读 SQL 语句。结果默认每页 20 行，最多 100 行。
+Agent 用它回忆当前 Session 或其他 Session 里之前做过的事。
 
 ```bash
+vibe data query --sql "select session_id, at, excerpt(text, 'watch list') from transcript where text like '%watch list%' order by at desc" --format text
+vibe data query --sql "select started_at, input, reply from turns where session_id = 'sesk8m4q2p7x' order by started_at" --format text
+vibe data query --sql "select session_id, title from sessions where parent_session_id = 'sesk8m4q2p7x'"
 vibe data query --sql "select group_concat(name, ', ') as tables from pragma_table_list where schema = 'main'"
 vibe data query --sql "select group_concat(name, ', ') as columns from pragma_table_info('run_definitions')"
 vibe data query --sql "PRAGMA table_info(run_definitions)" --limit 100   # 含类型与主键
 vibe data query --sql "select id, status, created_at from agent_runs order by created_at desc"
 vibe data query --sql-file query.sql --limit 50
-vibe data query --sql "select created_at, author, content_text from messages where session_id = 'sesk8m4q2p7x' order by created_at" --format text
 ```
+
+三个视图为每次查询提供读取对话历史的稳定入口；原始表照样可以直接查询：
+
+| 视图 | 列 | 含义 |
+| --- | --- | --- |
+| `sessions` | `session_id`、`title`、`agent_name`、`backend`、`model`、`status`、`workdir`、`created_at`、`last_active_at`、`parent_session_id` | 每个 Session 一行。`parent_session_id` 是用 `vibe agent run` 启动它的那个 Session。 |
+| `transcript` | `session_id`、`at`、`role`、`kind`、`text`、`turn_id`、`message_id` | 所有有正文的消息，`at` 是送达时间。`role` 为 `user`、`agent` 或 `harness`（Avibe 投递的输入：其他 Agent 的任务说明、回调、Watch 或 Task）；`kind` 是消息类型，例如 Agent 的回复是 `result`。 |
+| `turns` | `session_id`、`turn_id`、`started_at`、`ended_at`、`outcome`、`input`、`reply` | 每个有记录的 Agent 回合一行：它收到的原文和最终回复。没有回合记录的更早历史在 `transcript` 里。 |
+
+两个函数用来处理长文本。`excerpt(text, 'term')` 返回 `text` 中第一个匹配 `term`
+（不区分大小写）的位置前后约 300 个字符，第三个参数可以调整宽度；没有匹配时返回开头。
+`text REGEXP 'pattern'` 按 Python 正则表达式匹配，例如 `'(?i)PR ?#?2868'`。超过
+`--max-chars`（默认 2000）的文本值会被截断，以 `…[+N chars]` 结尾；响应会说明截断了
+几个值，`--max-chars 0` 保留完整值。
 
 `--format text` 把每一行输出为一条记录，适合阅读对话记录或消息正文这类长文本：先是
 一行 `-[ RECORD n ]`，然后每列一行 `column: value`。值按存储原样输出，换行就是真实

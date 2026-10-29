@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import difflib
+import functools
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from urllib.parse import quote
 
 from config import paths
 from storage.importer import ensure_sqlite_state, resolve_primary_platform_from_config
+from storage.models import MESSAGE_TURN_ID_SQL
 from storage.pagination import PageRequest, PageResult, page_result_from_limit_plus_one
 
 DEFAULT_QUERY_STEP_LIMIT = 250_000
@@ -48,6 +50,91 @@ _SQL_KEYWORDS = frozenset(
 )
 _COLUMNS_HINT = "Read a table's columns with PRAGMA table_info(<table>)."
 
+# Views every query can read, for recalling earlier work. Agents kept guessing these
+# names (a ``sessions`` table, a ``role`` column) and missing the shape of the real
+# tables: an Agent's reply is a ``result`` row, not ``type='agent'``, and a Turn's
+# input lives on ``session_turns``. They are TEMP views of this connection only, so
+# they add nothing to the database, and the raw tables stay queryable.
+#
+# ``turns`` compares the indexed turn id with ``+t.id``: a TEXT-affinity column on
+# the right would apply its affinity to the indexed expression and turn every
+# lookup into a scan of ``ix_messages_turn_id``.
+RECALL_VIEWS = {
+    "sessions": (
+        "SELECT s.id AS session_id, s.title, s.agent_name, s.agent_backend AS backend, s.model, "
+        "s.status, s.workdir, s.created_at, s.last_active_at, "
+        "(SELECT r.source_actor FROM agent_runs r WHERE r.session_id = s.id AND r.source_kind = 'agent' "
+        "AND r.session_policy IN ('none', 'create', 'fork') ORDER BY r.created_at, r.id LIMIT 1) "
+        "AS parent_session_id "
+        "FROM agent_sessions s"
+    ),
+    "transcript": (
+        "SELECT session_id, coalesce(delivered_at, created_at) AS at, author AS role, type AS kind, "
+        f"content_text AS text, {MESSAGE_TURN_ID_SQL} AS turn_id, id AS message_id "
+        "FROM messages WHERE content_text IS NOT NULL AND content_text != ''"
+    ),
+    "turns": (
+        "SELECT t.session_id, t.id AS turn_id, t.started_at, t.terminal_at AS ended_at, "
+        "t.terminal_outcome AS outcome, t.dispatch_text AS input, "
+        f"(SELECT content_text FROM messages WHERE {MESSAGE_TURN_ID_SQL} = +t.id AND type = 'result' "
+        "ORDER BY coalesce(delivered_at, created_at) DESC, id DESC LIMIT 1) AS reply "
+        "FROM session_turns t"
+    ),
+}
+
+EXCERPT_DEFAULT_WIDTH = 300
+
+
+def _excerpt(*args: Any) -> str | None:
+    """``excerpt(text, term[, width])``: ``width`` characters of ``text`` around its first ``term``.
+
+    Agents bounded long text with ``substr(text, 1, n)``, which keeps the opening
+    and, for a third to a half of keyword hits, loses the match itself. Matching is
+    case-insensitive like ``LIKE``; text without the term yields its opening.
+    """
+
+    if len(args) not in (2, 3):
+        raise ValueError("excerpt takes (text, term) or (text, term, width)")
+    text, term = args[0], args[1]
+    if text is None:
+        return None
+    text = str(text)
+    try:
+        width = int(args[2]) if len(args) == 3 else EXCERPT_DEFAULT_WIDTH
+    except (TypeError, ValueError) as exc:
+        raise ValueError("excerpt width must be a whole number of characters") from exc
+    if width < 1:
+        raise ValueError("excerpt width must be at least 1")
+    if len(text) <= width:
+        return text
+    match = re.search(re.escape(str(term)), text, re.IGNORECASE) if term not in (None, "") else None
+    start = max(0, (match.start() + match.end()) // 2 - width // 2) if match else 0
+    end = min(len(text), start + width)
+    start = max(0, end - width)
+    return ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
+
+
+@functools.lru_cache(maxsize=64)
+def _compiled_pattern(pattern: str) -> re.Pattern[str]:
+    try:
+        return re.compile(pattern)
+    except re.error as exc:
+        raise ValueError(f"invalid regular expression {pattern!r}: {exc}") from exc
+
+
+def _regexp(pattern: Any, value: Any) -> int | None:
+    """``value REGEXP pattern``, with Python regular expression syntax."""
+
+    if pattern is None or value is None:
+        return None
+    return 1 if _compiled_pattern(str(pattern)).search(str(value)) else 0
+
+
+_FUNCTION_HINTS = {
+    "excerpt": "Call excerpt(text, 'term') or excerpt(text, 'term', width).",
+    "regexp": "REGEXP takes a Python regular expression; add (?i) to ignore case.",
+}
+
 
 class ReadOnlyQueryError(ValueError):
     def __init__(self, message: str, *, code: str = "query_failed", hint: str | None = None):
@@ -83,6 +170,19 @@ def run_read_only_query(
     conn.row_factory = sqlite3.Row
     steps = 0
     denials: list[tuple[int, str | None]] = []
+    function_errors: list[tuple[str, str]] = []
+
+    def reporting(name, function):
+        # sqlite3 reports any exception from a Python function as "user-defined
+        # function raised exception"; keep the real reason for the error.
+        def call(*args):
+            try:
+                return function(*args)
+            except Exception as exc:
+                function_errors.append((name, str(exc)))
+                raise
+
+        return call
 
     def progress() -> int:
         nonlocal steps
@@ -90,6 +190,12 @@ def run_read_only_query(
         return 1 if steps > step_limit else 0
 
     try:
+        conn.create_function("excerpt", -1, reporting("excerpt", _excerpt), deterministic=True)
+        conn.create_function("regexp", 2, reporting("regexp", _regexp), deterministic=True)
+        # TEMP objects live in this connection only, so a read-only database still
+        # takes them; they must exist before query_only and the authorizer forbid it.
+        for name, select in RECALL_VIEWS.items():
+            conn.execute(f"CREATE TEMP VIEW {name} AS {select}")
         conn.execute("PRAGMA query_only = ON")
         def authorize(action, arg1, arg2, db_name, source):
             # SQL has no resource-row filter. Raw Skill observations share
@@ -124,6 +230,9 @@ def run_read_only_query(
         message = str(exc)
         code = "query_interrupted" if "interrupted" in message.lower() else "query_failed"
         conn.set_progress_handler(None, 0)
+        if function_errors:
+            name, reason = function_errors[0]
+            raise ReadOnlyQueryError(f"{name}: {reason}", code=code, hint=_FUNCTION_HINTS[name]) from exc
         hint = _error_hint(conn, statement, message, denials)
         raise ReadOnlyQueryError(message, code=code, hint=hint) from exc
     finally:
@@ -163,9 +272,14 @@ def _error_hint(
 
 
 def _schema_columns(conn: sqlite3.Connection) -> dict[str, list[str]]:
-    """Every queryable table's columns, in declaration order."""
+    """Every queryable view's and table's columns, in declaration order, views first."""
 
     columns: dict[str, list[str]] = {}
+    for view in RECALL_VIEWS:
+        try:
+            columns[view] = [row[1] for row in conn.execute(f"PRAGMA temp.table_info({view})")]
+        except sqlite3.DatabaseError:
+            continue  # a database without the tables a view reads has no such view to offer
     rows = conn.execute(
         "select m.name, p.name from sqlite_master m join pragma_table_info(m.name) p "
         "where m.type = 'table' and m.name not like 'sqlite_%' order by m.name, p.cid"
