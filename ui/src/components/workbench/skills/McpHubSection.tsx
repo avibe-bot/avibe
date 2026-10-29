@@ -96,27 +96,24 @@ export const McpHubSection: React.FC = () => {
       const added = res.added ?? [];
       const unchanged = res.unchanged ?? [];
       const failed = res.failed ?? [];
-      const failedLines = failed.map((item) => `${item.name}: ${item.error}`).join('\n');
-      if (!added.length && !unchanged.length) {
-        setAddError(
-          [res.error?.message, failedLines].filter(Boolean).join('\n') || describe(res.error),
-        );
+      const succeeded = added.length + unchanged.length;
+      const failedLines = failed.map((item) => t('mcpHub.failedLine', { name: item.name, error: item.error || '' }));
+      const inline = [
+        t('mcpHub.succeededCount', { count: succeeded }),
+        failed.length ? t('mcpHub.failedCount', { count: failed.length }) : null,
+        ...failedLines,
+      ].filter(Boolean).join('\n');
+      const toast = inline;
+      if (!succeeded) {
+        setAddError(inline || describe(res.error));
         return;
       }
       setShowAdd(false);
       setAddText('');
       if (failed.length) {
-        showToast(
-          t('mcpHub.addedPartial', {
-            count: added.length,
-            failed: failed.map((item) => `${item.name}: ${item.error}`).join('; '),
-          }),
-          'error',
-        );
-      } else if (added.length) {
-        showToast(t('mcpHub.addedCount', { count: added.length }), 'success');
+        showToast(toast, 'error', { label: t('common.close'), onClick: () => undefined });
       } else {
-        showToast(t('mcpHub.unchangedCount', { count: unchanged.length }), 'success');
+        showToast(t('mcpHub.succeededCount', { count: succeeded }), 'success');
       }
       await load();
     } finally {

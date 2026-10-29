@@ -44,6 +44,23 @@ def generated(runtime):
     return runtime
 
 
+def test_describe_walks_cause_chain_for_http_status():
+    class Response:
+        status_code = 400
+        reason = "Bad Request"
+        text = '{"message":"Bad credentials"}'
+
+    class HttpError(Exception):
+        def __init__(self):
+            super().__init__("boom")
+            self.response = Response()
+
+    outer = Exception("Server returned an error response")
+    outer.__cause__ = HttpError()
+    assert mcp_runtime._describe(outer).startswith("HTTP 400:")
+    assert "Bad Request" in mcp_runtime._describe(outer)
+
+
 def test_add_writes_avibe_store_and_registers(runtime):
     first = _run(runtime, "add", {"servers": [_server()]})
     assert first["ok"] and first["toolCount"] == 7

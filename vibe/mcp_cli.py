@@ -170,6 +170,8 @@ def _owner(operation: str, payload: dict[str, Any]) -> int:
             print(f"{item['name']}: unchanged")
         for item in failed:
             print(f"{item['name']}: failed — {item.get('error') or 'unknown'}", file=sys.stderr)
+        succeeded = len(added) + len(unchanged)
+        print(f"{succeeded} succeeded, {len(failed)} failed")
         if not added and not failed and not unchanged:
             names = ", ".join(response.get("saved") or [response.get("name") or ""])
             print(f"Registered {names} ({response.get('toolCount', 0)} tools).")

@@ -6384,6 +6384,9 @@
     "addedCount": "已添加 {{count}} 个。",
     "addedPartial": "已添加 {{count}} 个；失败：{{failed}}",
     "addSubtitle": "粘贴 MCP 配置 JSON，添加到 Avibe 后自动注册，所有 Agent 可用 vibe mcp 调用",
-    "unchangedCount": "{{count}} 个已存在。"
+    "unchangedCount": "{{count}} 个已存在。",
+    "succeededCount": "成功 {{count}} 个",
+    "failedCount": "失败 {{count}} 个：",
+    "failedLine": "{{name}} — {{error}}"
   }
 }

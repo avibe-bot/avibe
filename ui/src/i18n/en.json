@@ -6384,6 +6384,9 @@
     "addedCount": "Added {{count}} MCP servers.",
     "addedPartial": "Added {{count}}; failed: {{failed}}",
     "addSubtitle": "Paste MCP config JSON. Avibe registers it so every Agent can call vibe mcp.",
-    "unchangedCount": "{{count}} already present."
+    "unchangedCount": "{{count}} already present.",
+    "succeededCount": "{{count}} succeeded",
+    "failedCount": "{{count}} failed:",
+    "failedLine": "{{name}} — {{error}}"
   }
 }

@@ -188,21 +188,40 @@ class _Connection:
                 self._task.cancel()
 
 
-def _describe(exc: BaseException) -> str:
+def _http_excerpt(response: object) -> str:
+    status = getattr(response, "status_code", None)
+    if status is None:
+        return ""
+    text = ""
+    for attr in ("reason_phrase", "reason"):
+        value = getattr(response, attr, None)
+        if isinstance(value, str) and value.strip():
+            text = value.strip()
+            break
+    body = getattr(response, "text", None)
+    if isinstance(body, str) and body.strip() and body.strip() != text:
+        snippet = " ".join(body.strip().split())
+        if len(snippet) > 160:
+            snippet = snippet[:157] + "..."
+        text = f"{text}: {snippet}" if text else snippet
+    return f"HTTP {status}: {text}".rstrip(": ")
+
+
+def _describe(exc: BaseException, *, _seen: Optional[set[int]] = None) -> str:
+    seen = _seen if _seen is not None else set()
+    marker = id(exc)
+    if marker in seen:
+        return ""
+    seen.add(marker)
     nested = getattr(exc, "exceptions", None)
     if isinstance(nested, tuple) and nested:
-        return "; ".join(_describe(item) for item in nested)
-    response = getattr(exc, "response", None)
-    if response is not None:
-        status = getattr(response, "status_code", None)
-        text = ""
-        for attr in ("text", "reason_phrase", "reason"):
-            value = getattr(response, attr, None)
-            if isinstance(value, str) and value.strip():
-                text = value.strip()
-                break
-        if status is not None:
-            return f"HTTP {status}: {text or getattr(exc, 'message', None) or exc}".rstrip(": ")
+        return "; ".join(part for part in (_describe(item, _seen=seen) for item in nested) if part)
+    for candidate in (exc, getattr(exc, "__cause__", None), getattr(exc, "__context__", None)):
+        if candidate is None:
+            continue
+        http = _http_excerpt(getattr(candidate, "response", None) or candidate)
+        if http:
+            return http
     error = getattr(exc, "error", None)
     if error is not None:
         message = getattr(error, "message", None) or str(error)
@@ -212,8 +231,13 @@ def _describe(exc: BaseException) -> str:
             extra = str(data.get("message") or data.get("error") or "").strip()
         if extra and extra not in str(message):
             return f"{message}: {extra}"
-        if message:
+        if message and message != "Server returned an error response":
             return str(message)
+    cause = getattr(exc, "__cause__", None) or getattr(exc, "__context__", None)
+    if isinstance(cause, BaseException):
+        nested_text = _describe(cause, _seen=seen)
+        if nested_text:
+            return nested_text
     return f"{type(exc).__name__}: {exc}"
 
 
