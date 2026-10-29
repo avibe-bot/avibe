@@ -16,6 +16,10 @@ slower event-dispatch path.
   (``mark_write_attempt``). They add the loop time since the record started, up to
   the end of SQLite's own commit or rollback (``fsync`` included), to the totals of
   the code location that ended the transaction, and start the next record.
+- Known autocommit writers use ``track_autocommit_write`` around their complete
+  operation. It counts only on the bound loop thread, without inspecting every
+  cursor statement, and leaves a real SQLite transaction for the normal commit or
+  rollback census so one operation cannot be counted twice.
 
 The location is two frames: the first outside SQLAlchemy, ``contextlib`` and this
 module, and its caller, so a write behind a shared transaction helper still names
@@ -24,8 +28,9 @@ nothing is formatted until a report. The totals live in memory only. A location 
 logged once when it first appears, a ranked summary at most every
 ``SUMMARY_INTERVAL_SECONDS`` while new writes arrive, and a complete one at shutdown.
 
-Not counted: writes SQLite runs outside a transaction, such as DDL and
-``PRAGMA journal_mode`` (#2747).
+Autocommit writes are counted only at explicit call sites, such as DDL and
+``PRAGMA journal_mode`` during connection setup (#2747). Other statements outside
+a transaction remain uncounted until their path is deliberately marked.
 
 A write that cannot wait for another writer, because it takes the writer with a
 zero busy timeout (``_try_reserve_write_lock``), is marked with
@@ -126,12 +131,65 @@ class CensusConnection(sqlite3.Connection):
             _count(_site(sys._getframe(1)), now - record[0], never_waits=record[1])
 
 
+class _AutocommitWrite:
+    """Close one explicitly marked write, including failures, exactly once."""
+
+    def __init__(self, connection: CensusConnection, site: _Site) -> None:
+        self._connection = connection
+        self._site = site
+        self._started_at: float | None = None
+        self._closed = False
+
+    def __enter__(self) -> "_AutocommitWrite":
+        self._started_at = time.perf_counter()
+        return self
+
+    def __exit__(self, _exc_type: Any, _exc: Any, _tb: Any) -> bool:
+        if self._closed:
+            return False
+        self._closed = True
+        started_at = self._started_at
+        if started_at is None:
+            return False
+        # If the marked operation opened a real SQLite transaction, its eventual
+        # commit/rollback owns the timing and site. This keeps an explicit marker
+        # from double-counting a transaction that happened not to be autocommit.
+        if self._connection.in_transaction:
+            return False
+        _count(self._site, time.perf_counter() - started_at, never_waits=False)
+        return False
+
+
+def _dbapi_connection(conn: Any) -> Any:
+    if isinstance(conn, CensusConnection):
+        return conn
+    try:
+        return conn.connection.dbapi_connection
+    except AttributeError:
+        return None
+
+
+def track_autocommit_write(conn: Any) -> contextlib.AbstractContextManager[Any]:
+    """Measure one known autocommit write without inspecting every statement.
+
+    ``conn`` may be a SQLAlchemy connection or the raw ``CensusConnection`` used
+    during engine connection setup. Off-loop and non-census connections use a
+    no-op context, so read statements and unrelated worker activity pay no
+    per-statement cost.
+    """
+
+    dbapi_connection = _dbapi_connection(conn)
+    if threading.get_ident() != _loop_thread or not isinstance(dbapi_connection, CensusConnection):
+        return contextlib.nullcontext()
+    return _AutocommitWrite(dbapi_connection, _site(sys._getframe(1)))
+
+
 def watch_engine(engine: Engine) -> None:
     event.listen(engine, "checkout", _on_checkout)
 
 
 def _record(conn: Any) -> list[Any] | None:
-    return getattr(conn.connection.dbapi_connection, "_census", None)
+    return getattr(_dbapi_connection(conn), "_census", None)
 
 
 def mark_never_waits(conn: Any) -> None:
