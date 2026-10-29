@@ -587,17 +587,23 @@ const PetSurface: React.FC = () => {
     });
   }, [api, dismiss, isCurrentCard, updatePresentation]);
 
+  const hotkeyHeld = useRef(false);
+  const resetVoiceShortcut = useCallback(() => {
+    hotkeyHeld.current = false;
+    void petBridge.resetVoiceShortcut().catch(() => undefined);
+  }, []);
+
   const voice = usePetVoice({
     enabled: canChat && Boolean(binding) && !uncertain,
     epoch,
     draft,
     onOpenComposer: openComposer,
+    onCaptureEnd: resetVoiceShortcut,
   });
 
   const clearVoiceError = voice.clearError;
   useEffect(() => { if (!composing) clearVoiceError(); }, [composing, clearVoiceError]);
 
-  const hotkeyHeld = useRef(false);
   const onSummon = useCallback(() => {
     const intent = petShell.takeSummon();
     if (!intent) return;
@@ -613,18 +619,20 @@ const PetSurface: React.FC = () => {
     if (intent === 'show') openCards();
     else void setPanel(true);
     if (intent === 'listen') {
+      if (voice.finishing) { resetVoiceShortcut(); return; }
       hotkeyHeld.current = true;
+      if (!binding || !canChat || uncertain) resetVoiceShortcut();
       petComposer.requestListen();
     }
-  }, [setPanel, openCards, voice.stop, voice.busy, composing]);
+  }, [setPanel, openCards, voice.stop, voice.busy, voice.finishing, composing, binding, canChat, uncertain, resetVoiceShortcut]);
   useOnSummon(onSummon);
   useEffect(() => {
     if (!listenPending || !binding || !canChat || !expanded) return;
     petComposer.takeListen();
-    if (uncertain) { setDetailOpen(true); return; }
+    if (uncertain) { resetVoiceShortcut(); setDetailOpen(true); return; }
     if (hotkeyHeld.current && voice.available) voice.start();
-    else openComposer(draft);
-  }, [listenPending, binding, canChat, expanded, voice.available, voice.start, openComposer, draft, uncertain]);
+    else { resetVoiceShortcut(); openComposer(draft); }
+  }, [listenPending, binding, canChat, expanded, voice.available, voice.start, openComposer, draft, uncertain, resetVoiceShortcut]);
   const dockActiveRef = useRef(false);
   useLayoutEffect(() => { dockActiveRef.current = voice.busy || composing; }, [voice.busy, composing]);
   const suppressDock = useCallback(() => {
@@ -639,6 +647,7 @@ const PetSurface: React.FC = () => {
     const onBlur = () => {
       cancelPendingClick();
       suppressDock();
+      if (!voice.busy) resetVoiceShortcut();
       // Opening Avibe must preserve the history/card list through its key change.
       if (!doubleOpenedRef.current && !voice.busy && !draft.trim()) void setPanel(false);
     };
@@ -649,11 +658,12 @@ const PetSurface: React.FC = () => {
       window.removeEventListener('blur', onBlur);
       window.removeEventListener('focus', onFocus);
     };
-  }, [cancelPendingClick, draft, setPanel, suppressDock, voice.busy]);
+  }, [cancelPendingClick, draft, setPanel, suppressDock, voice.busy, resetVoiceShortcut]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       // Escape also dismisses an IME candidate list; that one is not ours.
       if (event.key !== 'Escape' || isComposingKey(event)) return;
+      if (!voice.busy) resetVoiceShortcut();
       // A history opened above the input closes before the input does.
       if (detailOpen && (voice.busy || composing)) { setDetailOpen(false); void setPanel(false); }
       else if (voice.busy) voice.cancel();
@@ -663,7 +673,7 @@ const PetSurface: React.FC = () => {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [closeComposer, composing, detailOpen, setPanel, voice]);
+  }, [closeComposer, composing, detailOpen, setPanel, voice, resetVoiceShortcut]);
 
   useEffect(() => {
     const node = inputRef.current;
@@ -1175,7 +1185,7 @@ function useHitRegions(rootRef: React.RefObject<HTMLDivElement | null>, epoch?: 
   }, [rootRef, epoch]);
 }
 
-function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boolean; epoch: PetSurfaceEpoch; draft: string; onOpenComposer: (text?: string) => void }) {
+function usePetVoice({ enabled, epoch, draft, onOpenComposer, onCaptureEnd }: { enabled: boolean; epoch: PetSurfaceEpoch; draft: string; onOpenComposer: (text?: string) => void; onCaptureEnd: () => void }) {
   const [asr, setAsr] = useState<{ epoch: PetSurfaceEpoch; enabled: boolean; available: boolean; checked: boolean; maxFileBytes?: number }>({ epoch, enabled, available: false, checked: false });
   const [preview, setPreview] = useState('');
   const [listening, setListening] = useState(false);
@@ -1205,6 +1215,7 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
   const stop = useCallback((commit: boolean) => {
     const capture = captureRef.current;
     if (!capture) return;
+    if (!capture.ending) onCaptureEnd();
     // A second commit is a no-op. Cancel must still abort an in-flight finish
     // (Escape, epoch change) so finishing cannot stick on the next surface.
     if (commit) {
@@ -1223,7 +1234,7 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
     setListening(false);
     setFinishing(false);
     setPreview('');
-  }, []);
+  }, [onCaptureEnd]);
   const start = useCallback(() => {
     if (!epoch.isCurrent() || !available || captureRef.current) return;
     const before = draft;
@@ -1238,6 +1249,7 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
     setError(null);
     const settle = () => {
       if (captureRef.current !== capture || !epoch.isCurrent()) return false;
+      if (!capture.ending) onCaptureEnd();
       captureRef.current = null;
       setListening(false);
       setFinishing(false);
@@ -1261,7 +1273,7 @@ function usePetVoice({ enabled, epoch, draft, onOpenComposer }: { enabled: boole
       // Release may precede microphone permission or pipeline startup.
       if (capture.ending && !capture.cancelled) capture.dictation.finish();
     }).catch((reason: unknown) => { fail(reason); capture.dictation.abort(); });
-  }, [asrForEpoch.maxFileBytes, available, epoch, draft, onOpenComposer]);
+  }, [asrForEpoch.maxFileBytes, available, epoch, draft, onOpenComposer, onCaptureEnd]);
   const cancel = useCallback(() => stop(false), [stop]);
   const clearError = useCallback(() => setError(null), []);
   useEffect(() => cancel, [epoch, enabled, cancel]);

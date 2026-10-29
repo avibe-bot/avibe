@@ -29,14 +29,14 @@ test('draft files follow final project and Agent selection through picker cancel
   const openProject = () => page.getByRole('button', { name: en.workbench.home.openProject, exact: true });
   const projectChip = (name: string) => page.getByRole('button', { name, exact: true });
   await openProject().click();
-  expect((await writes(page, '/api/browse')).at(-1)?.body.path).toBe('/fixture/中文项目');
+  await expect.poll(async () => (await writes(page, '/api/browse')).at(-1)?.body.path).toBe('/fixture/中文项目');
   await page.keyboard.press('Escape');
   await expect(input(page)).toHaveValue('请阅读这份中文文件');
   await openProject().click();
   await page.getByRole('button', { name: /^另一个项目(?: |$)/ }).click();
   await page.getByRole('button', { name: en.directoryBrowser.select, exact: true }).click();
   await page.getByRole('button', { name: en.workbench.newProjectDialog.pickFolder, exact: false }).click();
-  expect((await writes(page, '/api/browse')).at(-1)?.body.path).toBe('/fixture/中文项目/另一个项目');
+  await expect.poll(async () => (await writes(page, '/api/browse')).at(-1)?.body.path).toBe('/fixture/中文项目/另一个项目');
   await page.getByRole('button', { name: en.directoryBrowser.select, exact: true }).click();
   await page.getByRole('dialog').getByRole('button', { name: en.workbench.newProjectDialog.create, exact: true }).click();
   await expect(projectChip('另一个项目')).toHaveClass(/bg-mint-soft/);

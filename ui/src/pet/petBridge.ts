@@ -145,6 +145,13 @@ export const petBridge = {
     await invoke('pet_hit_regions', { rects });
   },
 
+  /** Clears native press-to-toggle state when the page cancels a conversation. */
+  resetVoiceShortcut: async (): Promise<void> => {
+    const invoke = shellInvoke();
+    if (!invoke) return;
+    await invoke('pet_reset_voice_shortcut');
+  },
+
   /** Normalize the legacy binding; callers cannot choose another session. */
   bindMain: async (): Promise<PetBinding> => {
     const invoke = shellInvoke();

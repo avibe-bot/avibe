@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pet-set-shortcut"
+description = "Enables the pet_set_shortcut command without any pre-configured scope."
+commands.allow = ["pet_set_shortcut"]
+
+[[permission]]
+identifier = "deny-pet-set-shortcut"
+description = "Denies the pet_set_shortcut command without any pre-configured scope."
+commands.deny = ["pet_set_shortcut"]

@@ -99,8 +99,7 @@
     },
     "pet": {
       "toggle": "Show Pet",
-      "shortcutMenu": "Pet Shortcut",
-      "shortcutUnavailable": "{{shortcut}} is unavailable — another app may be using it"
+      "shortcutSettings": "Shortcut settings…"
     },
     "uninstall": {
       "menuLabel": "Uninstall Avibe…",
@@ -469,7 +468,12 @@
       "menuPlacementStandalone": "Standalone",
       "menuPlacementInline": "Inline",
       "autosaved": "Changes are saved automatically",
-      "languageSaveFailed": "The language changed here, but could not be saved for this instance"
+      "languageSaveFailed": "The language changed here, but could not be saved for this instance",
+      "desktopMini": {
+        "title": "Desktop Mini",
+        "description": "Show the Desktop Mini pet on your desktop.",
+        "saveFailed": "The Desktop Mini setting could not be saved."
+      }
     },
     "shortcuts": {
       "title": "Shortcuts",
@@ -484,6 +488,22 @@
         "title": "Show Page annotation mode",
         "description": "Enter annotation mode on the Show Page in front."
       },
+      "desktopMiniTitle": "Desktop Mini",
+      "desktopMiniDescription": "Set the global shortcuts and voice behavior for Desktop Mini.",
+      "desktopMiniVoice": {
+        "title": "Voice conversation",
+        "description": "Use the global shortcut to start and finish a Desktop Mini voice conversation."
+      },
+      "desktopMiniToggle": {
+        "title": "Show or hide Desktop Mini",
+        "description": "Use the global shortcut to show or hide Desktop Mini."
+      },
+      "desktopMiniMode": {
+        "title": "Voice shortcut mode",
+        "description": "Choose whether the voice shortcut is held or pressed twice.",
+        "hold": "Hold to talk",
+        "toggle": "Press to start, press to stop"
+      },
       "change": "Change {{action}} shortcut",
       "pressKeys": "Press shortcut",
       "escapeToCancel": "Esc cancels",
@@ -491,6 +511,9 @@
       "reserved": "This shortcut is already used by Avibe.",
       "conflict": "Already used by {{action}}.",
       "saveFailed": "Couldn't save the shortcut in this browser.",
+      "loading": "Loading…",
+      "desktopSaveFailed": "Couldn't save the Desktop Mini settings. Your previous settings are unchanged.",
+      "registrationFailed": "Couldn't register {{shortcut}}. It may be used by another app.",
       "modifierLabels": {
         "control": "Control",
         "option": "Option",

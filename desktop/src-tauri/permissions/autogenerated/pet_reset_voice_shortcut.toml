@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pet-reset-voice-shortcut"
+description = "Enables the pet_reset_voice_shortcut command without any pre-configured scope."
+commands.allow = ["pet_reset_voice_shortcut"]
+
+[[permission]]
+identifier = "deny-pet-reset-voice-shortcut"
+description = "Denies the pet_reset_voice_shortcut command without any pre-configured scope."
+commands.deny = ["pet_reset_voice_shortcut"]

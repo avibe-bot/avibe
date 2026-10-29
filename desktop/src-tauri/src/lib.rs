@@ -92,10 +92,12 @@ const COMPUTER_USE_MENU_ID: &str = "computer-use";
 /// `parse_deep_link` owns. It is delivered as a page load only when the window
 /// has no Workbench able to open Settings in place.
 const SETTINGS_DEEP_LINK: &str = "avibe://settings";
+const SHORTCUT_SETTINGS_DEEP_LINK: &str = "avibe://settings/shortcuts";
 /// The in-page request to open Settings, read by `ui/src/lib/desktopShell.ts`.
 /// A Workbench that handles it cancels it; an uncancelled one falls back to
 /// loading the deep link's destination.
 const OPEN_SETTINGS_EVENT: &str = "avibe:desktop-open-settings";
+const OPEN_SHORTCUT_SETTINGS_EVENT: &str = "avibe:desktop-open-shortcut-settings";
 /// The in-page request to open the Version popover, read by
 /// `ui/src/lib/desktopShell.ts`. An uncancelled request falls back to the
 /// native updater dialog when the Workbench cannot receive it.
@@ -447,7 +449,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
         app.state::<notifications::Notifications>().enabled(),
         None::<&str>,
     )?;
-    let (pet_toggle, pet_shortcut) = pet::tray_items(app)?;
+    let (pet_toggle, pet_shortcut_settings) = pet::tray_items(app)?;
     #[cfg(target_os = "macos")]
     let computer_use_view = app.state::<computer_use::Controller>().view();
     #[cfg(target_os = "macos")]
@@ -479,7 +481,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &login,
             &notifications,
             &pet_toggle,
-            &pet_shortcut,
+            &pet_shortcut_settings,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -497,7 +499,7 @@ fn install_native_tray(app: &AppHandle) -> tauri::Result<()> {
             &login,
             &notifications,
             &pet_toggle,
-            &pet_shortcut,
+            &pet_shortcut_settings,
             &PredefinedMenuItem::separator(app)?,
             &quit,
         ],
@@ -584,6 +586,34 @@ fn open_workbench_settings(app: &AppHandle) {
         }
     }
     receive_native_deep_link(app, [SETTINGS_DEEP_LINK]);
+}
+
+fn open_workbench_shortcut_settings(app: &AppHandle) {
+    let Some(shell) = app.try_state::<Shell>() else {
+        return;
+    };
+    let Some(origin) = shell.active_origin.lock().ok().and_then(|origin| origin.clone()) else {
+        return;
+    };
+    if !settings_is_available(shell.activity.load(Ordering::SeqCst), true) {
+        return;
+    }
+    let shown = app
+        .get_webview_window(MAIN_WINDOW)
+        .filter(|window| window.url().is_ok_and(|url| origin.matches_url_origin(&url)));
+    if let Some(window) = shown {
+        focus_or_restore_main_window(app);
+        if window
+            .eval(format!(
+                "if (window.dispatchEvent(new Event('{OPEN_SHORTCUT_SETTINGS_EVENT}', {{ cancelable: true }}))) \
+                 window.location.assign('/settings/shortcuts');"
+            ))
+            .is_ok()
+        {
+            return;
+        }
+    }
+    receive_native_deep_link(app, [SHORTCUT_SETTINGS_DEEP_LINK]);
 }
 
 /// Asks the page to open Settings, and loads the deep link's destination when
@@ -1611,6 +1641,7 @@ fn ensure_main_window(app: &AppHandle) -> Option<WebviewWindow> {
         .ok()?
         .initialization_script(DESKTOP_SHELL_MARKER)
         .initialization_script(pet::DESKTOP_PET_MARKER)
+        .initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)
         .initialization_script(format!(
             "if (window.self === window.top) Object.defineProperty(window, '__AVIBE_DESKTOP_VERSION__', {{ value: {} }});",
             serde_json::to_string(&app.package_info().version.to_string()).expect("version JSON")
@@ -2147,16 +2178,12 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::Builder::new().build())
         .plugin(tauri_plugin_notification::init())
-        // The pet's summon shortcut. Only a press wakes it; the release is ignored.
+        // Desktop Mini owns two global shortcuts. The native state machine
+        // distinguishes voice press/release from the show/hide toggle and
+        // filters OS auto-repeat before the page sees an intent.
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(|app, _shortcut, event| {
-                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                        pet::wake(app, avibe_runtime_host::pet::PetIntent::Listen);
-                    } else {
-                        pet::wake(app, avibe_runtime_host::pet::PetIntent::Release);
-                    }
-                })
+                .with_handler(|app, shortcut, event| pet::handle_shortcut(app, shortcut, event.state()))
                 .build(),
         )
         .on_menu_event(|app, event| {
@@ -2181,7 +2208,7 @@ pub fn run() {
                     }
                 }
                 pet::MENU_ID => pet::toggle(app),
-                id if id.starts_with(pet::SHORTCUT_MENU_PREFIX) => pet::choose_shortcut(app, id),
+                pet::SHORTCUT_SETTINGS_MENU_ID => open_workbench_shortcut_settings(app),
                 #[cfg(target_os = "macos")]
                 COMPUTER_USE_MENU_ID => {
                     app.state::<computer_use::Controller>().toggle();
@@ -2304,12 +2331,18 @@ pub fn run() {
             updater::desktop_update_check,
             updater::desktop_update_install,
             updater::desktop_update_skip,
+            pet::pet_settings,
+            pet::pet_set_enabled,
+            pet::pet_set_shortcut,
+            pet::pet_reset_shortcuts,
+            pet::pet_set_voice_mode,
             pet::pet_ready,
             pet::pet_set_expanded,
             pet::pet_drag,
             pet::pet_settle,
             pet::pet_hit_regions,
             pet::pet_set_dismissed,
+            pet::pet_reset_voice_shortcut,
             pet::pet_bind,
             pet::pet_unbind,
             pet::pet_open
@@ -2369,7 +2402,7 @@ pub fn run() {
             }
             updater::init(app.handle())?;
             install_native_tray(app.handle())?;
-            pet::apply_shortcut(app.handle());
+            pet::apply_shortcuts(app.handle());
             #[cfg(target_os = "macos")]
             refresh_computer_use_control(app.handle());
             updater::check(app.handle().clone(), false);
@@ -2397,6 +2430,7 @@ mod tests {
             assert_eq!(settings_is_available(activity, true), activity == ACTIVITY_MONITOR);
         }
         assert!(avibe_runtime_host::deep_link::parse_deep_link(SETTINGS_DEEP_LINK).is_some());
+        assert!(avibe_runtime_host::deep_link::parse_deep_link(SHORTCUT_SETTINGS_DEEP_LINK).is_some());
     }
 
     #[test]

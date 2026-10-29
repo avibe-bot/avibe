@@ -11,6 +11,7 @@ import { ToastProvider } from '../context/ToastProvider';
 import type { WorkbenchSession } from '../context/ApiContext';
 import en from '../i18n/en.json';
 import zh from '../i18n/zh.json';
+import { canConfigureDesktopPet, isDesktopShell } from './desktopShell';
 
 vi.mock('../context/InstanceAuthorizationContext', async (original) => ({
   ...await original<typeof import('../context/InstanceAuthorizationContext')>(),
@@ -61,6 +62,7 @@ afterEach(() => {
   document.body.innerHTML = '';
   delete (window as { __AVIBE_DESKTOP_SHELL__?: true }).__AVIBE_DESKTOP_SHELL__;
   delete (window as { __AVIBE_DESKTOP_DRAG__?: true }).__AVIBE_DESKTOP_DRAG__;
+  delete (window as { __AVIBE_DESKTOP_PET_SETTINGS__?: true }).__AVIBE_DESKTOP_PET_SETTINGS__;
 });
 
 describe('native desktop drag surfaces', () => {
@@ -93,4 +95,19 @@ describe('native desktop drag surfaces', () => {
       }
     },
   );
+});
+
+describe('Desktop Mini settings capability', () => {
+  it.each([
+    ['web', false, false],
+    ['older shell', true, false],
+    ['current shell', true, true],
+  ] as const)('probes the dedicated capability marker for %s', (_label, shell, settings) => {
+    if (shell) Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    if (settings) {
+      Object.defineProperty(window, '__AVIBE_DESKTOP_PET_SETTINGS__', { configurable: true, value: true });
+    }
+    expect(isDesktopShell()).toBe(shell);
+    expect(canConfigureDesktopPet()).toBe(settings);
+  });
 });
