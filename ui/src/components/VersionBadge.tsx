@@ -113,14 +113,14 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [isPopupOpen, isDesktop]);
 
-  const loadAutoUpdateSetting = async () => {
+  const loadAutoUpdateSetting = React.useCallback(async () => {
     try {
       const config = await api.getConfig();
       setAutoUpdate(config.update?.auto_update ?? true);
     } catch (e) {
       console.error('Failed to load config:', e);
     }
-  };
+  }, [api]);
 
   const handleAutoUpdateToggle = async (enabled: boolean) => {
     setSavingAutoUpdate(true);
@@ -256,8 +256,6 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   React.useEffect(() => {
     const timer = window.setTimeout(() => {
       void checkVersion();
-      // The shell owns updates; it reads the Runtime's version only to show skew.
-      if (!inDesktopShell && capabilities.can_manage_instance) void loadAutoUpdateSetting();
     }, 0);
     return () => window.clearTimeout(timer);
     // This runs once per mounted badge. The desktop path waits one task so the
@@ -265,6 +263,15 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     // The API and updater actions are stable for the lifetime of the Workbench.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  React.useEffect(() => {
+    // The shell owns updates; it reads the Runtime's version only to show skew.
+    if (inDesktopShell || !capabilities.can_manage_instance) return;
+    const timer = window.setTimeout(() => {
+      void loadAutoUpdateSetting();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [capabilities.can_manage_instance, inDesktopShell, loadAutoUpdateSetting]);
 
   const handleUpgrade = async () => {
     if (isDesktopManaged && desktopActions) {

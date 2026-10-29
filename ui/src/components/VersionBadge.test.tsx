@@ -369,6 +369,23 @@ describe('desktop version ownership', () => {
     expect(await screen.findByText(i18n.t('dashboard.autoUpdate'))).toBeTruthy();
   });
 
+  it('loads the auto-update setting when an editor is promoted to member', async () => {
+    authorization.capabilities.can_manage_instance = false;
+    authorization.capabilities.is_instance_owner = false;
+    api.getVersion.mockResolvedValueOnce({ current: '9.9.9', latest: '9.9.9', has_update: false });
+    const view = render(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+
+    fireEvent.click(await screen.findByTitle('v9.9.9'));
+    expect(screen.queryByText(i18n.t('dashboard.autoUpdate'))).toBeNull();
+    expect(api.getConfig).not.toHaveBeenCalled();
+
+    authorization.capabilities.can_manage_instance = true;
+    view.rerender(<I18nextProvider i18n={i18n}><VersionBadge /></I18nextProvider>);
+
+    await vi.waitFor(() => expect(api.getConfig).toHaveBeenCalledOnce());
+    expect(await screen.findByText(i18n.t('dashboard.autoUpdate'))).toBeTruthy();
+  });
+
   it('shows a successful upgrade warning returned in the output', async () => {
     api.getVersion.mockResolvedValueOnce({ current: '9.9.9', latest: '10.0.0', has_update: true });
     api.doUpgrade.mockResolvedValueOnce({
