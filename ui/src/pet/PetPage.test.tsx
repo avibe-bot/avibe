@@ -2267,6 +2267,29 @@ describe('desktop mini v2 interaction contract', () => {
     expect(panel).toHaveBeenCalledWith(false);
   });
 
+  it('does not pair a completed hold with a later native double-click count', async () => {
+    withHistory();
+    mainSession('S'); render(<PetPage />);
+    await screen.findByLabelText('pet.recentTurns');
+    const { petBridge } = await import('./petBridge');
+    const opens = vi.spyOn(petBridge, 'open').mockResolvedValue();
+    const avatar = screen.getByLabelText('pet.recentTurns');
+    vi.useFakeTimers();
+    try {
+      fireEvent.pointerDown(avatar, { button: 0, pointerId: 1 });
+      await act(async () => vi.advanceTimersByTime(320));
+      fireEvent.pointerUp(avatar, { pointerId: 1 });
+
+      fireEvent.pointerDown(avatar, { button: 0, pointerId: 2, detail: 2 });
+      fireEvent.mouseDown(avatar, { detail: 2 });
+      fireEvent.pointerUp(avatar, { pointerId: 2 });
+
+      expect(opens).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the dock suppressed after opening Avibe until a fresh pointer re-entry', async () => {
     withHistory();
     canChat = false;
@@ -2938,6 +2961,21 @@ describe('Vibey bubble visibility (spec §4.2)', () => {
     fireEvent.click(screen.getByLabelText('pet.recentTurns'));
     await waitFor(() => expect(document.querySelector('.pet-mini-detail.is-open')).not.toBeNull());
     expect(document.querySelector('.pet-mini-avatar-unread-dot')).toBeNull();
+  });
+
+  it('clears the unread dot when another window marks the last reply read', async () => {
+    await runToResult();
+    await act(async () => { vi.advanceTimersByTime(20_100); });
+    await waitFor(() => expect(document.querySelector('.pet-mini-avatar-unread-dot')).not.toBeNull());
+
+    const read = message('r', 'S', { text: 'All done', read_at: '2026-10-04T00:00:02Z' });
+    tails.S = [
+      message('u', 'S', { author: 'user', type: 'user', text: 'hello' }),
+      read,
+    ];
+    await emit((h) => h.onMessageUpdated?.(read));
+
+    await waitFor(() => expect(document.querySelector('.pet-mini-avatar-unread-dot')).toBeNull());
   });
 
   it('a double-click leaves the lingering reply unseen and on its original timer', async () => {

@@ -848,6 +848,7 @@ const PetSurface: React.FC = () => {
   });
   const replyNeedsUnreadDot = Boolean(
     turnReply
+    && turnReply.read_at === null
     && !watched.seen.has(turnReply.id)
     && lingeringId === null,
   );
@@ -939,8 +940,9 @@ const PetSurface: React.FC = () => {
           doubleOpenedRef.current = false;
           allowDoubleEventRef.current = false;
           const now = performance.now();
-          const isSecondClick = event.detail >= 2
-            || (lastClickAtRef.current > 0 && now - lastClickAtRef.current <= DOUBLE_CLICK_DETECTION_MS);
+          const hasRecentEligibleClick = lastClickAtRef.current > 0
+            && now - lastClickAtRef.current <= DOUBLE_CLICK_DETECTION_MS;
+          const isSecondClick = hasRecentEligibleClick;
           if (!isSecondClick) composerBeforeClickRef.current = composing || voice.busy || Boolean(draft.trim());
           pressRef.current = {
             held: false,
@@ -969,7 +971,15 @@ const PetSurface: React.FC = () => {
           const press = pressRef.current;
           if (press) {
             press.clicks = event.detail;
-            if (!press.double && event.detail >= 2) press.double = true;
+            const now = performance.now();
+            if (
+              !press.double
+              && event.detail >= 2
+              && lastClickAtRef.current > 0
+              && now - lastClickAtRef.current <= DOUBLE_CLICK_DETECTION_MS
+            ) {
+              press.double = true;
+            }
           }
           // The input keeps its focus and caret: a Vibey click is not leaving it.
           if (inputRef.current && document.activeElement === inputRef.current) event.preventDefault();
