@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from unittest.mock import patch
 
+import pytest
+
 from config.v2_settings import RoutingSettings
 from core.handlers.settings_handler import SettingsHandler
 from core.modals import (
@@ -18,6 +20,7 @@ from core.modals import (
 )
 from modules.agents.catalog import AGENT_BACKENDS, NATIVE_CLI_BACKENDS
 from modules.im import MessageContext
+from vibe.i18n import t
 
 
 def _values(options) -> list[str]:
@@ -982,3 +985,41 @@ def test_scope_needs_new_session_answers_for_the_scope_the_web_saved() -> None:
     assert handler_for(threaded=True, routing_agent="vibey").scope_needs_new_session(
         platform="discord", kind="user", native_id="U1"
     ) is False
+
+
+@pytest.mark.parametrize("entry", ["handle_routing", "handle_settings"])
+@pytest.mark.parametrize(
+    ("is_dm", "public_url", "expected"),
+    [
+        # Through Avibe Cloud the reply links to this chat's own row.
+        (True, "https://team.avibe.bot", ("scopeSettings.openInWebUrl", {
+            "url": "https://team.avibe.bot/settings/platforms/users?platform=wechat&user=wx%40im.wechat",
+        })),
+        (False, "https://team.avibe.bot", ("scopeSettings.openInWebUrl", {
+            "url": "https://team.avibe.bot/settings/platforms/groups",
+        })),
+        # Without it, the reply says where the page is.
+        (True, None, ("scopeSettings.openInWeb", {"page": t("scopeSettings.pageUsers", "en")})),
+    ],
+)
+def test_a_chat_without_a_settings_form_is_pointed_at_the_web_settings_page(entry, is_dm, public_url, expected) -> None:
+    """WeChat shows neither buttons nor forms: `/agent` and `/settings` answer with where to change them."""
+    send_message = AsyncMock()
+    cloud = SimpleNamespace(enabled=public_url is not None, public_url=public_url or "")
+    controller = SimpleNamespace(
+        config=SimpleNamespace(platform="wechat", language="en", remote_access=SimpleNamespace(vibe_cloud=cloud)),
+        im_client=SimpleNamespace(send_message=send_message),
+        settings_manager=SimpleNamespace(),
+        _get_lang=lambda: "en",
+    )
+    context = MessageContext(
+        user_id="wx@im.wechat",
+        channel_id="wx@im.wechat",
+        platform="wechat",
+        platform_specific={"platform": "wechat", "is_dm": is_dm},
+    )
+
+    asyncio.run(getattr(SettingsHandler(controller), entry)(context))
+
+    key, params = expected
+    send_message.assert_awaited_once_with(context, t(key, "en", **params))

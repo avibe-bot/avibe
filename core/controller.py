@@ -893,6 +893,7 @@ class Controller:
             "resume": inbound(self.command_handler.handle_resume),
             "setup": inbound(self.command_handler.handle_setup),
             "settings": inbound(self.settings_handler.handle_settings),
+            "agent": inbound(self.settings_handler.handle_routing),
             "stop": inbound(self.command_handler.handle_stop),
             "bind": inbound(self.command_handler.handle_bind),
         }

@@ -657,6 +657,7 @@
       "commandStart": "/start - 显示欢迎消息",
       "commandCwd": "/cwd - 显示当前工作目录",
       "commandSetCwd": "/setcwd <路径> - 设置工作目录",
+      "commandAgent": "/agent - 切换 Agent、模型和推理强度",
       "commandResume": "/resume - 恢复当前目录下最近的会话",
       "commandSetup": "/setup [claude|codex|opencode] - 修复后端登录/认证",
       "commandStop": "/stop - 中断 {agent} 当前执行",
@@ -769,7 +770,6 @@
     "resultDesc": "最终执行结果（始终发送）"
   },
   "routing": {
-    "slackOnly": "🤖 Agent 切换目前仅在 Slack 可用。请使用 Slack Agent 设置进行配置。",
     "introTitle": "Agent 与模型设置",
     "introDesc": "选择该频道使用的 Agent。",
     "noAgents": "该频道没有可用的 Agent。",
@@ -778,6 +778,12 @@
       "model": "模型",
       "reasoningEffort": "推理强度"
     }
+  },
+  "scopeSettings": {
+    "openInWebUrl": "🔗 在 Web 设置页修改这个对话的 Agent、模型和其他设置：{url}",
+    "openInWeb": "🔗 在运行 Avibe 的电脑上打开 Avibe 工作台，进入「设置 → 通讯平台 → {page}」，即可修改这个对话的 Agent、模型和其他设置。",
+    "pageUsers": "私聊",
+    "pageGroups": "群组"
   },
   "message": {
     "ack": "{agent} 已收到，正在处理...",

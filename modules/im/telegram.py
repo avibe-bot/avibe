@@ -948,6 +948,7 @@ class TelegramBot(BaseIMClient):
             "resume",
             "settings",
             "routing",
+            "agent",
             "cwd",
             "setcwd",
             "set_cwd",

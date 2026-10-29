@@ -2,6 +2,7 @@ import { platformText } from '@/lib/platforms';
 import type { TFunction } from 'i18next';
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   Bot,
   Check,
@@ -446,6 +447,8 @@ export const UserList: React.FC = () => {
   const [searchQuery, setSearchQuery] = useState('');
   const [showDisabled, setShowDisabled] = useState(false);
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const rowRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [refreshTrigger, setRefreshTrigger] = useState(0);
   const userSaveVersionRef = useRef<Record<string, number>>({});
   const routeSaveVersionRef = useRef<Record<string, number>>({});
@@ -484,7 +487,34 @@ export const UserList: React.FC = () => {
     const next: Record<string, Record<string, UserConfig>> = {};
     for (const [p, u] of results) next[p] = u as Record<string, UserConfig>;
     setUsersByPlatform(next);
+    openLinkedUser(next);
   };
+
+  // A chat that cannot show a settings form links to its row (`?platform=…&user=…`):
+  // open it once it loads, then drop the link so a reload doesn't reopen it.
+  const linkedScrollRef = useRef<string | null>(null);
+  const openLinkedUser = (users: Record<string, Record<string, UserConfig>>) => {
+    const platform = searchParams.get('platform');
+    const userId = searchParams.get('user');
+    const linked = platform && userId ? users[platform]?.[userId] : undefined;
+    if (!platform || !userId || !linked) return;
+    const key = `${platform}::${userId}`;
+    setSearchQuery('');
+    if (!linked.enabled) setShowDisabled(true);
+    setExpandedKey(key);
+    linkedScrollRef.current = key;
+    setSearchParams((prev) => {
+      const params = new URLSearchParams(prev);
+      params.delete('platform');
+      params.delete('user');
+      return params;
+    }, { replace: true });
+  };
+  useEffect(() => {
+    if (!expandedKey || linkedScrollRef.current !== expandedKey) return;
+    linkedScrollRef.current = null;
+    rowRefs.current[expandedKey]?.scrollIntoView?.({ block: 'center' });
+  }, [expandedKey]);
 
   useEffect(() => { loadAllUsers(); }, [enabledPlatforms.join(','), refreshTrigger]);
 
@@ -701,6 +731,7 @@ export const UserList: React.FC = () => {
               return (
                 <div
                   key={u.key}
+                  ref={(element) => { rowRefs.current[u.key] = element; }}
                   className={clsx(
                     'rounded-xl border transition-colors',
                     expanded

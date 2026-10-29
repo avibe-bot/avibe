@@ -271,6 +271,7 @@ def test_dispatch_im_message_to_controller_loop_gates_admission_on_recovery():
 def test_setup_callbacks_gates_work_admission_but_not_runtime_evidence():
     controller = Controller.__new__(Controller)
     callback = AsyncMock()
+    open_routing = AsyncMock()
     controller.command_handler = SimpleNamespace(
         handle_start=callback,
         handle_new=callback,
@@ -284,6 +285,7 @@ def test_setup_callbacks_gates_work_admission_but_not_runtime_evidence():
     )
     controller.settings_handler = SimpleNamespace(
         handle_settings=callback,
+        handle_routing=open_routing,
         handle_settings_update=callback,
         handle_routing_update=callback,
         handle_routing_modal_update=callback,
@@ -317,6 +319,8 @@ def test_setup_callbacks_gates_work_admission_but_not_runtime_evidence():
     Controller._setup_callbacks(controller)
 
     assert all(value[2] is True for value in registered["on_command"].values())
+    # `/agent` opens the Agent settings the button does, on every platform.
+    assert registered["on_command"]["agent"][1] is open_routing
     assert registered["on_message"][0::2] == ("message", True)
     for name in (
         "on_callback_query",

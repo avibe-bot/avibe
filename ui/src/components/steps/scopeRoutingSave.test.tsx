@@ -67,7 +67,7 @@ describe('users page', () => {
   const larkReads = () => api.getUsers.mock.calls.filter(([platform]) => platform === 'lark').length;
 
   async function openUser() {
-    render(<UserList />);
+    render(<MemoryRouter><UserList /></MemoryRouter>);
     await waitFor(() => expect(larkReads()).toBe(1));
     await userEvent.click(await screen.findByText('Liu'));
   }
