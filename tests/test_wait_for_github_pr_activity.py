@@ -4620,6 +4620,115 @@ def test_coalescing_never_binds_an_existing_or_head_transition_reaction(tmp_path
     assert (rc, output) == (124, "")
 
 
+def _codex_review_state_summary(comment_id=640, *, head=COALESCED_HEAD, status="completed", findings=False,
+                                security=None, sha=None, updated_at="2026-10-27T15:37:00Z"):
+    """Codex's live review summary (avibe-bot/avibe#3040, comment 6445362341): edited in place, its state line names
+    the reviewed commit in full."""
+
+    code_review = {"commit_sha": head if sha is None else sha, "has_any_findings": findings,
+                   "has_unresolved_findings": findings, "status": status}
+    security_review = security or {"commit_sha": None, "has_any_findings": None, "has_unresolved_findings": None,
+                                   "status": None}
+    state = json.dumps({"code_review": code_review, "security_review": security_review}, separators=(",", ":"))
+    shown = {"completed": "✅ **Completed**", "running": "🔄 **Running**"}.get(status, status)
+    return {
+        "id": comment_id,
+        "body": (
+            "<!-- codex-pull-request-review-summary -->\n"
+            f"<!-- codex-review-state:v1 {state} -->\n\n"
+            "## Codex Review Summary\n\n"
+            "This comment shows the latest Codex review activity on this pull request.\n\n"
+            "| Review | Status | Commit | Review trigger |\n"
+            "| --- | --- | --- | --- |\n"
+            f"| 📝 **Code Review** | {shown} <relative-time datetime=\"{updated_at}\">{updated_at}</relative-time> "
+            f"| `{head[:7]}` | New commits |\n\n\n\n"
+            "<details> <summary>ℹ️ About Codex in GitHub</summary>\n<br/>\n\n"
+            "[Your team has set up Codex to review pull requests in this repo]"
+            "(https://chatgpt.com/codex/cloud/settings/general). Reviews are triggered when you\n"
+            "- Open a pull request for review\n- Mark a draft as ready\n"
+            "- Comment \"@codex review\" or \"@codex security review\".\n\n"
+            "Codex reacts with 👀 while any review is running, comments if it has suggestions, and reacts with 👍 "
+            "once all reviews finish with no findings.\n\n</details>"
+        ),
+        "user": {"login": "chatgpt-codex-connector[bot]"},
+        "created_at": "2026-10-27T14:59:16Z",
+        "updated_at": updated_at,
+        "html_url": f"https://github.com/example/repo/pull/153#issuecomment-{comment_id}",
+    }
+
+
+def test_a_pass_seen_with_its_head_change_still_pairs_with_the_later_green_ci(tmp_path):
+    """avibe-bot/avibe#3040: a fix was pushed, and Codex passed it before the waiter's next poll. That poll saw the
+    head change, the summary naming the new head as passed, and the +1 together; CI was still running. The +1 of a
+    head transition is never bound (it names no commit), so the summary's state, which does, must be: otherwise the
+    green CI after it is a half-success forever."""
+
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    running = _codex_review_state_summary(status="running", updated_at="2026-10-27T14:59:21Z")
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    assert _ci_cycle(module, path, [_success_state(pending, issue_comments=[running])], extra_args=options)[:2] == (
+        124, "",
+    )
+
+    new_head = "b" * 40
+    reaction = {"id": 702, "content": "+1", "user": {"login": "chatgpt-codex-connector[bot]"}}
+    passed = _codex_review_state_summary(head=new_head)
+    moved = _success_state(
+        _ci_run(head=new_head, status="in_progress", conclusion=None), head=new_head,
+        issue_comments=[passed], reactions=[reaction],
+    )
+    rc, output, _ = _ci_cycle(module, path, [moved], extra_args=options)
+    assert rc == 0 and "pr_head" in output and "success candidate" not in output
+
+    green = {**moved, "actions": [_ci_run(head=new_head)]}
+    rc, output, _ = _ci_cycle(module, path, [green], delivery="2", extra_args=options)
+    assert rc == 0
+    assert f"CI + Codex review success candidate for avibe-bot/avibe#153@{new_head[:12]}" in output
+    assert "issue_comment #640" in output
+    rc, output, _ = _ci_cycle(module, path, [green], delivery="3", extra_args=options)
+    assert (rc, output) == (124, "")
+
+
+@pytest.mark.parametrize(("summary", "passes"), [
+    ({}, True),
+    ({"status": "running"}, False),
+    ({"status": None}, False),
+    ({"findings": True}, False),
+    ({"findings": None}, False),
+    # The state must name the head in full; the table's short SHA is not the state.
+    ({"sha": COALESCED_HEAD[:7]}, False),
+    ({"sha": "b" * 40}, False),
+    ({"security": {"commit_sha": COALESCED_HEAD, "has_any_findings": None, "status": "running"}}, False),
+    ({"security": {"commit_sha": COALESCED_HEAD, "has_any_findings": True, "status": "completed"}}, False),
+    ({"security": {"commit_sha": COALESCED_HEAD, "has_any_findings": False, "status": "completed"}}, True),
+], ids=["passed", "running", "no-status", "findings", "findings-unknown", "short-sha", "other-head", "security-running", "security-findings",
+        "security-passed"])
+def test_the_review_summary_state_is_a_pass_only_for_the_head_with_every_review_done_clean(
+    tmp_path, summary, passes,
+):
+    module = _load_module()
+    path = tmp_path / "ci.json"
+    pending = _ci_run(head=COALESCED_HEAD, status="in_progress", conclusion=None)
+    _seed_ci_state(module, path, pending, head=COALESCED_HEAD)
+    options = ("--coalesce-success",)
+    comment = _codex_review_state_summary(**summary)
+
+    # A half-success stays quiet; a summary in no known shape (a status-less row) is surfaced, never a pass.
+    rc, output, _ = _ci_cycle(module, path, [_success_state(pending, issue_comments=[comment])], extra_args=options)
+    assert "success candidate" not in output
+    assert (rc, output) == (124, "") or (summary == {"status": None} and "issue_comment #640" in output)
+    rc, output, _ = _ci_cycle(
+        module, path, [_success_state(_ci_run(head=COALESCED_HEAD), issue_comments=[comment])], delivery="2",
+        extra_args=options,
+    )
+    assert ("CI + Codex review success candidate" in output) is passes
+    if passes:
+        assert rc == 0
+
+
 def test_coalescing_resets_old_head_evidence_without_mixing_ci(tmp_path):
     module = _load_module()
     path = tmp_path / "ci.json"
