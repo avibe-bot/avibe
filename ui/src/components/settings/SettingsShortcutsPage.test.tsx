@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { createInstance } from 'i18next';
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { I18nextProvider, initReactI18next } from 'react-i18next';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -23,14 +23,55 @@ const renderPage = () => render(
   </I18nextProvider>,
 );
 
+const nativePetState = () => ({
+  enabled: true,
+  voice_shortcut: 'Control+Alt+Space',
+  toggle_shortcut: 'Control+Alt+KeyM',
+  voice_mode: 'hold',
+  error: null,
+});
+
+const installDesktopPet = (state = nativePetState()) => {
+  Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+  Object.defineProperty(window, '__AVIBE_DESKTOP_PET_SETTINGS__', { configurable: true, value: true });
+  let current = { ...state };
+  const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+    if (command === 'pet_settings') return current;
+    if (command === 'pet_set_shortcut') {
+      current = {
+        ...current,
+        [args?.target === 'voice' ? 'voice_shortcut' : 'toggle_shortcut']: args?.shortcut,
+      };
+      return current;
+    }
+    if (command === 'pet_set_voice_mode') {
+      current = { ...current, voice_mode: args?.mode };
+      return current;
+    }
+    if (command === 'pet_set_enabled') {
+      current = { ...current, enabled: args?.enabled };
+      return current;
+    }
+    return current;
+  });
+  Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke } });
+  return { invoke, state: () => current };
+};
+
 beforeEach(() => {
   window.localStorage.clear();
   Object.defineProperty(navigator, 'platform', { configurable: true, value: 'Linux x86_64' });
+  Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+  Reflect.deleteProperty(window, '__AVIBE_DESKTOP_PET_SETTINGS__');
+  Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
 });
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  Reflect.deleteProperty(window, '__AVIBE_DESKTOP_SHELL__');
+  Reflect.deleteProperty(window, '__AVIBE_DESKTOP_PET_SETTINGS__');
+  Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
 });
 
 describe('SettingsShortcutsPage', () => {
@@ -137,5 +178,73 @@ describe('SettingsShortcutsPage', () => {
     fireEvent.click(voice);
     fireEvent.keyDown(voice, { code: 'Escape', key: 'Escape' });
     expect(voice.getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it.each(['browser', 'older-shell'] as const)('hides Desktop Mini controls in %s', (surface) => {
+    if (surface === 'older-shell') {
+      Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { configurable: true, value: true });
+    }
+    renderPage();
+    expect(screen.queryByText('Desktop Mini')).toBeNull();
+  });
+
+  it('loads Desktop Mini controls only when the shell grants the settings capability', async () => {
+    const native = installDesktopPet();
+    renderPage();
+
+    expect(await screen.findByText('Desktop Mini')).toBeTruthy();
+    expect(native.invoke).toHaveBeenCalledWith('pet_settings');
+    expect(screen.getByRole('button', { name: 'Change Voice conversation shortcut' }).textContent)
+      .toContain('Ctrl+Alt+Space');
+  });
+
+  it('captures global shortcuts and rejects collisions with the other shortcut and Alt+Z', async () => {
+    installDesktopPet();
+    renderPage();
+    await screen.findByText('Desktop Mini');
+    const voice = screen.getByRole('button', { name: 'Change Voice conversation shortcut' });
+
+    fireEvent.click(voice);
+    fireEvent.keyDown(voice, { code: 'KeyM', key: 'm', ctrlKey: true, altKey: true });
+    expect(screen.getByRole('alert').textContent).toBe('Already used by Show or hide Desktop Mini.');
+
+    fireEvent.keyDown(voice, { code: 'KeyZ', key: 'z', altKey: true });
+    expect(screen.getByRole('alert').textContent).toBe('Already used by Chat voice input.');
+  });
+
+  it('keeps the old shortcut visible when native registration refuses a candidate', async () => {
+    const native = installDesktopPet({
+      ...nativePetState(),
+      error: { target: 'voice', shortcut: 'Control+Alt+KeyQ' },
+    });
+    renderPage();
+    await screen.findByText('Desktop Mini');
+
+    const voice = screen.getByRole('button', { name: 'Change Voice conversation shortcut' });
+    expect(voice.textContent).toContain('Ctrl+Alt+Space');
+    expect(screen.getByRole('alert').textContent)
+      .toContain("Couldn't register Ctrl+Alt+Q. Your previous shortcut is still active.");
+    expect(native.state().voice_shortcut).toBe('Control+Alt+Space');
+  });
+
+  it('persists the voice mode and resets native and browser shortcuts together', async () => {
+    const native = installDesktopPet();
+    renderPage();
+    await screen.findByText('Desktop Mini');
+
+    const mode = screen.getByRole('combobox', { name: 'Voice shortcut mode' });
+    fireEvent.change(mode, { target: { value: 'toggle' } });
+    await waitFor(() => expect(native.state().voice_mode).toBe('toggle'));
+
+    const voice = screen.getByRole('button', { name: 'Change Chat voice input shortcut' });
+    fireEvent.click(voice);
+    fireEvent.keyDown(voice, { code: 'KeyV', key: 'v', altKey: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore defaults' }));
+    await waitFor(() => expect(native.state()).toMatchObject({
+      voice_shortcut: 'Control+Alt+Space',
+      toggle_shortcut: 'Control+Alt+KeyM',
+      voice_mode: 'hold',
+    }));
+    expect(readActionShortcuts()).toEqual(defaultActionShortcuts());
   });
 });

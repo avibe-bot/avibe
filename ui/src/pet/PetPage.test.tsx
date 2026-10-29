@@ -828,6 +828,7 @@ describe('PetPage review fixes, round 7', () => {
     act(() => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     });
+    expect(invoke).toHaveBeenCalledWith('pet_reset_voice_shortcut');
     await act(async () => ready.resolve({ binding: 'S', revision: 1, summon_pending: { intent: 'listen' } }));
     await act(async () => new Promise((resolve) => setTimeout(resolve, 20)));
     // The stale pending summon did not reopen the panel.

@@ -262,7 +262,7 @@ fn deep_links_have_native_entry_points_and_the_updates_popover_route() {
     assert!(!source.contains("on_open_url"));
     // The shell evaluates only its fixed Settings and Updates event scripts;
     // nothing page-supplied is ever evaluated.
-    assert_eq!(source.matches(".eval(").count(), 2);
+    assert_eq!(source.matches(".eval(").count(), 3);
     assert!(source.contains("window.eval(open_settings_script())"));
     assert!(source.contains("window.eval(open_updates_script())"));
     assert!(source.contains("avibe:desktop-open-updates"));
@@ -448,6 +448,11 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "desktop_update_check",
         "desktop_update_install",
         "desktop_update_skip",
+        "pet_settings",
+        "pet_set_enabled",
+        "pet_set_shortcut",
+        "pet_set_voice_mode",
+        "pet_reset_voice_shortcut",
         "pet_ready",
         "pet_set_expanded",
         "pet_drag",
@@ -738,6 +743,7 @@ fn the_pet_learns_the_shell_drags_it_from_one_top_level_marker() {
 #[test]
 fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     let source = shipping_source("src/lib.rs");
+    let pet_source = shipping_source("src/pet.rs");
     let builder = source
         .split("fn ensure_main_window(")
         .nth(1)
@@ -760,10 +766,24 @@ fn the_workbench_learns_it_runs_in_the_shell_from_one_top_level_marker() {
     // Show Page content runs in subframes, and WebView2 injects there regardless.
     assert!(marker.contains("if (window.self === window.top)"));
     assert!(marker.contains("Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true })"));
+    assert!(builder.contains(".initialization_script(pet::DESKTOP_PET_SETTINGS_MARKER)"));
+    let settings_marker = pet_source
+        .split("const DESKTOP_PET_SETTINGS_MARKER: &str =")
+        .nth(1)
+        .expect("Desktop Mini settings marker")
+        .split("\";\n")
+        .next()
+        .expect("settings marker literal");
+    assert!(settings_marker.contains("if (window.self === window.top)"));
+    assert!(settings_marker.contains("__AVIBE_DESKTOP_PET_SETTINGS__"));
     let reader = read_to_string(&crate_dir().join("../../ui/src/lib/desktopShell.ts"));
     assert!(
         reader.contains("window.__AVIBE_DESKTOP_SHELL__ === true"),
         "the Workbench must read the same marker the shell defines"
+    );
+    assert!(
+        reader.contains("window.__AVIBE_DESKTOP_PET_SETTINGS__ === true"),
+        "Settings must probe the Desktop Mini settings marker"
     );
 }
 
@@ -1225,10 +1245,23 @@ fn the_pet_and_the_workbench_get_only_their_pet_commands_on_loopback_pages() {
             "allow-pet-settle",
             "allow-pet-hit-regions",
             "allow-pet-set-dismissed",
+            "allow-pet-reset-voice-shortcut",
             "allow-pet-bind",
             "allow-pet-unbind",
             "allow-pet-open",
             "core:window:allow-start-dragging"
+        ])
+    );
+    let settings = read_json(crate_dir().join("capabilities/main-pet-settings.json"));
+    assert_eq!(settings["windows"], serde_json::json!([MAIN_WINDOW]));
+    assert_eq!(settings["local"], false);
+    assert_eq!(
+        settings["permissions"],
+        serde_json::json!([
+            "allow-pet-settings",
+            "allow-pet-set-enabled",
+            "allow-pet-set-shortcut",
+            "allow-pet-set-voice-mode"
         ])
     );
     let workbench = read_json(crate_dir().join("capabilities/main-pet-bind.json"));

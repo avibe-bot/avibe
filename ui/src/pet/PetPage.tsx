@@ -639,6 +639,7 @@ const PetSurface: React.FC = () => {
     const onBlur = () => {
       cancelPendingClick();
       suppressDock();
+      if (!voice.busy) void petBridge.resetVoiceShortcut().catch(() => undefined);
       // Opening Avibe must preserve the history/card list through its key change.
       if (!doubleOpenedRef.current && !voice.busy && !draft.trim()) void setPanel(false);
     };
@@ -654,6 +655,7 @@ const PetSurface: React.FC = () => {
     const onKey = (event: KeyboardEvent) => {
       // Escape also dismisses an IME candidate list; that one is not ours.
       if (event.key !== 'Escape' || isComposingKey(event)) return;
+      void petBridge.resetVoiceShortcut().catch(() => undefined);
       // A history opened above the input closes before the input does.
       if (detailOpen && (voice.busy || composing)) { setDetailOpen(false); void setPanel(false); }
       else if (voice.busy) voice.cancel();

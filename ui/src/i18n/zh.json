@@ -99,8 +99,7 @@
     },
     "pet": {
       "toggle": "显示桌宠",
-      "shortcutMenu": "桌宠快捷键",
-      "shortcutUnavailable": "{{shortcut}} 不可用，可能已被其他应用占用"
+      "shortcutSettings": "快捷键设置…"
     },
     "uninstall": {
       "menuLabel": "卸载 Avibe…",
@@ -469,7 +468,12 @@
       "menuPlacementStandalone": "独立",
       "menuPlacementInline": "内联",
       "autosaved": "修改会自动保存",
-      "languageSaveFailed": "语言已在本机切换，但未能保存到此实例"
+      "languageSaveFailed": "语言已在本机切换，但未能保存到此实例",
+      "desktopMini": {
+        "title": "桌面迷你窗",
+        "description": "在桌面上显示桌宠迷你窗。",
+        "saveFailed": "桌面迷你窗设置未能保存。"
+      }
     },
     "shortcuts": {
       "title": "快捷键",
@@ -484,6 +488,22 @@
         "title": "Show Page 标注模式",
         "description": "进入当前 Show Page 的标注模式。"
       },
+      "desktopMiniTitle": "桌面迷你窗",
+      "desktopMiniDescription": "设置桌面迷你窗的全局快捷键和语音行为。",
+      "desktopMiniVoice": {
+        "title": "语音对话",
+        "description": "使用全局快捷键开始和结束桌面迷你窗语音对话。"
+      },
+      "desktopMiniToggle": {
+        "title": "显示或隐藏桌面迷你窗",
+        "description": "使用全局快捷键显示或隐藏桌面迷你窗。"
+      },
+      "desktopMiniMode": {
+        "title": "语音快捷键模式",
+        "description": "选择按住说话，或按两次快捷键开始和结束。",
+        "hold": "按住说话",
+        "toggle": "按下开始，再按下结束"
+      },
       "change": "修改{{action}}快捷键",
       "pressKeys": "请按快捷键",
       "escapeToCancel": "按 Esc 取消",
@@ -491,6 +511,8 @@
       "reserved": "这个快捷键已被 Avibe 使用。",
       "conflict": "已被{{action}}使用。",
       "saveFailed": "无法在当前浏览器中保存快捷键。",
+      "loading": "正在加载…",
+      "registrationFailed": "无法注册{{shortcut}}，之前的快捷键仍在使用。",
       "modifierLabels": {
         "control": "Control",
         "option": "Option",

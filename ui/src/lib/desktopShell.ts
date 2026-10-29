@@ -7,6 +7,8 @@ declare global {
     readonly __AVIBE_DESKTOP_DRAG__?: true;
     /** The shell supports the desktop pet IPC. Conversation selection is main-only. */
     readonly __AVIBE_DESKTOP_PET__?: true;
+    /** The shell supports Desktop Mini settings IPC on the Workbench page. */
+    readonly __AVIBE_DESKTOP_PET_SETTINGS__?: true;
     /** The macOS shell answers the Computer Use guide's actions. */
     readonly __AVIBE_DESKTOP_COMPUTER_USE__?: true;
     /** The current Workbench handled the shell's update-popover request. */
@@ -47,6 +49,67 @@ export function desktopDragRegion(): '' | undefined {
  */
 export function canShowInDesktopPet(): boolean {
   return isDesktopShell() && window.__AVIBE_DESKTOP_PET__ === true;
+}
+
+/** Probe the settings contract itself so an older shell cannot render a broken control. */
+export function canConfigureDesktopPet(): boolean {
+  return isDesktopShell() && window.__AVIBE_DESKTOP_PET_SETTINGS__ === true;
+}
+
+export const DESKTOP_OPEN_SHORTCUT_SETTINGS_EVENT = 'avibe:desktop-open-shortcut-settings';
+export const DESKTOP_PET_SETTINGS_EVENT = 'avibe:desktop-pet-settings';
+
+export type DesktopPetVoiceMode = 'hold' | 'toggle';
+export type DesktopPetShortcutTarget = 'voice' | 'toggle';
+
+export type DesktopPetShortcutError = {
+  target: DesktopPetShortcutTarget;
+  shortcut: string;
+};
+
+export type DesktopPetSettings = {
+  enabled: boolean;
+  voice_shortcut: string;
+  toggle_shortcut: string;
+  voice_mode: DesktopPetVoiceMode;
+  error: DesktopPetShortcutError | null;
+};
+
+type DesktopPetSettingsListener = (state: DesktopPetSettings) => void;
+
+const desktopPetSettingsInvoke = (): ShellInvoke | null => {
+  if (!canConfigureDesktopPet()) return null;
+  const internals = (window as unknown as { __TAURI_INTERNALS__?: { invoke?: ShellInvoke } }).__TAURI_INTERNALS__;
+  return internals?.invoke ? internals.invoke.bind(internals) : null;
+};
+
+export type DesktopPetSettingsActions = {
+  getState: () => Promise<DesktopPetSettings>;
+  setEnabled: (enabled: boolean) => Promise<DesktopPetSettings>;
+  setShortcut: (target: DesktopPetShortcutTarget, shortcut: string) => Promise<DesktopPetSettings>;
+  setVoiceMode: (mode: DesktopPetVoiceMode) => Promise<DesktopPetSettings>;
+};
+
+export function desktopPetSettingsActions(): DesktopPetSettingsActions | null {
+  const invoke = desktopPetSettingsInvoke();
+  if (!invoke) return null;
+  return {
+    getState: async () => (await invoke('pet_settings')) as DesktopPetSettings,
+    setEnabled: async (enabled) => (await invoke('pet_set_enabled', { enabled })) as DesktopPetSettings,
+    setShortcut: async (target, shortcut) => (
+      await invoke('pet_set_shortcut', { target, shortcut })
+    ) as DesktopPetSettings,
+    setVoiceMode: async (mode) => (await invoke('pet_set_voice_mode', { mode })) as DesktopPetSettings,
+  };
+}
+
+export function listenDesktopPetSettings(handler: DesktopPetSettingsListener): () => void {
+  const listener = (event: Event) => {
+    const state = (event as CustomEvent<DesktopPetSettings>).detail;
+    if (state && typeof state.enabled === 'boolean') handler(state);
+  };
+  window.addEventListener(DESKTOP_PET_SETTINGS_EVENT, listener);
+  return () => window.removeEventListener(DESKTOP_PET_SETTINGS_EVENT, listener);
 }
 
 type ShellInvoke = (command: string, args?: Record<string, unknown>) => Promise<unknown>;

@@ -5,7 +5,7 @@ import type { LucideIcon } from 'lucide-react';
 import clsx from 'clsx';
 
 import { SettingsPageShell } from './SettingsPageShell';
-import { SettingsPanel } from './SettingsPrimitives';
+import { SettingsPanel, ToggleSwitch } from './SettingsPrimitives';
 import { Select } from '../ui/select';
 import { useTheme } from '../../context/ThemeContext';
 import type { ThemeMode } from '../../context/ThemeContext';
@@ -16,6 +16,7 @@ import {
 } from '../../lib/settingsMenuPlacement';
 import type { SettingsMenuPlacement } from '../../lib/settingsMenuPlacement';
 import type { TranslationKey } from '../../i18n/types';
+import { useDesktopPetSettings } from '../../lib/useDesktopPetSettings';
 
 // The 88px miniature is a drawing OF a theme, not a preview rendered IN one:
 // the Light card has to look light while the app is dark. Source Q8zxF1 builds
@@ -233,6 +234,7 @@ export const SettingsGeneralPage: React.FC = () => {
   const { languages, current, select } = useLanguageSelection();
   const { mode, setMode } = useTheme();
   const placement = useSettingsMenuPlacement();
+  const pet = useDesktopPetSettings();
 
   return (
     <SettingsPageShell
@@ -294,6 +296,31 @@ export const SettingsGeneralPage: React.FC = () => {
             className="grid-cols-1 sm:grid-cols-2"
           />
         </SettingsPanel>
+
+        {pet.supported && (
+          <SettingsPanel
+            variant="preference"
+            title={t('settings.general.desktopMini.title')}
+            description={t('settings.general.desktopMini.description')}
+            actions={(
+              <ToggleSwitch
+                enabled={pet.state?.enabled ?? false}
+                disabled={pet.loading || pet.state === null}
+                label={t('settings.general.desktopMini.title')}
+                onClick={() => {
+                  if (!pet.actions || !pet.state) return;
+                  void pet.apply(() => pet.actions!.setEnabled(!pet.state!.enabled));
+                }}
+              />
+            )}
+          >
+            {pet.error && (
+              <p role="alert" className="text-xs text-destructive-ink">
+                {t('settings.general.desktopMini.saveFailed')}
+              </p>
+            )}
+          </SettingsPanel>
+        )}
 
         {/* i3LvLl — the autosave contract, stated once for the whole page. */}
         <div className="flex items-center gap-2 text-[12px] text-muted">
