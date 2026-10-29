@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronRight, Globe, Loader2, Plus, RefreshCw, Search, Terminal, Trash2, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Globe, Loader2, Plus, RefreshCw, Search, Terminal, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
 
 import { useApi } from '../../../context/ApiContext';
@@ -19,6 +19,61 @@ const SOURCE_CHIP: Record<string, string> = {
   opencode: 'border-cyan/40 bg-cyan/10 text-cyan-ink',
 };
 
+function McpToolCard({
+  name,
+  description,
+  expanded,
+  onToggle,
+}: {
+  name: string;
+  description?: string;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const textRef = useRef<HTMLParagraphElement>(null);
+  const [truncated, setTruncated] = useState(false);
+
+  useLayoutEffect(() => {
+    const node = textRef.current;
+    if (!node || expanded) return;
+    setTruncated(node.scrollHeight > node.clientHeight + 1);
+  }, [description, expanded]);
+
+  if (!description) {
+    return (
+      <div className="rounded-[10px] border border-border bg-surface-3 px-3 py-2">
+        <div className="font-mono text-[12px] text-foreground">{name}</div>
+      </div>
+    );
+  }
+
+  const interactive = truncated || expanded;
+  return (
+    <button
+      type="button"
+      disabled={!interactive}
+      aria-expanded={interactive ? expanded : undefined}
+      onClick={() => interactive && onToggle()}
+      className={clsx(
+        'w-full rounded-[10px] border border-border bg-surface-3 px-3 py-2 text-left',
+        interactive ? 'hover:border-border-strong' : 'cursor-default',
+      )}
+    >
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="font-mono text-[12px] text-foreground">{name}</div>
+          <p ref={textRef} className={clsx('text-[11px] text-muted', !expanded && 'line-clamp-2')}>
+            {description}
+          </p>
+        </div>
+        {interactive ? (
+          <ChevronDown className={clsx('mt-0.5 size-3.5 shrink-0 text-muted transition-transform', expanded && 'rotate-180')} />
+        ) : null}
+      </div>
+    </button>
+  );
+}
+
 export const McpHubSection: React.FC = () => {
   const { t } = useTranslation();
   const api = useApi();
@@ -33,6 +88,7 @@ export const McpHubSection: React.FC = () => {
   const [addText, setAddText] = useState('');
   const [addError, setAddError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<McpServerSummary | null>(null);
+  const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
 
   const describe = useCallback(
     (error?: McpError) => (error ? t(`mcpHub.errors.${error.type}`, { defaultValue: error.message, message: error.message }) : t('mcpHub.failed')),
@@ -60,6 +116,10 @@ export const McpHubSection: React.FC = () => {
   }, [search, servers]);
 
   const current = servers.find((item) => item.name === selected) ?? null;
+
+  useEffect(() => {
+    setExpandedTools({});
+  }, [selected]);
 
   const onDiscover = async () => {
     if (!canManage) return;
@@ -203,7 +263,9 @@ export const McpHubSection: React.FC = () => {
                       {t(`mcpHub.source.${server.source ?? 'avibe'}`)}
                     </Badge>
                   </span>
-                  <span className="truncate font-mono text-[11px] text-muted">{server.command || server.url || server.description}</span>
+                  <span className="truncate font-mono text-[11px] text-muted" title={server.command || server.url || server.description || undefined}>
+                    {server.command || server.url || server.description}
+                  </span>
                   <span className="font-mono text-[10px] text-muted">
                     {t('mcpHub.toolMeta', { count: server.toolCount ?? 0, transport: transportLabel(server) })}
                   </span>
@@ -227,7 +289,9 @@ export const McpHubSection: React.FC = () => {
                     {t(`mcpHub.source.${current.source ?? 'avibe'}`)}
                   </Badge>
                 </div>
-                <div className="truncate font-mono text-[11px] text-muted">{current.command || current.url}</div>
+                <div className="truncate font-mono text-[11px] text-muted" title={current.command || current.url || undefined}>
+                  {current.command || current.url}
+                </div>
               </div>
               <Button type="button" variant="ghost" size="icon" className="size-6" onClick={() => setSelected(null)} aria-label={t('common.close')}>
                 <X className="size-3.5" />
@@ -236,10 +300,13 @@ export const McpHubSection: React.FC = () => {
             <div className="flex flex-col gap-1.5">
               <span className="font-mono text-[10px] font-bold uppercase tracking-[0.12em] text-muted">{t('mcpHub.tools')}</span>
               {(current.tools ?? []).map((tool) => (
-                <div key={tool.name} className="rounded-[10px] border border-border bg-surface-3 px-3 py-2">
-                  <div className="font-mono text-[12px] text-foreground">{tool.name}</div>
-                  {tool.description ? <div className="text-[11px] text-muted">{tool.description}</div> : null}
-                </div>
+                <McpToolCard
+                  key={tool.name}
+                  name={tool.name}
+                  description={tool.description}
+                  expanded={Boolean(expandedTools[tool.name])}
+                  onToggle={() => setExpandedTools((prev) => ({ ...prev, [tool.name]: !prev[tool.name] }))}
+                />
               ))}
             </div>
             <div className="rounded-[10px] border border-border bg-surface-3 px-3 py-2.5 font-mono text-[11px] text-muted">
