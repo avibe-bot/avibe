@@ -44,7 +44,7 @@ Usage examples:
 export VIBE_UI_BASE="http://127.0.0.1:5123"
 
 python3 skills/use-avibe/scripts/vibe_api.py GET /health
-python3 skills/use-avibe/scripts/vibe_api.py GET '/settings?platform=slack'
+python3 skills/use-avibe/scripts/vibe_api.py GET '/api/settings?platform=slack'
 python3 skills/use-avibe/scripts/vibe_api.py POST /doctor '{}'
 python3 skills/use-avibe/scripts/vibe_api.py POST /config '{"show_duration":true}'
 python3 skills/use-avibe/scripts/vibe_api.py DELETE '/api/users/U123?platform=slack'
@@ -52,35 +52,15 @@ python3 skills/use-avibe/scripts/vibe_api.py DELETE '/api/users/U123?platform=sl
 
 Payload can be passed as inline JSON, as `@payload.json`, or as `-` to read JSON from stdin.
 
-For scope updates, still fetch and merge first:
+For a scope update, read the scope's `expected_agent_name`, then patch only the fields that change:
 
 ```bash
 API_HELPER="skills/use-avibe/scripts/vibe_api.py"
-
-python3 "$API_HELPER" GET '/settings?platform=slack' > /tmp/slack_settings.json
-python3 - <<'PY'
-import json
-from pathlib import Path
-
-settings = json.loads(Path("/tmp/slack_settings.json").read_text())
-channels = settings.get("channels") or {}
-channels["C123"] = {
-    **channels.get("C123", {}),
-    "enabled": True,
-    "show_message_types": channels.get("C123", {}).get("show_message_types") or ["assistant"],
-    "custom_cwd": channels.get("C123", {}).get("custom_cwd"),
-    "require_mention": channels.get("C123", {}).get("require_mention"),
-    "routing": {
-        **(channels.get("C123", {}).get("routing") or {}),
-        "agent_name": "codex",
-        "model": "gpt-5.4",
-        "reasoning_effort": "high",
-        "codex_model": "gpt-5.4",
-        "codex_reasoning_effort": "high",
-    },
-}
-Path("/tmp/slack_payload.json").write_text(json.dumps({"platform": "slack", "channels": channels}))
-PY
-python3 "$API_HELPER" POST /settings @/tmp/slack_payload.json
-python3 "$API_HELPER" GET '/settings?platform=slack'
+EXPECTED="$(python3 "$API_HELPER" GET '/api/settings?platform=slack' \
+  | python3 -c 'import json,sys; print(json.dumps(((json.load(sys.stdin).get("channels") or {}).get("C123") or {}).get("expected_agent_name")))')"
+python3 "$API_HELPER" PATCH /api/settings/scope "{
+  \"platform\": \"slack\", \"scope\": \"channel\", \"id\": \"C123\",
+  \"changes\": {\"enabled\": true, \"routing\": {\"agent_name\": \"codex\", \"model\": \"gpt-5.4\", \"reasoning_effort\": \"high\"}},
+  \"expected_agent_name\": $EXPECTED
+}"
 ```

@@ -110,16 +110,16 @@ def _build_routing(name: str) -> dict:
         allowed = ", ".join(sorted(SUPPORTED_BACKENDS))
         raise SystemExit(f"{prefix}_BACKEND must be one of: {allowed}")
 
+    # The scope's model and effort apply to the Agent it routes to, so only
+    # that backend's variables can set them.
+    backend_prefix = f"{prefix}_{backend.upper()}" if backend else None
     return {
         "agent_name": backend or None,
+        "model": _optional(f"{backend_prefix}_MODEL") if backend_prefix else None,
+        "reasoning_effort": _optional(f"{backend_prefix}_REASONING_EFFORT") if backend_prefix else None,
         "opencode_agent": _optional(f"{prefix}_OPENCODE_AGENT"),
-        "opencode_model": _optional(f"{prefix}_OPENCODE_MODEL"),
-        "opencode_reasoning_effort": _optional(f"{prefix}_OPENCODE_REASONING_EFFORT"),
         "claude_agent": _optional(f"{prefix}_CLAUDE_AGENT"),
-        "claude_model": _optional(f"{prefix}_CLAUDE_MODEL"),
         "codex_agent": _optional(f"{prefix}_CODEX_AGENT"),
-        "codex_model": _optional(f"{prefix}_CODEX_MODEL"),
-        "codex_reasoning_effort": _optional(f"{prefix}_CODEX_REASONING_EFFORT"),
     }
 
 

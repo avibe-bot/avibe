@@ -67,14 +67,8 @@ export interface ChannelConfig {
     model?: string | null;
     reasoning_effort?: string | null;
     opencode_agent?: string | null;
-    opencode_model?: string | null;
-    opencode_reasoning_effort?: string | null;
     claude_agent?: string | null;
-    claude_model?: string | null;
-    claude_reasoning_effort?: string | null;
     codex_agent?: string | null;
-    codex_model?: string | null;
-    codex_reasoning_effort?: string | null;
   };
   require_mention?: boolean | null;  // null=use global default, true=require, false=don't require
   require_bind?: boolean | null;  // null/false=off, true=only bound users may use this channel
@@ -683,14 +677,8 @@ export const ChannelList: React.FC<ChannelListProps> = ({ data = {}, onNext, onB
       model: null,
       reasoning_effort: null,
       opencode_agent: null,
-      opencode_model: null,
-      opencode_reasoning_effort: null,
       claude_agent: null,
-      claude_model: null,
-      claude_reasoning_effort: null,
       codex_agent: null,
-      codex_model: null,
-      codex_reasoning_effort: null,
     },
     require_mention: null,
     require_bind: null,

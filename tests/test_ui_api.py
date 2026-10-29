@@ -24,7 +24,7 @@ from config.v2_config import (
     V2Config,
 )
 from config import paths
-from config.v2_settings import ChannelSettings, SettingsStore
+from config.v2_settings import LEGACY_ROUTING_ALIASES, ChannelSettings, SettingsStore
 from core.vibe_agents import VibeAgentStore
 from core import chat_discovery
 from core.services import scope_settings
@@ -1450,8 +1450,7 @@ def test_normalize_scope_routing_prefers_canonical_claude_overrides() -> None:
 
     assert result["model"] == "claude-opus-4-8"
     assert result["reasoning_effort"] == "high"
-    assert result["claude_model"] is None
-    assert result["claude_reasoning_effort"] is None
+    assert not LEGACY_ROUTING_ALIASES & set(result)
 
 
 def test_normalize_scope_routing_prefers_canonical_over_round_trip_aliases() -> None:
@@ -1467,8 +1466,7 @@ def test_normalize_scope_routing_prefers_canonical_over_round_trip_aliases() -> 
 
     assert result["model"] == "claude-sonnet-4-6"
     assert result["reasoning_effort"] == "high"
-    assert result["claude_model"] is None
-    assert result["claude_reasoning_effort"] is None
+    assert not LEGACY_ROUTING_ALIASES & set(result)
 
 
 def test_normalize_scope_routing_lifts_aliases_for_builtin_agent_name() -> None:
@@ -1482,6 +1480,7 @@ def test_normalize_scope_routing_lifts_aliases_for_builtin_agent_name() -> None:
 
     assert result["model"] == "claude-opus-4-8"
     assert result["reasoning_effort"] == "max"
+    assert not LEGACY_ROUTING_ALIASES & set(result)
 
 
 def test_normalize_scope_routing_preserves_explicit_canonical_clears() -> None:
@@ -1497,37 +1496,26 @@ def test_normalize_scope_routing_preserves_explicit_canonical_clears() -> None:
 
     assert result["model"] is None
     assert result["reasoning_effort"] is None
-    assert result["claude_model"] is None
-    assert result["claude_reasoning_effort"] is None
+    assert not LEGACY_ROUTING_ALIASES & set(result)
 
 
-def test_normalize_scope_routing_ignores_deprecated_backend_for_alias_lifting() -> None:
-    result = scope_settings.normalize_scope_routing(
-        {
-            "agent_backend": "claude",
-            "claude_model": "claude-opus-4-8",
-            "claude_reasoning_effort": "max",
-        }
-    )
-
-    assert result["model"] is None
-    assert result["reasoning_effort"] is None
-    assert result["claude_model"] == "claude-opus-4-8"
-    assert result["claude_reasoning_effort"] == "max"
-
-
-def test_normalize_scope_routing_preserves_legacy_overrides_without_backend() -> None:
-    result = scope_settings.normalize_scope_routing(
-        {
-            "claude_model": "claude-opus-4-8",
-            "claude_reasoning_effort": "max",
-        }
-    )
+@pytest.mark.parametrize(
+    "routing",
+    [
+        # A deprecated backend key is not an Agent the alias could apply to.
+        {"agent_backend": "claude", "claude_model": "claude-opus-4-8", "claude_reasoning_effort": "max"},
+        # Inheriting the default Agent: no backend owns the alias.
+        {"claude_model": "claude-opus-4-8", "claude_reasoning_effort": "max"},
+        # Another backend's alias.
+        {"agent_name": "codex", "claude_model": "claude-opus-4-8", "claude_reasoning_effort": "max"},
+    ],
+)
+def test_normalize_scope_routing_drops_aliases_the_route_cannot_apply(routing: dict) -> None:
+    result = scope_settings.normalize_scope_routing(routing)
 
     assert result["model"] is None
     assert result["reasoning_effort"] is None
-    assert result["claude_model"] == "claude-opus-4-8"
-    assert result["claude_reasoning_effort"] == "max"
+    assert not LEGACY_ROUTING_ALIASES & set(result)
 
 
 @pytest.mark.parametrize("surface", ["channel", "user", "thread", "im"])

@@ -103,8 +103,20 @@ reaches it through `SettingsManager.change_scope_settings`:
   message (a flat DM or chat), as the IM routing form says. `null` when the
   controller cannot answer. The row then says to send `/new` there.
 
-## Out of scope
+## Routing fields
 
-- Removing the legacy per-backend `<backend>_model` / `<backend>_reasoning_effort`
-  routing fields from the API, the Web types, and the stored routing JSON. They
-  are read-only aliases today; removing them is a separate contract cleanup.
+A scope route is `agent_name`, `model`, `reasoning_effort`, and each CLI
+backend's native agent (`opencode_agent`, `claude_agent`, `codex_agent`).
+The per-backend spellings of the model and effort that older releases wrote
+(`<backend>_model`, `<backend>_reasoning_effort`) are retired:
+
+- They are never stored or returned; a route written again drops them.
+- A stored row still carrying them is read with the alias filling an empty
+  `model` or `reasoning_effort`, after the payload's canonical value and the
+  row's columns, and only when the route's Agent is that built-in backend
+  (`claude_model` on a `claude` route). Any other alias applies to nothing.
+- API input, including `PATCH /api/settings/scope` from a page an older release
+  served, may still send them. An alias fills only a canonical key the request
+  does not name, by the same rule; a request never fails for naming one.
+- The Model Hub credential-address repair still rewrites them in stored rows,
+  where they persist until the row is next saved.

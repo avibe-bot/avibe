@@ -8,7 +8,8 @@ from config import paths
 from config.platform_registry import get_platform_descriptor
 from config.v2_sessions import SessionsStore
 from config.v2_settings import SettingsStore, ChannelSettings, GuildSettings, RoutingSettings, SCOPED_KEY_SEP
-from config.v2_settings import normalize_routing_settings, split_thread_settings_key
+from config.v2_settings import normalize_routing_settings, routing_from_stored_payload, routing_to_dict
+from config.v2_settings import split_thread_settings_key
 from config.v2_settings import UserSettings as BoundUserSettings
 from core.services import scope_settings
 from modules.sessions_facade import SessionsFacade
@@ -21,34 +22,6 @@ DEFAULT_SHOW_MESSAGE_TYPES: List[str] = ["assistant"]
 
 
 ChannelRouting = RoutingSettings
-
-
-def _routing_to_dict(routing: Optional[RoutingSettings]) -> dict:
-    if routing is None:
-        return {}
-    return asdict(normalize_routing_settings(routing))
-
-
-def _routing_from_dict(payload: Optional[dict]) -> RoutingSettings:
-    data = payload or {}
-    return normalize_routing_settings(RoutingSettings(
-        agent_name=data.get("agent_name") or data.get("agent"),
-        model=data.get("model") or data.get("model_override"),
-        reasoning_effort=data.get("reasoning_effort") or data.get("reasoning_effort_override"),
-        opencode_agent=data.get("opencode_agent"),
-        opencode_model=data.get("opencode_model"),
-        opencode_reasoning_effort=data.get("opencode_reasoning_effort"),
-        claude_agent=data.get("claude_agent"),
-        claude_model=data.get("claude_model"),
-        claude_reasoning_effort=data.get("claude_reasoning_effort"),
-        codex_agent=data.get("codex_agent"),
-        codex_model=data.get("codex_model"),
-        codex_reasoning_effort=data.get("codex_reasoning_effort"),
-    ))
-
-
-def _clone_routing(routing: Optional[RoutingSettings]) -> RoutingSettings:
-    return _routing_from_dict(_routing_to_dict(routing))
 
 
 @dataclass
@@ -65,7 +38,7 @@ class UserSettings:
             "custom_cwd": self.custom_cwd,
         }
         if self.channel_routing is not None:
-            result["routing"] = _routing_to_dict(self.channel_routing)
+            result["routing"] = routing_to_dict(self.channel_routing)
         return result
 
     @classmethod
@@ -83,7 +56,7 @@ class UserSettings:
             custom_cwd=payload.get("custom_cwd"),
         )
         if routing_data is not None:
-            settings.channel_routing = _routing_from_dict(routing_data)
+            settings.channel_routing = routing_from_stored_payload(routing_data)
         return settings
 
 
@@ -175,7 +148,7 @@ class SettingsManager:
         return UserSettings(
             show_message_types=self._normalize_show_message_types(channel_settings.show_message_types),
             custom_cwd=channel_settings.custom_cwd,
-            channel_routing=_clone_routing(channel_settings.routing),
+            channel_routing=normalize_routing_settings(channel_settings.routing),
             enabled=channel_settings.enabled,
         )
 
@@ -184,7 +157,7 @@ class SettingsManager:
         return UserSettings(
             show_message_types=self._normalize_show_message_types(bound_user.show_message_types),
             custom_cwd=bound_user.custom_cwd,
-            channel_routing=_clone_routing(bound_user.routing),
+            channel_routing=normalize_routing_settings(bound_user.routing),
             enabled=bound_user.enabled,
         )
 
@@ -488,7 +461,7 @@ class SettingsManager:
         current = self.get_channel_routing(settings_key)
         saved = self.change_scope_settings(
             settings_key,
-            {"routing": asdict(normalize_routing_settings(routing))},
+            {"routing": routing_to_dict(routing)},
             expected_agent_name=current.agent_name if current else None,
         )
         logger.info(
@@ -498,7 +471,7 @@ class SettingsManager:
             saved.routing.model,
             saved.routing.reasoning_effort,
         )
-        return _clone_routing(saved.routing)
+        return normalize_routing_settings(saved.routing)
 
     # ---------------------------------------------
     # Per-channel require_mention management

@@ -44,10 +44,10 @@ from config.v2_settings import (
     UserSettings,
     RoutingSettings,
     _UNSET_AGENT_BINDING,
+    LEGACY_ROUTING_ALIASES,
     normalize_show_message_types,
     _parse_routing,
-    _routing_to_dict,
-    routing_to_compat_dict,
+    routing_to_dict,
 )
 from config.v2_sessions import SessionsStore
 from config.platform_registry import get_platform_descriptor
@@ -5848,7 +5848,8 @@ def _scope_patch_value_error(name: str, value: Any) -> Optional[str]:
     if name == "routing":
         if not isinstance(value, dict):
             return "must be an object"
-        unknown = sorted(set(value) - scope_settings.ROUTING_FIELDS)
+        # Retired per-backend aliases are still accepted from older browser tabs.
+        unknown = sorted(set(value) - scope_settings.ROUTING_FIELDS - LEGACY_ROUTING_ALIASES)
         if unknown:
             return f"has unknown fields: {', '.join(unknown)}"
         if any(item is not None and not isinstance(item, str) for item in value.values()):
@@ -6807,7 +6808,7 @@ def _scope_settings_payload(settings: ChannelSettings, platform: str) -> dict:
         "custom_cwd": settings.custom_cwd,
         "require_mention": settings.require_mention,
         "require_bind": settings.require_bind,
-        "routing": routing_to_compat_dict(settings.routing),
+        "routing": routing_to_dict(settings.routing),
         "expected_agent_name": _agent_binding_expectation(settings),
     }
 
@@ -6820,7 +6821,7 @@ def _user_settings_payload(settings: UserSettings, platform: str) -> dict:
         "enabled": settings.enabled,
         "show_message_types": scope_settings.normalize_scope_message_types(settings.show_message_types, platform),
         "custom_cwd": settings.custom_cwd,
-        "routing": routing_to_compat_dict(settings.routing),
+        "routing": routing_to_dict(settings.routing),
         "expected_agent_name": _agent_binding_expectation(settings),
     }
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from config.v2_settings import ChannelSettings, RoutingSettings, SettingsStore, UserSettings
+from config.v2_settings import LEGACY_ROUTING_ALIASES, ChannelSettings, RoutingSettings, SettingsStore, UserSettings
 from core.vibe_agents import VibeAgentStore
 from storage.settings_service import ScopeAgentUnavailableError, StaleScopeAgentBindingError
 from vibe import api
@@ -89,6 +89,37 @@ def test_a_routing_edit_names_the_agent_its_view_was_based_on(store, stored_agen
         result = _patch("channel", "A", request, expected_agent_name=expected)["settings"]
         assert (result["routing"]["agent_name"], result["routing"]["model"], result["routing"]["reasoning_effort"]) == outcome
         assert result["expected_agent_name"] == outcome[0]
+
+
+@pytest.mark.parametrize(
+    ("routing", "outcome"),
+    [
+        # A page from an older release clears every retired alias beside its edit.
+        ({"model": "m1", "reasoning_effort": None, "codex_model": None, "claude_reasoning_effort": None},
+         ("m1", None)),
+        # An older API caller names the model only by the route's own alias...
+        ({"codex_model": "m2", "codex_reasoning_effort": "high"}, ("m2", "high")),
+        # ...which never overrides a canonical field the edit names.
+        ({"model": "m1", "codex_model": "m2"}, ("m1", None)),
+        # Another backend's alias applies to no field of this route.
+        ({"claude_model": "m2"}, ("m0", None)),
+    ],
+)
+def test_a_routing_edit_still_reads_retired_aliases_but_never_stores_them(store, routing, outcome):
+    agents = VibeAgentStore()
+    agents.create(name="codex", backend="codex")
+    agents.close()
+    store.set_channels_for_platform("slack", {
+        "A": ChannelSettings(enabled=True, routing=RoutingSettings(agent_name="codex", model="m0")),
+    })
+    store.save()
+
+    result = _patch("channel", "A", {"routing": routing}, expected_agent_name="codex")["settings"]["routing"]
+
+    assert (result["agent_name"], result["model"], result["reasoning_effort"]) == ("codex", *outcome)
+    assert not LEGACY_ROUTING_ALIASES & set(result)
+    saved = SettingsStore.get_instance().find_channel("A", platform="slack").routing
+    assert (saved.model, saved.reasoning_effort) == outcome
 
 
 def test_a_topic_override_starts_from_its_channel(store, monkeypatch):
