@@ -86,7 +86,7 @@ def test_json_batch_keeps_valid_neighbors_when_one_entry_is_invalid():
     assert parsed.failures[0]["name"] == "bad"
 
 
-@pytest.mark.parametrize("name", ["hidden.json", ".hidden.json", "--list", "-custom"])
+@pytest.mark.parametrize("name", ["hidden.json", ".hidden.json"])
 def test_hidden_registry_name_is_reserved(name):
     with pytest.raises(McpHubError) as caught:
         parse_provider_json(json.dumps({"mcpServers": {name: {"command": "srv"}}}))

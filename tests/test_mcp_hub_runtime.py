@@ -17,6 +17,8 @@ from core.mcp_hub import repository
 from core.mcp_hub import runtime as mcp_runtime
 from core.mcp_hub.prompt import build_mcp_prompt_block
 from core.mcp_hub.runtime import McpRuntime
+from tests.ui_server_test_helpers import save_config
+
 
 FIXTURE = str(Path(__file__).parent / "fixtures" / "mcp_echo_server.py")
 
@@ -32,7 +34,10 @@ def _server(command: str = sys.executable) -> dict:
 
 
 @pytest.fixture
-def runtime():
+def runtime(tmp_path):
+    config = save_config(tmp_path)
+    config.runtime.default_cwd = str(tmp_path)
+    config.save()
     owner = McpRuntime()
     yield owner
     owner.stop()
@@ -201,7 +206,7 @@ def test_explicit_cwd_difference_is_exists_not_unchanged(generated):
     result = _run(generated, "add", {"servers": [same_command]})
     assert result["ok"] is False
     assert result["failed"][0]["type"] == "exists"
-    assert repository.read_avibe_definition("echo")["transport"].get("cwd") in (None, "")
+    assert repository.read_avibe_definition("echo")["transport"].get("cwd") != "/tmp/mcp-other-cwd"
 
 
 def test_discover_keeps_neighbors_when_one_native_refresh_fails(runtime):
@@ -268,13 +273,6 @@ def test_oversized_result_is_omitted_but_reported_complete(generated, monkeypatc
     result = _run(generated, "call", {"name": "echo", "tool": "echo", "arguments": {"text": "x" * 100}})
     assert result["status"] == "ok" and result["resultOmitted"] == "too_large"
     assert result["result"] == {"isError": False}
-
-
-def test_reader_retries_when_refresh_deletes_the_old_snapshot(generated, monkeypatch):
-    live = repository.read_published("echo")["revision"]
-    reads = iter(["gone-revision", live])
-    monkeypatch.setattr(repository, "_current_revision", lambda name: next(reads))
-    assert repository.read_published("echo")["revision"] == live
 
 
 def test_malformed_avibe_definition_is_omitted_from_the_list(generated):

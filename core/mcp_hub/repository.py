@@ -286,22 +286,18 @@ def _load_revision(name: str, revision: str) -> dict[str, Any]:
 def read_published(name: str) -> Optional[dict[str, Any]]:
     """The active revision as one consistent snapshot, or ``None`` when never generated.
 
-    An unreadable or unknown-format snapshot omits the package. A missing
-    revision directory is retried once against a newer ``current.json``.
+    An unreadable or unknown-format snapshot omits the package.
     """
 
-    for attempt in range(2):
-        revision = _current_revision(name)
-        if revision is None:
-            return None
-        try:
-            return _load_revision(name, revision)
-        except FileNotFoundError:
-            if attempt:
-                raise McpHubError("invalid_package", f"{name}: revision {revision} is incomplete.") from None
-        except (OSError, ValueError) as exc:
-            raise McpHubError("invalid_package", f"{name}: revision {revision} is unreadable: {exc}") from None
-    return None
+    revision = _current_revision(name)
+    if revision is None:
+        return None
+    try:
+        return _load_revision(name, revision)
+    except FileNotFoundError:
+        raise McpHubError("invalid_package", f"{name}: revision {revision} is incomplete.") from None
+    except (OSError, ValueError) as exc:
+        raise McpHubError("invalid_package", f"{name}: revision {revision} is unreadable: {exc}") from None
 
 
 def new_revision_id() -> str:

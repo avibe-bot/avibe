@@ -8,7 +8,7 @@ import pytest
 
 from core.mcp_hub import repository
 from core.mcp_hub.runtime import McpRuntime
-from tests.ui_server_test_helpers import csrf_headers
+from tests.ui_server_test_helpers import csrf_headers, save_config
 from vibe import internal_client
 from vibe.authorization import http_authorization_policy
 from vibe.ui_server import app
@@ -19,7 +19,10 @@ PASTE = json.dumps({"mcpServers": {"echo": {
 
 
 @pytest.fixture
-def owner(monkeypatch):
+def owner(monkeypatch, tmp_path):
+    config = save_config(tmp_path)
+    config.runtime.default_cwd = str(tmp_path)
+    config.save()
     runtime = McpRuntime()
 
     async def forward(operation, payload, **_kwargs):

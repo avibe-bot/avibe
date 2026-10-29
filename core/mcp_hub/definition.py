@@ -45,13 +45,6 @@ def validate_name(name: object) -> str:
             field="name",
             usage=True,
         )
-    if name.startswith("-"):
-        raise McpHubError(
-            "invalid_name",
-            "Server names cannot start with `-`.",
-            field="name",
-            usage=True,
-        )
     return name
 
 

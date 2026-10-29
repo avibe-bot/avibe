@@ -467,6 +467,9 @@ class McpRuntime:
     @staticmethod
     def _save_one(definition: dict[str, Any], replace: bool) -> str:
         name = definition["name"]
+        if definition.get("transport", {}).get("type") == STDIO and not definition["transport"].get("cwd"):
+            definition = json.loads(json.dumps(definition))
+            definition["transport"]["cwd"] = repository.default_cwd()
         existing = None
         try:
             existing = repository.read_definition(name)
