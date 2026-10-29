@@ -121,8 +121,8 @@ The endpoint returns the following stable errors:
 - `desktop_shell_unavailable`
 - `confirmation_required`, with active Agent, Watch, and Task counts
 
-The Owner receives a success response only after the shell has acknowledged the
-same request:
+The Member or Owner caller receives a success response only after the shell has
+acknowledged the same request:
 
 ```json
 {
@@ -149,9 +149,13 @@ permission level.
 
 ## Shell Behaviour
 
-The shell responds to the SSE nudge and polls the file every 30 seconds as a
-fallback. It serializes processing with the existing updater busy gate and
-records `update_in_progress` rather than running two updater operations.
+The shell responds to the SSE nudge, reads the file once when the Runtime
+notification connection starts, and polls it every five seconds as a fallback.
+The fallback interval is intentionally shorter than the Runtime's ten-second
+acknowledgement deadline; a 30-second interval could only discover a request
+after the Runtime had expired it. The shell serializes processing with the
+existing updater busy gate and records `update_in_progress` rather than running
+two updater operations.
 
 For every accepted request it performs a fresh check. A target different from
 the latest authenticated manifest fails with `target_mismatch`.

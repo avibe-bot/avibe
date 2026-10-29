@@ -85,8 +85,6 @@ def test_terminal_status_is_not_reused_and_expired_request_cannot_revive(tmp_pat
         status_path=status_path,
         now=NOW,
     )
-    assert expire_desktop_update_request(first.request["request_id"], path=request_path)
-    assert not expire_desktop_update_request(first.request["request_id"], path=request_path)
 
     status_path.write_text(
         json.dumps(
@@ -113,6 +111,16 @@ def test_terminal_status_is_not_reused_and_expired_request_cannot_revive(tmp_pat
         now=NOW + timedelta(seconds=11),
     )
     assert next_request.request["request_id"] != first.request["request_id"]
+    assert expire_desktop_update_request(next_request.request["request_id"], path=request_path)
+    assert not expire_desktop_update_request(next_request.request["request_id"], path=request_path)
+
+    after_expiry = create_or_reuse_desktop_update_request(
+        "3.2.4-rc.1",
+        request_path=request_path,
+        status_path=status_path,
+        now=NOW + timedelta(seconds=12),
+    )
+    assert after_expiry.request["request_id"] != next_request.request["request_id"]
 
 
 def test_unexpired_shell_status_is_the_idempotency_record(tmp_path) -> None:
@@ -147,3 +155,42 @@ def test_unexpired_shell_status_is_the_idempotency_record(tmp_path) -> None:
     assert decision.reused is True
     assert decision.needs_nudge is False
     assert decision.request["request_id"] == "87dd4212-fb78-4c57-968c-2f699cc04462"
+
+
+def test_awaiting_host_status_cannot_keep_an_expired_request_alive(tmp_path) -> None:
+    request_path = tmp_path / "desktop-update-request.json"
+    status_path = tmp_path / "update-status.json"
+    first = create_or_reuse_desktop_update_request(
+        "3.2.4-rc.1",
+        request_path=request_path,
+        status_path=status_path,
+        now=NOW,
+    )
+    status_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "latest": "3.2.4-rc.1",
+                "has_update": True,
+                "remote_request": {
+                    "request_id": first.request["request_id"],
+                    "target": "3.2.4-rc.1",
+                    "phase": "awaiting_host",
+                    "progress": None,
+                    "error_code": None,
+                    "updated_at": "2026-10-29T02:00:05Z",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    replacement = create_or_reuse_desktop_update_request(
+        "3.2.4-rc.1",
+        request_path=request_path,
+        status_path=status_path,
+        now=NOW + timedelta(minutes=31),
+    )
+
+    assert replacement.reused is False
+    assert replacement.request["request_id"] != first.request["request_id"]

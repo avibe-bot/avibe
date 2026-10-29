@@ -169,6 +169,19 @@ def _remote_in_flight(remote: RemoteDesktopUpdateStatus | None) -> bool:
     return remote is not None and remote["phase"] not in _TERMINAL_PHASES
 
 
+def _awaiting_host_expired(
+    remote: RemoteDesktopUpdateStatus | None,
+    existing: DesktopUpdateRequest | None,
+    now: datetime,
+) -> bool:
+    if remote is None or remote["phase"] != "awaiting_host":
+        return False
+    if existing is not None and existing["request_id"] == remote["request_id"]:
+        return not _request_pending(existing, now)
+    updated_at = _parse_timestamp(remote["updated_at"])
+    return updated_at is not None and updated_at + UPDATE_REQUEST_TTL <= now
+
+
 def create_or_reuse_desktop_update_request(
     target: str,
     *,
@@ -186,10 +199,11 @@ def create_or_reuse_desktop_update_request(
     with _REQUEST_LOCK:
         status = read_desktop_update_status(status_path)
         remote = status["remote_request"] if status else None
-        if _remote_in_flight(remote):
+        existing = read_desktop_update_request(path)
+        awaiting_expired = _awaiting_host_expired(remote, existing, moment)
+        if _remote_in_flight(remote) and not awaiting_expired:
             if remote["target"] != normalized_target:
                 raise DesktopUpdateRequestError("update_in_progress")
-            existing = read_desktop_update_request(path)
             if existing is not None and existing["request_id"] == remote["request_id"]:
                 return RequestDecision(existing, reused=True, needs_nudge=False)
             # The shell has already acknowledged this request. Its status is the
@@ -207,8 +221,17 @@ def create_or_reuse_desktop_update_request(
                 needs_nudge=False,
             )
 
-        existing = read_desktop_update_request(path)
-        if existing is not None and _request_pending(existing, moment):
+        terminal_request_id = (
+            remote["request_id"]
+            if remote is not None
+            and (remote["phase"] in _TERMINAL_PHASES or awaiting_expired)
+            else None
+        )
+        if (
+            existing is not None
+            and _request_pending(existing, moment)
+            and existing["request_id"] != terminal_request_id
+        ):
             if existing["target"] != normalized_target:
                 raise DesktopUpdateRequestError("update_in_progress")
             return RequestDecision(existing, reused=True, needs_nudge=True)
