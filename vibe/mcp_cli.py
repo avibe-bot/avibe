@@ -75,6 +75,9 @@ def main(argv: list[str]) -> int:
 
 
 def add_main(argv: list[str]) -> int:
+    if argv and argv[0] in {"-h", "--help"}:
+        print(USAGE, end="")
+        return 0
     denied = _admit("owner")
     if denied is not None:
         return denied
@@ -85,6 +88,9 @@ def add_main(argv: list[str]) -> int:
 
 
 def discover_main(argv: list[str]) -> int:
+    if argv and argv[0] in {"-h", "--help"}:
+        print("usage: vibe mcp-discover\n", end="")
+        return 0
     denied = _admit("owner")
     if denied is not None:
         return denied

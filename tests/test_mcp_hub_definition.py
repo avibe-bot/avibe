@@ -11,8 +11,6 @@ import json
 import pytest
 
 from core.mcp_hub.definition import (
-    masked_definition,
-    merge_preserved_secrets,
     parse_add_argv,
     parse_provider_json,
 )
@@ -88,10 +86,10 @@ def test_json_batch_keeps_valid_neighbors_when_one_entry_is_invalid():
     assert parsed.failures[0]["name"] == "bad"
 
 
-@pytest.mark.parametrize("name", ["hidden.json", ".hidden.json"])
+@pytest.mark.parametrize("name", ["hidden.json", ".hidden.json", "--list", "-custom"])
 def test_hidden_registry_name_is_reserved(name):
     with pytest.raises(McpHubError) as caught:
-        parse_add_argv([name, "--", "srv"])
+        parse_provider_json(json.dumps({"mcpServers": {name: {"command": "srv"}}}))
     assert caught.value.type == "invalid_name"
 
 
@@ -134,16 +132,3 @@ def test_json_stdin_and_replace():
     assert [item["name"] for item in definitions] == ["a", "b"] and replace is True
 
 
-def test_masking_hides_values_and_empty_submission_keeps_stored_secret():
-    stored = parse_provider_json(json.dumps({"mcpServers": {"docs": {
-        "url": "https://example.invalid/mcp", "headers": {"Authorization": "Bearer real", "X-Keep": "v"}}}}))[0]
-    masked = masked_definition(stored)
-    assert masked["transport"]["headers"] == {"Authorization": "", "X-Keep": ""}
-    assert masked["transport"]["has_headers"] == {"Authorization": True, "X-Keep": True}
-    assert "real" not in json.dumps(masked)
-
-    # The page resubmits the whole map: blank keeps, a new value replaces, omission deletes.
-    submitted = parse_provider_json(json.dumps({"mcpServers": {"docs": {
-        "url": "https://example.invalid/mcp", "headers": {"Authorization": "", "X-New": "n"}}}}))[0]
-    merged = merge_preserved_secrets(submitted, stored)
-    assert merged["transport"]["headers"] == {"Authorization": "Bearer real", "X-New": "n"}

@@ -192,23 +192,6 @@ def write_definition(definition: dict[str, Any]) -> str:
     return AVIBE
 
 
-def read_enabled(name: str) -> bool:
-    """Every registered server is enabled; leftover ``state.json`` flags are ignored."""
-
-    return read_published(name) is not None
-
-
-def write_enabled(name: str, enabled: bool) -> None:
-    """No-op: enable/disable is not a Hub state."""
-
-    _ = name, enabled
-
-
-def remember_source(name: str, source: str) -> None:
-    _ = name, source
-
-
-
 def remove_package(name: str) -> str:
     """Avibe source: delete artifacts. Native source: hide in Avibe only."""
 
@@ -295,69 +278,26 @@ def _load_revision(name: str, revision: str) -> dict[str, Any]:
         "tools": _read_json(directory / "tools.json"),
         "commands": _read_json(directory / "commands.json"),
     }
-    if not _well_formed(published):
+    if not isinstance(published["definition"], dict) or not isinstance(published["tools"], list) or not isinstance(published["commands"], list):
         raise McpHubError("invalid_package", f"{name}: revision {revision} has an unsupported shape.")
     return published
-
-
-_FLAG_FIELDS = {"flag": str, "key": str, "kind": str, "required": bool, "description": str}
-
-
-def _well_formed(published: dict[str, Any]) -> bool:
-    """The fields every reader dereferences, so a bad revision isolates its package."""
-
-    manifest, definition = published["manifest"], published["definition"]
-    tools, commands = published["tools"], published["commands"]
-    if not isinstance(manifest.get("serverInfo", {}), dict) or not isinstance(definition, dict):
-        return False
-    transport = definition.get("transport")
-    if not isinstance(transport, dict):
-        return False
-    if transport.get("type") == "stdio":
-        if not isinstance(transport.get("command"), str) or not isinstance(transport.get("args", []), list):
-            return False
-    elif transport.get("type") != "streamable_http" or not isinstance(transport.get("url"), str):
-        return False
-    if not isinstance(tools, list) or not isinstance(commands, list) or len(tools) != len(commands):
-        return False
-    for tool, command in zip(tools, commands):
-        if not isinstance(tool, dict) or not isinstance(command, dict) or not isinstance(tool.get("name"), str):
-            return False
-        if command.get("name") != tool["name"] or not isinstance(command.get("validated"), bool):
-            return False
-        if not isinstance(command.get("description"), str) or not all(
-            isinstance(command.get(field), list) and all(isinstance(key, str) for key in command[field])
-            for field in ("jsonOnlyKeys", "requiredJsonOnly")
-        ):
-            return False
-        flags = command.get("flags")
-        if not isinstance(flags, list) or not all(
-            isinstance(flag, dict) and all(isinstance(flag.get(k), t) for k, t in _FLAG_FIELDS.items())
-            for flag in flags
-        ):
-            return False
-    return True
 
 
 def read_published(name: str) -> Optional[dict[str, Any]]:
     """The active revision as one consistent snapshot, or ``None`` when never generated.
 
-    A file missing mid-read means a concurrent publish pruned the revision we
-    pointed at, so ``current.json`` is reread once.
+    An unreadable or unknown-format snapshot omits the package.
     """
 
-    for attempt in range(2):
-        revision = _current_revision(name)
-        if revision is None:
-            return None
-        try:
-            return _load_revision(name, revision)
-        except FileNotFoundError:
-            if attempt:
-                raise McpHubError("invalid_package", f"{name}: revision {revision} is incomplete.") from None
-        except ValueError as exc:
-            raise McpHubError("invalid_package", f"{name}: revision {revision} is unreadable: {exc}") from None
-    return None
+    revision = _current_revision(name)
+    if revision is None:
+        return None
+    try:
+        return _load_revision(name, revision)
+    except FileNotFoundError:
+        raise McpHubError("invalid_package", f"{name}: revision {revision} is incomplete.") from None
+    except (OSError, ValueError) as exc:
+        raise McpHubError("invalid_package", f"{name}: revision {revision} is unreadable: {exc}") from None
 
 
 def new_revision_id() -> str:
@@ -366,12 +306,11 @@ def new_revision_id() -> str:
 
 
 def publish(name: str, *, definition: dict[str, Any], manifest: dict[str, Any], tools: list, commands: list) -> str:
-    """Write a full revision, then switch ``current.json``; keep current + previous."""
+    """Write one published snapshot, then switch ``current.json``."""
 
     _ensure_root()
     directory = package_dir(name)
     ensure_private_directory(directory)
-    previous = _current_revision(name)
     revision = new_revision_id()
     target = directory / "revisions" / revision
     ensure_private_directory(directory / "revisions")
@@ -381,9 +320,8 @@ def publish(name: str, *, definition: dict[str, Any], manifest: dict[str, Any], 
     _write_json(target / "commands.json", commands)
     _write_json(target / "manifest.json", {"formatVersion": FORMAT_VERSION, **manifest})
     _write_json(directory / "current.json", {"revision": revision})
-    keep = {revision, previous}
     for entry in (directory / "revisions").iterdir():
-        if entry.name not in keep:
+        if entry.name != revision:
             shutil.rmtree(entry, ignore_errors=True)
     return revision
 
@@ -493,8 +431,6 @@ def list_packages() -> list[dict[str, Any]]:
 
 
 
-def enabled_generated() -> list[dict[str, Any]]:
-    return list_packages()
 
 
 def default_cwd() -> str:

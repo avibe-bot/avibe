@@ -90,10 +90,10 @@ def test_batch_add_registers_neighbors_and_rolls_back_the_failure(runtime):
     assert repository.summarize("echo")["source"] == "avibe"
 
 
-def test_refresh_keeps_current_plus_previous(generated):
+def test_refresh_keeps_one_published_snapshot(generated):
     revisions = [_run(generated, "refresh", {"name": "echo"})["revision"] for _ in range(3)]
     kept = sorted(path.name for path in (repository.package_dir("echo") / "revisions").iterdir())
-    assert kept == sorted(revisions[-2:])
+    assert kept == [revisions[-1]]
 
 
 def test_failed_replace_add_restores_previous_avibe_definition(generated):
@@ -243,13 +243,6 @@ def test_oversized_result_is_omitted_but_reported_complete(generated, monkeypatc
     assert result["result"] == {"isError": False}
 
 
-def test_reader_rereads_current_when_its_revision_was_pruned(generated, monkeypatch):
-    live = repository.read_published("echo")["revision"]
-    reads = iter(["gone-revision", live])
-    monkeypatch.setattr(repository, "_current_revision", lambda name: next(reads))
-    assert repository.read_published("echo")["revision"] == live
-
-
 def test_malformed_avibe_definition_is_omitted_from_the_list(generated):
     path = repository.package_dir("broken") / "definition.json"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -257,13 +250,6 @@ def test_malformed_avibe_definition_is_omitted_from_the_list(generated):
     names = {item["name"] for item in repository.list_packages()}
     assert "echo" in names
     assert "broken" not in names
-
-
-def test_unreadable_leftover_state_is_ignored(generated):
-    state = repository.package_dir("echo") / "state.json"
-    state.write_text("{not json")
-    assert repository.summarize("echo")["name"] == "echo"
-    assert state.read_text() == "{not json"
 
 
 def test_future_format_revision_is_not_listed(generated):
@@ -299,6 +285,18 @@ def test_cli_treats_help_as_a_server_name(generated, capsys):
     assert "echo  Echo text back" in capsys.readouterr().out
     assert mcp_cli.main(["-h"]) == 0
     assert "usage:" in capsys.readouterr().out
+
+
+def test_mcp_add_and_discover_are_listed_and_print_usage(capsys):
+    from vibe import cli, mcp_cli
+
+    parser = cli.build_parser()
+    help_text = parser.format_help()
+    assert "mcp-add" in help_text and "mcp-discover" in help_text
+    assert mcp_cli.add_main(["--help"]) == 0
+    assert "vibe mcp-add" in capsys.readouterr().out
+    assert mcp_cli.discover_main(["--help"]) == 0
+    assert "vibe mcp-discover" in capsys.readouterr().out
 
 
 def test_mcp_add_does_not_treat_json_stdin_after_separator_as_avibe_option(monkeypatch):
@@ -391,9 +389,9 @@ def test_streamable_http_generate_and_call(runtime):
                 if attempt.connect_ex(("127.0.0.1", port)) == 0:
                     break
             time.sleep(0.1)
-        _run(runtime, "save", {"servers": [{"name": "web", "server": {
+        _run(runtime, "add", {"servers": [{"name": "web", "server": {
             "type": "http", "url": f"http://127.0.0.1:{port}/mcp", "headers": {"X-Test": "v"}}}]})
-        assert _run(runtime, "generate", {"name": "web"})["toolCount"] == 7
+        assert _run(runtime, "refresh", {"name": "web"})["toolCount"] == 7
         for text in ("one", "two"):
             result = _run(runtime, "call", {"name": "web", "tool": "echo", "arguments": {"text": text},
                                             "sessionId": "ses-http"})
@@ -406,29 +404,16 @@ def test_streamable_http_generate_and_call(runtime):
         server.wait(timeout=10)
 
 
-@pytest.mark.parametrize(
-    ("filename", "content"),
-    [
-        ("tools.json", {"not": "a list"}),
-        ("commands.json", [{"name": "add"}]),
-        *[("commands.json", field) for field in ("description", "jsonOnlyKeys", "requiredJsonOnly")],
-        ("definition.json", {"transport": {"type": "stdio"}}),
-    ],
-)
-def test_malformed_revision_file_disables_only_that_package(generated, capsys, filename, content):
+def test_malformed_revision_file_disables_only_that_package(generated, capsys):
     from vibe import mcp_cli
 
-    _run(generated, "save", {"servers": [{**_server(), "name": "other"}]})
+    _run(generated, "add", {"servers": [{**_server(), "name": "other"}]})
     revision = repository.read_published("echo")["revision"]
-    path = repository.package_dir("echo") / "revisions" / revision / filename
-    if isinstance(content, str):  # drop one field from every published command
-        commands = json.loads(path.read_text())
-        for command in commands:
-            del command[content]
-        content = commands
-    path.write_text(json.dumps(content))
+    path = repository.package_dir("echo") / "revisions" / revision / "tools.json"
+    path.write_text("{not json")
     names = {item["name"] for item in repository.list_packages()}
     assert "echo" not in names
+    assert "other" in names
     assert mcp_cli.main(["--list"]) == 0
     assert mcp_cli.main(["echo", "--list"]) == 1
     call = _run(generated, "call", {"name": "echo", "tool": "echo", "arguments": {"text": "x"}})

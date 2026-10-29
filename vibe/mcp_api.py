@@ -10,7 +10,7 @@ import asyncio
 from typing import Any
 
 from core.mcp_hub import repository
-from core.mcp_hub.definition import masked_definition, parse_provider_json, provider_entry
+from core.mcp_hub.definition import parse_provider_json, provider_entry
 from core.mcp_hub.errors import McpHubError
 
 _STATUS = {"usage": 400, "not_found": 404, "exists": 409, "unavailable": 503, "unknown_outcome": 502}
@@ -78,7 +78,6 @@ async def detail(name: str) -> dict[str, Any]:
         published = repository.read_published(name)
         payload: dict[str, Any] = {"ok": True, "server": summary}
         if published is not None:
-            payload["definition"] = masked_definition(published["definition"])
             payload["tools"] = [
                 {"name": tool.get("name"), "description": tool.get("description") or ""}
                 for tool in published["tools"]

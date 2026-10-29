@@ -23,7 +23,7 @@ def build_mcp_prompt_block() -> Optional[RenderedPromptBlock]:
     from vibe.i18n import t
 
     try:
-        packages = repository.enabled_generated()
+        packages = repository.list_packages()
     except Exception:
         logger.warning("MCP prompt index unavailable", exc_info=True)
         return None

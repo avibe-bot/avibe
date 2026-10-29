@@ -45,6 +45,13 @@ def validate_name(name: object) -> str:
             field="name",
             usage=True,
         )
+    if name.startswith("-"):
+        raise McpHubError(
+            "invalid_name",
+            "Server names cannot start with `-`.",
+            field="name",
+            usage=True,
+        )
     return name
 
 
@@ -310,43 +317,6 @@ def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
         if cwd is not None:
             server["cwd"] = cwd
     return [definition_from_provider(name, server, description=description)], replace
-
-
-# ---------------------------------------------------------------------------
-# Masking and edits (UI/API never return env/header values)
-# ---------------------------------------------------------------------------
-
-_SECRET_MAPS = ("env", "headers")
-
-
-def masked_definition(definition: dict[str, Any]) -> dict[str, Any]:
-    """Copy of a definition with env/header values blanked and ``has_<field>`` metadata."""
-
-    transport = dict(definition.get("transport") or {})
-    for field in _SECRET_MAPS:
-        values = transport.get(field)
-        if isinstance(values, dict):
-            transport[field] = {key: "" for key in values}
-            transport[f"has_{field}"] = {key: bool(value) for key, value in values.items()}
-    return {**definition, "transport": transport}
-
-
-def merge_preserved_secrets(submitted: dict[str, Any], existing: Optional[dict[str, Any]]) -> dict[str, Any]:
-    """Apply the config-secret rule: an empty submitted value keeps the stored one.
-
-    Maps are submitted whole, so keys left out are deleted.
-    """
-
-    if not existing:
-        return submitted
-    old = existing.get("transport") or {}
-    new = dict(submitted.get("transport") or {})
-    for field in _SECRET_MAPS:
-        values = new.get(field)
-        stored = old.get(field)
-        if isinstance(values, dict) and isinstance(stored, dict):
-            new[field] = {key: (stored.get(key, "") if value == "" else value) for key, value in values.items()}
-    return {**submitted, "transport": new}
 
 
 def provider_entry(definition: dict[str, Any]) -> dict[str, Any]:

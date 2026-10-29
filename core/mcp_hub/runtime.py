@@ -24,7 +24,7 @@ import anyio
 
 from core.mcp_hub import commands as mcp_commands
 from core.mcp_hub import native, repository
-from core.mcp_hub.definition import HTTP, STDIO, definition_from_provider, merge_preserved_secrets
+from core.mcp_hub.definition import HTTP, STDIO, definition_from_provider
 from core.mcp_hub.errors import McpHubError
 
 logger = logging.getLogger(__name__)
@@ -44,8 +44,6 @@ ENVELOPE_SCHEMA_VERSION = 1
 # Codes the SDK synthesizes locally when no server answer arrived (the
 # connection closed or its own timeout fired): the tool may have acted.
 _CLIENT_SIDE_CODES = {-32000, -32001}  # CONNECTION_CLOSED, REQUEST_TIMEOUT
-# Saves and removes rewrite whole native config files shared by every package.
-_NATIVE_FILES = ""
 _CALLBACK_REJECTIONS = {"Sampling not supported", "Elicitation not supported", "List roots not supported"}
 
 
@@ -377,9 +375,7 @@ class McpRuntime:
 
     async def handle(self, operation: str, payload: dict[str, Any]) -> tuple[int, bytes]:
         handlers = {
-            "save": self._save,
             "add": self._add,
-            "generate": self._refresh,
             "refresh": self._refresh,
             "discover": self._discover_all,
             "remove": self._remove,
@@ -398,19 +394,15 @@ class McpRuntime:
 
     # -- management -----------------------------------------------------------
 
-    async def _save(self, payload: dict[str, Any]) -> bytes:
-        return await self._add(payload)
-
     async def _add(self, payload: dict[str, Any]) -> bytes:
         replace = payload.get("replace") is True
-        preserve = payload.get("preserveSecrets") is True
         definitions = [
             definition_from_provider(item.get("name"), item.get("server"), description=item.get("description"))
             for item in payload.get("servers") or []
         ]
         if not definitions:
             raise McpHubError("usage", "No servers to save.", usage=True)
-        results = await asyncio.gather(*(self._add_one(item, replace, preserve) for item in definitions))
+        results = await asyncio.gather(*(self._add_one(item, replace) for item in definitions))
         added = [item for item in results if item.get("status") == "added"]
         unchanged = [item for item in results if item.get("status") == "unchanged"]
         failed = [item for item in results if item.get("status") == "failed"]
@@ -426,7 +418,7 @@ class McpRuntime:
             body["error"] = {"type": "add_partial", "message": summary, "failed": failed}
         return _dumps(body)
 
-    async def _add_one(self, definition: dict[str, Any], replace: bool, preserve: bool) -> dict[str, Any]:
+    async def _add_one(self, definition: dict[str, Any], replace: bool) -> dict[str, Any]:
         name = definition["name"]
         async with self._lock(name):
             previous = None
@@ -435,7 +427,7 @@ class McpRuntime:
             try:
                 previous = await asyncio.to_thread(repository.read_avibe_definition, name)
                 was_hidden = name in await asyncio.to_thread(repository.hidden_names)
-                outcome = await asyncio.to_thread(self._save_one, definition, replace, preserve)
+                outcome = await asyncio.to_thread(self._save_one, definition, replace)
                 if outcome == "unchanged":
                     return {"name": name, "status": "unchanged"}
                 if outcome == "exists":
@@ -473,7 +465,7 @@ class McpRuntime:
         }
 
     @staticmethod
-    def _save_one(definition: dict[str, Any], replace: bool, preserve: bool) -> str:
+    def _save_one(definition: dict[str, Any], replace: bool) -> str:
         name = definition["name"]
         existing = None
         try:
@@ -491,13 +483,6 @@ class McpRuntime:
                 return "unchanged"
             if listed:
                 return "exists"
-        if exists and preserve:
-            try:
-                definition = merge_preserved_secrets(definition, repository.read_definition(name))
-            except McpHubError:
-                published = repository.read_published(name)
-                if published is not None:
-                    definition = merge_preserved_secrets(definition, published["definition"])
         repository.write_definition(definition)
         return name
 
@@ -577,22 +562,23 @@ class McpRuntime:
         for name in stale:
             await asyncio.to_thread(repository.delete_artifacts, name)
         async def one(name: str) -> dict[str, Any]:
-            try:
-                body = json.loads(await self._refresh({"name": name, "waitStdio": True}))
-            except McpHubError as cop:
-                logger.warning("MCP discover %s failed: %s", name, cop.message)
+            async with self._lock(name):
+                try:
+                    body = json.loads(await self._refresh({"name": name, "waitStdio": True, "locked": True}))
+                except McpHubError as cop:
+                    logger.warning("MCP discover %s failed: %s", name, cop.message)
+                    await asyncio.to_thread(repository.unlist, name)
+                    return {"name": name, "status": "failed", "error": cop.message}
+                except Exception as cop:  # noqa: BLE001
+                    logger.warning("MCP discover %s failed: %s", name, cop)
+                    await asyncio.to_thread(repository.unlist, name)
+                    return {"name": name, "status": "failed", "error": str(cop)}
+                if body.get("ok"):
+                    return {"name": name, "status": "registered", "toolCount": body.get("toolCount")}
+                error = (body.get("error") or {}).get("message") or "failed"
+                logger.warning("MCP discover %s failed: %s", name, error)
                 await asyncio.to_thread(repository.unlist, name)
-                return {"name": name, "status": "failed", "error": cop.message}
-            except Exception as cop:  # noqa: BLE001
-                logger.warning("MCP discover %s failed: %s", name, cop)
-                await asyncio.to_thread(repository.unlist, name)
-                return {"name": name, "status": "failed", "error": str(cop)}
-            if body.get("ok"):
-                return {"name": name, "status": "registered", "toolCount": body.get("toolCount")}
-            error = (body.get("error") or {}).get("message") or "failed"
-            logger.warning("MCP discover %s failed: %s", name, error)
-            await asyncio.to_thread(repository.unlist, name)
-            return {"name": name, "status": "failed", "error": error}
+                return {"name": name, "status": "failed", "error": error}
 
         return list(await asyncio.gather(*(one(name) for name in sorted(names))))
 

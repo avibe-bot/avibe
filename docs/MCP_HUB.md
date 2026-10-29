@@ -49,7 +49,7 @@ vibe mcp-add --json-stdin < servers.json
 ## Delete
 
 - Avibe source: remove the definition and artifacts.
-- Native source: hide in Avibe (`<avibe-home>/mcp/hidden.json`); the native file is unchanged.
+- Native source: hide in Avibe (`<avibe-home>/mcp/.hidden.json`); the native file is unchanged.
 
 ```bash
 vibe mcp docs --remove
@@ -57,7 +57,7 @@ vibe mcp docs --remove
 
 ## Credentials are plaintext
 
-Env and header values are stored as given. The Web UI and API never return these values. URLs with `user:pass@` are rejected; put credentials in an `Authorization` header.
+Env and header values are stored as given. URLs with `user:pass@` are rejected; put credentials in an `Authorization` header.
 
 ## Call tools
 

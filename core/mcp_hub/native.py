@@ -6,11 +6,10 @@ Hub reads the union of:
 - Codex ``$CODEX_HOME/config.toml`` (default ``~/.codex``) ``[mcp_servers.<name>]``
 - OpenCode ``~/.config/opencode/opencode.json`` ``mcp``
 
-and writes add/save/remove back to them. Nothing is copied into
-``<avibe-home>/mcp``. For a name present in several files the first source in
-that order is canonical. New servers go to Claude, except ``cwd`` (which only
-Codex can express) sends them to Codex. Avibe sessions never load these servers
-natively; see :func:`codex_disable_overrides` and :func:`opencode_disabled_mcp`.
+as a read-only union. Avibe-added servers live under ``<avibe-home>/mcp``.
+For a name present in several files the first source in that order is canonical.
+Avibe sessions never load these servers natively; see
+:func:`codex_disable_overrides` and :func:`opencode_disabled_mcp`.
 """
 
 from __future__ import annotations
@@ -22,8 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from config.atomic_io import write_atomic
-from core.mcp_hub.definition import HTTP, STDIO, definition_from_provider
+from core.mcp_hub.definition import definition_from_provider
 from core.mcp_hub.errors import McpHubError
 
 logger = logging.getLogger(__name__)
@@ -91,29 +89,12 @@ def _load(source: str) -> tuple[Path, dict[str, Any]]:
     return path, data
 
 
-def _store(source: str, path: Path, data: dict[str, Any]) -> None:
-    if source == CODEX:
-        from vibe.codex_config import _dump_toml
-
-        text = _dump_toml(data)
-    else:
-        text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-    mode = (path.stat().st_mode & 0o777) if path.exists() else 0o600
-    write_atomic(path, text, follow_symlinks=True, mode=mode)
-
 
 def _servers(source: str, data: dict[str, Any]) -> dict[str, Any]:
     key = {CLAUDE: "mcpServers", CODEX: "mcp_servers", OPENCODE: "mcp"}[source]
     value = data.get(key)
     return value if isinstance(value, dict) else {}
 
-
-def _servers_for_write(source: str, data: dict[str, Any]) -> dict[str, Any]:
-    key = {CLAUDE: "mcpServers", CODEX: "mcp_servers", OPENCODE: "mcp"}[source]
-    value = data.setdefault(key, {})
-    if not isinstance(value, dict):
-        raise McpHubError("invalid_native_config", f"{source} config field {key} is not an object.")
-    return value
 
 
 # ---------------------------------------------------------------------------
@@ -177,67 +158,6 @@ def _resolve_cwd(path: Path, cwd: str) -> str:
     expanded = os.path.expanduser(cwd)
     return expanded if os.path.isabs(expanded) else os.path.normpath(os.path.join(path.parent, expanded))
 
-
-def _native_cwd(path: Path, cwd: str, kept: dict[str, Any]) -> str:
-    """The value to write back: the user's own spelling while it still means the same directory."""
-
-    raw = kept.get("cwd")
-    return raw if isinstance(raw, str) and raw.strip() and _resolve_cwd(path, raw) == cwd else cwd
-
-
-def _to_native(source: str, definition: dict[str, Any], previous: Any, path: Path) -> dict[str, Any]:
-    transport = definition["transport"]
-    kept = previous if isinstance(previous, dict) else {}
-    # Claude/OpenCode keep a cwd only where the user already wrote one (see write()).
-    cwd = _native_cwd(path, transport["cwd"], kept) if transport.get("cwd") else None
-    if source == CLAUDE:
-        if transport["type"] == HTTP:
-            entry: dict[str, Any] = {"type": "http", "url": transport["url"]}
-            if transport.get("headers"):
-                entry["headers"] = transport["headers"]
-            return entry
-        entry = {"type": "stdio", "command": transport["command"], "args": list(transport.get("args") or [])}
-        if transport.get("env"):
-            entry["env"] = transport["env"]
-        if cwd:
-            entry["cwd"] = cwd
-        return entry
-    if source == CODEX:
-        entry = {key: value for key, value in kept.items() if key in _CODEX_KEPT}
-        if transport["type"] == HTTP:
-            entry["url"] = transport["url"]
-            if transport.get("headers"):
-                entry["http_headers"] = transport["headers"]
-            return entry
-        entry.update(command=transport["command"], args=list(transport.get("args") or []))
-        if transport.get("env"):
-            raw_names = kept.get("env_vars") if isinstance(kept.get("env_vars"), list) else []
-            env_names = {
-                item if isinstance(item, str) else item.get("name")
-                for item in raw_names
-                if isinstance(item, str) or isinstance(item, dict) and isinstance(item.get("name"), str)
-            }
-            explicit = kept.get("env") if isinstance(kept.get("env"), dict) else {}
-            entry["env"] = {
-                key: value
-                for key, value in transport["env"].items()
-                if key not in env_names or key in explicit or value != os.environ.get(key)
-            }
-        if cwd:
-            entry["cwd"] = cwd
-        return entry
-    entry = {key: value for key, value in kept.items() if key in _OPENCODE_KEPT}
-    if transport["type"] == HTTP:
-        entry.update(type="remote", url=transport["url"])
-        if transport.get("headers"):
-            entry["headers"] = transport["headers"]
-        return entry
-    entry.update(type="local", command=[transport["command"], *(transport.get("args") or [])])
-    if transport.get("env"):
-        entry["environment"] = transport["env"]
-    if cwd:
-        entry["cwd"] = cwd
-    return entry
 
 
 _READERS: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
@@ -336,44 +256,6 @@ def disabled_names() -> set[str]:
                 names.add(str(name))
     return names
 
-
-def write(definition: dict[str, Any]) -> str:
-    """Write one definition to its canonical native file; returns the source."""
-
-    name = definition["name"]
-    existing = read_all().get(name)
-    if existing is not None:
-        source = existing.source
-    else:
-        source = CODEX if definition["transport"]["type"] == STDIO and definition["transport"].get("cwd") else CLAUDE
-    path, data = _load(source)
-    servers = _servers_for_write(source, data)
-    previous = servers.get(name)
-    has_cwd = isinstance(previous, dict) and "cwd" in previous
-    if source != CODEX and definition["transport"].get("cwd") and not has_cwd:
-        raise McpHubError(
-            "invalid_definition",
-            f"{name} lives in the {source} config, which has no cwd field.",
-            field="cwd",
-            usage=True,
-        )
-    servers[name] = _to_native(source, definition, previous, path)
-    _store(source, path, data)
-    return source
-
-
-def remove(name: str) -> list[str]:
-    """Remove ``name`` from every native file holding it (else the union keeps it)."""
-
-    removed = []
-    for source in SOURCES:
-        path, data = _load(source)
-        servers = _servers(source, data)
-        if name in servers:
-            del servers[name]
-            _store(source, path, data)
-            removed.append(source)
-    return removed
 
 
 # ---------------------------------------------------------------------------

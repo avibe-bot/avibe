@@ -29,19 +29,21 @@ Out of scope: OAuth, SSE (explicit `unsupported_transport_sse` error), project s
 ## 2. Package on disk
 
 ```text
-<avibe-home>/mcp/<name>/
-  state.json               # Avibe-side: enabled, description, last native source
-  current.json             # pointer to the published revision
-  revisions/<revision>/    # <revision> = generation timestamp + random suffix
-    definition.json        # immutable snapshot of the definition used to generate and to connect
-    manifest.json          # formatVersion, description, generatedAt, serverInfo.version if the server provides it (optional; shown in UI)
-    tools.json             # original tool descriptors
-    commands.json          # generated flags and help
+<avibe-home>/mcp/
+  .hidden.json             # names hidden from Avibe lists (native files unchanged)
+  <name>/
+    definition.json        # Avibe-owned connection (absent for native-only servers)
+    current.json           # pointer to the one published snapshot
+    revisions/<revision>/  # <revision> = generation timestamp + random suffix
+      definition.json      # snapshot used to connect
+      manifest.json        # formatVersion, description, generatedAt, serverInfo.version
+      tools.json
+      commands.json
 ```
 
-- Native files are the connection store. Avibe home holds `state.json`, `current.json` and revision snapshots (including `revisions/*/definition.json`). Nothing is duplicated into V2 config. Every file is written with the existing `config/atomic_io.py` `write_atomic`.
-- `commands.json` is declarative data interpreted by the shared `vibe mcp` runner, not code. Tool implementations stay on the server/executable.
-- Revisions are derived data: a revision whose `formatVersion` this release does not read is shown as "needs regeneration" (definition kept, nothing deleted) instead of being migrated. Any other unreadable, invalid or future-format file of a package (`definition.json`, `state.json`, `current.json`) disables only that package with a warning; startup never fails and bad files are not overwritten.
+- Native files are a read-only source. Avibe-added servers store `definition.json` here. Hub never writes Claude/Codex/OpenCode files. Every file is written with `config/atomic_io.py` `write_atomic`.
+- `commands.json` is declarative data interpreted by the shared `vibe mcp` runner, not code.
+- One published snapshot per server. An unreadable or unknown-`formatVersion` snapshot omits only that package; leftover MVP `state.json` is ignored.
 
 ## 3. Prompt injection
 
@@ -68,7 +70,7 @@ List all servers: `vibe mcp --list`.
 - No tool names, schemas, URLs, commands, credentials or management commands.
 - The block has two fixed parts: stable shared instructions (examples must stay parser-valid), then one `<server>: <description>` line per package, where `<server>` is the exact CLI selector.
 - Disable/remove takes effect on the next prompt build; new calls are rejected immediately even if a running turn still sees the old list.
-- The index grants nothing: every call rechecks enabled state at the owner.
+- The index grants nothing: every call rechecks the published revision at the owner.
 
 Agents discover details on demand:
 
@@ -196,7 +198,7 @@ Lifecycle follows mcporter `generate-cli` (inspected at [`5362d60`](https://gith
 - **C0** (after authorization): pin SDK, confirm caller-context/IPC fit, SDK protocol negotiation, and the result byte cap. Hermetic temp `AVIBE_HOME` and loopback fixtures.
 - **C1:** repository + parser, generator/publisher, runtime, CLI, prompt index.
 - **C2:** UI/API, i18n, user documentation (adding servers, plaintext credential behavior, regeneration, tool invocation), Ruff and UI build; Incus regression on request.
-- **C3:** Disable Claude/Codex/OpenCode native MCP in Avibe sessions. Hub reads/writes those backends' config files as the connection store (no copy-import). Generated CLI artifacts remain under `<avibe-home>/mcp/`.
+- **C3:** Disable Claude/Codex/OpenCode native MCP in Avibe sessions. Hub **reads** those backends' config files as a source and stores Avibe-added servers under `<avibe-home>/mcp/`. Spawn isolation is unchanged.
 
 Acceptance:
 

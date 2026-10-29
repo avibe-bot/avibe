@@ -2,8 +2,8 @@
 
 Contract (docs/plans/mcp-hub-mvp.md §1, acceptance 6): Hub lists the union of
 Claude ``.claude.json``, Codex ``config.toml`` and OpenCode ``opencode.json``
-servers, writes add/save/remove back to the canonical file without disturbing
-anything else, and every spawn path disables the user's native servers.
+servers as a read-only union, stores Avibe-added servers under the Hub,
+and every spawn path disables the user's native servers.
 Runs under the hermetic homes ``tests/conftest.py`` provides.
 """
 
@@ -151,34 +151,9 @@ CODEX_HOME = "/tmp/codex"
     transport = repository.read_definition("node_repl")["transport"]
     assert transport["command"] == "/bin/node_repl"
     assert transport["env"] == {"HUB_TEST_PRESENT": "from-parent", "CODEX_HOME": "/tmp/codex"}
-    native.write(repository.read_definition("node_repl"))
-    rewritten = tomllib.loads(codex.read_text())["mcp_servers"]["node_repl"]
-    assert "env" not in rewritten or "HUB_TEST_PRESENT" not in rewritten["env"]
     stored = tomllib.loads(codex.read_text())["mcp_servers"]["node_repl"]
     assert stored["startup_timeout_sec"] == 120
     assert stored["env_vars"] == ["HUB_TEST_PRESENT", "HUB_TEST_MISSING"]
-
-
-def test_codex_env_var_edit_is_written_as_explicit_env(native_files, monkeypatch):
-    _claude, codex, _opencode = native_files
-    monkeypatch.setenv("TOKEN", "old")
-    codex.write_text(CODEX + '\n[mcp_servers.editable]\ncommand = "srv"\nenv_vars = ["TOKEN"]\n')
-    definition = repository.read_definition("editable")
-    definition["transport"]["env"]["TOKEN"] = "new"
-    native.write(definition)
-    stored = tomllib.loads(codex.read_text())["mcp_servers"]["editable"]
-    assert stored["env_vars"] == ["TOKEN"]
-    assert stored["env"]["TOKEN"] == "new"
-
-
-def test_codex_env_var_object_shape_survives_replace(native_files, monkeypatch):
-    _claude, codex, _opencode = native_files
-    monkeypatch.setenv("TOKEN", "old")
-    codex.write_text(CODEX + '\n[mcp_servers.object-env]\ncommand = "srv"\nenv_vars = [{name = "TOKEN", source = "local"}]\n')
-    definition = repository.read_definition("object-env")
-    native.write(definition)
-    stored = tomllib.loads(codex.read_text())["mcp_servers"]["object-env"]
-    assert stored["env_vars"] == [{"name": "TOKEN", "source": "local"}]
 
 
 def test_opencode_local_cwd_is_resolved_from_native_file(native_files):
