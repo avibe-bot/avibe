@@ -363,6 +363,13 @@ class McpRuntime:
     async def _close_all(self) -> None:
         if self._sweeper is not None:
             self._sweeper.cancel()
+        task = self._discover_task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         for connection in list(self._connections.values()):
             await connection.close()
 
@@ -431,7 +438,7 @@ class McpRuntime:
                     return {
                         "name": name,
                         "status": "failed",
-                        "error": f"{name} already exists with a different definition; pass --replace to change it.",
+                        "error": f"{name} already exists with a different definition.",
                         "type": "exists",
                     }
                 body = json.loads(await self._refresh({"name": name, "waitStdio": True, "locked": True}))
@@ -468,10 +475,16 @@ class McpRuntime:
         except McpHubError:
             existing = repository.read_avibe_definition(name)
         exists = existing is not None or repository.read_published(name) is not None
+        listed = name not in repository.hidden_names() and repository.read_published(name) is not None
         if exists and not replace:
-            if existing is not None and McpRuntime._comparable_definition(existing) == McpRuntime._comparable_definition(definition):
+            if (
+                listed
+                and existing is not None
+                and McpRuntime._comparable_definition(existing) == McpRuntime._comparable_definition(definition)
+            ):
                 return "unchanged"
-            return "exists"
+            if listed:
+                return "exists"
         if exists and preserve:
             try:
                 definition = merge_preserved_secrets(definition, repository.read_definition(name))

@@ -106,6 +106,25 @@ def test_failed_replace_add_restores_previous_avibe_definition(generated):
     assert repository.read_avibe_definition("echo") == previous
 
 
+def test_readding_hidden_native_identical_definition_registers_again(runtime):
+    from core.mcp_hub import native
+
+    claude = native.claude_path()
+    claude.parent.mkdir(parents=True, exist_ok=True)
+    claude.write_text(json.dumps({"mcpServers": {
+        "echo": {"type": "stdio", "command": sys.executable, "args": [FIXTURE]},
+    }}))
+    assert _run(runtime, "discover", {})["ok"]
+    assert _run(runtime, "remove", {"name": "echo"})["ok"]
+    assert "echo" in repository.hidden_names()
+    assert repository.read_published("echo") is None
+    result = _run(runtime, "add", {"servers": [_server()]})
+    assert result["ok"] is True
+    assert result["added"][0]["name"] == "echo"
+    assert "echo" not in repository.hidden_names()
+    assert repository.read_published("echo") is not None
+
+
 def test_explicit_cwd_difference_is_exists_not_unchanged(generated):
     same_command = {
         "name": "echo",
@@ -219,6 +238,18 @@ def test_cli_list_and_help_work_with_the_owner_down(generated, capsys):
     assert mcp_cli.main(["echo", "echo", "--text", "x"]) == 1
     assert "not running" in capsys.readouterr().err
     assert mcp_cli.main(["echo", "echo", "--bogus", "x"]) == 2
+
+
+def test_cli_treats_help_as_a_server_name(generated, capsys):
+    from vibe import mcp_cli
+
+    added = _run(generated, "add", {"servers": [{**_server(), "name": "help"}]})
+    assert added["ok"] is True
+    generated.stop()
+    assert mcp_cli.main(["help", "--list"]) == 0
+    assert "echo  Echo text back" in capsys.readouterr().out
+    assert mcp_cli.main(["-h"]) == 0
+    assert "usage:" in capsys.readouterr().out
 
 
 def test_prompt_index_lists_enabled_servers_and_its_examples_parse(generated, capsys, monkeypatch):

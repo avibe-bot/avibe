@@ -84,6 +84,15 @@ def test_add_writes_avibe_store_and_remove_hides_native(native_files, runtime):
     assert "shared" in repository.hidden_names()
 
 
+def test_concurrent_hide_keeps_every_name(native_files):
+    from concurrent.futures import ThreadPoolExecutor
+
+    names = ["shared", "docs", "local"]
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        list(pool.map(repository.hide_name, names))
+    assert set(names) <= repository.hidden_names()
+
+
 def test_unparseable_native_file_is_skipped_and_never_rewritten(native_files):
     _claude, codex, _opencode = native_files
     codex.write_text("[mcp_servers.local\nbroken")

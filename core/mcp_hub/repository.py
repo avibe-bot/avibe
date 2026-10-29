@@ -14,6 +14,7 @@ import logging
 import os
 import secrets
 import shutil
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -30,6 +31,7 @@ logger = logging.getLogger(__name__)
 FORMAT_VERSION = 1
 AVIBE = "avibe"
 _HIDDEN_FILE = "hidden.json"
+_HIDDEN_LOCK = threading.Lock()
 
 
 def mcp_root() -> Path:
@@ -95,16 +97,18 @@ def hidden_names() -> set[str]:
 
 
 def hide_name(name: str) -> None:
-    _ensure_root()
-    names = sorted(hidden_names() | {validate_name(name)})
-    _write_json(_hidden_path(), {"names": names})
+    with _HIDDEN_LOCK:
+        _ensure_root()
+        names = sorted(hidden_names() | {validate_name(name)})
+        _write_json(_hidden_path(), {"names": names})
 
 
 def unhide_name(name: str) -> None:
-    names = hidden_names()
-    names.discard(name)
-    _ensure_root()
-    _write_json(_hidden_path(), {"names": sorted(names)})
+    with _HIDDEN_LOCK:
+        names = hidden_names()
+        names.discard(name)
+        _ensure_root()
+        _write_json(_hidden_path(), {"names": sorted(names)})
 
 
 def _avibe_definition_path(name: str) -> Path:

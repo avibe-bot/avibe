@@ -947,7 +947,7 @@ export type ApiContextType = {
     toolCount?: number;
     added?: { name: string; toolCount?: number }[];
     unchanged?: { name: string }[];
-    failed?: { name: string; error?: string }[];
+    failed?: { name: string; error?: string; type?: string }[];
   }>;
   discoverMcp: () => Promise<McpResult & { results?: { name: string; status: string; error?: string; toolCount?: number }[] }>;
   refreshMcp: (name: string) => Promise<McpResult & { name?: string; toolCount?: number }>;

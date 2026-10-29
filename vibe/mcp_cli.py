@@ -98,7 +98,7 @@ def discover_main(argv: list[str]) -> int:
 
 
 def _dispatch(argv: list[str]) -> int:
-    if not argv or argv[0] in {"-h", "--help", "help"}:
+    if not argv or argv[0] in {"-h", "--help"}:
         print(USAGE, end="")
         return 0 if argv else 2
     head = argv[0]

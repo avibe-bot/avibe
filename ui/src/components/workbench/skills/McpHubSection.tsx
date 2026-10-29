@@ -160,7 +160,12 @@ export const McpHubSection: React.FC = () => {
       const unchanged = res.unchanged ?? [];
       const failed = res.failed ?? [];
       const succeeded = added.length + unchanged.length;
-      const failedLines = failed.map((item) => t('mcpHub.failedLine', { name: item.name, error: item.error || '' }));
+      const failedLines = failed.map((item) =>
+        t('mcpHub.failedLine', {
+          name: item.name,
+          error: item.type ? t(`mcpHub.errors.${item.type}`, { defaultValue: item.error || '', message: item.error || '', name: item.name }) : (item.error || ''),
+        }),
+      );
       const inline = [
         t('mcpHub.succeededCount', { count: succeeded }),
         failed.length ? t('mcpHub.failedCount', { count: failed.length }) : null,
