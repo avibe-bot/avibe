@@ -59,6 +59,14 @@ _COLUMNS_HINT = "Read a table's columns with PRAGMA table_info(<table>)."
 # ``turns`` compares the indexed turn id with ``+t.id``: a TEXT-affinity column on
 # the right would apply its affinity to the indexed expression and turn every
 # lookup into a scan of ``ix_messages_turn_id``.
+#
+# ``digests`` says what each Session is about and where it stands, for an Agent to
+# recognize a Session before it reads the transcript: a Vibey Session's latest
+# checkpoint memory (``session_digests``: its mind, memo, and now, together in
+# ``text``), otherwise the Session's first input and latest reply. Every
+# lookup is by Session id through an index, so a search over all of them stays a
+# pass over one row per Session.
+_GAP = "char(10) || char(10)"
 RECALL_VIEWS = {
     "sessions": (
         "SELECT s.id AS session_id, s.title, s.agent_name, s.agent_backend AS backend, s.model, "
@@ -79,6 +87,22 @@ RECALL_VIEWS = {
         f"(SELECT content_text FROM messages WHERE {MESSAGE_TURN_ID_SQL} = +t.id AND type = 'result' "
         "ORDER BY coalesce(delivered_at, created_at) DESC, id DESC LIMIT 1) AS reply "
         "FROM session_turns t"
+    ),
+    "digests": (
+        "SELECT * FROM (SELECT s.session_id, s.title, s.agent_name, s.last_active_at, s.parent_session_id, "
+        "d.updated_at AS digest_at, d.mind, d.memo, d.now, "
+        "CASE WHEN d.session_id IS NOT NULL THEN ltrim("
+        f"coalesce({_GAP} || d.mind, '') || coalesce({_GAP} || d.memo, '') || coalesce({_GAP} || d.now, ''), "
+        "char(10)) ELSE nullif(ltrim("
+        f"coalesce({_GAP} || '# First input' || char(10) || (SELECT m.content_text FROM messages m "
+        "WHERE m.session_id = s.session_id AND m.type IN ('user', 'harness', 'agent_initiated') "
+        "AND m.content_text != '' ORDER BY m.created_at, m.id LIMIT 1), '') "
+        f"|| coalesce({_GAP} || '# Latest reply' || char(10) || (SELECT m.content_text FROM messages m "
+        "WHERE m.session_id = s.session_id AND m.type = 'result' AND m.content_text != '' "
+        "ORDER BY m.created_at DESC, m.id DESC LIMIT 1), ''), "
+        "char(10)), '') END AS text "
+        "FROM sessions s LEFT JOIN session_digests d ON d.session_id = s.session_id) "
+        "WHERE text IS NOT NULL"
     ),
 }
 

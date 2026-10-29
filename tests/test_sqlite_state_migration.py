@@ -44,7 +44,7 @@ from vibe.message_types import build_partial_index_predicate
 pytestmark = pytest.mark.no_sqlite_template
 
 
-HEAD_REVISION = "20261020_0071"
+HEAD_REVISION = "20261030_0072"
 PREVIOUS_HEAD_REVISION = "20261016_0068"
 _SCOPE_ID_DRIFT_TABLES = ("messages", "agent_events", "media_objects")
 # ``storage.models`` builds a bare ``MetaData()``, so its foreign keys are unnamed and

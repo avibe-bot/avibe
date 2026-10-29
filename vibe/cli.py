@@ -18061,11 +18061,15 @@ def build_parser():
         help="Run one read-only SQL query",
         description="Run one guarded read-only SQL query against the local SQLite state database.",
         epilog=(
-            "Recall earlier work through three views (the raw tables stay queryable):\n"
+            "Recall earlier work through four views (the raw tables stay queryable):\n"
+            "  digests(session_id, title, agent_name, last_active_at, parent_session_id, digest_at, mind, memo, now, text)\n"
+            "    what each Session is about and where it stands: a Vibey Session's latest checkpoint memory\n"
+            "    (mind, memo, now; text holds all three), else its first input and latest reply\n"
             "  sessions(session_id, title, agent_name, backend, model, status, workdir, created_at, last_active_at, parent_session_id)\n"
             "  transcript(session_id, at, role, kind, text, turn_id, message_id)   role: user, agent, harness\n"
             "  turns(session_id, turn_id, started_at, ended_at, outcome, input, reply)\n"
             "excerpt(text, 'term'[, width]) shows the text around a match; REGEXP takes a Python pattern.\n"
+            "  vibe data query --sql \"select session_id, title, excerpt(text, 'tax') from digests where text like '%tax%' order by last_active_at desc\" --format text\n"
             "  vibe data query --sql \"select session_id, at, excerpt(text, 'watch list') from transcript where text like '%watch list%' order by at desc\" --format text\n"
             "  vibe data query --sql \"select started_at, input, reply from turns where session_id = 'ses...' order by started_at\" --format text\n"
             "Discover the schema before guessing names:\n"

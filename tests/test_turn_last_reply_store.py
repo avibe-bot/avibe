@@ -13,6 +13,7 @@ import sqlite3
 
 import pytest
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy import event, select
 
 from config import paths
@@ -26,8 +27,8 @@ from storage.settings_service import upsert_scope
 NOW = "2026-10-20T00:00:00.000000Z"
 SESSION = "ses_last_reply"
 TURN = "trn_last_reply"
-REVISION = "20261020_0071"
 PREVIOUS_REVISION = "20261018_0070"
+HEAD = ScriptDirectory.from_config(migrations.alembic_config()).get_current_head()
 
 
 def _seed(conn) -> dict:
@@ -220,7 +221,7 @@ async def test_a_released_database_upgrades_and_its_running_turn_ends_without_a_
         dispose_cached_sqlite_engines()
 
     with sqlite3.connect(path) as conn:
-        assert conn.execute("select version_num from alembic_version").fetchone() == (REVISION,)
+        assert conn.execute("select version_num from alembic_version").fetchone() == (HEAD,)
     command.downgrade(migrations.alembic_config(path), PREVIOUS_REVISION)
     with sqlite3.connect(path) as conn:
         tables = {row[0] for row in conn.execute("select name from sqlite_master where type = 'table'")}

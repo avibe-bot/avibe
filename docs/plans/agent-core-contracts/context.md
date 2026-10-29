@@ -483,6 +483,13 @@ Iterative checkpoints start from what the latest one kept: its mind is `mind.md`
 skills candidates again, and its message is part of the forked prefix. The mind is revised, never rewritten whole, so
 what the model leaves alone stays word for word across any number of checkpoints (§11).
 
+The latest checkpoint's memory is also how other Sessions recall this one. The transaction that appends a
+`Compaction` holding any of the mind, the memo, and the now writes them to the Session's one `session_digests` row,
+the memo as the checkpoint shows it (`# 5. The user's words`, its entries, their cut notes); `vibe data query` reads
+it through its `digests` view. A row holding none of them (a drop that left them out, §8 c) leaves the previous
+digest, still the latest memory the Session wrote. Only the latest is kept: the Session itself reads its earlier
+detail in its earlier record, and every checkpoint stays in its own row.
+
 ## 8. Overflow ladder
 
 Bounded per model request. Each step makes the next request smaller; the ladder takes at least one step and stops
