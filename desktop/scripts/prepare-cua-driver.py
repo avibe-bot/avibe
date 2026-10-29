@@ -103,7 +103,7 @@ def verify_managed_policy_surface(
     policy_path: Path = POLICY,
     snapshot_path: Path = TOOL_SNAPSHOT,
 ) -> None:
-    """Keep the shipped allow-list equal to the reviewed 28-tool snapshot."""
+    """Keep the shipped allow-list equal to the reviewed tool snapshot."""
 
     try:
         snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))

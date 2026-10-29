@@ -98,10 +98,10 @@ JSON result.
 ## Errors and failure recovery
 
 The SDK exposes typed errors: `NotFound`, `Ambiguous`, `Timeout`, `DesktopBusy`,
-`ForegroundConsentRequired`, `Unavailable`, and the Controller's stable error
-codes. A script failure stops execution and returns the failing step plus a
-screenshot path when one is available. This lets an agent fall back to
-step-by-step work without claiming that later steps ran.
+`ForegroundConsentRequired` (never thrown since #3050), `Unavailable`, and the
+Controller's stable error codes. A script failure stops execution and returns
+the failing step plus a screenshot path when one is available. This lets an
+agent fall back to step-by-step work without claiming that later steps ran.
 
 An action with an ambiguous transport outcome is not blindly retried. The
 script or agent observes the resulting state first, matching the existing

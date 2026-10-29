@@ -30,8 +30,7 @@ if __package__ in {None, ""}:
 
 from core.agent_core.ai.errors import redact_provider_text
 from core.computer_use import (
-    COMPUTER_USE_TOOL_SNAPSHOT_SHA256,
-    COMPUTER_USE_TOOL_NAMES,
+    COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS,
     ComputerUseState,
     ComputerUseStatus,
     computer_use_state_path,
@@ -92,12 +91,11 @@ _INPUT_TOOLS = frozenset(
         "set_value",
     }
 )
-_WINDOW_MUTATION_TOOLS = _INPUT_TOOLS | {"set_window_frame"}
+# Window activation is an exact-window mutation, not input: it takes the same
+# target lock but needs no prior observation of the window's contents.
+_WINDOW_MUTATION_TOOLS = _INPUT_TOOLS | {"set_window_frame", "bring_to_front"}
 _OBSERVE_TOOLS = frozenset({"get_window_state", "zoom"})
 _ALLOWED_TARGET_KEYS = frozenset({"kind", "pid", "window_id"})
-_UPSTREAM_NOT_DISPATCHED_CODES = frozenset({"foreground_consent_required"})
-_COMMAND_MODIFIERS = frozenset({"cmd", "command", "meta"})
-_SHIFT_MODIFIERS = frozenset({"shift"})
 
 logger = logging.getLogger(__name__)
 
@@ -397,7 +395,9 @@ class _SessionState:
     element_token_windows: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
-def _load_snapshot(state_path: Path) -> tuple[list[dict[str, Any]], set[str]]:
+def _load_snapshot(
+    state_path: Path,
+) -> tuple[list[dict[str, Any]], set[str], frozenset[str]]:
     state = read_computer_use_state(state_path)
     if state is None:
         raise RuntimeError("computer-use state is missing")
@@ -406,10 +406,8 @@ def _load_snapshot(state_path: Path) -> tuple[list[dict[str, Any]], set[str]]:
     except OSError as exc:
         raise RuntimeError("computer-use tool snapshot is unreadable") from exc
     actual_sha256 = hashlib.sha256(snapshot_bytes).hexdigest()
-    if (
-        actual_sha256 != state.tool_snapshot.sha256
-        or actual_sha256 != COMPUTER_USE_TOOL_SNAPSHOT_SHA256
-    ):
+    approved_names = COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS.get(actual_sha256)
+    if actual_sha256 != state.tool_snapshot.sha256 or approved_names is None:
         raise RuntimeError("computer-use tool snapshot digest is not approved")
     payload = json.loads(snapshot_bytes.decode("utf-8"))
     if not isinstance(payload, dict) or payload.get("schema_version") != 1:
@@ -418,9 +416,7 @@ def _load_snapshot(state_path: Path) -> tuple[list[dict[str, Any]], set[str]]:
     if not isinstance(tools, list):
         raise RuntimeError("computer-use tool snapshot has no tools array")
     names = [tool.get("name") for tool in tools if isinstance(tool, dict)]
-    if len(names) != len(COMPUTER_USE_TOOL_NAMES) or set(names) != set(
-        COMPUTER_USE_TOOL_NAMES
-    ):
+    if len(names) != len(approved_names) or set(names) != approved_names:
         raise RuntimeError("computer-use tool snapshot does not match the approved surface")
 
     accepted_session: set[str] = set()
@@ -453,7 +449,7 @@ def _load_snapshot(state_path: Path) -> tuple[list[dict[str, Any]], set[str]]:
         schema["required"] = [*dict.fromkeys([*required, "session"])]
         tool.pop("outputSchema", None)
         advertised.append(tool)
-    return advertised, accepted_session
+    return advertised, accepted_session, approved_names
 
 
 def _bounded_diagnostic(value: Any) -> str | None:
@@ -611,12 +607,7 @@ def _fold_tool_result(
             return _error_result(
                 code,
                 detail=detail,
-                dispatched=(
-                    False
-                    if code in _UPSTREAM_NOT_DISPATCHED_CODES
-                    or structured.get("dispatched") is False
-                    else None
-                ),
+                dispatched=False if structured.get("dispatched") is False else None,
                 result_params=_driver_error_params(structured),
             )
         return _error_result(
@@ -816,36 +807,6 @@ def _remove_legacy_lease_files(directory: Path) -> None:
             )
 
 
-def _normalize_key(value: Any) -> str:
-    return str(value or "").strip().lower().replace("⌘", "cmd")
-
-
-def _focus_shortcut(arguments: Mapping[str, Any], tool_name: str) -> bool:
-    keys: list[str] = []
-    if tool_name == "hotkey":
-        raw = arguments.get("keys")
-        if isinstance(raw, list):
-            keys = [_normalize_key(value) for value in raw]
-        elif isinstance(raw, str):
-            keys = [_normalize_key(value) for value in raw.replace("+", " ").split()]
-    elif tool_name == "press_key":
-        raw_modifiers = arguments.get("modifiers")
-        if isinstance(raw_modifiers, list):
-            keys.extend(_normalize_key(value) for value in raw_modifiers)
-        keys.append(_normalize_key(arguments.get("key")))
-    normalized = {key for key in keys if key}
-    if not normalized.intersection(_COMMAND_MODIFIERS):
-        return False
-    non_modifiers = normalized - _COMMAND_MODIFIERS - _SHIFT_MODIFIERS
-    if non_modifiers == {"l"}:
-        return True
-    if non_modifiers == {"g"} and normalized.intersection(_SHIFT_MODIFIERS):
-        return True
-    if len(non_modifiers) == 1 and next(iter(non_modifiers)) in set("123456789[]"):
-        return True
-    return False
-
-
 def _validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
     if "click_mode" in arguments and tool_name != "click":
         raise ComputerServerError(
@@ -893,11 +854,8 @@ def _validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
                     'click_mode="raw" requires an exact pid + window_id '
                     "background left-click with x/y, count=1, and no modifiers.",
                 )
-    if arguments.get("delivery_mode") == "foreground":
-        raise ComputerServerError(
-            "foreground_forbidden",
-            "Foreground input is disabled on macOS computer use.",
-        )
+    # ``delivery_mode`` passes through: the driver owns the background default
+    # and the bounded foreground rung, and a change of focus is not a refusal.
     if "scope" in arguments and arguments.get("scope") != "window":
         raise ComputerServerError(
             "window_target_required",
@@ -933,11 +891,6 @@ def _validate_input(tool_name: str, arguments: Mapping[str, Any]) -> None:
                 "window_target_required",
                 "Input must provide pid and window_id, or an element token.",
             )
-    if _focus_shortcut(arguments, tool_name):
-        raise ComputerServerError(
-            "focus_shortcut_forbidden",
-            "This shortcut may activate application chrome. Use launch_app with urls instead.",
-        )
 
 
 class ComputerUseServer:
@@ -951,7 +904,11 @@ class ComputerUseServer:
     ) -> None:
         self._state_path = state_path or computer_use_state_path()
         _remove_legacy_lease_files(self._state_path.parent)
-        self._tools, self._upstream_accepts_session = _load_snapshot(self._state_path)
+        (
+            self._tools,
+            self._upstream_accepts_session,
+            self._tool_names,
+        ) = _load_snapshot(self._state_path)
         self._status_reader = status_reader or (
             lambda: effective_computer_use_status(state_path=self._state_path)
         )
@@ -1168,7 +1125,7 @@ class ComputerUseServer:
                 dispatched=False,
             )
         session = session.strip()
-        if name not in COMPUTER_USE_TOOL_NAMES:
+        if name not in self._tool_names:
             return _error_result("unknown_tool", dispatched=False, tool=name)
         if not isinstance(arguments, dict):
             return _error_result(

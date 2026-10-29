@@ -34,7 +34,7 @@ COMPUTER_USE_STATE_DIR_ENV = "AVIBE_COMPUTER_USE_STATE_DIR"
 COMPUTER_USE_STATE_FILE = "computer-use.json"
 COMPUTER_USE_LOCK_FILE = "computer-use.lock"
 COMPUTER_USE_TOOL_SNAPSHOT_SHA256 = (
-    "edf496838092b2fa21807724b30308c4e9a90a404c9a9b7783a299b71e427144"
+    "0af1e40dbf8d48303c25d969fa54b54ccff5d0c36f2f7966b4f04964c13e5ba0"
 )
 
 COMPUTER_USE_TOOL_NAMES = (
@@ -49,6 +49,7 @@ COMPUTER_USE_TOOL_NAMES = (
     "zoom",
     "launch_app",
     "kill_app",
+    "bring_to_front",
     "set_window_frame",
     "click",
     "double_click",
@@ -67,6 +68,17 @@ COMPUTER_USE_TOOL_NAMES = (
     "list_sessions",
     "health_report",
 )
+
+# Each approved snapshot digest and the exact tool set it advertises. Desktop
+# shells released before window activation still bundle the previous snapshot;
+# a newer Runtime they adopt keeps Computer Use available without activation.
+COMPUTER_USE_APPROVED_TOOL_SNAPSHOTS: Mapping[str, frozenset[str]] = {
+    COMPUTER_USE_TOOL_SNAPSHOT_SHA256: frozenset(COMPUTER_USE_TOOL_NAMES),
+    "edf496838092b2fa21807724b30308c4e9a90a404c9a9b7783a299b71e427144": frozenset(
+        COMPUTER_USE_TOOL_NAMES
+    )
+    - {"bring_to_front"},
+}
 
 _STATE_VALUES = frozenset(
     {

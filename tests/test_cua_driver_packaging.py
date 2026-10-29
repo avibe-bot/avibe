@@ -19,7 +19,7 @@ _SCRIPT = run_path(
 )
 
 
-def test_managed_policy_matches_the_pinned_28_tool_snapshot() -> None:
+def test_managed_policy_matches_the_pinned_tool_snapshot() -> None:
     """Release preparation rejects policy drift before any driver is packaged."""
 
     _SCRIPT["verify_managed_policy_surface"]()

@@ -113,6 +113,7 @@ vibe computer observe apps
 vibe computer observe windows
 vibe computer observe window --arg pid=123 --arg window_id=456 --output /tmp/window.png
 vibe computer click --arg pid=123 --arg window_id=456 --arg x=120 --arg y=80
+vibe computer activate --arg pid=123 --arg window_id=456
 ```
 
 The CLI runs only from an active Avibe Agent Turn. It takes the caller Session
@@ -120,10 +121,23 @@ from the Agent environment, and the Controller checks that Session against its
 own live active-Turn registry. Turn IDs are not exported or accepted as
 capabilities. An Agent cannot choose a different Session or pass a driver
 `session` value. Requests use the existing Controller and `ComputerUseServer`
-checks, including the authenticated `require_bind` entry path, observe-first,
-exact window targets, target-scoped mutation locks, focus-shortcut rejection,
-and native state/admission checks. Driver state is keyed by Avibe
-Session and survives Turn boundaries until the Session is ended or archived.
+checks: observe-first, exact window targets, target-scoped mutation locks, and
+native state/admission checks. Driver state is keyed by Avibe Session and
+survives Turn boundaries until the Session is ended or archived.
+
+Input uses background delivery by default and leaves the frontmost window and
+pointer alone. When an application ignores background input, the agent can
+repeat that action with `delivery_mode: "foreground"`: the driver briefly
+fronts the exact window, acts, and restores the previous frontmost window.
+`vibe computer activate` (`activate()` in the SDK) brings one exact window to
+the front and leaves it there. Neither asks for confirmation per action.
+
+The Skill treats readiness as observable state: the target window exists, it
+is stable across observations, and its screenshot or accessibility tree is
+usable. It does not wait a fixed time after launching an application.
+Irreversible external effects, such as sending, paying, or deleting, still
+require the agent to verify, ask for confirmation, verify again, and only then
+act.
 
 `observe window` and `zoom` can write screenshots to a caller-selected path.
 Human output includes accessibility state and element tokens when available;
@@ -131,25 +145,25 @@ Human output includes accessibility state and element tokens when available;
 `needs_permission`, `needs_runtime`, `starting`, `error`, `unavailable`,
 `target_busy`, and safety rejections instead of retrying automatically.
 
-## Remote and shared-channel use
+## Remote and unattended use
 
-Computer use follows Avibe's existing user binding rules. For Slack, Discord,
-Telegram, Feishu/Lark, WeChat, or another shared channel, enable
-`require_bind` so only bound users can ask an agent to operate the Mac.
-
-There is no approval prompt for each click or keystroke. Keep computer use off
-when you do not want remote or unattended sessions to access desktop apps.
+Any Agent Turn can use Computer Use while it is on, including Turns started
+from an IM channel, a scheduled task, or another Agent. Who may start a Turn is
+decided by Avibe's general message-ingress rules, which are not a Computer Use
+control. There is no approval prompt for each click, keystroke, or window
+activation. Keep computer use off when you do not want remote or unattended
+sessions to access desktop apps.
 
 ### Same-user local trust boundary
 
 Computer Use is a cooperative control for Avibe's local Agent processes. The
 Controller IPC endpoint and driver socket are reachable by other processes
 running as the same macOS user. A same-user local process that discovers those
-paths can call the driver directly and bypass the Python-layer `require_bind`,
-`observe_first`, focus-shortcut, and window-target checks. `require_bind`
-protects shared-channel callers that enter through Avibe; it cannot constrain
-an arbitrary local same-user process. Keep the macOS account and local process
-environment trusted when Computer Use is enabled.
+paths can call the driver directly and bypass the Python-layer
+`observe_first`, window-target, and target-lock checks. Those checks govern
+Avibe-owned callers; they cannot constrain an arbitrary local same-user
+process. Keep the macOS account and local process environment trusted when
+Computer Use is enabled.
 
 ## macOS limits
 
@@ -158,8 +172,10 @@ environment trusted when Computer Use is enabled.
 - A window screenshot may still contain an application's contents while the
   Mac is locked. Do not treat locking the screen as a way to hide app contents
   from an already authorized computer-use session.
-- Avibe asks the driver to avoid taking focus and to leave the physical pointer
-  in place. Some applications can still activate themselves in response to
-  their own controls or operating-system behavior.
+- Background input asks the driver to leave focus and the physical pointer in
+  place. Foreground input and window activation change the frontmost window,
+  and a foreground pixel action moves the pointer. Some applications can also
+  activate themselves in response to their own controls or operating-system
+  behavior.
 - Computer use does not operate elevated or otherwise inaccessible targets.
   The agent should report the limitation instead of repeatedly retrying.

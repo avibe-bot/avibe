@@ -313,6 +313,7 @@ vibe computer observe apps
 vibe computer observe windows
 vibe computer observe window --arg pid=123 --arg window_id=456 --output /tmp/window.png
 vibe computer zoom --arg pid=123 --arg window_id=456 --arg x1=0 --arg y1=0 --arg x2=800 --arg y2=600 --output /tmp/zoom.png
+vibe computer activate --arg pid=123 --arg window_id=456
 vibe computer click --arg pid=123 --arg window_id=456 --arg x=120 --arg y=80
 vibe computer type --arg pid=123 --arg window_id=456 --arg text="hello"
 vibe computer key --arg key=return --arg pid=123 --arg window_id=456
@@ -335,11 +336,13 @@ accessibility state and element tokens when the driver returns them.
 Machine-readable output keeps the structured driver object in
 `result.structuredContent` and retains the legacy text content. `force-quit`
 uses the driver's SIGKILL operation; unsaved application state can be lost.
+`activate` brings one exact window to the front and leaves it there. Input
+commands accept `--arg delivery_mode=foreground`, which briefly fronts the
+exact window for that action and then restores the previous frontmost window.
 
 The command reaches the running Controller over local control IPC, so the
-existing `require_bind`, observe-first, exact-window, focus-shortcut,
-target-scoped lock, desktop state, and driver admission checks remain in the
-same enforcement path. A missing active Turn, `off`, `needs_permission`,
+existing observe-first, exact-window, target-scoped lock, desktop state, and
+driver admission checks remain in the same enforcement path. A missing active Turn, `off`, `needs_permission`,
 `needs_runtime`, `starting`, `error`, `unavailable`, or `target_busy` result is
 reported to the caller; the CLI does not retry it automatically. The driver
 session and observation state are keyed by Avibe Session and are retired when

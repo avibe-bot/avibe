@@ -1124,9 +1124,6 @@ def test_sdk_controller_error_ambiguity_table(tmp_path: Path) -> None:
         "stale_window_handle",
         "target_busy",
         "platform_unsupported",
-        "foreground_forbidden",
-        "focus_shortcut_forbidden",
-        "foreground_consent_required",
         "window_target_required",
         "observe_first",
         "session_unavailable",
@@ -1394,7 +1391,6 @@ export default async () => {
     ("controller_code", "error_class"),
     [
         ("element_not_found", "NotFound"),
-        ("foreground_forbidden", "ForegroundConsentRequired"),
         ("computer_use_unavailable", "Unavailable"),
     ],
 )
@@ -1403,6 +1399,8 @@ def test_sdk_maps_controller_error_families(
     controller_code: str,
     error_class: str,
 ) -> None:
+    # Released scripts may still import ForegroundConsentRequired; the import
+    # must keep linking even though nothing throws it any more.
     payload, _server, _requests = _run_node_script(
         tmp_path,
         f"""
