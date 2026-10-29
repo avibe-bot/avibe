@@ -94,11 +94,10 @@ def management_http(tmp_path, monkeypatch):
 # A newly registered Owner-only management route must be consciously classified.
 _RETAINED_OWNER_ROUTES = {
     # MCP Hub management runs arbitrary local commands: Owner-only (plan §7).
-    ("POST", "/api/mcp/parse"),
-    ("POST", "/api/mcp/save"),
-    ("PATCH", "/api/mcp/{name}"),
+    ("POST", "/api/mcp"),
+    ("POST", "/api/mcp/discover"),
+    ("POST", "/api/mcp/{name}/refresh"),
     ("DELETE", "/api/mcp/{name}"),
-    ("POST", "/api/mcp/{name}/{operation}"),
     ("PUT", "/api/permissions/authorized-users"),
     ("PUT", "/api/permissions/projects/{project_id}/access"),
     ("PUT", "/api/permissions/resources/{resource_kind}/{resource_id}/access"),

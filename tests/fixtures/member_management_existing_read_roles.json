@@ -37,7 +37,6 @@
   "GET /api/inbox": "viewer",
   "GET /api/mcp": "editor",
   "GET /api/mcp/example": "editor",
-  "GET /api/mcp/example/tools": "editor",
   "GET /api/media/example": "viewer",
   "GET /api/media/example/meta": "viewer",
   "GET /api/models/agents/example/models": "editor",
