@@ -109,6 +109,7 @@ def _parse_remote_request(payload: object) -> RemoteDesktopUpdateStatus | None:
         or not isinstance(target, str)
         or not target.strip()
         or len(target) > 96
+        or not isinstance(phase, str)
         or phase not in REMOTE_UPDATE_PHASES
         or not (
             progress is None

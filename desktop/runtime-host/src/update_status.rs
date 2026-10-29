@@ -562,28 +562,66 @@ mod tests {
     }
 
     #[test]
-    fn malformed_remote_status_is_dropped_without_losing_the_ordinary_result() {
-        let value = serde_json::json!({
-            "schema_version": 1,
-            "phase": "available",
-            "current": "3.2.3",
-            "latest": "3.2.4",
-            "channel": "test",
-            "has_update": true,
-            "checked_at": "2026-10-29T02:00:00Z",
-            "remote_install_allowed": true,
-            "remote_request": {
-                "request_id": "bad",
-                "target": "3.2.4",
-                "phase": "downloading",
-                "progress": 101,
-                "updated_at": "not-a-timestamp"
-            }
-        });
-        let record: UpdateStatusRecord = serde_json::from_value(value).expect("ordinary status remains readable");
-        assert_eq!(record.phase, UpdateStatusPhase::Available);
-        assert!(record.remote_request.is_none());
-        assert!(record.remote_install_allowed);
+    fn every_remote_status_field_degrades_without_losing_the_ordinary_result() {
+        let cases = [
+            ("request_id", "list", serde_json::json!([]), false),
+            ("request_id", "object", serde_json::json!({}), false),
+            ("request_id", "number", serde_json::json!(7), false),
+            ("request_id", "null", serde_json::Value::Null, false),
+            ("request_id", "opaque-string", serde_json::json!("opaque-request"), true),
+            ("target", "list", serde_json::json!([]), false),
+            ("target", "object", serde_json::json!({}), false),
+            ("target", "number", serde_json::json!(7), false),
+            ("target", "null", serde_json::Value::Null, false),
+            ("target", "opaque-string", serde_json::json!("opaque-target"), true),
+            ("phase", "list", serde_json::json!([]), false),
+            ("phase", "object", serde_json::json!({}), false),
+            ("phase", "number", serde_json::json!(7), false),
+            ("phase", "null", serde_json::Value::Null, false),
+            ("phase", "unknown-string", serde_json::json!("unknown"), false),
+            ("progress", "list", serde_json::json!([]), false),
+            ("progress", "object", serde_json::json!({}), false),
+            ("progress", "out-of-range-number", serde_json::json!(101), false),
+            ("progress", "null", serde_json::Value::Null, true),
+            ("progress", "unknown-string", serde_json::json!("unknown"), false),
+            ("error_code", "list", serde_json::json!([]), false),
+            ("error_code", "object", serde_json::json!({}), false),
+            ("error_code", "number", serde_json::json!(7), false),
+            ("error_code", "null", serde_json::Value::Null, true),
+            ("error_code", "opaque-string", serde_json::json!("unknown"), true),
+            ("updated_at", "list", serde_json::json!([]), false),
+            ("updated_at", "object", serde_json::json!({}), false),
+            ("updated_at", "number", serde_json::json!(7), false),
+            ("updated_at", "null", serde_json::Value::Null, false),
+            ("updated_at", "unknown-string", serde_json::json!("unknown"), false),
+        ];
+
+        for (field, shape, field_value, kept) in cases {
+            let mut value = serde_json::json!({
+                "schema_version": 1,
+                "phase": "available",
+                "current": "3.2.3",
+                "latest": "3.2.4",
+                "channel": "test",
+                "has_update": true,
+                "checked_at": "2026-10-29T02:00:00Z",
+                "remote_install_allowed": true,
+                "remote_request": {
+                    "request_id": "request-1",
+                    "target": "3.2.4",
+                    "phase": "downloading",
+                    "progress": 42,
+                    "error_code": null,
+                    "updated_at": "2026-10-29T02:00:00Z"
+                }
+            });
+            value["remote_request"][field] = field_value;
+            let record: UpdateStatusRecord = serde_json::from_value(value).expect("ordinary status remains readable");
+
+            assert_eq!(record.phase, UpdateStatusPhase::Available, "{field}-{shape}");
+            assert_eq!(record.remote_request.is_some(), kept, "{field}-{shape}");
+            assert!(record.remote_install_allowed, "{field}-{shape}");
+        }
     }
 
     #[test]

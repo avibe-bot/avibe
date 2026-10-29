@@ -91,6 +91,34 @@ Remote phases are:
 `requested -> acknowledged -> checking -> awaiting_host | downloading ->
 installing -> restarting -> completed | failed | declined | expired`
 
+## Remote Request Lifecycle
+
+The Runtime writes only `desktop-update-request.json`. The shell writes only the
+`remote_request` receipt in `update-status.json`. The updater busy gate exists
+only in shell memory and disappears when that process exits.
+
+| Persisted receipt phase | Live poll or timer after request TTL | Shell startup reconciliation |
+| --- | --- | --- |
+| `requested` | Leave unchanged; its live worker owns settlement. | `failed/shell_interrupted` |
+| `acknowledged` | Leave unchanged; its live worker owns settlement. | `failed/shell_interrupted` |
+| `checking` | Leave unchanged; its live worker owns settlement. | `failed/shell_interrupted` |
+| `awaiting_host` | `expired` and release the busy gate through the single expiry chokepoint. | `failed/shell_interrupted` |
+| `downloading` | Leave unchanged; its live worker owns settlement. | `failed/shell_interrupted` |
+| `installing` | Leave unchanged; its live worker owns settlement. | `failed/shell_interrupted` |
+| `restarting` | Leave unchanged. | `completed` when the running shell version equals the target; otherwise `failed/restart_version_mismatch`. |
+| `completed` | Never rewrite. | Never rewrite. |
+| `failed` | Never rewrite. | Never rewrite. |
+| `declined` | Never rewrite. | Never rewrite. |
+| `expired` | Never rewrite. | Never rewrite. |
+
+Worker success, worker failure, and host decline write their terminal receipt
+before releasing the busy gate. Live expiry requires both request ID and target
+to match the current `awaiting_host` receipt, so a stale request file cannot
+mutate a newer receipt or release its gate. Startup never resumes a persisted
+non-terminal receipt: every such receipt belonged to the process that died.
+After startup reconciliation, no receipt remains non-terminal unless the new
+process accepts a new request.
+
 `progress` is an integer percentage only while downloading. The Runtime parser
 accepts older files without the new fields and ignores unknown fields. A malformed
 remote subsection is dropped without discarding a valid ordinary update result.
@@ -100,7 +128,8 @@ data.
 The shell preserves the remote subsection when publishing an ordinary check.
 It writes every remote transition atomically. A restart leaves `restarting`
 persisted. On startup, the new shell compares its package version with the
-target and writes `completed` on equality or `failed/version_mismatch` otherwise.
+target and writes `completed` on equality or
+`failed/restart_version_mismatch` otherwise.
 An app that never starts leaves `restarting`; the remote UI eventually reports
 that completion could not be confirmed.
 

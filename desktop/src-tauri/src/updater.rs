@@ -405,28 +405,27 @@ fn remote_preference_can_change(state: &State) -> bool {
         .is_none_or(|request| request.phase.is_terminal())
 }
 
-fn restart_outcome(target: &str, current: &str) -> (RemoteRequestPhase, Option<&'static str>) {
-    if target == current {
-        (RemoteRequestPhase::Completed, None)
-    } else {
-        (RemoteRequestPhase::Failed, Some("version_mismatch"))
+fn startup_remote_request_outcome(
+    request: &RemoteRequestStatus,
+    current: &str,
+) -> Option<(RemoteRequestPhase, Option<&'static str>)> {
+    match request.phase {
+        RemoteRequestPhase::Restarting if request.target == current => Some((RemoteRequestPhase::Completed, None)),
+        RemoteRequestPhase::Restarting => Some((RemoteRequestPhase::Failed, Some("restart_version_mismatch"))),
+        RemoteRequestPhase::Completed
+        | RemoteRequestPhase::Failed
+        | RemoteRequestPhase::Declined
+        | RemoteRequestPhase::Expired => None,
+        RemoteRequestPhase::Requested
+        | RemoteRequestPhase::Acknowledged
+        | RemoteRequestPhase::Checking
+        | RemoteRequestPhase::AwaitingHost
+        | RemoteRequestPhase::Downloading
+        | RemoteRequestPhase::Installing => Some((RemoteRequestPhase::Failed, Some("shell_interrupted"))),
     }
 }
 
-fn reconcile_restarting(app: &AppHandle) {
-    let request = {
-        let updater = app.state::<Updater>();
-        let request = updater.state.lock().expect("updater state").remote_request.clone();
-        request
-    };
-    let Some(request) = request.filter(|request| request.phase == RemoteRequestPhase::Restarting) else {
-        return;
-    };
-    let (phase, error_code) = restart_outcome(&request.target, &app.package_info().version.to_string());
-    set_remote_phase(app, &request.request_id, &request.target, phase, None, error_code);
-}
-
-fn recover_remote_request(app: &AppHandle) {
+fn reconcile_remote_request_on_startup(app: &AppHandle) {
     let request = {
         let updater = app.state::<Updater>();
         let request = updater.state.lock().expect("updater state").remote_request.clone();
@@ -435,26 +434,11 @@ fn recover_remote_request(app: &AppHandle) {
     let Some(request) = request else {
         return;
     };
-    if request.phase.is_terminal() || request.phase == RemoteRequestPhase::Restarting {
+    let Some((phase, error_code)) = startup_remote_request_outcome(&request, &app.package_info().version.to_string())
+    else {
         return;
-    }
-    let path = app.state::<Updater>().remote_request_path.clone();
-    match read_desktop_update_request(&path, SystemTime::now()) {
-        Ok(_) => handle_remote_update_request(app),
-        Err(DesktopUpdateRequestError::Expired(request)) => {
-            expire_remote_request(app, &request.request_id, &request.target);
-        }
-        Err(_) => {
-            set_remote_phase(
-                app,
-                &request.request_id,
-                &request.target,
-                RemoteRequestPhase::Failed,
-                None,
-                Some("request_unavailable"),
-            );
-        }
-    }
+    };
+    set_remote_phase(app, &request.request_id, &request.target, phase, None, error_code);
 }
 fn label(phase: Phase, c: &Catalog) -> &str {
     match phase {
@@ -515,8 +499,7 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
             None::<&str>,
         )?,
     });
-    reconcile_restarting(app);
-    recover_remote_request(app);
+    reconcile_remote_request_on_startup(app);
     Ok(())
 }
 fn set_state(app: &AppHandle, phase: Phase, latest: Option<String>) {
@@ -1986,11 +1969,72 @@ mod tests {
     }
 
     #[test]
-    fn restart_receipt_is_completed_only_by_the_matching_new_shell() {
-        assert_eq!(restart_outcome("3.2.4", "3.2.4"), (RemoteRequestPhase::Completed, None));
+    fn startup_reconciliation_settles_every_persisted_remote_phase() {
+        let request = |phase| {
+            RemoteRequestStatus::new(
+                "00000000-0000-4000-8000-000000000000",
+                "3.2.4",
+                phase,
+                None,
+                None,
+                SystemTime::UNIX_EPOCH,
+            )
+        };
+        for (phase, expected) in [
+            (
+                RemoteRequestPhase::Requested,
+                Some((RemoteRequestPhase::Failed, Some("shell_interrupted"))),
+            ),
+            (
+                RemoteRequestPhase::Acknowledged,
+                Some((RemoteRequestPhase::Failed, Some("shell_interrupted"))),
+            ),
+            (
+                RemoteRequestPhase::Checking,
+                Some((RemoteRequestPhase::Failed, Some("shell_interrupted"))),
+            ),
+            (
+                RemoteRequestPhase::AwaitingHost,
+                Some((RemoteRequestPhase::Failed, Some("shell_interrupted"))),
+            ),
+            (
+                RemoteRequestPhase::Downloading,
+                Some((RemoteRequestPhase::Failed, Some("shell_interrupted"))),
+            ),
+            (
+                RemoteRequestPhase::Installing,
+                Some((RemoteRequestPhase::Failed, Some("shell_interrupted"))),
+            ),
+            (
+                RemoteRequestPhase::Restarting,
+                Some((RemoteRequestPhase::Completed, None)),
+            ),
+            (RemoteRequestPhase::Completed, None),
+            (RemoteRequestPhase::Failed, None),
+            (RemoteRequestPhase::Declined, None),
+            (RemoteRequestPhase::Expired, None),
+        ] {
+            assert_eq!(
+                startup_remote_request_outcome(&request(phase), "3.2.4"),
+                expected,
+                "{phase:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn restart_receipt_fails_when_the_new_shell_version_does_not_match() {
+        let request = RemoteRequestStatus::new(
+            "00000000-0000-4000-8000-000000000000",
+            "3.2.4",
+            RemoteRequestPhase::Restarting,
+            None,
+            None,
+            SystemTime::UNIX_EPOCH,
+        );
         assert_eq!(
-            restart_outcome("3.2.4", "3.2.3"),
-            (RemoteRequestPhase::Failed, Some("version_mismatch"))
+            startup_remote_request_outcome(&request, "3.2.3"),
+            Some((RemoteRequestPhase::Failed, Some("restart_version_mismatch")))
         );
     }
 

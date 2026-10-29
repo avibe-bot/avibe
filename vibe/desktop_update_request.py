@@ -120,7 +120,7 @@ def parse_desktop_update_request(payload: object) -> DesktopUpdateRequest | None
     state = payload.get("state")
     created_at = _parse_timestamp(payload.get("created_at"))
     expires_at = _parse_timestamp(payload.get("expires_at"))
-    if target is None or state not in {"pending", "expired"}:
+    if target is None or not isinstance(state, str) or state not in {"pending", "expired"}:
         return None
     if created_at is None or expires_at is None or expires_at <= created_at:
         return None
