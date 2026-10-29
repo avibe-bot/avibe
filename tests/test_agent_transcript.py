@@ -34,7 +34,7 @@ from storage import message_deliveries, messages_service
 from storage.agent_transcript import SQLiteTranscriptStore, TranscriptError, resolve_fork_point
 from storage.db import create_sqlite_engine
 from storage.importer import ensure_sqlite_state
-from storage.models import agent_events, messages
+from storage.models import agent_events, messages, session_digests
 from storage.models import message_deliveries as delivery_rows
 from storage.settings_service import upsert_scope
 
@@ -489,6 +489,59 @@ async def test_turn_context_load_ignores_long_fork_history(engine) -> None:
     assert len(full) == len(root_rows) + 2
     assert [entry.row_id for entry in turn] == [child_input, child_response.row_id]
     assert all(entry.session_id == "ses_long_child" for entry in turn)
+
+
+async def test_a_checkpoint_keeps_the_sessions_latest_memory_as_its_digest(engine) -> None:
+    """Other Sessions recall this one by its latest checkpoint's mind, memo, and now, kept in its one
+    ``session_digests`` row with the checkpoint row; a checkpoint that holds none of them (a drop that left
+    them out) leaves the previous one."""
+    with engine.begin() as conn:
+        home = _scope(conn, "C-home")
+        _session(conn, "ses_main", home)
+        consumed = _row(conn, "ses_main", home, "报税材料齐了吗？\n先看清单")
+    store = SQLiteTranscriptStore(engine)
+    await store.consume_input("ses_main", consumed, _user("报税材料齐了吗？\n先看清单"))
+    checkpoint = {
+        **COMPACTION,
+        "mind": "# 1. Where I stand\n## For whom and why\n用户要按时报税。",
+        "mind_truncated": False,
+        "memo": [{"seq": 1, "text": "报税材料齐了吗？\n先看清单", "truncated": True}],
+        "checkpoint": "# 6. Now\n## Current step\n- 核对清单",
+    }
+    written = await store.append_payload("ses_main", "compaction", checkpoint)
+    left_out = {**COMPACTION, "mode": "dropped", "reason": "overflow", "checkpoint": "", "mind": "", "memo": []}
+    await store.append_payload("ses_main", "compaction", left_out)
+
+    def digests() -> list[dict]:
+        with engine.connect() as conn:
+            return [dict(row) for row in conn.execute(select(session_digests)).mappings()]
+
+    with engine.connect() as conn:
+        written_at = conn.execute(
+            select(agent_events.c.created_at).where(agent_events.c.id == written.row_id)
+        ).scalar_one()
+    assert digests() == [
+        {
+            "session_id": "ses_main",
+            "compaction_id": written.row_id,
+            "updated_at": written_at,
+            "mind": "# 1. Where I stand\n## For whom and why\n用户要按时报税。",
+            "memo": "# 5. The user's words\n- (#1) 报税材料齐了吗？\n  先看清单\n"
+            "  [cut short; the whole message is #1 in the earlier record]",
+            "now": "# 6. Now\n## Current step\n- 核对清单",
+        }
+    ]
+
+    later = await store.append_payload(
+        "ses_main", "compaction", {**checkpoint, "memo": [], "checkpoint": "# 6. Now\n## Current step\n- 已提交"}
+    )
+    [digest] = digests()
+    assert (digest["compaction_id"], digest["mind"], digest["memo"], digest["now"]) == (
+        later.row_id,
+        "# 1. Where I stand\n## For whom and why\n用户要按时报税。",
+        None,
+        "# 6. Now\n## Current step\n- 已提交",
+    )
 
 
 async def test_a_cancelled_write_raises_only_after_its_commit_settled(engine) -> None:

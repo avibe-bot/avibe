@@ -19,6 +19,8 @@ context exactly when its ``context_seq`` is non-null:
 Every entry carries its row's ``created_at`` as epoch seconds, as written and
 as loaded (C-9 reads a response's to tell a cold provider cache after a
 restart). ``append_payloads`` commits several payload rows in one transaction.
+A checkpoint row rewrites its Session's ``session_digests`` row in the same one:
+the mind, memo, and now that other Sessions recall it by.
 
 Allocation. Every write takes SQLite's writer lock before its first read
 (``reserve_write_lock``) and runs under a per-Session lock, so
@@ -69,6 +71,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
 from sqlalchemy import and_, bindparam, func, or_, select, text
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine
 
 from core.agent_core.harness.fork import fork_point, latest_cut
@@ -90,7 +93,16 @@ from core.agent_core.messages import (
 from storage import agent_events_service, media_service, messages_service
 from storage.agent_session_rows import reserve_write_lock
 from storage.message_deliveries import TURN_OWNER_STATES
-from storage.models import MESSAGE_TURN_ID_SQL, agent_events, agent_sessions, message_deliveries, messages, scopes, session_turns
+from storage.models import (
+    MESSAGE_TURN_ID_SQL,
+    agent_events,
+    agent_sessions,
+    message_deliveries,
+    messages,
+    scopes,
+    session_digests,
+    session_turns,
+)
 from storage.vibey_recovery import VIBEY_RECOVERY_INPUT_PREDICATE
 
 INPUT_TYPES = ("user", "harness", "agent_initiated", "annotation")
@@ -434,6 +446,8 @@ class SQLiteTranscriptStore:
         )
         if message is not None:
             _register_images(conn, origin.scope_id, session_id, message)
+        if kind == "compaction":
+            _record_digest(conn, session_id, row["id"], row["created_at"], payload)
         return ContextEntry(
             session_id, seq, kind, row["id"], message=message, payload=payload, created_at=_epoch(row["created_at"])
         )
@@ -1002,6 +1016,35 @@ def _event_entry(session_id: str, row: Mapping[str, Any]) -> ContextEntry:
     return ContextEntry(
         session_id, row["context_seq"], kind, row_id, message=message, payload=payload, created_at=_epoch(row["created_at"])
     )
+
+
+def _record_digest(
+    conn: Connection, session_id: str, compaction_id: str, written_at: str, payload: Mapping[str, Any]
+) -> None:
+    """Keep the checkpoint's mind, memo, and now as the Session's digest, the memory other Sessions recall.
+
+    A checkpoint that holds none of them (a drop that left them out, context.md section 8 c) leaves the previous
+    digest: it is still the latest memory the Session wrote.
+    """
+    # Only a Vibey runtime appends a checkpoint, and it has the harness loaded; this module's other importers
+    # (core.session_turns, restart resume) never write one and need not load it.
+    from core.agent_core.harness.context import MemoItem, memo_text
+
+    mind = _block(payload.get("mind"))
+    memo = memo_text([MemoItem(**item) for item in payload["memo"]]) if payload.get("memo") else None
+    now = _block(payload.get("checkpoint"))
+    if not (mind or memo or now):
+        return
+    values = {"compaction_id": compaction_id, "updated_at": written_at, "mind": mind, "memo": memo, "now": now}
+    conn.execute(
+        sqlite_insert(session_digests)
+        .values(session_id=session_id, **values)
+        .on_conflict_do_update(index_elements=[session_digests.c.session_id], set_=values)
+    )
+
+
+def _block(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and value.strip() else None
 
 
 def _message(value: Any, expected: type, row_id: str) -> Any:

@@ -259,6 +259,7 @@ SQLite 数据库的 `agent_events` 与 `skill_usage_daily` 中，没有统计面
 Agent 用它回忆当前 Session 或其他 Session 里之前做过的事。
 
 ```bash
+vibe data query --sql "select session_id, title, excerpt(text, '报税') from digests where text like '%报税%' order by last_active_at desc" --format text
 vibe data query --sql "select session_id, at, excerpt(text, 'watch list') from transcript where text like '%watch list%' order by at desc" --format text
 vibe data query --sql "select started_at, input, reply from turns where session_id = 'sesk8m4q2p7x' order by started_at" --format text
 vibe data query --sql "select session_id, title from sessions where parent_session_id = 'sesk8m4q2p7x'"
@@ -269,10 +270,12 @@ vibe data query --sql "select id, status, created_at from agent_runs order by cr
 vibe data query --sql-file query.sql --limit 50
 ```
 
-三个视图为每次查询提供读取对话历史的稳定入口；原始表照样可以直接查询：
+四个视图为每次查询提供读取对话历史的稳定入口；原始表照样可以直接查询。先用 `digests`
+认出 Session，再到 `transcript` 或 `turns` 里读细节：
 
 | 视图 | 列 | 含义 |
 | --- | --- | --- |
+| `digests` | `session_id`、`title`、`agent_name`、`last_active_at`、`parent_session_id`、`digest_at`、`mind`、`memo`、`now`、`text` | 每个有内容的 Session 一行：它在做什么、进展到哪里。写过压缩摘要的 Vibey Session 给出最新一份摘要里的记忆，写于 `digest_at`：`mind`（心智：为谁、为什么，目标，关键决定，经验）、`memo`（备忘：保留的用户原话）、`now`（现场：进度与下一步），`text` 是三者合在一起。其他 Session 的 `text` 是它的第一条输入和最新一条回复。 |
 | `sessions` | `session_id`、`title`、`agent_name`、`backend`、`model`、`status`、`workdir`、`created_at`、`last_active_at`、`parent_session_id` | 每个 Session 一行。`parent_session_id` 是用 `vibe agent run` 启动它的那个 Session。 |
 | `transcript` | `session_id`、`at`、`role`、`kind`、`text`、`turn_id`、`message_id` | 所有有正文的消息，`at` 是送达时间。`role` 为 `user`、`agent` 或 `harness`（Avibe 投递的输入：其他 Agent 的任务说明、回调、Watch 或 Task）；`kind` 是消息类型，例如 Agent 的回复是 `result`。 |
 | `turns` | `session_id`、`turn_id`、`started_at`、`ended_at`、`outcome`、`input`、`reply` | 每个有记录的 Agent 回合一行：它收到的原文和最终回复。没有回合记录的更早历史在 `transcript` 里。 |

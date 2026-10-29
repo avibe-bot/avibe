@@ -550,6 +550,21 @@ agent_events = Table(
     ),
 )
 
+# A Vibey Session's latest memory, for other Sessions to recall: the mind, the memo, and
+# the now of its latest checkpoint that holds any of them (context.md section 7). One row
+# per Session, rewritten by primary key in the transaction that appends the
+# ``context_compaction`` row; ``vibe data query`` reads it through its ``digests`` view.
+session_digests = Table(
+    "session_digests",
+    metadata,
+    Column("session_id", String, ForeignKey("agent_sessions.id", ondelete="CASCADE"), primary_key=True),
+    Column("compaction_id", String, nullable=False),
+    Column("updated_at", String, nullable=False),
+    Column("mind", Text, nullable=True),
+    Column("memo", Text, nullable=True),
+    Column("now", Text, nullable=True),
+)
+
 skill_usage_daily = Table(
     "skill_usage_daily",
     metadata,

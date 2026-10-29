@@ -118,6 +118,42 @@ def test_history_views_answer_in_the_shape_agents_ask_for(state_db: Path) -> Non
     }
 
 
+def test_digests_say_what_each_session_is_about(state_db: Path) -> None:
+    """A Vibey Session's checkpoint memory, else the first input and latest reply; one row per Session that
+    has either, so one ``text like`` finds a Session before its transcript is read."""
+    _seed_history(state_db)
+    with sqlite3.connect(state_db) as conn:
+        _session(conn, "ses-taxes", "Taxes", "2026-10-02T00:00:00Z")
+        _session(conn, "ses-v4", "Older checkpoint", "2026-10-02T00:00:00Z")
+        conn.executemany(
+            "insert into session_digests (session_id, compaction_id, updated_at, mind, memo, now)"
+            " values (?, ?, '2026-10-02T01:00:00Z', ?, ?, ?)",
+            [
+                ("ses-taxes", "evt-1", "# 1. Where I stand\n用户要按时报税。", "# 5. The user's words\n- (#1) 材料齐了吗？",
+                 "# 6. Now\n- 核对清单"),
+                ("ses-v4", "evt-2", None, None, "# 1. Self and method\n- 只读核验"),
+            ],
+        )
+        conn.commit()
+
+    digests = {
+        row["session_id"]: row
+        for row in _rows("select session_id, title, parent_session_id, digest_at, text from digests", state_db)
+    }
+
+    # OTHER has nothing to say.
+    assert set(digests) == {PARENT, CHILD, "ses-taxes", "ses-v4"}
+    assert digests["ses-taxes"]["text"] == (
+        "# 1. Where I stand\n用户要按时报税。\n\n# 5. The user's words\n- (#1) 材料齐了吗？\n\n# 6. Now\n- 核对清单"
+    )
+    assert digests["ses-taxes"]["digest_at"] == "2026-10-02T01:00:00Z"
+    assert digests["ses-v4"]["text"] == "# 1. Self and method\n- 只读核验"
+    assert digests[CHILD]["text"] == "# First input\nSlim the watch list rows\n\n# Latest reply\nPR #2971 is open"
+    assert (digests[CHILD]["parent_session_id"], digests[CHILD]["digest_at"]) == (PARENT, None)
+    assert digests[PARENT]["text"] == "# First input\nShip it"
+    assert _rows("select session_id from digests where text like '%报税%'", state_db) == [{"session_id": "ses-taxes"}]
+
+
 def test_history_views_read_through_indexes(state_db: Path) -> None:
     """A Session's transcript and each Turn's reply are index lookups, not scans of every message.
 
@@ -134,6 +170,11 @@ def test_history_views_read_through_indexes(state_db: Path) -> None:
     turns = plan("select reply from turns where session_id = 'x'")
     assert any(step.startswith("SEARCH") and "ix_messages_turn_id" in step for step in turns), turns
     assert not any(step.startswith("SCAN") and "messages" in step for step in turns), turns
+
+    # A search over every digest is one pass over the Sessions; each Session's own rows are looked up.
+    digests = plan("select session_id from digests where text like '%x%'")
+    assert all("agent_sessions" in step for step in digests if step.startswith("SCAN")), digests
+    assert any(step.startswith("SEARCH d ") for step in digests), digests
 
 
 def test_history_views_never_hide_a_real_table(state_db: Path) -> None:

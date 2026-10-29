@@ -35,7 +35,7 @@ def test_skill_schema_upgrade_downgrade_preserves_existing_events(tmp_path):
     migrations.run_migrations(path)
     with sqlite3.connect(path) as conn:
         assert conn.execute(f"SELECT {columns} FROM agent_events ORDER BY id").fetchall() == original
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("20261020_0071",)
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("20261030_0072",)
         assert conn.execute("SELECT count(*) FROM skill_usage_daily").fetchone() == (0,)
         assert {row[2] for row in conn.execute("PRAGMA foreign_key_list(skill_usage_daily)")} == {
             "scopes",

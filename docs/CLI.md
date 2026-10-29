@@ -356,6 +356,7 @@ Results return 20 rows per page by default and at most 100. It is how an Agent
 recalls earlier work in this Session or any other.
 
 ```bash
+vibe data query --sql "select session_id, title, excerpt(text, 'tax') from digests where text like '%tax%' order by last_active_at desc" --format text
 vibe data query --sql "select session_id, at, excerpt(text, 'watch list') from transcript where text like '%watch list%' order by at desc" --format text
 vibe data query --sql "select started_at, input, reply from turns where session_id = 'sesk8m4q2p7x' order by started_at" --format text
 vibe data query --sql "select session_id, title from sessions where parent_session_id = 'sesk8m4q2p7x'"
@@ -366,11 +367,13 @@ vibe data query --sql "select id, status, created_at from agent_runs order by cr
 vibe data query --sql-file query.sql --limit 50
 ```
 
-Three views give every query a stable way into conversation history; the raw
-tables stay queryable:
+Four views give every query a stable way into conversation history; the raw
+tables stay queryable. Start from `digests` to recognize a Session, then read
+its details in `transcript` or `turns`:
 
 | View | Columns | Meaning |
 | --- | --- | --- |
+| `digests` | `session_id`, `title`, `agent_name`, `last_active_at`, `parent_session_id`, `digest_at`, `mind`, `memo`, `now`, `text` | One row per Session that has something to say: what it is about and where it stands. For a Vibey Session that has written a checkpoint, the latest checkpoint's memory, written at `digest_at`: `mind` (for whom and why, goals, key decisions, lessons), `memo` (the user's own words it keeps), and `now` (progress and next steps); `text` holds all three. Otherwise `text` is the Session's first input and latest reply. |
 | `sessions` | `session_id`, `title`, `agent_name`, `backend`, `model`, `status`, `workdir`, `created_at`, `last_active_at`, `parent_session_id` | One row per Session. `parent_session_id` is the Session whose Agent started it with `vibe agent run`. |
 | `transcript` | `session_id`, `at`, `role`, `kind`, `text`, `turn_id`, `message_id` | Every message with text, in delivery time `at`. `role` is `user`, `agent`, or `harness` (input Avibe delivered: another Agent's brief, a callback, a Watch or Task); `kind` is the message type, such as `result` for an Agent's reply. |
 | `turns` | `session_id`, `turn_id`, `started_at`, `ended_at`, `outcome`, `input`, `reply` | One row per recorded Agent Turn: the text it was given and its final reply. Older history without Turn records is in `transcript`. |

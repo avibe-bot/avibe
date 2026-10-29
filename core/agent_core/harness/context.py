@@ -1343,6 +1343,11 @@ def _memo_lines(items: Sequence[MemoItem]) -> list[str]:
     return lines if items else [MEMO_HEADING, MIND_EMPTY]
 
 
+def memo_text(items: Sequence[MemoItem]) -> str:
+    """The memo under its heading, as the checkpoint shows it: what the Session's digest keeps of it (section 7)."""
+    return "\n".join(_memo_lines(items))
+
+
 # --- skills carried back (context.md section 7) ----------------------------------------
 
 

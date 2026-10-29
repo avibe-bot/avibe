@@ -56,7 +56,7 @@ def test_context_seq_upgrade_and_downgrade_keep_released_rows(tmp_path):
 
     migrations.run_migrations(path)
     with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("20261020_0071",)
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone() == ("20261030_0072",)
         assert_released_rows_unchanged(conn)
         assert _index_sql(conn, "ix_agent_events_turn_sequence_id") is not None
         for table, (first, same_session, other_session) in _IDS.items():
