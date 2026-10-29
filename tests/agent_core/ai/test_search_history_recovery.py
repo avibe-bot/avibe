@@ -1,4 +1,4 @@
-"""Search-history repair, not a blanket invalid-request retry.
+"""Search-history repair, not a blanket invalid-request retry. Scenario MH-HOSTED-VIBEY-005.
 
 Existing opaque tests omit deferred native calls and reject only before output. These
 regressions exercise the real wire compiler and adapter with that missing shape.
