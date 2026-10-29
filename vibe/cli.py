@@ -18942,10 +18942,9 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("data", "retention"): "member",
     # ``vibe mcp`` admits itself from raw argv (vibe/mcp_cli.py): discovery and
     # calls at Editor like Skills, management Owner-only. This floor is reached
-    # only if argparse ever dispatches it.
+    # only if argparse ever dispatches it. ``mcp-add`` / ``mcp-discover`` are
+    # raw-argv siblings, not parser leaves.
     ("mcp",): "owner",
-    ("mcp-add",): "owner",
-    ("mcp-discover",): "owner",
 }
 
 #: Argv-level entry points the supervisor and the installer use. They are not

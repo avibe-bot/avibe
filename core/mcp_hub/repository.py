@@ -436,11 +436,10 @@ def summarize(name: str, servers: Optional[dict[str, native.NativeServer]] = Non
 
 
 def _candidate_names(servers: dict[str, native.NativeServer]) -> set[str]:
-    hidden = hidden_names() | native.disabled_names()
+    avibe_owned: set[str] = set()
     names: set[str] = set()
     root = mcp_root()
     if root.is_dir():
-
         for entry in root.iterdir():
             if not entry.is_dir():
                 continue
@@ -450,7 +449,9 @@ def _candidate_names(servers: dict[str, native.NativeServer]) -> set[str]:
                 continue
             if (entry / "definition.json").is_file():
                 names.add(entry.name)
+                avibe_owned.add(entry.name)
     names.update(servers)
+    hidden = hidden_names() | (native.disabled_names() - avibe_owned)
     return {name for name in names if name not in hidden}
 
 

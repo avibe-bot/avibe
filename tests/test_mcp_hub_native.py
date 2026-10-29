@@ -72,7 +72,7 @@ def test_hub_reads_native_union_without_listing_unpublished(native_files):
 def test_add_writes_avibe_store_and_remove_hides_native(native_files, runtime):
     claude, _codex, _opencode = native_files
     before = claude.read_bytes()
-    new = {"name": "fresh", "server": {"url": "https://fresh.invalid/mcp"}, "description": "Fresh"}
+    new = {"name": "fresh", "server": {"command": "/nonexistent/mcp-fresh"}, "description": "Fresh"}
     result = _run(runtime, "add", {"servers": [new]})
     assert result["ok"] is False  # http fixture is unreachable; add rolls back
     assert repository.read_avibe_definition("fresh") is None

@@ -72,7 +72,7 @@ def test_all_failed_batch_returns_per_server_reasons_and_identical_readd_is_unch
     batch = {
         "mcpServers": {
             "echo": {"command": sys.executable, "args": [FIXTURE], "env": {"ECHO_TOKEN": "s3cret-value"}},
-            "github": {"url": "https://example.invalid/mcp"},
+            "github": {"command": "/nonexistent/mcp-github"},
             "other": {"command": "/nonexistent/mcp-other"},
         }
     }
@@ -88,7 +88,7 @@ def test_all_failed_batch_returns_per_server_reasons_and_identical_readd_is_unch
 
     empty_fail = {
         "mcpServers": {
-            "github": {"url": "https://example.invalid/mcp"},
+            "github": {"command": "/nonexistent/mcp-github"},
             "other": {"command": "/nonexistent/mcp-other"},
         }
     }
@@ -99,6 +99,18 @@ def test_all_failed_batch_returns_per_server_reasons_and_identical_readd_is_unch
     assert {item["name"] for item in none_body["failed"]} == {"github", "other"}
     assert none_body["error"]["message"]
     assert "Unexpected MCP Hub response" not in json.dumps(none_body)
+
+
+def test_malformed_json_add_returns_top_level_error_without_batch_arrays(owner):
+    client = app.test_client()
+    headers = csrf_headers(client)
+    response = client.post("/api/mcp", json={"text": "{not json"}, headers=headers)
+    body = response.get_json()
+    assert response.status_code == 400
+    assert body["ok"] is False
+    assert body.get("error", {}).get("message")
+    assert "added" not in body
+    assert "failed" not in body
 
 
 @pytest.mark.parametrize(

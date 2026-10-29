@@ -421,40 +421,43 @@ class McpRuntime:
 
     async def _add_one(self, definition: dict[str, Any], replace: bool, preserve: bool) -> dict[str, Any]:
         name = definition["name"]
-        previous = await asyncio.to_thread(repository.read_avibe_definition, name)
-        try:
-            async with self._lock(name):
+        async with self._lock(name):
+            previous = await asyncio.to_thread(repository.read_avibe_definition, name)
+            try:
                 outcome = await asyncio.to_thread(self._save_one, definition, replace, preserve)
-            if outcome == "unchanged":
-                return {"name": name, "status": "unchanged"}
-            if outcome == "exists":
-                return {
-                    "name": name,
-                    "status": "failed",
-                    "error": f"{name} already exists with a different definition; pass --replace to change it.",
-                    "type": "exists",
-                }
-            body = json.loads(await self._refresh({"name": name, "waitStdio": True}))
-            if body.get("ok"):
-                return {
-                    "name": name,
-                    "status": "added",
-                    "revision": body.get("revision"),
-                    "toolCount": body.get("toolCount"),
-                }
-            error = (body.get("error") or {}).get("message") or "failed"
-        except McpHubError as cop:
-            error = cop.message
-        except Exception as cop:  # noqa: BLE001
-            error = str(cop)
-        await asyncio.to_thread(repository.rollback_avibe_definition, name, previous)
-        return {"name": name, "status": "failed", "error": error}
+                if outcome == "unchanged":
+                    return {"name": name, "status": "unchanged"}
+                if outcome == "exists":
+                    return {
+                        "name": name,
+                        "status": "failed",
+                        "error": f"{name} already exists with a different definition; pass --replace to change it.",
+                        "type": "exists",
+                    }
+                body = json.loads(await self._refresh({"name": name, "waitStdio": True, "locked": True}))
+                if body.get("ok"):
+                    return {
+                        "name": name,
+                        "status": "added",
+                        "revision": body.get("revision"),
+                        "toolCount": body.get("toolCount"),
+                    }
+                error = (body.get("error") or {}).get("message") or "failed"
+            except McpHubError as cop:
+                error = cop.message
+            except Exception as cop:  # noqa: BLE001
+                error = str(cop)
+            await asyncio.to_thread(repository.rollback_avibe_definition, name, previous)
+            return {"name": name, "status": "failed", "error": error}
 
     @staticmethod
     def _comparable_definition(definition: dict[str, Any]) -> dict[str, Any]:
-        transport = dict((definition.get("transport") or {}))
-        transport.pop("cwd", None)
-        return {"name": definition.get("name"), "description": definition.get("description") or "", "transport": transport}
+        transport = dict(definition.get("transport") or {})
+        return {
+            "name": definition.get("name"),
+            "description": definition.get("description") or "",
+            "transport": transport,
+        }
 
     @staticmethod
     def _save_one(definition: dict[str, Any], replace: bool, preserve: bool) -> str:
@@ -481,32 +484,40 @@ class McpRuntime:
 
     async def _refresh(self, payload: dict[str, Any]) -> bytes:
         name = payload.get("name")
+        if not isinstance(name, str) or not name:
+            raise McpHubError("usage", "name is required.", usage=True)
+        if payload.get("locked"):
+            return await self._refresh_locked(name, wait_stdio=payload.get("waitStdio") is True)
         async with self._lock(name):
-            definition = await asyncio.to_thread(repository.read_definition, name)
-            snapshot = json.loads(json.dumps(definition))
-            if snapshot["transport"]["type"] == STDIO and not snapshot["transport"].get("cwd"):
-                snapshot["transport"]["cwd"] = await asyncio.to_thread(repository.default_cwd)
-            stdio = snapshot["transport"]["type"] == STDIO
+            return await self._refresh_locked(name, wait_stdio=payload.get("waitStdio") is True)
+
+    async def _refresh_locked(self, name: str, *, wait_stdio: bool) -> bytes:
+        definition = await asyncio.to_thread(repository.read_definition, name)
+        snapshot = json.loads(json.dumps(definition))
+
+        if snapshot["transport"]["type"] == STDIO and not snapshot["transport"].get("cwd"):
+            snapshot["transport"]["cwd"] = await asyncio.to_thread(repository.default_cwd)
+        stdio = snapshot["transport"]["type"] == STDIO
+        if stdio:
+            if wait_stdio:
+                await self.acquire_stdio_slot_wait()
+            else:
+                self.acquire_stdio_slot()
+        try:
+            with anyio.fail_after(GENERATION_TIMEOUT_SECONDS):
+                tools, server_info = await self._discover(snapshot)
+        except TimeoutError:
+            raise McpHubError("timeout", "Refresh timed out.") from None
+        except McpHubError:
+            raise
+        except Exception as cop:
+            raise McpHubError("connection", f"Refresh failed: {_describe(cop)}") from None
+        finally:
             if stdio:
-                if payload.get("waitStdio"):
-                    await self.acquire_stdio_slot_wait()
-                else:
-                    self.acquire_stdio_slot()
-            try:
-                with anyio.fail_after(GENERATION_TIMEOUT_SECONDS):
-                    tools, server_info = await self._discover(snapshot)
-            except TimeoutError:
-                raise McpHubError("timeout", "Refresh timed out.") from None
-            except McpHubError:
-                raise
-            except Exception as cop:
-                raise McpHubError("connection", f"Refresh failed: {_describe(cop)}") from None
-            finally:
-                if stdio:
-                    self.release_stdio_slot()
-            revision = await asyncio.to_thread(self._publish, name, snapshot, definition, tools, server_info)
-            await self._retire_package(name, keep_revision=revision)
-            return _dumps({"ok": True, "name": name, "revision": revision, "toolCount": len(tools)})
+                self.release_stdio_slot()
+        revision = await asyncio.to_thread(self._publish, name, snapshot, definition, tools, server_info)
+        await self._retire_package(name, keep_revision=revision)
+        return _dumps({"ok": True, "name": name, "revision": revision, "toolCount": len(tools)})
 
     async def _discover_all(self, payload: dict[str, Any]) -> bytes:
         _ = payload
@@ -519,15 +530,17 @@ class McpRuntime:
         return _dumps({"ok": True, "results": results})
 
     async def _run_discover_pass(self) -> list[dict[str, Any]]:
-        hidden = await asyncio.to_thread(lambda: repository.hidden_names() | native.disabled_names())
         native_servers = await asyncio.to_thread(native.read_all)
         names: set[str] = set()
+        avibe_owned: set[str] = set()
         root = repository.mcp_root()
         if root.is_dir():
             for entry in root.iterdir():
                 if entry.is_dir() and (entry / "definition.json").is_file():
                     names.add(entry.name)
+                    avibe_owned.add(entry.name)
         names.update(native_servers)
+        hidden = await asyncio.to_thread(lambda: repository.hidden_names() | (native.disabled_names() - avibe_owned))
         names -= hidden
         stale = [
             name
@@ -537,7 +550,14 @@ class McpRuntime:
         for name in stale:
             await asyncio.to_thread(repository.delete_artifacts, name)
         async def one(name: str) -> dict[str, Any]:
-            body = json.loads(await self._refresh({"name": name, "waitStdio": True}))
+            try:
+                body = json.loads(await self._refresh({"name": name, "waitStdio": True}))
+            except McpHubError as cop:
+                logger.warning("MCP discover %s failed: %s", name, cop.message)
+                return {"name": name, "status": "failed", "error": cop.message}
+            except Exception as cop:  # noqa: BLE001
+                logger.warning("MCP discover %s failed: %s", name, cop)
+                return {"name": name, "status": "failed", "error": str(cop)}
             if body.get("ok"):
                 return {"name": name, "status": "registered", "toolCount": body.get("toolCount")}
             error = (body.get("error") or {}).get("message") or "failed"

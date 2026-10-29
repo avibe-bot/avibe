@@ -6474,6 +6474,7 @@
     "toolMeta": "{{count}} tools · {{transport}}",
     "tools": "Tools",
     "generatedAt": "last refreshed {{time}}",
+    "generatedAtWithVersion": "last refreshed {{time}} · server v{{version}}",
     "serverVersion": "server v{{version}}",
     "refreshed": "Refreshed {{name}} ({{count}} tools).",
     "added": "Added {{name}}.",
@@ -6493,6 +6494,7 @@
     "unchangedCount": "{{count}} already present.",
     "succeededCount": "{{count}} succeeded",
     "failedCount": "{{count}} failed:",
-    "failedLine": "{{name}} — {{error}}"
+    "failedLine": "{{name}} — {{error}}",
+    "callHint": "vibe mcp {{name}} <tool>"
   }
 }

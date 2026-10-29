@@ -6474,6 +6474,7 @@
     "toolMeta": "{{count}} 个工具 · {{transport}}",
     "tools": "工具",
     "generatedAt": "最近刷新 {{time}}",
+    "generatedAtWithVersion": "最近刷新 {{time}} · 服务端 v{{version}}",
     "serverVersion": "服务端 v{{version}}",
     "refreshed": "已刷新 {{name}}（{{count}} 个工具）。",
     "added": "已添加 {{name}}。",
@@ -6493,6 +6494,7 @@
     "unchangedCount": "{{count}} 个已存在。",
     "succeededCount": "成功 {{count}} 个",
     "failedCount": "失败 {{count}} 个：",
-    "failedLine": "{{name}} — {{error}}"
+    "failedLine": "{{name}} — {{error}}",
+    "callHint": "vibe mcp {{name}} <tool>"
   }
 }

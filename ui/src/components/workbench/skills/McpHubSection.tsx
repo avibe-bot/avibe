@@ -83,12 +83,17 @@ export const McpHubSection: React.FC = () => {
   const [servers, setServers] = useState<McpServerSummary[]>([]);
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
+  const [expandedFor, setExpandedFor] = useState<string | null>(null);
+  const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [addText, setAddText] = useState('');
   const [addError, setAddError] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<McpServerSummary | null>(null);
-  const [expandedTools, setExpandedTools] = useState<Record<string, boolean>>({});
+  if (expandedFor !== selected) {
+    setExpandedFor(selected);
+    setExpandedTools({});
+  }
 
   const describe = useCallback(
     (error?: McpError) => (error ? t(`mcpHub.errors.${error.type}`, { defaultValue: error.message, message: error.message }) : t('mcpHub.failed')),
@@ -106,6 +111,8 @@ export const McpHubSection: React.FC = () => {
   }, [api, describe, showToast, t]);
 
   useEffect(() => {
+    // One-shot list from the MCP Hub API; setState lands after the fetch.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
   }, [load]);
 
@@ -116,10 +123,6 @@ export const McpHubSection: React.FC = () => {
   }, [search, servers]);
 
   const current = servers.find((item) => item.name === selected) ?? null;
-
-  useEffect(() => {
-    setExpandedTools({});
-  }, [selected]);
 
   const onDiscover = async () => {
     if (!canManage) return;
@@ -164,8 +167,9 @@ export const McpHubSection: React.FC = () => {
         ...failedLines,
       ].filter(Boolean).join('\n');
       const toast = inline;
+      const hasBatch = Boolean(res.added || res.unchanged || res.failed);
       if (!succeeded) {
-        setAddError(inline || describe(res.error));
+        setAddError(hasBatch ? inline : describe(res.error));
         return;
       }
       setShowAdd(false);
@@ -310,11 +314,16 @@ export const McpHubSection: React.FC = () => {
               ))}
             </div>
             <div className="rounded-[10px] border border-border bg-surface-3 px-3 py-2.5 font-mono text-[11px] text-muted">
-              vibe mcp {current.name} {'<tool>'}
+              {t('mcpHub.callHint', { name: current.name })}
             </div>
             <div className="font-mono text-[10px] text-muted">
-              {current.generatedAt ? t('mcpHub.generatedAt', { time: current.generatedAt }) : null}
-              {current.serverVersion ? ` · ${t('mcpHub.serverVersion', { version: current.serverVersion })}` : null}
+              {current.generatedAt && current.serverVersion
+                ? t('mcpHub.generatedAtWithVersion', { time: current.generatedAt, version: current.serverVersion })
+                : current.generatedAt
+                  ? t('mcpHub.generatedAt', { time: current.generatedAt })
+                  : current.serverVersion
+                    ? t('mcpHub.serverVersion', { version: current.serverVersion })
+                    : null}
             </div>
             {canManage ? (
               <div className="flex items-center gap-2 pt-1">

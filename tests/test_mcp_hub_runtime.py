@@ -106,6 +106,45 @@ def test_failed_replace_add_restores_previous_avibe_definition(generated):
     assert repository.read_avibe_definition("echo") == previous
 
 
+def test_explicit_cwd_difference_is_exists_not_unchanged(generated):
+    same_command = {
+        "name": "echo",
+        "server": {"command": sys.executable, "args": [FIXTURE], "cwd": "/tmp/mcp-other-cwd"},
+        "description": "Echo tools",
+    }
+    result = _run(generated, "add", {"servers": [same_command]})
+    assert result["ok"] is False
+    assert result["failed"][0]["type"] == "exists"
+    assert repository.read_avibe_definition("echo")["transport"].get("cwd") in (None, "")
+
+
+def test_discover_keeps_neighbors_when_one_native_refresh_fails(runtime):
+    from core.mcp_hub import native
+
+    claude = native.claude_path()
+    claude.parent.mkdir(parents=True, exist_ok=True)
+    claude.write_text(json.dumps({"mcpServers": {
+        "echo": {"type": "stdio", "command": sys.executable, "args": [FIXTURE]},
+        "dead": {"type": "stdio", "command": "/nonexistent/mcp-dead"},
+    }}))
+    result = _run(runtime, "discover", {})
+    by_name = {item["name"]: item for item in result["results"]}
+    assert result["ok"] is True
+    assert by_name["echo"]["status"] == "registered"
+    assert by_name["dead"]["status"] == "failed"
+
+
+def test_avibe_owned_server_is_listed_even_if_codex_disables_the_same_name(generated):
+    from core.mcp_hub import native
+
+    path = native.codex_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('[mcp_servers.echo]\ncommand = "codex-echo"\nenabled = false\n')
+    names = {item["name"] for item in repository.list_packages()}
+    assert "echo" in names
+    assert repository.summarize("echo")["source"] == "avibe"
+
+
 def test_calls_return_envelopes(generated):
     ok = _run(generated, "call", {"name": "echo", "tool": "echo", "arguments": {"text": "hi", "repeat": 2},
                                   "sessionId": "ses-1"})
