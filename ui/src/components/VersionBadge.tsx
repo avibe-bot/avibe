@@ -313,6 +313,10 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
   const localRemoteRequest = desktopUpdateState?.remoteRequest?.phase === 'awaiting_host'
     ? desktopUpdateState.remoteRequest : null;
   const nativeUpdateStateAvailable = Boolean(desktopActions && desktopUpdateState);
+  const refreshBlockedByRemoteRequest = nativeUpdateStateAvailable
+    ? Boolean(desktopUpdateState?.remoteRequest
+      && !TERMINAL_REMOTE_PHASES.includes(desktopUpdateState.remoteRequest.phase))
+    : remoteRequestActive && !remoteUpdateTimedOut;
   // A desktop-managed Runtime relays the desktop app's own conclusion. The
   // shell also exposes its in-memory state so a fresh native check lights the
   // badge before the Runtime's status file has been reread.
@@ -436,6 +440,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     let pollTimer: number | undefined;
     let reconnectDeadline: number | undefined;
     let deadlineTimer: number | undefined;
+    const requestDeadline = Date.now() + REMOTE_REQUEST_TIMEOUT_MS;
     const controller = new AbortController();
     const stop = () => {
       stopped = true;
@@ -451,9 +456,9 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
     deadlineTimer = window.setTimeout(timeOut, REMOTE_REQUEST_TIMEOUT_MS);
     const startReconnectDeadline = () => {
       if (reconnectDeadline !== undefined) return;
-      reconnectDeadline = Date.now() + REMOTE_RECONNECT_TIMEOUT_MS;
+      reconnectDeadline = Math.min(requestDeadline, Date.now() + REMOTE_RECONNECT_TIMEOUT_MS);
       window.clearTimeout(deadlineTimer);
-      deadlineTimer = window.setTimeout(timeOut, REMOTE_RECONNECT_TIMEOUT_MS);
+      deadlineTimer = window.setTimeout(timeOut, Math.max(0, reconnectDeadline - Date.now()));
     };
     const poll = async () => {
       try {
@@ -465,14 +470,21 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
           setVersionInfo(fresh);
           setRemoteUpdateTimedOut(false);
           setRemoteDisconnected(false);
-          if (receipt.phase === 'restarting') startReconnectDeadline();
-          if (TERMINAL_REMOTE_PHASES.includes(receipt.phase)) {
+          if (receipt.phase === 'restarting') {
+            startReconnectDeadline();
+          } else if (TERMINAL_REMOTE_PHASES.includes(receipt.phase)) {
             if (receipt.phase !== 'completed' || normalizeVersion(fresh.current) === normalizeVersion(receipt.target)) {
               setRemoteUpdateTimedOut(false);
               stop();
               return;
             }
             startReconnectDeadline();
+          } else if (reconnectDeadline !== undefined) {
+            // A matching active receipt ends the outage, but does not grant a
+            // fresh request budget on recovery or subsequent healthy reads.
+            reconnectDeadline = undefined;
+            window.clearTimeout(deadlineTimer);
+            deadlineTimer = window.setTimeout(timeOut, Math.max(0, requestDeadline - Date.now()));
           }
         } else {
           startReconnectDeadline();
@@ -565,7 +577,7 @@ export const VersionBadge: React.FC<{ openUpward?: boolean }> = ({ openUpward = 
                   size="icon"
                   className="h-7 w-7 text-muted hover:text-foreground"
                   onClick={() => checkVersion(true)}
-                  disabled={checking || restarting || (remoteRequestActive && !remoteUpdateTimedOut) || Boolean(localRemoteRequest)}
+                  disabled={checking || restarting || refreshBlockedByRemoteRequest}
                   aria-label={refreshLabel}
                   title={refreshLabel}
                 >

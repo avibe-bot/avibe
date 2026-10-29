@@ -8,6 +8,7 @@ import type { DesktopRemoteUpdateResult, VersionInfo, UpgradeResult } from '../c
 import {
   DESKTOP_OPEN_UPDATES_EVENT,
   DESKTOP_UPDATE_STATE_EVENT,
+  type DesktopUpdateState,
 } from '../lib/desktopShell';
 
 const api = vi.hoisted(() => ({
@@ -58,6 +59,7 @@ function renderInShell(
     has_update: boolean;
     error?: string | null;
     managed_by?: 'desktop';
+    remote_request?: VersionInfo['remote_request'];
   },
 ) {
   Object.defineProperty(window, '__AVIBE_DESKTOP_SHELL__', { value: true, configurable: true });
@@ -558,6 +560,36 @@ describe('remote desktop update contract', () => {
     expect(api.getVersion).toHaveBeenCalledTimes(calls);
   });
 
+  // Recovery must restore the request's original budget, not keep the outage
+  // budget or start a fresh 35 minutes. Completion-only recovery misses both.
+  it.each(['downloading', 'awaiting_host'] as const)('restores the original deadline after reconnecting to %s', async (phase) => {
+    api.getVersion.mockResolvedValue(remoteReceipt(phase));
+    await openTimingPopup();
+    await act(() => vi.advanceTimersByTimeAsync(10 * 60_000));
+    api.getVersion.mockRejectedValueOnce(new Error('disconnected'));
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+    expect(screen.getByText(i18n.t('dashboard.desktopRemoteUpdateRestarting'))).toBeTruthy();
+    await act(() => vi.advanceTimersByTimeAsync(125_000));
+    expect(screen.queryByText(i18n.t('dashboard.desktopRemoteUpdateTimedOut'))).toBeNull();
+    expect(screen.getByText(i18n.t(phase === 'downloading'
+      ? 'dashboard.desktopRemoteUpdateDownloadingUnknown'
+      : 'dashboard.desktopRemoteUpdateAwaitingHost'))).toBeTruthy();
+
+    // A second outage must have its own bounded recovery and still cannot
+    // extend the original deadline, even with repeated healthy receipt reads.
+    api.getVersion.mockRejectedValueOnce(new Error('disconnected again'));
+    await act(() => vi.advanceTimersByTimeAsync(2000));
+    await act(() => vi.advanceTimersByTimeAsync(125_000));
+    expect(screen.queryByText(i18n.t('dashboard.desktopRemoteUpdateTimedOut'))).toBeNull();
+    await act(() => vi.advanceTimersByTimeAsync(35 * 60_000 - 10 * 60_000 - 254_000 - 1));
+    expect(screen.queryByText(i18n.t('dashboard.desktopRemoteUpdateTimedOut'))).toBeNull();
+    await act(() => vi.advanceTimersByTimeAsync(1));
+    expect(screen.getByText(i18n.t('dashboard.desktopRemoteUpdateTimedOut'))).toBeTruthy();
+    const calls = api.getVersion.mock.calls.length;
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    expect(api.getVersion).toHaveBeenCalledTimes(calls);
+  });
+
   it.each(['unreachable', 'stuck', 'wrong-version', 'hanging-read'] as const)('bounds %s reconnect and never claims success', async (mode) => {
     const info = remoteReceipt(mode === 'wrong-version' ? 'completed' : 'restarting');
     api.getVersion.mockResolvedValue(info);
@@ -601,17 +633,43 @@ describe('remote desktop update contract', () => {
     expect(screen.getByRole('dialog')).toBeTruthy();
   });
 
-  it('shows local remote context and uses decline rather than global skip', async () => {
-    desktopInvoke.mockImplementation(async (command: string) => command === 'desktop_update_state'
-      ? { phase: 'available', latest: '10.0.0', channel: 'stable', interactive: true, skippedVersion: null,
-        remoteRequest: { requestId: 'request-1', target: '10.0.0', phase: 'awaiting_host', progress: null, errorCode: null, updatedAt: '' } }
-      : undefined);
-    renderInShell('9.9.9', '9.9.9', '10.0.0', true);
+  // Native settlement can precede the API status-file read; both a direct
+  // Ignore snapshot and an unsolicited expiry event must release refresh.
+  it.each(['ignore', 'expiry'] as const)('uses native %s settlement despite a stale API receipt', async (settlement) => {
+    let state: DesktopUpdateState = {
+      phase: 'available', latest: '10.0.0', channel: 'stable', interactive: true, skippedVersion: null,
+      remoteRequest: { requestId: 'request-1', target: '10.0.0', phase: 'awaiting_host', progress: null, errorCode: null, updatedAt: '' },
+    };
+    desktopInvoke.mockImplementation(async (command: string) => {
+      if (command === 'desktop_update_state') return state;
+      if (command === 'desktop_update_remote_decline') {
+        state = { ...state, remoteRequest: { ...state.remoteRequest!, phase: 'declined' } };
+      }
+      return undefined;
+    });
+    api.getVersion.mockResolvedValue(remoteReceipt('awaiting_host'));
+    renderInShell('9.9.9', '9.9.9', '10.0.0', true, remoteReceipt('awaiting_host'));
+    const transformCallback = vi.fn<(handler: (event: unknown) => void) => number>(() => 1);
+    Object.assign(window.__TAURI_INTERNALS__!, { transformCallback });
     expect(await screen.findByText(i18n.t('dashboard.desktopRemoteUpdateLocalRequest', { target: '10.0.0' }))).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateIgnore') }));
-    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_remote_decline'));
+    await vi.waitFor(() => expect(api.getVersion).toHaveBeenCalledOnce());
+    expect((screen.getByRole('button', { name: i18n.t('dashboard.checkUpdate') }) as HTMLButtonElement).disabled).toBe(true);
+    if (settlement === 'ignore') {
+      fireEvent.click(screen.getByRole('button', { name: i18n.t('dashboard.desktopRemoteUpdateIgnore') }));
+      await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_remote_decline'));
+      await vi.waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      fireEvent.click(screen.getByTitle('v9.9.9'));
+    } else {
+      await vi.waitFor(() => expect(transformCallback).toHaveBeenCalledOnce());
+      state = { ...state, remoteRequest: { ...state.remoteRequest!, phase: 'expired' } };
+      act(() => transformCallback.mock.calls[0][0]({ payload: state }));
+    }
     expect(desktopInvoke).not.toHaveBeenCalledWith('desktop_update_skip');
     expect(desktopInvoke).not.toHaveBeenCalledWith('desktop_update_check');
+    const refresh = screen.getByRole('button', { name: i18n.t('dashboard.checkUpdate') });
+    expect((refresh as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(refresh);
+    await vi.waitFor(() => expect(desktopInvoke).toHaveBeenCalledWith('desktop_update_check'));
   });
 
   it('keeps the Member pure-Web upgrade and handles its counted confirmation', async () => {

@@ -159,6 +159,8 @@ struct State {
     availability_interactive: bool,
     remote_install_allowed: bool,
     remote_request: Option<RemoteRequestStatus>,
+    /// The accepted request owns its deadline even if the mailbox is replaced.
+    active_request: Option<DesktopUpdateRequest>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -248,6 +250,103 @@ fn publish_status(app: &AppHandle) {
     }
 }
 
+/// All terminal receipt writes and gate releases happen together under the state
+/// mutex. Local checks share the gate but never own a remote receipt.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Settlement {
+    Completed,
+    Failed(&'static str),
+    Declined,
+    Expired,
+    ShellInterrupted,
+    RestartVersionMismatch,
+}
+
+impl Settlement {
+    fn receipt(self) -> (RemoteRequestPhase, Option<&'static str>) {
+        match self {
+            Self::Completed => (RemoteRequestPhase::Completed, None),
+            Self::Failed(code) => (RemoteRequestPhase::Failed, Some(code)),
+            Self::Declined => (RemoteRequestPhase::Declined, None),
+            Self::Expired => (RemoteRequestPhase::Expired, Some(REMOTE_REQUEST_EXPIRY_CODE)),
+            Self::ShellInterrupted => (RemoteRequestPhase::Failed, Some("shell_interrupted")),
+            Self::RestartVersionMismatch => (RemoteRequestPhase::Failed, Some("restart_version_mismatch")),
+        }
+    }
+}
+
+fn settle(
+    state: &mut State,
+    busy: &AtomicBool,
+    context: Option<&RemoteInstallContext>,
+    outcome: Settlement,
+    now: SystemTime,
+) -> bool {
+    if let Some(context) = context {
+        if !remote_request_can_transition(state.remote_request.as_ref(), &context.request_id, &context.target) {
+            return false;
+        }
+        if outcome == Settlement::Declined
+            && state.remote_request.as_ref().unwrap().phase != RemoteRequestPhase::AwaitingHost
+        {
+            return false;
+        }
+        let (phase, code) = outcome.receipt();
+        state.remote_request = Some(RemoteRequestStatus::new(
+            &context.request_id,
+            &context.target,
+            phase,
+            None,
+            code.map(str::to_owned),
+            now,
+        ));
+        state.active_request = None;
+        if phase != RemoteRequestPhase::Completed && native_update_needs_remote_failure(state.phase) {
+            state.phase = Phase::Error;
+            state.manifest = None;
+            state.availability_interactive = false;
+        }
+    } else if state
+        .remote_request
+        .as_ref()
+        .is_some_and(|request| !request.phase.is_terminal())
+    {
+        return false;
+    }
+    finish(busy);
+    true
+}
+
+fn finish(busy: &AtomicBool) {
+    busy.store(false, Ordering::SeqCst);
+}
+
+fn settle_update(app: &AppHandle, context: Option<&RemoteInstallContext>, outcome: Settlement) -> bool {
+    let updater = app.state::<Updater>();
+    let settled = {
+        let mut state = updater.state.lock().expect("updater state");
+        // Install failure changes native progress, not the last check result.
+        let record = base_status(app, &state);
+        let settled = settle(&mut state, &updater.busy, context, outcome, SystemTime::now());
+        if settled {
+            let record = record.with_remote(state.remote_install_allowed, state.remote_request.clone());
+            if let Err(error) = updater.status.write(&record) {
+                eprintln!("desktop update status: {error}");
+            }
+        }
+        settled
+    };
+    if settled {
+        let phase = updater.state.lock().expect("updater state").phase;
+        let _ = updater
+            .menu
+            .set_text(format!("{} — {}", label(phase, &catalog()), app.package_info().version));
+        let _ = updater.channel_menu.set_enabled(!updater.busy.load(Ordering::SeqCst));
+        emit_state(app);
+    }
+    settled
+}
+
 fn set_remote_phase_if(
     app: &AppHandle,
     request_id: &str,
@@ -257,21 +356,23 @@ fn set_remote_phase_if(
     error_code: Option<&str>,
     should_replace: impl FnOnce(Option<&RemoteRequestStatus>) -> bool,
 ) -> bool {
-    let status = RemoteRequestStatus::new(
-        request_id,
-        target,
-        phase,
-        progress,
-        error_code.map(str::to_owned),
-        SystemTime::now(),
-    );
+    assert!(!phase.is_terminal(), "terminal receipts must use settle");
     let replaced = {
         let updater = app.state::<Updater>();
         let mut state = updater.state.lock().expect("updater state");
-        if !should_replace(state.remote_request.as_ref()) {
+        if !remote_request_can_transition(state.remote_request.as_ref(), request_id, target)
+            || !should_replace(state.remote_request.as_ref())
+        {
             false
         } else {
-            state.remote_request = Some(status);
+            state.remote_request = Some(RemoteRequestStatus::new(
+                request_id,
+                target,
+                phase,
+                progress,
+                error_code.map(str::to_owned),
+                SystemTime::now(),
+            ));
             true
         }
     };
@@ -290,13 +391,13 @@ fn set_remote_phase(
     progress: Option<u8>,
     error_code: Option<&str>,
 ) -> bool {
-    set_remote_phase_if(app, request_id, target, phase, progress, error_code, |current| {
-        remote_request_can_transition(current, request_id)
-    })
+    set_remote_phase_if(app, request_id, target, phase, progress, error_code, |_| true)
 }
 
-fn remote_request_can_transition(current: Option<&RemoteRequestStatus>, request_id: &str) -> bool {
-    current.is_none_or(|request| request.request_id == request_id && !request.phase.is_terminal())
+fn remote_request_can_transition(current: Option<&RemoteRequestStatus>, request_id: &str, target: &str) -> bool {
+    current.is_some_and(|request| {
+        request.request_id == request_id && request.target == target && !request.phase.is_terminal()
+    })
 }
 
 fn expire_awaiting_remote_request(
@@ -306,23 +407,23 @@ fn expire_awaiting_remote_request(
     target: &str,
     now: SystemTime,
 ) -> bool {
-    let Some(current) = state.remote_request.as_ref() else {
-        return false;
-    };
-    if current.request_id != request_id || current.target != target || current.phase != RemoteRequestPhase::AwaitingHost
+    if state
+        .remote_request
+        .as_ref()
+        .is_none_or(|current| current.phase != RemoteRequestPhase::AwaitingHost)
     {
         return false;
     }
-    state.remote_request = Some(RemoteRequestStatus::new(
-        request_id,
-        target,
-        RemoteRequestPhase::Expired,
-        None,
-        Some(REMOTE_REQUEST_EXPIRY_CODE.to_owned()),
+    settle(
+        state,
+        busy,
+        Some(&RemoteInstallContext {
+            request_id: request_id.to_owned(),
+            target: target.to_owned(),
+        }),
+        Settlement::Expired,
         now,
-    ));
-    busy.store(false, Ordering::SeqCst);
-    true
+    )
 }
 
 fn expire_remote_request(app: &AppHandle, request_id: &str, target: &str) -> bool {
@@ -333,7 +434,7 @@ fn expire_remote_request(app: &AppHandle, request_id: &str, target: &str) -> boo
     };
     if expired {
         let updater = app.state::<Updater>();
-        let _ = updater.channel_menu.set_enabled(true);
+        let _ = updater.channel_menu.set_enabled(!updater.busy.load(Ordering::SeqCst));
         publish_status(app);
         emit_state(app);
     }
@@ -342,17 +443,6 @@ fn expire_remote_request(app: &AppHandle, request_id: &str, target: &str) -> boo
 
 fn native_update_needs_remote_failure(phase: Phase) -> bool {
     matches!(phase, Phase::Downloading | Phase::Installing)
-}
-
-fn end_native_update_after_remote_failure(app: &AppHandle) {
-    let should_end = {
-        let updater = app.state::<Updater>();
-        let should_end = native_update_needs_remote_failure(updater.state.lock().expect("updater state").phase);
-        should_end
-    };
-    if should_end {
-        set_state(app, Phase::Error, None);
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -368,25 +458,29 @@ fn claim_remote_request(
     request: &DesktopUpdateRequest,
     now: SystemTime,
 ) -> RemoteRequestStart {
-    if state.remote_request.as_ref().is_some_and(|previous| {
-        previous.request_id == request.request_id && (previous.phase.is_terminal() || busy.load(Ordering::SeqCst))
-    }) {
+    if state
+        .remote_request
+        .as_ref()
+        .is_some_and(|previous| previous.request_id == request.request_id)
+    {
         return RemoteRequestStart::AlreadyHandled;
+    }
+    // Sleep/wake may deliver the competing nudge before the original timer.
+    // Settle the original owner before attempting to acquire the gate again.
+    if let Some(previous) = state
+        .active_request
+        .clone()
+        .filter(|previous| previous.expires_in(now).is_zero())
+    {
+        expire_awaiting_remote_request(state, busy, &previous.request_id, &previous.target, now);
     }
     if busy
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        state.remote_request = Some(RemoteRequestStatus::new(
-            &request.request_id,
-            &request.target,
-            RemoteRequestPhase::Failed,
-            None,
-            Some("update_in_progress".to_owned()),
-            now,
-        ));
         return RemoteRequestStart::Busy;
     }
+    state.active_request = Some(request.clone());
     state.remote_request = Some(RemoteRequestStatus::new(
         &request.request_id,
         &request.target,
@@ -405,40 +499,40 @@ fn remote_preference_can_change(state: &State) -> bool {
         .is_none_or(|request| request.phase.is_terminal())
 }
 
-fn startup_remote_request_outcome(
-    request: &RemoteRequestStatus,
-    current: &str,
-) -> Option<(RemoteRequestPhase, Option<&'static str>)> {
+fn startup_remote_request_outcome(request: &RemoteRequestStatus, current: &str) -> Option<Settlement> {
     match request.phase {
-        RemoteRequestPhase::Restarting if request.target == current => Some((RemoteRequestPhase::Completed, None)),
-        RemoteRequestPhase::Restarting => Some((RemoteRequestPhase::Failed, Some("restart_version_mismatch"))),
+        RemoteRequestPhase::Restarting if request.target == current => Some(Settlement::Completed),
+        RemoteRequestPhase::Restarting => Some(Settlement::RestartVersionMismatch),
         RemoteRequestPhase::Completed
         | RemoteRequestPhase::Failed
         | RemoteRequestPhase::Declined
         | RemoteRequestPhase::Expired => None,
-        RemoteRequestPhase::Requested
-        | RemoteRequestPhase::Acknowledged
-        | RemoteRequestPhase::Checking
-        | RemoteRequestPhase::AwaitingHost
-        | RemoteRequestPhase::Downloading
-        | RemoteRequestPhase::Installing => Some((RemoteRequestPhase::Failed, Some("shell_interrupted"))),
+        _ => Some(Settlement::ShellInterrupted),
     }
 }
 
 fn reconcile_remote_request_on_startup(app: &AppHandle) {
-    let request = {
-        let updater = app.state::<Updater>();
-        let request = updater.state.lock().expect("updater state").remote_request.clone();
-        request
-    };
+    let request = app
+        .state::<Updater>()
+        .state
+        .lock()
+        .expect("updater state")
+        .remote_request
+        .clone();
     let Some(request) = request else {
         return;
     };
-    let Some((phase, error_code)) = startup_remote_request_outcome(&request, &app.package_info().version.to_string())
-    else {
+    let Some(outcome) = startup_remote_request_outcome(&request, &app.package_info().version.to_string()) else {
         return;
     };
-    set_remote_phase(app, &request.request_id, &request.target, phase, None, error_code);
+    settle_update(
+        app,
+        Some(&RemoteInstallContext {
+            request_id: request.request_id,
+            target: request.target,
+        }),
+        outcome,
+    );
 }
 fn label(phase: Phase, c: &Catalog) -> &str {
     match phase {
@@ -467,6 +561,9 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
     let status_dir = app.path().app_data_dir()?;
     let status = UpdateStatusStore::new(status_dir.join(UPDATE_STATUS_FILE));
     let remote_request = status.read().ok().flatten().and_then(|record| record.remote_request);
+    let remote_busy = remote_request
+        .as_ref()
+        .is_some_and(|request| !request.phase.is_terminal());
     let remote_install_path = app.path().app_local_data_dir()?.join(REMOTE_INSTALL_PREFERENCE_FILE);
     let remote_install_allowed = read_remote_install_preference(&remote_install_path).unwrap_or_else(|error| {
         eprintln!("desktop remote-install preference: {error}");
@@ -481,8 +578,9 @@ pub fn init(app: &AppHandle) -> tauri::Result<()> {
             availability_interactive: false,
             remote_install_allowed,
             remote_request,
+            active_request: None,
         }),
-        busy: AtomicBool::new(false),
+        busy: AtomicBool::new(remote_busy),
         source: AtomicUsize::new(0),
         channel_path,
         skipped_path: app.path().app_local_data_dir()?.join("update-skipped.json"),
@@ -749,7 +847,7 @@ fn validate_remote_request_gate(
         return Err(RemoteRequestGateError::Expired);
     }
     if !request.is_pending() {
-        return Err(RemoteRequestGateError::Mismatch);
+        return Err(RemoteRequestGateError::Expired);
     }
     Ok(())
 }
@@ -874,9 +972,9 @@ pub fn check(app: AppHandle, interactive: bool) {
         return;
     }
     if KEY.trim().is_empty() || TARGET == "unsupported" {
-        updater.busy.store(false, Ordering::SeqCst);
         set_state(&app, Phase::Disabled, None);
         publish_check(&app);
+        settle_update(&app, None, Settlement::Completed);
         if interactive {
             show(&app, &catalog().disabled_detail, None);
         }
@@ -892,14 +990,14 @@ pub fn check(app: AppHandle, interactive: bool) {
                 publish_check(&app);
                 let skipped = skipped_version(&app.state::<Updater>());
                 if !should_prompt(interactive, skipped.as_deref(), &manifest.version) {
-                    finish(&app);
+                    settle_update(&app, None, Settlement::Completed);
                     return;
                 }
                 if workbench_ready(&app) {
                     // The Workbench owns the confirmation UI. Keep the signed
                     // manifest in native state, but release the check lock so
                     // closing the popover cannot strand the updater as busy.
-                    finish(&app);
+                    settle_update(&app, None, Settlement::Completed);
                     return;
                 }
                 let c = catalog();
@@ -925,15 +1023,17 @@ pub fn check(app: AppHandle, interactive: bool) {
                         Choice::Install => install(confirmation, manifest),
                         Choice::Skip => {
                             skip_version(&confirmation, &manifest.version);
-                            finish(&confirmation);
+                            settle_update(&confirmation, None, Settlement::Completed);
                         }
-                        Choice::Later => finish(&confirmation),
+                        Choice::Later => {
+                            settle_update(&confirmation, None, Settlement::Completed);
+                        }
                     });
             }
             Ok(None) => {
-                finish(&app);
                 set_state(&app, Phase::Current, None);
                 publish_check(&app);
+                settle_update(&app, None, Settlement::Completed);
                 if interactive {
                     let latest = app
                         .state::<Updater>()
@@ -947,9 +1047,9 @@ pub fn check(app: AppHandle, interactive: bool) {
             }
             Err(error) => {
                 eprintln!("desktop update check: {error}");
-                finish(&app);
                 set_state(&app, Phase::Error, None);
                 publish_check(&app);
+                settle_update(&app, None, Settlement::Failed("check_failed"));
                 if interactive {
                     show(&app, &catalog().check_failed, None);
                 }
@@ -1056,7 +1156,7 @@ pub fn desktop_update_skip(window: WebviewWindow, app: AppHandle) -> Result<(), 
             .ok_or_else(|| "The available desktop update has no version.".to_owned())?
     };
     skip_version(&app, &version);
-    finish(&app);
+    emit_state(&app);
     Ok(())
 }
 
@@ -1076,26 +1176,46 @@ pub fn desktop_update_remote_decline(window: WebviewWindow, app: AppHandle) -> R
     let Some(request) = request.filter(|request| request.phase == RemoteRequestPhase::AwaitingHost) else {
         return Err("No remote desktop update is waiting for host action.".to_owned());
     };
-    set_remote_phase(
+    settle_update(
         &app,
-        &request.request_id,
-        &request.target,
-        RemoteRequestPhase::Declined,
-        None,
-        None,
+        Some(&RemoteInstallContext {
+            request_id: request.request_id,
+            target: request.target,
+        }),
+        Settlement::Declined,
     );
-    finish(&app);
     Ok(())
 }
 
 fn reread_remote_request(app: &AppHandle, context: &RemoteInstallContext) -> Result<(), RemoteRequestGateError> {
-    let path = app.state::<Updater>().remote_request_path.clone();
-    let request = match read_desktop_update_request(&path, SystemTime::now()) {
-        Ok(request) => request,
-        Err(DesktopUpdateRequestError::Expired(_)) => return Err(RemoteRequestGateError::Expired),
+    let updater = app.state::<Updater>();
+    let owned = updater
+        .state
+        .lock()
+        .expect("updater state")
+        .active_request
+        .clone()
+        .ok_or(RemoteRequestGateError::Mismatch)?;
+    validate_owned_request_file(&updater.remote_request_path, &owned, context, SystemTime::now())
+}
+
+fn validate_owned_request_file(
+    path: &Path,
+    owned: &DesktopUpdateRequest,
+    context: &RemoteInstallContext,
+    now: SystemTime,
+) -> Result<(), RemoteRequestGateError> {
+    validate_remote_request_gate(owned, context, now)?;
+    let request = match read_desktop_update_request(path, now) {
+        Ok(request) | Err(DesktopUpdateRequestError::Expired(request)) => request,
         Err(_) => return Err(RemoteRequestGateError::Unavailable),
     };
-    validate_remote_request_gate(&request, context, SystemTime::now())
+    // The mailbox is not ownership. An unrelated pending OR expired file must
+    // not cancel the accepted request, or change its original deadline.
+    if request.request_id != context.request_id || request.target != context.target {
+        return Ok(());
+    }
+    validate_remote_request_gate(&request, context, now)
 }
 
 fn record_remote_gate_failure(
@@ -1103,24 +1223,13 @@ fn record_remote_gate_failure(
     context: &RemoteInstallContext,
     error: RemoteRequestGateError,
 ) -> String {
-    let (phase, code) = match error {
-        RemoteRequestGateError::Expired => (RemoteRequestPhase::Expired, "expired"),
-        RemoteRequestGateError::Unavailable => (RemoteRequestPhase::Failed, "request_unavailable"),
-        RemoteRequestGateError::Mismatch => (RemoteRequestPhase::Failed, "request_mismatch"),
+    let (outcome, code) = match error {
+        RemoteRequestGateError::Expired => (Settlement::Expired, "expired"),
+        RemoteRequestGateError::Unavailable => (Settlement::Failed("request_unavailable"), "request_unavailable"),
+        RemoteRequestGateError::Mismatch => return "request_mismatch".to_owned(),
     };
-    set_remote_phase(app, &context.request_id, &context.target, phase, None, Some(code));
-    end_native_update_after_remote_failure(app);
+    settle_update(app, Some(context), outcome);
     code.to_owned()
-}
-
-fn finish_remote_gate_failure(
-    app: &AppHandle,
-    context: &RemoteInstallContext,
-    error: RemoteRequestGateError,
-) -> String {
-    let code = record_remote_gate_failure(app, context, error);
-    finish(app);
-    code
 }
 
 fn notify_remote_request(app: &AppHandle) {
@@ -1147,15 +1256,14 @@ fn schedule_remote_expiry(app: &AppHandle, request: DesktopUpdateRequest) {
 }
 
 fn fail_remote_request(app: &AppHandle, request: &DesktopUpdateRequest, error_code: &'static str) {
-    set_remote_phase(
+    settle_update(
         app,
-        &request.request_id,
-        &request.target,
-        RemoteRequestPhase::Failed,
-        None,
-        Some(error_code),
+        Some(&RemoteInstallContext {
+            request_id: request.request_id.clone(),
+            target: request.target.clone(),
+        }),
+        Settlement::Failed(error_code),
     );
-    finish(app);
 }
 
 pub fn handle_remote_update_request(app: &AppHandle) {
@@ -1229,7 +1337,7 @@ async fn process_remote_update_request(app: AppHandle, request: DesktopUpdateReq
                 target: request.target.clone(),
             };
             if let Err(error) = reread_remote_request(&app, &remote) {
-                let code = finish_remote_gate_failure(&app, &remote, error);
+                let code = record_remote_gate_failure(&app, &remote, error);
                 eprintln!("remote desktop update request gate: {code}");
                 return;
             }
@@ -1263,36 +1371,55 @@ async fn process_remote_update_request(app: AppHandle, request: DesktopUpdateReq
         }
     }
 }
-fn finish(app: &AppHandle) {
-    let updater = app.state::<Updater>();
-    updater.busy.store(false, Ordering::SeqCst);
-    let _ = updater.channel_menu.set_enabled(true);
-    emit_state(app);
-}
 
 fn install(app: AppHandle, manifest: Manifest) {
     install_with_context(app, manifest, None);
 }
 
+/// Claim the install transition before a timer/Ignore can settle the prompt.
+/// Only one host action may start downloading the accepted request.
+fn begin_remote_download(state: &mut State, remote: &RemoteInstallContext, now: SystemTime) -> bool {
+    if !state.remote_request.as_ref().is_some_and(|request| {
+        request.request_id == remote.request_id
+            && request.target == remote.target
+            && matches!(
+                request.phase,
+                RemoteRequestPhase::Checking | RemoteRequestPhase::AwaitingHost
+            )
+    }) {
+        return false;
+    }
+    state.remote_request = Some(RemoteRequestStatus::new(
+        &remote.request_id,
+        &remote.target,
+        RemoteRequestPhase::Downloading,
+        Some(0),
+        None,
+        now,
+    ));
+    true
+}
+
 fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<RemoteInstallContext>) {
     if let Some(remote) = &remote {
+        let updater = app.state::<Updater>();
+        // Claim the worker before rereading the mailbox: a second host action
+        // must not settle a download that the first action already started.
+        if !begin_remote_download(
+            &mut updater.state.lock().expect("updater state"),
+            remote,
+            SystemTime::now(),
+        ) {
+            return;
+        }
         if let Err(error) = reread_remote_request(&app, remote) {
-            let code = finish_remote_gate_failure(&app, remote, error);
+            let code = record_remote_gate_failure(&app, remote, error);
             eprintln!("remote desktop update request gate: {code}");
             return;
         }
+        publish_status(&app);
     }
     set_state(&app, Phase::Downloading, None);
-    if let Some(remote) = &remote {
-        set_remote_phase(
-            &app,
-            &remote.request_id,
-            &remote.target,
-            RemoteRequestPhase::Downloading,
-            Some(0),
-            None,
-        );
-    }
     tauri::async_runtime::spawn(async move {
         let result = async {
             let artifact = manifest
@@ -1387,8 +1514,8 @@ fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<Remot
                     );
                 } else {
                     set_state(&app, Phase::Installed, None);
+                    settle_update(&app, None, Settlement::Completed);
                 }
-                finish(&app);
                 #[cfg(target_os = "macos")]
                 {
                     super::restart_after_computer_use_shutdown(app);
@@ -1397,7 +1524,6 @@ fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<Remot
             Err(error) => {
                 eprintln!("desktop update install: {error}");
                 if error.strip_prefix("remote_request_gate:").is_some() {
-                    finish(&app);
                     return;
                 }
                 if let Some(remote) = &remote {
@@ -1406,19 +1532,11 @@ fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<Remot
                     } else {
                         "install_failed"
                     };
-                    set_remote_phase(
-                        &app,
-                        &remote.request_id,
-                        &remote.target,
-                        RemoteRequestPhase::Failed,
-                        None,
-                        Some(error_code),
-                    );
-                    end_native_update_after_remote_failure(&app);
+                    settle_update(&app, Some(remote), Settlement::Failed(error_code));
                 } else {
                     set_state(&app, Phase::Error, None);
+                    settle_update(&app, None, Settlement::Failed("install_failed"));
                 }
-                finish(&app);
                 if !workbench_ready(&app) {
                     app.dialog()
                         .message(catalog().install_failed)
@@ -1437,6 +1555,7 @@ mod tests {
 
     fn state_with_remote_request(request_id: &str, target: &str, phase: RemoteRequestPhase) -> State {
         State {
+            active_request: None,
             phase: Phase::Available,
             latest: Some(target.to_owned()),
             channel: Channel::Stable,
@@ -1542,6 +1661,7 @@ mod tests {
             Phase::Error,
         ] {
             let state = State {
+                active_request: None,
                 phase,
                 latest: Some("3.2.3".to_owned()),
                 channel: Channel::Test,
@@ -1583,6 +1703,7 @@ mod tests {
             SystemTime::UNIX_EPOCH,
         );
         let mut state = State {
+            active_request: None,
             phase: Phase::Error,
             latest: Some("3.2.4".to_owned()),
             channel: Channel::Stable,
@@ -1672,6 +1793,7 @@ mod tests {
         )
         .unwrap();
         let mut state = State {
+            active_request: None,
             phase: Phase::Idle,
             latest: None,
             channel: Channel::Stable,
@@ -1722,7 +1844,7 @@ mod tests {
             RemoteRequestPhase::Restarting,
         ] {
             let current = receipt(request_id, phase);
-            assert!(remote_request_can_transition(Some(&current), request_id));
+            assert!(remote_request_can_transition(Some(&current), request_id, "3.2.4"));
         }
         for phase in [
             RemoteRequestPhase::Completed,
@@ -1731,15 +1853,16 @@ mod tests {
             RemoteRequestPhase::Expired,
         ] {
             let current = receipt(request_id, phase);
-            assert!(!remote_request_can_transition(Some(&current), request_id));
+            assert!(!remote_request_can_transition(Some(&current), request_id, "3.2.4"));
         }
-        assert!(remote_request_can_transition(None, request_id));
+        assert!(!remote_request_can_transition(None, request_id, "3.2.4"));
         assert!(!remote_request_can_transition(
             Some(&receipt(
                 "11111111-1111-4111-8111-111111111111",
                 RemoteRequestPhase::Requested,
             )),
             request_id,
+            "3.2.4",
         ));
     }
 
@@ -1893,6 +2016,7 @@ mod tests {
             )
         };
         let mut state = State {
+            active_request: None,
             phase: Phase::Idle,
             latest: None,
             channel: Channel::Stable,
@@ -1981,34 +2105,13 @@ mod tests {
             )
         };
         for (phase, expected) in [
-            (
-                RemoteRequestPhase::Requested,
-                Some((RemoteRequestPhase::Failed, Some("shell_interrupted"))),
-            ),
-            (
-                RemoteRequestPhase::Acknowledged,
-                Some((RemoteRequestPhase::Failed, Some("shell_interrupted"))),
-            ),
-            (
-                RemoteRequestPhase::Checking,
-                Some((RemoteRequestPhase::Failed, Some("shell_interrupted"))),
-            ),
-            (
-                RemoteRequestPhase::AwaitingHost,
-                Some((RemoteRequestPhase::Failed, Some("shell_interrupted"))),
-            ),
-            (
-                RemoteRequestPhase::Downloading,
-                Some((RemoteRequestPhase::Failed, Some("shell_interrupted"))),
-            ),
-            (
-                RemoteRequestPhase::Installing,
-                Some((RemoteRequestPhase::Failed, Some("shell_interrupted"))),
-            ),
-            (
-                RemoteRequestPhase::Restarting,
-                Some((RemoteRequestPhase::Completed, None)),
-            ),
+            (RemoteRequestPhase::Requested, Some(Settlement::ShellInterrupted)),
+            (RemoteRequestPhase::Acknowledged, Some(Settlement::ShellInterrupted)),
+            (RemoteRequestPhase::Checking, Some(Settlement::ShellInterrupted)),
+            (RemoteRequestPhase::AwaitingHost, Some(Settlement::ShellInterrupted)),
+            (RemoteRequestPhase::Downloading, Some(Settlement::ShellInterrupted)),
+            (RemoteRequestPhase::Installing, Some(Settlement::ShellInterrupted)),
+            (RemoteRequestPhase::Restarting, Some(Settlement::Completed)),
             (RemoteRequestPhase::Completed, None),
             (RemoteRequestPhase::Failed, None),
             (RemoteRequestPhase::Declined, None),
@@ -2019,6 +2122,26 @@ mod tests {
                 expected,
                 "{phase:?}",
             );
+            let receipt = request(phase);
+            let mut state = state_with_remote_request(&receipt.request_id, &receipt.target, phase);
+            let busy = AtomicBool::new(true);
+            if let Some(outcome) = startup_remote_request_outcome(&receipt, "3.2.4") {
+                assert!(settle(
+                    &mut state,
+                    &busy,
+                    Some(&RemoteInstallContext {
+                        request_id: receipt.request_id,
+                        target: receipt.target,
+                    }),
+                    outcome,
+                    SystemTime::now()
+                ));
+                assert!(!busy.load(Ordering::SeqCst));
+                assert_eq!(state.remote_request.as_ref().unwrap().phase, outcome.receipt().0);
+            } else {
+                assert_eq!(state.remote_request, Some(receipt));
+                assert!(busy.load(Ordering::SeqCst));
+            }
         }
     }
 
@@ -2034,7 +2157,231 @@ mod tests {
         );
         assert_eq!(
             startup_remote_request_outcome(&request, "3.2.3"),
-            Some((RemoteRequestPhase::Failed, Some("restart_version_mismatch")))
+            Some(Settlement::RestartVersionMismatch)
+        );
+    }
+
+    fn pending_request(id: &str, target: &str, created: u64, ttl: u64) -> DesktopUpdateRequest {
+        let timestamp = |seconds| format!("1970-01-01T00:{:02}:{:02}Z", seconds / 60, seconds % 60);
+        DesktopUpdateRequest::parse(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1, "request_id": id, "target": target, "state": "pending",
+                "created_at": timestamp(created), "expires_at": timestamp(created + ttl),
+            }))
+            .unwrap(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(created),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn competing_request_settles_expired_owner_before_claiming_with_delayed_timer() {
+        let old = pending_request("00000000-0000-4000-8000-000000000000", "3.2.4", 100, 60);
+        let new = pending_request("11111111-1111-4111-8111-111111111111", "3.2.5", 150, 60);
+        let mut state = state_with_remote_request(&old.request_id, &old.target, RemoteRequestPhase::AwaitingHost);
+        state.active_request = Some(old.clone());
+        let busy = AtomicBool::new(true);
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(161);
+
+        assert_eq!(
+            claim_remote_request(&mut state, &busy, &new, now),
+            RemoteRequestStart::Started
+        );
+        assert!(busy.load(Ordering::SeqCst));
+        assert_eq!(state.active_request.as_ref(), Some(&new));
+        let receipt = state.remote_request.clone();
+        assert_eq!(receipt.as_ref().unwrap().request_id, new.request_id);
+        assert_eq!(receipt.as_ref().unwrap().phase, RemoteRequestPhase::Requested);
+        // The old timer fires only after the new request owns both resources.
+        assert!(!expire_awaiting_remote_request(
+            &mut state,
+            &busy,
+            &old.request_id,
+            &old.target,
+            now
+        ));
+        assert_eq!(state.remote_request, receipt);
+        assert!(busy.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn busy_rejection_preserves_receipt_and_gate_in_every_inflight_phase() {
+        let old = pending_request("00000000-0000-4000-8000-000000000000", "3.2.4", 100, 60);
+        let new = pending_request("11111111-1111-4111-8111-111111111111", "3.2.5", 150, 60);
+        for phase in [
+            RemoteRequestPhase::Requested,
+            RemoteRequestPhase::Acknowledged,
+            RemoteRequestPhase::Checking,
+            RemoteRequestPhase::AwaitingHost,
+            RemoteRequestPhase::Downloading,
+            RemoteRequestPhase::Installing,
+            RemoteRequestPhase::Restarting,
+        ] {
+            let mut state = state_with_remote_request(&old.request_id, &old.target, phase);
+            state.active_request = Some(old.clone());
+            let busy = AtomicBool::new(true);
+            // Prompt expiry is replaceable; a running worker remains the owner
+            // even when the mailbox deadline passes.
+            let now = SystemTime::UNIX_EPOCH
+                + Duration::from_secs(if phase == RemoteRequestPhase::AwaitingHost {
+                    159
+                } else {
+                    161
+                });
+            let before = state.remote_request.clone();
+            assert_eq!(
+                claim_remote_request(&mut state, &busy, &new, now),
+                RemoteRequestStart::Busy,
+                "{phase:?}"
+            );
+            assert_eq!(state.remote_request, before, "{phase:?}");
+            assert_eq!(state.active_request.as_ref(), Some(&old));
+            assert!(busy.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn settlement_releases_only_its_own_gate_exactly_once() {
+        let id = "00000000-0000-4000-8000-000000000000";
+        let target = "3.2.4";
+        let context = RemoteInstallContext {
+            request_id: id.to_owned(),
+            target: target.to_owned(),
+        };
+        for outcome in [
+            Settlement::Completed,
+            Settlement::Failed("install_failed"),
+            Settlement::Declined,
+            Settlement::Expired,
+            Settlement::ShellInterrupted,
+            Settlement::RestartVersionMismatch,
+        ] {
+            let mut state = state_with_remote_request(id, target, RemoteRequestPhase::AwaitingHost);
+            state.active_request = Some(pending_request(id, target, 100, 60));
+            let busy = AtomicBool::new(true);
+            let now = SystemTime::UNIX_EPOCH + Duration::from_secs(101);
+            assert!(settle(&mut state, &busy, Some(&context), outcome, now));
+            let receipt = state.remote_request.clone();
+            assert_eq!(receipt.as_ref().unwrap().phase, outcome.receipt().0);
+            assert_eq!(receipt.as_ref().unwrap().error_code.as_deref(), outcome.receipt().1);
+            assert!(state.active_request.is_none());
+            assert!(!busy.load(Ordering::SeqCst));
+            // A later local check owns the gate; a duplicate settlement cannot release it.
+            busy.store(true, Ordering::SeqCst);
+            assert!(!settle(&mut state, &busy, Some(&context), outcome, now));
+            assert!(busy.load(Ordering::SeqCst));
+            assert_eq!(state.remote_request, receipt);
+        }
+    }
+
+    #[test]
+    fn stale_settlement_and_local_completion_cannot_release_remote_owner() {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let target = "3.2.5";
+        let mut state = state_with_remote_request(id, target, RemoteRequestPhase::AwaitingHost);
+        let before = state.remote_request.clone();
+        let busy = AtomicBool::new(true);
+        for context in [
+            None,
+            Some(RemoteInstallContext {
+                request_id: "00000000-0000-4000-8000-000000000000".into(),
+                target: target.into(),
+            }),
+            Some(RemoteInstallContext {
+                request_id: id.into(),
+                target: "3.2.4".into(),
+            }),
+        ] {
+            assert!(!settle(
+                &mut state,
+                &busy,
+                context.as_ref(),
+                Settlement::Failed("install_failed"),
+                SystemTime::now()
+            ));
+            assert_eq!(state.remote_request, before);
+            assert!(busy.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn install_transition_and_prompt_settlement_are_mutually_exclusive() {
+        let id = "00000000-0000-4000-8000-000000000000";
+        let target = "3.2.4";
+        let context = RemoteInstallContext {
+            request_id: id.into(),
+            target: target.into(),
+        };
+        let now = SystemTime::UNIX_EPOCH;
+        for install_first in [true, false] {
+            for outcome in [Settlement::Declined, Settlement::Expired] {
+                let mut state = state_with_remote_request(id, target, RemoteRequestPhase::AwaitingHost);
+                let busy = AtomicBool::new(true);
+                let end_prompt = |state: &mut State| match outcome {
+                    Settlement::Expired => expire_awaiting_remote_request(state, &busy, id, target, now),
+                    _ => settle(state, &busy, Some(&context), outcome, now),
+                };
+                if install_first {
+                    assert!(begin_remote_download(&mut state, &context, now));
+                    assert!(!begin_remote_download(&mut state, &context, now));
+                    assert!(!end_prompt(&mut state));
+                    assert_eq!(
+                        state.remote_request.as_ref().unwrap().phase,
+                        RemoteRequestPhase::Downloading
+                    );
+                    assert!(busy.load(Ordering::SeqCst));
+                } else {
+                    assert!(end_prompt(&mut state));
+                    assert!(!begin_remote_download(&mut state, &context, now));
+                    assert!(!busy.load(Ordering::SeqCst));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn request_file_revalidation_ignores_unrelated_pending_and_expired_files() {
+        let owned = pending_request("00000000-0000-4000-8000-000000000000", "3.2.4", 100, 60);
+        let context = RemoteInstallContext {
+            request_id: owned.request_id.clone(),
+            target: owned.target.clone(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("request.json");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(101);
+        for (id, target) in [
+            ("11111111-1111-4111-8111-111111111111", "3.2.4"),
+            (owned.request_id.as_str(), "3.2.5"),
+        ] {
+            for phase in ["pending", "expired"] {
+                fs::write(
+                    &path,
+                    serde_json::to_vec(&serde_json::json!({
+                        "schema_version": 1, "request_id": id, "target": target, "state": phase,
+                        "created_at": owned.created_at, "expires_at": owned.expires_at,
+                    }))
+                    .unwrap(),
+                )
+                .unwrap();
+                assert_eq!(validate_owned_request_file(&path, &owned, &context, now), Ok(()));
+                assert_eq!(
+                    validate_owned_request_file(&path, &owned, &context, now + Duration::from_secs(60)),
+                    Err(RemoteRequestGateError::Expired)
+                );
+            }
+        }
+        fs::write(
+            &path,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1, "request_id": owned.request_id, "target": owned.target, "state": "expired",
+                "created_at": owned.created_at, "expires_at": owned.expires_at,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            validate_owned_request_file(&path, &owned, &context, now),
+            Err(RemoteRequestGateError::Expired)
         );
     }
 
