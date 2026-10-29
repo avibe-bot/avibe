@@ -120,6 +120,16 @@ const ZH_PRODUCT_CATALOG: &str = include_str!("../../../ui/src/i18n/zh.json");
 #[derive(Default)]
 struct PendingDesktopUpdateOpen(AtomicBool);
 
+impl PendingDesktopUpdateOpen {
+    fn request(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    fn take(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ProductCatalog {
@@ -653,11 +663,19 @@ fn open_desktop_updates(app: &AppHandle) -> bool {
 }
 
 fn request_desktop_updates(app: &AppHandle) {
-    app.state::<PendingDesktopUpdateOpen>().0.store(true, Ordering::SeqCst);
+    app.state::<PendingDesktopUpdateOpen>().request();
 }
 
 fn take_desktop_update_request(app: &AppHandle) -> bool {
-    app.state::<PendingDesktopUpdateOpen>().0.swap(false, Ordering::SeqCst)
+    app.state::<PendingDesktopUpdateOpen>().take()
+}
+
+fn request_and_open_desktop_updates(app: &AppHandle) {
+    request_desktop_updates(app);
+    focus_or_restore_main_window(app);
+    if open_desktop_updates(app) {
+        let _ = take_desktop_update_request(app);
+    }
 }
 
 fn refresh_runtime_tray(app: &AppHandle, state: TrayRuntimeState) {
@@ -2336,6 +2354,9 @@ pub fn run() {
             pet::pet_set_shortcut,
             pet::pet_reset_shortcuts,
             pet::pet_set_voice_mode,
+            updater::desktop_remote_install_allowed,
+            updater::desktop_remote_install_set,
+            updater::desktop_update_remote_decline,
             pet::pet_ready,
             pet::pet_set_expanded,
             pet::pet_drag,
@@ -2450,6 +2471,15 @@ mod tests {
              window.dispatchEvent(new Event('avibe:desktop-open-updates', { cancelable: true })); \
              if (!window.__AVIBE_DESKTOP_UPDATES_HANDLED__) window.location.assign('avibe://updates-fallback');"
         );
+    }
+
+    #[test]
+    fn a_pending_update_open_survives_until_a_workbench_takes_it() {
+        let pending = PendingDesktopUpdateOpen::default();
+        assert!(!pending.take());
+        pending.request();
+        assert!(pending.take());
+        assert!(!pending.take());
     }
 
     #[test]

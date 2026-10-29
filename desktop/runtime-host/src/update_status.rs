@@ -16,19 +16,22 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use semver::Version;
+use serde::{Deserialize, Serialize};
 
 use crate::update::Channel;
 
 const UPDATE_STATUS_SCHEMA_VERSION: u32 = 1;
 pub const UPDATE_STATUS_FILE: &str = "update-status.json";
+pub const DESKTOP_UPDATE_REQUEST_FILE: &str = "desktop-update-request.json";
+pub const REMOTE_REQUEST_MAX_AGE: chrono::Duration = chrono::Duration::minutes(30);
 
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// A completed check. In-flight phases (checking, downloading, installing) are
 /// never persisted, so a recheck cannot make the web forget a known update. The
 /// install handoff is not a result either: the next launch's check publishes it.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UpdateStatusPhase {
     Current,
@@ -37,7 +40,82 @@ pub enum UpdateStatusPhase {
     Error,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemoteRequestPhase {
+    Requested,
+    Acknowledged,
+    Checking,
+    AwaitingHost,
+    Downloading,
+    Installing,
+    Restarting,
+    Completed,
+    Failed,
+    Declined,
+    Expired,
+}
+
+impl RemoteRequestPhase {
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::Failed | Self::Declined | Self::Expired)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct RemoteRequestStatus {
+    pub request_id: String,
+    pub target: String,
+    pub phase: RemoteRequestPhase,
+    pub progress: Option<u8>,
+    pub error_code: Option<String>,
+    pub updated_at: String,
+}
+
+impl RemoteRequestStatus {
+    pub fn new(
+        request_id: impl Into<String>,
+        target: impl Into<String>,
+        phase: RemoteRequestPhase,
+        progress: Option<u8>,
+        error_code: Option<String>,
+        updated_at: SystemTime,
+    ) -> Self {
+        let progress = (phase == RemoteRequestPhase::Downloading).then_some(progress.unwrap_or(0));
+        Self {
+            request_id: request_id.into(),
+            target: target.into(),
+            phase,
+            progress,
+            error_code: error_code.filter(|error| !error.trim().is_empty()),
+            updated_at: rfc3339(updated_at),
+        }
+    }
+
+    fn valid(&self) -> bool {
+        !self.request_id.trim().is_empty()
+            && !self.target.trim().is_empty()
+            && self.updated_at.parse::<chrono::DateTime<chrono::FixedOffset>>().is_ok()
+            && self.progress.is_none_or(|progress| progress <= 100)
+            && (self.phase == RemoteRequestPhase::Downloading || self.progress.is_none())
+            && self.error_code.as_deref().is_none_or(|error| !error.trim().is_empty())
+    }
+}
+
+fn deserialize_remote_request<'de, D>(deserializer: D) -> Result<Option<RemoteRequestStatus>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| {
+        serde_json::from_value::<RemoteRequestStatus>(value)
+            .ok()
+            .filter(RemoteRequestStatus::valid)
+    }))
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UpdateStatusRecord {
     pub schema_version: u32,
     pub phase: UpdateStatusPhase,
@@ -49,6 +127,12 @@ pub struct UpdateStatusRecord {
     pub has_update: bool,
     /// RFC 3339 UTC.
     pub checked_at: String,
+    /// Whether a local Workbench has opted into unattended remote installs.
+    #[serde(default)]
+    pub remote_install_allowed: bool,
+    /// The last remote request, including terminal outcomes.
+    #[serde(default, deserialize_with = "deserialize_remote_request")]
+    pub remote_request: Option<RemoteRequestStatus>,
 }
 
 impl UpdateStatusRecord {
@@ -76,7 +160,15 @@ impl UpdateStatusRecord {
             channel,
             has_update: phase == UpdateStatusPhase::Available,
             checked_at: rfc3339(checked_at),
+            remote_install_allowed: false,
+            remote_request: None,
         }
+    }
+
+    pub fn with_remote(mut self, remote_install_allowed: bool, remote_request: Option<RemoteRequestStatus>) -> Self {
+        self.remote_install_allowed = remote_install_allowed;
+        self.remote_request = remote_request;
+        self
     }
 
     /// What the Runtime rejects (`vibe/desktop_update_status.py`), refused before writing.
@@ -89,6 +181,130 @@ impl UpdateStatusRecord {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum DesktopUpdateRequestState {
+    Pending,
+    Expired,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct DesktopUpdateRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub target: String,
+    state: DesktopUpdateRequestState,
+    pub created_at: String,
+    pub expires_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DesktopUpdateRequestError {
+    Invalid(String),
+    Expired(DesktopUpdateRequest),
+}
+
+impl std::fmt::Display for DesktopUpdateRequestError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(error) => formatter.write_str(error),
+            Self::Expired(_) => formatter.write_str("desktop update request expired"),
+        }
+    }
+}
+
+impl std::error::Error for DesktopUpdateRequestError {}
+
+fn uuid_shaped(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23].into_iter().all(|index| bytes[index] == b'-')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            index == 8
+                || index == 13
+                || index == 18
+                || index == 23
+                || (byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        })
+}
+
+fn parse_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    value
+        .parse::<chrono::DateTime<chrono::FixedOffset>>()
+        .ok()
+        .map(|moment| moment.with_timezone(&chrono::Utc))
+}
+
+impl DesktopUpdateRequest {
+    pub fn is_pending(&self) -> bool {
+        self.state == DesktopUpdateRequestState::Pending
+    }
+
+    pub fn parse(bytes: &[u8], now: SystemTime) -> Result<Self, DesktopUpdateRequestError> {
+        let request: Self = serde_json::from_slice(bytes)
+            .map_err(|_| DesktopUpdateRequestError::Invalid("invalid desktop update request".to_owned()))?;
+        let parsed_target = Version::parse(&request.target);
+        if request.schema_version != UPDATE_STATUS_SCHEMA_VERSION
+            || !uuid_shaped(&request.request_id)
+            || request.target.len() > 96
+            || request.target.trim() != request.target
+            || parsed_target.is_err()
+            || parsed_target.is_ok_and(|version| version.to_string() != request.target)
+        {
+            return Err(DesktopUpdateRequestError::Invalid(
+                "invalid desktop update request".to_owned(),
+            ));
+        }
+        let now = chrono::DateTime::<chrono::Utc>::from(now);
+        let Some(created_at) = parse_timestamp(&request.created_at) else {
+            return Err(DesktopUpdateRequestError::Invalid(
+                "invalid desktop update request timestamps".to_owned(),
+            ));
+        };
+        let Some(expires_at) = parse_timestamp(&request.expires_at) else {
+            return Err(DesktopUpdateRequestError::Invalid(
+                "invalid desktop update request timestamps".to_owned(),
+            ));
+        };
+        if created_at > now || expires_at <= created_at || expires_at - created_at > REMOTE_REQUEST_MAX_AGE {
+            return Err(DesktopUpdateRequestError::Invalid(
+                "invalid desktop update request timestamps".to_owned(),
+            ));
+        }
+        if !request.is_pending() || expires_at <= now {
+            return Err(DesktopUpdateRequestError::Expired(request));
+        }
+        Ok(request)
+    }
+
+    pub fn expires_at(&self) -> chrono::DateTime<chrono::Utc> {
+        parse_timestamp(&self.expires_at).expect("validated desktop update request timestamp")
+    }
+
+    pub fn expires_in(&self, now: SystemTime) -> std::time::Duration {
+        (self.expires_at() - chrono::DateTime::<chrono::Utc>::from(now))
+            .to_std()
+            .unwrap_or_default()
+    }
+}
+
+pub fn parse_desktop_update_request(
+    bytes: &[u8],
+    now: SystemTime,
+) -> Result<DesktopUpdateRequest, DesktopUpdateRequestError> {
+    DesktopUpdateRequest::parse(bytes, now)
+}
+
+pub fn read_desktop_update_request(
+    path: &std::path::Path,
+    now: SystemTime,
+) -> Result<DesktopUpdateRequest, DesktopUpdateRequestError> {
+    let bytes = fs::read(path)
+        .map_err(|_| DesktopUpdateRequestError::Invalid("desktop update request unavailable".to_owned()))?;
+    parse_desktop_update_request(&bytes, now)
 }
 
 fn rfc3339(moment: SystemTime) -> String {
@@ -106,6 +322,20 @@ pub struct UpdateStatusStore {
 impl UpdateStatusStore {
     pub fn new(path: PathBuf) -> Self {
         Self { path }
+    }
+
+    pub fn read(&self) -> io::Result<Option<UpdateStatusRecord>> {
+        match fs::read(&self.path) {
+            Ok(bytes) => {
+                let record: UpdateStatusRecord = serde_json::from_slice(&bytes).map_err(io::Error::other)?;
+                record
+                    .validate()
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                Ok(Some(record))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// Replaces the file atomically: a reader sees the previous record or this
@@ -181,7 +411,20 @@ mod tests {
 
         // The document the Runtime relays in `tests/test_version_identity.py`.
         let shared: serde_json::Value = serde_json::from_str(AVAILABLE_FIXTURE).expect("fixture");
-        assert_eq!(written(&dir), shared);
+        let actual = written(&dir);
+        for key in [
+            "schema_version",
+            "phase",
+            "current",
+            "latest",
+            "channel",
+            "has_update",
+            "checked_at",
+        ] {
+            assert_eq!(actual[key], shared[key], "{key}");
+        }
+        assert_eq!(actual["remote_install_allowed"], false);
+        assert_eq!(actual["remote_request"], serde_json::Value::Null);
         fs::remove_dir_all(dir).expect("cleanup");
     }
 
@@ -223,6 +466,124 @@ mod tests {
             assert_eq!(written(&dir), before, "a refused record leaves the last one");
         }
         fs::remove_dir_all(dir).expect("cleanup");
+    }
+
+    fn request_json(request_id: &str, target: &str, state: &str, created_at: &str, expires_at: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "request_id": request_id,
+            "target": target,
+            "state": state,
+            "created_at": created_at,
+            "expires_at": expires_at,
+        }))
+        .expect("request JSON")
+    }
+
+    fn request_now(value: &str) -> SystemTime {
+        chrono::DateTime::parse_from_rfc3339(value).expect("timestamp").into()
+    }
+
+    #[test]
+    fn request_parser_rejects_malformed_forged_state_stale_and_expired_input() {
+        let valid = request_json(
+            "123e4567-e89b-12d3-a456-426614174000",
+            "3.2.4-rc.1",
+            "pending",
+            "2026-10-29T02:00:00Z",
+            "2026-10-29T02:30:00Z",
+        );
+        let request = parse_desktop_update_request(&valid, request_now("2026-10-29T02:05:00Z")).unwrap();
+        assert_eq!(request.request_id, "123e4567-e89b-12d3-a456-426614174000");
+
+        for malformed in [
+            request_json(
+                "not-a-uuid",
+                "3.2.4",
+                "pending",
+                "2026-10-29T02:00:00Z",
+                "2026-10-29T02:30:00Z",
+            ),
+            request_json(
+                "123E4567-e89b-12d3-a456-426614174000",
+                "3.2.4",
+                "pending",
+                "2026-10-29T02:00:00Z",
+                "2026-10-29T02:30:00Z",
+            ),
+            request_json(
+                "123e4567-e89b-12d3-a456-426614174000",
+                "v3.2.4",
+                "pending",
+                "2026-10-29T02:00:00Z",
+                "2026-10-29T02:30:00Z",
+            ),
+            request_json(
+                "123e4567-e89b-12d3-a456-426614174000",
+                "3.2.4",
+                "acknowledged",
+                "2026-10-29T02:00:00Z",
+                "2026-10-29T02:30:00Z",
+            ),
+            request_json(
+                "123e4567-e89b-12d3-a456-426614174000",
+                "3.2.4",
+                "pending",
+                "2026-10-29T02:30:00Z",
+                "2026-10-29T02:00:00Z",
+            ),
+        ] {
+            assert!(parse_desktop_update_request(&malformed, request_now("2026-10-29T02:05:00Z")).is_err());
+        }
+
+        let expired = request_json(
+            "123e4567-e89b-12d3-a456-426614174000",
+            "3.2.4",
+            "pending",
+            "2026-10-29T01:00:00Z",
+            "2026-10-29T01:30:00Z",
+        );
+        assert!(matches!(
+            parse_desktop_update_request(&expired, request_now("2026-10-29T02:05:00Z")),
+            Err(DesktopUpdateRequestError::Expired(_))
+        ));
+
+        let explicitly_expired = request_json(
+            "123e4567-e89b-12d3-a456-426614174000",
+            "3.2.4",
+            "expired",
+            "2026-10-29T02:00:00Z",
+            "2026-10-29T02:30:00Z",
+        );
+        assert!(matches!(
+            parse_desktop_update_request(&explicitly_expired, request_now("2026-10-29T02:05:00Z")),
+            Err(DesktopUpdateRequestError::Expired(_))
+        ));
+    }
+
+    #[test]
+    fn malformed_remote_status_is_dropped_without_losing_the_ordinary_result() {
+        let value = serde_json::json!({
+            "schema_version": 1,
+            "phase": "available",
+            "current": "3.2.3",
+            "latest": "3.2.4",
+            "channel": "test",
+            "has_update": true,
+            "checked_at": "2026-10-29T02:00:00Z",
+            "remote_install_allowed": true,
+            "remote_request": {
+                "request_id": "bad",
+                "target": "3.2.4",
+                "phase": "downloading",
+                "progress": 101,
+                "updated_at": "not-a-timestamp"
+            }
+        });
+        let record: UpdateStatusRecord = serde_json::from_value(value).expect("ordinary status remains readable");
+        assert_eq!(record.phase, UpdateStatusPhase::Available);
+        assert!(record.remote_request.is_none());
+        assert!(record.remote_install_allowed);
     }
 
     #[test]

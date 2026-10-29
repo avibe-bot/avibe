@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-remote-install-set"
+description = "Enables the desktop_remote_install_set command without any pre-configured scope."
+commands.allow = ["desktop_remote_install_set"]
+
+[[permission]]
+identifier = "deny-desktop-remote-install-set"
+description = "Denies the desktop_remote_install_set command without any pre-configured scope."
+commands.deny = ["desktop_remote_install_set"]

@@ -140,6 +140,9 @@ pub trait NotificationSink: Send + Sync {
     /// The Runtime's unread total, for the app icon badge. It is state rather
     /// than an interruption, so neither the toggle nor focus gates it.
     fn show_unread(&self, total: u64);
+    /// A remote desktop update event is only a nudge. The shell must re-read
+    /// and validate its request file; the SSE payload never reaches this API.
+    fn desktop_update_requested(&self) {}
 }
 
 #[derive(Default)]
@@ -548,6 +551,10 @@ pub async fn run_notifications(
                 let allowed_at_receipt = sink.gate().allows();
                 for frame in decoder.push(&chunk) {
                     unread_changed.notify_one();
+                    if frame.event == "desktop.update.requested" {
+                        sink.desktop_update_requested();
+                        continue;
+                    }
                     let candidate = filter
                         .lock()
                         .ok()

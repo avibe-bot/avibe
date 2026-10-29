@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -89,6 +89,7 @@ struct FakeSink {
     delivered: Mutex<Vec<NotificationIntent>>,
     sources: Mutex<Vec<Option<String>>>,
     unread: Mutex<Vec<u64>>,
+    desktop_update_nudges: AtomicUsize,
 }
 
 impl Default for FakeSink {
@@ -100,6 +101,7 @@ impl Default for FakeSink {
             delivered: Mutex::new(Vec::new()),
             sources: Mutex::new(Vec::new()),
             unread: Mutex::new(Vec::new()),
+            desktop_update_nudges: AtomicUsize::new(0),
         }
     }
 }
@@ -120,6 +122,10 @@ impl NotificationSink for FakeSink {
 
     fn show_unread(&self, total: u64) {
         self.unread.lock().unwrap().push(total);
+    }
+
+    fn desktop_update_requested(&self) {
+        self.desktop_update_nudges.fetch_add(1, Ordering::SeqCst);
     }
 }
 
@@ -193,6 +199,30 @@ async fn global_sse_is_an_allow_list_not_a_second_event_bus() {
         *sink.delivered.lock().unwrap(),
         [NotificationIntent::ApprovalRequested, NotificationIntent::RunSucceeded]
     );
+    task.abort();
+}
+
+#[tokio::test(start_paused = true)]
+async fn desktop_update_sse_is_a_payload_free_nudge() {
+    let transport = Arc::new(FakeTransport::default());
+    let sink = Arc::new(FakeSink::default());
+    transport.stream(
+        [frame(
+            "desktop.update.requested",
+            json!({
+                "request_id": "forged",
+                "target": "99.99.99",
+                "remote_install_allowed": true,
+            }),
+        )],
+        false,
+    );
+    let task = spawn(transport.clone(), sink.clone());
+    settle().await;
+
+    assert_eq!(sink.desktop_update_nudges.load(Ordering::SeqCst), 1);
+    assert!(sink.delivered.lock().unwrap().is_empty());
+    assert!(transport.refetched.lock().unwrap().is_empty());
     task.abort();
 }
 

@@ -12,6 +12,9 @@
     "allow-desktop-update-state",
     "allow-desktop-update-check",
     "allow-desktop-update-install",
-    "allow-desktop-update-skip"
+    "allow-desktop-update-skip",
+    "allow-desktop-remote-install-allowed",
+    "allow-desktop-remote-install-set",
+    "allow-desktop-update-remote-decline"
   ]
 }

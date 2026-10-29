@@ -127,7 +127,10 @@ fn desktop_update_commands_are_workbench_scoped() {
             "allow-desktop-update-state",
             "allow-desktop-update-check",
             "allow-desktop-update-install",
-            "allow-desktop-update-skip"
+            "allow-desktop-update-skip",
+            "allow-desktop-remote-install-allowed",
+            "allow-desktop-remote-install-set",
+            "allow-desktop-update-remote-decline"
         ])
     );
     let source = shipping_source("src/lib.rs");
@@ -136,6 +139,9 @@ fn desktop_update_commands_are_workbench_scoped() {
         "updater::desktop_update_check",
         "updater::desktop_update_install",
         "updater::desktop_update_skip",
+        "updater::desktop_remote_install_allowed",
+        "updater::desktop_remote_install_set",
+        "updater::desktop_update_remote_decline",
     ] {
         assert!(source.contains(command), "missing Workbench updater command {command}");
     }
@@ -455,6 +461,9 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "pet_reset_shortcuts",
         "pet_set_voice_mode",
         "pet_reset_voice_shortcut",
+        "desktop_remote_install_allowed",
+        "desktop_remote_install_set",
+        "desktop_update_remote_decline",
         "pet_ready",
         "pet_set_expanded",
         "pet_drag",
