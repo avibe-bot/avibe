@@ -152,6 +152,13 @@ export const petBridge = {
     await invoke('pet_reset_voice_shortcut');
   },
 
+  /** Opens the native pet context menu inside the desktop shell. */
+  contextMenu: async (): Promise<void> => {
+    const invoke = shellInvoke();
+    if (!invoke) return;
+    await invoke('pet_context_menu');
+  },
+
   /** Normalize the legacy binding; callers cannot choose another session. */
   bindMain: async (): Promise<PetBinding> => {
     const invoke = shellInvoke();

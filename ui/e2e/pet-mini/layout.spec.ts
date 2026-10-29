@@ -17,7 +17,8 @@ for (const theme of ['light', 'dark']) {
         - document.querySelector('.pet-mini-collapsed')!.getBoundingClientRect().bottom);
       expect(gap).toBeGreaterThanOrEqual(13);
       expect(gap).toBeLessThanOrEqual(15);
-      await expect(page.locator('.pet-mini-reply-toggle')).toContainText(lang === 'zh' ? /已回复：\S/ : /Replied: \S/);
+      await expect(page.locator('.pet-mini-reply-toggle')).not.toContainText(/已回复：|Replied:/);
+      await expect(page.locator('.pet-mini-reply-toggle')).toContainText('我会帮你');
       await page.locator('.pet-mini-collapsed').click();
       const stop = page.locator('.pet-mini-stop').first();
       await expect(stop).toHaveAttribute('aria-label', lang === 'zh' ? /^停止：.+/ : /^Stop: .+/);
@@ -986,11 +987,11 @@ test('an old, finished exchange starts with the bubble hidden, and takes no spac
   await expect.poll(() => bubbleIsRegion(page)).toBe(false);
 });
 
-// The reply lingers for 10s of on-screen time after the turn ends (spec §4.2).
+// The reply lingers for 20s of on-screen time after the turn ends (spec §4.2).
 // It waits until the running turn and its conversation are on screen, so the
 // turn's end is one this page watched happen.
 const finishTurn = async (page: import('@playwright/test').Page, text = '做完了。') => {
-  await expect(page.locator('.pet-mini-reply-bubble')).toContainText('检查桌宠 mini 的交互');
+  await expect(page.locator('.pet-mini-reply-toggle')).toContainText('思考中');
   await page.evaluate((text) =>
     window.petFixtureFinishTurn({ id: 'live_reply', author: 'agent', type: 'result', text, read_at: null }), text);
 };
@@ -1007,7 +1008,7 @@ const tabToToggle = async (page: import('@playwright/test').Page, browserName: s
 };
 
 for (const theme of ['light', 'dark']) {
-  test(`a running turn shows thinking, then its reply for 10s on screen (${theme})`, async ({ page }) => {
+  test(`a running turn shows thinking, then its reply for 20s on screen (${theme})`, async ({ page }) => {
     await page.clock.install();
     await page.goto('/e2e/pet-mini/fixture.html?scenario=personal&lang=zh&running=1&asr=1');
     await page.evaluate((theme) => { document.documentElement.dataset.theme = theme; }, theme);
@@ -1017,8 +1018,8 @@ for (const theme of ['light', 'dark']) {
     await finishTurn(page);
     await page.clock.runFor(100);
     await expect(bubbleShown(page)).toBeVisible();
-    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('已回复：做完了。');
-    await page.clock.runFor(9_500);
+    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('做完了。');
+    await page.clock.runFor(19_500);
     await expect(bubbleShown(page)).toBeVisible();
     await page.clock.runFor(1_000);
     await expect(bubbleShown(page)).toHaveCount(0);
@@ -1034,12 +1035,12 @@ test('a background completion arriving during the linger does not take over its 
   await page.clock.runFor(500);
   await finishTurn(page);
   await page.clock.runFor(1_000);
-  await expect(page.locator('.pet-mini-reply-toggle')).toContainText('已回复：做完了。');
+  await expect(page.locator('.pet-mini-reply-toggle')).toContainText('做完了。');
   await page.evaluate(() => window.petFixtureMessage({
     id: 'background', author: 'agent', type: 'result', text: '后台任务也完成了。', read_at: null, metadata: { detached: true },
   }));
   await page.clock.runFor(500);
-  await expect(page.locator('.pet-mini-reply-toggle')).toContainText('已回复：做完了。');
+  await expect(page.locator('.pet-mini-reply-toggle')).toContainText('做完了。');
   await expect(page.locator('.pet-mini-reply-toggle')).not.toContainText('后台任务');
 });
 
@@ -1375,7 +1376,7 @@ for (const reduced of [false, true]) {
       }
       return seen;
     });
-    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('已回复');
+    await expect(page.locator('.pet-mini-reply-toggle')).toContainText('做完了');
     for (const frame of frames) expect(Math.abs(frame.centre - centre)).toBeLessThanOrEqual(1);
     const widths = frames.map((frame) => frame.width);
     for (let i = 1; i < widths.length; i += 1) expect(widths[i]).toBeGreaterThanOrEqual(widths[i - 1] - 0.5);

@@ -2209,6 +2209,7 @@ pub fn run() {
                 }
                 pet::MENU_ID => pet::toggle(app),
                 pet::SHORTCUT_SETTINGS_MENU_ID => open_workbench_shortcut_settings(app),
+                pet::HIDE_MENU_ID => pet::toggle(app),
                 #[cfg(target_os = "macos")]
                 COMPUTER_USE_MENU_ID => {
                     app.state::<computer_use::Controller>().toggle();
@@ -2337,6 +2338,7 @@ pub fn run() {
             pet::pet_reset_shortcuts,
             pet::pet_set_voice_mode,
             pet::pet_ready,
+            pet::pet_context_menu,
             pet::pet_set_expanded,
             pet::pet_drag,
             pet::pet_settle,

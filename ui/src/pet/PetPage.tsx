@@ -7,11 +7,14 @@ import { ApiError, useApi, type InboxSession, type RunningAgent, type VaultReque
 import { useInstanceAuthorization } from '@/context/InstanceAuthorizationContext';
 import { useWorkbenchInbox } from '@/context/WorkbenchInboxContext';
 import { Button } from '@/components/ui/button';
+import { ChatImage } from '@/components/ui/chat-image';
+import { FileCard } from '@/components/ui/file-card';
 import { Markdown } from '@/components/ui/markdown';
 import { QuickReplies } from '@/components/workbench/QuickReplies';
 import { isComposingKey } from '@/lib/imeComposition';
 import { useDocumentVisible, usePageActive } from '@/lib/pageActivity';
 import { isDetachedCompletionMessage } from '@/lib/chatMessageTypes';
+import { readMessageAttachments } from '@/lib/messageAttachments';
 import { usePendingVaultRequests } from '@/lib/usePendingVaultRequests';
 import { useVaultRequestRefresh } from '@/lib/useVaultRequestRefresh';
 import { vaultRequestType } from '@/lib/vaultRequestPlacement';
@@ -35,7 +38,7 @@ import { FencedSource } from './fencedSource';
 import './pet-mini.css';
 
 const HOLD_MS = 320;
-const DOUBLE_CLICK_MS = 450;
+const DOUBLE_CLICK_DETECTION_MS = 450;
 const DISMISS_EXIT_MS = 500;
 const STOP_CONFIRM_MS = 3000;
 const STOP_LINGER_MS = 2500;
@@ -77,9 +80,41 @@ type CardPresentation = { phase?: StopPhase; leaving?: boolean; retained?: PetCa
 
 const isRunning = (agent: RunningAgent) => agent.state === 'active';
 
+/** Make an agent reply readable when it is shown inside a compact card. */
+const collapseMarkdownToPlainText = (text: string): string => {
+  const code: string[] = [];
+  let nextCode = 0;
+  const protectCode = (): string => `@@PETCODE${nextCode++}@@`;
+  const plain = text
+    .replace(/```[^\n]*\n([\s\S]*?)\n?```|~~~[^\n]*\n([\s\S]*?)\n?~~~/g, (_match, fencedBacktick: string, fencedTilde: string) => {
+      const value = fencedBacktick ?? fencedTilde ?? '';
+      code.push(value);
+      return protectCode();
+    })
+    .replace(/`([^`\n]+)`/g, (_match, value: string) => {
+      code.push(value);
+      return protectCode();
+    })
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+    .replace(/(^|\n)\s{0,3}(?:#{1,6}|>|[-*+]|\d+\.)[ \t]+/g, '$1')
+    .replace(/~~([^~\n]+)~~/g, '$1')
+    .replace(/\*\*\*([^*\n]+)\*\*\*/g, '$1')
+    .replace(/___([^_\n]+)___/g, '$1')
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/__([^_\n]+)__/g, '$1')
+    .replace(/(?<!\w)\*([^*\n]+)\*(?!\w)/g, '$1')
+    .replace(/(?<!\w)_([^_\n]+)_(?!\w)/g, '$1')
+    .replace(/<!--[\s\S]*?-->|<\/?[a-z][a-z0-9-]*(?:\s+[^<>]*?)?\/?>/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return plain.replace(/@@PETCODE(\d+)@@/g, (_match, index: string) => code[Number(index)] ?? '');
+};
+
 function agentCard(
   agent: RunningAgent,
   unreadBySession: Record<string, number>,
+  previewBySession: Record<string, string>,
   vaultRequests: VaultRequest[],
   stoppable: string[],
   fallback: string,
@@ -93,13 +128,14 @@ function agentCard(
   const needsInput = vaultRequests.some((request) => request.session?.id === agent.session_id);
   const hasUnread = (unreadBySession[agent.session_id] ?? 0) > 0;
   const running = isRunning(agent);
+  const preview = collapseMarkdownToPlainText(previewBySession[agent.session_id] ?? '');
   const status = needsInput
     ? t('pet.needsAuthorization')
     : running
       ? t('pet.activityStatus.running')
       : hasUnread
-        ? t('pet.replied')
-        : t('pet.activityStatus.waiting');
+        ? preview
+        : '';
   return {
     id: agent.session_id,
     sessionId: agent.session_id,
@@ -249,6 +285,10 @@ const PetSurface: React.FC = () => {
   const quickReplies = openQuickReplies(data.messages);
   const runningAgents = useConversationAgentSnapshot(capabilities.can_use_agents === true);
   const { rows: repliedAgents, pending: repliesPending } = usePetReplyActivities(capabilities.can_use_agents === true, epoch, inbox.inboxSessions ?? EMPTY_INBOX);
+  const previewBySession = useMemo(
+    () => Object.fromEntries((inbox.inboxSessions ?? []).map((row) => [row.session_id, row.preview_text ?? ''])),
+    [inbox.inboxSessions],
+  );
   const activitySnapshotReady = inbox.unreadLoaded === true && !inbox.loading && runningAgents.ok && !repliesPending;
   const visibleAgentRows = useMemo(() => (
     [...(runningAgents.ok ? runningAgents.agents : []), ...repliedAgents].filter((agent) => (
@@ -270,16 +310,12 @@ const PetSurface: React.FC = () => {
   const openCards = useCallback(() => {
     setDetailOpen(false);
     void setPanel(true);
-  }, [setPanel]);
-  // A Vibey click (§5.1) is about Vibey's own conversation: it collapses an
-  // expanded card list, else closes an open history, else opens the history.
-  // The collapsed stack is the only way to expand the cards (§3.3). Every
-  // branch leaves the shell's panel state matching what is drawn. Typing and
-  // dictation stay as they are: the history opens above the input.
+  }, [setDetailOpen, setPanel]);
+  // A Vibey click (§5.1) opens the main card immediately, closes it when it is
+  // already open, and folds the other cards as part of opening.
   const toggleVibey = () => {
-    if (cardsListed) { void setPanel(false); return; }
     if (historyOpen) { setDetailOpen(false); void setPanel(false); return; }
-    if (!binding || resolvingMain || (data.messages.length === 0 && !optimisticTitle)) return;
+    if (!binding || resolvingMain) return;
     openHistory();
   };
   const [composing, setComposing] = useState(false);
@@ -301,9 +337,11 @@ const PetSurface: React.FC = () => {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const avatarRef = useRef<HTMLButtonElement>(null);
   // Pair native mousedown click counts with time for webviews that always report 1.
-  // No history/card side effects occur until a pointer single click is confirmed.
+  // A normal pointer click is handled on its pointer-up; this ref only decides
+  // whether that click is also the second half of a double-click.
   const pressRef = useRef<{ held: boolean; dragged: boolean; clicks: number; double: boolean; x: number; y: number; timer: number } | null>(null);
-  const pendingClickRef = useRef<{ at: number; timer: number } | null>(null);
+  const lastClickAtRef = useRef(0);
+  const composerBeforeClickRef = useRef(false);
   const doubleOpenedRef = useRef(false);
   const allowDoubleEventRef = useRef(false);
   const dismissTimers = useRef<Record<string, number>>({});
@@ -350,11 +388,10 @@ const PetSurface: React.FC = () => {
       Object.values(stopTimers.current).forEach(window.clearTimeout);
       Object.values(dismissTimers.current).forEach(window.clearTimeout);
       if (pressRef.current) window.clearTimeout(pressRef.current.timer);
-      if (pendingClickRef.current) window.clearTimeout(pendingClickRef.current.timer);
       stopTimers.current = {};
       dismissTimers.current = {};
       pressRef.current = null;
-      pendingClickRef.current = null;
+      lastClickAtRef.current = 0;
       doubleOpenedRef.current = false;
       allowDoubleEventRef.current = false;
     };
@@ -381,13 +418,6 @@ const PetSurface: React.FC = () => {
     setHovered(next);
   }, []);
   useEffect(() => onPetHover(handlePetHover), [handlePetHover]);
-  const cancelPendingClick = useCallback(() => {
-    const pending = pendingClickRef.current;
-    if (!pending) return;
-    window.clearTimeout(pending.timer);
-    pendingClickRef.current = null;
-  }, []);
-
   useEffect(() => {
     if (exchange.user?.text?.trim() === optimisticTitle) setOptimisticTitle('');
   }, [exchange.user, optimisticTitle]);
@@ -402,6 +432,7 @@ const PetSurface: React.FC = () => {
     return [...bySession.values()].map((agent) => agentCard(
       agent,
       inbox.unreadBySession,
+      previewBySession,
       visibleVaultRequests,
       stoppable,
       t('pet.untitledTask'),
@@ -411,6 +442,7 @@ const PetSurface: React.FC = () => {
     .map((card) => ({ ...card, id: `${card.sessionId}:${generations[card.sessionId] ?? 0}` }));
   }, [
     inbox.unreadBySession,
+    previewBySession,
     t,
     visibleAgentRows,
     visibleVaultRequests,
@@ -489,14 +521,14 @@ const PetSurface: React.FC = () => {
   const closeComposer = useCallback(() => {
     setComposing(false);
     setDraft('');
-  }, [setDraft]);
+  }, [setComposing, setDraft]);
   // An open history stays open: the input takes its place below it (§5.2).
   const openComposer = useCallback((text = '', selected?: SessionReference[]) => {
     if (!epoch.isCurrent()) return;
     setDraft(text, selected);
     setComposing(true);
     window.setTimeout(() => { if (epoch.isCurrent()) inputRef.current?.focus(); }, 0);
-  }, [setDraft, epoch]);
+  }, [epoch, setComposing, setDraft]);
 
   const send = useCallback(async (text: string, metadata?: Record<string, unknown>) => {
     if (!epoch.isCurrent() || !text.trim() || !binding || !canChat || data.session?.id !== binding) return false;
@@ -531,7 +563,7 @@ const PetSurface: React.FC = () => {
       // Release this request's document-wide lock, not a new surface's state.
       petComposer.setSending(false);
     }
-  }, [api, binding, canChat, data, setPanel, setUncertain, epoch, draftReferences]);
+  }, [api, binding, canChat, data, draftReferences, epoch, setComposing, setDetailOpen, setPanel, setUncertain]);
   const submit = async () => {
     const submitted = draft;
     if (!(await send(submitted)) || !epoch.isCurrent()) return;
@@ -635,8 +667,8 @@ const PetSurface: React.FC = () => {
   }, [listenPending, binding, canChat, expanded, voice.available, voice.start, openComposer, draft, uncertain, resetVoiceShortcut]);
   const dockActiveRef = useRef(false);
   useLayoutEffect(() => { dockActiveRef.current = voice.busy || composing; }, [voice.busy, composing]);
-  const suppressDock = useCallback(() => {
-    if (dockActiveRef.current) return;
+  const suppressDock = useCallback((force = false) => {
+    if (!force && dockActiveRef.current) return;
     // The shell emits transitions only; an already-outside pointer can enter next.
     hoverSuppressedRef.current = shellHoveredRef.current;
     setHoverSuppressed(true);
@@ -645,8 +677,7 @@ const PetSurface: React.FC = () => {
   }, []);
   useEffect(() => {
     const onBlur = () => {
-      cancelPendingClick();
-      suppressDock();
+      suppressDock(doubleOpenedRef.current && !composerBeforeClickRef.current && !draft.trim() && !voice.busy);
       if (!voice.busy) resetVoiceShortcut();
       // Opening Avibe must preserve the history/card list through its key change.
       if (!doubleOpenedRef.current && !voice.busy && !draft.trim()) void setPanel(false);
@@ -658,7 +689,7 @@ const PetSurface: React.FC = () => {
       window.removeEventListener('blur', onBlur);
       window.removeEventListener('focus', onFocus);
     };
-  }, [cancelPendingClick, draft, setPanel, suppressDock, voice.busy, resetVoiceShortcut]);
+  }, [draft, setPanel, suppressDock, voice.busy, resetVoiceShortcut]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       // Escape also dismisses an IME candidate list; that one is not ours.
@@ -777,7 +808,15 @@ const PetSurface: React.FC = () => {
   // The bubble is drawn: the speech slot shows it, alone or, while its history
   // is open or asked for, above the input or the marquee (§5.2). Every input
   // to the linger (time, pointer) means something only while this holds.
-  const bubbleDrawn = hasBubbleContent && Boolean(binding) && (!inputShown || detailOpen);
+  const noReplyDetail = historyOpen
+    && !data.running
+    && !failure
+    && exchange.results.length === 0
+    && !uncertain
+    && !queued
+    && vaultRequests.length === 0
+    && !quickReplies;
+  const bubbleDrawn = hasBubbleContent && Boolean(binding) && (!inputShown || detailOpen) && !noReplyDetail;
   // The reply is on screen: the bubble is drawn and its summary row is the
   // reply (not "thinking" while the turn still runs, nor a failure notice).
   // Only then does the linger spend its time.
@@ -800,13 +839,26 @@ const PetSurface: React.FC = () => {
   const { lingeringId, keepAtLeast } = useReplyLinger({
     scope: epoch,
     candidateId: lingerReply?.id ?? null,
-    counting: documentVisible && replyOnScreen && !pointerOverBubble && !historyPending,
+    counting: documentVisible && replyOnScreen && !pointerOverBubble && !historyPending && !historyOpen && !inputShown,
     keyboardHeld: () => {
       const node = bubbleRef.current;
       const active = document.activeElement;
       return Boolean(node && active && node.contains(active) && active.matches(':focus-visible'));
     },
   });
+  const replyNeedsUnreadDot = Boolean(
+    turnReply
+    && turnReply.read_at === null
+    && !watched.seen.has(turnReply.id)
+    && lingeringId === null,
+  );
+  const [replyUnreadDotClearedFor, setReplyUnreadDotClearedFor] = useState<string | null>(null);
+  const replyUnreadDot = Boolean(
+    !historyOpen
+    && turnReply
+    && replyNeedsUnreadDot
+    && replyUnreadDotClearedFor !== turnReply.id,
+  );
   const showReplyBubble = hasBubbleContent && (held || lingeringId !== null);
   // A bubble that is not drawn, or is hidden, cannot be under the pointer, and
   // its leave event may never come (the input replaced it under a still
@@ -815,10 +867,16 @@ const PetSurface: React.FC = () => {
   // Looking at the history is looking at the reply (`seen` above): once it
   // closes, the reply does not linger again.
   function openHistory() {
+    if (turnReply) setReplyUnreadDotClearedFor(turnReply.id);
     setDetailOpen(true);
+    if (canChat && !uncertain && !voice.busy) openComposer(draft);
     // A refused expansion leaves no history to wait for: drop the request so
     // the pending hold ends and the linger resumes.
-    void setPanel(true).then(() => { if (epoch.isCurrent() && !petPanel.current()) setDetailOpen(false); });
+    void setPanel(true).then(() => {
+      if (!epoch.isCurrent() || petPanel.current()) return;
+      setDetailOpen(false);
+      if (!draft.trim()) setComposing(false);
+    });
   }
   const toggleHistory = () => {
     if (detailOpen) { setDetailOpen(false); void setPanel(false); } else openHistory();
@@ -826,31 +884,22 @@ const PetSurface: React.FC = () => {
   const openDoubleClick = () => {
     if (doubleOpenedRef.current) return;
     doubleOpenedRef.current = true;
-    cancelPendingClick();
-    if (!binding) return;
+    const preserveComposer = composerBeforeClickRef.current || Boolean(draft.trim()) || voice.busy;
+    if (!preserveComposer) setComposing(false);
+    if (turnReply) setReplyUnreadDotClearedFor(turnReply.id);
+    setDetailOpen(false);
+    void setPanel(false);
+    const lastUnread = exchange.results.at(-1);
+    if (binding && lastUnread?.read_at === null && exchange.unreadComplete) {
+      void inbox.markRead(binding, lastUnread.id);
+    }
+    if (!binding) {
+      suppressDock(!preserveComposer);
+      return;
+    }
     void petBridge.open(sessionLink(binding)).then(() => {
-      if (epoch.isCurrent()) suppressDock();
+      if (epoch.isCurrent()) suppressDock(!preserveComposer);
     }, () => undefined);
-  };
-  const beginDoubleClick = (clicks: number) => {
-    const pending = pendingClickRef.current;
-    // A native count alone cannot pair a click with a previous hold or drag.
-    if (!pending || (clicks !== 2 && performance.now() - pending.at > DOUBLE_CLICK_MS)) return false;
-    cancelPendingClick();
-    return true;
-  };
-  const toggleVibeyRef = useRef(toggleVibey);
-  useLayoutEffect(() => { toggleVibeyRef.current = toggleVibey; });
-  const scheduleSingleClick = () => {
-    cancelPendingClick();
-    const at = performance.now();
-    const timer = window.setTimeout(() => {
-      if (pendingClickRef.current?.timer !== timer || !epoch.isCurrent()) return;
-      pendingClickRef.current = null;
-      allowDoubleEventRef.current = false;
-      toggleVibeyRef.current();
-    }, DOUBLE_CLICK_MS);
-    pendingClickRef.current = { at, timer };
   };
   useLayoutEffect(() => {
     // Focus inside a bubble that folds away (still mounted) moves to Vibey too.
@@ -877,7 +926,6 @@ const PetSurface: React.FC = () => {
         data-pet-hit
         onClick={(event) => {
           if (event.detail !== 0) return;
-          cancelPendingClick();
           doubleOpenedRef.current = false;
           allowDoubleEventRef.current = false;
           toggleVibey();
@@ -891,11 +939,16 @@ const PetSurface: React.FC = () => {
           const pointerId = event.pointerId;
           doubleOpenedRef.current = false;
           allowDoubleEventRef.current = false;
+          const now = performance.now();
+          const hasRecentEligibleClick = lastClickAtRef.current > 0
+            && now - lastClickAtRef.current <= DOUBLE_CLICK_DETECTION_MS;
+          const isSecondClick = hasRecentEligibleClick;
+          if (!isSecondClick) composerBeforeClickRef.current = composing || voice.busy || Boolean(draft.trim());
           pressRef.current = {
             held: false,
             dragged: false,
             clicks: event.detail || 1,
-            double: beginDoubleClick(event.detail),
+            double: isSecondClick,
             x: event.clientX,
             y: event.clientY,
             timer: window.setTimeout(() => {
@@ -903,7 +956,7 @@ const PetSurface: React.FC = () => {
               const press = pressRef.current;
               if (!press) return;
               press.held = true;
-              cancelPendingClick();
+              lastClickAtRef.current = 0;
               doubleOpenedRef.current = false;
               allowDoubleEventRef.current = false;
               target.setPointerCapture?.(pointerId);
@@ -918,7 +971,15 @@ const PetSurface: React.FC = () => {
           const press = pressRef.current;
           if (press) {
             press.clicks = event.detail;
-            if (!press.double && beginDoubleClick(event.detail)) press.double = true;
+            const now = performance.now();
+            if (
+              !press.double
+              && event.detail >= 2
+              && lastClickAtRef.current > 0
+              && now - lastClickAtRef.current <= DOUBLE_CLICK_DETECTION_MS
+            ) {
+              press.double = true;
+            }
           }
           // The input keeps its focus and caret: a Vibey click is not leaving it.
           if (inputRef.current && document.activeElement === inputRef.current) event.preventDefault();
@@ -929,7 +990,7 @@ const PetSurface: React.FC = () => {
           if (Math.hypot(event.clientX - press.x, event.clientY - press.y) < 4) return;
           press.dragged = true;
           window.clearTimeout(press.timer);
-          cancelPendingClick();
+          lastClickAtRef.current = 0;
           doubleOpenedRef.current = false;
           allowDoubleEventRef.current = false;
           // The drop's layout arrives as the shell's snapshot (petShell).
@@ -939,7 +1000,7 @@ const PetSurface: React.FC = () => {
           const press = pressRef.current;
           pressRef.current = null;
           if (press) window.clearTimeout(press.timer);
-          cancelPendingClick();
+          lastClickAtRef.current = 0;
           doubleOpenedRef.current = false;
           allowDoubleEventRef.current = false;
           if (press?.held) voice.stop(true);
@@ -954,14 +1015,17 @@ const PetSurface: React.FC = () => {
             doubleOpenedRef.current = false;
             allowDoubleEventRef.current = false;
           } else if (press.dragged || press.clicks > 2) {
-            cancelPendingClick();
+            lastClickAtRef.current = 0;
             doubleOpenedRef.current = false;
             allowDoubleEventRef.current = false;
           } else if (press.double) {
+            lastClickAtRef.current = 0;
             allowDoubleEventRef.current = true;
+            toggleVibey();
             openDoubleClick();
           } else {
-            scheduleSingleClick();
+            lastClickAtRef.current = performance.now();
+            toggleVibey();
           }
         }}
         onPointerLeave={() => {
@@ -969,14 +1033,20 @@ const PetSurface: React.FC = () => {
           if (press && !press.held) {
             window.clearTimeout(press.timer);
             pressRef.current = null;
-            cancelPendingClick();
+            lastClickAtRef.current = 0;
             doubleOpenedRef.current = false;
             allowDoubleEventRef.current = false;
           }
         }}
-        onContextMenu={(event) => event.preventDefault()}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          void petBridge.contextMenu().catch(() => undefined);
+        }}
       >
         <PetAvatar pose={voice.listening ? 'listening' : pose} badge={unreadCount + cardUnread} />
+        {replyUnreadDot && unreadCount + cardUnread === 0 && (
+          <span className="pet-mini-unread-dot pet-mini-avatar-unread-dot" aria-label={t('pet.unreadBadge', { count: 1 })} />
+        )}
       </button>
       <MiniDock
         enabled={canChat && Boolean(binding)}
@@ -1020,7 +1090,7 @@ const PetSurface: React.FC = () => {
           </div>
         </div>
         <SpeechSlot open={voice.busy || composing || showReplyBubble || resolvingMain || !binding}>
-          {bubbleDrawn && binding ? (
+          {bubbleDrawn && showReplyBubble && binding ? (
             // Still drawn while the slot closes, so it fades out rather than vanishing.
             <div
               // Its own identity, so a notice drawn in the same place replaces
@@ -1044,7 +1114,6 @@ const PetSurface: React.FC = () => {
               canChat={canChat}
               binding={binding}
               exchange={exchange}
-              messages={data.messages}
               failure={data.running ? null : failure}
               running={data.running}
               queued={(data.turn?.pending_input_count ?? 0) > 0}
@@ -1430,6 +1499,7 @@ const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, op
   const subtitle = phase === 'stopping' ? t('pet.stop.stopping') : phase === 'stopped' ? t('pet.stop.stopped') : phase === 'failed' ? t('pet.stop.failed') : card.status;
   const stopText = phase === 'confirm' ? t('pet.stop.confirmStop') : t('pet.stop.stop', { title: card.title });
   const Reference = expanded ? 'button' : 'span';
+  const unread = card.hasUnread && !card.running && !card.needsInput;
   return (
     <article className={clsx('pet-mini-card', card.needsInput && 'is-needs-input')} title={card.title} data-session-id={card.sessionId} data-pet-hit>
       {expanded && <button type="button" className="pet-mini-dismiss" data-pet-hit onClick={onDismiss} aria-label={t('pet.dismiss')}><svg viewBox="0 0 16 16" aria-hidden><path d="m4 4 8 8M12 4 4 12" /></svg></button>}
@@ -1442,7 +1512,8 @@ const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, op
         <div className={clsx('pet-mini-subtitle', phase === 'stopped' && 'is-stopped')} title={subtitle}>
           {running && <span className="pet-mini-running-dot" aria-hidden />}
           {phase === 'stopped' && <span className="pet-mini-stopped-dot" aria-hidden />}
-          <span>{subtitle}</span>
+          {unread && <span className="pet-mini-unread-dot" aria-hidden />}
+          {subtitle && <span>{subtitle}</span>}
         </div>
       </Reference>
       {expanded && (
@@ -1461,7 +1532,33 @@ const CardBody: React.FC<{ card: PetCard; expanded: boolean; t: (key: string, op
   );
 };
 
-type MainDetailProps = { epoch: PetSurfaceEpoch; voiceNeedsCloud: boolean; canChat: boolean; visible: boolean; binding: string; exchange: ReturnType<typeof latestExchange>; messages: WorkbenchMessage[]; failure: WorkbenchMessage | null; running: boolean; queued: boolean; markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>; onRead: () => void; vaultRequestIds: string[]; quickReplies: ReturnType<typeof openQuickReplies>; onChoose: (message: WorkbenchMessage, choice: string) => Promise<boolean>; uncertain: boolean; onInspect: () => void };
+type MainDetailProps = { epoch: PetSurfaceEpoch; voiceNeedsCloud: boolean; canChat: boolean; visible: boolean; binding: string; exchange: ReturnType<typeof latestExchange>; failure: WorkbenchMessage | null; running: boolean; queued: boolean; markRead: (sessionId: string, untilMessageId?: string) => Promise<boolean>; onRead: () => void; vaultRequestIds: string[]; quickReplies: ReturnType<typeof openQuickReplies>; onChoose: (message: WorkbenchMessage, choice: string) => Promise<boolean>; uncertain: boolean; onInspect: () => void };
+
+const MessageContent: React.FC<{ message: WorkbenchMessage }> = ({ message }) => {
+  const { t } = useTranslation();
+  const attachments = readMessageAttachments(message.content);
+  return (
+    <>
+      <Markdown
+        content={message.text}
+        references={(message.content as { references?: MentionReference[] })?.references}
+        softBreaks
+      />
+      {attachments.length > 0 && (
+        <div className="pet-mini-message-attachments">
+          {attachments.map((attachment, index) => {
+            if (!attachment.url) return null;
+            return attachment.image ? (
+              <ChatImage key={index} src={attachment.url} alt={attachment.name} width={attachment.width} height={attachment.height} />
+            ) : (
+              <FileCard key={index} href={attachment.url}>{attachment.name || t('pet.fileAttachment')}</FileCard>
+            );
+          })}
+        </div>
+      )}
+    </>
+  );
+};
 
 /**
  * Animates a box between two widths CSS cannot interpolate (its content's width
@@ -1522,7 +1619,7 @@ const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boole
   const reply = last?.text?.trim() ?? '';
   const summary = props.running ? t('pet.thinking')
     : props.failure ? `${t('pet.failedPrefix')} ${props.failure.text.trim()}`
-        : reply ? t('pet.repliedPrefix', { text: reply })
+        : reply ? collapseMarkdownToPlainText(reply)
           : t('pet.waiting');
   // A status word alone ("thinking", "waiting") sizes the bubble to its
   // content (§4.2); a reply, a failure or the open history take the column.
@@ -1553,15 +1650,14 @@ const MainReplyBubble: React.FC<Omit<MainDetailProps, 'visible'> & { open: boole
 
 const MainDetail: React.FC<MainDetailProps> = (props) => {
   const { t } = useTranslation();
-  const lastResultRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
+  const lastResultRef = useRef<HTMLDivElement>(null);
   const resultKey = `${props.binding}\u0000${props.exchange.results.at(-1)?.id ?? ''}`;
   const [seenResult, setSeenResult] = useState<{ epoch: PetSurfaceEpoch; key: string } | null>(null);
   // Chat-style: open at the very bottom, where the end of the newest reply,
   // its actions and notices sit right above the toggle row. While open, new
   // content keeps a reader who is at the bottom pinned there, and leaves one
-  // who has scrolled up where they are. A different latest input, which may be
-  // drawn after a promoted result (`answersEarlierInput`), re-opens at the end.
+  // who has scrolled up where they are.
   useLayoutEffect(() => {
     if (!props.visible) return undefined;
     const inner = innerRef.current;
@@ -1587,11 +1683,10 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
       history.removeEventListener('scroll', onScroll);
       observer?.disconnect();
     };
-  }, [props.visible, props.exchange.user?.id]);
+  }, [props.visible, props.exchange.results.at(-1)?.id]);
   useEffect(() => {
     const node = lastResultRef.current;
-    if (!props.visible || !node) return;
-    if (typeof IntersectionObserver === 'undefined') return;
+    if (!props.visible || !node || typeof IntersectionObserver === 'undefined') return undefined;
     const observer = new IntersectionObserver(([entry]) => {
       if (props.epoch.isCurrent()) setSeenResult(entry.isIntersecting ? { epoch: props.epoch, key: resultKey } : null);
     }, {
@@ -1600,24 +1695,20 @@ const MainDetail: React.FC<MainDetailProps> = (props) => {
     observer.observe(node);
     return () => observer.disconnect();
   }, [props.visible, resultKey, props.epoch]);
-  usePetMarkRead(props.epoch, props.binding, props.exchange, props.markRead, props.onRead, props.visible && (typeof IntersectionObserver === 'undefined' || (seenResult?.epoch === props.epoch && seenResult.key === resultKey)));
-  const firstCurrent = props.messages.findIndex((message) => message.id === props.exchange.user?.id || props.exchange.results.some((result) => result.id === message.id));
-  const history = props.messages.slice(0, Math.max(0, firstCurrent))
-    .filter((message) => message.type === 'user' || message.type === 'result').slice(-6);
-  const currentUser = props.exchange.user && <div className="pet-mini-detail-user"><Markdown content={props.exchange.user.text} references={(props.exchange.user.content as { references?: MentionReference[] })?.references} softBreaks /></div>;
+  const resultVisible = props.visible && (typeof IntersectionObserver === 'undefined'
+    || (seenResult?.epoch === props.epoch && seenResult.key === resultKey));
+  usePetMarkRead(props.epoch, props.binding, props.exchange, props.markRead, props.onRead, resultVisible);
+  const lastResult = props.exchange.results.at(-1);
   return (
     <div ref={innerRef} className="pet-mini-detail-inner">
-      {history.map((message) => <div key={message.id} className={message.author === 'user' ? 'pet-mini-detail-user' : 'pet-mini-detail-result'}><Markdown content={message.text} references={(message.content as { references?: MentionReference[] })?.references} softBreaks /></div>)}
-      {!props.exchange.answersEarlierInput && currentUser}
-      {props.exchange.results.map((message, index) => <div ref={index === props.exchange.results.length - 1 ? lastResultRef : undefined} key={message.id} className="pet-mini-detail-result"><Markdown content={message.text} references={(message.content as { references?: MentionReference[] })?.references} softBreaks /></div>)}
-      {props.exchange.answersEarlierInput && currentUser}
+      {props.running && <p className="pet-mini-detail-muted">{t('pet.thinking')}</p>}
+      {lastResult && <div ref={lastResultRef} className="pet-mini-detail-result"><MessageContent message={lastResult} /></div>}
       {props.failure && (
         <div className="pet-mini-detail-notice" role="status">
           <p>{props.failure.text}</p>
           {props.failure.metadata?.failure_next_step === 'models' && <Button variant="link" size="sm" className="px-0" onClick={() => void petBridge.open(sessionLink(props.binding))}>{t('pet.fixInAvibe')}</Button>}
         </div>
       )}
-      {props.running && <p className="pet-mini-detail-muted">{t('pet.thinking')}</p>}
       {props.voiceNeedsCloud && <p className="pet-mini-detail-muted">{t('pet.voice.cloudRequired')}</p>}
       {props.queued && <p className="pet-mini-detail-muted">{t('pet.queued')}</p>}
       {/* The pinned Open in Avibe button is where the rest of the tail lives. */}
@@ -1636,7 +1727,7 @@ function usePetMarkRead(epoch: PetSurfaceEpoch, binding: string, exchange: Retur
   const marker = useRef<string | null>(null);
   useEffect(() => { marker.current = null; }, [epoch]);
   useEffect(() => {
-    if (!epoch.isCurrent() || !unreadId || !exchange.unreadComplete || !active || !visible) return;
+    if (!epoch.isCurrent() || !unreadId || exchange.results.length !== 1 || !exchange.unreadComplete || !active || !visible) return;
     const key = `${binding}\u0000${unreadId}`;
     if (marker.current === key) return;
     marker.current = key;
@@ -1644,5 +1735,5 @@ function usePetMarkRead(epoch: PetSurfaceEpoch, binding: string, exchange: Retur
       if (!epoch.isCurrent()) return;
       if (applied) onRead(); else marker.current = null;
     }, () => { if (epoch.isCurrent()) marker.current = null; });
-  }, [active, binding, exchange.unreadComplete, markRead, onRead, unreadId, visible, epoch]);
+  }, [active, binding, exchange.results.length, exchange.unreadComplete, markRead, onRead, unreadId, visible, epoch]);
 }

@@ -582,7 +582,6 @@
     },
     "src/pet/PetPage.tsx": {
       "avibe/localized-user-text": 3,
-      "react-hooks/preserve-manual-memoization": 2,
       "react-hooks/set-state-in-effect": 6
     }
   },

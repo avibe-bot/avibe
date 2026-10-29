@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useLatestRef } from '@/lib/useLatestRef';
 
 /** How long a reply stays on screen after its turn ends, once nothing else holds the bubble. */
-export const REPLY_LINGER_MS = 10_000;
+export const REPLY_LINGER_MS = 20_000;
 /** The least time left when the pointer leaves a paused reply. */
 export const REPLY_LINGER_RESUME_MS = 3_000;
 /** How soon to look again while keyboard focus holds an otherwise spent reply. */

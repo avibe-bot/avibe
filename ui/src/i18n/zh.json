@@ -99,6 +99,7 @@
     },
     "pet": {
       "toggle": "显示桌宠",
+      "hide": "隐藏桌宠",
       "shortcutSettings": "快捷键设置…"
     },
     "uninstall": {
@@ -6277,7 +6278,7 @@
     "mainAgentTitle": "歪比",
     "thinking": "思考中",
     "waiting": "等待中",
-    "repliedPrefix": "已回复：{{text}}",
+    "fileAttachment": "文件",
     "untitledTask": "未命名任务",
     "dismiss": "移除任务",
     "voiceContinue": "继续语音输入",
@@ -6333,7 +6334,6 @@
     "unknownProject": "会话",
     "unknownAgent": "Agent",
     "needsAuthorization": "需要你授权",
-    "replied": "已回复",
     "referenceSession": "引用会话：{{title}}",
     "authorize": "授权",
     "recentTurns": "最近几轮",
