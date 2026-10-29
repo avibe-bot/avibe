@@ -166,6 +166,54 @@ def test_desktop_update_request_reports_confirmation_and_delivery(monkeypatch, t
 
 
 @pytest.mark.parametrize(
+    ("phase", "error_code", "expected_status", "expected_error"),
+    [
+        ("failed", "update_in_progress", 409, "update_in_progress"),
+        ("failed", "target_mismatch", 200, None),
+        ("failed", "check_failed", 200, None),
+    ],
+)
+def test_desktop_update_request_only_returns_sync_shell_rejections(
+    monkeypatch,
+    tmp_path,
+    phase,
+    error_code,
+    expected_status,
+    expected_error,
+) -> None:
+    monkeypatch.setenv("AVIBE_DESKTOP_MANAGED_RUNTIME", "1")
+    monkeypatch.setenv("AVIBE_COMPUTER_USE_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(api, "get_version_info", _version)
+
+    async def no_interruptions():
+        return UpgradeInterruptions(0, 0, 0)
+
+    monkeypatch.setattr(
+        "vibe.upgrade_interruptions.count_upgrade_interruptions",
+        no_interruptions,
+    )
+    monkeypatch.setattr(
+        "vibe.ui_server._wait_for_desktop_update_ack",
+        _acknowledged(phase=phase, error_code=error_code),
+    )
+    client = app.test_client()
+    response = client.post(
+        "/api/desktop/update/request",
+        json={"target_version": TARGET},
+        headers=csrf_headers(client, "http://127.0.0.1"),
+        base_url="http://127.0.0.1",
+    )
+    assert response.status_code == expected_status
+    payload = response.get_json()
+    if expected_error is None:
+        assert payload["ok"] is True
+        assert payload["delivery"] == "prompt"
+    else:
+        assert payload["ok"] is False
+        assert payload["error"] == expected_error
+
+
+@pytest.mark.parametrize(
     ("managed", "has_update", "expected", "status"),
     [
         (False, True, "not_desktop_managed", 409),

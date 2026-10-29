@@ -7232,12 +7232,15 @@ async def desktop_update_request():
             503,
         )
     status, remote = acknowledged
-    if remote["phase"] == "failed":
+    if (
+        remote["phase"] == "failed"
+        and remote["error_code"] == "update_in_progress"
+    ):
         return (
             jsonify(
                 {
                     "ok": False,
-                    "error": remote["error_code"] or "desktop_update_failed",
+                    "error": "update_in_progress",
                     "request_id": remote["request_id"],
                 }
             ),
