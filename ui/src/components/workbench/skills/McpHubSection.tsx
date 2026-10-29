@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, ChevronRight, Globe, Loader2, Plus, RefreshCw, Search, Terminal, Trash2, X } from 'lucide-react';
 import clsx from 'clsx';
@@ -110,11 +110,11 @@ export const McpHubSection: React.FC = () => {
     }
   }, [api, describe, showToast, t]);
 
-  useEffect(() => {
-    // One-shot list from the MCP Hub API; setState lands after the fetch.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
+  const [listed, setListed] = useState(false);
+  if (!listed) {
+    setListed(true);
     void load();
-  }, [load]);
+  }
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
