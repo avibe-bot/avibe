@@ -254,7 +254,7 @@ def _load_revision(name: str, revision: str) -> dict[str, Any]:
         raise McpHubError(
             "needs_regeneration",
             f"{name}: the published package was written by another Avibe version.",
-            hint=f"vibe mcp regenerate {name}",
+            hint=f"vibe mcp {name} --refresh",
         )
     published = {
         "revision": revision,

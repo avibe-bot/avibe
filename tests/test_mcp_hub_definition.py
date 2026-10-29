@@ -1,4 +1,4 @@
-"""MCP Hub definition parsing: the page JSON and ``vibe mcp add`` share one shape.
+"""MCP Hub definition parsing: the page JSON and ``vibe mcp-add`` share one shape.
 
 Contract (docs/plans/mcp-hub-mvp.md §4.3, §5): both entry points normalize to the
 same ``definition.json``; unsupported transports, options, placeholders and

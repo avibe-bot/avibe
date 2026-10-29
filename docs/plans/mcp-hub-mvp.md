@@ -1,26 +1,28 @@
 # Avibe MCP Hub MVP design
 
 > Status: implemented (instance-global Hub). Official latest stable Python MCP SDK, no OAuth, no generated Skills.
-> Model: discover tools at generation time, persist a static CLI package, explicitly regenerate to update.
+> Model: auto-discover reachable servers and register them; no draft/enable lifecycle.
 > Principle: smallest complete design; reuse existing caller context, IPC, credentials, i18n and owner lifecycle; no speculative defenses.
+> Design source of truth: `avibe-docs/design.pen`, frames `avibe — Skills & MCP · …`.
 
 ## 1. Change contract
 
-Add MCP Hub to the Skills page. A user pastes a provider `mcpServers` JSON block (or runs `vibe mcp add`), saves it, and generates a package. Every backend calls tools through `vibe mcp <server> <tool>`; no Skill loader.
+Add MCP Hub to the Skills & MCP page. Reachable servers are registered automatically; unreachable ones are simply not listed. Every backend calls tools through `vibe mcp <server> <tool>`; no Skill loader.
 
-**Native MCP is off; Hub owns the same files.** Claude, Codex and OpenCode must not load their own MCP servers in Avibe sessions. Hub does not copy configs into `~/.avibe/mcp` as a second store of connection definitions. It reads and writes the backends' existing files:
+**Native MCP is off.** Claude, Codex and OpenCode must not load their own MCP servers in Avibe sessions. Hub **reads** native files as one source and stores Avibe-added servers only under `<avibe-home>/mcp/<name>/definition.json` (add never writes native files):
 
 - Claude: `~/.claude.json` `mcpServers`
 - Codex: `~/.codex/config.toml` `[mcp_servers.<name>]`
 - OpenCode: `~/.config/opencode/opencode.json` `mcp`
 
-Avibe-only runtime artifacts (generated CLI revision, enabled flag, current pointer) still live under `<avibe-home>/mcp/<name>/`. Connection fields (command, url, env, headers) are edited in the native file. Disable native loading with `strict_mcp_config=True` + empty `mcp_servers` for Claude, an overlay Codex config without `[mcp_servers]`, and OpenCode `mcp.*.enabled=false` / empty overlay at spawn — never delete the user's files.
+Avibe-only runtime artifacts (published CLI revision, current pointer) live under `<avibe-home>/mcp/<name>/`. Disable native loading with `strict_mcp_config=True` + empty `mcp_servers` for Claude, Codex `-c enabled=false` overrides, and OpenCode overlay at spawn — never delete the user's files.
 
 ```text
-paste / vibe mcp add → save definition → generate (connect, SDK protocol negotiation, tools/list all pages) → publish static revision
+startup / vibe mcp-discover → connect + tools/list → publish revision (success = listed)
+vibe mcp-add → Avibe store + refresh that name
 ```
 
-In scope: stdio and Streamable HTTP, tool discovery and calling, plaintext env/header configuration, generate/regenerate, static help/list, shared runtime, structured/multimodal results.
+In scope: stdio and Streamable HTTP, auto-discovery, plaintext env/header configuration, static help/list, shared runtime, structured/multimodal results.
 
 Out of scope: OAuth, SSE (explicit `unsupported_transport_sse` error), project scope, Skill generation, resources/prompts, sampling, update detection, auto-install/upgrade of server software, package sharing/import.
 

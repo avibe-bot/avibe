@@ -1,4 +1,4 @@
-"""Connection definitions: provider ``mcpServers`` JSON and ``vibe mcp add`` argv.
+"""Connection definitions: provider ``mcpServers`` JSON and ``vibe mcp-add`` argv.
 
 Both entry points normalize through :func:`definition_from_provider`, so the page
 and the CLI produce identical ``definition.json`` documents. Parsing never runs or
@@ -19,8 +19,6 @@ SCHEMA_VERSION = 1
 STDIO = "stdio"
 HTTP = "streamable_http"
 
-# CLI grammar (`vibe mcp add|generate|...`) cannot select these as a server name.
-_RESERVED_NAMES: frozenset[str] = frozenset()
 _STDIO_TYPES = {None, "stdio"}
 _HTTP_TYPES = {"http", "streamable-http", "streamable_http"}
 _PROVIDER_FIELDS = {"type", "command", "args", "env", "cwd", "url", "headers", "enabled", "description"}
@@ -37,13 +35,6 @@ def validate_name(name: object) -> str:
         raise McpHubError(
             "invalid_name",
             "Server names cannot be empty, `.`/`..`, or contain `/`, `\\`, or NUL.",
-            field="name",
-            usage=True,
-        )
-    if name in _RESERVED_NAMES:
-        raise McpHubError(
-            "invalid_name",
-            f"{name!r} is a vibe mcp management command; choose a different server name.",
             field="name",
             usage=True,
         )
@@ -176,14 +167,14 @@ def parse_provider_json(text: str) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# ``vibe mcp add`` (Claude Code ``mcp add`` subset plus Avibe extensions)
+# ``vibe mcp-add`` (Claude Code ``mcp add`` subset plus Avibe extensions)
 # ---------------------------------------------------------------------------
 
 _UNSUPPORTED_ADD_OPTIONS = {"--scope", "-s", "--callback-port", "--client-id", "--client-secret"}
 
 
 def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
-    """Return ``(definitions, replace)`` for ``vibe mcp add`` arguments.
+    """Return ``(definitions, replace)`` for ``vibe mcp-add`` arguments.
 
     ``--json-stdin`` is resolved by the caller, which passes the stdin text as
     the single token after ``--json-stdin``.
@@ -215,7 +206,7 @@ def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
         token = head[index]
         option, eq, inline = token.partition("=") if token.startswith("--") else (token, "", "")
         if option in _UNSUPPORTED_ADD_OPTIONS:
-            raise McpHubError("unsupported_option", f"{option} is not supported by vibe mcp add.", usage=True)
+            raise McpHubError("unsupported_option", f"{option} is not supported by vibe mcp-add.", usage=True)
         if option in {"--transport", "-t"}:
             transport = inline if eq else value_of(option)
         elif option in {"--env", "-e"}:
@@ -267,7 +258,7 @@ def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
         if command is not None and rest:
             raise McpHubError("usage", "Put the server command after --.", usage=True)
         if not argv_command:
-            raise McpHubError("usage", "Missing server command (vibe mcp add <name> -- <command> [args...]).", usage=True)
+            raise McpHubError("usage", "Missing server command (vibe mcp-add <name> -- <command> [args...]).", usage=True)
         server.update(command=argv_command[0], args=argv_command[1:])
         if env:
             server["env"] = env
@@ -277,7 +268,7 @@ def parse_add_argv(argv: list[str]) -> tuple[list[dict[str, Any]], bool]:
             server["headers"] = headers
     else:
         if command is not None or len(rest) != 1:
-            raise McpHubError("usage", "HTTP servers take exactly one URL: vibe mcp add --transport http <name> <url>.", usage=True)
+            raise McpHubError("usage", "HTTP servers take exactly one URL: vibe mcp-add --transport http <name> <url>.", usage=True)
         server["url"] = rest[0]
         if headers:
             server["headers"] = headers

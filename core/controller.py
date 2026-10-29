@@ -340,6 +340,7 @@ class Controller:
         self.vibey_recovery = VibeyRecovery(self)
         self.trace_retention_task: Optional[asyncio.Task] = None
         self.web_ui_watchdog_task: Optional[asyncio.Task] = None
+        self.mcp_discovery_task: Optional[asyncio.Task] = None
         self._trace_retention_executor: Optional[Any] = None
         self._trace_retention_cancel_event: Optional[threading.Event] = None
         self._trace_retention_future: Optional[Any] = None
@@ -1327,7 +1328,17 @@ class Controller:
             logger.error("Failed to start the Web UI watchdog: %s", e, exc_info=True)
         try:
             # Off the readiness path: native MCP handshake must not delay startup.
-            asyncio.create_task(self.mcp_runtime.submit("discover", {}))
+            task = asyncio.create_task(self.mcp_runtime.submit("discover", {}))
+
+            def _log_mcp_discovery(done: asyncio.Task) -> None:
+                if done.cancelled():
+                    return
+                exc = done.exception()
+                if exc is not None:
+                    logger.error("MCP Hub discovery failed", exc_info=exc)
+
+            task.add_done_callback(_log_mcp_discovery)
+            self.mcp_discovery_task = task
         except Exception as e:
             logger.error("Failed to start MCP Hub discovery: %s", e, exc_info=True)
 
@@ -2558,6 +2569,16 @@ class Controller:
                     pass
             self.vibey_model_supply_task = None
 
+        async def _cancel_mcp_discovery_task() -> None:
+            task = getattr(self, "mcp_discovery_task", None)
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self.mcp_discovery_task = None
+
         async def _cancel_web_ui_watchdog_task() -> None:
             task = self.web_ui_watchdog_task
             if task and not task.done():
@@ -2636,6 +2657,7 @@ class Controller:
 
         _stop_loop_coroutine(_cancel_cleanup_task(), "Idle cleanup task")
         _stop_loop_coroutine(_cancel_vibey_model_supply_task(), "Vibey model supply seed")
+        _stop_loop_coroutine(_cancel_mcp_discovery_task(), "MCP Hub discovery")
         _stop_loop_coroutine(_cancel_web_ui_watchdog_task(), "Web UI watchdog task")
         # Retention cancellation is cooperative at a delete-batch boundary;
         # wait for that bounded join instead of abandoning the worker after
