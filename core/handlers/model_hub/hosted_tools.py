@@ -331,10 +331,12 @@ def listed_executor_model(source: ModelHubSourceConfig, tool: str, *, spec_for: 
     of them run a given tool, so one that does not is passed over.
     """
 
-    listed = {model.id for model in source.models if not model.retired}
+    # Google names a model inside its ``models/`` collection, the name a Gemini Source keeps; an entry is its id.
+    listed = {model.id.removeprefix("models/"): model.id for model in source.models if not model.retired}
     for entry in source_executor_models(source.vendor, source.protocol):
         snapshots = sorted(model for model in listed if _DATED_SNAPSHOT.fullmatch(model.removeprefix(entry)) and model != entry)
-        model_id = entry if entry in listed else snapshots[-1] if snapshots else None
+        bare = entry if entry in listed else snapshots[-1] if snapshots else None
+        model_id = listed[bare] if bare is not None else None
         if model_id is not None and runs_on(source, model_id, tool, spec_for=spec_for) is not None:
             return model_id
     return None

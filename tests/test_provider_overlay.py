@@ -301,22 +301,14 @@ def test_an_image_model_entry_is_read_in_a_stable_form(monkeypatch, tmp_path):
     assert catalog.provider_image_models("anthropic") == ()
 
 
-EXECUTOR_PROTOCOLS = {"anthropic", "openai_responses"}
-
-
 @pytest.mark.parametrize("vendor", sorted(BUNDLED["providers"]))
 def test_each_vendors_executor_models_run_every_search_tool_the_vendor_offers(vendor):
     """MH-HOSTED-005: an executor model the overlay does not declare a tool on would silently drop the vendor from
-    that tool's executor chain on every Source that lists it first.
-
-    The executor speaks Anthropic and Responses (``hosted_executor.executor_request``); Gemini runs Google Search
-    natively on its own hop only (``vibey-gemini-native.md`` §6), so a tool offered on another protocol needs none.
-    """
+    that tool's executor chain on every Source that lists it first."""
     offered = {
         (protocol, tool)
         for family in catalog.bundled_provider_overlay()[vendor]
         for protocol, tools in family.hosted_tools.items()
-        if protocol in EXECUTOR_PROTOCOLS
         for tool in tools
     }
     executors = catalog.provider_executor_models(vendor)
@@ -338,3 +330,18 @@ def test_a_providers_value_that_is_not_an_object_disables_only_the_overlay(
     assert dict(overlay) == {}
     assert len(_overlay_warnings(caplog)) == 1
     assert catalog.load_bundled_catalog()["backends"] == BUNDLED_ROWS
+
+
+def test_every_gemini_declaration_is_a_tool_generate_content_knows():
+    """A ``google`` hop and the Gemini executor send each declaration as its generateContent tool object; an unknown
+    type would have none to send."""
+
+    from core.handlers.model_hub.request import GOOGLE_NATIVE_TOOL_TYPES
+
+    declared = {
+        json.loads(spec.declaration_json)["type"]
+        for families in catalog.bundled_provider_overlay().values()
+        for family in families
+        for spec in family.hosted_tools.get("google", {}).values()
+    }
+    assert declared and declared <= set(GOOGLE_NATIVE_TOOL_TYPES.values())

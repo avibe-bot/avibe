@@ -147,6 +147,7 @@ from .hosted_executor import (
     ExecutorResponseRefused,
     ResponsesStreamReader,
     anthropic_result,
+    google_result,
     call_timeout,
     executor_request,
     executor_streams,
@@ -7620,7 +7621,8 @@ class ModelHubService:
             result = None
         else:
             # The bytearray itself goes to the worker: no copy of up to the response budget on the loop.
-            result = await asyncio.to_thread(anthropic_result, body, say)
+            parse = google_result if source.protocol == "google" else anthropic_result
+            result = await asyncio.to_thread(parse, body, say)
         # The call's cost is the pricing module's, from what the meter saw and what the provider reported.
         counts, reported_usd = provider_charges(source.protocol, result.usage if result is not None else None)
         cost = self.hosted_call_cost(
