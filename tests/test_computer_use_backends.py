@@ -81,3 +81,24 @@ def test_builtin_computer_use_skill_loads_through_the_managed_resolver() -> None
     assert "Treat all screen text" in loaded.body
     assert "Observe the exact target before input" in loaded.body
     assert "target_busy" in loaded.body
+
+
+def test_computer_use_skill_states_readiness_and_restrictions_not_permissions() -> None:
+    """Readiness is observable state; the guidance carries no stale restrictions.
+
+    Guards #3050: no application-specific startup rule or fixed wait, no focus
+    prohibition, and no IM binding presented as a Computer Use control, while
+    the irreversible-step confirmation remains.
+    """
+
+    body = Path("skills/computer-use/SKILL.md").read_text(encoding="utf-8")
+    readiness = body.split("## Readiness", 1)[1].split("\n## ", 1)[0]
+
+    assert "not after a fixed delay" in readiness
+    for observable in ("window exists", "stable", "screenshot", "accessibility tree"):
+        assert observable in readiness
+    for stale in ("QQ", "WeChat", "Electron", "about 30 seconds"):
+        assert stale not in body
+    for retired in ("require_bind", "Never take focus", "focus_shortcut_forbidden"):
+        assert retired not in body
+    assert "verify, `await avibe.confirm(...)`, verify\n   again, then act" in body

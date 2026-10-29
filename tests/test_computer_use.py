@@ -54,14 +54,14 @@ def _write_state(
     return state_path, snapshot
 
 
-def test_tool_contract_has_exactly_the_approved_28_names() -> None:
-    """Protect the reviewed v1 surface from silently widening with upstream."""
+def test_tool_contract_has_exactly_the_approved_29_names() -> None:
+    """Protect the reviewed surface from silently widening with upstream."""
 
-    assert len(COMPUTER_USE_TOOL_NAMES) == 28
-    assert len(set(COMPUTER_USE_TOOL_NAMES)) == 28
+    assert len(COMPUTER_USE_TOOL_NAMES) == 29
+    assert len(set(COMPUTER_USE_TOOL_NAMES)) == 29
+    assert "bring_to_front" in COMPUTER_USE_TOOL_NAMES
     assert {
         "check_permissions",
-        "bring_to_front",
         "move_cursor",
         "invoke_menu",
     }.isdisjoint(COMPUTER_USE_TOOL_NAMES)

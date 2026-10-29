@@ -52,6 +52,12 @@ export interface WindowSelector extends BaseSelector {
 }
 
 export interface ActionOptions {
+  /**
+   * Driver delivery rung. `"background"` (default) leaves focus alone;
+   * `"foreground"` briefly fronts the exact window, acts, then restores the
+   * previous frontmost window.
+   */
+  delivery_mode?: "background" | "foreground";
   [key: string]: unknown;
 }
 
@@ -89,6 +95,8 @@ export interface WindowHandle {
     options?: WaitOptions | number,
   ): Promise<ElementHandle>;
   observe(options?: ActionOptions): Promise<Record<string, unknown>>;
+  /** Bring this exact window to the front and leave it there. */
+  activate(): Promise<Effect>;
   click(options: ActionOptions): Promise<Effect>;
   type(text: string, options?: ActionOptions): Promise<Effect>;
   press(key: string, options?: ActionOptions): Promise<Effect>;
@@ -141,6 +149,7 @@ export class TargetBusy extends ControllerError {}
 export type DesktopBusy = TargetBusy;
 /** @deprecated Use TargetBusy. */
 export const DesktopBusy: typeof TargetBusy;
+/** @deprecated Foreground input needs no consent; this is never thrown. */
 export class ForegroundConsentRequired extends ControllerError {}
 export class Unavailable extends ControllerError {}
 export class ConfirmRefused extends ControllerError {}

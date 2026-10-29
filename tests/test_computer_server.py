@@ -34,9 +34,19 @@ def _snapshot() -> dict[str, Any]:
     return json.loads(source.read_text(encoding="utf-8"))
 
 
-def _state(tmp_path: Path, *, generation: int = 1) -> tuple[Path, ComputerUseState]:
+_RELEASED_SNAPSHOT_WITHOUT_ACTIVATION = Path(
+    "tests/fixtures/computer_use/released-tools-v0.31.0-28.json"
+)
+
+
+def _state(
+    tmp_path: Path,
+    *,
+    generation: int = 1,
+    snapshot_source: Path = Path("desktop/cua-driver/tools-v0.31.0.json"),
+) -> tuple[Path, ComputerUseState]:
     snapshot_path = tmp_path / "tools.json"
-    shutil.copyfile("desktop/cua-driver/tools-v0.31.0.json", snapshot_path)
+    shutil.copyfile(snapshot_source, snapshot_path)
     digest = hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
     state = ComputerUseState(
         schema_version=1,
@@ -480,7 +490,7 @@ def test_advertised_surface_requires_session_and_drops_output_schema(
         status_reader=lambda: ComputerUseStatus("ready", None, state),
         upstream_factory=lambda _state: None,  # type: ignore[arg-type]
     )
-    assert len(server.tools) == 28
+    assert len(server.tools) == 29
     assert {tool["name"] for tool in server.tools} == set(COMPUTER_USE_TOOL_NAMES)
     for tool in server.tools:
         assert "session" in tool["inputSchema"]["required"]
@@ -497,6 +507,44 @@ def test_snapshot_loader_rejects_changed_or_unapproved_bytes(tmp_path: Path) -> 
     snapshot_path.write_text(snapshot_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="digest"):
         ComputerUseServer(state_path=state_path)
+
+
+@pytest.mark.asyncio
+async def test_released_snapshot_without_activation_keeps_computer_use_available(
+    tmp_path: Path,
+) -> None:
+    """A newer Runtime adopted by an older desktop shell degrades to no activation."""
+
+    state_path, state = _state(
+        tmp_path,
+        snapshot_source=_RELEASED_SNAPSHOT_WITHOUT_ACTIVATION,
+    )
+    upstream = FakeUpstream()
+    upstream.blocked_tools = set()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+
+    assert {tool["name"] for tool in server.tools} == (
+        set(COMPUTER_USE_TOOL_NAMES) - {"bring_to_front"}
+    )
+    listed = await server.call_tool("list_apps", {"session": "ses-a"})
+    assert not listed.get("isError")
+    activated = await server.call_tool(
+        "bring_to_front",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    assert activated["structuredContent"] == {
+        "code": "unknown_tool",
+        "dispatched": False,
+        "params": {"tool": "bring_to_front"},
+    }
+    assert [params["name"] for _method, params in upstream.calls] == [
+        "start_session",
+        "list_apps",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -648,6 +696,25 @@ async def test_non_ready_call_names_status_and_never_spawns_upstream(
             {"pid": 41, "window_id": 9, "x": 1, "y": 1, "session": "ses-script"},
             [],
             [],
+            "stale_window_handle",
+            ["start_session", "list_windows"],
+        ),
+        (
+            {
+                "kind": "window",
+                "pid": 41,
+                "window_id": 9,
+                "app": {
+                    "kind": "app",
+                    "pid": 41,
+                    "bundle_id": "com.apple.mail",
+                    "name": None,
+                },
+            },
+            "bring_to_front",
+            {"pid": 41, "window_id": 9, "session": "ses-script"},
+            [],
+            [{"pid": 41, "window_id": 10, "app_name": "Mail"}],
             "stale_window_handle",
             ["start_session", "list_windows"],
         ),
@@ -1096,13 +1163,14 @@ def test_result_folding_preserves_driver_error_code_params_and_detail() -> None:
     assert result["structuredContent"] == payload
 
 
-def test_result_folding_marks_consent_refusal_not_dispatched() -> None:
+def test_result_folding_keeps_the_driver_not_dispatched_marker() -> None:
     result = _fold_tool_result(
         {
             "result": {
                 "content": [],
                 "structuredContent": {
-                    "code": "foreground_consent_required",
+                    "code": "background_unavailable",
+                    "dispatched": False,
                     "params": {},
                 },
                 "isError": True,
@@ -1112,7 +1180,7 @@ def test_result_folding_marks_consent_refusal_not_dispatched() -> None:
 
     payload = json.loads(result["content"][0]["text"])
     assert payload == {
-        "code": "foreground_consent_required",
+        "code": "background_unavailable",
         "dispatched": False,
         "params": {},
     }
@@ -1939,10 +2007,10 @@ async def test_session_label_is_normalized_before_forwarding(
 
 
 @pytest.mark.asyncio
-async def test_window_input_requires_observation_and_rejects_focus_routes(
+async def test_window_input_requires_observation_of_the_exact_target(
     tmp_path: Path,
 ) -> None:
-    """macOS admits only exact background-window input after fresh observation."""
+    """Input reaches the driver only for an exact window observed in this Session."""
 
     state_path, state = _state(tmp_path)
     upstream = FakeUpstream()
@@ -2013,29 +2081,158 @@ async def test_window_input_requires_observation_and_rejects_focus_routes(
     assert not raw_after_observation.get("isError")
     assert upstream.calls[-1][1]["arguments"]["click_mode"] == "raw"
 
-    foreground = await server.call_tool(
-        "click",
-        {
-            "session": "ses-a",
-            "pid": 7,
-            "window_id": 9,
-            "x": 1,
-            "y": 2,
-            "delivery_mode": "foreground",
-        },
-    )
-    assert "foreground_forbidden" in foreground["content"][0]["text"]
 
-    shortcut = await server.call_tool(
-        "hotkey",
-        {
-            "session": "ses-a",
-            "pid": 7,
-            "window_id": 9,
-            "keys": ["cmd", "shift", "["],
-        },
+_FOCUS_CHANGING_INPUT = [
+    ("click", {"x": 1, "y": 2, "delivery_mode": "foreground"}),
+    ("click", {"x": 1, "y": 2, "modifier": ["cmd"], "delivery_mode": "foreground"}),
+    ("double_click", {"x": 1, "y": 2, "delivery_mode": "foreground"}),
+    ("right_click", {"x": 1, "y": 2, "delivery_mode": "foreground"}),
+    ("drag", {"from_x": 1, "from_y": 2, "to_x": 3, "to_y": 4, "delivery_mode": "foreground"}),
+    ("scroll", {"direction": "down", "delivery_mode": "foreground"}),
+    ("type_text", {"text": "hello", "delivery_mode": "foreground"}),
+    ("press_key", {"key": "return", "delivery_mode": "foreground"}),
+    ("press_key", {"key": "l", "modifiers": ["cmd"]}),
+    ("press_key", {"key": "g", "modifiers": ["meta", "shift"]}),
+    ("hotkey", {"keys": ["cmd", "l"], "delivery_mode": "foreground"}),
+    ("hotkey", {"keys": ["command", "shift", "g"]}),
+    ("hotkey", {"keys": "meta+1"}),
+    ("hotkey", {"keys": ["⌘", "9"]}),
+    ("hotkey", {"keys": ["cmd", "shift", "["]}),
+    ("hotkey", {"keys": ["cmd", "]"]}),
+]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("tool", "extra"), _FOCUS_CHANGING_INPUT)
+async def test_focus_changing_input_reaches_the_driver_unchanged(
+    tmp_path: Path,
+    tool: str,
+    extra: dict[str, Any],
+) -> None:
+    """Foreground delivery and focus-changing chords are ordinary input.
+
+    They keep every target obligation of background input (exact window,
+    observe-first) and add no refusal or consent step of their own.
+    """
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
     )
-    assert "focus_shortcut_forbidden" in shortcut["content"][0]["text"]
+    arguments = {"session": "ses-a", "pid": 7, "window_id": 9, **extra}
+
+    unobserved = await server.call_tool(tool, arguments)
+    assert unobserved["structuredContent"] == {
+        "code": "observe_first",
+        "dispatched": False,
+        "params": {},
+    }
+    assert not any(params["name"] == tool for _method, params in upstream.calls)
+
+    observed = await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    assert not observed.get("isError")
+    result = await server.call_tool(tool, arguments)
+
+    assert not result.get("isError"), result
+    method, forwarded = upstream.calls[-1]
+    assert method == "tools/call"
+    assert forwarded == {"name": tool, "arguments": arguments}
+
+
+@pytest.mark.asyncio
+async def test_window_activation_forwards_one_exact_window_without_observation(
+    tmp_path: Path,
+) -> None:
+    """Activation is not input: it needs an exact window but no prior observation."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+    )
+
+    for arguments in ({"pid": 7}, {"window_id": 9}, {"pid": True, "window_id": 9}):
+        refused = await server.call_tool(
+            "bring_to_front",
+            {"session": "ses-a", **arguments},
+        )
+        assert refused["structuredContent"]["code"] == "window_target_required"
+        assert refused["structuredContent"]["dispatched"] is False
+    assert not any(params["name"] == "bring_to_front" for _method, params in upstream.calls)
+
+    activated = await server.call_tool(
+        "bring_to_front",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+
+    assert not activated.get("isError"), activated
+    assert [params["name"] for _method, params in upstream.calls] == [
+        "start_session",
+        "bring_to_front",
+    ]
+    assert upstream.calls[-1][1]["arguments"] == {
+        "session": "ses-a",
+        "pid": 7,
+        "window_id": 9,
+    }
+
+
+@pytest.mark.asyncio
+async def test_window_activation_shares_the_exact_window_lock(
+    tmp_path: Path,
+) -> None:
+    """Activation cannot interleave with another Session's input to that window."""
+
+    state_path, state = _state(tmp_path)
+    upstream = FakeUpstream()
+    upstream.block = asyncio.Event()
+    upstream.blocked_tools = {"click"}
+    server = ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=lambda _state: asyncio.sleep(0, result=upstream),
+        target_lock_manager=_TargetLockManager(wait_seconds=0.01),
+    )
+    observed = await server.call_tool(
+        "get_window_state",
+        {"session": "ses-a", "pid": 7, "window_id": 9},
+    )
+    assert not observed.get("isError")
+    click = asyncio.create_task(
+        server.call_tool(
+            "click",
+            {"session": "ses-a", "pid": 7, "window_id": 9, "x": 1, "y": 2},
+        )
+    )
+    await _wait_until(lambda: upstream.inflight_by_tool.get("click"))
+
+    same_window = await server.call_tool(
+        "bring_to_front",
+        {"session": "ses-b", "pid": 7, "window_id": 9},
+    )
+    other_window = await server.call_tool(
+        "bring_to_front",
+        {"session": "ses-b", "pid": 7, "window_id": 10},
+    )
+
+    assert same_window["structuredContent"]["code"] == "target_busy"
+    assert same_window["structuredContent"]["dispatched"] is False
+    assert not other_window.get("isError")
+    assert [
+        params["arguments"]["window_id"]
+        for _method, params in upstream.calls
+        if params["name"] == "bring_to_front"
+    ] == [10]
+    upstream.block.set()
+    assert not (await click).get("isError")
 
 
 @pytest.mark.asyncio
@@ -2354,8 +2551,11 @@ async def test_admission_retries_generation_change_exactly_once(
         ({"pid": True, "window_id": 9}, "window_target_required"),
         ({"pid": 7, "window_id": True}, "window_target_required"),
         (
-            {"pid": 7, "window_id": 9, "delivery_mode": "foreground"},
-            "foreground_forbidden",
+            {
+                "target": {"kind": "desktop"},
+                "delivery_mode": "foreground",
+            },
+            "window_target_required",
         ),
     ],
 )
@@ -2363,44 +2563,11 @@ def test_input_rejects_non_window_and_unknown_target_shapes(
     arguments: dict[str, Any],
     code: str,
 ) -> None:
-    """The macOS input boundary accepts only an exact background window."""
+    """The macOS input boundary accepts only an exact window target."""
 
     with pytest.raises(ComputerServerError) as raised:
         _validate_input("click", arguments)
     assert raised.value.code == code
-
-
-@pytest.mark.parametrize(
-    ("tool_name", "arguments"),
-    [
-        ("hotkey", {"keys": ["cmd", "l"]}),
-        ("hotkey", {"keys": ["command", "shift", "g"]}),
-        ("hotkey", {"keys": "meta+1"}),
-        ("hotkey", {"keys": ["⌘", "9"]}),
-        ("hotkey", {"keys": ["cmd", "["]}),
-        ("hotkey", {"keys": ["cmd", "]"]}),
-        ("hotkey", {"keys": ["cmd", "shift", "["]}),
-        ("hotkey", {"keys": ["cmd", "shift", "]"]}),
-        ("press_key", {"key": "l", "modifiers": ["cmd"]}),
-        ("press_key", {"key": "g", "modifiers": ["meta", "shift"]}),
-    ],
-)
-def test_all_documented_focus_shortcuts_are_rejected(
-    tool_name: str,
-    arguments: dict[str, Any],
-) -> None:
-    """Every shortcut named by the pinned no-foreground guide is blocked."""
-
-    with pytest.raises(ComputerServerError) as raised:
-        _validate_input(
-            tool_name,
-            {
-                "pid": 7,
-                "window_id": 9,
-                **arguments,
-            },
-        )
-    assert raised.value.code == "focus_shortcut_forbidden"
 
 
 @pytest.mark.asyncio

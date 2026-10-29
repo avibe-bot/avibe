@@ -150,6 +150,8 @@ export class TargetBusy extends ControllerError {
 // Keep the released SDK export working while the wire code moves to target_busy.
 export const DesktopBusy = TargetBusy;
 
+// Foreground input needs no consent and is never refused for changing focus,
+// so nothing throws this. It stays exported so released scripts still load.
 export class ForegroundConsentRequired extends ControllerError {
   constructor(message, options = {}) {
     super(message, {
@@ -188,13 +190,6 @@ function publicError(error) {
   };
   if (error.code === "target_busy" || error.code === "desktop_busy") {
     return new TargetBusy(error.message, options);
-  }
-  if (
-    error.code === "foreground_forbidden" ||
-    error.code === "focus_shortcut_forbidden" ||
-    error.code === "foreground_consent_required"
-  ) {
-    return new ForegroundConsentRequired(error.message, options);
   }
   if (
     error.code === "timeout" ||
@@ -780,6 +775,16 @@ class WindowHandle {
   async observe(options = {}) {
     return sdkStep("window.observe", async () =>
       publicObservation(await observeWindow(this, true, options)),
+    );
+  }
+
+  // Bring this exact window to the front and leave it there. The previous
+  // frontmost window is not restored.
+  async activate() {
+    return sdkStep("window.activate", async () =>
+      effectResult(
+        await callHandleTool(this, "bring_to_front", windowArguments(this)),
+      ),
     );
   }
 

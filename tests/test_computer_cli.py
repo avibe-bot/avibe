@@ -65,6 +65,7 @@ def test_parser_covers_the_allowlisted_driver_operations_without_session_id() ->
         (["computer", "observe", "windows"], ("observe", "windows")),
         (["computer", "observe", "window"], ("observe", "window")),
         (["computer", "zoom"], ("zoom",)),
+        (["computer", "activate"], ("activate",)),
         (["computer", "click"], ("click",)),
         (["computer", "type"], ("type",)),
         (["computer", "key"], ("key",)),

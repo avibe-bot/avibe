@@ -10,14 +10,25 @@
 - Companion docs: `desktop-tray-lifecycle.md` (native toggle pattern),
   `desktop-auto-update.md` (signing), `desktop-product-gaps.md`
 
+## Amendment (2026-10-29, #3050)
+
+Foreground input and window activation are ordinary Computer Use operations.
+The Controller forwards `delivery_mode: "foreground"` and focus-changing
+chords, and the managed surface adds the pinned driver's `bring_to_front`
+(`vibe computer activate`), for 29 tools. None needs per-action consent.
+Readiness is observable window state rather than a fixed wait, and IM
+`require_bind` is not a Computer Use control. The focus-shortcut rejection
+and the activation exclusion recorded below are superseded; see
+[`2026-10-29-computer-use-foreground-and-readiness.md`](2026-10-29-computer-use-foreground-and-readiness.md).
+
 ## Current Slice 1 contract (2026-10-11)
 
 Route A is shipped on `master` at merge commit
 `61e315abef588657be7cca19940a289c588ba2c5`; the exact reviewed Route A head
 was `d8be44c74bf45b18e55ec35ffcd98edb97ef272f`. Its embedded Cua Driver,
 raw `click_mode`, native toggle and lifecycle, macOS permission flow,
-Workbench status line, lease, observe-first, exact-window, focus-shortcut, and
-same-user safety boundaries remain the foundation for this slice.
+Workbench status line, lease, observe-first, exact-window, and same-user
+safety boundaries remain the foundation for this slice.
 
 Slice 1 delivers the user-facing path that replaced the earlier backend MCP
 proposal:
@@ -210,8 +221,9 @@ Harness, scheduled run). Users grant OS permissions to Avibe once.
 
 Remote IM requests may drive the desktop. This adds no new trust tier: a bound
 IM user's agent already runs with full shell access on this machine
-(`bypassPermissions` / `danger-full-access`). Computer use is therefore gated by
-the same identity rules (`core/auth.py` binding, channel `require_bind`), plus:
+(`bypassPermissions` / `danger-full-access`). Whoever may start an Agent Turn
+under Avibe's general message-ingress rules may therefore use computer use,
+with these Computer Use controls:
 
 1. **Explicit enablement.** Computer use is off until the user turns it on in
    the desktop app. While it is off, the driver does not run.
@@ -228,7 +240,7 @@ screenshots still capture app contents while the screen is locked.
 
 There is no per-action approval prompt. Unattended IM use is the point of the
 feature, and per-call prompts would not reach a user who is away from the
-machine. User docs must recommend `require_bind` for shared channels.
+machine.
 
 ## Architecture
 
@@ -598,12 +610,14 @@ running. The tray keeps the shell alive after the window closes.
     path, and tests redirect it.
 - **Tool policy.** Ship a YAML allow-list as the driver's managed policy
   (Phase 0 finding). It is pinned with the driver version, because the list
-  must be reviewed against each new tool surface. The v1 list has exactly 28
-  tools, and the bundled tool snapshot must equal it:
+  must be reviewed against each new tool surface. The list has exactly 29
+  tools (28 in v1, plus `bring_to_front` from #3050), and the bundled tool
+  snapshot must equal it:
   - Observation: `list_apps`, `list_windows`, `get_window_state`,
     `verify_state`, `get_accessibility_tree`, `get_screen_size`,
     `get_desktop_state`, `get_cursor_position`, `zoom`.
-  - Apps and windows: `launch_app`, `kill_app`, `set_window_frame`.
+  - Apps and windows: `launch_app`, `kill_app`, `bring_to_front`,
+    `set_window_frame`.
   - Input: `click`, `double_click`, `right_click`, `drag`, `scroll`,
     `type_text`, `press_key`, `hotkey`, `set_value`.
   - Clipboard: `clipboard_read`, `clipboard_write`.
@@ -614,30 +628,18 @@ running. The tray keeps the shell alive after the window closes.
     dialogs, and only the native toggle-on action may prompt. The policy
     applies to every caller, the shell included, so the shell's health check
     uses `health_report` instead.
-  - `bring_to_front`, `move_cursor`, and `invoke_menu` are excluded. The first
-    persistently takes the foreground, and the second can move the user's real
-    pointer. `invoke_menu` temporarily activates the target and restores the
-    previous app only on a best-effort basis. Activation is the purpose of all
-    three, so they are removed.
-  - **Focus boundary (macOS).** Avibe cannot promise that no background
-    input ever takes focus. An app can activate itself in response to any
-    event, and the driver's guide (`MACOS.md` at the pinned tag, "The
-    no-foreground contract") names shortcuts that do. So the boundary is
-    what Avibe enforces:
-    - No tool exists whose purpose is activation.
-    - Foreground delivery is rejected, and input must address one window
-      (below).
-    - The driver keeps a 500 ms focus-steal lease, which reverts an
-      activation seen during the post-action watch.
-    - As defense in depth, the server rejects the focus-intent shortcuts
-      that guide names: `⌘L`, `⌘⇧G`, and the browser tab shortcuts `⌘1`
-      to `⌘9`, `⌘[`, `⌘]`, `⌘⇧[`, and `⌘⇧]`. The prompt says to open a URL
-      with `launch_app` and `urls` instead.
-
-    What remains is that an app may still raise itself after background
-    input. The idle-desktop validation measures this, and the user docs
-    state it. The release check re-reads that guide section for every new
-    driver version.
+  - `move_cursor` and `invoke_menu` are excluded: the first moves the user's
+    real pointer outside any window action, and `invoke_menu` activates the
+    target and restores the previous app only on a best-effort basis.
+    `bring_to_front` was excluded in v1 and is admitted by #3050 as explicit,
+    exact-window activation.
+  - **Focus boundary (macOS).** Background delivery is the default and asks
+    the driver not to take focus, although an app can still activate itself
+    in response to any event. Since #3050, `delivery_mode: "foreground"`, the
+    focus-intent shortcuts named by the driver guide, and `bring_to_front` are
+    forwarded like other window operations; input must still address one
+    exact window (below). The driver serializes foreground and activation
+    calls on its process-wide desktop lane.
   - **Window-only input (macOS).** The computer MCP server admits an input
     call only when it addresses one window: a `pid` with a `window_id`, or an
     element token. It rejects any other targeting, including a desktop target
@@ -789,12 +791,11 @@ running. The tray keeps the shell alive after the window closes.
       A server process that has no record of a session, for example after the
       backend restarted it, starts that session with every window requiring
       observation. Nothing has to persist across server processes.
-  - **Same-user trust boundary.** The Python server's lease, `require_bind`,
-    `observe_first`, focus-shortcut, and window-target checks are cooperative
-    controls for Avibe-owned callers. A same-user local process that discovers
+  - **Same-user trust boundary.** The Python server's target locks,
+    `observe_first`, and window-target checks are cooperative controls for
+    Avibe-owned callers. A same-user local process that discovers
     `D.socket_path` or `D.proxy_executable` can connect to the daemon or invoke
-    the proxy directly and bypass those Python-layer checks. `require_bind`
-    protects shared-channel callers that enter through Avibe; it cannot
+    the proxy directly and bypass those Python-layer checks; they cannot
     constrain arbitrary local processes under the same OS account. This is an
     accepted Phase 1 trust boundary and is stated in the user documentation.
   - Tool restriction stays in the driver's managed policy, not in this server.
@@ -851,11 +852,10 @@ running. The tray keeps the shell alive after the window closes.
   untrusted, and observe state before retrying any action, since an error result
   does not prove the action failed. If every window comes back AX-unresolved and
   the desktop shows no apps, the screen is likely locked: stop and tell the
-  user. On macOS, it never uses focus-intent shortcuts (open URLs with
-  `launch_app` and `urls`), and no tool may deliberately take focus or move the
-  pointer; if
-  only a foreground action would work, the agent tells the user. On Windows, the
-  Q6 run decides foreground use.
+  user. Background delivery is the default; since #3050 the agent may repeat
+  an action that had no observable effect with foreground delivery, or activate
+  the exact window, without asking first. On Windows, the Q6 run decides
+  foreground use.
 
 ### Workbench
 
@@ -1109,7 +1109,7 @@ Direct-mode runs used `cua-driver mcp --direct` from a scratch directory with
 - [ ] Core: `core/computer_use.py`, the computer MCP server, configuration
   reconciliation, Claude/Codex/OpenCode translation, prompt
 - [ ] Workbench status line + i18n
-- [ ] User docs: enabling, permissions, `require_bind` guidance, stop
+- [ ] User docs: enabling, permissions, stop
 - [ ] Installed byte-fixed ad-hoc build, idle desktop: the agent cursor overlay stays visible, and
   representative AX and pixel actions neither take focus nor move the user's
   pointer (redoes the confounded Phase 0 check)
@@ -1222,8 +1222,9 @@ Each case lives in the suite of the component that owns the behavior.
     and input to a window gets `observe_first` until that same window is
     observed. Observing window A does not clear window B. A new server
     process requires an observation before a session's first input.
-  - macOS input: a desktop-targeted, foreground, or unrecognised input
-    call is rejected, and so are the guide's focus-intent shortcuts.
+  - macOS input: a desktop-targeted or unrecognised input target is
+    rejected; foreground delivery and focus-intent shortcuts are forwarded
+    (#3050).
 - **Manual, on the one final installed byte-fixed ad-hoc build.**
   - The final candidate must be built from the guidance-fix exact source head
     under a new bundle identifier. Candidate 5 remains fixed and ungranted;

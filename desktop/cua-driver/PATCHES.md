@@ -62,6 +62,7 @@ patch onto the next pinned source commit, rerun the fixture and lifecycle
 acceptance, refresh the source and snapshot hashes, and review the Avibe
 forwarding admission again.
 
-The bounded foreground mode remains deferred. It requires separate evidence
-for apps that reject both AX actions and background synthetic events; it is
-not an implicit fallback for this patch.
+Foreground delivery is the unpatched driver's own `delivery_mode:
+"foreground"` rung, and window activation is its `bring_to_front` tool. Both
+are forwarded unchanged since #3050; neither is an implicit fallback for this
+patch, whose raw selector stays background-only.

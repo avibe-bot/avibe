@@ -1,8 +1,11 @@
 # Route B: Bounded Foreground Delivery
 
-Status: owner-facing decision record. This document defines a design boundary
-only. It does not authorize implementation. Owner and source review are
-required before any product change or merge.
+Status: superseded. The implementation of this record (#2607) was reverted by
+#2674. The owner decision on #3050 replaced per-call consent, leases, and
+verified restoration with ordinary foreground input and explicit window
+activation; see
+[`2026-10-29-computer-use-foreground-and-readiness.md`](2026-10-29-computer-use-foreground-and-readiness.md).
+The record below is kept for history.
 
 [Route A](desktop-computer-use.md#route-a-raw-single-click-selector-2026-10-10)
 remains the shipped background contract. Route B is a separate, explicit

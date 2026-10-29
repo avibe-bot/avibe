@@ -16934,7 +16934,7 @@ def build_parser():
     )
     computer_subparsers = computer_parser.add_subparsers(
         dest="computer_command",
-        metavar="{run,js,js-reset,observe,zoom,click,type,key,hotkey,scroll,drag,set-value,clipboard,launch,force-quit}",
+        metavar="{run,js,js-reset,observe,zoom,activate,click,type,key,hotkey,scroll,drag,set-value,clipboard,launch,force-quit}",
     )
     computer_subparsers.required = True
 
@@ -17043,6 +17043,7 @@ def build_parser():
 
     for name, help_text in (
         ("zoom", "Inspect one exact window at a readable scale"),
+        ("activate", "Bring one exact window to the front and leave it there"),
         ("click", "Click an observed element or exact window coordinate"),
         ("type", "Type text into an observed target"),
         ("key", "Press one key"),
@@ -18821,6 +18822,7 @@ _CLI_COMMAND_FLOORS: dict[tuple[str, ...], Optional[str]] = {
     ("computer", "js"): "member",
     ("computer", "js-reset"): "member",
     ("computer", "zoom"): "member",
+    ("computer", "activate"): "member",
     ("computer", "click"): "member",
     ("computer", "type"): "member",
     ("computer", "key"): "member",

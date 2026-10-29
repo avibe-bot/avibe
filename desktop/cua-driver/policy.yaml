@@ -6,6 +6,7 @@ allow:
     - verify_state
     - launch_app
     - kill_app
+    - bring_to_front
     - set_window_frame
     - click
     - double_click

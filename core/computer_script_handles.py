@@ -64,6 +64,7 @@ _WINDOW_HANDLE_TOOLS = frozenset(
     {
         "get_window_state",
         "zoom",
+        "bring_to_front",
         "click",
         "double_click",
         "type_text",

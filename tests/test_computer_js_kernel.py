@@ -565,6 +565,146 @@ def test_concurrent_calls_in_one_session_are_serialized() -> None:
     assert _run(scenario) == ["a1", "a2", "b"]
 
 
+class _RecordingUpstream:
+    """Driver transport behind the real ``ComputerUseServer``: one Mail window."""
+
+    serial = 1
+
+    def __init__(self) -> None:
+        self.alive = True
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        assert method == "tools/call"
+        name = params["name"]
+        self.calls.append((name, dict(params["arguments"])))
+        content: list[dict[str, Any]] = []
+        if name == "list_apps":
+            structured = {"apps": [{"pid": 41, "bundle_id": "com.apple.mail", "name": "Mail"}]}
+        elif name == "list_windows":
+            structured = {
+                "windows": [
+                    {"pid": 41, "window_id": 9, "title": "Inbox", "is_on_screen": True, "z_index": 1}
+                ]
+            }
+        elif name == "get_window_state":
+            structured = {"pid": 41, "window_id": 9, "elements": []}
+            png = base64.b64encode(b"png-fixture").decode("ascii")
+            content = [{"type": "image", "data": png, "mimeType": "image/png"}]
+        else:
+            structured = {"effect": "confirmed", "route": "system_api"}
+        return {"jsonrpc": "2.0", "id": 1, "result": {"content": content, "structuredContent": structured}}
+
+    async def notify(self, method: str, params: dict[str, Any]) -> None:
+        return None
+
+    async def close(self) -> None:
+        self.alive = False
+
+
+def _real_computer_server(directory: Path, upstream: _RecordingUpstream) -> Any:
+    import hashlib
+
+    from core.computer_server import ComputerUseServer
+    from core.computer_use import ComputerUseStatus, read_computer_use_state
+
+    snapshot = directory / "tools.json"
+    shutil.copyfile("desktop/cua-driver/tools-v0.31.0.json", snapshot)
+    state_path = directory / "computer-use.json"
+    state_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "enabled": True,
+                "state": "ready",
+                "reason": None,
+                "shell_pid": 123,
+                "instance_id": "shell-test",
+                "generation": 1,
+                "driver_version": "0.31.0",
+                "tool_snapshot": {
+                    "path": str(snapshot),
+                    "sha256": hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+                },
+                "socket_path": str(directory / "driver.sock"),
+                "proxy_executable": str(directory / "cua-driver"),
+                "host_bundle_id": "bot.avibe.desktop.test",
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = read_computer_use_state(state_path)
+
+    async def factory(_state: Any) -> _RecordingUpstream:
+        return upstream
+
+    return ComputerUseServer(
+        state_path=state_path,
+        status_reader=lambda: ComputerUseStatus("ready", None, state),
+        upstream_factory=factory,
+    )
+
+
+def test_activation_and_foreground_input_reach_the_driver_without_consent(
+    tmp_path: Path,
+) -> None:
+    """The SDK and CLI routes deliver activation and foreground input as asked.
+
+    Everything between the caller and the driver transport is production code:
+    the Node kernel and SDK, the Controller's script and CLI routes, and
+    ``ComputerUseServer`` admission. No step asks for or waits on consent.
+    """
+
+    upstream = _RecordingUpstream()
+
+    async def scenario(h: _Harness) -> tuple[dict, dict]:
+        h.controller.computer_use_server = _real_computer_server(tmp_path, upstream)
+        report = await h.js(
+            "const mail = await computer.app({ bundleId: 'com.apple.mail' });\n"
+            "const win = await mail.window({ title: 'Inbox' });\n"
+            "const activated = await win.activate();\n"
+            "const clicked = await win.click({ x: 10, y: 20, delivery_mode: 'foreground' });\n"
+            "const focused = await win.hotkey(['cmd', 'l']);\n"
+            "[activated.status, clicked.status, focused.status]"
+        )
+        cli_route = await h.client.post(
+            "/internal/computer-use",
+            json={
+                "caller_session_id": SESSION,
+                "tool": "bring_to_front",
+                "arguments": {"pid": 41, "window_id": 9},
+            },
+        )
+        return report, cli_route.json()
+
+    report, cli_route = _run(scenario)
+
+    assert report["ok"] is True, report
+    assert report["result"] == ["confirmed", "confirmed", "confirmed"]
+    assert cli_route["ok"] is True, cli_route
+    actions = [
+        (name, arguments)
+        for name, arguments in upstream.calls
+        if name in {"bring_to_front", "click", "hotkey"}
+    ]
+    assert actions == [
+        ("bring_to_front", {"pid": 41, "window_id": 9, "session": SESSION}),
+        (
+            "click",
+            {
+                "x": 10,
+                "y": 20,
+                "delivery_mode": "foreground",
+                "pid": 41,
+                "window_id": 9,
+                "session": SESSION,
+            },
+        ),
+        ("hotkey", {"keys": ["cmd", "l"], "pid": 41, "window_id": 9, "session": SESSION}),
+        ("bring_to_front", {"pid": 41, "window_id": 9, "session": SESSION}),
+    ]
+
+
 def test_exceptions_and_unserializable_results_are_reported() -> None:
     async def scenario(h: _Harness) -> tuple[dict, dict]:
         thrown = await h.js("null.boom")
