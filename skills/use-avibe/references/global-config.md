@@ -2,9 +2,9 @@
 
 ### Global config
 
-- `GET /config`
+- `GET /api/config`
   - returns the current V2 config payload
-- `POST /config`
+- `POST /api/config`
   - accepts a partial object, deep-merges it with current config, validates it through `V2Config.from_payload`, then persists it
   - use for platform credentials, enabled platforms, primary platform, runtime defaults, agent defaults, UI config, remote-access provider settings, update policy, and global toggles
   - the handler only persists and (for `remote_access`) reconciles the cloudflared tunnel; running platform adapters keep using their previous credentials and transport until a restart. Plan a `vibe restart --delay-seconds 60` after any credential, `proxy_url`, or transport-level change.
@@ -140,7 +140,7 @@ Important config payload shape:
 }
 ```
 
-Discord server access belongs to `/settings`, not `/config`. Store enabled
+Discord server access belongs to `/api/settings`, not `/api/config`. Store enabled
 servers under `guilds`, next to channel settings:
 
 ```json
@@ -162,13 +162,13 @@ Per-platform fields worth knowing about:
 - every platform inherits `proxy_url` from the shared `BaseIMConfig`. Set it when the host machine cannot reach the upstream API directly. Accepts standard HTTP/HTTPS proxy URLs and any `socks*://` URL (`socks4`, `socks4a`, `socks5`, `socks5h`). SOCKS variants route through `aiohttp_socks`.
 - `slack.disable_link_unfurl` suppresses link previews when posting messages.
 - `discord.thread_auto_archive_minutes` must be one of `60`, `1440`, `4320`, or `10080`.
-- `discord.guild_allowlist` / `guild_denylist` are legacy input lists; current runtime server access lives in `/settings` under `guilds`.
+- `discord.guild_allowlist` / `guild_denylist` are legacy input lists; current runtime server access lives in `/api/settings` under `guilds`.
 - `telegram.forum_auto_topic` enables automatic topic creation in forum chats; `use_webhook` plus `webhook_url` / `webhook_secret_token` switches Telegram delivery to the webhook transport.
 - `telegram.allowed_chat_ids` / `allowed_user_ids` restrict which chats and users Telegram will respond to.
 - `wechat.cdn_base_url` controls the CDN host used for fetching WeChat media; the default `novac2c.cdn.weixin.qq.com` is the official c2c CDN.
 - `update.auto_update`, `check_interval_minutes`, and `idle_minutes` control unattended upgrades; `notify_admins` posts the upgrade announcement to bound admins.
 - `agents.<backend>.auto_update` (default `true`) installs a newer backend CLI release on the same check once `idle_minutes` have passed without a message and no turn is using that backend; messages that arrive during the install run afterwards. Each release is tried once unattended, and `check_interval_minutes = 0` stops it as well.
-- `ui.setup_host`, `setup_port`, and `open_browser` configure the local Web UI server; changing host or port requires `POST /ui/reload`.
+- `ui.setup_host`, `setup_port`, and `open_browser` configure the local Web UI server; changing host or port requires `POST /api/ui/reload`.
 
 Secret-bearing config fields that you should not print:
 
@@ -191,40 +191,40 @@ Secret-bearing config fields that you should not print:
 
 ### Platform discovery and validation
 
-- `GET /slack/manifest`
+- `GET /api/slack/manifest`
   - returns Slack app manifest JSON for setup
-- `POST /slack/auth_test`
+- `POST /api/slack/auth_test`
   - payload: `{"bot_token": "xoxb-..."}`
-- `POST /slack/channels`
+- `POST /api/slack/channels`
   - payload: `{"bot_token": "xoxb-...", "browse_all": false}`
-- `POST /discord/auth_test`
+- `POST /api/discord/auth_test`
   - payload: `{"bot_token": "..."}`
-- `POST /discord/guilds`
+- `POST /api/discord/guilds`
   - payload: `{"bot_token": "..."}`
-- `POST /discord/channels`
+- `POST /api/discord/channels`
   - payload: `{"bot_token": "...", "guild_id": "..."}`
-- `POST /telegram/auth_test`
+- `POST /api/telegram/auth_test`
   - payload: `{"bot_token": "123:abc"}`
-- `POST /telegram/chats`
+- `POST /api/telegram/chats`
   - payload: `{"include_private": false}`
-- `POST /lark/auth_test`
+- `POST /api/lark/auth_test`
   - payload: `{"app_id": "...", "app_secret": "...", "domain": "feishu"}`
-- `POST /lark/chats`
+- `POST /api/lark/chats`
   - payload: `{"app_id": "...", "app_secret": "...", "domain": "feishu"}`
-- `POST /lark/temp_ws/start`
+- `POST /api/lark/temp_ws/start`
   - payload: `{"app_id": "...", "app_secret": "...", "domain": "feishu"}`
-- `POST /lark/temp_ws/stop`
+- `POST /api/lark/temp_ws/stop`
   - payload: `{}`
-- `POST /wechat/qr_login/start`
+- `POST /api/wechat/qr_login/start`
   - payload: `{"base_url": "https://ilinkai.weixin.qq.com"}` or `{}`
-- `POST /wechat/qr_login/poll`
+- `POST /api/wechat/qr_login/poll`
   - payload: `{"session_key": "..."}`
 
 WeChat QR login is special: when login is confirmed and a token is returned, the API auto-binds the WeChat user and schedules an internal service restart so the new token can take effect. Do not add an extra restart unless the user asks.
 
 ### Change the global default working directory
 
-Use `POST /config`:
+Use `POST /api/config`:
 
 ```json
 {
@@ -238,7 +238,7 @@ Do not overwrite scope-level `custom_cwd` entries.
 
 ### Switch primary platform
 
-Use `POST /config` and keep `platforms.enabled` complete:
+Use `POST /api/config` and keep `platforms.enabled` complete:
 
 ```json
 {
@@ -256,7 +256,7 @@ Make sure the target platform config section exists and validates. Do not delete
 
 When the host cannot reach a platform API directly, set `proxy_url` on that platform's config block.
 
-Use `POST /config` with only the proxy field for the affected platform:
+Use `POST /api/config` with only the proxy field for the affected platform:
 
 ```json
 {
@@ -270,5 +270,5 @@ Notes:
 
 - `proxy_url` accepts `http://`, `https://`, and any `socks*://` scheme (`socks4`, `socks4a`, `socks5`, `socks5h`). The SOCKS variants route through `aiohttp_socks` (bundled).
 - Set the field to `null` (or omit it on a fresh save) to disable the proxy.
-- `POST /config` only persists the new value; running platform adapters keep their old transport until the service restarts. After saving, run `vibe restart --delay-seconds 60` (or `POST /control {"action":"restart"}` with the user's confirmation) so the proxy applies to live connections.
+- `POST /api/config` only persists the new value; running platform adapters keep their old transport until the service restarts. After saving, run `vibe restart --delay-seconds 60` (or `POST /api/control {"action":"restart"}` with the user's confirmation) so the proxy applies to live connections.
 - Do not paste credentialed proxy URLs (`user:pass@host`) into logs or chat replies; mask the credentials portion when reporting back.
