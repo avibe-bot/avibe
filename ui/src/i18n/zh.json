@@ -6345,7 +6345,7 @@
     "title": "MCP",
     "searchPlaceholder": "搜索 MCP 服务器…",
     "add": "添加 MCP",
-    "addTitle": "添加 MCP 服务器",
+    "addTitle": "添加 MCP",
     "refresh": "刷新",
     "refreshAll": "刷新",
     "remove": "删除",
@@ -6382,6 +6382,8 @@
       "unsupported_transport_sse": "不支持 SSE；请使用 Streamable HTTP 地址。"
     },
     "addedCount": "已添加 {{count}} 个。",
-    "addedPartial": "已添加 {{count}} 个；失败：{{failed}}"
+    "addedPartial": "已添加 {{count}} 个；失败：{{failed}}",
+    "addSubtitle": "粘贴 MCP 配置 JSON，添加到 Avibe 后自动注册，所有 Agent 可用 vibe mcp 调用",
+    "unchangedCount": "{{count}} 个已存在。"
   }
 }

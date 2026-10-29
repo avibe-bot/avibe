@@ -93,21 +93,19 @@ export const McpHubSection: React.FC = () => {
     setAddError(null);
     try {
       const res = await api.addMcp(addText);
-      const added = res.added ?? (res.ok && (res.saved || res.name) ? [{ name: (res.saved ?? [res.name])[0] }] : []);
+      const added = res.added ?? [];
+      const unchanged = res.unchanged ?? [];
       const failed = res.failed ?? [];
-      if (!added.length && !failed.length && !res.ok) {
-        setAddError(describe(res.error));
-        return;
-      }
-      if (!added.length) {
-        setAddError(failed.map((item) => `${item.name}: ${item.error}`).join('\n') || describe(res.error));
+      const failedLines = failed.map((item) => `${item.name}: ${item.error}`).join('\n');
+      if (!added.length && !unchanged.length) {
+        setAddError(
+          [res.error?.message, failedLines].filter(Boolean).join('\n') || describe(res.error),
+        );
         return;
       }
       setShowAdd(false);
       setAddText('');
-      if (!failed.length) {
-        showToast(t('mcpHub.addedCount', { count: added.length }), 'success');
-      } else {
+      if (failed.length) {
         showToast(
           t('mcpHub.addedPartial', {
             count: added.length,
@@ -115,6 +113,10 @@ export const McpHubSection: React.FC = () => {
           }),
           'error',
         );
+      } else if (added.length) {
+        showToast(t('mcpHub.addedCount', { count: added.length }), 'success');
+      } else {
+        showToast(t('mcpHub.unchangedCount', { count: unchanged.length }), 'success');
       }
       await load();
     } finally {
@@ -269,9 +271,10 @@ export const McpHubSection: React.FC = () => {
       <Dialog open={showAdd} onOpenChange={(open) => (!open ? setShowAdd(false) : undefined)}>
         <DialogContent className="max-w-lg" closeLabel={t('common.close')}>
           <DialogTitle>{t('mcpHub.addTitle')}</DialogTitle>
-          <DialogDescription>{t('mcpHub.pasteHint')}</DialogDescription>
+          <DialogDescription>{t('mcpHub.addSubtitle')}</DialogDescription>
           <Textarea value={addText} onChange={(event) => setAddText(event.target.value)} className="min-h-40 font-mono text-[12px]" placeholder={t('mcpHub.pastePlaceholder')} />
-          {addError ? <div className="text-[12px] text-destructive-ink">{addError}</div> : null}
+          <p className="text-[11px] text-muted">{t('mcpHub.pasteHint')}</p>
+          {addError ? <div className="whitespace-pre-wrap text-[12px] text-destructive-ink">{addError}</div> : null}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setShowAdd(false)}>{t('common.cancel')}</Button>
             <Button type="button" disabled={busy !== null || !addText.trim()} onClick={() => void onAdd()}>

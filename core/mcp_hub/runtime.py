@@ -192,6 +192,28 @@ def _describe(exc: BaseException) -> str:
     nested = getattr(exc, "exceptions", None)
     if isinstance(nested, tuple) and nested:
         return "; ".join(_describe(item) for item in nested)
+    response = getattr(exc, "response", None)
+    if response is not None:
+        status = getattr(response, "status_code", None)
+        text = ""
+        for attr in ("text", "reason_phrase", "reason"):
+            value = getattr(response, attr, None)
+            if isinstance(value, str) and value.strip():
+                text = value.strip()
+                break
+        if status is not None:
+            return f"HTTP {status}: {text or getattr(exc, 'message', None) or exc}".rstrip(": ")
+    error = getattr(exc, "error", None)
+    if error is not None:
+        message = getattr(error, "message", None) or str(error)
+        data = getattr(error, "data", None)
+        extra = ""
+        if isinstance(data, dict):
+            extra = str(data.get("message") or data.get("error") or "").strip()
+        if extra and extra not in str(message):
+            return f"{message}: {extra}"
+        if message:
+            return str(message)
     return f"{type(exc).__name__}: {exc}"
 
 
@@ -359,12 +381,18 @@ class McpRuntime:
             raise McpHubError("usage", "No servers to save.", usage=True)
         results = await asyncio.gather(*(self._add_one(item, replace, preserve) for item in definitions))
         added = [item for item in results if item.get("status") == "added"]
+        unchanged = [item for item in results if item.get("status") == "unchanged"]
         failed = [item for item in results if item.get("status") == "failed"]
-        body: dict[str, Any] = {"ok": bool(added), "added": added, "failed": failed}
+        ok = bool(added or unchanged)
+        body: dict[str, Any] = {"ok": ok, "added": added, "unchanged": unchanged, "failed": failed}
         if len(added) == 1:
             body.update({k: added[0][k] for k in ("name", "revision", "toolCount") if k in added[0]})
-        if not added and len(failed) == 1:
-            body["error"] = {"type": "connection", "message": failed[0].get("error") or "failed"}
+        if failed and not added:
+            summary = "; ".join(f"{item['name']}: {item.get('error') or 'failed'}" for item in failed)
+            body["error"] = {"type": "add_failed", "message": summary, "failed": failed}
+        elif failed:
+            summary = "; ".join(f"{item['name']}: {item.get('error') or 'failed'}" for item in failed)
+            body["error"] = {"type": "add_partial", "message": summary, "failed": failed}
         return _dumps(body)
 
     async def _add_one(self, definition: dict[str, Any], replace: bool, preserve: bool) -> dict[str, Any]:
@@ -372,7 +400,16 @@ class McpRuntime:
         previous = await asyncio.to_thread(repository.read_avibe_definition, name)
         try:
             async with self._lock(name):
-                await asyncio.to_thread(self._save_one, definition, replace, preserve)
+                outcome = await asyncio.to_thread(self._save_one, definition, replace, preserve)
+            if outcome == "unchanged":
+                return {"name": name, "status": "unchanged"}
+            if outcome == "exists":
+                return {
+                    "name": name,
+                    "status": "failed",
+                    "error": f"{name} already exists with a different definition; pass --replace to change it.",
+                    "type": "exists",
+                }
             body = json.loads(await self._refresh({"name": name, "waitStdio": True}))
             if body.get("ok"):
                 return {
@@ -390,16 +427,24 @@ class McpRuntime:
         return {"name": name, "status": "failed", "error": error}
 
     @staticmethod
+    def _comparable_definition(definition: dict[str, Any]) -> dict[str, Any]:
+        transport = dict((definition.get("transport") or {}))
+        transport.pop("cwd", None)
+        return {"name": definition.get("name"), "description": definition.get("description") or "", "transport": transport}
+
+    @staticmethod
     def _save_one(definition: dict[str, Any], replace: bool, preserve: bool) -> str:
         name = definition["name"]
-        exists = repository.read_avibe_definition(name) is not None or repository.read_published(name) is not None
+        existing = None
+        try:
+            existing = repository.read_definition(name)
+        except McpHubError:
+            existing = repository.read_avibe_definition(name)
+        exists = existing is not None or repository.read_published(name) is not None
         if exists and not replace:
-            raise McpHubError(
-                "exists",
-                f"MCP server {name!r} already exists; pass --replace to change its definition.",
-                field="name",
-                usage=True,
-            )
+            if existing is not None and McpRuntime._comparable_definition(existing) == McpRuntime._comparable_definition(definition):
+                return "unchanged"
+            return "exists"
         if exists and preserve:
             try:
                 definition = merge_preserved_secrets(definition, repository.read_definition(name))

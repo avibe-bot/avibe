@@ -55,6 +55,52 @@ def test_add_registers_and_delete_removes_through_the_api(owner):
     assert client.get("/api/mcp/echo").status_code == 404
 
 
+def test_all_failed_batch_returns_per_server_reasons_and_identical_readd_is_unchanged(owner):
+    client = app.test_client()
+    headers = csrf_headers(client)
+    first = client.post("/api/mcp", json={"text": PASTE}, headers=headers)
+    assert first.status_code == 200 and first.get_json()["ok"]
+
+    again = client.post("/api/mcp", json={"text": PASTE}, headers=headers)
+    body = again.get_json()
+    assert again.status_code == 200
+    assert body["ok"] is True
+    assert body["unchanged"][0]["name"] == "echo"
+    assert body["failed"] == []
+    assert body["added"] == []
+
+    batch = {
+        "mcpServers": {
+            "echo": {"command": sys.executable, "args": [FIXTURE], "env": {"ECHO_TOKEN": "s3cret-value"}},
+            "github": {"url": "https://example.invalid/mcp"},
+            "other": {"command": "/nonexistent/mcp-other"},
+        }
+    }
+    failed = client.post("/api/mcp", json={"text": json.dumps(batch)}, headers=headers)
+    payload = failed.get_json()
+    assert failed.status_code == 200
+    assert payload["ok"] is True  # echo is unchanged
+    names = {item["name"]: item for item in payload["failed"]}
+    assert "github" in names and names["github"]["error"]
+    assert "other" in names
+    assert payload["unchanged"][0]["name"] == "echo"
+    assert payload.get("error", {}).get("message") or names["github"]["error"]
+
+    empty_fail = {
+        "mcpServers": {
+            "github": {"url": "https://example.invalid/mcp"},
+            "other": {"command": "/nonexistent/mcp-other"},
+        }
+    }
+    none = client.post("/api/mcp", json={"text": json.dumps(empty_fail)}, headers=headers)
+    none_body = none.get_json()
+    assert none.status_code == 200
+    assert none_body["ok"] is False
+    assert {item["name"] for item in none_body["failed"]} == {"github", "other"}
+    assert none_body["error"]["message"]
+    assert "Unexpected MCP Hub response" not in json.dumps(none_body)
+
+
 @pytest.mark.parametrize(
     ("method", "path", "role"),
     [

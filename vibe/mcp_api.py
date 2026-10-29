@@ -31,6 +31,8 @@ async def _owner(operation: str, payload: dict[str, Any]) -> dict[str, Any]:
     except internal_client.InternalServerTimeout:
         raise McpHubError("unknown_outcome", "The Avibe service connection broke; refresh to see the result.") from None
     if not response.get("ok"):
+        if operation == "add" and (response.get("failed") or response.get("unchanged") is not None):
+            return response
         raise McpHubError.from_payload(response.get("error"))
     return response
 

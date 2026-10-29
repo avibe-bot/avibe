@@ -6345,7 +6345,7 @@
     "title": "MCP",
     "searchPlaceholder": "Search MCP servers…",
     "add": "Add MCP",
-    "addTitle": "Add MCP server",
+    "addTitle": "Add MCP",
     "refresh": "Refresh",
     "refreshAll": "Refresh",
     "remove": "Delete",
@@ -6382,6 +6382,8 @@
       "unsupported_transport_sse": "SSE is not supported; use a Streamable HTTP URL."
     },
     "addedCount": "Added {{count}} MCP servers.",
-    "addedPartial": "Added {{count}}; failed: {{failed}}"
+    "addedPartial": "Added {{count}}; failed: {{failed}}",
+    "addSubtitle": "Paste MCP config JSON. Avibe registers it so every Agent can call vibe mcp.",
+    "unchangedCount": "{{count}} already present."
   }
 }

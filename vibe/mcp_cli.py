@@ -163,14 +163,17 @@ def _owner(operation: str, payload: dict[str, Any]) -> int:
     if operation in {"add", "save"}:
         added = response.get("added") or []
         failed = response.get("failed") or []
+        unchanged = response.get("unchanged") or []
         for item in added:
             print(f"{item['name']}: added ({item.get('toolCount', 0)} tools)")
+        for item in unchanged:
+            print(f"{item['name']}: unchanged")
         for item in failed:
             print(f"{item['name']}: failed — {item.get('error') or 'unknown'}", file=sys.stderr)
-        if not added and not failed:
+        if not added and not failed and not unchanged:
             names = ", ".join(response.get("saved") or [response.get("name") or ""])
             print(f"Registered {names} ({response.get('toolCount', 0)} tools).")
-        return 0 if added or response.get("ok") else 1
+        return 0 if added or unchanged or response.get("ok") else 1
     elif operation == "refresh":
         print(f"Refreshed {response['name']} ({response.get('toolCount', 0)} tools).")
     elif operation == "remove":
