@@ -19,6 +19,7 @@ import httpx
 
 from core.agent_core.ai.hosted import (
     GOOGLE_SEARCH_TOOL_TYPE,
+    google_grounding_citations,
     google_grounding_sources,
     google_hosted_block,
     google_search_count,
@@ -111,7 +112,11 @@ _GOOGLE_WIRE_SHAPES = {
                 WireField(
                     "groundingMetadata",
                     Mapping,
-                    children=(WireField("webSearchQueries", list), WireField("groundingChunks", list)),
+                    children=(
+                        WireField("webSearchQueries", list),
+                        WireField("groundingChunks", list),
+                        WireField("groundingSupports", list),
+                    ),
                 ),
                 WireField(
                     "content",
@@ -256,6 +261,8 @@ class _GoogleStream:
         # Each Google Search by its call id: its slot and its toolCall part, until its toolResponse arrives.
         self._searches: dict[str, tuple[tuple[str, str], dict[str, Any]]] = {}
         self._grounding: Mapping[str, Any] | None = None
+        # Each answer text block's text as streamed, by its slot, for the grounding Gemini reports at the finish.
+        self._texts: dict[tuple[str, int], list[str]] = {}
         self.ended = False
         self._finish: str | None = None
         self._finish_message: str | None = None
@@ -352,7 +359,9 @@ class _GoogleStream:
                 self.assembler.set_thinking_signature(key, signature)
             return events
         if text:
-            emitted = self.assembler.text_delta(self._key("text"), text)
+            key = self._key("text")
+            self._texts.setdefault(key, []).append(text)
+            emitted = self.assembler.text_delta(key, text)
             if emitted is not None:
                 events.append(emitted)
         if signature:
@@ -398,13 +407,15 @@ class _GoogleStream:
         )
 
     def _ground(self) -> None:
-        """Gemini reports a response's searches and sources once: they count its calls and fill its last record."""
+        """A response's searches are counted from its own calls. Gemini reports the sources once, with the answer they
+        ground, which is often a later response of the turn: they cite its text, and fill this response's last search
+        record when it ran one."""
 
-        if not self._searches or self._grounding is None:
+        if self._searches:
+            calls = [part for _, part in self._searches.values()]
+            self.assembler.set_hosted_facts(counts={"web_search_requests": google_search_count(calls)})
+        if self._grounding is None or "web_search" not in self.hosted:
             return
-        searches = google_search_count(self._grounding)
-        if searches:
-            self.assembler.set_hosted_facts(counts={"web_search_requests": searches})
         sources = google_grounding_sources(self._grounding)
         completed = [
             (key, block) for key, _ in self._searches.values()
@@ -413,6 +424,30 @@ class _GoogleStream:
         if sources and completed:
             key, block = completed[-1]
             self.assembler.hosted_block(key, replace(block, record=replace(block.record, sources=sources)))
+        self._cite()
+
+    def _cite(self) -> None:
+        """Each grounding support as citations on the answer text it grounds: at its range where that text is found
+        (in order, after the end of the last one found, so a repeated sentence cites each occurrence), else once per
+        source on the last text block."""
+
+        texts = [(key, "".join(parts)) for key, parts in self._texts.items()]
+        if not texts:
+            return
+        position = (0, 0)
+        loose: set[str] = set()
+        for segment, citations in google_grounding_citations(self._grounding):
+            found = _find_segment([text for _, text in texts], segment, position) if segment else None
+            if found is not None and segment:
+                index, start = found
+                position = (index, start + len(segment))
+                for item in citations:
+                    self.assembler.add_text_citation(texts[index][0], replace(item, start=start, end=start + len(segment)))
+                continue
+            for item in citations:
+                if item.url not in loose:
+                    loose.add(item.url)
+                    self.assembler.add_text_citation(texts[-1][0], item)
 
     def finish(self) -> list[Any]:
         if self._finish is None and self._blocked is None:
@@ -430,6 +465,21 @@ class _GoogleStream:
         if terminal is not None:
             events.append(terminal)
         return events
+
+
+def _find_segment(texts: list[str], segment: str, position: tuple[int, int]) -> tuple[int, int] | None:
+    """Where ``segment`` first occurs in the texts at or after ``position`` (block, offset), else anywhere."""
+
+    block, offset = position
+    for index in range(block, len(texts)):
+        start = texts[index].find(segment, offset if index == block else 0)
+        if start >= 0:
+            return index, start
+    for index, text in enumerate(texts):
+        start = text.find(segment)
+        if start >= 0:
+            return index, start
+    return None
 
 
 def build_google_payload(

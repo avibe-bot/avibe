@@ -117,18 +117,24 @@ included (owner, 2026-10-27: "统一都走原生").
 - The adapter sends that declaration as `{"googleSearch": {}}` after the `functionDeclarations`, with
   `toolConfig.includeServerSideToolInvocations: true`, which Gemini requires to run it next to functions (measured).
 - A response's `toolCall`/`toolResponse` pair (`toolType: GOOGLE_SEARCH_WEB`) becomes one `HostedToolBlock`
-  (`action: search` with the call's `queries`; the record's sources are the response's `groundingChunks`, each
-  once), with both parts verbatim, signatures included, as its native payload. Same-Source replay sends them back
-  in place; any other target gets the synthetic call and result (`vibey-hosted-tools.md` §5). The
-  `search_suggestions` markup is never kept (§0). A server-side part of a tool the request did not declare stays
-  out of the transcript.
+  (`action: search` with the call's `queries`), with both parts verbatim, signatures included, as its native
+  payload. Same-Source replay sends them back in place; any other target gets the synthetic call and result
+  (`vibey-hosted-tools.md` §5). The `toolResponse` carries Google's `search_suggestions` markup: it stays inside that
+  opaque payload, which only goes back to the Source, and is never shown, rendered into a record or sent elsewhere
+  (§0). A server-side part of a tool the request did not declare stays out of the transcript.
+- Gemini reports a search's sources once, in `groundingMetadata`, on the response whose answer they ground. After a
+  search and a function call that is the turn's next response, which ran no search (measured 2026-10-27). So each
+  `groundingSupports` entry cites the answer text it grounds (`TextBlock.citations`: its `segment.text` found in the
+  response's text, in order, gives the range; one not found cites each source once without one), on every surface through the
+  shared citation builder. When the search and its answer are one response, the `groundingChunks` (each URL once)
+  are also its last search record's sources. `searchEntryPoint` is not read.
 - Gateway: `hosted_admission` reads the keyed declaration through `request.declared_tool_types` and Gemini's
   server-side parts as replays (the in-flight response is the last `model` content followed only by function
   responses). Gemini's refusal "Tool call context circulation is not enabled" before output is the narrow negative
-  rule for `web_search` `call`, so the hop falls back to the executor chain. Cost: the response's distinct `groundingMetadata.webSearchQueries` × list price, as
-  `hosted_summary.counts.web_search_requests`.
-- Not in this step: a positive evidence rule (the Tools tab shows no "最近一次 … 正常" for Google Search) and
-  answer citations from `groundingSupports` (the record lists the sources; the text carries no links).
+  rule for `web_search` `call`, so the hop falls back to the executor chain. Cost: the distinct `args.queries` of each
+  search call (at least one per call) × list price, as `hosted_summary.counts.web_search_requests` of the response
+  that ran them; `webSearchQueries` lists only the queries that grounded the answer (measured: one of two).
+- Not in this step: a positive evidence rule (the Tools tab shows no "最近一次 … 正常" for Google Search).
 - Public docs (`avibe-docs`, en and zh): Gemini searches with Google, queries go to Google, and the price.
 
 ## 5. Delivery
@@ -146,7 +152,8 @@ of each other once PR 1 is merged.
 
 - A Gemini subscription (Antigravity) is served by the engine over Chat only; it keeps Exa/Tavily search.
 - Source links in Google's grounding are redirect URLs; the card shows the domain as title.
-- Google Search has no positive evidence yet and Gemini answers carry no inline citations (§4).
+- Google Search has no positive evidence yet (§4).
+- A search whose answer comes in a later response lists no sources on its own card; the answer cites them (§4).
 - Gemini is not a search executor for other hops: the executor speaks Anthropic and Responses only, so Gemini runs
   Google Search on its own hop and names no `executor_models` (a follow-up would add a `google` executor request
   and result).

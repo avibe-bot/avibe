@@ -16,6 +16,7 @@ from core.agent_core.ai.provider import Done, HostedToolRoute, ModelEndpoint, Mo
 from core.agent_core.cancel import CancelToken
 from core.agent_core.messages import (
     AssistantMessage,
+    Citation,
     HostedSource,
     HostedToolBlock,
     ImageBlock,
@@ -332,14 +333,21 @@ RESPONSE_PART = {
     "toolResponse": {"toolType": "GOOGLE_SEARCH_WEB", "response": {"search_suggestions": "<div>chips</div>"}, "id": "srch_1"},
     "thoughtSignature": SIG_B,
 }
+# Gemini lists only the queries that grounded the answer (measured: one of the call's two).
 GROUNDING = {
-    "webSearchQueries": ["btc price today", "btc close", "btc price today"],
+    "webSearchQueries": ["btc price today"],
     "groundingChunks": [
         {"web": {"uri": "https://grounding.invalid/a", "title": "coindesk.com"}},
         {"web": {"uri": "https://grounding.invalid/b", "title": "coinbase.com"}},
         {"web": {"uri": "https://grounding.invalid/a", "title": "coindesk.com"}},
     ],
+    "groundingSupports": [
+        {"segment": {"startIndex": 0, "endIndex": 21, "text": "BTC closed at $79,6xx"}, "groundingChunkIndices": [0, 1]},
+    ],
+    "searchEntryPoint": {"renderedContent": "<div>chips</div>"},
 }
+A = "https://grounding.invalid/a"
+B = "https://grounding.invalid/b"
 
 
 def _searching(*messages: Any) -> ModelRequest:
@@ -396,8 +404,14 @@ async def test_a_google_search_is_one_hosted_call_whose_parts_go_back_verbatim()
         HostedSource(url="https://grounding.invalid/b", title="coinbase.com"),
     )
     assert search.native.source_id == SOURCE and search.native.payload == (CALL_PART, RESPONSE_PART)
-    # Google bills each distinct query the model ran.
+    # Google bills each distinct query the call ran, not only those the grounding lists.
     assert message.hosted_summary is not None and message.hosted_summary.counts == {"web_search_requests": 2}
+    # The grounded sentence cites its sources at its range; the Search Suggestions are not kept.
+    [answer] = [block for block in message.content if isinstance(block, TextBlock)]
+    assert answer.citations == (
+        Citation(url=A, title="coindesk.com", start=0, end=21), Citation(url=B, title="coinbase.com", start=0, end=21),
+    )
+    assert "chips" not in json.dumps([str(block) for block in message.content if not isinstance(block, HostedToolBlock)])
 
     # Back to the same Source, the call's parts go verbatim, signatures included, before the answer.
     body = await _body(_searching(_user("btc?"), message, _user("and eth?")), gateway=True)
@@ -414,5 +428,50 @@ async def test_a_google_search_is_one_hosted_call_whose_parts_go_back_verbatim()
 
 
 async def test_a_server_side_call_the_request_did_not_declare_stays_out_of_the_transcript() -> None:
-    message = _final(await _stream(_parts(CALL_PART), _parts(RESPONSE_PART), _parts({"text": "ok"}, finish="STOP")))
-    assert message.content == (TextBlock(text="ok"),) and message.hosted_summary is None
+    grounded = {"candidates": [{"content": {"role": "model", "parts": []}, "groundingMetadata": GROUNDING}]}
+    message = _final(await _stream(
+        _parts(CALL_PART), _parts(RESPONSE_PART), _parts({"text": "BTC closed at $79,6xx."}, finish="STOP"), grounded,
+    ))
+    assert message.content == (TextBlock(text="BTC closed at $79,6xx."),) and message.hosted_summary is None
+
+
+async def test_the_answer_a_search_of_an_earlier_response_grounds_cites_it() -> None:
+    """Gemini reports the sources with the answer they ground: after a search and a function call, that is the next
+    response of the turn, which ran no search and so is not billed for one (measured 2026-10-27)."""
+
+    grounding = {**GROUNDING, "groundingSupports": [
+        *GROUNDING["groundingSupports"],
+        # A support whose text is not in the answer as streamed cites its source once, without a range.
+        {"segment": {"text": "not in the answer"}, "groundingChunkIndices": [1, 7]},
+        {"segment": {"text": "also elsewhere"}, "groundingChunkIndices": [1]},
+    ]}
+    finish = {"candidates": [{"content": {"role": "model", "parts": [{"text": "."}]}, "finishReason": "STOP",
+                              "groundingMetadata": grounding}]}
+    events = await _stream(_parts({"text": "Checked: "}), _parts({"text": "BTC closed at $79,6xx"}), finish,
+                           request=_searching(_user("btc?")))
+    message = _final(events)
+
+    assert message.hosted_summary is None
+    assert not [block for block in message.content if isinstance(block, HostedToolBlock)]
+    [answer] = message.content
+    assert answer == TextBlock(text="Checked: BTC closed at $79,6xx.", citations=(
+        Citation(url=A, title="coindesk.com", start=9, end=30), Citation(url=B, title="coinbase.com", start=9, end=30),
+        Citation(url=B, title="coinbase.com"),
+    ))
+
+
+async def test_supports_of_a_repeated_sentence_cite_each_occurrence_in_order() -> None:
+    grounding = {
+        "groundingChunks": [{"web": {"uri": A, "title": "a.example"}}, {"web": {"uri": B, "title": "b.example"}}],
+        "groundingSupports": [
+            {"segment": {"text": "No change."}, "groundingChunkIndices": [0]},
+            {"segment": {"text": "No change."}, "groundingChunkIndices": [1]},
+        ],
+    }
+    finish = {"candidates": [{"content": {"role": "model", "parts": [{"text": "Alpha: No change. Beta: No change."}]},
+                              "finishReason": "STOP", "groundingMetadata": grounding}]}
+    [answer] = _final(await _stream(finish, request=_searching(_user("status?")))).content
+
+    assert answer.citations == (
+        Citation(url=A, title="a.example", start=7, end=17), Citation(url=B, title="b.example", start=24, end=34),
+    )

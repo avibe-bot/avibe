@@ -674,7 +674,7 @@ Gemini stream events (each `data:` frame is a `GenerateContentResponse` whose pa
 | `…parts[].functionCall` | delta | `ToolCallStart` and one `ToolCallDelta` of the JSON `args`; `id` is the native id, `thoughtSignature` the call's signature. An empty name is terminal `invalid_request`. |
 | `…parts[].toolCall` / `toolResponse` with `toolType: GOOGLE_SEARCH_WEB` | state | One `web_search` `HostedToolBlock` per call `id` (Hosted tools, below), only when the request declared it natively. |
 | any other part | ignored | Parts of a kind the request did not declare (inline data, code execution, another server-side tool). |
-| `candidates[0].groundingMetadata` | state | `webSearchQueries` and `groundingChunks` of the response, read at its finish (Hosted tools, below). |
+| `candidates[0].groundingMetadata` | state | `groundingChunks` and `groundingSupports` of the answer they ground, read at the response's finish (Hosted tools, below). |
 | `candidates[0].finishReason` | state | Stop reason (below). |
 | `usageMetadata` | state | `input = promptTokenCount - cachedContentTokenCount`; `output = candidatesTokenCount + thoughtsTokenCount`; `cache_read = cachedContentTokenCount`; `reasoning = thoughtsTokenCount`. The last frame's counts win. |
 | `promptFeedback.blockReason` without a finish | Done | `safety`, with the block reason as `error_message`. |
@@ -749,9 +749,9 @@ Gemini (`google`, plan `../vibey-gemini-native.md` §4) runs `web_search` as Goo
 | --- | --- |
 | Native declaration | `{"googleSearch": {}}` after the `functionDeclarations`, for the overlay's `{"type": "google_search"}`, plus `toolConfig.includeServerSideToolInvocations: true` |
 | Proxy declaration | a `functionDeclarations` entry with the canonical schema |
-| Native result → `HostedToolBlock` | a `toolCall` part (`toolType: GOOGLE_SEARCH_WEB`, `args.queries`) opens one `search` block by its `id`, `pending`; the `toolResponse` part with the same `id` completes it. Both parts, signatures included, are its `native.payload`. The `search_suggestions` markup in the response is never kept. |
-| Response-level facts | at the finish, the distinct `groundingMetadata.webSearchQueries` are `counts.web_search_requests`, and the `groundingChunks` (`web.uri`, `web.title`, each URL once) are the sources of the response's last completed search |
-| Citations | none yet: `groundingSupports` is not read |
+| Native result → `HostedToolBlock` | a `toolCall` part (`toolType: GOOGLE_SEARCH_WEB`, `args.queries`) opens one `search` block by its `id`, `pending`; the `toolResponse` part with the same `id` completes it. Both parts, signatures included, are its `native.payload`; the `search_suggestions` markup the `toolResponse` carries stays only there, never shown. |
+| Response-level facts | at the finish, the distinct `args.queries` of each search call (at least one per call) are `counts.web_search_requests`; when the response also carries `groundingMetadata`, its `groundingChunks` (`web.uri`, `web.title`, each URL once) are the sources of its last completed search |
+| Citations | each `groundingSupports` entry of a response's `groundingMetadata` (which comes with the grounded answer, often the turn's response after the search): a citation per named `groundingChunks[].web` on the text block where its `segment.text` is next found (after the previous support's match, so a repeated sentence cites each occurrence), at that range, else once per URL on the last text block without a range; only on a request that declared Google Search |
 | Same-Source replay | `native.payload` parts verbatim, in place in the `model` content |
 | Other-origin replay | the portable synthetic call and result, as for the other protocols |
 | Pinning, in-flight replay | as for the other protocols; the in-flight response is the last `model` content followed only by function responses |
