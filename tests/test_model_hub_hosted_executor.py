@@ -30,7 +30,13 @@ from core.handlers.model_hub import search_chain as search_chain_module
 from core.handlers.model_hub import service as service_module
 from core.handlers.model_hub.adapter import DiscoveredModel, InvokeCancelledError, RawOutcomeKind, UpstreamRejection
 from core.handlers.model_hub.capability_evidence import EvidenceFeature
-from core.handlers.model_hub.hosted_executor import ResponsesReadout, anthropic_result, excerpt, responses_result
+from core.handlers.model_hub.hosted_executor import (
+    ResponsesReadout,
+    anthropic_result,
+    excerpt,
+    google_result,
+    responses_result,
+)
 from core.handlers.model_hub import hosted_tools as hosted_tools_module
 from core.handlers.model_hub.pricing import PriceTable
 from core.handlers.model_hub.stream_wire import ProtocolSSEState, ProtocolUsageReport
@@ -53,6 +59,8 @@ from tests.test_model_hub_vibey_consumer import _vibey_service
 XAI = "src_xaikey0001"
 OPENAI = "src_openai0001"
 ANTHROPIC = "src_anthkey0001"
+GEMINI = "src_gemkey0001"
+GEMINI_LITE = "models/gemini-flash-lite-latest"
 POST_1 = "https://x.com/OpenAI/status/2107909792945832070"
 POST_2 = "https://x.com/OpenAI/status/2107895006350791071"
 PAGE_A = "https://github.com/router-for-me/CLIProxyAPI/releases"
@@ -320,6 +328,98 @@ async def test_an_anthropic_executor_is_buffered_and_keeps_the_providers_results
     }
 
 
+# A Gemini generateContent answer with Google Search, as gemini-flash-lite-latest gave it on 2026-10-29: the answer and
+# the search's grounding in one response. Grounding links are Google redirects titled with the domain.
+REDIRECT_A = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/AAA"
+REDIRECT_B = "https://vertexaisearch.cloud.google.com/grounding-api-redirect/BBB"
+GEMINI_ANSWER = "1. The latest release of **CLIProxyAPI** is **v8.0.47**.\n2. It adds raw request body byte-range patching."
+GEMINI_SEARCH = {
+    "candidates": [{
+        "content": {"role": "model", "parts": [
+            {"text": "planning the search", "thought": True},
+            {"text": GEMINI_ANSWER, "thoughtSignature": "c2ln"},
+        ]},
+        "finishReason": "STOP",
+        "groundingMetadata": {
+            "webSearchQueries": ["CLIProxyAPI latest release", "CLIProxyAPI v8.0.47", " "],
+            "groundingChunks": [
+                {"web": {"uri": REDIRECT_A, "title": "github.com"}},
+                {"web": {"uri": REDIRECT_B, "title": "newreleases.io"}},
+                {"web": {"uri": REDIRECT_A, "title": "github.com"}},
+            ],
+            "groundingSupports": [
+                {"segment": {"startIndex": 52, "endIndex": 58, "text": "0.47**"}, "groundingChunkIndices": [0, 2]},
+                {"segment": {"text": "It adds raw request body byte-range patching"}, "groundingChunkIndices": [1, 9]},
+            ],
+            "searchEntryPoint": {"renderedContent": "<div>chips</div>"},
+        },
+    }],
+    "usageMetadata": {"promptTokenCount": 2000, "candidatesTokenCount": 100, "totalTokenCount": 2100},
+    "modelVersion": "gemini-3.5-flash-lite",
+}
+
+
+def _with_gemini(*sources):
+    gemini = replace(
+        _source(GEMINI, "Gemini key", vendor="gemini", protocol="google", model_id=GEMINI_LITE),
+        base_url="https://generativelanguage.googleapis.com",
+    )
+    return [*sources, gemini]
+
+
+@pytest.mark.asyncio
+async def test_a_gemini_executor_is_buffered_and_reads_googles_grounding(tmp_path):
+    """MH-HOSTED-GATEWAY-004: Gemini searches with Google Search, asked in the instruction (nothing forces a built-in
+    tool), and answers in one response; the record keeps Google's sources in order, each once, a supported one with
+    its line of the answer, and never the Search Suggestions."""
+
+    service = _vibey_service(tmp_path, _with_gemini(*_sources()), handles=[
+        LiveInvokeHandle(_outcome(RawOutcomeKind.SUCCESS, source_id=GEMINI), (json.dumps(GEMINI_SEARCH).encode(),)),
+    ])
+    # The vendor names the model by its id; the Source lists it in Google's models/ collection.
+    _bind(service, "web_search", (GEMINI, "gemini-flash-lite-latest"))
+    status, answer = await _call(service, "web_search", {"arguments": {"query": "CLIProxyAPI latest release"}})
+
+    assert status == 200, answer
+    assert service.adapter.invocations == [(GEMINI, GEMINI_LITE, "vibey")]
+    sent = service.adapter.requests[0]
+    assert sent.protocol == "google"
+    assert set(sent) == {"systemInstruction", "contents", "tools", "generationConfig"}
+    assert sent["tools"] == [{"googleSearch": {}}]
+    assert "with Google Search" in sent["systemInstruction"]["parts"][0]["text"]
+    assert sent["contents"] == [{"role": "user", "parts": [{"text": "CLIProxyAPI latest release"}]}]
+    assert sent["generationConfig"] == {"maxOutputTokens": 4096}
+    assert answer["record"] == {"status": "completed", "sources": [
+        {"url": REDIRECT_A, "title": "github.com", "snippet": "The latest release of CLIProxyAPI is v8.0.47."},
+        {"url": REDIRECT_B, "title": "newreleases.io", "snippet": "It adds raw request body byte-range patching."},
+    ]}
+    assert "chips" not in json.dumps(answer)
+    assert answer["execution"]["executor_origin"] == {"provider": "gemini", "api": "google", "model": GEMINI_LITE}
+
+
+@pytest.mark.parametrize(("response", "status", "error"), [
+    # The model answered without searching: a model choice, not a Source failure.
+    ({"candidates": [{"content": {"parts": [{"text": "From memory."}]}, "finishReason": "STOP"}]},
+     "failed", "didNotRun web_search"),
+    ({"promptFeedback": {"blockReason": "SAFETY"}}, "failed", "SAFETY"),
+    ({**GEMINI_SEARCH, "candidates": [{**GEMINI_SEARCH["candidates"][0], "finishReason": "MAX_TOKENS"}]},
+     "incomplete", "MAX_TOKENS"),
+    ({**GEMINI_SEARCH, "candidates": [{**GEMINI_SEARCH["candidates"][0], "finishReason": "SAFETY"}]},
+     "failed", "SAFETY"),
+    (b"not json", "failed", None),
+])
+def test_a_gemini_executor_completes_only_a_search_that_finished(response, status, error):
+    body = response if isinstance(response, bytes) else json.dumps(response).encode()
+    result = google_result(body, lambda key, **params: f"{key} {' '.join(params.values())}")
+
+    assert result.record["status"] == status
+    if error is not None:
+        assert error in result.record["error"]
+    # A search that ran keeps what it found, even when its answer stopped early.
+    if status == "incomplete":
+        assert [source["url"] for source in result.record["sources"]] == [REDIRECT_A, REDIRECT_B]
+
+
 ANTHROPIC_SEARCH = {
     "type": "message", "role": "assistant", "stop_reason": "end_turn",
     "content": [
@@ -345,6 +445,9 @@ ANTHROPIC_SEARCH = {
     # plus the two searches Anthropic counted at $10 per thousand.
     ("web_search", (ANTHROPIC, "claude-haiku-4-5"), "metered", ANTHROPIC_SEARCH, {"basis": "list", "usd": 0.0225}),
     ("web_search", (ANTHROPIC, "claude-haiku-4-5"), "monthly", ANTHROPIC_SEARCH, {"basis": "included"}),
+    # The list price: 2,000 input and 100 output tokens at $0.1 and $0.4 per million, plus the two distinct non-empty
+    # queries Google ran at $14 per thousand.
+    ("web_search", (GEMINI, "gemini-flash-lite-latest"), "metered", GEMINI_SEARCH, {"basis": "list", "usd": 0.02824}),
     # OpenAI reports no search counter, so its per-call fee, and so the call, cannot be valued.
     (
         "web_search", (OPENAI, "gpt-6-astra"), "metered",
@@ -369,7 +472,7 @@ ANTHROPIC_SEARCH = {
 async def test_a_proxied_call_carries_the_pricing_modules_cost(tmp_path, tool, executor, billing, response, cost):
     """MH-HOSTED-GATEWAY-004: the cost is included, the provider's own figure, or the list price; absent when unknown."""
 
-    sources = [replace(source, billing=billing) if source.id == executor[0] else source for source in _sources()]
+    sources = [replace(source, billing=billing) if source.id == executor[0] else source for source in _with_gemini(*_sources())]
     frames = response if isinstance(response, tuple) else (json.dumps(response).encode(),)
     tokens = ProtocolUsageReport.of(input_tokens=2000, cached_input_tokens=0, output_tokens=100)
     service = _vibey_service(tmp_path, sources, handles=[
@@ -377,8 +480,10 @@ async def test_a_proxied_call_carries_the_pricing_modules_cost(tmp_path, tool, e
     ])
     prices = PriceTable(
         catalog={"anthropic": {"models": {"claude-haiku-4-5": {"cost": {"input": 1, "output": 5}}}},
-                 "openai": {"models": {"gpt-6-astra": {"cost": {"input": 1, "output": 5}}}}},
-        vendor_map={"families": [{"prefix": "claude-", "vendor_id": "anthropic"}, {"prefix": "gpt-", "vendor_id": "openai"}]},
+                 "openai": {"models": {"gpt-6-astra": {"cost": {"input": 1, "output": 5}}}},
+                 "google": {"models": {"gemini-flash-lite-latest": {"cost": {"input": 0.1, "output": 0.4}}}}},
+        vendor_map={"families": [{"prefix": "claude-", "vendor_id": "anthropic"}, {"prefix": "gpt-", "vendor_id": "openai"},
+                                 {"prefix": "gemini-", "vendor_id": "google"}]},
         overrides={}, price_table_date="2026-10-13",
     )
     service.usage_writer = UsageWriter(service.usage, price_table=lambda: prices)

@@ -137,6 +137,25 @@ included (owner, 2026-10-27: "统一都走原生").
 - Not in this step: a positive evidence rule (the Tools tab shows no "最近一次 … 正常" for Google Search).
 - Public docs (`avibe-docs`, en and zh): Gemini searches with Google, queries go to Google, and the price.
 
+## 4.1 Gemini as a search executor (follow-up, 2026-10-29)
+
+A Gemini API key Source also runs proxied `web_search` calls for other hops (`vibey-hosted-tools.md` §6), so a
+model without native search (Gemini 2.5, DeepSeek, a Chat relay) can search with Google.
+
+- `executor_models`: `gemini-flash-lite-latest`, `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite`, preferred
+  first; each runs Google Search (measured 2026-10-29). A Source lists them in Google's `models/` collection, so
+  `listed_executor_model` matches an entry by the id without that prefix and calls the listed name.
+- The request is one buffered `generateContent`: the executor instruction (naming Google Search, since nothing
+  forces a built-in tool) as `systemInstruction`, the query as the user content, `tools: [{"googleSearch": {}}]`,
+  `maxOutputTokens: 4096`, no thinking config. No functions are declared, so no `toolConfig` is needed.
+- The answer and its grounding come in that one response (measured). The record's sources are the `groundingChunks`
+  in Google's order, each URL once, titled with the domain; a source a `groundingSupports` entry names gains the
+  answer line its segment is found in as its snippet. The Search Suggestions are never read. `STOP` completes the
+  call, `MAX_TOKENS` leaves it incomplete with its sources, any other finish or a blocked prompt fails it, and an
+  answer with no `webSearchQueries` did not run the tool.
+- Cost: the distinct non-empty `webSearchQueries` × the overlay price, plus the executor model's tokens.
+- No positive evidence yet, as for native Google Search (§6).
+
 ## 5. Delivery
 
 | PR | Scope | Visible result |
@@ -154,8 +173,5 @@ of each other once PR 1 is merged.
 - Source links in Google's grounding are redirect URLs; the card shows the domain as title.
 - Google Search has no positive evidence yet (§4).
 - A search whose answer comes in a later response lists no sources on its own card; the answer cites them (§4).
-- Gemini is not a search executor for other hops: the executor speaks Anthropic and Responses only, so Gemini runs
-  Google Search on its own hop and names no `executor_models` (a follow-up would add a `google` executor request
-  and result).
 - The OpenAI-compatible Chat path keeps no dummy for another origin's current-turn call: after PR 2 no official
   Gemini Source uses it, and a Chat relay that serves Gemini is the relay's to translate.

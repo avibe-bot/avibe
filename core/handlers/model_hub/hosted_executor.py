@@ -24,7 +24,7 @@ from core.agent_core.ai.sse import SSEParser
 
 from .events import bounded_diagnostic_detail
 from .hosted_items import responses_item_tool
-from .request import ModelHubRequest
+from .request import GOOGLE_NATIVE_TOOL_TYPES, ModelHubRequest
 
 EXECUTOR_TOOLS: Final = ("web_search", "x_search", "web_fetch")
 # One deadline for a search call's whole executor chain, not one per candidate.
@@ -32,6 +32,10 @@ SEARCH_TIMEOUT_SECONDS: Final = 180.0
 # Responses counts reasoning against this cap, so it leaves room beyond the list itself.
 _RESPONSES_OUTPUT_TOKENS: Final = 4096
 _ANTHROPIC_OUTPUT_TOKENS: Final = 2048
+# Gemini counts its thoughts against this cap too.
+_GOOGLE_OUTPUT_TOKENS: Final = 4096
+# The generateContent tool object for each overlay declaration type (``{"type": "google_search"}`` → ``googleSearch``).
+_GOOGLE_TOOL_KEYS: Final = {kind: key for key, kind in GOOGLE_NATIVE_TOOL_TYPES.items()}
 # A search answer is a short cited list; this bounds a misbehaving response.
 EXECUTOR_RESPONSE_MAX_BYTES: Final = 16 * 1024 * 1024
 _SNIPPET_CHARS: Final = 500
@@ -110,7 +114,7 @@ def parse_call(tool: str, payload: object) -> ExecutorCall:
 
 
 def executor_streams(source: ModelHubSourceConfig) -> bool:
-    """A Responses executor streams, so the idle bound stays fed; Anthropic is buffered."""
+    """A Responses executor streams, so the idle bound stays fed; Anthropic and Gemini are buffered."""
 
     return source.protocol == "openai_responses"
 
@@ -139,6 +143,20 @@ def executor_request(
         if chosen:
             query = f"{query}\n\n(Search with {chosen}.)"
     instructions = _SEARCH_INSTRUCTIONS[call.tool]
+    if source.protocol == "google":
+        # Gemini runs Google Search for a built-in tool it is asked to use; nothing forces it, so the instruction
+        # names it. The model is in the path (the engine client's), not the body.
+        key = _GOOGLE_TOOL_KEYS.get(declaration.get("type"))
+        if key is None:
+            # The overlay declares only types generateContent knows (``test_provider_overlay``).
+            raise ValueError(f"unsupported Gemini hosted declaration: {declaration.get('type')!r}")
+        payload = {
+            "systemInstruction": {"parts": [{"text": instructions.replace("the web_search tool", "Google Search")}]},
+            "contents": [{"role": "user", "parts": [{"text": query}]}],
+            "tools": [{key: {}}],
+            "generationConfig": {"maxOutputTokens": _GOOGLE_OUTPUT_TOKENS},
+        }
+        return ModelHubRequest(payload, protocol=source.protocol)
     if source.protocol == "anthropic":
         payload = {
             "model": model_id,
@@ -293,8 +311,9 @@ class ResponsesStreamReader:
 class ExecutorResult:
     """The record for the call.
 
-    ``usage`` is the response's own ``usage`` section, as the provider sent it,
-    which the call's cost is read from.
+    ``usage`` is what the provider reported charging for, as it sent it, which
+    the call's cost is read from: the response's ``usage`` section, or on Gemini
+    its ``groundingMetadata``, whose queries Google bills.
     """
 
     record: dict[str, Any]
@@ -306,6 +325,13 @@ def provider_charges(protocol: str, usage: Mapping[str, Any] | None) -> tuple[di
 
     if usage is None:
         return {}, None
+    if protocol == "google":
+        # Google bills each distinct, non-empty query the model ran.
+        queries = usage.get("webSearchQueries")
+        distinct = {query.strip() for query in queries if isinstance(query, str) and query.strip()} if isinstance(
+            queries, list
+        ) else set()
+        return reported_counts({"web_search_requests": len(distinct)}), None
     counters = usage.get("server_tool_use") if protocol == "anthropic" else usage.get("server_side_tool_usage_details")
     cost = reported_cost(usage)
     return reported_counts(counters), cost.usd if cost is not None else None
@@ -579,3 +605,80 @@ def _anthropic_record(message: Any, say: Say) -> ExecutorResult:
         return ExecutorResult({"status": "completed", "sources": sources})
     ended = failure(say, "modelHub.hostedTools.responseEnded", status=str(stop or "unknown"))
     return ExecutorResult(failed_record(ended, sources, status="incomplete" if stop in {"max_tokens", "pause_turn"} else "failed"))
+
+
+def google_result(body: bytes | bytearray, say: Say) -> ExecutorResult:
+    """The canonical record of one buffered Gemini Google Search executor call; parse it off the loop."""
+
+    try:
+        response = json.loads(body)
+    except (ValueError, RecursionError):
+        return ExecutorResult(failed_record(failure(say, "modelHub.hostedTools.unreadable")))
+    return _google_record(response if isinstance(response, dict) else {}, say)
+
+
+def _google_record(response: Mapping[str, Any], say: Say) -> ExecutorResult:
+    """Gemini answers in one response: its text, and the search's queries, sources and supports in its
+    ``groundingMetadata``. Sources keep Google's order, each once; a supported one gains its line of the answer."""
+
+    candidates = response.get("candidates")
+    candidate = candidates[0] if isinstance(candidates, list) and candidates and isinstance(candidates[0], dict) else {}
+    grounding = candidate.get("groundingMetadata")
+    grounding = grounding if isinstance(grounding, dict) else {}
+    queries = grounding.get("webSearchQueries")
+    if not any(isinstance(query, str) and query.strip() for query in (queries if isinstance(queries, list) else ())):
+        feedback = response.get("promptFeedback")
+        blocked = feedback.get("blockReason") if isinstance(feedback, dict) else None
+        if isinstance(blocked, str) and blocked:
+            return ExecutorResult(failed_record(failure(say, "modelHub.hostedTools.responseEnded", status=blocked)))
+        return ExecutorResult(failed_record(failure(say, "modelHub.hostedTools.didNotRun", tool="web_search")))
+    content = candidate.get("content")
+    parts = content.get("parts") if isinstance(content, dict) else None
+    text = "".join(
+        part["text"] for part in (parts if isinstance(parts, list) else ())
+        if isinstance(part, dict) and isinstance(part.get("text"), str) and part.get("thought") is not True
+    )
+    chunks = grounding.get("groundingChunks")
+    chunks = chunks if isinstance(chunks, list) else []
+    sources: list[dict[str, Any]] = []
+    by_chunk: dict[int, dict[str, Any]] = {}
+    for index, chunk in enumerate(chunks):
+        web = chunk.get("web") if isinstance(chunk, dict) else None
+        url = _text_field(web, "uri") if isinstance(web, dict) else None
+        if not url:
+            continue
+        known = next((source for source in sources if source["url"] == url), None)
+        if known is None:
+            known = {"url": url}
+            title = _text_field(web, "title")
+            if title and title.strip():
+                known["title"] = title.strip()
+            sources.append(known)
+        by_chunk[index] = known
+    cursor = 0
+    supports = grounding.get("groundingSupports")
+    for support in (supports if isinstance(supports, list) else ())[:_MAX_CITATIONS]:
+        segment = support.get("segment") if isinstance(support, dict) else None
+        cited = _text_field(segment, "text") if isinstance(segment, dict) else None
+        indices = support.get("groundingChunkIndices") if isinstance(support, dict) else None
+        if not cited or not isinstance(indices, list):
+            continue
+        # Located in the text, in order: Google's offsets count bytes, and a sentence may recur.
+        start = text.find(cited, cursor)
+        start = text.find(cited) if start < 0 else start
+        if start < 0:
+            continue
+        cursor = start + len(cited)
+        for number in indices:
+            source = by_chunk.get(number) if isinstance(number, int) and not isinstance(number, bool) else None
+            if source is not None and "snippet" not in source:
+                snippet = excerpt(text, start, start + len(cited), source["url"], [])
+                if snippet:
+                    source["snippet"] = snippet
+    # Success is an allow-list here too: an early stop is incomplete, anything else fails.
+    finish = _text_field(candidate, "finishReason")
+    if finish == "STOP":
+        return ExecutorResult({"status": "completed", "sources": sources}, usage=grounding)
+    ended = failure(say, "modelHub.hostedTools.responseEnded", status=str(finish or "unknown"))
+    record = failed_record(ended, sources, status="incomplete" if finish == "MAX_TOKENS" else "failed")
+    return ExecutorResult(record, usage=grounding)

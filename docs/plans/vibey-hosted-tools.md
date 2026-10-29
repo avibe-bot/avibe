@@ -94,7 +94,8 @@ The user has an Anthropic API key, an xAI API key and an OpenAI API key, and has
   declarations. For each vendor and model family, per protocol, it holds:
   - the native declaration of each search tool the vendor offers, with its `include` values and list price;
   - new, at vendor scope: `executor_models`, the vendor's lightweight models that run proxied search calls, preferred first (§6), e.g.
-    Anthropic's Haiku tier, OpenAI's mini tier, xAI's fast tier; the executor call uses the declaration of the family
+    Anthropic's Haiku tier, OpenAI's mini tier, xAI's fast tier, Gemini's Flash-Lite tier (amended 2026-10-29,
+    `vibey-gemini-native.md` §4.1); the executor call uses the declaration of the family
     row that model matches. The implementation PR picks the shipped ids;
   - new: `image_models`, the vendor's image models with a one-line description, the endpoint kind (§7.4), the
     parameters each supports, and a list price where one exists.
@@ -581,7 +582,7 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
      removed Source cannot be served at all. It calls the first admitted candidate: one short native request on
      that Source's executor model, with the
      overlay's declaration, the tool forced where the protocol allows it (`tool_choice: "required"` on Responses;
-     Anthropic is asked in the message alone), a fixed instruction to search and list numbered results with one or
+     Anthropic and Gemini are asked in the message alone), a fixed instruction to search and list numbered results with one or
      two cited sentences each, a small output cap, and no reasoning effort.
   4. On a failure that normal routing fails over from (a transient one such as an overload or a server error
      included), or a narrow-rule refusal (which also writes negative evidence), it tries the next candidate. A model
@@ -596,7 +597,7 @@ These rules are C-1 rows in `cross-provider.md` and per-protocol rows in `conver
      does. A manual row is the user's, and stays. A failure mid-stream moves on too: nothing
      reaches Vibey until the gateway returns the record, so "before output" here means before the result is
      returned, and the partial call is still metered on its Source. A completed response that never ran the tool
-     (the model chose not to; Anthropic is asked in the message alone) ends the chain with a `failed` record: it is
+     (the model chose not to; Anthropic and Gemini are asked in the message alone) ends the chain with a `failed` record: it is
      a model choice, not a Source failure, and moving on would double the cost. Any other outcome ends the chain.
   5. With no admitted candidate, the call returns a `failed` record naming the providers whose Sources can run the
      tool ("add a Source from one of these providers: xAI"). When Sources that would run it exist but each has a
