@@ -462,7 +462,7 @@ pub fn pet_context_menu(window: WebviewWindow) -> Result<(), String> {
     let catalog = native_pet_catalog();
     let shortcut = {
         let store = pet.store();
-        shortcut_label(store.shortcut(), cfg!(target_os = "macos"))
+        shortcut_label(store.toggle_shortcut(), cfg!(target_os = "macos"))
     };
     let hide = MenuItem::with_id(app, HIDE_MENU_ID, &catalog.hide, true, Some(shortcut.as_str()))
         .map_err(|error| error.to_string())?;
