@@ -74,8 +74,8 @@ def test_add_writes_avibe_store_and_remove_hides_native(native_files, runtime):
     before = claude.read_bytes()
     new = {"name": "fresh", "server": {"url": "https://fresh.invalid/mcp"}, "description": "Fresh"}
     result = _run(runtime, "add", {"servers": [new]})
-    assert result["ok"] is False  # http fixture is unreachable
-    assert repository.read_avibe_definition("fresh") is not None
+    assert result["ok"] is False  # http fixture is unreachable; add rolls back
+    assert repository.read_avibe_definition("fresh") is None
     assert claude.read_bytes() == before
     assert "fresh" not in {item["name"] for item in repository.list_packages()}
 

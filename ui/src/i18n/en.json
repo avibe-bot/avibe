@@ -6380,6 +6380,8 @@
       "capacity": "Too many MCP server processes are running; try again later.",
       "not_found": "Unknown MCP server.",
       "unsupported_transport_sse": "SSE is not supported; use a Streamable HTTP URL."
-    }
+    },
+    "addedCount": "Added {{count}} MCP servers.",
+    "addedPartial": "Added {{count}}; failed: {{failed}}"
   }
 }

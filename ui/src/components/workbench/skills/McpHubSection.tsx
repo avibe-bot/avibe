@@ -93,13 +93,29 @@ export const McpHubSection: React.FC = () => {
     setAddError(null);
     try {
       const res = await api.addMcp(addText);
-      if (!res.ok) {
+      const added = res.added ?? (res.ok && (res.saved || res.name) ? [{ name: (res.saved ?? [res.name])[0] }] : []);
+      const failed = res.failed ?? [];
+      if (!added.length && !failed.length && !res.ok) {
         setAddError(describe(res.error));
+        return;
+      }
+      if (!added.length) {
+        setAddError(failed.map((item) => `${item.name}: ${item.error}`).join('\n') || describe(res.error));
         return;
       }
       setShowAdd(false);
       setAddText('');
-      showToast(t('mcpHub.added', { name: (res.saved ?? [])[0] || res.name || '' }), 'success');
+      if (!failed.length) {
+        showToast(t('mcpHub.addedCount', { count: added.length }), 'success');
+      } else {
+        showToast(
+          t('mcpHub.addedPartial', {
+            count: added.length,
+            failed: failed.map((item) => `${item.name}: ${item.error}`).join('; '),
+          }),
+          'error',
+        );
+      }
       await load();
     } finally {
       setBusy(null);

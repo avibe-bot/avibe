@@ -151,7 +151,7 @@ def _owner(operation: str, payload: dict[str, Any]) -> int:
         raise McpHubError("unavailable", "The Avibe service is not running.", hint="vibe start") from None
     except internal_client.InternalServerTimeout:
         raise McpHubError("unknown_outcome", "The Avibe service connection broke; check vibe mcp --list.") from None
-    if not response.get("ok"):
+    if not response.get("ok") and not (operation in {"add", "save"} and "failed" in response):
         raise McpHubError.from_payload(response.get("error"))
     if operation == "discover":
         for item in response.get("results") or []:
@@ -161,8 +161,16 @@ def _owner(operation: str, payload: dict[str, Any]) -> int:
                 print(f"{item['name']}: failed — {item.get('error') or 'unknown'}", file=sys.stderr)
         return 0
     if operation in {"add", "save"}:
-        names = ", ".join(response.get("saved") or [response.get("name") or ""])
-        print(f"Registered {names} ({response.get('toolCount', 0)} tools).")
+        added = response.get("added") or []
+        failed = response.get("failed") or []
+        for item in added:
+            print(f"{item['name']}: added ({item.get('toolCount', 0)} tools)")
+        for item in failed:
+            print(f"{item['name']}: failed — {item.get('error') or 'unknown'}", file=sys.stderr)
+        if not added and not failed:
+            names = ", ".join(response.get("saved") or [response.get("name") or ""])
+            print(f"Registered {names} ({response.get('toolCount', 0)} tools).")
+        return 0 if added or response.get("ok") else 1
     elif operation == "refresh":
         print(f"Refreshed {response['name']} ({response.get('toolCount', 0)} tools).")
     elif operation == "remove":

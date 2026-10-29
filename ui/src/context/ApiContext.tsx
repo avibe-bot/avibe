@@ -913,7 +913,13 @@ export type ApiContextType = {
   // Agent Skills — thin shells over the askill CLI (see /api/skills*).
   listSkills: (params?: { scope?: SkillScope | 'all'; projectId?: string; backends?: string[] }) => Promise<SkillsListResult>;
   listMcpServers: () => Promise<McpResult & { servers?: McpServerSummary[] }>;
-  addMcp: (text: string) => Promise<McpResult & { saved?: string[]; name?: string; toolCount?: number }>;
+  addMcp: (text: string) => Promise<McpResult & {
+    saved?: string[];
+    name?: string;
+    toolCount?: number;
+    added?: { name: string; toolCount?: number }[];
+    failed?: { name: string; error?: string }[];
+  }>;
   discoverMcp: () => Promise<McpResult & { results?: { name: string; status: string; error?: string; toolCount?: number }[] }>;
   refreshMcp: (name: string) => Promise<McpResult & { name?: string; toolCount?: number }>;
   removeMcp: (name: string) => Promise<McpResult>;

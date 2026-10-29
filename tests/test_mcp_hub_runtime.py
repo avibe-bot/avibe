@@ -47,9 +47,28 @@ def generated(runtime):
 def test_add_writes_avibe_store_and_registers(runtime):
     first = _run(runtime, "add", {"servers": [_server()]})
     assert first["ok"] and first["toolCount"] == 7
+    assert first["added"][0]["name"] == "echo"
     assert repository.read_avibe_definition("echo") is not None
+    assert first.get("failed") == []
+
+
+def test_batch_add_registers_neighbors_and_rolls_back_the_failure(runtime):
+    """One failing server in the middle must not block or leave an invisible definition."""
+
+    good = _server()
+    bad = {"name": "github", "server": {"command": "/nonexistent/mcp-github"}}
+    other = {"name": "zeta", "server": {"command": sys.executable, "args": [FIXTURE]}, "description": "Z"}
+    result = _run(runtime, "add", {"servers": [good, bad, other]})
+    names = {item["name"] for item in result["added"]}
+    failed = {item["name"]: item["error"] for item in result["failed"]}
+    assert result["ok"] is True
+    assert names == {"echo", "zeta"}
+    assert "github" in failed and failed["github"]
+    assert repository.read_avibe_definition("github") is None
+    assert "github" not in {item["name"] for item in repository.list_packages()}
+    assert repository.read_published("echo") is not None
+    assert repository.read_published("zeta") is not None
     published = repository.read_published("echo")
-    assert published["revision"] == first["revision"]
     assert [tool["name"] for tool in published["tools"]] == ["add", "crash", "echo", "fail", "nap", "reject", "session_text"]
     assert repository.summarize("echo")["source"] == "avibe"
 
@@ -60,12 +79,14 @@ def test_refresh_keeps_current_plus_previous(generated):
     assert kept == sorted(revisions[-2:])
 
 
-def test_failed_refresh_leaves_previous_revision_active(generated):
+def test_failed_replace_add_restores_previous_avibe_definition(generated):
     before = repository.read_published("echo")["revision"]
-    _run(generated, "add", {"servers": [_server("/nonexistent/mcp-server")], "replace": True})
-    result = _run(generated, "refresh", {"name": "echo"})
-    assert result["ok"] is False and result["error"]["type"] == "connection"
+    previous = repository.read_avibe_definition("echo")
+    result = _run(generated, "add", {"servers": [_server("/nonexistent/mcp-server")], "replace": True})
+    assert result["ok"] is False
+    assert result["failed"][0]["name"] == "echo"
     assert repository.read_published("echo")["revision"] == before
+    assert repository.read_avibe_definition("echo") == previous
 
 
 def test_calls_return_envelopes(generated):

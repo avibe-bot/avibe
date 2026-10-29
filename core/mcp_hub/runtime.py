@@ -205,6 +205,8 @@ class McpRuntime:
         self._package_locks: dict[Any, asyncio.Lock] = {}
         self._connections: dict[tuple, _Connection] = {}
         self._stdio_open = 0
+        self._stdio_lock: Optional[asyncio.Lock] = None
+        self._stdio_free: Optional[asyncio.Condition] = None
         self._sweeper: Optional[asyncio.Task] = None
         self._discover_lock = asyncio.Lock()
         self._discover_task: Optional[asyncio.Task] = None
@@ -243,6 +245,13 @@ class McpRuntime:
 
     # -- bookkeeping ----------------------------------------------------------
 
+    def _stdio_sync(self) -> tuple[asyncio.Lock, asyncio.Condition]:
+        if self._stdio_lock is None:
+            self._stdio_lock = asyncio.Lock()
+            self._stdio_free = asyncio.Condition(self._stdio_lock)
+        assert self._stdio_free is not None
+        return self._stdio_lock, self._stdio_free
+
     def acquire_stdio_slot(self) -> None:
         if self._stdio_open >= STDIO_PROCESS_CAP:
             raise McpHubError(
@@ -251,8 +260,30 @@ class McpRuntime:
             )
         self._stdio_open += 1
 
+    async def acquire_stdio_slot_wait(self) -> None:
+        """Wait for a stdio slot instead of failing with ``capacity`` (batch paths)."""
+
+        _lock, free = self._stdio_sync()
+        async with free:
+            while self._stdio_open >= STDIO_PROCESS_CAP:
+                await free.wait()
+            self._stdio_open += 1
+
     def release_stdio_slot(self) -> None:
         self._stdio_open = max(0, self._stdio_open - 1)
+        free = self._stdio_free
+        if free is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+
+        async def _notify() -> None:
+            async with free:
+                free.notify()
+
+        loop.create_task(_notify())
 
     def forget(self, connection: _Connection) -> None:
         if self._connections.get(connection.key) is connection:
@@ -326,18 +357,37 @@ class McpRuntime:
         ]
         if not definitions:
             raise McpHubError("usage", "No servers to save.", usage=True)
-        saved = []
-        results = []
-        for definition in definitions:
-            name = definition["name"]
+        results = await asyncio.gather(*(self._add_one(item, replace, preserve) for item in definitions))
+        added = [item for item in results if item.get("status") == "added"]
+        failed = [item for item in results if item.get("status") == "failed"]
+        body: dict[str, Any] = {"ok": bool(added), "added": added, "failed": failed}
+        if len(added) == 1:
+            body.update({k: added[0][k] for k in ("name", "revision", "toolCount") if k in added[0]})
+        if not added and len(failed) == 1:
+            body["error"] = {"type": "connection", "message": failed[0].get("error") or "failed"}
+        return _dumps(body)
+
+    async def _add_one(self, definition: dict[str, Any], replace: bool, preserve: bool) -> dict[str, Any]:
+        name = definition["name"]
+        previous = await asyncio.to_thread(repository.read_avibe_definition, name)
+        try:
             async with self._lock(name):
                 await asyncio.to_thread(self._save_one, definition, replace, preserve)
-            saved.append(name)
-            results.append(json.loads(await self._refresh({"name": name})))
-        failed = next((item for item in results if not item.get("ok")), None)
-        if failed is not None:
-            return _dumps(failed)
-        return _dumps({"ok": True, "saved": saved, **results[-1]})
+            body = json.loads(await self._refresh({"name": name, "waitStdio": True}))
+            if body.get("ok"):
+                return {
+                    "name": name,
+                    "status": "added",
+                    "revision": body.get("revision"),
+                    "toolCount": body.get("toolCount"),
+                }
+            error = (body.get("error") or {}).get("message") or "failed"
+        except McpHubError as cop:
+            error = cop.message
+        except Exception as cop:  # noqa: BLE001
+            error = str(cop)
+        await asyncio.to_thread(repository.rollback_avibe_definition, name, previous)
+        return {"name": name, "status": "failed", "error": error}
 
     @staticmethod
     def _save_one(definition: dict[str, Any], replace: bool, preserve: bool) -> str:
@@ -369,7 +419,10 @@ class McpRuntime:
                 snapshot["transport"]["cwd"] = await asyncio.to_thread(repository.default_cwd)
             stdio = snapshot["transport"]["type"] == STDIO
             if stdio:
-                self.acquire_stdio_slot()
+                if payload.get("waitStdio"):
+                    await self.acquire_stdio_slot_wait()
+                else:
+                    self.acquire_stdio_slot()
             try:
                 with anyio.fail_after(GENERATION_TIMEOUT_SECONDS):
                     tools, server_info = await self._discover(snapshot)
@@ -414,16 +467,15 @@ class McpRuntime:
         ]
         for name in stale:
             await asyncio.to_thread(repository.delete_artifacts, name)
-        results: list[dict[str, Any]] = []
-        for name in sorted(names):
-            body = json.loads(await self._refresh({"name": name}))
+        async def one(name: str) -> dict[str, Any]:
+            body = json.loads(await self._refresh({"name": name, "waitStdio": True}))
             if body.get("ok"):
-                results.append({"name": name, "status": "registered", "toolCount": body.get("toolCount")})
-            else:
-                error = (body.get("error") or {}).get("message") or "failed"
-                logger.warning("MCP discover %s failed: %s", name, error)
-                results.append({"name": name, "status": "failed", "error": error})
-        return results
+                return {"name": name, "status": "registered", "toolCount": body.get("toolCount")}
+            error = (body.get("error") or {}).get("message") or "failed"
+            logger.warning("MCP discover %s failed: %s", name, error)
+            return {"name": name, "status": "failed", "error": error}
+
+        return list(await asyncio.gather(*(one(name) for name in sorted(names))))
 
     @staticmethod
     async def _discover(snapshot: dict[str, Any]) -> tuple[list, Any]:
