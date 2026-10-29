@@ -2,7 +2,7 @@
 name: background-watch-hook
 slug: background-watch-hook
 description: Run durable `vibe watch` waits for PR reviews, CI, files or external signals, then resume the Agent in the right Session.
-version: 0.19.0
+version: 0.19.1
 ---
 
 # Background Watch Hook

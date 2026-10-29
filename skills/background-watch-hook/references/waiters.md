@@ -206,7 +206,7 @@ notification policy for recognized success shapes, not a generic readiness gate:
 known half-successes stay quiet, but findings, errors, unfamiliar review payloads,
 and head/lifecycle/thread changes still reach the Agent. The Agent must fetch live
 state and apply the repository's exact-head review, complete CI, and thread gates.
-A completed Codex summary or a `Reviewed commit` line alone is not a clean pass.
+A summary's "Completed" row or a `Reviewed commit` line alone is not a clean pass.
 
 One caveat on CI: a requested workflow that never matches — renamed, misspelled,
 or never triggered on this branch — cannot establish success. Verify each
@@ -255,18 +255,23 @@ one-shot wait. Prefer `--coalesce-success` for delivery loops:
 | CI turns green after an unfamiliar verdict was reported | Report the CI result once, since the Agent may be judging that verdict |
 
 Recognized review successes are Codex-authored clean-pass comments/reviews naming
-the current SHA, and a new Codex `+1` on the PR body observed after an unchanged
-head's baseline. A clean-pass comment is either the bare two-line verdict or
-Codex's complete receipt: the `codex-review-receipt` marker, the verdict with a short
-plain sign-off (`:+1:`, "Chef's kiss.", ...), the `Reviewed commit` line, and its
-standard details footer. Any other text in it, or problem text in the sign-off,
+the current SHA, Codex's review summary whose `codex-review-state` line names the
+current head in full as `completed` with no findings (and every other review it
+lists finished without any), and a new Codex `+1` on the PR body observed after an
+unchanged head's baseline. A clean-pass comment is either the bare two-line verdict
+or Codex's complete receipt: the `codex-review-receipt` marker, the verdict with a
+short plain sign-off (`:+1:`, "Chef's kiss.", ...), the `Reviewed commit` line, and
+its standard details footer. Any other text in it, or problem text in the sign-off,
 keeps it reportable. A reaction present at seeding or first seen with a head change
 cannot be bound this way; head-transition reactions remain visible as ordinary
-activity. A reaction candidate still needs the repository's stricter epoch and
-prior-review checks in the follow-up; the waiter does not certify that gate.
-Codex's mutable summary comment is progress, not a verdict: routine updates stay
-quiet in this mode, while its error/failure text remains reportable. Unknown
-verdict formats are surfaced rather than silently interpreted as success.
+activity. The summary state names its commit, so it is bound even when its edit is
+first seen with the head change; without it, a pass that lands before the next poll
+would leave the later green CI a half-success forever (#3040). A reaction candidate
+still needs the repository's stricter epoch and prior-review checks in the
+follow-up; the waiter does not certify that gate. Codex's mutable summary comment is
+otherwise progress, not a verdict: routine updates stay quiet in this mode, while
+its error/failure text remains reportable. Unknown verdict formats are surfaced
+rather than silently interpreted as success.
 
 Deferred evidence lives in the same owner-specific state file and pending delivery
 transaction. Retain the latest ordered bot outcome, per-resource semantic history,

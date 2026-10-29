@@ -450,6 +450,26 @@ def _codex_clean_pass_body_sha(body: str) -> str | None:
     return match.group(1) if match else None
 
 
+def _is_codex_summary_pass(item: dict[str, Any], head_sha: str) -> bool:
+    """Codex's review summary in its known shape, whose state line names ``head_sha`` in full as reviewed with no
+    findings, and every other review it lists finished without one: the pass ``pr-delivery-loop`` reads.
+
+    The summary is edited in place, so this is a verdict about the commit it names, wherever its row was first seen.
+    """
+
+    if not _is_codex_progress(item):
+        return False
+    state = _codex_summary_state(str(item.get("body") or ""))
+    code_review = state.get("code_review") if state is not None else None
+    if not isinstance(code_review, dict) or str(code_review.get("commit_sha") or "").casefold() != head_sha.casefold():
+        return False
+    others = [review for review in state.values() if isinstance(review, dict) and review.get("status") is not None]
+    return all(
+        str(review.get("status")).casefold() == "completed" and review.get("has_any_findings") is False
+        for review in (code_review, *others)
+    )
+
+
 def _is_codex_clean_pass(item: dict[str, Any], head_sha: str) -> bool:
     """Recognize a success shape, not a substitute for the Agent's review gate."""
 
@@ -457,6 +477,8 @@ def _is_codex_clean_pass(item: dict[str, Any], head_sha: str) -> bool:
         return False
     if str(item.get("state") or "").lower() in {"changes_requested", "dismissed"}:
         return False
+    if _is_codex_summary_pass(item, head_sha):
+        return True
     body_sha = _codex_clean_pass_body_sha(str(item.get("body") or ""))
     if body_sha is None:
         return False
@@ -521,8 +543,8 @@ def _github_time(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
 
-def _codex_summary_code_review(body: str) -> dict[str, Any] | None:
-    """The ``code_review`` object of a Codex summary's machine-readable state line."""
+def _codex_summary_state(body: str) -> dict[str, Any] | None:
+    """A Codex summary's machine-readable state line, as an object."""
 
     for line in body.splitlines():
         match = re.fullmatch(r"<!-- codex-review-state:v1 (.+) -->", line.strip())
@@ -532,9 +554,16 @@ def _codex_summary_code_review(body: str) -> dict[str, Any] | None:
             state = json.loads(match.group(1))
         except json.JSONDecodeError:
             return None
-        code_review = state.get("code_review") if isinstance(state, dict) else None
-        return code_review if isinstance(code_review, dict) else None
+        return state if isinstance(state, dict) else None
     return None
+
+
+def _codex_summary_code_review(body: str) -> dict[str, Any] | None:
+    """The ``code_review`` object of a Codex summary's machine-readable state line."""
+
+    state = _codex_summary_state(body)
+    code_review = state.get("code_review") if state is not None else None
+    return code_review if isinstance(code_review, dict) else None
 
 
 def _codex_review_stall(
@@ -959,7 +988,8 @@ def _coalesced_review_state(
     ):
         old_items = (baseline or {}).get(kind, {})
         for item in state[kind]:
-            if not _is_codex_item(item) or _is_codex_progress(item):
+            # A summary is progress, except the state that names this head as passed.
+            if not _is_codex_item(item) or (_is_codex_progress(item) and not _is_codex_clean_pass(item, head)):
                 continue
             if kind == "reviews" and not _is_actionable_review(item):
                 continue
