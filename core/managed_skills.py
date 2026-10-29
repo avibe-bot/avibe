@@ -1404,7 +1404,45 @@ def _source_manifest(entries: Sequence[_SnapshotEntry]) -> tuple[tuple[bytes, bo
     return tuple((entry.relative_bytes, entry.is_directory, entry.token) for entry in entries)
 
 
-def _assert_source_unchanged(source: Path, entries: Sequence[_SnapshotEntry]) -> None:
+def _assert_source_unchanged(source: Path, entries: Sequence[_SnapshotEntry], snapshot: Path) -> None:
+    """Recheck the validated copy's bytes, not just timestamp-based identities."""
+
+    for entry in entries:
+        if entry.is_directory:
+            continue
+        source_fd: int | None = None
+        snapshot_fd: int | None = None
+        changed = f"Built-in Skill source changed during publication: {entry.relative}"
+        try:
+            source_fd, before = _open_regular_file(entry.path)
+            snapshot_fd, copied = _open_regular_file(snapshot.joinpath(*entry.relative.split("/")))
+            if _stat_token(before) != entry.token or copied.st_size != before.st_size:
+                raise RuntimeError(changed)
+            # Buffered binary reads handle short reads without comparing different
+            # chunk boundaries. Bound the work by the already-enumerated file size.
+            with os.fdopen(source_fd, "rb", closefd=False) as current, os.fdopen(
+                snapshot_fd, "rb", closefd=False
+            ) as staged:
+                remaining = int(before.st_size)
+                while remaining:
+                    chunk = current.read(min(1024 * 1024, remaining))
+                    if not chunk or chunk != staged.read(len(chunk)):
+                        raise RuntimeError(changed)
+                    remaining -= len(chunk)
+                if current.read(1) or staged.read(1):
+                    raise RuntimeError(changed)
+            if _stat_token(os.fstat(source_fd)) != entry.token:
+                raise RuntimeError(changed)
+        except OSError as exc:
+            raise RuntimeError(changed) from exc
+        finally:
+            if snapshot_fd is not None:
+                os.close(snapshot_fd)
+            if source_fd is not None:
+                os.close(source_fd)
+
+    # Retain the tree/identity checks, including replacement or disappearance
+    # during the byte comparison. Stat tokens alone cannot detect same-tick writes.
     if _source_manifest(_snapshot_entries(source)) != _source_manifest(entries):
         raise RuntimeError("Built-in Skill source changed during publication")
 
@@ -1464,7 +1502,7 @@ def publish_builtin_skills(
         try:
             _copy_snapshot_entries(entries, staging)
             _validate_builtin_catalog(staging)
-            _assert_source_unchanged(source, entries)
+            _assert_source_unchanged(source, entries, staging)
             if os.path.lexists(destination):
                 try:
                     destination_stat = destination.stat(follow_symlinks=False)
