@@ -30,7 +30,9 @@ change does not add remote control of the desktop preference.
 - `remote-install.json` is shell-owned and defaults to disabled. It is read and
   written only through Tauri IPC granted to the main Workbench window at the
   adopted loopback origin. HTTP clients can only read the resulting value from
-  `/api/version`.
+  `/api/version`. The shell rejects preference changes while a remote request
+  is active, so the delivery reported at acknowledgement stays fixed for that
+  request.
 
 ## Request File
 

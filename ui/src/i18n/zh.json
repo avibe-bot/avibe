@@ -4196,7 +4196,7 @@
     "desktopRemoteUpdateUnknownWork": "部分活动无法检查，可能还会中断其他正在运行的工作。",
     "updateInterruptWarning": "安装会重启 Avibe，可能中断 Agent、Watch、Task 和 IM 工作；中断的工作可能无法恢复。",
     "runtimeUpdateDelivery": "Runtime 更新并重启",
-    "desktopRemoteUpdateLocalRequest": "有成员远程请求更新到 {{target}}。你可以立即安装或忽略此请求。",
+    "desktopRemoteUpdateLocalRequest": "有人远程请求更新到 {{target}}。你可以立即安装或忽略此请求。",
     "desktopRemoteUpdateRequiresHost": "此安装需要主机上的用户授予权限或修复安装。",
     "desktopRemoteUpdateVerifying": "主机已报告完成，正在等待确认已安装的版本…",
     "desktopRemoteUpdateDownloadingUnknown": "正在下载更新…",

@@ -4196,7 +4196,7 @@
     "desktopRemoteUpdateUnknownWork": "Some activity could not be checked. Additional running work may be interrupted.",
     "updateInterruptWarning": "Installation restarts Avibe and can interrupt Agent, Watch, Task, and IM work. Interrupted work may not resume.",
     "runtimeUpdateDelivery": "a Runtime upgrade and restart",
-    "desktopRemoteUpdateLocalRequest": "A member requested an update to {{target}} remotely. Install it now or ignore this request.",
+    "desktopRemoteUpdateLocalRequest": "An update to {{target}} was requested remotely. Install it now or ignore this request.",
     "desktopRemoteUpdateRequiresHost": "This installation needs someone at the host to grant permission or repair the installation.",
     "desktopRemoteUpdateVerifying": "The host reported completion. Waiting to confirm the installed version…",
     "desktopRemoteUpdateDownloadingUnknown": "Downloading the update…",
