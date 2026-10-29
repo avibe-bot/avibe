@@ -248,14 +248,15 @@ fn publish_status(app: &AppHandle) {
     }
 }
 
-fn set_remote_phase(
+fn set_remote_phase_if(
     app: &AppHandle,
     request_id: &str,
     target: &str,
     phase: RemoteRequestPhase,
     progress: Option<u8>,
     error_code: Option<&str>,
-) {
+    should_replace: impl FnOnce(Option<&RemoteRequestStatus>) -> bool,
+) -> bool {
     let status = RemoteRequestStatus::new(
         request_id,
         target,
@@ -264,19 +265,64 @@ fn set_remote_phase(
         error_code.map(str::to_owned),
         SystemTime::now(),
     );
-    {
+    let replaced = {
         let updater = app.state::<Updater>();
-        updater.state.lock().expect("updater state").remote_request = Some(status);
+        let mut state = updater.state.lock().expect("updater state");
+        if !should_replace(state.remote_request.as_ref()) {
+            false
+        } else {
+            state.remote_request = Some(status);
+            true
+        }
+    };
+    if replaced {
+        publish_status(app);
+        emit_state(app);
     }
-    publish_status(app);
-    emit_state(app);
+    replaced
 }
 
-fn remote_request_matches(state: &State, request_id: &str, phase: RemoteRequestPhase) -> bool {
-    state
-        .remote_request
-        .as_ref()
-        .is_some_and(|request| request.request_id == request_id && request.phase == phase)
+fn set_remote_phase(
+    app: &AppHandle,
+    request_id: &str,
+    target: &str,
+    phase: RemoteRequestPhase,
+    progress: Option<u8>,
+    error_code: Option<&str>,
+) -> bool {
+    set_remote_phase_if(app, request_id, target, phase, progress, error_code, |current| {
+        remote_request_can_transition(current, request_id)
+    })
+}
+
+fn remote_request_can_transition(current: Option<&RemoteRequestStatus>, request_id: &str) -> bool {
+    current.is_none_or(|request| request.request_id == request_id && !request.phase.is_terminal())
+}
+
+fn expire_remote_request(app: &AppHandle, request_id: &str, target: &str) -> bool {
+    set_remote_phase(
+        app,
+        request_id,
+        target,
+        RemoteRequestPhase::Expired,
+        None,
+        Some(REMOTE_REQUEST_EXPIRY_CODE),
+    )
+}
+
+fn native_update_needs_remote_failure(phase: Phase) -> bool {
+    matches!(phase, Phase::Downloading | Phase::Installing)
+}
+
+fn end_native_update_after_remote_failure(app: &AppHandle) {
+    let should_end = {
+        let updater = app.state::<Updater>();
+        let should_end = native_update_needs_remote_failure(updater.state.lock().expect("updater state").phase);
+        should_end
+    };
+    if should_end {
+        set_state(app, Phase::Error, None);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -365,22 +411,19 @@ fn recover_remote_request(app: &AppHandle) {
     let path = app.state::<Updater>().remote_request_path.clone();
     match read_desktop_update_request(&path, SystemTime::now()) {
         Ok(_) => handle_remote_update_request(app),
-        Err(DesktopUpdateRequestError::Expired(request)) => set_remote_phase(
-            app,
-            &request.request_id,
-            &request.target,
-            RemoteRequestPhase::Expired,
-            None,
-            Some(REMOTE_REQUEST_EXPIRY_CODE),
-        ),
-        Err(_) => set_remote_phase(
-            app,
-            &request.request_id,
-            &request.target,
-            RemoteRequestPhase::Failed,
-            None,
-            Some("request_unavailable"),
-        ),
+        Err(DesktopUpdateRequestError::Expired(request)) => {
+            expire_remote_request(app, &request.request_id, &request.target);
+        }
+        Err(_) => {
+            set_remote_phase(
+                app,
+                &request.request_id,
+                &request.target,
+                RemoteRequestPhase::Failed,
+                None,
+                Some("request_unavailable"),
+            );
+        }
     }
 }
 fn label(phase: Phase, c: &Catalog) -> &str {
@@ -1053,6 +1096,7 @@ fn record_remote_gate_failure(
         RemoteRequestGateError::Mismatch => (RemoteRequestPhase::Failed, "request_mismatch"),
     };
     set_remote_phase(app, &context.request_id, &context.target, phase, None, Some(code));
+    end_native_update_after_remote_failure(app);
     code.to_owned()
 }
 
@@ -1085,23 +1129,20 @@ fn schedule_remote_expiry(app: &AppHandle, request: DesktopUpdateRequest) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(wait).await;
-        let current = {
-            let updater = handle.state::<Updater>();
-            updater.state.lock().ok().and_then(|state| {
-                remote_request_matches(&state, &request.request_id, RemoteRequestPhase::AwaitingHost)
-                    .then(|| state.remote_request.clone())
-                    .flatten()
-            })
-        };
-        if let Some(current) = current {
-            set_remote_phase(
-                &handle,
-                &current.request_id,
-                &current.target,
-                RemoteRequestPhase::Expired,
-                None,
-                Some(REMOTE_REQUEST_EXPIRY_CODE),
-            );
+        let expired = set_remote_phase_if(
+            &handle,
+            &request.request_id,
+            &request.target,
+            RemoteRequestPhase::Expired,
+            None,
+            Some(REMOTE_REQUEST_EXPIRY_CODE),
+            |current| {
+                current.is_some_and(|current| {
+                    current.request_id == request.request_id && current.phase == RemoteRequestPhase::AwaitingHost
+                })
+            },
+        );
+        if expired {
             finish(&handle);
         }
     });
@@ -1124,14 +1165,7 @@ pub fn handle_remote_update_request(app: &AppHandle) {
     let request = match read_desktop_update_request(&request_path, SystemTime::now()) {
         Ok(request) => request,
         Err(DesktopUpdateRequestError::Expired(request)) => {
-            set_remote_phase(
-                app,
-                &request.request_id,
-                &request.target,
-                RemoteRequestPhase::Expired,
-                None,
-                Some(REMOTE_REQUEST_EXPIRY_CODE),
-            );
+            expire_remote_request(app, &request.request_id, &request.target);
             return;
         }
         Err(_) => return,
@@ -1284,22 +1318,15 @@ fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<Remot
                             } else {
                                 received.saturating_mul(100).checked_div(total).unwrap_or(0).min(100) as u8
                             };
-                            let current = progress_app
-                                .state::<Updater>()
-                                .state
-                                .lock()
-                                .ok()
-                                .and_then(|state| state.remote_request.clone());
-                            if should_publish_download_progress(current.as_ref(), &remote.request_id, progress) {
-                                set_remote_phase(
-                                    &progress_app,
-                                    &remote.request_id,
-                                    &remote.target,
-                                    RemoteRequestPhase::Downloading,
-                                    Some(progress),
-                                    None,
-                                );
-                            }
+                            set_remote_phase_if(
+                                &progress_app,
+                                &remote.request_id,
+                                &remote.target,
+                                RemoteRequestPhase::Downloading,
+                                Some(progress),
+                                None,
+                                |current| should_publish_download_progress(current, &remote.request_id, progress),
+                            );
                         },
                     )
                     .await
@@ -1389,6 +1416,7 @@ fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<Remot
                         None,
                         Some(error_code),
                     );
+                    end_native_update_after_remote_failure(&app);
                 } else {
                     set_state(&app, Phase::Error, None);
                 }
@@ -1659,6 +1687,63 @@ mod tests {
             state.remote_request.as_ref().map(|status| status.phase),
             Some(RemoteRequestPhase::Requested)
         );
+    }
+
+    #[test]
+    fn remote_transitions_preserve_terminal_and_newer_receipts() {
+        let request_id = "00000000-0000-4000-8000-000000000000";
+        let receipt = |id, phase| RemoteRequestStatus::new(id, "3.2.4", phase, None, None, SystemTime::UNIX_EPOCH);
+
+        for phase in [
+            RemoteRequestPhase::Requested,
+            RemoteRequestPhase::Acknowledged,
+            RemoteRequestPhase::Checking,
+            RemoteRequestPhase::AwaitingHost,
+            RemoteRequestPhase::Downloading,
+            RemoteRequestPhase::Installing,
+            RemoteRequestPhase::Restarting,
+        ] {
+            let current = receipt(request_id, phase);
+            assert!(remote_request_can_transition(Some(&current), request_id));
+        }
+        for phase in [
+            RemoteRequestPhase::Completed,
+            RemoteRequestPhase::Failed,
+            RemoteRequestPhase::Declined,
+            RemoteRequestPhase::Expired,
+        ] {
+            let current = receipt(request_id, phase);
+            assert!(!remote_request_can_transition(Some(&current), request_id));
+        }
+        assert!(remote_request_can_transition(None, request_id));
+        assert!(!remote_request_can_transition(
+            Some(&receipt(
+                "11111111-1111-4111-8111-111111111111",
+                RemoteRequestPhase::Requested,
+            )),
+            request_id,
+        ));
+    }
+
+    #[test]
+    fn remote_install_failures_end_every_native_progress_phase() {
+        for phase in [
+            Phase::Idle,
+            Phase::Checking,
+            Phase::Current,
+            Phase::Available,
+            Phase::Downloading,
+            Phase::Installing,
+            Phase::Installed,
+            Phase::Disabled,
+            Phase::Error,
+        ] {
+            assert_eq!(
+                native_update_needs_remote_failure(phase),
+                matches!(phase, Phase::Downloading | Phase::Installing),
+                "{phase:?}",
+            );
+        }
     }
 
     #[test]

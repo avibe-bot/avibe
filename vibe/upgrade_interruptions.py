@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import logging
-from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -34,12 +34,22 @@ class UpgradeInterruptions:
         }
 
 
-def _unsettled(counts: dict[str, Any]) -> int:
-    return sum(
-        value
-        for key in ("queued", "running")
-        if isinstance((value := counts.get(key)), int) and not isinstance(value, bool)
-    )
+def _count_harness_interruptions() -> tuple[int, int]:
+    """Count only active Harness rows on a worker thread."""
+
+    from storage.background import SQLiteBackgroundTaskStore
+
+    store = SQLiteBackgroundTaskStore(include_private_metadata=False)
+    try:
+        def active(run_type: str) -> int:
+            return sum(
+                store.count_runs(status=status, run_type=run_type)
+                for status in ("queued", "running")
+            )
+
+        return active("watch"), active("scheduled")
+    finally:
+        store.close()
 
 
 async def count_upgrade_interruptions() -> UpgradeInterruptions:
@@ -49,7 +59,6 @@ async def count_upgrade_interruptions() -> UpgradeInterruptions:
     zero. Callers can still proceed after an explicit confirmation.
     """
 
-    from storage.background import SQLiteBackgroundTaskStore
     from vibe import internal_client
 
     agents = watches = tasks = 0
@@ -75,17 +84,11 @@ async def count_upgrade_interruptions() -> UpgradeInterruptions:
         logger.warning("Could not count active Agents before upgrade", exc_info=True)
         unknown = True
 
-    store = None
     try:
-        store = SQLiteBackgroundTaskStore(include_private_metadata=False)
-        watches = _unsettled(store.count_runs_by_status(run_type="watch"))
-        tasks = _unsettled(store.count_runs_by_status(run_type="scheduled"))
+        watches, tasks = await asyncio.to_thread(_count_harness_interruptions)
     except Exception:
         logger.warning("Could not count active Harness work before upgrade", exc_info=True)
         unknown = True
-    finally:
-        if store is not None:
-            store.close()
 
     return UpgradeInterruptions(
         agents=agents,
