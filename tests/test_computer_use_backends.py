@@ -97,6 +97,9 @@ def test_computer_use_skill_states_readiness_and_restrictions_not_permissions() 
     assert "not after a fixed delay" in readiness
     for observable in ("window exists", "stable", "screenshot", "accessibility tree"):
         assert observable in readiness
+    # A usable screenshot alone is enough: an empty tree must not veto it.
+    assert "Either form of\nusability is enough" in readiness
+    assert "empty tree is not ready" not in readiness
     for stale in ("QQ", "WeChat", "Electron", "about 30 seconds"):
         assert stale not in body
     for retired in ("require_bind", "Never take focus", "focus_shortcut_forbidden"):

@@ -44,14 +44,17 @@ After a launch, a window change, or an action that loads content, wait until:
 
 - the target window exists (`app.waitFor`);
 - its state is stable: two consecutive observations show the same title and
-  controls, with no loading or progress indicator; and
+  content, with no loading or progress indicator; and
 - the observation is usable: a screenshot that shows the content, or an
   accessibility tree with the controls you need.
 
-Use `waitFor` and `expect` to poll; they stop at their timeout. A window that
-shows only its frame or an empty tree is not ready yet: observe again while the
-state keeps changing, and report what you observed once it stops changing or the
-timeout ends.
+Use `waitFor` and `expect` to poll; they stop at their timeout. Either form of
+usability is enough: an empty or unavailable accessibility tree does not hold
+back a target whose stable screenshot shows the content you need, and pixel
+input then reads its coordinates from that screenshot. A window that shows only
+its frame, with neither usable visual content nor useful controls, is not ready
+yet: observe again while the state keeps changing, and report what you observed
+once it stops changing or the timeout ends.
 
 ## SDK cheat-sheet
 
