@@ -120,6 +120,21 @@
   animation:pet-mini-pulse 2s cubic-bezier(.4,0,.6,1) infinite}
 .pet-mini-stopped-dot {
   background:color-mix(in srgb,var(--pet-ink) 40%,transparent)}
+.pet-mini-unread-dot {
+  width:5px;
+  height:5px;
+  flex:none;
+  border-radius:999px;
+  background:#34d399}
+.pet-mini-avatar-unread-dot {
+  position:absolute;
+  top:14px;
+  right:14px;
+  z-index:2;
+  width:8px;
+  height:8px;
+  border:2px solid var(--pet-card);
+  box-sizing:content-box}
 
 @keyframes pet-mini-pulse {
   50% {
@@ -864,15 +879,21 @@ to {
   gap:6px;
   margin-top:3px;
   overflow:hidden;
-  text-overflow:ellipsis;
-  white-space:nowrap;
   font-size:13px;
   line-height:20px}
 .pet-mini-reply-summary {
   min-width:0;
   overflow:hidden;
-  text-overflow:ellipsis;
-  white-space:nowrap}
+  display:-webkit-box;
+  -webkit-box-orient:vertical;
+  -webkit-line-clamp:3;
+  overflow:hidden;
+  word-break:break-word}
+.pet-mini-message-attachments {
+  display:flex;
+  flex-direction:column;
+  gap:8px;
+  margin-top:8px}
 .pet-mini-bubble-history {
   position:relative;
   z-index:1;

@@ -9,6 +9,7 @@
   },
   "permissions": [
     "allow-pet-ready",
+    "allow-pet-context-menu",
     "allow-pet-set-expanded",
     "allow-pet-drag",
     "allow-pet-settle",

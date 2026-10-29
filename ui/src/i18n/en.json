@@ -99,6 +99,9 @@
     },
     "pet": {
       "toggle": "Show Pet",
+      "hide": "Hide Desktop Mini",
+      "shortcutMenu": "Pet Shortcut",
+      "shortcutUnavailable": "{{shortcut}} is unavailable — another app may be using it",
       "shortcutSettings": "Shortcut settings…"
     },
     "uninstall": {
@@ -6277,7 +6280,7 @@
     "mainAgentTitle": "Vibey",
     "thinking": "Thinking",
     "waiting": "Waiting",
-    "repliedPrefix": "Replied: {{text}}",
+    "fileAttachment": "File",
     "untitledTask": "Untitled task",
     "dismiss": "Dismiss task",
     "voiceContinue": "Continue voice input",
@@ -6333,7 +6336,6 @@
     "unknownProject": "Conversation",
     "unknownAgent": "Agent",
     "needsAuthorization": "Needs your approval",
-    "replied": "Replied",
     "referenceSession": "Reference session: {{title}}",
     "authorize": "Review",
     "recentTurns": "Recent turns",

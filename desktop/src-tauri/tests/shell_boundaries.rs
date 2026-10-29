@@ -456,6 +456,7 @@ fn every_shell_command_is_declared_so_its_permission_exists() {
         "pet_set_voice_mode",
         "pet_reset_voice_shortcut",
         "pet_ready",
+        "pet_context_menu",
         "pet_set_expanded",
         "pet_drag",
         "pet_settle",
@@ -1242,6 +1243,7 @@ fn the_pet_and_the_workbench_get_only_their_pet_commands_on_loopback_pages() {
         pet["permissions"],
         serde_json::json!([
             "allow-pet-ready",
+            "allow-pet-context-menu",
             "allow-pet-set-expanded",
             "allow-pet-drag",
             "allow-pet-settle",

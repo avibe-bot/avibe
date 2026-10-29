@@ -25,6 +25,7 @@ fn main() {
         "pet_set_voice_mode",
         "pet_reset_voice_shortcut",
         "pet_ready",
+        "pet_context_menu",
         "pet_set_expanded",
         "pet_drag",
         "pet_settle",

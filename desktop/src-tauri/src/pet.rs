@@ -16,14 +16,15 @@ use std::time::Duration;
 
 use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
-    area_for, clamp_anchor, default_anchor, frame_at, hovering, place_moved, rescale, upward_frame, valid_session_id,
+    area_for, clamp_anchor, default_anchor, frame_at, hovering, place_moved, rescale, shortcut_label, upward_frame,
+    valid_session_id,
     FrameState, FrameStep, HitRect, LayoutSnapshot, LogicalRect, PageKind, PetAnchor, PetBinding, PetFrame, PetIntent,
     PetLayout, PetReady, PetStore, ShortcutEvent, VoiceMode, VoiceShortcutState, WorkArea, DEFAULT_SHORTCUT,
     DEFAULT_TOGGLE_SHORTCUT,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
-use tauri::menu::{CheckMenuItem, MenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, Submenu};
 use tauri::{
     AppHandle, Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
@@ -36,6 +37,7 @@ use crate::{native_catalog_for_locales, Shell, DESKTOP_SHELL_MARKER, MAIN_WINDOW
 pub const PET_WINDOW: &str = "pet";
 pub const MENU_ID: &str = "show-pet";
 pub const SHORTCUT_SETTINGS_MENU_ID: &str = "pet-shortcut-settings";
+pub const HIDE_MENU_ID: &str = "hide-pet";
 const PET_PATH: &str = "/pet";
 const SUMMON_EVENT: &str = "avibe:pet-summon";
 const BOUND_EVENT: &str = "avibe:pet-bound";
@@ -71,6 +73,9 @@ pub const DESKTOP_PET_SETTINGS_MARKER: &str =
 pub struct NativePetCatalog {
     toggle: String,
     shortcut_settings: String,
+    hide: String,
+    shortcut_menu: String,
+    shortcut_unavailable: String,
 }
 
 fn native_pet_catalog() -> NativePetCatalog {
@@ -444,6 +449,28 @@ pub fn toggle(app: &AppHandle) {
     if let Err(error) = set_enabled(app, !app.state::<Pet>().enabled()) {
         eprintln!("The desktop pet preference could not be saved: {error}");
     }
+}
+
+/// Shows the pet's native context menu. The menu action calls [`toggle`]
+/// through the same event path as the tray switch, so both surfaces persist
+/// the same `enabled` preference and reconcile the same window.
+#[tauri::command]
+pub fn pet_context_menu(window: WebviewWindow) -> Result<(), String> {
+    ensure_pet_page(&window)?;
+    let app = window.app_handle();
+    let pet = app.state::<Pet>();
+    if !pet.enabled() {
+        return Ok(());
+    }
+    let catalog = native_pet_catalog();
+    let shortcut = {
+        let store = pet.store();
+        shortcut_label(store.shortcut(), cfg!(target_os = "macos"))
+    };
+    let hide = MenuItem::with_id(app, HIDE_MENU_ID, &catalog.hide, true, Some(shortcut.as_str()))
+        .map_err(|error| error.to_string())?;
+    let menu = Menu::with_items(app, &[&hide]).map_err(|error| error.to_string())?;
+    window.popup_menu(&menu).map_err(|error| error.to_string())
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1751,6 +1778,9 @@ mod tests {
             let catalog = native_catalog_for_locales([locale.to_owned()]).pet;
             assert!(!catalog.toggle.is_empty());
             assert!(!catalog.shortcut_settings.is_empty());
+            assert!(!catalog.hide.is_empty());
+            assert!(!catalog.shortcut_menu.is_empty());
+            assert!(catalog.shortcut_unavailable.contains("{{shortcut}}"));
         }
     }
 
