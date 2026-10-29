@@ -16,10 +16,10 @@ use std::time::Duration;
 
 use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
-    area_for, clamp_anchor, default_anchor, frame_at, hovering, place_moved, rescale, shortcut_label, upward_frame,
-    valid_session_id, FrameState, FrameStep, HitRect, LayoutSnapshot, LogicalRect, PageKind, PetAnchor, PetBinding,
-    PetFrame, PetIntent, PetLayout, PetReady, PetStore, ShortcutEvent, VoiceMode, VoiceShortcutState, WorkArea,
-    DEFAULT_SHORTCUT, DEFAULT_TOGGLE_SHORTCUT,
+    area_for, clamp_anchor, default_anchor, frame_at, hovering, place_moved, rescale, upward_frame, valid_session_id,
+    FrameState, FrameStep, HitRect, LayoutSnapshot, LogicalRect, PageKind, PetAnchor, PetBinding, PetFrame, PetIntent,
+    PetLayout, PetReady, PetStore, ShortcutEvent, VoiceMode, VoiceShortcutState, WorkArea, DEFAULT_SHORTCUT,
+    DEFAULT_TOGGLE_SHORTCUT,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
@@ -77,6 +77,10 @@ pub struct NativePetCatalog {
 
 fn native_pet_catalog() -> NativePetCatalog {
     native_catalog_for_locales(sys_locale::get_locales()).pet
+}
+
+fn native_pet_menu_accelerator(store: &PetStore) -> &str {
+    store.toggle_shortcut()
 }
 
 #[derive(Clone, Copy)]
@@ -462,7 +466,7 @@ pub fn pet_context_menu(window: WebviewWindow) -> Result<(), String> {
     let catalog = native_pet_catalog();
     let shortcut = {
         let store = pet.store();
-        shortcut_label(store.toggle_shortcut(), cfg!(target_os = "macos"))
+        native_pet_menu_accelerator(&store).to_owned()
     };
     let hide = MenuItem::with_id(app, HIDE_MENU_ID, &catalog.hide, true, Some(shortcut.as_str()))
         .map_err(|error| error.to_string())?;
@@ -1563,6 +1567,7 @@ pub fn pet_open(window: WebviewWindow, link: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use avibe_runtime_host::pet::shortcut_label;
     use avibe_runtime_host::pet::{settle_frame, DRAG_HEIGHT, WINDOW_HEIGHT};
     use std::cell::RefCell;
 
@@ -1777,6 +1782,22 @@ mod tests {
             assert!(!catalog.shortcut_settings.is_empty());
             assert!(!catalog.hide.is_empty());
         }
+    }
+
+    #[test]
+    fn context_menu_uses_raw_toggle_shortcut_as_native_accelerator() {
+        let directory = TestPetDirectory::new();
+        let pet = Pet::new(directory.file());
+        let store = pet.store();
+        let accelerator = native_pet_menu_accelerator(&store);
+
+        assert_eq!(accelerator, DEFAULT_TOGGLE_SHORTCUT);
+        assert!(parse_shortcut(accelerator).is_ok());
+        assert_ne!(
+            accelerator,
+            shortcut_label(accelerator, cfg!(target_os = "macos")),
+            "native menus receive the accelerator syntax, not the display label"
+        );
     }
 
     fn origin(raw: &str) -> LoopbackOrigin {
