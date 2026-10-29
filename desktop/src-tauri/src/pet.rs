@@ -17,14 +17,13 @@ use std::time::Duration;
 use avibe_runtime_host::deep_link::parse_deep_link;
 use avibe_runtime_host::pet::{
     area_for, clamp_anchor, default_anchor, frame_at, hovering, place_moved, rescale, shortcut_label, upward_frame,
-    valid_session_id,
-    FrameState, FrameStep, HitRect, LayoutSnapshot, LogicalRect, PageKind, PetAnchor, PetBinding, PetFrame, PetIntent,
-    PetLayout, PetReady, PetStore, ShortcutEvent, VoiceMode, VoiceShortcutState, WorkArea, DEFAULT_SHORTCUT,
-    DEFAULT_TOGGLE_SHORTCUT,
+    valid_session_id, FrameState, FrameStep, HitRect, LayoutSnapshot, LogicalRect, PageKind, PetAnchor, PetBinding,
+    PetFrame, PetIntent, PetLayout, PetReady, PetStore, ShortcutEvent, VoiceMode, VoiceShortcutState, WorkArea,
+    DEFAULT_SHORTCUT, DEFAULT_TOGGLE_SHORTCUT,
 };
 use avibe_runtime_host::LoopbackOrigin;
 use serde::{Deserialize, Serialize};
-use tauri::menu::{CheckMenuItem, Menu, MenuItem, Submenu};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem};
 use tauri::{
     AppHandle, Manager, Monitor, PhysicalPosition, PhysicalSize, WebviewUrl, WebviewWindow, WebviewWindowBuilder,
 };
@@ -74,8 +73,6 @@ pub struct NativePetCatalog {
     toggle: String,
     shortcut_settings: String,
     hide: String,
-    shortcut_menu: String,
-    shortcut_unavailable: String,
 }
 
 fn native_pet_catalog() -> NativePetCatalog {
@@ -1779,8 +1776,6 @@ mod tests {
             assert!(!catalog.toggle.is_empty());
             assert!(!catalog.shortcut_settings.is_empty());
             assert!(!catalog.hide.is_empty());
-            assert!(!catalog.shortcut_menu.is_empty());
-            assert!(catalog.shortcut_unavailable.contains("{{shortcut}}"));
         }
     }
 

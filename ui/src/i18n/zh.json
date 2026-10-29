@@ -100,8 +100,6 @@
     "pet": {
       "toggle": "显示桌宠",
       "hide": "隐藏桌宠",
-      "shortcutMenu": "桌宠快捷键",
-      "shortcutUnavailable": "{{shortcut}} 不可用，可能已被其他应用占用",
       "shortcutSettings": "快捷键设置…"
     },
     "uninstall": {

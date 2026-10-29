@@ -100,8 +100,6 @@
     "pet": {
       "toggle": "Show Pet",
       "hide": "Hide Desktop Mini",
-      "shortcutMenu": "Pet Shortcut",
-      "shortcutUnavailable": "{{shortcut}} is unavailable — another app may be using it",
       "shortcutSettings": "Shortcut settings…"
     },
     "uninstall": {
