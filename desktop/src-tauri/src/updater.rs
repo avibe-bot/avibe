@@ -299,15 +299,45 @@ fn remote_request_can_transition(current: Option<&RemoteRequestStatus>, request_
     current.is_none_or(|request| request.request_id == request_id && !request.phase.is_terminal())
 }
 
-fn expire_remote_request(app: &AppHandle, request_id: &str, target: &str) -> bool {
-    set_remote_phase(
-        app,
+fn expire_awaiting_remote_request(
+    state: &mut State,
+    busy: &AtomicBool,
+    request_id: &str,
+    target: &str,
+    now: SystemTime,
+) -> bool {
+    let Some(current) = state.remote_request.as_ref() else {
+        return false;
+    };
+    if current.request_id != request_id || current.target != target || current.phase != RemoteRequestPhase::AwaitingHost
+    {
+        return false;
+    }
+    state.remote_request = Some(RemoteRequestStatus::new(
         request_id,
         target,
         RemoteRequestPhase::Expired,
         None,
-        Some(REMOTE_REQUEST_EXPIRY_CODE),
-    )
+        Some(REMOTE_REQUEST_EXPIRY_CODE.to_owned()),
+        now,
+    ));
+    busy.store(false, Ordering::SeqCst);
+    true
+}
+
+fn expire_remote_request(app: &AppHandle, request_id: &str, target: &str) -> bool {
+    let expired = {
+        let updater = app.state::<Updater>();
+        let mut state = updater.state.lock().expect("updater state");
+        expire_awaiting_remote_request(&mut state, &updater.busy, request_id, target, SystemTime::now())
+    };
+    if expired {
+        let updater = app.state::<Updater>();
+        let _ = updater.channel_menu.set_enabled(true);
+        publish_status(app);
+        emit_state(app);
+    }
+    expired
 }
 
 fn native_update_needs_remote_failure(phase: Phase) -> bool {
@@ -1129,22 +1159,7 @@ fn schedule_remote_expiry(app: &AppHandle, request: DesktopUpdateRequest) {
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(wait).await;
-        let expired = set_remote_phase_if(
-            &handle,
-            &request.request_id,
-            &request.target,
-            RemoteRequestPhase::Expired,
-            None,
-            Some(REMOTE_REQUEST_EXPIRY_CODE),
-            |current| {
-                current.is_some_and(|current| {
-                    current.request_id == request.request_id && current.phase == RemoteRequestPhase::AwaitingHost
-                })
-            },
-        );
-        if expired {
-            finish(&handle);
-        }
+        expire_remote_request(&handle, &request.request_id, &request.target);
     });
 }
 
@@ -1436,6 +1451,26 @@ fn install_with_context(app: AppHandle, manifest: Manifest, remote: Option<Remot
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state_with_remote_request(request_id: &str, target: &str, phase: RemoteRequestPhase) -> State {
+        State {
+            phase: Phase::Available,
+            latest: Some(target.to_owned()),
+            channel: Channel::Stable,
+            manifest: None,
+            availability_interactive: true,
+            remote_install_allowed: false,
+            remote_request: Some(RemoteRequestStatus::new(
+                request_id,
+                target,
+                phase,
+                None,
+                None,
+                SystemTime::UNIX_EPOCH,
+            )),
+        }
+    }
+
     #[test]
     fn dialog_buttons_map_to_one_choice_and_dismissal_is_later() {
         for locale in ["en", "zh"] {
@@ -1723,6 +1758,122 @@ mod tests {
             )),
             request_id,
         ));
+    }
+
+    #[test]
+    fn remote_expiry_is_order_independent_for_poll_and_timer() {
+        let request_id = "00000000-0000-4000-8000-000000000000";
+        let target = "3.2.4";
+
+        for (first, second) in [("poll", "timer"), ("timer", "poll")] {
+            let mut state = state_with_remote_request(request_id, target, RemoteRequestPhase::AwaitingHost);
+            let busy = AtomicBool::new(true);
+
+            assert!(
+                expire_awaiting_remote_request(
+                    &mut state,
+                    &busy,
+                    request_id,
+                    target,
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+                ),
+                "{first} wins the expiry race",
+            );
+            let expired = state.remote_request.clone();
+            assert!(!busy.load(Ordering::SeqCst));
+            assert!(
+                !expire_awaiting_remote_request(
+                    &mut state,
+                    &busy,
+                    request_id,
+                    target,
+                    SystemTime::UNIX_EPOCH + Duration::from_secs(2),
+                ),
+                "{second} observes the terminal receipt",
+            );
+            assert_eq!(state.remote_request, expired);
+            assert!(!busy.load(Ordering::SeqCst));
+        }
+    }
+
+    #[test]
+    fn remote_expiry_preserves_every_terminal_receipt_and_its_gate() {
+        let request_id = "00000000-0000-4000-8000-000000000000";
+        let target = "3.2.4";
+
+        for phase in [
+            RemoteRequestPhase::Completed,
+            RemoteRequestPhase::Failed,
+            RemoteRequestPhase::Declined,
+            RemoteRequestPhase::Expired,
+        ] {
+            let mut state = state_with_remote_request(request_id, target, phase);
+            let before = state.remote_request.clone();
+            let busy = AtomicBool::new(true);
+
+            assert!(!expire_awaiting_remote_request(
+                &mut state,
+                &busy,
+                request_id,
+                target,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            ));
+            assert_eq!(state.remote_request, before, "{phase:?}");
+            assert!(busy.load(Ordering::SeqCst), "{phase:?}");
+        }
+    }
+
+    #[test]
+    fn remote_expiry_does_not_release_an_active_update_gate() {
+        let request_id = "00000000-0000-4000-8000-000000000000";
+        let target = "3.2.4";
+
+        for phase in [
+            RemoteRequestPhase::Requested,
+            RemoteRequestPhase::Acknowledged,
+            RemoteRequestPhase::Checking,
+            RemoteRequestPhase::Downloading,
+            RemoteRequestPhase::Installing,
+            RemoteRequestPhase::Restarting,
+        ] {
+            let mut state = state_with_remote_request(request_id, target, phase);
+            let before = state.remote_request.clone();
+            let busy = AtomicBool::new(true);
+
+            assert!(!expire_awaiting_remote_request(
+                &mut state,
+                &busy,
+                request_id,
+                target,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            ));
+            assert_eq!(state.remote_request, before, "{phase:?}");
+            assert!(busy.load(Ordering::SeqCst), "{phase:?}");
+        }
+    }
+
+    #[test]
+    fn stale_remote_expiry_cannot_mutate_a_newer_request_or_gate() {
+        let current_request_id = "11111111-1111-4111-8111-111111111111";
+        let current_target = "3.2.5";
+        let mut state = state_with_remote_request(current_request_id, current_target, RemoteRequestPhase::AwaitingHost);
+        let before = state.remote_request.clone();
+        let busy = AtomicBool::new(true);
+
+        for (request_id, target) in [
+            ("00000000-0000-4000-8000-000000000000", "3.2.4"),
+            (current_request_id, "3.2.4"),
+        ] {
+            assert!(!expire_awaiting_remote_request(
+                &mut state,
+                &busy,
+                request_id,
+                target,
+                SystemTime::UNIX_EPOCH + Duration::from_secs(1),
+            ));
+            assert_eq!(state.remote_request, before);
+            assert!(busy.load(Ordering::SeqCst));
+        }
     }
 
     #[test]
